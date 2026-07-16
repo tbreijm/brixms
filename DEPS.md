@@ -18,6 +18,7 @@ trusted core, and every dependency is attack surface and a determinism risk.
 | `camino` | UTF-8 paths (`Utf8Path`) across the CLI and package manager. |
 | `serde` (+ `serde_json`) | **Diagnostics/manifests only.** Never a semantic serializer — canon is the only serializer for semantic data. |
 | `wasmtime` | The WASM Driver host in brix-rt. Pulled in only by that lane. |
+| `unicode-normalization` | Appendix G requires identifiers to be NFC-normalized before canonical encoding. Applied in `brix-canon`'s `write_ident`. Pure, `no_std`-capable, table-driven UAX #15 implementation with a stable API; the de-facto standard crate (a Rust project dependency). ASCII identifiers take an allocation-free fast path, so the cost is paid only on non-ASCII idents. See "Pending justifications" resolution below. |
 
 ## Determinism rules that override convenience
 
@@ -30,10 +31,18 @@ trusted core, and every dependency is attack surface and a determinism risk.
   (spec Part V §8).
 - `unsafe` is denied workspace-wide except an allowlisted arena module.
 
-## Pending justifications (freeze blockers)
+## Resolved freeze blockers
 
-- **`unicode-normalization` (or equivalent)** — Appendix G requires identifiers
-  to be NFC-normalized before canonical encoding. `brix-canon`'s `write_ident`
-  currently encodes raw UTF-8 with an `APP-G:` TODO. Adding NFC needs an entry
-  here and must land (or be consciously deferred via erratum) **before the canon
-  vectors freeze at G0**, because it changes identifier bytes.
+- **`unicode-normalization` — RESOLVED (added), 2026-07-16.** Appendix G requires
+  identifiers to be NFC-normalized before canonical encoding. `brix-canon`'s
+  `write_ident` previously encoded raw UTF-8 with an `APP-G:` TODO. Decision:
+  **add the dependency and apply NFC**, rather than defer via erratum. Rationale:
+  (1) NFC folding is *normative* App. G text ("strings: NFC for identifiers"), so
+  deferring would freeze knowingly-wrong identifier bytes at G0 and force a
+  `CANON_VERSION` bump later; (2) the crate is the de-facto standard, pure, and
+  table-driven (no ambient authority, no nondeterminism); (3) identifiers are a
+  narrow surface and ASCII takes an allocation-free fast path. `write_ident` and
+  record field-name encoding now fold to NFC; string *values* (`write_str`)
+  deliberately do **not** fold, per App. G ("values as raw Unicode scalar
+  sequences"). The golden vectors include a decomposed-vs-precomposed identifier
+  case so the cross-check pins this behavior. Whitelist entry above.
