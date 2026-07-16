@@ -1,0 +1,12 @@
+// source: 27.2 Relation frames (block 40)
+let orders: Frame<{
+  order: Order
+  client: Client
+  weight: Quantity<Mass>
+  due: Instant
+  risk: Probability
+}> =
+  frame from {
+    order: Order { client, weight, due }
+    LateRisk(order, risk)
+  }

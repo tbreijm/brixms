@@ -1,0 +1,14 @@
+// source: 21.6 Decision intelligence (block 24)
+decision FleetAssignment {
+  alternatives from CandidateAssignment
+
+  objectives {
+    minimize Cost weight 0.4
+    minimize DeliveryRisk weight 0.4
+    minimize Emissions weight 0.2
+  }
+
+  constraints { Capacity, Availability, ContractTerms }
+  risk { maximumProbability(CriticalFailure) <= 0.01 }
+  approval OperationsManager
+}

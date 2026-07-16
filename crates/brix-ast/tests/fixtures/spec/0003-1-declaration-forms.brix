@@ -1,0 +1,8 @@
+// source: 1. Declaration forms (block 3)
+entity Name { key k: T; a: T2 }                     // keyed unary relation, bears identity
+entity Name { a: T }                                 // unkeyed: transaction-mintable only
+
+rel Name { r1: T1; r2: T2 } key(r1)                  // ground n-ary relation
+state rel Name { ... } key(...)                      // one live version per key; `set` supersedes
+event rel Name { key id: EventId; ...; at: Instant } time(at)
+open rel Name { ... }                                // extent not owned here; absence needs witness

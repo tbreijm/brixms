@@ -1,0 +1,12 @@
+[package]
+name = "brix-diag"
+description = "Diagnostic types, BRX codes, JSON/SARIF projection."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

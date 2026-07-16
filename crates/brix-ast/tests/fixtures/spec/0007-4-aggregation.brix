@@ -1,0 +1,3 @@
+// source: 4. Aggregation (block 7)
+aggregate fn count<S>(r: Rel<S>) -> Nat
+aggregate fn median<S: Ord>(r: Rel<S>) -> Option<S>

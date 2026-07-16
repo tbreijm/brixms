@@ -1,0 +1,23 @@
+// source: 19.6 Native language-model support (block 22)
+language task AssessLateOrder {
+  input { order: Order }
+
+  context from {
+    Order(order)
+    OrderStatus(order, status)
+    LateRisk(order, risk)
+    EffectivePrice(order, amount)
+  }
+
+  output OrderAssessment
+  evidence required
+  mode grounded
+
+  tools { OrderTimeline, RouteHistory, CheckCapacity }
+
+  policy {
+    maximumOutputTokens: 800
+    timeout: 10 seconds
+    onUnsupportedClaim: Reject
+  }
+}

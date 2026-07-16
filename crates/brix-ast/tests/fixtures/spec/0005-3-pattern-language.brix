@@ -1,0 +1,12 @@
+// source: 3. Pattern language (block 5)
+R(role: x, other)                    // edge clause; punning: `other` = `other: other`
+e @ R(role: x)                       // bind the edge reference
+x: Entity { field, f2: v }           // entity attribute clause
+let v = pureExpr                     // local binding; `?` allowed (error edges)
+when boolExpr                        // guard
+any { case {...} case {...} }        // disjunction with compatible bindings
+exists { ... }                       // existence test, no exported bindings
+without { ... }                      // stratified negation (model-closed or witnessed)
+optional { ... }                     // bindings become Option<T>; same completeness rule
+history R(role: x)                   // bypass masks and supersession; reads history
+path Hop(from -> to)+ from x to y    // traversal with explicit incidence roles

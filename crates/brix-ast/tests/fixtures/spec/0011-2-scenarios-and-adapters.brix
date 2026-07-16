@@ -1,0 +1,12 @@
+// source: 2. Scenarios and adapters (block 11)
+scenario Name {
+  seed 42
+  bind sim.Clock(resolution: 1 hours)
+  bind P to <adapter>
+  setup { ...transactions... }
+  step every D for T { ...transactions per tick... }
+  at T { ...one-shot transactions... }
+  assert always { boolQuery }        // every settled revision
+  assert eventually { boolQuery }    // by scenario end
+  assert at end { boolQuery }
+}

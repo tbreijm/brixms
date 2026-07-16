@@ -1,0 +1,14 @@
+// source: 27.4 Immutable cleaning and preparation recipes (block 43)
+data recipe CleanCarrierOrders {
+  input RawCarrierOrder
+
+  step parse Timestamp from occurredAt
+  step normalize Weight to kilograms
+  step trim carrierReference
+  step map carrierCode using CarrierCodeMapping
+  step validate destination against KnownLocation
+  step detectDuplicates by eventId
+  step quarantine when severity >= Error
+
+  output CleanCarrierOrder
+}

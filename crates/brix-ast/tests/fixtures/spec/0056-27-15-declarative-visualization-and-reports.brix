@@ -1,0 +1,14 @@
+// source: 27.15 Declarative visualization and reports (block 56)
+visualization LateRiskByDistance {
+  data DeliveryEvaluationFrame
+
+  map {
+    x RouteDistance
+    y PredictedLateProbability
+    color ServiceLevel
+  }
+
+  layer points
+  layer smooth(method: Logistic)
+  facet by Region
+}

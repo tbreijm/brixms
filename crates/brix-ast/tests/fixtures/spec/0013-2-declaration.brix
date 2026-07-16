@@ -1,0 +1,12 @@
+// source: 2. Declaration (block 13)
+policy AssignVehicle {
+  context   { order: Order }
+  candidates -> Rel<{ vehicle: Vehicle }> from {
+    AssignmentCandidate(order, vehicle)
+  }
+  suggestion { vehicle: Vehicle; score: Estimate<F64> }
+  feedback   { deliveredOnTime: Bool; margin: Money<EUR>;
+               emptyDistance: Quantity<Kilometre> }
+  objective  AssignmentReward          // a pure fn feedback -> F64, in brix.learn terms
+  authority  advisory                  // the default, stated anyway
+}

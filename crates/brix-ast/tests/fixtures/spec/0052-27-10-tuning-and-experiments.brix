@@ -1,0 +1,21 @@
+// source: 27.10 Tuning and experiments (block 52)
+tuning DeliveryRiskTuning {
+  workflow DeliveryRiskWorkflow
+
+  vary {
+    learningRate in logRange(0.001, 0.3)
+    maximumDepth in 2..12
+    minimumLeafSize in 10..500
+  }
+
+  optimize {
+    maximize ROC_AUC
+    minimize CalibrationError
+    minimize InferenceCost
+  }
+
+  budget {
+    trials <= 200
+    totalCompute <= 500 core hours
+  }
+}

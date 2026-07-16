@@ -1,0 +1,5 @@
+// source: 6. The mask primitive (block 2)
+derive Override: mask(price) by manual from {
+  price  @ ComputedPrice(order: o)
+  manual @ ManualPrice(order: o)
+}

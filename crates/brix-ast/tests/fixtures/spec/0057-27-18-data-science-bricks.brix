@@ -1,0 +1,11 @@
+// source: 27.18 Data-science bricks (block 57)
+brick DeliveryRiskIntelligence {
+  feature set DeliveryRiskFeatures
+  data recipe CleanDeliveryData
+  dataset DeliveryRiskTraining
+  ml workflow DeliveryRiskWorkflow
+  visualization CalibrationDashboard
+  decision threshold EscalateLateRisk
+  view RiskExplanation
+  monitor DeliveryRiskMonitoring
+}

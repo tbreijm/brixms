@@ -1,0 +1,2 @@
+// source: 3. Pattern language (block 6)
+path ( Hop(from -> to) | Transfer(arrival -> departure) )+ from x to y

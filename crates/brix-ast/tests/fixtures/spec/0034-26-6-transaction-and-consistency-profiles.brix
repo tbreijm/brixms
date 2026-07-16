@@ -1,0 +1,7 @@
+// source: 26.6 Transaction and consistency profiles (block 34)
+transaction AssignVehicle
+  isolation Serializable
+  intent request.intent
+{
+  ...
+}

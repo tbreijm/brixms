@@ -1,0 +1,27 @@
+// source: 26.2 Model-validity envelopes (block 28)
+model contract DeliveryRiskValidity {
+  applies to DeliveryRiskModel
+
+  validFor {
+    geography in EuropeanUnion
+    planningHorizon <= 14 days
+    vehicleClass in SupportedVehicleClass
+  }
+
+  assumes {
+    TrafficObservationCoverage >= 0.95
+    RouteNetworkAge <= 24 hours
+    HistoricalCalibrationWindow >= 90 days
+  }
+
+  requires {
+    OrderWeight(order)
+    PlannedRoute(order)
+    CurrentVehicleState(vehicle)
+  }
+
+  outOfDomain when {
+    ExtremeWeatherAlert(region)
+    UnknownVehicleClass(vehicle)
+  }
+}

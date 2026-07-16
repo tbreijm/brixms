@@ -1,0 +1,18 @@
+// source: 27.8 Estimator and workflow contracts (block 51)
+ml workflow DeliveryRiskWorkflow {
+  data LateDeliveryTraining
+
+  preprocess CleanAndEncodeDeliveryData
+  model GradientBoostedClassifier
+  calibrate Isotonic
+  threshold CostSensitiveThreshold
+
+  evaluate {
+    ROC_AUC
+    PR_AUC
+    LogLoss
+    BrierScore
+    CalibrationError
+    CostAtThreshold
+  }
+}

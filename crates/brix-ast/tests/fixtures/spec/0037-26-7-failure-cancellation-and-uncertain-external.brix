@@ -1,0 +1,6 @@
+// source: 26.7 Failure, cancellation, and uncertain external outcomes (block 37)
+protocol TransferFunds {
+  reconcile using LookupTransferByIdempotencyKey
+  compensate using ReverseTransfer
+  retry only when DefinitelyNotApplied
+}

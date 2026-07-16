@@ -1,0 +1,4 @@
+// source: 2. Derived relations and rules (block 4)
+rel R { a: A; b: B } key(a)
+
+derive RuleName: R(a: x, b: y) from { ...pattern... }

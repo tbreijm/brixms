@@ -1,0 +1,12 @@
+[package]
+name = "brix-oracle"
+description = "Naive reference evaluator. The semantic authority; frozen at G1."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

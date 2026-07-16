@@ -1,0 +1,18 @@
+// source: 22.1 The component thesis (block 26)
+brick OrderManagement @ 1.0.0 {
+  ontology OrderOntology
+  model OrderModel
+  behavior OrderRules
+  workflow OrderWorkflow
+  simulation OrderSimulation
+  decisions OrderDecisions
+
+  experience {
+    view OrderDetails
+    form OrderEditor
+    dashboard OrderOperations
+  }
+
+  provides { port Orders, port OrderExperience }
+  requires { port Inventory, port TransportCapacity }
+}

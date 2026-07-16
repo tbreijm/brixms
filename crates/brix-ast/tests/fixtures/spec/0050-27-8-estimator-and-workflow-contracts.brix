@@ -1,0 +1,12 @@
+// source: 27.8 Estimator and workflow contracts (block 50)
+protocol Estimator<Features, Target, Artifact> {
+  fit(
+    training: TrainingSet<Features, Target>,
+    configuration: TrainingConfiguration
+  ) -> TrainingOutcome<Artifact>
+
+  predict(
+    artifact: Artifact,
+    examples: Frame<Features>
+  ) -> PredictionSet<Target>
+}

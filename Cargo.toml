@@ -1,0 +1,61 @@
+# BrixMS toolchain workspace (Ring 0).
+# Build order & crate briefs: spec/Ring0_Build_Plan.md §1.
+# Determinism discipline is enforced by [workspace.lints] below + clippy.toml.
+[workspace]
+resolver = "2"
+members = [
+    "crates/brix-canon",
+    "crates/brix-diag",
+    "crates/brix-ast",
+    "crates/brix-ir",
+    "crates/brix-phase",
+    "crates/brix-oracle",
+    "crates/brix-rt",
+    "crates/brixc",
+    "crates/brixpkg",
+    "crates/brix-cli",
+    "crates/brix-conformance",
+    "sdk/brix-driver-rs",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/tbreijm/brixms"
+
+# Centralized dependency versions. The Ring 0 whitelist (Ring0_Build_Plan.md §0):
+# nothing here without an Opus-written justification in DEPS.md.
+[workspace.dependencies]
+blake3 = "1"
+logos = "0.14"
+petgraph = "0.6"
+pubgrub = "0.2"
+proptest = "1"
+insta = "1"
+miette = { version = "7", features = ["fancy"] }
+quote = "1"
+syn = { version = "2", features = ["full"] }
+prettyplease = "0.2"
+indexmap = "2"
+camino = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# wasmtime pulled in only by brix-rt / the Driver host when that lane lands it.
+wasmtime = "27"
+
+# Determinism discipline, enforced mechanically (Ring0_Build_Plan.md §0).
+# `unsafe` is denied workspace-wide except an allowlisted arena module
+# (which re-enables it locally with #[allow]). HashMap/HashSet bans live in
+# clippy.toml (disallowed-types) because they are semantic-path bans, not
+# a blanket workspace lint — see DEPS.md and CONTRIBUTING.md.
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+# Escalate the determinism-relevant lints; lanes tighten further per crate.
+disallowed_types = "deny"
+
+[profile.release]
+# Reproducibility: keep codegen deterministic across machines (G3).
+codegen-units = 1

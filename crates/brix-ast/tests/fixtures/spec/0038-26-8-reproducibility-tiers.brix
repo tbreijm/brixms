@@ -1,0 +1,9 @@
+// source: 26.8 Reproducibility tiers (block 38)
+enum ReproducibilityTier {
+  Canonical
+  Replayable
+  StatisticallyReproducible
+  ArtifactDependent
+  ProviderDependent
+  Exploratory
+}

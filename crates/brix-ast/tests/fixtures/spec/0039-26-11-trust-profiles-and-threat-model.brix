@@ -1,0 +1,11 @@
+// source: 26.11 Trust profiles and threat model (block 39)
+enum TrustClass {
+  CertifiedArtifact
+  TrustedLocalCode
+  SandboxedPackage
+  ExternalService
+  LearnedArtifact
+  HumanAssertion
+  UntrustedContent
+  CompromisedOrRevoked
+}

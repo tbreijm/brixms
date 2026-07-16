@@ -1,0 +1,13 @@
+// source: 1. One world, several disciplines (block 18)
+hybrid simulation CityMobility {
+  discrete TrafficEvents
+  continuous TrafficStocks
+  agents DriverPopulation
+
+  synchronize {
+    continuousToDiscrete on threshold
+    agentsToContinuous every 1 minutes
+    continuousToAgents every 1 minutes
+    settle after every exchange
+  }
+}

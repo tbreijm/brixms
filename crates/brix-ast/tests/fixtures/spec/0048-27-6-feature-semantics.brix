@@ -1,0 +1,14 @@
+// source: 27.6 Feature semantics (block 48)
+feature set DeliveryRiskFeatures @ 3 {
+  entity Order
+
+  include {
+    DaysUntilDue
+    RouteDistance
+    CurrentTrafficSeverity
+    ClientLateRate
+    VehicleReliability
+  }
+
+  target WasDeliveredLate
+}

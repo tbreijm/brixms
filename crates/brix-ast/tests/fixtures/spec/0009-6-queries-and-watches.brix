@@ -1,0 +1,2 @@
+// source: 6. Queries and watches (block 9)
+query Name(args) -> Rel<Row> = from { ... } yield { ... }

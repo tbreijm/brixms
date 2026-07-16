@@ -1,0 +1,5 @@
+# Pinned toolchain — reproducibility is a release gate (G3: two-machine determinism).
+# Bump deliberately, never ambiently, and re-verify canon vectors on any change.
+[toolchain]
+channel = "1.96.1"
+components = ["rustfmt", "clippy"]

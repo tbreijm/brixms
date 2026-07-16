@@ -1,0 +1,233 @@
+// source: Part I — The flagship program (block 1)
+package demo.logistics @ 1.1.0
+module World
+
+use brix.math.{Decimal, clamp}
+use brix.math.units.{Mass, kg, Kilometre, km}
+use brix.time.{Instant, Duration, hours}
+use brix.sim
+
+// ------------------------------------------------------------------
+// 1. Structure — what exists
+// ------------------------------------------------------------------
+
+entity Location { key code: String }
+entity Client   { key code: String; tier: Tier }
+entity Vehicle  { key plate: String; class: VehicleClass; capacity: Quantity<Mass> }
+entity Tariff   { key class: VehicleClass }        // keyed by class: one tariff per class
+
+enum Tier         { Standard; Key }
+enum VehicleClass { Compact; Standard; SUV }
+enum Status       { Open; Delivered; Cancelled }
+
+entity Order {
+  key ref: String
+  client: Client
+  from: Location
+  to: Location
+  weight: Quantity<Mass>
+  due: Instant
+}
+
+// ground n-ary relation: asserted by transactions or Drivers
+rel Distance { from: Location; to: Location; length: Quantity<Kilometre> } key(from, to)
+
+// state relations: at most one live version per key; `set` supersedes
+state rel OrderStatus { order: Order; value: Status }                    key(order)
+state rel TariffRate  { tariff: Tariff; rate: Money<EUR> / Kilometre }   key(tariff)
+state rel ManualPrice { order: Order; amount: Money<EUR> }               key(order)
+
+// event relation: persistent occurrences with identity and time
+event rel Delivered { key id: EventId; order: Order; at: Instant } time(at)
+
+// ------------------------------------------------------------------
+// 2. Coupling declared early: assignment is an external choice,
+//    not a deduction. The model requests; a planner decides.
+// ------------------------------------------------------------------
+
+protocol AssignOrder {
+  request { order: Order; weight: Quantity<Mass> } key(order)
+  outcome Chosen     { vehicle: Vehicle }
+  outcome NoCapacity { }
+}
+
+protocol NotifyOps {
+  // keyed by order: a changed risk supersedes the prior request version (Part VII §3)
+  request { order: Order; risk: Probability } key(order)
+  outcome Sent   { at: Instant }
+  outcome Failed { reason: String; retryable: Bool }
+  policy { retry { maxAttempts: 3, backoff: Exponential(base: 1 s, max: 30 s) } }
+}
+
+// ------------------------------------------------------------------
+// 3. Dynamics — what follows
+// ------------------------------------------------------------------
+
+fn surcharge(weight: Quantity<Mass>) -> Money<EUR> =
+  if weight > 3500 kg then 150 EUR else 0 EUR
+
+partial fn riskModel(due: Instant, now: Instant)
+  -> Result<Probability, ValidationError> {
+  let remaining = due - now
+  if remaining <= 0 hours { Probability.try(1.0) }
+  else { Probability.try(clamp(1.0 - remaining / 24 hours, 0.0, 1.0)) }
+}
+
+// Unassigned: model-closed negation over relations this namespace owns.
+rel Unassigned { order: Order } key(order)
+derive Waiting: Unassigned(order: o) from {
+  OrderStatus(order: o, value: Open)
+  without { Move(order: o) }
+  without { Delivered(order: o) }
+}
+
+// The model asks the world to assign; the world answers as ground outcomes;
+// deduction resumes from the answer.
+derive RequestAssignment: AssignOrder.request(order: o, weight: w) from {
+  Unassigned(order: o)
+  o: Order { weight: w }
+}
+
+rel Move { order: Order; vehicle: Vehicle } key(order)
+derive Assign: Move(order: o, vehicle: v) from {
+  AssignOrder.Chosen(order: o, vehicle: v)
+}
+
+// Pricing: pure deduction over assignments, tariffs, and distances.
+rel ComputedPrice { order: Order; amount: Money<EUR> } key(order)
+derive PriceOrder: ComputedPrice(order: o, amount) from {
+  Move(order: o, vehicle: v)
+  v: Vehicle { class: cls }
+  t: Tariff { class: cls }
+  TariffRate(tariff: t, rate)
+  o: Order { from: a, to: b, weight: w }
+  Distance(from: a, to: b, length)
+  let amount = rate * length + surcharge(w)
+}
+
+// Override: `mask` binds edge references — the target and the reason are
+// both concrete edges, which is what provenance records (Part III §6).
+derive Override: mask(price) by manual from {
+  price  @ ComputedPrice(order: o)
+  manual @ ManualPrice(order: o)
+}
+
+rel EffectivePrice { order: Order; amount: Money<EUR> } key(order)
+derive FromManual:   EffectivePrice(order: o, amount) from { ManualPrice(order: o, amount) }
+derive FromComputed: EffectivePrice(order: o, amount) from { ComputedPrice(order: o, amount) }
+// FromComputed reads ComputedPrice live; because Override can mask it, the
+// compiler places FromComputed strictly above Override (Part III §6). The
+// two EffectivePrice rules therefore never conflict on a key.
+
+// Risk: a partial function inside a rule; a failing match derives a sealed
+// RuleError edge for that site and contributes nothing else (Part III §9).
+rel LateRisk { order: Order; risk: Probability } key(order)
+derive Risk: LateRisk(order: o, risk) from {
+  Unassigned(order: o)
+  o: Order { due }
+  sim.Now(at: now)
+  let risk = riskModel(due, now)?
+}
+
+derive Escalate: NotifyOps.request(order: o, risk) from {
+  LateRisk(order: o, risk)
+  when risk > 0.8
+}
+
+constraint Capacity strict {
+  Move(order: o, vehicle: v)
+  o: Order { weight: w }
+  v: Vehicle { capacity: cap }
+  when w > cap
+}
+
+// ------------------------------------------------------------------
+// 4. Observation — what is asked
+// ------------------------------------------------------------------
+
+query KeyClientsAtRisk(threshold: Probability)
+  -> Rel<{ order: Order; client: Client; risk: Probability }> =
+  from {
+    LateRisk(order: o, risk)
+    o: Order { client: c }
+    c: Client { tier: Key }
+    when risk > threshold
+  }
+  yield { order: o, client: c, risk }
+
+// ------------------------------------------------------------------
+// 5. Production coupling — Drivers for the two protocols
+// ------------------------------------------------------------------
+
+driver PlannerClient for AssignOrder needs Net<"planner.internal"> {
+  on request(req, cancel) {
+    let resp = http.post("https://planner.internal/assign", encode(req))?
+    match decodeAssignment(resp.body) {
+      Ok(Some(v)) => succeed Chosen { vehicle: v }
+      Ok(None)    => succeed NoCapacity { }
+      Err(e)      => fail { error: e, retryable: false }
+    }
+  }
+}
+
+driver OpsNotifier for NotifyOps needs Net<"ops.internal"> {
+  on request(req, cancel) {
+    let resp = http.post("https://ops.internal/alert", encode(req))?
+    if resp.ok { succeed Sent { at: clock.now() } }
+    else       { fail Failed { reason: resp.status.text,
+                               retryable: resp.status.retryable } }
+  }
+}
+
+// ------------------------------------------------------------------
+// 6. The same model as a simulation
+// ------------------------------------------------------------------
+
+scenario RushWeek {
+  seed 42
+  bind sim.Clock(resolution: 1 hours)
+
+  // Explicit adapters, explicit lifecycle meaning (Part VI §2):
+  bind AssignOrder to sim.script {
+    when req.weight <= 2000 kg => Chosen { vehicle: Vehicle("V-01") }
+    when req.weight <= 3500 kg => Chosen { vehicle: Vehicle("V-02") }
+    otherwise                  => NoCapacity { }
+  }
+  bind NotifyOps to sim.capture     // requests recorded, left unresolved
+
+  setup {
+    let ams = ensure Location { code: "AMS" }
+    let rtm = ensure Location { code: "RTM" }
+    ensure Client { code: "ACME", tier: Key }
+    ensure Vehicle { plate: "V-01", class: Standard, capacity: 2000 kg }
+    ensure Vehicle { plate: "V-02", class: SUV,      capacity: 3500 kg }
+    let std = ensure Tariff { class: Standard }
+    let suv = ensure Tariff { class: SUV }
+    set TariffRate(tariff: std, rate: 1.20 EUR/km)
+    set TariffRate(tariff: suv, rate: 1.65 EUR/km)
+    assert Distance(from: ams, to: rtm, length: 78 km)
+  }
+
+  step every 1 hours for 168 hours {
+    let o = ensure Order { ref: sim.name("ord"), client: Client("ACME"),
+                           from: Location("AMS"), to: Location("RTM"),
+                           weight: sim.uniform(200 kg, 4000 kg),
+                           due: sim.now() + 6 hours }
+    set OrderStatus(order: o, value: Open)
+  }
+
+  at 24 hours {
+    // exercise the event relation and delivery-aware negation
+    assert Delivered { id: sim.eventId(), order: Order("ord-1"), at: sim.now() }
+    set OrderStatus(order: Order("ord-1"), value: Delivered)
+  }
+
+  at 36 hours {
+    set ManualPrice(order: Order("ord-2"), amount: 95 EUR)   // exercises the mask
+  }
+
+  assert always     { count(from { Violation() }) == 0 }
+  assert eventually { count(from { AssignOrder.NoCapacity() }) > 0 }
+  assert eventually { count(from { NotifyOps.request() }) > 0 }
+  assert at end     { count(from { EffectivePrice() }) > 0 }
+}

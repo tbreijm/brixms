@@ -1,0 +1,8 @@
+// source: 26.4 Canonical Brix interchange (block 33)
+interchange LogisticsFeed {
+  format BRDP
+  schema LogisticsProjection@3
+  encoding CanonicalBinary
+  compression Zstd
+  integrity SignedDigest
+}

@@ -1,0 +1,11 @@
+// source: 27.2 Relation frames (block 41)
+let clientRisk =
+  orders
+    |> filter(|row| row.risk >= 0.5)
+    |> group(by: [.client])
+    |> summarize {
+         openOrders: count()
+         totalWeight: sum(.weight)
+         maximumRisk: max(.risk)
+       }
+    |> arrange(.maximumRisk descending)

@@ -1,0 +1,10 @@
+// source: 26.7 Failure, cancellation, and uncertain external outcomes (block 36)
+enum OperationOutcome<T, E> {
+  Succeeded(T)
+  Failed(E)
+  TimedOut(Deadline)
+  Cancelled(CancellationRef)
+  ResourceExhausted(ResourceFinding)
+  ProviderUnavailable(ProviderFinding)
+  UnknownOutcome(ReconciliationRef)
+}

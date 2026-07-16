@@ -1,0 +1,9 @@
+// source: 4. Invocation (block 15)
+derive RequestAdvice: AssignVehicle.request(order: o) from {
+  Unassigned(order: o)
+}
+
+rel AssignmentAdvice {
+  order: Order; vehicle: Vehicle
+  score: Estimate<F64>; decision: AssignVehicle.Decision
+} key(order, decision)

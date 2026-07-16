@@ -1,0 +1,11 @@
+// source: 27.12 Predictions, calibration, and decision thresholds (block 53)
+record Prediction<T> {
+  subject: EntityRef
+  value: T
+  uncertainty: Option<Estimate<T>>
+  model: ModelVersionRef
+  features: FeatureVectorRef
+  asOf: ValidTime
+  producedAt: TransactionTime
+  applicability: ApplicabilityStatus
+}

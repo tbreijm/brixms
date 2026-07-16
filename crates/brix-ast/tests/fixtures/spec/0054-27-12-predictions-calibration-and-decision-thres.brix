@@ -1,0 +1,10 @@
+// source: 27.12 Predictions, calibration, and decision thresholds (block 54)
+decision threshold EscalateLateRisk {
+  prediction DeliveryLateProbability
+  threshold 0.82
+
+  objective {
+    falseNegativeCost: 500 EUR
+    falsePositiveCost: 25 EUR
+  }
+}

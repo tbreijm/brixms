@@ -1,0 +1,3 @@
+// source: 4. Aggregation (block 8)
+let n     = count(from { Move(vehicle: v) })
+let total = sum(from { Line(order: o, amount) } yield amount)

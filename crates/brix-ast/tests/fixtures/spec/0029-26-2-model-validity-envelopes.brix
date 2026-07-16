@@ -1,0 +1,10 @@
+// source: 26.2 Model-validity envelopes (block 29)
+enum ModelDomainStatus {
+  Valid
+  Degraded { findings: Set<ModelFinding> }
+  OutOfDomain { reasons: Set<ModelFinding> }
+  InsufficientObservation { missing: Set<RequirementRef> }
+  AssumptionBreached { assumptions: Set<AssumptionRef> }
+  Stale { through: ValidTime }
+  Uncalibrated { reason: CalibrationFinding }
+}

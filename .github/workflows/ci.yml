@@ -1,0 +1,29 @@
+name: CI
+
+# The green-gate. It lives before the second merge (Build_Plan_v2.md §2) and
+# holds the determinism discipline: fmt, clippy-as-error, and the full test
+# suite must all pass. Frozen-artifact drift (canon vectors, oracle) shows up
+# here as changed insta snapshots.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (pinned via rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace

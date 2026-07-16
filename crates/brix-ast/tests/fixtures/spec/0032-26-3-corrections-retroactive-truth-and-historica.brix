@@ -1,0 +1,8 @@
+// source: 26.3 Corrections, retroactive truth, and historical belief (block 32)
+correction policy OperationalHistory {
+  derivedHistory Recompute
+  publishedReports MarkSuperseded
+  executedProtocols PreserveOutcome
+  trainingDatasets RepairLineage
+  externalNotifications EmitCorrection
+}

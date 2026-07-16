@@ -1,0 +1,12 @@
+[package]
+name = "brix-driver-rs"
+description = "Rust guest SDK for WASM Drivers (delta ABI + capability imports)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

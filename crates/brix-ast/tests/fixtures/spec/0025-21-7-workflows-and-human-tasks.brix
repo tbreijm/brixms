@@ -1,0 +1,11 @@
+// source: 21.7 Workflows and human tasks (block 25)
+workflow CapacityException {
+  start when { CapacityViolation(order: o) }
+
+  task ReviewException assigned to Dispatcher {
+    due within 2 hours
+    outcome Approve
+    outcome Reassign
+    outcome Reject
+  }
+}

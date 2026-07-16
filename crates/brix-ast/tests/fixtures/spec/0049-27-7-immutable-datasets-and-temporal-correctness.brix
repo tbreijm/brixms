@@ -1,0 +1,9 @@
+// source: 27.7 Immutable datasets and temporal correctness (block 49)
+dataset LateDeliveryTraining {
+  source DeliveryRiskFeatures
+  observationTime OrderDispatchTime
+  labelTime OrderDeliveredTime
+
+  include where { OrderCompleted() }
+  exclude where { InvalidTrainingExample() }
+}

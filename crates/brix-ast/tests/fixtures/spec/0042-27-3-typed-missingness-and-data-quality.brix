@@ -1,0 +1,10 @@
+// source: 27.3 Typed missingness and data quality (block 42)
+enum Missing<T> {
+  Present(T)
+  NotObserved
+  NotApplicable
+  Unknown
+  Redacted
+  Invalid(DataFinding)
+  Pending
+}

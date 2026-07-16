@@ -1,0 +1,13 @@
+# Determinism discipline (Ring0_Build_Plan.md §0):
+# std HashMap/HashSet are disallowed because their iteration order is
+# nondeterministic, and any observable order in a BrixMS semantic path must be
+# canon byte order. Semantic crates (brix-canon, brix-oracle, brix-rt, generated
+# code) MUST use BTreeMap or a sorted IndexMap instead.
+#
+# Non-semantic crates that legitimately need a hash map (e.g. a parser symbol
+# cache whose order is never observed) may re-allow locally with an
+# `#[allow(clippy::disallowed_types)]` and a one-line justification comment.
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "nondeterministic iteration order; use BTreeMap or a sorted IndexMap in semantic paths (Ring0 §0)" },
+    { path = "std::collections::HashSet", reason = "nondeterministic iteration order; use BTreeSet or a sorted IndexSet in semantic paths (Ring0 §0)" },
+]

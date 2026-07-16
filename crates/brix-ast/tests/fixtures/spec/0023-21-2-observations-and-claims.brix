@@ -1,0 +1,9 @@
+// source: 21.2 Observations and claims (block 23)
+event rel ObservationReceived {
+  key id: ObservationId
+  source: Source
+  observedAt: ValidTime
+  receivedAt: TransactionTime
+  payload: ObservationPayload
+  confidence: Option<Probability>
+}

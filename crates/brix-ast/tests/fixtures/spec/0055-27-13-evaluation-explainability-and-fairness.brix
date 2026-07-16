@@ -1,0 +1,9 @@
+// source: 27.13 Evaluation, explainability, and fairness (block 55)
+record MetricResult<T> {
+  metric: MetricRef
+  value: T
+  interval: Option<Interval<T>>
+  population: PopulationRef
+  sampleSize: Nat
+  method: EvaluationMethod
+}

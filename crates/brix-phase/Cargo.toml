@@ -1,0 +1,12 @@
+[package]
+name = "brix-phase"
+description = "Dependency graph, SCC, phase assignment, minimal offending path (App. F)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

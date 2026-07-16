@@ -1,0 +1,12 @@
+// source: 3. Lowering (block 14)
+derive Outcome: AssignVehicle.Feedback(
+  decision: d, deliveredOnTime: onTime, margin, emptyDistance
+) from {
+  d @ AssignVehicle.Decision(chosen: v)
+  DecisionApplied(decision: d, order: o)        // authority trail, §5
+  Delivered(order: o, at: t)
+  o: Order { due }
+  let onTime = t <= due
+  Margin(order: o, amount: margin)
+  EmptyLeg(order: o, vehicle: v, length: emptyDistance)
+}

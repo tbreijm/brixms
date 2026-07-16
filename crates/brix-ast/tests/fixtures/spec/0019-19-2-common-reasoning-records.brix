@@ -1,0 +1,31 @@
+// source: 19.2 Common reasoning records (block 19)
+record Estimate<T> {
+  value: T
+  error: ErrorBound<T>
+  confidence: Probability
+  method: MethodDescriptor
+}
+
+record Interval<T> {
+  lower: T
+  upper: T
+}
+
+enum ProofResult<T> {
+  Proven { proposition: T, proof: logic.Proof }
+  Disproven { counterexample: logic.Counterexample }
+  Unknown { reason: logic.UnknownReason }
+}
+
+record Grounded<T> {
+  value: T
+  evidence: Set<EvidenceRef>
+  inference: reasoning.RunRef
+}
+
+record Suggestion<T> {
+  candidate: T
+  score: Estimate<Real>
+  evidence: Set<EvidenceRef>
+  producer: reasoning.ReasonerRef
+}

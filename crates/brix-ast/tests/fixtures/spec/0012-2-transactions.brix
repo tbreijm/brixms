@@ -1,0 +1,10 @@
+// source: 2. Transactions (block 12)
+transaction serializable {
+  let o = ensure Order { ... }              // return-or-create keyed ENTITY
+  fresh Note { ... }                        // mint unkeyed, transaction-stable identity
+  let c: ClaimRef<Move> =
+    assert Move(order: o, vehicle: v)       // assert RELATION; returns claim reference
+  set OrderStatus(order: o, value: Open)    // state rel: assert + supersede
+  retract c                                 // consume a ClaimRef; unambiguous
+  supersede newEdge over oldEdge            // explicit lineage
+}

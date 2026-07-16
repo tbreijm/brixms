@@ -1,0 +1,11 @@
+// source: 27.5 Factors and statistical formulas (block 44)
+factor ServiceLevel {
+  Economy
+  Standard
+  Express
+  Critical
+}
+
+ordered factor RiskBand {
+  Low < Moderate < High < Critical
+}

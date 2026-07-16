@@ -1,0 +1,7 @@
+// source: 19.4 Mathematics (block 21)
+measure Length
+measure Time
+unit kilometre: Length = 1000 metres
+unit hour: Time = 3600 seconds
+
+type Speed = Quantity<Length / Time>

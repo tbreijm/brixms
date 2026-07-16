@@ -1,0 +1,15 @@
+// source: 27.5 Factors and statistical formulas (block 45)
+statistical model LateDeliveryModel {
+  outcome Late
+
+  formula {
+    Late ~ Distance
+         + Weight
+         + ServiceLevel
+         + WeatherSeverity
+         + Distance:WeatherSeverity
+  }
+
+  family Binomial
+  link Logit
+}

@@ -1,0 +1,9 @@
+// source: 27.6 Feature semantics (block 47)
+record FeatureValue<T> {
+  subject: EntityRef
+  feature: FeatureRef
+  value: Missing<T>
+  asOf: ValidTime
+  computedAt: TransactionTime
+  snapshot: SnapshotId
+}

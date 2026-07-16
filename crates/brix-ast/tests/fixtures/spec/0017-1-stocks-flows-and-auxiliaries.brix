@@ -1,0 +1,7 @@
+// source: 1. Stocks, flows and auxiliaries (block 17)
+system dynamics FleetCapacity {
+  stock AvailableVehicles: Quantity<VehicleCount> = 100 vehicles
+  inflow Returned into AvailableVehicles rate returnRate
+  outflow Dispatched from AvailableVehicles rate dispatchRate
+  auxiliary utilization = ActiveVehicles.value / TotalFleet.value
+}

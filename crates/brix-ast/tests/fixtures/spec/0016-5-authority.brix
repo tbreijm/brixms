@@ -1,0 +1,7 @@
+// source: 5. Authority (block 16)
+derive AutoAssign: AssignVehicleCommand.request(order: o, vehicle: v) from {
+  AssignmentAdvice(order: o, vehicle: v, score, decision: d)
+  AutoAssignmentEnabled()
+  when score.lowerBound > 0.90
+  without { AssignmentSafetyRisk(order: o, vehicle: v) }
+}
