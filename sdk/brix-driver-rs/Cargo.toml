@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# The guest SDK re-exports the delta-ABI types from brix-rt so guest and host
+# cannot drift, and canon-encodes payloads through brix-canon (the one
+# serializer). Both are workspace-internal path deps (Ring0_Build_Plan.md §0),
+# not third-party whitelist entries.
+brix-rt = { path = "../../crates/brix-rt" }
+brix-canon = { path = "../../crates/brix-canon" }
 
 [lints]
 workspace = true

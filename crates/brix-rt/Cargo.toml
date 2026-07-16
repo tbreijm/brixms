@@ -7,6 +7,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Workspace-internal sibling crate (Ring0_Build_Plan.md §0 dependency order:
+# brix-rt depends on canon + diag). Not part of the external DEPS.md
+# whitelist — that governs third-party crates entering
+# [workspace.dependencies], not path deps between crates in this workspace.
+brix-canon = { path = "../brix-canon" }
+
+[dev-dependencies]
+proptest = { workspace = true }
 
 [lints]
 workspace = true

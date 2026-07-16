@@ -84,6 +84,10 @@ version = "0.0.0"
 [[package]]
 name = "brix-driver-rs"
 version = "0.0.0"
+dependencies = [
+ "brix-canon",
+ "brix-rt",
+]
 
 [[package]]
 name = "brix-ir"
@@ -100,6 +104,10 @@ version = "0.0.0"
 [[package]]
 name = "brix-rt"
 version = "0.0.0"
+dependencies = [
+ "brix-canon",
+ "proptest",
+]
 
 [[package]]
 name = "brixc"
