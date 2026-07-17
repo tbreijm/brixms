@@ -99,6 +99,11 @@ version = "0.0.0"
 [[package]]
 name = "brix-ir"
 version = "0.0.0"
+dependencies = [
+ "brix-canon",
+ "insta",
+ "proptest",
+]
 
 [[package]]
 name = "brix-oracle"

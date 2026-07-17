@@ -4,3 +4,6 @@ Cargo.lock.orig
 .DS_Store
 *.pending-snap
 /registry-local
+
+# Claude Code local worktrees / session state
+.claude/
