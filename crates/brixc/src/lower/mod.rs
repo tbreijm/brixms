@@ -28,6 +28,7 @@ pub use resolve::{FnInfo, LowerMeta, ProgramResolver, UnitClass, VariantLookup};
 use brix_ast::{Diagnostic, File, Severity};
 use brix_ir::check::{check_relation_keys, check_rule};
 use brix_ir::frontend::FrontendSource;
+use brix_ir::infer::infer_source;
 
 use crate::pipeline::{Frontend, Lower, PipelineError};
 
@@ -60,7 +61,7 @@ pub fn lower_file(file: &File, parse_diags: &brix_ast::Diagnostics) -> Lowered {
     let mut meta = LowerMeta::default();
 
     let resolver = schema::build(file, &mut meta, &mut diags);
-    let source = decl::lower_decls(file, &resolver, &mut meta, &mut diags);
+    let mut source = decl::lower_decls(file, &resolver, &mut meta, &mut diags);
 
     for schema in resolver.relations() {
         for finding in check_relation_keys(schema) {
@@ -71,6 +72,9 @@ pub fn lower_file(file: &File, parse_diags: &brix_ast::Diagnostics) -> Lowered {
         for finding in check_rule(rule, &resolver) {
             diags.push(diag::render_finding(&finding, &meta));
         }
+    }
+    for error in infer_source(&mut source, &resolver) {
+        diags.push(diag::render_type_error(&error));
     }
 
     Lowered {

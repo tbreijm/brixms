@@ -210,6 +210,112 @@ derive R: Seen(x: amount) from {
 }
 
 // ---------------------------------------------------------------------
+// Type inference / ground dimensions (issue #13).
+// ---------------------------------------------------------------------
+
+fn type_errors(lowered: &brixc::Lowered) -> Vec<&brix_ast::Diagnostic> {
+    lowered
+        .diags
+        .iter()
+        .filter(|d| d.code == "BRX-IR-0005")
+        .collect()
+}
+
+#[test]
+fn wrong_role_type_is_one_hard_error_without_a_cascade() {
+    let lowered = lower(
+        r#"
+package t @ 1.0.0
+rel Input { value: Int } key(value)
+rel Output { value: String } key(value)
+derive R: Output(value: value) from { Input(value) }
+"#,
+    );
+    let errors = type_errors(&lowered);
+    assert_eq!(errors.len(), 1, "{:#?}", lowered.diags);
+    assert!(errors[0].message.contains("type mismatch"));
+}
+
+#[test]
+fn pricing_rate_divided_by_length_is_one_dimension_error() {
+    let lowered = lower(
+        r#"
+package t @ 1.0.0
+use brix.math.units.Kilometre
+rel Input { rate: Money<EUR> / Kilometre; length: Quantity<Kilometre>; surcharge: Money<EUR> } key(length)
+rel Output { amount: Money<EUR> } key(amount)
+derive R: Output(amount: amount) from {
+  Input(rate, length, surcharge)
+  let amount = rate / length + surcharge
+}
+"#,
+    );
+    let errors = type_errors(&lowered);
+    assert_eq!(errors.len(), 1, "{:#?}", lowered.diags);
+    assert!(errors[0].message.contains("dimension error in add"));
+}
+
+#[test]
+fn non_bool_when_guard_is_one_targeted_error() {
+    let lowered = lower(
+        r#"
+package t @ 1.0.0
+rel Input { x: Int } key(x)
+rel Output { x: Int } key(x)
+derive R: Output(x) from { Input(x); when 1 }
+"#,
+    );
+    let errors = type_errors(&lowered);
+    assert_eq!(errors.len(), 1, "{:#?}", lowered.diags);
+    assert!(errors[0].message.contains("when guard must be Bool"));
+}
+
+#[test]
+fn call_arity_is_one_targeted_error() {
+    let lowered = lower(
+        r#"
+package t @ 1.0.0
+fn f(x: Int) -> Int = x
+rel Input { x: Int } key(x)
+rel Output { x: Int } key(x)
+derive R: Output(x: y) from { Input(x); let y = f() }
+"#,
+    );
+    let errors = type_errors(&lowered);
+    assert_eq!(errors.len(), 1, "{:#?}", lowered.diags);
+    assert!(errors[0].message.contains("arity error"));
+}
+
+#[test]
+fn money_times_money_is_rejected() {
+    let lowered = lower(
+        r#"
+package t @ 1.0.0
+rel Input { a: Money<EUR>; b: Money<EUR> } key(a)
+rel Output { x: Int } key(x)
+derive R: Output(x: 1) from { Input(a, b); let product = a * b }
+"#,
+    );
+    let errors = type_errors(&lowered);
+    assert_eq!(errors.len(), 1, "{:#?}", lowered.diags);
+    assert!(errors[0].message.contains("dimension error in mul"));
+}
+
+#[test]
+fn dividing_distinct_currencies_is_rejected() {
+    let lowered = lower(
+        r#"
+package t @ 1.0.0
+rel Input { eur: Money<EUR>; usd: Money<USD> } key(eur)
+rel Output { x: Int } key(x)
+derive R: Output(x: 1) from { Input(eur, usd); let exchange = eur / usd }
+"#,
+    );
+    let errors = type_errors(&lowered);
+    assert_eq!(errors.len(), 1, "{:#?}", lowered.diags);
+    assert!(errors[0].message.contains("dimension error in div"));
+}
+// ---------------------------------------------------------------------
 // Protocol relation synthesis.
 // ---------------------------------------------------------------------
 

@@ -142,12 +142,13 @@ pub enum Clause {
         entity: Ident,
         fields: Vec<RoleArg>,
     },
-    /// `let pat = expr` — local binding. `expr` here is an opaque expression
-    /// reference (the expression IR lives in [`crate::core`]); we record which
-    /// variable it binds and whether it uses `?` (a failure site).
-    Let { binds: Ident, has_question: bool },
+    /// `let pat = expr` — local binding.
+    Let {
+        binds: Ident,
+        expr: crate::core::Expr,
+    },
     /// `when boolExpr` — guard.
-    When,
+    When(crate::core::Expr),
     /// `any { case {...} ... }` — disjunction; each case is a sub-pattern with
     /// compatible bindings.
     Any(Vec<Pattern>),
@@ -196,17 +197,8 @@ impl fmt::Display for Clause {
                 }
                 write!(f, " }}")
             }
-            Clause::Let {
-                binds,
-                has_question,
-            } => {
-                write!(
-                    f,
-                    "let {binds} = <expr>{}",
-                    if *has_question { "?" } else { "" }
-                )
-            }
-            Clause::When => write!(f, "when <expr>"),
+            Clause::Let { binds, expr } => write!(f, "let {binds} = {}", expr.kind),
+            Clause::When(expr) => write!(f, "when {}", expr.kind),
             Clause::Any(cases) => {
                 write!(f, "any {{ ")?;
                 for (i, c) in cases.iter().enumerate() {
@@ -319,7 +311,7 @@ impl Pattern {
                 }
                 Clause::Cross(p) => out.extend(p.bound_vars()),
                 // exists/without export nothing; when/guards bind nothing.
-                Clause::Exists(_) | Clause::Without(_) | Clause::When => {}
+                Clause::Exists(_) | Clause::Without(_) | Clause::When(_) => {}
             }
         }
         out.sort();
@@ -347,7 +339,7 @@ impl Pattern {
                     }
                 }
                 Clause::Cross(p) => p.collect_reads(ctx, out),
-                Clause::Entity { .. } | Clause::Let { .. } | Clause::When => {}
+                Clause::Entity { .. } | Clause::Let { .. } | Clause::When(_) => {}
             }
         }
     }

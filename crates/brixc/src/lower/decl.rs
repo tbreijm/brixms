@@ -179,7 +179,7 @@ fn lower_entity_clause(ctx: &mut BodyCtx, e: &ast::EntityClause) -> Clause {
     }
 }
 
-fn lower_let_clause(ctx: &mut BodyCtx, l: &ast::LetClause, ordinal: u32) -> Clause {
+fn lower_let_clause(ctx: &mut BodyCtx, l: &ast::LetClause, _ordinal: u32) -> Clause {
     let binds = match &*l.pattern.kind {
         ast::ExprKind::Ident(p) if p.segments.len() == 1 => {
             IrIdent::new(p.segments[0].text.clone())
@@ -204,37 +204,13 @@ fn lower_let_clause(ctx: &mut BodyCtx, l: &ast::LetClause, ordinal: u32) -> Clau
             format!("`let {binds}` rebinds an already-bound name (no shadowing)"),
         ));
     }
-    let has_question = expr_contains_try(&value);
-    ctx.meta
-        .set_clause_expr(ctx.decl_name.clone(), ordinal, value);
-    Clause::Let {
-        binds,
-        has_question,
-    }
+    Clause::Let { binds, expr: value }
 }
 
-fn lower_when_clause(ctx: &mut BodyCtx, e: &ast::Expr, ordinal: u32) -> Clause {
+fn lower_when_clause(ctx: &mut BodyCtx, e: &ast::Expr, _ordinal: u32) -> Clause {
     let value = expr::lower_expr(ctx, e);
     ctx.effects = ctx.effects.combine(&expr::effects_of(&value, ctx.resolver));
-    ctx.meta
-        .set_clause_expr(ctx.decl_name.clone(), ordinal, value);
-    Clause::When
-}
-
-fn expr_contains_try(e: &core::Expr) -> bool {
-    use core::ExprKind;
-    match &*e.kind {
-        ExprKind::Try { .. } => true,
-        ExprKind::Call { args, .. } => args.iter().any(expr_contains_try),
-        ExprKind::Field { base, .. } => expr_contains_try(base),
-        ExprKind::If { cond, then, els } => {
-            expr_contains_try(cond) || expr_contains_try(then) || expr_contains_try(els)
-        }
-        ExprKind::Comprehension { yields, .. } => {
-            yields.as_ref().map(expr_contains_try).unwrap_or(false)
-        }
-        ExprKind::Var(_) | ExprKind::Lit(_) => false,
-    }
+    Clause::When(value)
 }
 
 // ---------------------------------------------------------------------
@@ -379,8 +355,6 @@ fn lower_query(
             (IrIdent::new(p.name.text.clone()), ty)
         })
         .collect();
-    meta.set_query_params(name.clone(), params.clone());
-
     let mut ctx = BodyCtx::new(name.clone(), resolver, meta, diags);
     // Query params are in scope for the body/yield (design: params live in
     // `LowerMeta` — mismatch (E) — but the *names* still participate in the
@@ -394,6 +368,7 @@ fn lower_query(
 
     Query {
         name,
+        params,
         body,
         yields,
         result,

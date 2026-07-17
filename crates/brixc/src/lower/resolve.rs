@@ -16,7 +16,6 @@ use std::collections::BTreeMap;
 
 use brix_ast::ast;
 use brix_ast::Span;
-use brix_ir::core::Expr as IrExpr;
 use brix_ir::effects::EffectRow;
 use brix_ir::frontend::{FnSignature, RelationSchema, SchemaResolver, TableResolver};
 use brix_ir::ident::{Ident as IrIdent, QualIdent};
@@ -256,20 +255,10 @@ pub struct FnInfo {
     pub body: Option<ast::FnBody>,
 }
 
-/// The v0 side tables for the impedance mismatches that don't yet have an
-/// IR-shape fix (design §"Impedance mismatches", (C) and (E); (D) needs no
-/// table — the record bridge's field order is recoverable from the
-/// enclosing `Expr::ty`, see `expr.rs`). Also carries the span map Core IR
-/// itself has no room for, and the monotonic `TyVar` supply.
+/// Lowering metadata that deliberately remains outside semantic Core IR:
+/// source spans, fn-only information, and the monotonic `TyVar` supply.
 #[derive(Default)]
 pub struct LowerMeta {
-    /// (C) `pattern::Clause::When`/`Clause::Let` carry no expr payload.
-    /// Keyed by (decl name, DFS clause-visit ordinal — see
-    /// `decl::ClauseCounter`), since one decl's body may contain several
-    /// `when`/`let` clauses, including nested ones.
-    clause_exprs: BTreeMap<(IrIdent, u32), IrExpr>,
-    /// (E) `core::Query` carries no `params`.
-    query_params: BTreeMap<IrIdent, Vec<(IrIdent, Ty)>>,
     fn_info: BTreeMap<QualIdent, FnInfo>,
     decl_spans: BTreeMap<IrIdent, Span>,
     relation_decl_spans: BTreeMap<QualIdent, Span>,
@@ -308,22 +297,6 @@ impl LowerMeta {
         self.role_spans
             .get(&(relation.clone(), role.clone()))
             .copied()
-    }
-
-    pub fn set_clause_expr(&mut self, decl: IrIdent, ordinal: u32, expr: IrExpr) {
-        self.clause_exprs.insert((decl, ordinal), expr);
-    }
-
-    pub fn clause_expr(&self, decl: &IrIdent, ordinal: u32) -> Option<&IrExpr> {
-        self.clause_exprs.get(&(decl.clone(), ordinal))
-    }
-
-    pub fn set_query_params(&mut self, name: IrIdent, params: Vec<(IrIdent, Ty)>) {
-        self.query_params.insert(name, params);
-    }
-
-    pub fn query_params(&self, name: &IrIdent) -> Option<&[(IrIdent, Ty)]> {
-        self.query_params.get(name).map(|v| v.as_slice())
     }
 
     pub fn set_fn_info(&mut self, name: QualIdent, info: FnInfo) {

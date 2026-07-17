@@ -163,6 +163,7 @@ fn constraint_and_query_display() {
     };
     let q = Query {
         name: Ident::new("OpenOrders"),
+        params: vec![],
         body: Pattern::new(vec![edge("Order", &[("id", "o")])]),
         yields: Expr::new(
             Ty::NodeRef(Ident::new("Order")),

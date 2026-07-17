@@ -15,6 +15,7 @@
 use brix_ast::{Diagnostic, Span};
 use brix_ir::check::Finding;
 use brix_ir::ident::Ident as IrIdent;
+use brix_ir::infer::TypeError;
 
 use super::resolve::LowerMeta;
 
@@ -64,6 +65,8 @@ pub const UNRESOLVED_TYPE: &str = "BRX-LOW-0012";
 /// `BRX-LOW-0013` — mismatch (F): a compound unit type (`T / U`) has no
 /// `Ty` representation; lowered to `Ty::Var` with this warning.
 pub const COMPOUND_UNIT: &str = "BRX-LOW-0013";
+/// `BRX-IR-0005` — an expression failed HM/ground-dimension type checking.
+pub const TYPE_ERROR: &str = "BRX-IR-0005";
 
 pub fn error(code: &'static str, span: Span, msg: impl Into<String>) -> Diagnostic {
     Diagnostic::error(code, span, msg)
@@ -97,4 +100,8 @@ pub fn render_finding(finding: &Finding, meta: &LowerMeta) -> Diagnostic {
 
 fn decl_span(meta: &LowerMeta, name: &IrIdent) -> Span {
     meta.decl_span(name).unwrap_or(Span::empty(0))
+}
+
+pub fn render_type_error(error: &TypeError) -> Diagnostic {
+    Diagnostic::error(TYPE_ERROR, Span::empty(0), error.to_string())
 }
