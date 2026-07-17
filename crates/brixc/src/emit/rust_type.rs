@@ -60,6 +60,7 @@ pub fn rust_type_of(ty: &Ty) -> String {
         Ty::Record(_) => unresolved("a Record<_> value cannot be a relation column"),
         Ty::Fn { .. } => unresolved("a function type cannot be a relation column"),
         Ty::Var(_) => unresolved("unresolved type variable reached codegen"),
+        Ty::Error => unresolved("a type-error-recovery marker reached codegen"),
     }
 }
 

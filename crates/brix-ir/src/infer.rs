@@ -1,6 +1,11 @@
 //! Hindley--Milner style monomorphic inference for the lowered v1 Core IR.
 //! Polymorphic dimension variables and trait bounds are deliberately deferred;
 //! all physical dimensions here are ground exponent vectors.
+//!
+//! The pure unification/dimension algebra lives in [`crate::solve`] and is
+//! shared with [`crate::reflect`] (#15 PR2: "one algorithm, two
+//! observers") — this module supplies only the *observation*: it mutates
+//! `Expr.ty` in place and accumulates [`TypeError`]s.
 
 use std::collections::BTreeMap;
 
@@ -8,10 +13,8 @@ use crate::core::{Expr, ExprKind, Head, Query, Rule};
 use crate::frontend::{FrontendSource, SchemaResolver};
 use crate::ident::{Ident, QualIdent};
 use crate::pattern::{Arg, Clause, Lit, Pattern, RoleArg};
-use crate::types::{
-    dimensions_div, dimensions_mul, money_dimensions, quantity_dimensions, Dimensions, Row,
-    RowTail, Ty, TyVar,
-};
+use crate::solve::{self, DimBinaryStep, DimStep, Step};
+use crate::types::{Row, Ty, TyVar};
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TypeError {
@@ -230,14 +233,14 @@ impl Infer {
                                 field: field.clone(),
                                 base: Ty::Record(row.clone()),
                             });
-                            Ty::Var(TyVar(u32::MAX))
+                            Ty::Error
                         }),
                     t => {
                         self.errors.push(TypeError::UnknownField {
                             field: field.clone(),
                             base: t,
                         });
-                        Ty::Var(TyVar(u32::MAX))
+                        Ty::Error
                     }
                 }
             }
@@ -255,7 +258,7 @@ impl Infer {
                     Ty::Result(ok, _) => *ok,
                     t => {
                         self.errors.push(TypeError::TryNonResult { found: t });
-                        Ty::Var(TyVar(u32::MAX))
+                        Ty::Error
                     }
                 }
             }
@@ -309,7 +312,7 @@ impl Infer {
             }
             return sig.ret.clone();
         }
-        Ty::Var(TyVar(u32::MAX))
+        Ty::Error
     }
     fn operator(&mut self, name: &str, args: &[Ty]) -> Ty {
         if args.len() != if name == "not" || name == "neg" { 1 } else { 2 } {
@@ -318,7 +321,7 @@ impl Infer {
                 expected: if name == "not" || name == "neg" { 1 } else { 2 },
                 found: args.len(),
             });
-            return Ty::Var(TyVar(u32::MAX));
+            return Ty::Error;
         }
         match name {
             "and" | "or" => {
@@ -338,47 +341,44 @@ impl Infer {
             "mul" => self.dimension_binary(&args[0], &args[1], true),
             "div" => self.dimension_binary(&args[0], &args[1], false),
             "neg" => args[0].clone(),
-            _ => Ty::Var(TyVar(u32::MAX)),
+            _ => Ty::Error,
         }
     }
+    /// Dimension-vs-variable ruling: when one side lacks ground dimensions,
+    /// [`solve::same_dimension_step`] solves/unifies it rather than
+    /// reporting a conflict — see that function's doc for the frozen
+    /// ruling. Only two ground, unequal dimension sets are a real error.
     fn same_dimension(&mut self, operation: &str, a: &Ty, b: &Ty) -> Ty {
-        if let (Some(x), Some(y)) = (dims(a), dims(b)) {
-            if x != y {
+        match solve::same_dimension_step(a, b) {
+            DimStep::Ok(t) => t,
+            DimStep::Conflict => {
                 self.errors.push(TypeError::Dimension {
                     operation: operation.to_owned(),
                     left: a.clone(),
                     right: b.clone(),
                 });
-                Ty::Var(TyVar(u32::MAX))
-            } else {
-                a.clone()
+                Ty::Error
             }
-        } else {
-            self.unify(a.clone(), b.clone());
-            a.clone()
+            DimStep::Solve(x, y) => {
+                self.unify(x.clone(), y);
+                x
+            }
         }
     }
     fn dimension_binary(&mut self, a: &Ty, b: &Ty, mul: bool) -> Ty {
-        match (dims(a), dims(b)) {
-            (Some(x), Some(y)) => {
-                if has_distinct_currencies(&x, &y) || (mul && has_money(&x) && has_money(&y)) {
-                    self.errors.push(TypeError::Dimension {
-                        operation: if mul { "mul" } else { "div" }.to_owned(),
-                        left: a.clone(),
-                        right: b.clone(),
-                    });
-                    Ty::Var(TyVar(u32::MAX))
-                } else {
-                    from_dims(if mul {
-                        dimensions_mul(&x, &y)
-                    } else {
-                        dimensions_div(&x, &y)
-                    })
-                }
+        match solve::dimension_binary_step(a, b, mul) {
+            DimBinaryStep::Ok(t) => t,
+            DimBinaryStep::Conflict => {
+                self.errors.push(TypeError::Dimension {
+                    operation: if mul { "mul" } else { "div" }.to_owned(),
+                    left: a.clone(),
+                    right: b.clone(),
+                });
+                Ty::Error
             }
-            _ => {
-                self.unify(a.clone(), b.clone());
-                a.clone()
+            DimBinaryStep::Solve(x, y) => {
+                self.unify(x.clone(), y);
+                x
             }
         }
     }
@@ -393,51 +393,56 @@ impl Infer {
         }
     }
     fn resolve(&self, t: Ty) -> Ty {
-        match t {
-            Ty::Var(v) => self
-                .subst
-                .get(&v)
-                .cloned()
-                .map(|x| self.resolve(x))
-                .unwrap_or(Ty::Var(v)),
-            Ty::Option(x) => Ty::option(self.resolve(*x)),
-            Ty::Result(a, b) => Ty::Result(Box::new(self.resolve(*a)), Box::new(self.resolve(*b))),
-            x => x,
-        }
+        solve::resolve(&self.subst, t)
     }
+    /// The one unification entry point. [`solve::step`] is the shared
+    /// algebra's answer to "what should happen for these two resolved
+    /// types"; this method is only the *observation* — push a
+    /// [`TypeError`] or recurse — the algorithm itself never lives here.
     fn unify(&mut self, a: Ty, b: Ty) {
         let a = self.resolve(a);
         let b = self.resolve(b);
-        if a == b {
-            return;
-        }
-        match (a, b) {
-            (Ty::Var(v), t) | (t, Ty::Var(v)) => self.bind(v, t),
-            // `Probability` is the constrained [0,1] F64 domain. Range
-            // validation is a numeric/strict-IEEE follow-up; v1 admits the
-            // representation-level bridge used by the flagship's clamp.
-            (Ty::Probability, Ty::F64) | (Ty::F64, Ty::Probability) => {}
-            (Ty::Record(a), Ty::Record(b)) | (Ty::Rel(a), Ty::Rel(b)) => self.unify_rows(*a, *b),
-            (expected, found) => self.errors.push(TypeError::Mismatch { expected, found }),
+        match solve::step(a, b) {
+            Step::Done => {}
+            Step::Bind(v, t) => self.bind(v, t),
+            Step::Rows(a, b) => self.unify_rows(a, b),
+            Step::Descend(pairs) => {
+                for (x, y) in pairs {
+                    self.unify(x, y);
+                }
+            }
+            Step::Mismatch(expected, found) => {
+                self.errors.push(TypeError::Mismatch { expected, found })
+            }
         }
     }
     fn bind(&mut self, v: TyVar, t: Ty) {
-        if occurs(v, &t, &self.subst) {
+        if solve::occurs(v, &t, &self.subst) {
             self.errors.push(TypeError::Occurs { var: v, in_ty: t });
         } else {
             self.subst.insert(v, t);
         }
     }
+    /// Row symmetry ruling: [`solve::match_rows`] checks both directions,
+    /// so `{a} ~ closed {a,b}` is a mismatch regardless of which side is
+    /// `a`/`b` — a left-only check (the previous behavior here) would miss
+    /// the case where `b` is closed and has an extra field `a` lacks.
     fn unify_rows(&mut self, a: Row, b: Row) {
-        for field in &a.fields {
-            if let Some(other) = b.fields.iter().find(|x| x.name == field.name) {
-                self.unify(field.ty.clone(), other.ty.clone())
-            } else if matches!(b.tail, RowTail::Closed) {
-                self.errors.push(TypeError::UnknownField {
-                    field: field.name.clone(),
-                    base: Ty::Record(Box::new(b.clone())),
-                })
-            }
+        let matched = solve::match_rows(&a, &b);
+        for (x, y) in matched.pairs {
+            self.unify(x, y);
+        }
+        for field in matched.missing_in_right {
+            self.errors.push(TypeError::UnknownField {
+                field,
+                base: Ty::Record(Box::new(b.clone())),
+            });
+        }
+        for field in matched.missing_in_left {
+            self.errors.push(TypeError::UnknownField {
+                field,
+                base: Ty::Record(Box::new(a.clone())),
+            });
         }
     }
     fn zonk_expr(&self, e: &mut Expr) {
@@ -486,53 +491,13 @@ impl Infer {
         }
     }
 }
-fn dims(t: &Ty) -> Option<Dimensions> {
-    match t {
-        Ty::Quantity(m) => Some(quantity_dimensions(m)),
-        Ty::Money(c) => Some(money_dimensions(c)),
-        Ty::Dimensioned(d) => Some(d.clone()),
-        _ => None,
-    }
-}
-fn from_dims(d: Dimensions) -> Ty {
-    if d.len() == 1 && d[0].exponent == 1 {
-        if let Some(c) = d[0].name.as_str().strip_prefix("money:") {
-            return Ty::Money(Ident::new(c));
-        }
-        return Ty::Quantity(d[0].name.clone());
-    }
-    Ty::Dimensioned(d)
-}
-fn has_money(dims: &Dimensions) -> bool {
-    dims.iter().any(|d| d.name.as_str().starts_with("money:"))
-}
-fn has_distinct_currencies(left: &Dimensions, right: &Dimensions) -> bool {
-    let left: Vec<&str> = left
-        .iter()
-        .filter_map(|d| d.name.as_str().strip_prefix("money:"))
-        .collect();
-    let right: Vec<&str> = right
-        .iter()
-        .filter_map(|d| d.name.as_str().strip_prefix("money:"))
-        .collect();
-    !left.is_empty() && !right.is_empty() && left != right
-}
-fn occurs(v: TyVar, t: &Ty, s: &BTreeMap<TyVar, Ty>) -> bool {
-    match t {
-        Ty::Var(x) => *x == v || s.get(x).is_some_and(|z| occurs(v, z, s)),
-        Ty::Option(x) | Ty::List(x) | Ty::Vector(x) | Ty::Set(x) | Ty::Bag(x) | Ty::Estimate(x) => {
-            occurs(v, x, s)
-        }
-        Ty::Result(a, b) | Ty::Map(a, b) => occurs(v, a, s) || occurs(v, b, s),
-        _ => false,
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::{Expr, ExprKind, Query};
     use crate::frontend::TableResolver;
+    use crate::types::{dimensions_div, money_dimensions, quantity_dimensions};
 
     fn var(name: &str, ty: Ty) -> Expr {
         Expr::new(ty, ExprKind::Var(Ident::new(name)))
