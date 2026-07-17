@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 
 use brix_ast::ast;
-use brix_ast::{Diagnostic, Span};
+use brix_diag::{Diagnostic, Span};
 use brix_ir::core::{Expr as IrExpr, ExprKind, ExprOrigin, SourceRange};
 use brix_ir::effects::EffectRow;
 use brix_ir::frontend::SchemaResolver;

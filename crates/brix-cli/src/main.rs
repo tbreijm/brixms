@@ -5,6 +5,11 @@
 //! is a legible "not yet implemented" rather than silently accepted.
 
 use brix_cli::args::{parse, Invocation, ParsedArgs};
+use brix_diag::DiagnosticFormat;
+
+const EXIT_SUCCESS: i32 = 0;
+const EXIT_FAILURE: i32 = 1;
+const EXIT_USAGE: i32 = 2;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -14,7 +19,7 @@ fn main() {
         Ok(Invocation::Verb(p)) => std::process::exit(dispatch(&p)),
         Err(e) => {
             eprintln!("brix: {e}");
-            std::process::exit(1);
+            std::process::exit(EXIT_USAGE);
         }
     }
 }
@@ -25,39 +30,69 @@ fn dispatch(p: &ParsedArgs) -> i32 {
         "run" => run_run(p),
         other => {
             eprintln!("brix: `{other}` is not yet implemented (try `brix --help`)");
-            1
+            EXIT_USAGE
         }
     }
 }
 
 fn run_build(p: &ParsedArgs) -> i32 {
+    let format = match diagnostic_format(p) {
+        Ok(format) => format,
+        Err(message) => {
+            eprintln!("brix build: {message}");
+            return EXIT_USAGE;
+        }
+    };
     let Some(operand) = p.operand() else {
         eprintln!("brix build: expected a source file or package path");
-        return 1;
+        return EXIT_USAGE;
     };
     match brix_cli::build::build(operand, profile_from(p)) {
         Ok(outcome) => {
             println!("brix: built {}", outcome.binary_path);
-            0
+            EXIT_SUCCESS
         }
         Err(e) => {
-            eprintln!("brix build: {e}");
-            1
+            report_error("build", &e, format);
+            EXIT_FAILURE
         }
     }
 }
 
 fn run_run(p: &ParsedArgs) -> i32 {
+    let format = match diagnostic_format(p) {
+        Ok(format) => format,
+        Err(message) => {
+            eprintln!("brix run: {message}");
+            return EXIT_USAGE;
+        }
+    };
     let Some(operand) = p.operand() else {
         eprintln!("brix run: expected a source file or package path");
-        return 1;
+        return EXIT_USAGE;
     };
     match brix_cli::build::run(operand) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("brix run: {e}");
-            1
+            report_error("run", &e, format);
+            EXIT_FAILURE
         }
+    }
+}
+
+fn diagnostic_format(p: &ParsedArgs) -> Result<DiagnosticFormat, String> {
+    match p.value("diagnostic-format") {
+        None => Ok(DiagnosticFormat::Human),
+        Some(value) => DiagnosticFormat::parse(value).ok_or_else(|| {
+            format!("unsupported diagnostic format `{value}` (expected human, json, or sarif)")
+        }),
+    }
+}
+
+fn report_error(command: &str, error: &brix_cli::build::BuildError, format: DiagnosticFormat) {
+    match format {
+        DiagnosticFormat::Human => eprintln!("brix {command}: {error}"),
+        DiagnosticFormat::Json | DiagnosticFormat::Sarif => println!("{}", error.render(format)),
     }
 }
 
@@ -73,6 +108,9 @@ fn print_help() {
         "brix: BrixMS toolchain (Ring 0)\n\n\
          Usage:\n\
          \x20\x20brix build <path>   Compile a package/source file to a Rust workspace\n\
-         \x20\x20brix run <path>     Build, then execute the produced binary\n"
+         \x20\x20brix run <path>     Build, then execute the produced binary\n\
+         \n\
+         Build/run accept --diagnostic-format human|json|sarif. Exit codes: 0 success,\n\
+         1 build/runtime failure, 2 command-line usage error.\n"
     );
 }

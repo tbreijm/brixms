@@ -1,8 +1,7 @@
 //! The one diagnostic channel (design §"Error strategy").
 //!
-//! `brix-ast`'s `Diagnostic`/`Severity` is the brix-diag stand-in (see that
-//! crate's module docs); lowering reuses it rather than inventing a second
-//! diagnostic type. Codes: `BRX-AST-*` (parse, already on the `Diagnostics`
+//! `brix-diag` owns the one shared diagnostic type. Codes: `BRX-AST-*` (parse,
+//! already on the `Diagnostics`
 //! handed to [`crate::lower::lower_file`]), `BRX-LOW-*` (lowering, this
 //! module), `BRX-IR-*` (rendered [`brix_ir::check::Finding`]s).
 //!
@@ -12,7 +11,7 @@
 //! [`crate::lower::lower_file`]). Nothing here reorders; callers that want a
 //! different order sort afterward.
 
-use brix_ast::{Diagnostic, Span};
+use brix_diag::{Diagnostic, Span};
 use brix_ir::check::Finding;
 use brix_ir::ident::Ident as IrIdent;
 use brix_ir::infer::TypeError;

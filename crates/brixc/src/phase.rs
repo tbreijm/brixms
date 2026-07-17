@@ -25,10 +25,11 @@ impl PhaseAssign for AstPhase {
 
     fn assign_phases(&self, ir: Self::Ir) -> Result<Self::Phased, PipelineError> {
         let facts = to_rule_facts(&ir);
-        let phases = brix_phase::infer_phases(&facts).map_err(|e| PipelineError::Stage {
-            stage: Stage::Phase,
-            message: e.to_string(),
-        })?;
+        let phases =
+            brix_phase::infer_phases(&facts).map_err(|error| PipelineError::Diagnostic {
+                stage: Stage::Phase,
+                diagnostic: error.diagnostic(),
+            })?;
         Ok(Phased {
             lowered: ir,
             phases,

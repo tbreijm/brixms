@@ -16,6 +16,8 @@
 
 use std::fmt;
 
+use brix_diag::Diagnostic;
+
 /// Which pipeline stage a not-yet-wired seam belongs to, and which sibling crate
 /// owns it. Used to make `todo` seams self-describing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +68,11 @@ pub enum PipelineError {
     Unimplemented { stage: Stage, owner: &'static str },
     /// A stage ran but failed (placeholder for a `brix-diag` Diagnostic).
     Stage { stage: Stage, message: String },
+    /// A stage failed with a structured, source-map-ready diagnostic.
+    Diagnostic {
+        stage: Stage,
+        diagnostic: Diagnostic,
+    },
 }
 
 impl PipelineError {
@@ -88,6 +95,9 @@ impl fmt::Display for PipelineError {
             ),
             PipelineError::Stage { stage, message } => {
                 write!(f, "brixc `{stage}` stage failed: {message}")
+            }
+            PipelineError::Diagnostic { stage, diagnostic } => {
+                write!(f, "brixc `{stage}` stage failed: {diagnostic:?}")
             }
         }
     }

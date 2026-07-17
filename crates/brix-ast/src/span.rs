@@ -4,50 +4,7 @@
 //! information is derived on demand (see [`LineIndex`]) rather than carried on
 //! every node, so span arithmetic (merging, shrinking) stays cheap.
 
-/// A half-open `[start, end)` byte range into one source file.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct Span {
-    pub start: u32,
-    pub end: u32,
-}
-
-impl Span {
-    pub const fn new(start: u32, end: u32) -> Self {
-        Span { start, end }
-    }
-
-    /// An empty span at `at`, used for synthesized/missing nodes during
-    /// error recovery.
-    pub const fn empty(at: u32) -> Self {
-        Span { start: at, end: at }
-    }
-
-    /// The smallest span covering both `self` and `other`.
-    pub fn to(self, other: Span) -> Span {
-        Span {
-            start: self.start.min(other.start),
-            end: self.end.max(other.end),
-        }
-    }
-
-    pub fn len(self) -> u32 {
-        self.end.saturating_sub(self.start)
-    }
-
-    pub fn is_empty(self) -> bool {
-        self.end <= self.start
-    }
-
-    pub fn as_range(self) -> std::ops::Range<usize> {
-        self.start as usize..self.end as usize
-    }
-}
-
-impl std::fmt::Debug for Span {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}..{}", self.start, self.end)
-    }
-}
+pub use brix_diag::Span;
 
 /// Maps byte offsets to 1-based (line, column) pairs for human-facing
 /// diagnostics. Built once per source file.
