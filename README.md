@@ -1,5 +1,9 @@
 # BrixMS
 
+[![CI](https://github.com/tbreijm/brixms/actions/workflows/ci.yml/badge.svg)](https://github.com/tbreijm/brixms/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/tbreijm/brixms?include_prereleases&sort=semver&label=release)](https://github.com/tbreijm/brixms/releases)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+
 **A typed language in which a program is an executable model of a world.**
 
 Durable state is a versioned, typed hypergraph; dynamics are pure derivation
@@ -17,6 +21,18 @@ encoding, parser, Core IR + typechecker, reference oracle, runtime, `brixc`
 codegen, the `brix` CLI, the package manager, and the Driver SDK). Everything
 else in the language is, by the spec's own layer rules, ordinary BrixMS packages
 built on these tools (Ring 1).
+
+## Status
+
+**Pre-G0 alpha.** The current pre-release is
+**[v0.1.0-alpha.1](https://github.com/tbreijm/brixms/releases/tag/v0.1.0-alpha.1)**
+— the Ring 0 foundation. The canonical encoding is frozen and the core kernels
+(parser + idempotent `brix fmt`, Core IR + checks, the reference oracle, the
+runtime substrate, and the package manager) are in place and tested. **APIs are
+unstable and the `brix` CLI is still a scaffold** — this is not yet a usable
+toolchain. Progress is measured by gate, not date (see
+[Gates, not dates](#gates-not-dates)); open spec questions awaiting a ruling
+live in [`spec/errata/`](./spec/errata).
 
 ## Origin & license
 

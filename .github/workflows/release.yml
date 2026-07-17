@@ -1,0 +1,62 @@
+name: Release
+
+# Fires when a version tag is pushed. Re-runs the same green-gate as CI (a
+# release must never ship red), then publishes a GitHub Release for the tag.
+# Tags carrying a semver pre-release suffix (e.g. `v0.1.0-alpha.1`) are marked
+# as pre-releases so they are not surfaced as "latest".
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # create/edit releases
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (pinned via rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+
+      # The merge bar, re-asserted for the exact tagged commit.
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Classify pre-release
+        id: classify
+        run: |
+          # Semver pre-release tags contain a hyphen after the version core.
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PRE: ${{ steps.classify.outputs.prerelease }}
+        run: |
+          pre_flag=""
+          if [[ "$PRE" == "true" ]]; then pre_flag="--prerelease"; fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — leaving it as-is."
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              --verify-tag \
+              $pre_flag
+          fi
