@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+logos = { workspace = true }
+brix-diag = { path = "../brix-diag" }
 
 [lints]
 workspace = true
