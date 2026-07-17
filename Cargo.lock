@@ -124,12 +124,16 @@ name = "brix-oracle"
 version = "0.0.0"
 dependencies = [
  "brix-canon",
+ "brix-phase",
  "insta",
 ]
 
 [[package]]
 name = "brix-phase"
 version = "0.0.0"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "brix-rt"
@@ -146,6 +150,7 @@ dependencies = [
  "brix-ast",
  "brix-canon",
  "brix-ir",
+ "brix-phase",
  "brixpkg",
  "camino",
  "prettyplease",

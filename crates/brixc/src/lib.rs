@@ -18,9 +18,9 @@
 //!
 //! | Stage | Trait | Owner | Status |
 //! |-------|-------|-------|--------|
-//! | parse | [`pipeline::Frontend`] | `brix-ast` | `todo` seam ([`pipeline::UnwiredFrontend`]) |
-//! | lower | [`pipeline::Lower`] | `brix-ir` | `todo` seam ([`pipeline::UnwiredLower`]) |
-//! | phase | [`pipeline::PhaseAssign`] | `brix-phase` | `todo` seam ([`pipeline::UnwiredPhase`]) |
+//! | parse | [`pipeline::Frontend`] | `brix-ast` | **real** ([`lower::AstFrontend`]) |
+//! | lower | [`pipeline::Lower`] | `brix-ir` | **real** ([`lower::AstLower`]) |
+//! | phase | [`pipeline::PhaseAssign`] | `brix-phase` | **real** ([`phase::AstPhase`]) |
 //! | plan  | [`pipeline::Plan`] | `brixc` | **real** ([`plan`]) |
 //! | emit  | [`pipeline::Emit`] | `brixc` | **real** ([`emit`]) |
 //!
@@ -48,9 +48,11 @@
 pub mod cache;
 pub mod emit;
 pub mod lower;
+pub mod phase;
 pub mod pipeline;
 pub mod plan;
 
 pub use cache::{CacheInputs, CacheKey, Profile, ToolchainId};
 pub use lower::{lower_file, AstFrontend, AstLower, Lowered};
+pub use phase::{AstPhase, Phased};
 pub use pipeline::{PipelineError, Stage};
