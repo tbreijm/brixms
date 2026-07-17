@@ -17,7 +17,7 @@ pub mod span;
 pub use ast::File;
 pub use diag::{BrxCode, CanonValue, Diagnostic, Diagnostics, Label, Severity};
 pub use fmt::format_file;
-pub use parser::parse_file;
+pub use parser::{parse_file, parse_file_with_limit, DEFAULT_MAX_PARSE_DEPTH};
 pub use span::{LineIndex, Span};
 
 /// Parse then canonically format `src`. Convenience for `brix fmt`.
