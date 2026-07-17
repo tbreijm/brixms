@@ -21,7 +21,7 @@ pub enum TokKind {
     // ---- trivia -------------------------------------------------------
     #[token("\n")]
     Newline,
-    #[regex(r"//[^\n]*")]
+    #[regex(r"//[^\n]*", allow_greedy = true)]
     LineComment,
     #[regex(r"/\*([^*]|\*[^/])*\*/")]
     BlockComment,
