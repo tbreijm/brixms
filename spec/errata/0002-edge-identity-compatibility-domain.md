@@ -1,6 +1,6 @@
 # Erratum 0002 — How the relation compatibility domain enters EdgeId
 
-**Status:** proposed (awaiting Tony's ruling)
+**Status:** ruled 2026-07-17
 **Filed by:** Lane 5 (rt + delta ABI)
 **Affects:** Part III §3 (surface identity), Appendix G (canonical encoding,
 "relation tuples" and "entity keys" clauses), Part XXVIII §28.3 ("identity
@@ -42,7 +42,7 @@ domain token, renames can preserve identity. This is a semantics decision
 about identity stability across program evolution, squarely Tony's to rule,
 not a lane's to assume.
 
-## Proposed ruling (for the v0 blitz)
+## Ruling (adopted 2026-07-17)
 
 Until `brix-ir` carries declared compatibility-domain tokens, rule:
 
@@ -64,10 +64,9 @@ This keeps one serializer and one hash domain, matches Appendix G's
 here the fqn), and defers the migration-token machinery to when the surface
 that declares it exists — recorded as deferred-not-dropped.
 
-## Provisional implementation
+## Implementation alignment
 
 `brix-rt` implements exactly this (see `crates/brix-rt/src/graph.rs`,
 `edge_id`): relation name canon-encoded, then the role tuple, into
-`Domain::Edge`. If the ruling adds a declared domain token, the change is
-localized to `edge_id` and its callers; the delta-ABI shape is unaffected
-(it transports the already-resolved `EdgeId`).
+`Domain::Edge`. An eventual declared domain token will be resolved by `edge_id`
+and its callers; the delta ABI transports the already-resolved `EdgeId`.

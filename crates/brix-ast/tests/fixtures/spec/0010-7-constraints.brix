@@ -1,2 +1,0 @@
-// source: 7. Constraints (block 10)
-constraint Name (advisory | strict | audit) { ...pattern... when ... }

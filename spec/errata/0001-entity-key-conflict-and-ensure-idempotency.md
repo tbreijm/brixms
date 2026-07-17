@@ -1,7 +1,7 @@
 # 0001 — Entity key-conflict semantics and `ensure` idempotency
 
 **Lane:** oracle (brix-oracle)
-**Status:** proposed, unruled
+**Status:** ruled 2026-07-17
 **Affected sections:** Part III §8 (Key-conflict semantics), Part VII §2
 (Transactions, `ensure`), Appendix A (`KeyConflict` schema)
 **Affected conformance IDs:** Appendix I.5 (Key conflicts)
@@ -50,11 +50,11 @@ G1. Two candidate readings:
   transactions can too, so entities are structurally a shared surface, not
   purely ground.
 
-## Proposed ruling
+## Ruling (adopted 2026-07-17)
 
 Adopt **(b)**: extend `KeyConflict(relation, key, candidates, supports,
 atRevision)` to cover `Entity` relations uniformly, regardless of whether a
-candidate row originated from a transaction (`ensure`/`fresh`) or a rule
+candidate row originated from a transaction (`ensure`) or a rule
 (`keyed by (...)`). Rationale: `KeyConflict`'s schema is already keyed by
 `relation` generically, non-arbitration ("expose the disagreement, not
 arbitrate it") is stated as the kernel's general default rather than a
@@ -62,22 +62,15 @@ Derived-only default, and this is the only reading under which "never a
 silent winner" holds for entities without inventing a fifth, unwritten
 transaction-conflict rule specific to non-key entity fields.
 
-Corollary for `ensure`: a transaction's own `ensure` calls within *one*
-transaction that disagree on non-key fields for the same key should likely
-fail the transaction outright (same intent, same operation, avoidable by
-construction) rather than waiting for settlement — but that is a **static/
-transaction-validation** question distinct from the cross-transaction/
-cross-rule case `KeyConflict` covers, and is left to whoever owns
-`brix-rt`'s transaction pipeline (Ring0_Build_Plan §1.7) to rule on
-separately.
+Corollary for `ensure`: disagreeing `ensure` calls for one key, including calls
+staged by one transaction, contribute competing entity candidates and surface as
+`KeyConflict` at settlement. Repeating the complete same row is idempotent.
 
-## What the oracle does today (interim, pending ruling)
+## Implementation alignment
 
 `crates/brix-oracle/src/eval.rs::refresh_live` runs the same key-conflict
 grouping-and-withdrawal pass for `Entity` relations as for `Derived`
-relations (reading (b) above). Within one oracle transaction, nothing
-currently stops two disagreeing `ensure`/`fresh` calls for the same key —
-both are staged as separate candidate rows and surface as an ordinary
-`KeyConflict` at the next settlement, same as a cross-transaction
-disagreement would. This is implemented, not merely stubbed, but is called
-out here because it is a judgment call standing in for an actual ruling.
+relations. Within one oracle transaction, two disagreeing `ensure` calls for
+the same key are staged as separate candidate rows and surface as an ordinary
+`KeyConflict` at the next settlement, the same as a cross-transaction
+disagreement.
