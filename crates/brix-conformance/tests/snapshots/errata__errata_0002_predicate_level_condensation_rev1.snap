@@ -1,0 +1,16 @@
+---
+source: crates/brix-conformance/tests/errata.rs
+expression: "render(&revisions[0])"
+---
+revision 1
+  Link:
+    { dst: "b", src: "a" }
+    { dst: "c", src: "b" }
+    { dst: "d", src: "c" }
+  Reach:
+    { dst: "b", src: "a" }
+    { dst: "c", src: "a" }
+    { dst: "c", src: "b" }
+    { dst: "d", src: "a" }
+    { dst: "d", src: "b" }
+    { dst: "d", src: "c" }

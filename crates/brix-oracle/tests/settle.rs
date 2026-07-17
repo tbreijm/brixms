@@ -290,6 +290,72 @@ fn derived_key_conflict_withholds_value() {
 }
 
 // ---------------------------------------------------------------------------
+// 3b. Per-kind KeyConflict on an Entity relation (errata 0001): a
+//     transaction-ensured candidate disagreeing with a rule-derived one for
+//     the same key must surface all distinct candidates, not collapse them
+//     — `RelationDef::digest` hashes only key fields for `Entity` kind, so
+//     naively reusing it to identify candidates would always collapse a
+//     conflict group to one entry (every candidate shares the conflicted
+//     key by construction). Regression test for that bug.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn entity_key_conflict_surfaces_distinct_candidates() {
+    let program = Program::new()
+        .with_relation(RelationDef::entity("Widget", &["code", "label"], &["code"]))
+        .with_relation(RelationDef::ground(
+            "RawLabel",
+            &["code", "label"],
+            &["code"],
+        ))
+        .with_rule(rule(
+            "FromRaw",
+            "Widget",
+            &[("code", var("c")), ("label", var("l"))],
+            vec![edge("RawLabel", &[("code", var("c")), ("label", var("l"))])],
+        ));
+    program.validate().unwrap();
+    let phases = brix_oracle::phase::infer_phases(&program).unwrap();
+
+    // A ground-ensured Widget("w1", "A") coexists with RawLabel("w1", "B"),
+    // which drives FromRaw to derive a competing Widget("w1", "B") — two
+    // disagreeing candidates under one entity key, from two different
+    // sources (Part III §8 extended to Entity relations, errata 0001).
+    let ensured = row(&[
+        ("code", Value::Str("w1".into())),
+        ("label", Value::Str("A".into())),
+    ]);
+    let mut widget = Extent::new();
+    widget.insert(brix_oracle::row::row_key(&ensured), edge_record(ensured));
+
+    let raw = row(&[
+        ("code", Value::Str("w1".into())),
+        ("label", Value::Str("B".into())),
+    ]);
+    let mut raw_label = Extent::new();
+    raw_label.insert(brix_oracle::row::row_key(&raw), edge_record(raw));
+
+    let ground = BTreeMap::from([
+        ("Widget".to_string(), widget),
+        ("RawLabel".to_string(), raw_label),
+    ]);
+
+    let settled = settle(&program, &phases, &ground, &empty_ground(), 1);
+    assert!(
+        settled.extent("Widget").unwrap().is_empty(),
+        "no silent winner under the conflicted key"
+    );
+    assert_eq!(settled.provenance.key_conflicts.len(), 1);
+    assert_eq!(
+        settled.provenance.key_conflicts[0].candidates.len(),
+        2,
+        "both disagreeing candidates must be individually visible"
+    );
+
+    insta::assert_snapshot!("entity_key_conflict", render(&settled));
+}
+
+// ---------------------------------------------------------------------------
 // 4. Error edges (Part III §9): `?` failure derives a RuleError, siblings
 //    unaffected.
 // ---------------------------------------------------------------------------
