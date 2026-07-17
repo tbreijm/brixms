@@ -361,9 +361,9 @@ impl Infer {
     fn dimension_binary(&mut self, a: &Ty, b: &Ty, mul: bool) -> Ty {
         match (dims(a), dims(b)) {
             (Some(x), Some(y)) => {
-                if mul && has_money(&x) && has_money(&y) {
+                if has_distinct_currencies(&x, &y) || (mul && has_money(&x) && has_money(&y)) {
                     self.errors.push(TypeError::Dimension {
-                        operation: "mul".to_owned(),
+                        operation: if mul { "mul" } else { "div" }.to_owned(),
                         left: a.clone(),
                         right: b.clone(),
                     });
@@ -505,6 +505,17 @@ fn from_dims(d: Dimensions) -> Ty {
 }
 fn has_money(dims: &Dimensions) -> bool {
     dims.iter().any(|d| d.name.as_str().starts_with("money:"))
+}
+fn has_distinct_currencies(left: &Dimensions, right: &Dimensions) -> bool {
+    let left: Vec<&str> = left
+        .iter()
+        .filter_map(|d| d.name.as_str().strip_prefix("money:"))
+        .collect();
+    let right: Vec<&str> = right
+        .iter()
+        .filter_map(|d| d.name.as_str().strip_prefix("money:"))
+        .collect();
+    !left.is_empty() && !right.is_empty() && left != right
 }
 fn occurs(v: TyVar, t: &Ty, s: &BTreeMap<TyVar, Ty>) -> bool {
     match t {

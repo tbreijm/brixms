@@ -300,6 +300,21 @@ derive R: Output(x: 1) from { Input(a, b); let product = a * b }
     assert_eq!(errors.len(), 1, "{:#?}", lowered.diags);
     assert!(errors[0].message.contains("dimension error in mul"));
 }
+
+#[test]
+fn dividing_distinct_currencies_is_rejected() {
+    let lowered = lower(
+        r#"
+package t @ 1.0.0
+rel Input { eur: Money<EUR>; usd: Money<USD> } key(eur)
+rel Output { x: Int } key(x)
+derive R: Output(x: 1) from { Input(eur, usd); let exchange = eur / usd }
+"#,
+    );
+    let errors = type_errors(&lowered);
+    assert_eq!(errors.len(), 1, "{:#?}", lowered.diags);
+    assert!(errors[0].message.contains("dimension error in div"));
+}
 // ---------------------------------------------------------------------
 // Protocol relation synthesis.
 // ---------------------------------------------------------------------
