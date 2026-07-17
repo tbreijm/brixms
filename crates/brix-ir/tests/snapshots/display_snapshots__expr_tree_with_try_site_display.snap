@@ -1,0 +1,5 @@
+---
+source: crates/brix-ir/tests/display_snapshots.rs
+expression: e.to_string()
+---
+if flag { o.due } else { epoch(parse("42")?/*site:60d241cc460c*/) } : Instant
