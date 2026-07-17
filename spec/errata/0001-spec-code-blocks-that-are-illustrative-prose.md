@@ -1,7 +1,7 @@
 # 0001 — Several spec ` ```brix ` blocks are illustrative prose/templates, not Appendix D syntax
 
 **Lane:** ast + fmt (brix-ast)
-**Status:** proposed, awaiting ruling
+**Status:** ruled 2026-07-17
 **Affected sections:** Part I §3 (Pattern language), §6 (Queries and watches),
 §7 (Constraints); Part VI §2 (Scenarios and adapters); Appendix D (surface
 grammar)
@@ -76,29 +76,20 @@ other unparseable prose is captured verbatim and re-emitted unchanged (see the
 `fmt` idempotence design; the formatter never encodes anything on the comment
 channel).
 
-## Proposed ruling
+## Ruling (adopted 2026-07-17)
 
-Adopt one of:
-
-- **(a) Fence-annotation (recommended).** Mark illustrative blocks in the spec
+Adopt **(a), fence annotation.** Mark illustrative blocks in the spec
   source with a distinguishing fence info-string (e.g. ` ```brix-example ` or
   ` ```text `) so `extract_fixtures.sh` does not carve them as parse fixtures at
   all. This makes the corpus exactly "every block that claims to be real BrixMS,"
   removes the need for an `is_known_errata` allow-list, and documents intent at
   the point of authorship.
-- **(b) Keep the allow-list.** Accept `is_known_errata` as the normative
-  mechanism and freeze the five prefixes above as the known illustrative set,
-  revisiting only if new prose blocks are added to the spec.
-
-Either way, the substantive request to the spec author (Tony) is to **confirm
-these five blocks are non-normative examples** and not grammar the parser is
-expected to accept — so the exclusion is an authored decision, not a parser
+The five blocks are non-normative examples, not grammar the parser is expected to
+accept. The exclusion is therefore an authored specification decision, not a parser
 convenience.
 
-## What brix-ast does until ruled
+## Implementation alignment
 
-Implements (b): `crates/brix-ast/tests/corpus.rs::is_known_errata` excludes the
-five prefixes from the clean-parse count; all five still parse without panic and
-format idempotently. If the ruling is (a), the `is_known_errata` list is deleted
-and `extract_fixtures.sh`'s fence filter changes — a two-file change confined to
-this lane, no AST or parser impact.
+`brix-example` fences are excluded by `scripts/extract_fixtures.sh`; the parser corpus
+therefore contains only blocks claiming to be executable BrixMS. The former
+`is_known_errata` allow-list is deleted.

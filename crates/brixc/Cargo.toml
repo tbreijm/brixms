@@ -8,6 +8,9 @@ repository.workspace = true
 
 [dependencies]
 brix-canon = { path = "../brix-canon" }
+brix-ast = { path = "../brix-ast" }
+brix-ir = { path = "../brix-ir" }
+brix-phase = { path = "../brix-phase" }
 brixpkg = { path = "../brixpkg" }
 camino = { workspace = true }
 quote = { workspace = true }

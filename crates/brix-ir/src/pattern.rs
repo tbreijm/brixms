@@ -25,6 +25,17 @@ pub enum Lit {
     /// A canonicalized `f64` bit pattern (NaN already folded to one pattern per
     /// Part V §8). Never dereferenced as a float inside brix-ir.
     F64Bits(u64),
+    /// An enum-variant literal (mismatch B): `ty` names the declared enum
+    /// (`Tier`, `Status`, ...), `ordinal` is the variant's zero-based
+    /// declaration-order index — the App. G canonical encoding ("enums
+    /// encode by declaration-order ordinal"), never the variant's name. A
+    /// `Str` encoding would poison canonical semantics here: two variants
+    /// renamed but not reordered must compare/encode identically to
+    /// consumers that only see the ordinal.
+    Enum {
+        ty: QualIdent,
+        ordinal: u32,
+    },
 }
 
 impl fmt::Display for Lit {
@@ -35,6 +46,7 @@ impl fmt::Display for Lit {
             Lit::Int(i) => write!(f, "{i}"),
             Lit::Str(s) => write!(f, "{s:?}"),
             Lit::F64Bits(bits) => write!(f, "f64:0x{bits:016x}"),
+            Lit::Enum { ty, ordinal } => write!(f, "{ty}#{ordinal}"),
         }
     }
 }
@@ -130,12 +142,13 @@ pub enum Clause {
         entity: Ident,
         fields: Vec<RoleArg>,
     },
-    /// `let pat = expr` — local binding. `expr` here is an opaque expression
-    /// reference (the expression IR lives in [`crate::core`]); we record which
-    /// variable it binds and whether it uses `?` (a failure site).
-    Let { binds: Ident, has_question: bool },
+    /// `let pat = expr` — local binding.
+    Let {
+        binds: Ident,
+        expr: crate::core::Expr,
+    },
     /// `when boolExpr` — guard.
-    When,
+    When(crate::core::Expr),
     /// `any { case {...} ... }` — disjunction; each case is a sub-pattern with
     /// compatible bindings.
     Any(Vec<Pattern>),
@@ -184,17 +197,8 @@ impl fmt::Display for Clause {
                 }
                 write!(f, " }}")
             }
-            Clause::Let {
-                binds,
-                has_question,
-            } => {
-                write!(
-                    f,
-                    "let {binds} = <expr>{}",
-                    if *has_question { "?" } else { "" }
-                )
-            }
-            Clause::When => write!(f, "when <expr>"),
+            Clause::Let { binds, expr } => write!(f, "let {binds} = {}", expr.kind),
+            Clause::When(expr) => write!(f, "when {}", expr.kind),
             Clause::Any(cases) => {
                 write!(f, "any {{ ")?;
                 for (i, c) in cases.iter().enumerate() {
@@ -307,7 +311,7 @@ impl Pattern {
                 }
                 Clause::Cross(p) => out.extend(p.bound_vars()),
                 // exists/without export nothing; when/guards bind nothing.
-                Clause::Exists(_) | Clause::Without(_) | Clause::When => {}
+                Clause::Exists(_) | Clause::Without(_) | Clause::When(_) => {}
             }
         }
         out.sort();
@@ -335,7 +339,7 @@ impl Pattern {
                     }
                 }
                 Clause::Cross(p) => p.collect_reads(ctx, out),
-                Clause::Entity { .. } | Clause::Let { .. } | Clause::When => {}
+                Clause::Entity { .. } | Clause::Let { .. } | Clause::When(_) => {}
             }
         }
     }
@@ -480,6 +484,32 @@ mod tests {
             !vars.contains(&Ident::new("d")),
             "without exports no bindings (Part IV §3)"
         );
+    }
+
+    #[test]
+    fn enum_lit_displays_type_and_ordinal_not_the_variant_name() {
+        // Mismatch (B): the encoding is the ordinal, never the surface name.
+        let l = Lit::Enum {
+            ty: q("Tier"),
+            ordinal: 1,
+        };
+        assert_eq!(l.to_string(), "Tier#1");
+    }
+
+    #[test]
+    fn enum_lit_as_an_edge_arg_round_trips_through_display() {
+        let p = Pattern::new(vec![Clause::Edge {
+            bind: None,
+            relation: q("OrderStatus"),
+            args: vec![RoleArg {
+                role: Ident::new("value"),
+                arg: Arg::Lit(Lit::Enum {
+                    ty: q("Status"),
+                    ordinal: 0,
+                }),
+            }],
+        }]);
+        assert_eq!(p.to_string(), "OrderStatus(value: Status#0)");
     }
 
     #[test]
