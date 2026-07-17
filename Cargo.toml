@@ -30,7 +30,7 @@ repository = "https://github.com/tbreijm/brixms"
 blake3 = "1"
 logos = "0.14"
 petgraph = "0.6"
-pubgrub = "0.2"
+pubgrub = "0.4"
 proptest = "1"
 insta = "1"
 miette = { version = "7", features = ["fancy"] }
