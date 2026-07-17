@@ -74,11 +74,7 @@ pub fn lower_file(file: &File, parse_diags: &brix_ast::Diagnostics) -> Lowered {
         }
     }
     for error in infer_source(&mut source, &resolver) {
-        // Pattern schema recovery remains conservative: a bad binding must
-        // not cascade into otherwise independent expression diagnostics.
-        if !matches!(error, brix_ir::infer::TypeError::Mismatch { .. }) {
-            diags.push(diag::render_type_error(&error));
-        }
+        diags.push(diag::render_type_error(&error));
     }
 
     Lowered {

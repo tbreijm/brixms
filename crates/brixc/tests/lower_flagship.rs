@@ -44,6 +44,23 @@ fn flagship_lowers_with_zero_errors() {
 }
 
 #[test]
+fn flagship_pricing_multiply_to_divide_mutation_is_one_dimension_error() {
+    let src =
+        include_str!("../../brix-ast/tests/fixtures/spec/0001-part-i-the-flagship-program.brix")
+            .replacen("rate * length", "rate / length", 1);
+    let (file, parse_diags) = parse_file(&src);
+    assert!(!parse_diags.has_errors());
+    let lowered = lower_file(&file, &parse_diags);
+    let errors: Vec<_> = lowered
+        .diags
+        .iter()
+        .filter(|d| d.code == "BRX-IR-0005")
+        .collect();
+    assert_eq!(errors.len(), 1, "{:#?}", lowered.diags);
+    assert!(errors[0].message.contains("dimension error in add"));
+}
+
+#[test]
 fn flagship_produces_exactly_the_expected_warnings() {
     let lowered = lower_flagship();
     let mut warnings: Vec<(&str, String)> = lowered
@@ -212,4 +229,98 @@ fn tariff_enum_key_role_passes_key_canonical_check() {
         "expected Ty::Enum, got {ty}"
     );
     assert!(brix_ir::types::check_key_canonical(ty).is_ok());
+}
+
+#[test]
+fn flagship_modeled_expression_types_have_no_residual_ty_vars() {
+    let lowered = lower_flagship();
+    for rule in &lowered.source.rules {
+        assert_pattern_is_ground(&rule.body, &rule.name.to_string());
+    }
+    for query in &lowered.source.queries {
+        for (_, ty) in &query.params {
+            assert!(!ty_contains_var(ty), "query parameter type retains {ty}");
+        }
+        assert_pattern_is_ground(&query.body, &query.name.to_string());
+        assert_expr_is_ground(&query.yields, &query.name.to_string());
+        assert!(
+            !ty_contains_var(&query.result),
+            "query result retains {}",
+            query.result
+        );
+    }
+}
+
+fn assert_pattern_is_ground(pattern: &brix_ir::pattern::Pattern, owner: &str) {
+    for clause in &pattern.clauses {
+        match clause {
+            brix_ir::pattern::Clause::Let { expr, .. } | brix_ir::pattern::Clause::When(expr) => {
+                assert_expr_is_ground(expr, owner)
+            }
+            brix_ir::pattern::Clause::Any(cases) => {
+                for case in cases {
+                    assert_pattern_is_ground(case, owner);
+                }
+            }
+            brix_ir::pattern::Clause::Exists(p)
+            | brix_ir::pattern::Clause::Without(p)
+            | brix_ir::pattern::Clause::Optional(p)
+            | brix_ir::pattern::Clause::Cross(p) => assert_pattern_is_ground(p, owner),
+            _ => {}
+        }
+    }
+}
+
+fn assert_expr_is_ground(expr: &brix_ir::core::Expr, owner: &str) {
+    // The Risk rule's riskModel error component is an explicitly named v1
+    // exemption: ValidationError is not declared in the flagship namespace
+    // and function bodies are intentionally deferred.
+    let named_deferred_risk_model_error = owner == "Risk"
+        && matches!(&*expr.kind, brix_ir::core::ExprKind::Call { func, .. } if func.to_string() == "riskModel")
+        && matches!(&expr.ty, brix_ir::types::Ty::Result(_, error) if matches!(&**error, brix_ir::types::Ty::Var(_)));
+    assert!(
+        named_deferred_risk_model_error || !ty_contains_var(&expr.ty),
+        "{owner} retains {}",
+        expr.ty
+    );
+    match &*expr.kind {
+        brix_ir::core::ExprKind::Call { args, .. } => {
+            for arg in args {
+                assert_expr_is_ground(arg, owner);
+            }
+        }
+        brix_ir::core::ExprKind::Field { base, .. } => assert_expr_is_ground(base, owner),
+        brix_ir::core::ExprKind::Record { fields } => {
+            for (_, value) in fields {
+                assert_expr_is_ground(value, owner);
+            }
+        }
+        brix_ir::core::ExprKind::If { cond, then, els } => {
+            assert_expr_is_ground(cond, owner);
+            assert_expr_is_ground(then, owner);
+            assert_expr_is_ground(els, owner);
+        }
+        brix_ir::core::ExprKind::Try { inner, .. } => assert_expr_is_ground(inner, owner),
+        brix_ir::core::ExprKind::Comprehension { pattern, yields } => {
+            assert_pattern_is_ground(pattern, owner);
+            if let Some(yielded) = yields {
+                assert_expr_is_ground(yielded, owner);
+            }
+        }
+        brix_ir::core::ExprKind::Var(_) | brix_ir::core::ExprKind::Lit(_) => {}
+    }
+}
+
+fn ty_contains_var(ty: &brix_ir::types::Ty) -> bool {
+    use brix_ir::types::Ty;
+    match ty {
+        Ty::Var(_) => true,
+        Ty::Option(t) | Ty::List(t) | Ty::Vector(t) | Ty::Set(t) | Ty::Bag(t) | Ty::Estimate(t) => {
+            ty_contains_var(t)
+        }
+        Ty::Result(a, b) | Ty::Map(a, b) => ty_contains_var(a) || ty_contains_var(b),
+        Ty::Rel(row) | Ty::Record(row) => row.fields.iter().any(|field| ty_contains_var(&field.ty)),
+        Ty::Fn { params, ret, .. } => params.iter().any(ty_contains_var) || ty_contains_var(ret),
+        _ => false,
+    }
 }

@@ -130,10 +130,20 @@ impl Infer {
                         }
                     }
                 }
-                Clause::Entity { fields, .. } => {
-                    for arg in fields {
-                        if let Arg::Var(v) = &arg.arg {
-                            env.entry(v.clone()).or_insert(Ty::Var(TyVar(u32::MAX)));
+                Clause::Entity {
+                    var,
+                    entity,
+                    fields,
+                } => {
+                    env.entry(var.clone())
+                        .or_insert_with(|| Ty::NodeRef(entity.clone()));
+                    if let Some(schema) = resolver.relation(&QualIdent::simple(entity.as_str())) {
+                        for arg in fields {
+                            if let Some((_, ty)) =
+                                schema.roles.iter().find(|(name, _)| name == &arg.role)
+                            {
+                                self.role_arg(arg, ty.clone(), env);
+                            }
                         }
                     }
                 }
@@ -324,17 +334,14 @@ impl Infer {
                 self.same_dimension(name, &args[0], &args[1]);
                 Ty::Bool
             }
-            "add" | "sub" => {
-                self.same_dimension(name, &args[0], &args[1]);
-                args[0].clone()
-            }
+            "add" | "sub" => self.same_dimension(name, &args[0], &args[1]),
             "mul" => self.dimension_binary(&args[0], &args[1], true),
             "div" => self.dimension_binary(&args[0], &args[1], false),
             "neg" => args[0].clone(),
             _ => Ty::Var(TyVar(u32::MAX)),
         }
     }
-    fn same_dimension(&mut self, operation: &str, a: &Ty, b: &Ty) {
+    fn same_dimension(&mut self, operation: &str, a: &Ty, b: &Ty) -> Ty {
         if let (Some(x), Some(y)) = (dims(a), dims(b)) {
             if x != y {
                 self.errors.push(TypeError::Dimension {
@@ -342,18 +349,33 @@ impl Infer {
                     left: a.clone(),
                     right: b.clone(),
                 });
+                Ty::Var(TyVar(u32::MAX))
+            } else {
+                a.clone()
             }
         } else {
             self.unify(a.clone(), b.clone());
+            a.clone()
         }
     }
     fn dimension_binary(&mut self, a: &Ty, b: &Ty, mul: bool) -> Ty {
         match (dims(a), dims(b)) {
-            (Some(x), Some(y)) => from_dims(if mul {
-                dimensions_mul(&x, &y)
-            } else {
-                dimensions_div(&x, &y)
-            }),
+            (Some(x), Some(y)) => {
+                if mul && has_money(&x) && has_money(&y) {
+                    self.errors.push(TypeError::Dimension {
+                        operation: "mul".to_owned(),
+                        left: a.clone(),
+                        right: b.clone(),
+                    });
+                    Ty::Var(TyVar(u32::MAX))
+                } else {
+                    from_dims(if mul {
+                        dimensions_mul(&x, &y)
+                    } else {
+                        dimensions_div(&x, &y)
+                    })
+                }
+            }
             _ => {
                 self.unify(a.clone(), b.clone());
                 a.clone()
@@ -391,6 +413,10 @@ impl Infer {
         }
         match (a, b) {
             (Ty::Var(v), t) | (t, Ty::Var(v)) => self.bind(v, t),
+            // `Probability` is the constrained [0,1] F64 domain. Range
+            // validation is a numeric/strict-IEEE follow-up; v1 admits the
+            // representation-level bridge used by the flagship's clamp.
+            (Ty::Probability, Ty::F64) | (Ty::F64, Ty::Probability) => {}
             (Ty::Record(a), Ty::Record(b)) | (Ty::Rel(a), Ty::Rel(b)) => self.unify_rows(*a, *b),
             (expected, found) => self.errors.push(TypeError::Mismatch { expected, found }),
         }
@@ -476,6 +502,9 @@ fn from_dims(d: Dimensions) -> Ty {
         return Ty::Quantity(d[0].name.clone());
     }
     Ty::Dimensioned(d)
+}
+fn has_money(dims: &Dimensions) -> bool {
+    dims.iter().any(|d| d.name.as_str().starts_with("money:"))
 }
 fn occurs(v: TyVar, t: &Ty, s: &BTreeMap<TyVar, Ty>) -> bool {
     match t {
