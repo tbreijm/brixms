@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 
 use brix_ast::ast;
 use brix_ast::{Diagnostic, Span};
-use brix_ir::core::{Expr as IrExpr, ExprKind};
+use brix_ir::core::{Expr as IrExpr, ExprKind, ExprOrigin, SourceRange};
 use brix_ir::effects::EffectRow;
 use brix_ir::frontend::SchemaResolver;
 use brix_ir::ident::{Ident as IrIdent, QualIdent};
@@ -28,6 +28,10 @@ use super::resolve::{LowerMeta, ProgramResolver, UnitClass, VariantLookup};
 /// Per-declaration lowering state (design: "one flat scope per body").
 /// Constructed fresh in `decl.rs` for each `derive`/`constraint`/`query`.
 pub struct BodyCtx<'a> {
+    /// Declaration owning every expression lowered through this context.
+    /// Together with the AST byte range it gives each Core expression a
+    /// stable, content-addressed origin (see `core::ExprOrigin`).
+    pub decl_name: IrIdent,
     pub resolver: &'a ProgramResolver,
     pub meta: &'a mut LowerMeta,
     pub diags: &'a mut Vec<Diagnostic>,
@@ -60,6 +64,7 @@ impl<'a> BodyCtx<'a> {
     ) -> Self {
         let sites = SiteAssigner::new(decl_name.clone());
         BodyCtx {
+            decl_name,
             resolver,
             meta,
             diags,
@@ -257,7 +262,7 @@ fn resolve_arg_ident(
 // ---------------------------------------------------------------------
 
 pub fn lower_expr(ctx: &mut BodyCtx, e: &ast::Expr) -> IrExpr {
-    match &*e.kind {
+    let lowered = match &*e.kind {
         ast::ExprKind::Int(i) => match int_lit(*i, e.span, ctx.diags) {
             Some(lit) => IrExpr::new(Ty::Var(ctx.meta.fresh_tyvar()), ExprKind::Lit(lit)),
             None => poison(ctx.meta),
@@ -330,7 +335,14 @@ pub fn lower_expr(ctx: &mut BodyCtx, e: &ast::Expr) -> IrExpr {
             ));
             poison(ctx.meta)
         }
-    }
+    };
+    lowered.with_origin(ExprOrigin::source(
+        &ctx.decl_name,
+        SourceRange {
+            start: e.span.start,
+            end: e.span.end,
+        },
+    ))
 }
 
 fn lower_binary(
