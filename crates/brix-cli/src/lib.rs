@@ -7,4 +7,7 @@
 //! thin front-end over this surface.
 
 pub mod args;
+pub mod build;
+pub mod package;
 pub mod scaffold;
+pub mod toolchain;

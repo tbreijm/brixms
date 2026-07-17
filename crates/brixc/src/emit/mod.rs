@@ -25,9 +25,11 @@
 
 mod project;
 mod rust_type;
+mod workspace;
 
 pub use project::project;
 pub use rust_type::rust_type_of;
+pub use workspace::{assemble_workspace, sanitize_crate_name};
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};

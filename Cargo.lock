@@ -87,6 +87,8 @@ dependencies = [
 name = "brix-cli"
 version = "0.0.0"
 dependencies = [
+ "brix-ast",
+ "brix-canon",
  "brixc",
  "brixpkg",
  "camino",
