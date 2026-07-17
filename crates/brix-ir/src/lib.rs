@@ -46,6 +46,7 @@ pub mod core;
 pub mod effects;
 pub mod frontend;
 pub mod ident;
+pub mod infer;
 pub mod pattern;
 pub mod site;
 pub mod traits;

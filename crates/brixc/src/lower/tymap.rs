@@ -3,7 +3,9 @@
 use brix_ast::ast::{self, TypeArg, TypeKind};
 use brix_ast::{Diagnostic, Span};
 use brix_ir::ident::Ident as IrIdent;
-use brix_ir::types::{IntWidth, Row, RowField, Ty};
+use brix_ir::types::{
+    dimensions_div, money_dimensions, quantity_dimensions, Dimensions, IntWidth, Row, RowField, Ty,
+};
 
 use super::diag;
 use super::resolve::{LowerMeta, ProgramResolver};
@@ -31,17 +33,27 @@ pub fn lower_type(
         TypeKind::Row { fields, rest } => {
             Ty::record(lower_row(fields, rest, pos, resolver, meta, diags))
         }
-        TypeKind::Div(_, _) => {
-            // Mismatch (F): no compound-unit type in `ir::types::Ty`. A v0
-            // `Ty::Var` is check-safe (never a key role in the flagship
-            // corpus) — see design ruling.
-            diags.push(diag::warning(
-                diag::COMPOUND_UNIT,
-                ty.span,
-                "compound unit type (`T / U`) is unsupported in v0; treating it as an unsolved type",
-            ));
-            Ty::Var(meta.fresh_tyvar())
+        TypeKind::Div(left, right) => {
+            let l = lower_type(left, pos, resolver, meta, diags);
+            let r = lower_type(right, pos, resolver, meta, diags);
+            match (ground_dimensions(&l), ground_dimensions(&r)) {
+                (Some(a), Some(b)) => Ty::Dimensioned(dimensions_div(&a, &b)),
+                _ => {
+                    diags.push(diag::error(diag::COMPOUND_UNIT, ty.span,
+                        "compound unit operands must be Quantity, Money, or another ground dimension"));
+                    Ty::Var(meta.fresh_tyvar())
+                }
+            }
         }
+    }
+}
+
+fn ground_dimensions(ty: &Ty) -> Option<Dimensions> {
+    match ty {
+        Ty::Quantity(m) => Some(quantity_dimensions(m)),
+        Ty::Money(c) => Some(money_dimensions(c)),
+        Ty::Dimensioned(ds) => Some(ds.clone()),
+        _ => None,
     }
 }
 
@@ -88,6 +100,16 @@ fn lower_named(
     }
 
     let qi = resolver.resolve_path(path);
+    // Prelude measures are dimension names in type position.  They are not
+    // value-level units (which have their own `UnitClass`), so normalize them
+    // directly to their one-dimensional quantity type.
+    if args.is_empty() {
+        if let Some(last) = qi.segments().last() {
+            if matches!(last.as_str(), "Mass" | "Kilometre") {
+                return Ty::Quantity(last.clone());
+            }
+        }
+    }
     if resolver.is_entity(&qi) {
         let last = qi
             .segments()

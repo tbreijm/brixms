@@ -2,9 +2,8 @@
 //!
 //! "Cleanly" means: zero error-severity diagnostics, and only the warnings
 //! this v0 lowering is honestly expected to produce — the `driver`/
-//! `scenario` sections (deferred wholesale, design's defer line) plus two
-//! tymap gaps the flagship happens to exercise: `TariffRate.rate: Money<EUR>
-//! / Kilometre` (mismatch F, no compound-unit `Ty`) and `riskModel`'s
+//! `scenario` sections (deferred wholesale, design's defer line) plus the
+//! unresolved `riskModel` return type.
 //! `ValidationError` return-type component (declared nowhere in this file —
 //! an unresolved type name in fn-signature position is a warning, not an
 //! error, design tymap rule). Both are real gaps, not bugs to paper over;
@@ -55,18 +54,13 @@ fn flagship_produces_exactly_the_expected_warnings() {
         .collect();
     warnings.sort();
 
-    // 2 drivers + 1 scenario, skip-with-warning (BRX-LOW-0002); plus two
-    // tymap v0 gaps the flagship itself exercises: TariffRate's compound
-    // unit role (mismatch F, BRX-LOW-0013) and riskModel's undeclared
+    // 2 drivers + 1 scenario, skip-with-warning (BRX-LOW-0002); plus
+    // riskModel's undeclared
     // `ValidationError` return-type component (BRX-LOW-0012, warning
     // severity because it's fn-sig position, not role position).
     let decl_skips = warnings
         .iter()
         .filter(|(c, _)| *c == "BRX-LOW-0002")
-        .count();
-    let compound_unit = warnings
-        .iter()
-        .filter(|(c, _)| *c == "BRX-LOW-0013")
         .count();
     let unresolved_ty = warnings
         .iter()
@@ -78,16 +72,12 @@ fn flagship_produces_exactly_the_expected_warnings() {
         "2 driver decls + 1 scenario decl: {warnings:#?}"
     );
     assert_eq!(
-        compound_unit, 1,
-        "TariffRate.rate: Money<EUR>/Kilometre: {warnings:#?}"
-    );
-    assert_eq!(
         unresolved_ty, 1,
         "riskModel's ValidationError: {warnings:#?}"
     );
     assert_eq!(
         warnings.len(),
-        5,
+        4,
         "no other warning should appear: {warnings:#?}"
     );
 }
@@ -174,10 +164,7 @@ fn price_order_head_and_mask_and_query_shape_are_correct() {
         }
         other => panic!("expected Rel<{{...}}> result, got {other:?}"),
     }
-    let params = lowered
-        .meta
-        .query_params(&query.name)
-        .expect("query params side table (mismatch E)");
+    let params = &query.params;
     assert_eq!(params.len(), 1);
     assert_eq!(params[0].0.as_str(), "threshold");
 }

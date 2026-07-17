@@ -47,6 +47,8 @@ pub enum ExprKind {
     Call { func: QualIdent, args: Vec<Expr> },
     /// A field/role projection (`score.lowerBound`, `o.due`).
     Field { base: Expr, field: Ident },
+    /// Structural record literal with explicit field names.
+    Record { fields: Vec<(Ident, Expr)> },
     /// `if c { t } else { e }`.
     If { cond: Expr, then: Expr, els: Expr },
     /// A `?` postfix failure site (Part III §9). Carries the stable [`SiteId`]
@@ -85,6 +87,16 @@ impl fmt::Display for ExprKind {
                 write!(f, ")")
             }
             ExprKind::Field { base, field } => write!(f, "{}.{field}", base.kind),
+            ExprKind::Record { fields } => {
+                write!(f, "{{ ")?;
+                for (i, (name, value)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{name}: {}", value.kind)?;
+                }
+                write!(f, " }}")
+            }
             ExprKind::If { cond, then, els } => {
                 write!(
                     f,
@@ -233,6 +245,7 @@ impl fmt::Display for Constraint {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Query {
     pub name: Ident,
+    pub params: Vec<(Ident, Ty)>,
     pub body: Pattern,
     pub yields: Expr,
     /// Result row type `Rel<Row>`.

@@ -42,7 +42,6 @@ pub struct BodyCtx<'a> {
     /// (design: "both idents MUST be edge-bound aliases").
     pub edge_aliases: BTreeSet<IrIdent>,
     pub sites: SiteAssigner,
-    pub decl_name: IrIdent,
     /// Running union of declared `EffectRow`s of fns resolved inside this
     /// body's `let`/`when` values (design: "effects = union of declared
     /// EffectRows of fns resolved in body let/when"), accumulated as each
@@ -67,7 +66,6 @@ impl<'a> BodyCtx<'a> {
             bound: BTreeSet::new(),
             edge_aliases: BTreeSet::new(),
             sites,
-            decl_name,
             effects: EffectRow::empty(),
             next_clause: 0,
         }
@@ -632,14 +630,8 @@ fn lower_measured(ctx: &mut BodyCtx, value: &ast::Expr, unit: &ast::Ident, span:
     }
 }
 
-/// Mismatch (D) bridge: `core::ExprKind` has no record node. Every
-/// struct-literal — anonymous (`{ a: 1 }`) or named (`Chosen { ... }`, v0
-/// does not model the outcome-name distinction) — becomes `ty =
-/// Record(Row)` with `kind = Call{brix.record.new, args in CANONICAL field
-/// order}`. The row itself (carried on `Expr::ty`) is what makes this
-/// reversible later: the field-name↔position mapping needed to rebuild a
-/// real `ExprKind::Record` is recoverable from `Row::canonical_field_order`
-/// without a LowerMeta side table.
+/// Struct literals retain their field names in Core IR so row inference does
+/// not depend on a positional lowering convention.
 fn lower_struct_lit(ctx: &mut BodyCtx, _path: Option<&ast::Path>, fields: &[ast::Arg]) -> IrExpr {
     let mut named: Vec<(IrIdent, IrExpr)> = Vec::new();
     for a in fields {
@@ -663,16 +655,7 @@ fn lower_struct_lit(ctx: &mut BodyCtx, _path: Option<&ast::Path>, fields: &[ast:
             })
             .collect(),
     );
-    let mut ordered = named;
-    ordered.sort_by(|a, b| a.0.as_str().as_bytes().cmp(b.0.as_str().as_bytes()));
-    let args: Vec<IrExpr> = ordered.into_iter().map(|(_, e)| e).collect();
-    IrExpr::new(
-        Ty::record(row),
-        ExprKind::Call {
-            func: QualIdent::from("brix.record.new"),
-            args,
-        },
-    )
+    IrExpr::new(Ty::record(row), ExprKind::Record { fields: named })
 }
 
 fn lower_field(ctx: &mut BodyCtx, base: &ast::Expr, name: &ast::Ident) -> IrExpr {
@@ -792,6 +775,11 @@ fn collect_effects(e: &IrExpr, resolver: &ProgramResolver, acc: &mut EffectRow) 
         ExprKind::Comprehension { yields, .. } => {
             if let Some(y) = yields {
                 collect_effects(y, resolver, acc);
+            }
+        }
+        ExprKind::Record { fields } => {
+            for (_, value) in fields {
+                collect_effects(value, resolver, acc);
             }
         }
         ExprKind::Var(_) | ExprKind::Lit(_) => {}

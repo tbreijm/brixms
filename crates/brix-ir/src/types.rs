@@ -17,6 +17,53 @@
 use crate::ident::{Ident, QualIdent};
 use core::fmt;
 
+/// One ground dimension exponent. Dimension names include a currency where
+/// needed (`money:EUR`), making currency mixing a dimension mismatch.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Dimension {
+    pub name: Ident,
+    pub exponent: i32,
+}
+
+/// Canonical, sorted exponent vector for a ground dimension.
+pub type Dimensions = Vec<Dimension>;
+
+pub fn dimensions_mul(a: &Dimensions, b: &Dimensions) -> Dimensions {
+    dimensions_combine(a, b, 1)
+}
+pub fn dimensions_div(a: &Dimensions, b: &Dimensions) -> Dimensions {
+    dimensions_combine(a, b, -1)
+}
+fn dimensions_combine(a: &Dimensions, b: &Dimensions, sign: i32) -> Dimensions {
+    let mut out = a.clone();
+    for rhs in b {
+        match out.binary_search_by(|x| x.name.cmp(&rhs.name)) {
+            Ok(pos) => out[pos].exponent += sign * rhs.exponent,
+            Err(pos) => out.insert(
+                pos,
+                Dimension {
+                    name: rhs.name.clone(),
+                    exponent: sign * rhs.exponent,
+                },
+            ),
+        }
+    }
+    out.retain(|d| d.exponent != 0);
+    out
+}
+pub fn quantity_dimensions(measure: &Ident) -> Dimensions {
+    vec![Dimension {
+        name: measure.clone(),
+        exponent: 1,
+    }]
+}
+pub fn money_dimensions(currency: &Ident) -> Dimensions {
+    vec![Dimension {
+        name: Ident::new(format!("money:{currency}")),
+        exponent: 1,
+    }]
+}
+
 /// A type inference variable. Stubbed: brix-ir assigns these but does not yet
 /// solve them (no unifier). `u32` is enough for a single compilation unit.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -116,6 +163,8 @@ pub enum Ty {
     Enum(QualIdent),
     Quantity(Ident),
     Money(Ident),
+    /// A ground compound physical dimension, e.g. `Money<EUR> / Kilometre`.
+    Dimensioned(Dimensions),
     Probability,
     EventId,
     /// `Estimate<T> = { value, error, confidence, method }` (Part V §7).
@@ -177,6 +226,22 @@ impl fmt::Display for Ty {
             Ty::Enum(q) => write!(f, "Enum<{q}>"),
             Ty::Quantity(m) => write!(f, "Quantity<{m}>"),
             Ty::Money(c) => write!(f, "Money<{c}>"),
+            Ty::Dimensioned(ds) => {
+                if ds.is_empty() {
+                    return write!(f, "Number");
+                }
+                for (i, d) in ds.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " * ")?;
+                    }
+                    if d.exponent == 1 {
+                        write!(f, "{}", d.name)?;
+                    } else {
+                        write!(f, "{}^{}", d.name, d.exponent)?;
+                    }
+                }
+                Ok(())
+            }
             Ty::Probability => write!(f, "Probability"),
             Ty::EventId => write!(f, "EventId"),
             Ty::Estimate(t) => write!(f, "Estimate<{t}>"),
