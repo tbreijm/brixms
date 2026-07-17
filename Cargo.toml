@@ -49,7 +49,7 @@ serde_json = "1"
 # wasmtime pulled in only by brix-rt / the Driver host when that lane lands it.
 wasmtime = "27"
 # toml: brixpkg manifest/lockfile parsing only — see DEPS.md.
-toml = "0.8"
+toml = "1.1"
 
 # Determinism discipline, enforced mechanically (Ring0_Build_Plan.md §0).
 # `unsafe` is denied workspace-wide except an allowlisted arena module
