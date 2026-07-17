@@ -1,20 +1,23 @@
 name: CI
 
-# The green-gate. It lives before the second merge (Build_Plan_v2.md §2) and
-# holds the determinism discipline: fmt, clippy-as-error, and the full test
-# suite must all pass. Frozen-artifact drift (canon vectors, oracle) shows up
-# here as changed insta snapshots.
+# The green-gate that protects `main` (Build_Plan_v2.md §2 + Ring0_Build_Plan
+# §1.10). Holds the determinism discipline: fmt, clippy-as-error, the full test
+# suite, frozen-artifact stability, and a supply-chain/license gate must all
+# pass. Frozen-artifact drift (canon vectors, oracle/ir insta snapshots) shows
+# up as a failing `determinism` or `test` job.
 on:
   push:
     branches: [main]
   pull_request:
+  merge_group: # merge-queue ready
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-test:
+  lint:
+    name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,5 +28,72 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy (warnings are errors)
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (pinned via rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
       - name: Test
         run: cargo test --workspace
+
+  determinism:
+    name: determinism
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (pinned via rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Run the suite twice; frozen artifacts must not drift
+        run: |
+          set -euo pipefail
+          cargo test --workspace
+          cargo test --workspace
+          # insta writes *.snap.new only on a snapshot mismatch, and the canon
+          # golden-vector test fails outright on drift. Either way the working
+          # tree must be byte-identical after repeated runs (proxy for the G3
+          # reproducibility gate).
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Non-deterministic output / frozen-artifact drift after repeated runs:"
+            git status --porcelain
+            git --no-pager diff | head -300
+            exit 1
+          fi
+          echo "Frozen artifacts stable across repeated runs."
+
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Supply-chain + license gate (advisories, licenses, bans, sources)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    # Reported as a code-quality measurement, not a hard gate (no threshold);
+    # not a required status check.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain (pinned via rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Measure coverage
+        run: |
+          cargo llvm-cov --workspace --summary-only | tee coverage.txt
+          {
+            echo "### Coverage (workspace)"
+            echo ''
+            echo '```'
+            cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

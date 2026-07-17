@@ -1,0 +1,42 @@
+# cargo-deny — supply-chain and license gate (run in CI, see .github/workflows/ci.yml).
+# Enforces: no known security advisories, no yanked crates, only OSI-permissive
+# licenses compatible with this project's Apache-2.0, and crates.io-only sources.
+
+[advisories]
+version = 2
+# Fail on any RUSTSEC advisory affecting the dependency graph, and on yanked crates.
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licenses compatible with Apache-2.0 redistribution. Add here (with a
+# comment) only after checking the crate's terms — never to silence a real copyleft.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception", # wasmtime / cranelift toolchain
+    "MIT",
+    "MITNFA",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-DFS-2016",
+    "Unicode-3.0", # newer unicode-ident
+    "CC0-1.0",
+    "MPL-2.0", # file-level copyleft, redistribution-compatible
+]
+confidence-threshold = 0.9
+exceptions = []
+
+[bans]
+# Duplicate versions and wildcard deps are quality smells, warned (not failed) so a
+# transitive duplicate deep in wasmtime's tree doesn't red the build; tighten later.
+multiple-versions = "warn"
+wildcards = "warn"
+allow-wildcard-paths = true
+
+[sources]
+# Only the public crates.io registry; no unvetted git or alternate registries.
+unknown-registry = "deny"
+unknown-git = "deny"
