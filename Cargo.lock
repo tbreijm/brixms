@@ -153,6 +153,7 @@ dependencies = [
  "brix-phase",
  "brixpkg",
  "camino",
+ "insta",
  "prettyplease",
  "proc-macro2",
  "quote",

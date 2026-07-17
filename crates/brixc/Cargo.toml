@@ -18,5 +18,8 @@ proc-macro2 = { workspace = true }
 prettyplease = { workspace = true }
 syn = { workspace = true }
 
+[dev-dependencies]
+insta = { workspace = true }
+
 [lints]
 workspace = true
