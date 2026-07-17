@@ -1,7 +1,7 @@
 # 0001 — Is `Estimate<F64>` `Canonical`, given floats are banned from key/identity positions?
 
 **Lane:** ir
-**Status:** proposed, awaiting ruling
+**Status:** ruled 2026-07-17
 **Affected conformance:** Appendix I.14 (Policy determinism), Appendix I.8 (Numerics),
 Appendix E `Key` judgment
 
@@ -55,7 +55,7 @@ second check is exactly the fork in the road: reject it, and the flagship's
 own worked policy example (`AssignVehicle`) is inexpressible; accept it, and
 "which excludes raw floats" needs a narrower reading than its plain text.
 
-## Proposed ruling
+## Ruling (adopted 2026-07-17)
 
 Adopt the two-domain reading implied by Appendix G's own totalOrder clause,
 made explicit:
@@ -92,11 +92,9 @@ made explicit:
   puts `Estimate<F64>` (or bare `F64`) in a `key(...)` position, to pin the
   key-domain side of the ruling.
 
-## What brix-ir does until ruled
+## Implementation alignment
 
 `crates/brix-ir/src/types.rs` implements the ruling above as
 `check_key_canonical` (strict, floats always rejected) and
 `check_value_canonical` (floats admitted). Both are unit-tested
-(`estimate_f64_is_value_canonical_but_not_key_canonical`). If the ruling comes
-back different, only those two functions and their doc comments need to
-change — no other lane depends on this distinction yet.
+(`estimate_f64_is_value_canonical_but_not_key_canonical`).

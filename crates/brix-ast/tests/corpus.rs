@@ -40,57 +40,14 @@ fn load_fixtures() -> Vec<(String, String)> {
     out
 }
 
-/// Fixtures known to hit a genuine Appendix D grammar gap (tracked as
-/// errata). They must still not panic and must format idempotently, but are
-/// not counted toward the clean-parse total.
-fn is_known_errata(name: &str) -> bool {
-    // 0003 is a *documentation* block: it uses literal `...`, `<...>`, and a
-    // second `entity Name { ... }` redeclaration as prose placeholders, not
-    // real syntax (errata 0001). We parse it structurally but don't require
-    // zero diagnostics.
-    name.starts_with("0003-")
-        // 0005 is the Part III §3 pattern-language *catalog*: a bare list of
-        // clause forms (`R(role: x, other)`, `let v = pureExpr`, ...) at
-        // top level, one per line with a trailing comment — never wrapped
-        // in a `derive`/`query`/etc. body, so it isn't a legal top-level
-        // program at all, just documentation shorthand.
-        || name.starts_with("0005-")
-        // 0009 is a `query` *template*: `query Name(args) -> Rel<Row> =
-        // from { ... } yield { ... }` uses `Name`/`args`/`Row` as prose
-        // placeholders for "a name here" / "a param list here" — `args`
-        // alone is not a valid `Ident : Type` parameter.
-        || name.starts_with("0009-")
-        // 0010 is a `constraint` *header template*:
-        // `constraint Name (advisory | strict | audit) { ...pattern... }`
-        // — the `(a | b | c)` alternation and `...pattern...` are prose
-        // notation for "pick one kind" / "a pattern block here", not
-        // Appendix D grammar.
-        || name.starts_with("0010-")
-        // 0011 is a `scenario` *template*: `bind P to <adapter>` uses
-        // `<adapter>` as a literal placeholder token (not a real generic),
-        // and `setup { ...transactions... }` / `step ... { ...transactions
-        // per tick... }` use prose inside the transaction bodies.
-        || name.starts_with("0011-")
-}
-
 #[test]
 fn corpus_parses() {
     let fixtures = load_fixtures();
-    let mut pass = 0usize;
     let mut clean = 0usize;
-    let mut errata = 0usize;
     let mut report = String::new();
     for (name, src) in &fixtures {
         let (_file, diags) = brix_ast::parse_file(src);
         let ok = !diags.has_errors();
-        if is_known_errata(name) {
-            errata += 1;
-            report.push_str(&format!(
-                "  ERRATA  {name} ({} diagnostic(s))\n",
-                diags.len()
-            ));
-            continue;
-        }
         if ok {
             clean += 1;
             report.push_str(&format!("  ok      {name}\n"));
@@ -100,20 +57,13 @@ fn corpus_parses() {
                 indent(&diags.render(src, name), 10)
             ));
         }
-        pass += 1;
     }
     let total = fixtures.len();
-    eprintln!(
-        "\ncorpus: {clean}/{} clean-parse (+{errata} tracked errata) of {total} fixtures\n{report}",
-        pass
-    );
+    eprintln!("\ncorpus: {clean}/{total} clean-parse of {total} fixtures\n{report}",);
 
-    // Baseline: keep the number that parse cleanly from regressing. Raise
-    // this as coverage improves.
-    const BASELINE_CLEAN: usize = 50;
-    assert!(
-        clean >= BASELINE_CLEAN,
-        "clean-parse regression: {clean} < baseline {BASELINE_CLEAN}"
+    assert_eq!(
+        clean, total,
+        "every executable BrixMS block in the normative spec must parse cleanly"
     );
 }
 
@@ -144,8 +94,8 @@ fn fmt_idempotent() {
             ));
         }
         // Parse-stability: formatted output must itself parse without new
-        // errors (errata fixtures excepted — their diagnostics are expected).
-        if d2.has_errors() && !is_known_errata(&name) {
+        // errors.
+        if d2.has_errors() {
             failures.push(format!(
                 "{name}: formatted output does not parse cleanly:\n{}",
                 d2.render(&once, &name)

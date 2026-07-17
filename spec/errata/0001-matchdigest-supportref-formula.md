@@ -1,6 +1,6 @@
 # Erratum 0001 — Normative formulas for MatchDigest and SupportRef
 
-**Status:** proposed (awaiting Tony's ruling)
+**Status:** ruled 2026-07-17
 **Filed by:** Lane 5 (rt + delta ABI)
 **Affects:** Part III §3 (surface identity and reference types), §9 (error
 edges), §11 (provenance as a relation); Appendix A (sealed schemas);
@@ -43,7 +43,7 @@ bindings change the bytes. This is exactly the kind of choice CONTRIBUTING.md
 says becomes an erratum rather than a guess, because both lanes that must
 agree (oracle, rt) are being built in parallel against the same spec text.
 
-## Proposed ruling
+## Ruling (adopted 2026-07-17)
 
 Add to Part III (or Appendix G) the following, versioned under `canon/1`:
 
@@ -79,10 +79,9 @@ single serializer (`brix-canon`); neither introduces a new canon rule, so
 this does **not** require a `CANON_VERSION` bump — it fixes *which bytes* get
 fed to the existing `value` domain, which was previously unspecified.
 
-## Provisional implementation
+## Implementation alignment
 
 `brix-rt` implements exactly the above (see
 `crates/brix-rt/src/ids.rs`: `MatchDigest::of`, `SupportRef::of`) so this
-lane is unblocked, clearly marked as tracking this erratum. If the ruling
-differs, the change is localized to those two constructors and the
-`sorted_bindings_canon` contract feeding them; no ABI shape changes.
+lane is aligned with the normative formulas. The constructors and the
+`sorted_bindings_canon` contract remain the sole implementation points.

@@ -1,7 +1,7 @@
 # 0002 — Appendix F condensation is predicate-granular for tuple production
 
 **Lane:** oracle (brix-oracle)
-**Status:** proposed, awaiting ruling
+**Status:** ruled 2026-07-17
 **Affected sections:** Appendix F (Phase inference, steps 1 & 4), Part III §5
 (rule dependency graph / SCC condensation), Part III §6 (`Masked.atPhase`)
 **Affected conformance IDs:** Appendix I.1 (Incremental = full recompute —
@@ -58,7 +58,7 @@ Standard stratified-Datalog theory (Apt–Blair–Walker) defines strata as a ma
 oracle's two failing phase counts are the literal-transcription artifact, not a
 disagreement with that theory.
 
-## Proposed ruling
+## Ruling (adopted 2026-07-17)
 
 > **Erratum (Appendix F, steps 1/4; Part III §5).** The dependency graph D is
 > rule-granular, but condensation is predicate-granular for tuple production: in
@@ -78,13 +78,11 @@ Mask heads are deliberately excluded from the co-production merge: the Part III
 mask (`producers(R) ⇒ M(R)`), so merging them would create spurious in-SCC
 cycles on legal pricing-override programs.
 
-## What the oracle does until ruled
+## Implementation alignment
 
 `crates/brix-oracle/src/phase.rs::infer_phases` implements the ruling: before
 Tarjan, for each relation with ≥2 Tuple-head producer rules it adds positive
 edges forming a cycle over those producers (in sorted `RuleId` order), unioning
 them into one SCC; mask-head producers are excluded. Steps 4 (strict/mask
-in-SCC error) and 5 (condensation + topo-sort) are unchanged and operate on the
-enlarged components. If the ruling comes back rule-granular after all, only the
-pre-Tarjan edge-augmentation block is removed — no change to the SCC, error, or
-ordering machinery.
+in-SCC error) and 5 (condensation + topo-sort) operate on the enlarged
+components.

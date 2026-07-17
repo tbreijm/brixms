@@ -729,14 +729,24 @@ sealed provenance relations.
 
 ```text
 NodeId  = Hash(entity compatibility domain, canonical key encoding)
-EdgeId  = Hash(relation compatibility domain, canonical role tuple)
+EdgeId  = Hash(Edge, canon_ident(relation compatibility domain)
+                    ++ canonical role tuple)
 ClaimId = Hash(transaction intent, operation ordinal, source scope)
 ```
 
 Unkeyed entities are minted only by transactions with transaction-stable identity. A
 rule that derives a node uses `keyed by (...)`: a deterministic Skolem identity over the
-rule and its key bindings. Canonical encodings are normative (Appendix G); floats are
-inadmissible in keys.
+rule and its key bindings. Until a declaration supplies an explicit compatibility-domain
+token, an entity or relation's stable fully-qualified name is its compatibility domain;
+introducing a token for an existing declaration is an explicit identity migration.
+
+`MatchDigest` and `SupportRef` are deterministic engine-internal identities. For a rule
+`R` and its bound-variable record `B` (binding names sorted by canonical name bytes),
+`MatchDigest = Hash(Value, canon(R) ++ canon(B))`. For a support of `edge` from that
+match, `SupportRef = Hash(Value, canon(edge) ++ canon(R) ++ canon(MatchDigest))`.
+Only bound variables enter `B`: read-set edges and join order do not. Canonical encodings
+are normative (Appendix G); floats are inadmissible in keys. *(Errata 0001: identity
+formulas; 0002: compatibility-domain encoding.)*
 
 ## 4. Revisions and settlement
 
@@ -834,6 +844,14 @@ under `snapshot`, the second commit fails on write-write detection.
 **`event rel`.** Event identity is immutable: reasserting an existing `EventId` with
 identical content is idempotent; with different content it fails the transaction.
 
+**`entity`.** Every candidate entity row for one entity key participates in the same
+`KeyConflict` exposure as a derived relation, whether its candidate came from `ensure`,
+`fresh`, or a `keyed by (...)` rule. Repeating `ensure` with the same complete row is
+idempotent; a different non-key payload is a distinct candidate. A conflicted entity key
+has no ordinary live entity until exactly one candidate remains. This rule also applies
+to disagreeing candidates staged by one transaction: the kernel exposes the disagreement
+rather than silently choosing a payload. *(Erratum 0001: entity key conflicts.)*
+
 **Derived relations.** Conflicting derived tuples cannot be rejected during settlement —
 they may follow validly from valid ground facts. The engine derives a sealed edge
 instead:
@@ -902,7 +920,7 @@ relations; governance rules over them are ordinary BrixMS — subject to Part VI
 
 ## 1. Declaration forms
 
-```brix
+```brix-example
 entity Name { key k: T; a: T2 }                     // keyed unary relation, bears identity
 entity Name { a: T }                                 // unkeyed: transaction-mintable only
 
@@ -935,7 +953,7 @@ one key become `KeyConflict` (Part III §8).
 
 One pattern language serves rules, queries, constraints, and comprehensions:
 
-```brix
+```brix-example
 R(role: x, other)                    // edge clause; punning: `other` = `other: other`
 e @ R(role: x)                       // bind the edge reference
 x: Entity { field, f2: v }           // entity attribute clause
@@ -1002,14 +1020,17 @@ let total = sum(from { Line(order: o, amount) } yield amount)
 
 `Rel<S>` is a first-class immutable value: a typed finite relation with schema row `S`.
 Snapshot-relative when captured from the graph; passable to pure functions; comparable
-and hashable **only when `S: Canonical`** (which excludes raw floats — wrap them or keep
-such relations out of identity positions). Joins, windows, pivots, and matrix views are
+and hashable **only when `S: ValueCanonical`**. Value canonicality admits floats,
+including inside `Estimate<T>`, using Appendix G's canonicalized IEEE bit patterns. A
+separate `KeyCanonical` judgment governs keys and identity positions and excludes floats
+at every nesting depth. Joins, windows, pivots, and matrix views are
 `brix.rel` functions, not syntax. A transaction may assert a relation value through an
-explicit template expansion; a rule may not.
+explicit template expansion; a rule may not. *(Erratum 0001: `Estimate<F64>` value
+canonicality.)*
 
 ## 6. Queries and watches
 
-```brix
+```brix-example
 query Name(args) -> Rel<Row> = from { ... } yield { ... }
 ```
 
@@ -1021,7 +1042,7 @@ omission; coalescing across revisions is opt-in.
 
 ## 7. Constraints
 
-```brix
+```brix-example
 constraint Name (advisory | strict | audit) { ...pattern... when ... }
 ```
 
@@ -1120,7 +1141,7 @@ Determinism inside settlement is not a configuration profile; it is the semantic
 - parallel and incremental execution must reproduce the canonical sequential result
   bit-for-bit — this is a conformance test, not an aspiration;
 - floats remain inadmissible in keys and canonical identity; `Rel<S>` hashes only when
-  `S: Canonical`;
+  `S: ValueCanonical`;
 - high-performance approximate reductions are available as functions returning
   `Estimate<F64>`, or at boundaries, where the effect row says so.
 
@@ -1142,7 +1163,7 @@ time arrives as facts.
 
 ## 2. Scenarios and adapters
 
-```brix
+```brix-example
 scenario Name {
   seed 42
   bind sim.Clock(resolution: 1 hours)
@@ -1221,9 +1242,11 @@ transaction serializable {
 }
 ```
 
-`ensure` is defined for keyed **entities** only: it returns existing identity or creates
-it. Relations are asserted, never ensured — obtaining identity and asserting structure
-are different acts and read differently. `assert` returns a `ClaimRef<R>`; because claim
+`ensure` is defined for keyed **entities** only: it returns the existing candidate or
+creates one. Repeating the same complete entity row is idempotent; competing payloads
+under one key are settled as `KeyConflict` candidates (Part III §8). Relations are
+asserted, never ensured — obtaining identity and asserting structure are different acts
+and read differently. `assert` returns a `ClaimRef<R>`; because claim
 identity is derived from transaction intent and operation ordinal, the reference is
 retry-stable. `retract` consumes a `ClaimRef` (the affine type system prevents double
 retraction); retracting withdraws one source's claim and the edge stays live if other
@@ -5127,17 +5150,22 @@ safety for rules) is stated here and mechanized under Edition 5.
 Construct graph D over rules and constraint/query read-sites:
 
 1. **Positive edge** r₁ → r₂ when r₂ reads a relation r₁ derives (live, monotone).
-2. **Strict edge** r₁ ⇒ r₂ when r₂ reads through `without`, `optional`-absence, an
+2. **Co-producers.** Before condensation, add a positive cycle in canonical rule-id
+   order among all Tuple-head producers of each relation R. Thus tuple production is
+   predicate-granular: every producer of R shares one SCC and R becomes complete at one
+   phase boundary. Mask-head producers are excluded from this coupling. *(Erratum 0002:
+   predicate-level condensation.)*
+3. **Strict edge** r₁ ⇒ r₂ when r₂ reads through `without`, `optional`-absence, an
    `aggregate fn`, or a witness over anything r₁ derives.
-3. **Mask edges** for each relation R with mask-producer set M(R) ≠ ∅:
+4. **Mask edges** for each relation R with mask-producer set M(R) ≠ ∅:
    producers(R) ⇒ M(R), and M(R) ⇒ every ordinary live read-site of R (excluding the
    target binding inside each m ∈ M(R); `history` reads excluded).
-4. Condense SCCs of positive edges. A strict or mask edge inside one SCC is a
+5. Condense SCCs of positive edges. A strict or mask edge inside one SCC is a
    compile-time error reporting the minimal cycle.
-5. Phases are the topological order of the condensation with strict/mask edges as
+6. Phases are the topological order of the condensation with strict/mask edges as
    ordering constraints; user `phase` declarations add constraints and must be
    consistent, else error with the conflicting path.
-6. Within a phase: least fixpoint, semi-naive, order-free.
+7. Within a phase: least fixpoint, semi-naive, order-free.
 
 # Appendix G — Canonical encoding and identity (normative sketch)
 
@@ -5159,10 +5187,12 @@ aggregate row ordering, `Canonical` hashing, and serde of key material:
 - quantities: normalized to the measure's base unit, value + measure identifier;
 - money: currency code + minor-unit integer;
 - entity keys: type compatibility domain digest + key fields in declaration order;
-- relation tuples: relation compatibility domain digest + roles sorted by role name;
-- floats: NOT encodable in `canon/1` key positions; canonical row order for aggregation
-  uses the non-float remainder of the row, with full-row totalOrder tiebreak defined
-  over canonicalized bit patterns for the float components.
+- relation tuples: `canon_ident(relation compatibility domain)` + roles sorted by role
+  name, then hashed in the `Edge` domain; absent an explicit declared token, the domain
+  is the relation's stable fully-qualified name;
+- floats: NOT encodable in `canon/1` key or identity positions. They are value-canonical
+  outside those positions: canonical row order and value digests use canonicalized bit
+  patterns (including one NaN pattern) and full-row `totalOrder` tiebreaks.
 
 Hash algorithm: BLAKE3, versioned with the profile. Identity compatibility is a schema
 promise; changing key meaning requires a new compatibility domain and explicit mapping.
