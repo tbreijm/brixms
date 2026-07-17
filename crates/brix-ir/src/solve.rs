@@ -111,8 +111,15 @@ pub fn step(a: Ty, b: Ty) -> Step {
         return Step::Done;
     }
     match (a, b) {
-        (Ty::Var(v), t) | (t, Ty::Var(v)) => Step::Bind(v, t),
-        // An already-erred type absorbs silently against anything concrete.
+        // An already-erred type absorbs silently against anything — including
+        // a type variable. This arm MUST precede the variable-binding arm
+        // below: `Ty::Error` is a non-bindable error marker, so
+        // `step(Var(v), Error)` (or the symmetric `step(Error, Var(v))`) must
+        // absorb to `Done`, never `Bind(v, Error)`. Binding the marker into
+        // the substitution would leak it into every later `resolve` of `v`,
+        // re-introducing exactly the cross-contamination the poison kill set
+        // out to remove.
+        //
         // The failure that produced `Ty::Error` was already reported at its
         // origin site (unknown field, bad arity, dimension conflict, ...);
         // letting it flow into a later unify and report a *second*,
@@ -126,6 +133,7 @@ pub fn step(a: Ty, b: Ty) -> Step {
         // the same sentinel. `Error` gets the cascade-suppression on
         // purpose, isolated per call site, without the contamination.
         (Ty::Error, _) | (_, Ty::Error) => Step::Done,
+        (Ty::Var(v), t) | (t, Ty::Var(v)) => Step::Bind(v, t),
         // `Probability` is the constrained [0,1] `F64` domain. Full range
         // validation is a numeric/strict-IEEE follow-up; v1 admits the
         // representation-level bridge the flagship's clamp relies on. This
@@ -339,6 +347,24 @@ mod tests {
         // Error is not itself Var: it must not be equal to a concrete type
         // either, only absorbed by this explicit rule.
         assert!(Ty::Error != Ty::Bool);
+    }
+
+    #[test]
+    fn error_absorbs_against_a_variable_and_is_never_bound() {
+        // Regression: the `Ty::Error` absorption arm must precede the
+        // variable-binding arm, in BOTH operand orders. If it does not,
+        // `step` returns `Bind(v, Error)` and the non-bindable error marker
+        // leaks into the substitution — corrupting every later `resolve` of
+        // `v` and re-opening the poison-contamination hole this PR closes.
+        let v = TyVar(3);
+        assert!(
+            matches!(step(Ty::Var(v), Ty::Error), Step::Done),
+            "step(Var, Error) must absorb to Done, never Bind"
+        );
+        assert!(
+            matches!(step(Ty::Error, Ty::Var(v)), Step::Done),
+            "step(Error, Var) must absorb to Done, never Bind"
+        );
     }
 
     #[test]
