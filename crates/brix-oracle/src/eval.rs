@@ -16,7 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use brix_canon::{CanonWriter, Canonical, Digest, Domain, EdgeId};
 
 use crate::phase::Phase;
-use crate::program::{BinOp, Clause, Expr, Head, Program, RelName, RuleId, Severity, Var};
+use crate::program::{
+    BinOp, Clause, Expr, Head, Program, RelName, RelationDef, RuleId, Severity, Var,
+};
 use crate::provenance::{
     ClaimEdge, KeyConflictEdge, MaskedEdge, Provenance, RuleErrorEdge, SupportEdge, SupportRef,
     ViolationEdge,
@@ -388,7 +390,7 @@ fn refresh_live(
             let mut candidate_ids = BTreeSet::new();
             let mut supports = BTreeSet::new();
             for (_, r) in &members {
-                candidate_ids.insert(def.digest(&r.row));
+                candidate_ids.insert(candidate_digest(def, &r.row));
                 supports.extend(r.supports.iter().cloned());
             }
             conflicts.push(KeyConflictEdge {
@@ -402,6 +404,22 @@ fn refresh_live(
         live.insert(name.clone(), filtered);
     }
     (live, conflicts)
+}
+
+/// A content-sensitive fingerprint for one candidate row under a
+/// conflicted key. Deliberately distinct from `RelationDef::digest`
+/// (identity): for `Entity` kind that hashes *only* the key fields, so it
+/// cannot tell two disagreeing candidate rows under one key apart — every
+/// candidate in a conflict group shares the same key by construction, so
+/// using identity here would always collapse them to one `Digest`
+/// (errata 0001: entity key-conflict candidates must be individually
+/// visible, "never a silent winner," the same guarantee `Derived`/`Ground`
+/// already get from their content-sensitive `edge_id`).
+fn candidate_digest(def: &RelationDef, row: &Row) -> Digest {
+    let mut w = CanonWriter::new();
+    w.write_tag(&def.name);
+    row.canon_write(&mut w);
+    Digest::of(Domain::Value, &w.finish())
 }
 
 /// Run one phase's naive fixpoint: repeatedly evaluate every rule in the
