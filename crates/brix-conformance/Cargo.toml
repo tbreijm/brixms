@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+brix-canon = { path = "../brix-canon" }
+brix-oracle = { path = "../brix-oracle" }
+
+[dev-dependencies]
+insta = { workspace = true }
 
 [lints]
 workspace = true
