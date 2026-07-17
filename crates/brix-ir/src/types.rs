@@ -14,7 +14,7 @@
 //! (CONTRIBUTING.md's "no floats in a semantic path" — [`crate::pattern::Lit`]
 //! is where a *value* would appear, and it stores IEEE bit patterns, not `f64`).
 
-use crate::ident::Ident;
+use crate::ident::{Ident, QualIdent};
 use core::fmt;
 
 /// A type inference variable. Stubbed: brix-ir assigns these but does not yet
@@ -104,6 +104,16 @@ pub enum Ty {
     NodeRef(Ident),
     EdgeRef(Ident),
     ClaimRef(Ident),
+    /// A nominal, closed-set enum type declared by `enum E { V1; V2; ... }`
+    /// (Part V §2 addendum; Appendix G "enums encode by declaration-order
+    /// ordinal"). The `QualIdent` names the declared enum; the *value*
+    /// domain for this type is [`crate::pattern::Lit::Enum`], which carries
+    /// the variant's declaration-order ordinal (never its name) as the
+    /// canonical encoding. `Ty::Enum` itself needs no `Canonical` impl (it
+    /// names a type, not a value) but is unconditionally admissible in key
+    /// position: it falls through `walk_key`'s scalar wildcard below, same
+    /// as `NodeRef`/`Quantity`/`Money`.
+    Enum(QualIdent),
     Quantity(Ident),
     Money(Ident),
     Probability,
@@ -164,6 +174,7 @@ impl fmt::Display for Ty {
             Ty::NodeRef(e) => write!(f, "NodeRef<{e}>"),
             Ty::EdgeRef(e) => write!(f, "EdgeRef<{e}>"),
             Ty::ClaimRef(e) => write!(f, "ClaimRef<{e}>"),
+            Ty::Enum(q) => write!(f, "Enum<{q}>"),
             Ty::Quantity(m) => write!(f, "Quantity<{m}>"),
             Ty::Money(c) => write!(f, "Money<{c}>"),
             Ty::Probability => write!(f, "Probability"),
@@ -339,8 +350,10 @@ fn walk_key(ty: &Ty, path: &str, out: &mut Vec<KeyCanonicalError>) {
             }
         }
         // Scalars (Unit, Bool, Char, Str, Bytes, Int, Decimal, time types,
-        // NodeRef/EdgeRef/ClaimRef, Quantity, Money, Probability, EventId)
-        // are Canonical and admissible in key positions.
+        // NodeRef/EdgeRef/ClaimRef, Enum, Quantity, Money, Probability,
+        // EventId) are Canonical and admissible in key positions. `Enum`
+        // encodes by declaration-order ordinal (App. G), never by name, so
+        // it carries no float/var/fn/rel hazard.
         _ => {}
     }
 }
@@ -451,6 +464,29 @@ mod tests {
             check_key_canonical(&estimate).is_err(),
             "floats stay inadmissible in keys regardless of the Estimate wrapper"
         );
+    }
+
+    #[test]
+    fn enum_type_is_key_canonical() {
+        // Mismatch (A): a role typed `Tier`/`VehicleClass`/... must be
+        // admissible as a key role, not fall back to `Ty::Var` (which would
+        // trip `UnresolvedTypeVar` — a false positive on the flagship).
+        assert!(check_key_canonical(&Ty::Enum(crate::ident::QualIdent::simple("Tier"))).is_ok());
+    }
+
+    #[test]
+    fn enum_type_display_shows_the_qualified_name() {
+        let ty = Ty::Enum(crate::ident::QualIdent::simple("VehicleClass"));
+        assert_eq!(ty.to_string(), "Enum<VehicleClass>");
+    }
+
+    #[test]
+    fn enum_key_role_nested_in_a_record_is_still_canonical() {
+        let row = Row::closed(vec![RowField {
+            name: Ident::new("class"),
+            ty: Ty::Enum(crate::ident::QualIdent::simple("VehicleClass")),
+        }]);
+        assert!(check_key_canonical(&Ty::record(row)).is_ok());
     }
 
     #[test]

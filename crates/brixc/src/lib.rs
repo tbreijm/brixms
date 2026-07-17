@@ -47,8 +47,10 @@
 
 pub mod cache;
 pub mod emit;
+pub mod lower;
 pub mod pipeline;
 pub mod plan;
 
 pub use cache::{CacheInputs, CacheKey, Profile, ToolchainId};
+pub use lower::{lower_file, AstFrontend, AstLower, Lowered};
 pub use pipeline::{PipelineError, Stage};
