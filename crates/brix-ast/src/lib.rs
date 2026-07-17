@@ -15,7 +15,7 @@ pub mod parser;
 pub mod span;
 
 pub use ast::File;
-pub use diag::{Diagnostic, Diagnostics, Severity};
+pub use diag::{BrxCode, CanonValue, Diagnostic, Diagnostics, Label, Severity};
 pub use fmt::format_file;
 pub use parser::parse_file;
 pub use span::{LineIndex, Span};

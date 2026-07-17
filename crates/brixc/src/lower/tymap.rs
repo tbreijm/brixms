@@ -1,7 +1,7 @@
 //! `ast::Type` → `ir::types::Ty` (design §"tymap (AST Type → Ty)").
 
 use brix_ast::ast::{self, TypeArg, TypeKind};
-use brix_ast::{Diagnostic, Span};
+use brix_diag::{Diagnostic, Span};
 use brix_ir::ident::Ident as IrIdent;
 use brix_ir::types::{
     dimensions_div, money_dimensions, quantity_dimensions, Dimensions, IntWidth, Row, RowField, Ty,

@@ -1,0 +1,9 @@
+---
+source: crates/brix-conformance/tests/errata.rs
+expression: "render(&revisions[0])"
+---
+revision 1
+  A:
+    { x: 42 }
+  B:
+    { x: 42 }

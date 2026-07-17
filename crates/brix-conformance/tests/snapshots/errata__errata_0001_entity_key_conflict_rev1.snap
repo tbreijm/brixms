@@ -1,0 +1,9 @@
+---
+source: crates/brix-conformance/tests/errata.rs
+expression: render(settled)
+---
+revision 1
+  RawLabel:
+    { code: "w1", label: "B" }
+  KeyConflict:
+    Widget (2 candidates)

@@ -55,7 +55,15 @@ impl std::error::Error for ArgError {}
 fn is_value_option(key: &str) -> bool {
     matches!(
         key,
-        "rule" | "manifest" | "name" | "at" | "seed" | "profile" | "target" | "registry"
+        "rule"
+            | "manifest"
+            | "name"
+            | "at"
+            | "seed"
+            | "profile"
+            | "target"
+            | "registry"
+            | "diagnostic-format"
     )
 }
 
@@ -177,5 +185,20 @@ mod tests {
                 option: "rule".into()
             })
         );
+    }
+
+    #[test]
+    fn parses_diagnostic_format() {
+        let inv = parse(&args(&[
+            "build",
+            "world.brix",
+            "--diagnostic-format",
+            "sarif",
+        ]))
+        .unwrap();
+        let Invocation::Verb(p) = inv else {
+            panic!("expected verb")
+        };
+        assert_eq!(p.value("diagnostic-format"), Some("sarif"));
     }
 }

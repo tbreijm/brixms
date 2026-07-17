@@ -13,8 +13,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::process::Command;
 
-use brix_ast::{parse_file, Diagnostic, Severity};
+use brix_ast::parse_file;
 use brix_canon::{Digest, Domain};
+use brix_diag::{DiagnosticFormat, Diagnostics};
 use brixc::pipeline::PhaseAssign;
 use brixc::{AstPhase, CacheInputs, CacheKey, PipelineError, Profile};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -25,8 +26,7 @@ use crate::{package, toolchain};
 pub enum BuildError {
     Locate(package::LocateError),
     Io(std::io::Error),
-    ParseFailed(String),
-    LowerFailed(String),
+    Diagnostics(DiagnosticReport),
     Phase(PipelineError),
     Toolchain(toolchain::ToolchainError),
     CargoBuildFailed(std::process::ExitStatus),
@@ -37,11 +37,36 @@ impl fmt::Display for BuildError {
         match self {
             BuildError::Locate(e) => write!(f, "{e}"),
             BuildError::Io(e) => write!(f, "I/O error: {e}"),
-            BuildError::ParseFailed(s) => write!(f, "{s}"),
-            BuildError::LowerFailed(s) => write!(f, "{s}"),
+            BuildError::Diagnostics(report) => f.write_str(&report.render(DiagnosticFormat::Human)),
             BuildError::Phase(e) => write!(f, "{e}"),
             BuildError::Toolchain(e) => write!(f, "{e}"),
             BuildError::CargoBuildFailed(status) => write!(f, "cargo build failed: {status}"),
+        }
+    }
+}
+
+/// A source-labelled collection emitted by an attempted compiler stage.
+#[derive(Debug)]
+pub struct DiagnosticReport {
+    pub source: String,
+    pub path: String,
+    pub diagnostics: Diagnostics,
+}
+
+impl DiagnosticReport {
+    pub fn render(&self, format: DiagnosticFormat) -> String {
+        self.diagnostics
+            .render_format(format, &self.source, &self.path)
+    }
+}
+
+impl BuildError {
+    /// Machine-facing renderings are meaningful only for diagnostics. Other
+    /// operational errors retain their human `Display` representation.
+    pub fn render(&self, format: DiagnosticFormat) -> String {
+        match self {
+            Self::Diagnostics(report) => report.render(format),
+            _ => self.to_string(),
         }
     }
 }
@@ -71,17 +96,33 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
 
     let (file, parse_diags) = parse_file(&source);
     if parse_diags.has_errors() {
-        return Err(BuildError::ParseFailed(
-            parse_diags.render(&source, located.source_path.as_str()),
-        ));
+        return Err(BuildError::Diagnostics(DiagnosticReport {
+            source,
+            path: located.source_path.to_string(),
+            diagnostics: parse_diags,
+        }));
     }
 
     let lowered = brixc::lower_file(&file, &parse_diags);
     if lowered.has_errors() {
-        return Err(BuildError::LowerFailed(format_diagnostics(&lowered.diags)));
+        return Err(BuildError::Diagnostics(DiagnosticReport {
+            source,
+            path: located.source_path.to_string(),
+            diagnostics: Diagnostics::from_items(lowered.diags),
+        }));
     }
 
-    let phased = AstPhase.assign_phases(lowered).map_err(BuildError::Phase)?;
+    let phased = match AstPhase.assign_phases(lowered) {
+        Ok(phased) => phased,
+        Err(PipelineError::Diagnostic { diagnostic, .. }) => {
+            return Err(BuildError::Diagnostics(DiagnosticReport {
+                source,
+                path: located.source_path.to_string(),
+                diagnostics: Diagnostics::from_items(vec![diagnostic]),
+            }));
+        }
+        Err(error) => return Err(BuildError::Phase(error)),
+    };
     let (relations, rules) = brixc::emit::project(&phased.lowered);
 
     let crate_name = brixc::emit::sanitize_crate_name(located.manifest.name.as_str());
@@ -165,13 +206,4 @@ fn run_cargo_build(cache_dir: &Utf8Path, profile: Profile) -> Result<(), BuildEr
         return Err(BuildError::CargoBuildFailed(status));
     }
     Ok(())
-}
-
-fn format_diagnostics(diags: &[Diagnostic]) -> String {
-    diags
-        .iter()
-        .filter(|d| d.severity == Severity::Error)
-        .map(|d| format!("{}: {}", d.code, d.message))
-        .collect::<Vec<_>>()
-        .join("\n")
 }

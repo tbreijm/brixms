@@ -1,0 +1,9 @@
+---
+source: crates/brix-oracle/tests/settle.rs
+expression: render(&settled)
+---
+revision 1
+  RawLabel:
+    { code: "w1", label: "B" }
+  KeyConflict:
+    Widget (2 candidates)
