@@ -13,12 +13,13 @@ trusted core, and every dependency is attack surface and a determinism risk.
 | `proptest` | Property tests (canon roundtrip/ordering laws, phase-order invariance, fuzzing). |
 | `insta` | Golden snapshots for canon vectors, IR `Display`, generated code. |
 | `miette` | Human diagnostic rendering in brix-diag (JSON/SARIF are hand-emitted). |
-| `quote` + `syn` + `prettyplease` | Rust codegen + formatting in brixc. |
+| `quote` + `proc-macro2` + `syn` + `prettyplease` | Rust codegen + formatting in brixc. `proc-macro2` is the token-stream substrate of this trio (`quote!` produces a `proc_macro2::TokenStream`; `syn`/`prettyplease` consume one) — named explicitly because brixc's emit stage passes token streams across function boundaries, not new surface. |
 | `indexmap` | Insertion-/sort-ordered maps where a deterministic non-BTree map is wanted. |
 | `camino` | UTF-8 paths (`Utf8Path`) across the CLI and package manager. |
 | `serde` (+ `serde_json`) | **Diagnostics/manifests only.** Never a semantic serializer — canon is the only serializer for semantic data. |
 | `wasmtime` | The WASM Driver host in brix-rt. Pulled in only by that lane. |
 | `unicode-normalization` | Appendix G requires identifiers to be NFC-normalized before canonical encoding. Applied in `brix-canon`'s `write_ident`. Pure, `no_std`-capable, table-driven UAX #15 implementation with a stable API; the de-facto standard crate (a Rust project dependency). ASCII identifiers take an allocation-free fast path, so the cost is paid only on non-ASCII idents. See "Pending justifications" resolution below. |
+| `toml` | Parses/serializes `brixpkg` package manifests (`brix.toml`) and the lockfile's on-disk TOML shape. **Manifests and lockfiles only, never semantic data** — same rule as `serde`: package metadata (name, version, dependency table) is not a BrixMS relation/graph value, so this is not a second semantic encoder. Every digest that must be stable (lockfile entry digests, content-addressed registry keys) is computed by hashing canonical bytes through `brix-canon`'s `Digest`/`Canonical`, never by hashing the TOML text or relying on `toml`/`serde` for byte-stability. |
 
 ## Determinism rules that override convenience
 
