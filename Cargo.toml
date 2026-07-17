@@ -28,7 +28,7 @@ repository = "https://github.com/tbreijm/brixms"
 # nothing here without an Opus-written justification in DEPS.md.
 [workspace.dependencies]
 blake3 = "1"
-logos = "0.14"
+logos = "0.16"
 petgraph = "0.6"
 pubgrub = "0.2"
 proptest = "1"
