@@ -32,6 +32,106 @@ fn entity_field<'a>(clauses: &'a [Clause], var: &str) -> &'a [brix_ir::pattern::
 }
 
 // ---------------------------------------------------------------------
+// Expression origin stability (issue #15 PR 1: stable expression origins).
+// ---------------------------------------------------------------------
+
+#[test]
+fn lowered_expression_carries_stable_source_origin() {
+    let src = r#"
+package t @ 1.0.0
+rel Input { x: Int } key(x)
+rel Output { y: Int } key(y)
+derive R: Output(y: y) from { Input(x); let y = x + 1 }
+"#;
+    let lowered = lower(src);
+    let rule = &lowered.source.rules[0];
+    let expression = rule
+        .body
+        .clauses
+        .iter()
+        .find_map(|clause| match clause {
+            Clause::Let { expr, .. } => Some(expr),
+            _ => None,
+        })
+        .expect("let expression");
+    let start = src.find("x + 1").expect("fixture expression") as u32;
+    assert_eq!(
+        expression.origin.range,
+        Some(brix_ir::core::SourceRange {
+            start,
+            end: start + "x + 1".len() as u32,
+        })
+    );
+    assert_eq!(
+        expression.origin.id,
+        brix_ir::core::ExprId::derive(
+            &IrIdent::new("R"),
+            expression.origin.range.expect("source range"),
+        )
+    );
+}
+
+#[test]
+fn repeated_lowering_of_identical_source_yields_byte_identical_origins() {
+    // Determinism (App G / Appendix I.2 discipline): `ExprId` is a canonical
+    // content digest, not a positional/monotonic counter, so lowering the
+    // same source twice — including in two independent `ProgramResolver`
+    // passes — must reproduce exactly the same origin ids and ranges. This
+    // is the guarantee the `determinism` CI gate (run the suite twice,
+    // require a byte-clean tree) exercises at the whole-workspace level;
+    // this test pins it down at the unit that will key type facts and
+    // provenance to source expressions.
+    let src = r#"
+package t @ 1.0.0
+rel Input { x: Int } key(x)
+rel Output { y: Int } key(y)
+derive R: Output(y: y) from { Input(x); let y = x + 1 }
+"#;
+
+    fn let_expr_origin(lowered: &brixc::Lowered) -> brix_ir::core::ExprOrigin {
+        let rule = &lowered.source.rules[0];
+        rule.body
+            .clauses
+            .iter()
+            .find_map(|clause| match clause {
+                Clause::Let { expr, .. } => Some(expr.origin),
+                _ => None,
+            })
+            .expect("let expression")
+    }
+
+    let first = let_expr_origin(&lower(src));
+    let second = let_expr_origin(&lower(src));
+    assert_eq!(
+        first, second,
+        "re-lowering identical source must produce byte-identical expression origins"
+    );
+    assert_eq!(first.id.digest(), second.id.digest());
+
+    // Unrelated edits (adding a clause elsewhere in the body) must not
+    // renumber the origin of an expression whose own declaration name and
+    // source range are unchanged — the whole point of a content-addressed
+    // `ExprId` over a positional counter.
+    let src_with_prefix_clause = r#"
+package t @ 1.0.0
+rel Input { x: Int } key(x)
+rel Output { y: Int } key(y)
+derive R: Output(y: y) from { when true; Input(x); let y = x + 1 }
+"#;
+    let start = src_with_prefix_clause.find("x + 1").expect("fixture");
+    let range = brix_ir::core::SourceRange {
+        start: start as u32,
+        end: (start + "x + 1".len()) as u32,
+    };
+    let recomputed = brix_ir::core::ExprOrigin::source(&IrIdent::new("R"), range);
+    assert_eq!(
+        recomputed.id,
+        brix_ir::core::ExprId::derive(&IrIdent::new("R"), range),
+        "ExprId::derive must be a pure function of (declaration, range)"
+    );
+}
+
+// ---------------------------------------------------------------------
 // Type-directed enum-variant disambiguation (mismatch B).
 // ---------------------------------------------------------------------
 

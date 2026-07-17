@@ -16,12 +16,69 @@ use crate::ident::{Ident, QualIdent};
 use crate::pattern::Pattern;
 use crate::site::SiteId;
 use crate::types::Ty;
+use brix_canon::{CanonWriter, Digest, Domain};
 use core::fmt;
+
+/// A source-file byte range carried without coupling Core IR to a particular
+/// parser crate. Ranges are half-open (`[start, end)`).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct SourceRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+/// Deterministic identity for an expression in a declaration. The lowering
+/// adapter derives it from the declaration name and source range, so repeated
+/// lowering of identical source produces the same identity. A future
+/// semantic-anchor pass can preserve identities through source relocation.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct ExprId(Digest);
+
+impl ExprId {
+    pub fn derive(declaration: &Ident, range: SourceRange) -> Self {
+        let mut writer = CanonWriter::new();
+        writer.write_ident(declaration.as_str());
+        writer.write_uint(range.start as u64);
+        writer.write_uint(range.end as u64);
+        ExprId(writer.digest(Domain::Value))
+    }
+
+    pub fn digest(self) -> Digest {
+        self.0
+    }
+}
+
+/// Stable identity plus the source range needed to render explanations back
+/// to users. Synthesized expressions carry no range.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct ExprOrigin {
+    pub id: ExprId,
+    pub range: Option<SourceRange>,
+}
+
+impl ExprOrigin {
+    pub fn source(declaration: &Ident, range: SourceRange) -> Self {
+        ExprOrigin {
+            id: ExprId::derive(declaration, range),
+            range: Some(range),
+        }
+    }
+
+    pub fn synthetic() -> Self {
+        ExprOrigin {
+            id: ExprId::derive(&Ident::new("%synthetic"), SourceRange { start: 0, end: 0 }),
+            range: None,
+        }
+    }
+}
 
 /// A typed expression node. `ty` is the node's result type; `kind` is the
 /// operator. Closed set.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Expr {
+    /// Stable source identity, keyed to source position for use by
+    /// diagnostics and later provenance-tracking passes.
+    pub origin: ExprOrigin,
     pub ty: Ty,
     pub kind: Box<ExprKind>,
 }
@@ -29,14 +86,21 @@ pub struct Expr {
 impl Expr {
     pub fn new(ty: Ty, kind: ExprKind) -> Self {
         Expr {
+            origin: ExprOrigin::synthetic(),
             ty,
             kind: Box::new(kind),
         }
+    }
+
+    pub fn with_origin(mut self, origin: ExprOrigin) -> Self {
+        self.origin = origin;
+        self
     }
 }
 
 /// The closed operator set of the expression IR.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[allow(clippy::large_enum_variant)] // Core IR values are immutable; boxing every branch obscures traversal.
 pub enum ExprKind {
     /// A bound variable reference.
     Var(Ident),
