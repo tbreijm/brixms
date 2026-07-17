@@ -40,6 +40,12 @@ pub use input::{Produces, ReadSite, RelId, RuleFacts, RuleId};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use brix_diag::{CanonValue, Diagnostic, Span};
+
+/// Stable diagnostic for a strict or mask edge that makes stratification
+/// impossible.  `BRX4xxx` is the semantic/phase-analysis code range.
+pub const NON_MONOTONE_CYCLE: &str = "BRX4001";
+
 /// One inferred phase: an ordered position and the positive-SCC of rules
 /// that settle together (mutual positive recursion allowed within).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,6 +93,35 @@ impl std::fmt::Display for PhaseError {
     }
 }
 impl std::error::Error for PhaseError {}
+
+impl PhaseError {
+    /// Project the minimal phase witness into the shared diagnostic channel.
+    /// Rule facts have no source span, so callers that retain source metadata
+    /// may refine the empty primary span; the structural path itself is fully
+    /// preserved for JSON/SARIF and later source mapping.
+    pub fn diagnostic(&self) -> Diagnostic {
+        match self {
+            Self::CycleThroughNonMonotoneEdge {
+                from,
+                to,
+                reason,
+                path,
+            } => Diagnostic::error(NON_MONOTONE_CYCLE, Span::empty(0), self.to_string())
+                .with_structure(CanonValue::Object(BTreeMap::from([
+                    ("from".to_owned(), CanonValue::String(from.clone())),
+                    (
+                        "path".to_owned(),
+                        CanonValue::List(path.iter().cloned().map(CanonValue::String).collect()),
+                    ),
+                    (
+                        "reason".to_owned(),
+                        CanonValue::String((*reason).to_owned()),
+                    ),
+                    ("to".to_owned(), CanonValue::String(to.clone())),
+                ]))),
+        }
+    }
+}
 
 /// Run Appendix F over `rules` and return the phase order.
 pub fn infer_phases(rules: &[RuleFacts]) -> Result<Vec<Phase>, PhaseError> {

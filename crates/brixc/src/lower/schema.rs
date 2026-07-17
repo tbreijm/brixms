@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use brix_ast::ast::{self, Decl, RelKind, RelMod, TypeKind};
-use brix_ast::Diagnostic;
+use brix_diag::Diagnostic;
 use brix_ir::effects::{Effect, EffectRow};
 use brix_ir::frontend::{FnSignature, RelationSchema, SchemaResolver};
 use brix_ir::ident::{Ident as IrIdent, QualIdent};

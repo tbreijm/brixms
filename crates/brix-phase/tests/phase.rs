@@ -136,6 +136,23 @@ fn strict_edge_inside_one_scc_is_a_direct_cycle_error() {
     }
 }
 
+#[test]
+fn cycle_error_preserves_its_minimal_witness_as_diagnostic_structure() {
+    let rules = vec![
+        produces("A", "R", vec![live("S"), strict("S")]),
+        produces("B", "S", vec![live("R")]),
+    ];
+    let error = infer_phases(&rules).expect_err("strict edge within positive SCC must fail");
+    let diagnostic = error.diagnostic();
+    assert_eq!(diagnostic.code, "BRX4001");
+    let brix_diag::CanonValue::Object(structure) = diagnostic.structure else {
+        panic!("phase error must have structured details")
+    };
+    assert!(
+        matches!(structure.get("path"), Some(brix_diag::CanonValue::List(path)) if !path.is_empty())
+    );
+}
+
 /// A residual cycle at the condensation level (no single SCC contains it,
 /// but strict edges close a cycle across several) is also an error, with
 /// the shortest witness path through the condensation graph — not an

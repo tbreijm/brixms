@@ -10,7 +10,7 @@
 //! reported it).
 
 use brix_ast::ast::{self, Decl};
-use brix_ast::{Diagnostic, Span};
+use brix_diag::{Diagnostic, Span};
 use brix_ir::core::{self, Constraint, Query, Rule};
 use brix_ir::frontend::{FrontendSource, RelationSchema, SchemaResolver};
 use brix_ir::ident::{Ident as IrIdent, QualIdent};

@@ -25,7 +25,8 @@ mod tymap;
 
 pub use resolve::{FnInfo, LowerMeta, ProgramResolver, UnitClass, VariantLookup};
 
-use brix_ast::{Diagnostic, File, Severity};
+use brix_ast::File;
+use brix_diag::{Diagnostic, Severity};
 use brix_ir::check::{check_relation_keys, check_rule};
 use brix_ir::frontend::FrontendSource;
 use brix_ir::infer::infer_source;

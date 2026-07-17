@@ -84,3 +84,35 @@ fn build_then_run_then_cache_hit() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+#[test]
+fn diagnostic_formats_and_exit_codes_are_public_contract() {
+    let root = tmp_dir("diagnostics");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("broken.brix");
+    std::fs::write(&source_path, "package broken @ 0.1.0\nrel Input {").unwrap();
+
+    let json = brix(&["build", source_path.as_str(), "--diagnostic-format", "json"]);
+    assert_eq!(json.status.code(), Some(1));
+    let json_output = String::from_utf8_lossy(&json.stdout);
+    assert!(
+        json_output.starts_with("{\"diagnostics\":"),
+        "{json_output}"
+    );
+    assert!(json_output.contains("BRX-AST-"), "{json_output}");
+
+    let sarif = brix(&["build", source_path.as_str(), "--diagnostic-format=sarif"]);
+    assert_eq!(sarif.status.code(), Some(1));
+    let sarif_output = String::from_utf8_lossy(&sarif.stdout);
+    assert!(
+        sarif_output.contains("\"version\":\"2.1.0\""),
+        "{sarif_output}"
+    );
+    assert!(sarif_output.contains("BRX-AST-"), "{sarif_output}");
+
+    let usage = brix(&["build"]);
+    assert_eq!(usage.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&usage.stderr).contains("expected a source file"));
+
+    std::fs::remove_dir_all(&root).ok();
+}

@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 brix-ast = { path = "../brix-ast" }
 brix-canon = { path = "../brix-canon" }
+brix-diag = { path = "../brix-diag" }
 brixc = { path = "../brixc" }
 brixpkg = { path = "../brixpkg" }
 camino = { workspace = true }
