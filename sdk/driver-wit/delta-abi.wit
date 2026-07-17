@@ -1,0 +1,214 @@
+// delta-abi.wit — the WIT half of the BrixMS delta ABI.
+//
+// Ring0 §1.7: "One Rust trait + one WIT world, generated from a single
+// definition." The Rust half is `brix_rt::delta` (crates/brix-rt/src/delta.rs);
+// this is the WASM-component half that tier-B rules and guest Drivers compile
+// against. The two are hand-kept in lockstep for now — a `wit-bindgen`/macro
+// pipeline that emits both from one source is a follow-up (it needs `brixc`,
+// which is a different lane and not yet on this branch). Until then, the
+// invariant is enforced by review and by the type-name/field correspondence
+// documented inline below; every shape here mirrors a Rust type one-for-one.
+//
+// The contract in one sentence: **typed batches in, emissions + support ops
+// out** (Ring0 §1.7). A guest exports `apply`; the host imports capabilities
+// the guest may call at a boundary (Part VII §4).
+//
+// Serialization rule (HARD, Ring0 §0 / CONTRIBUTING.md): every `row`,
+// `canon-row`, and `error` byte string on this boundary is **brix-canon**
+// bytes (`canon/1`). There is exactly one serializer; WIT `list<u8>` here is
+// always canon output, never a second encoding. Digests are the raw 32 bytes
+// of `brix_canon::Digest`.
+
+package brixms:delta@0.1.0;
+
+// ---------------------------------------------------------------------------
+// Shared identity + value types. Mirror brix-canon / brix_rt::ids one-for-one.
+// ---------------------------------------------------------------------------
+interface types {
+    // A 32-byte brix-canon digest. `node-id`, `edge-id`, `claim-id`, and
+    // `match-digest` are all this shape under distinct canon domains on the
+    // host side; the boundary carries the raw bytes and the host re-tags.
+    type digest = list<u8>;      // exactly 32 bytes
+    type node-id = digest;
+    type edge-id = digest;
+    type claim-id = digest;
+    type match-digest = digest;
+
+    // A canon-encoded row/value/error payload (brix_rt::delta::CanonRow /
+    // brix_rt::value::CanonBytes). Opaque bytes on the wire; the guest
+    // decodes and encodes through its brix-canon binding.
+    type canon-row = list<u8>;
+    type canon-bytes = list<u8>;
+
+    // A monotonic per-namespace committed revision (brix_rt::ids::DataRevision).
+    type data-revision = u64;
+
+    // A compiler-assigned expression-site id (brix_rt::ids::SiteId).
+    type site-id = u32;
+
+    // Stable names (brix_rt::ids::RelationRef / RoleRef / RuleRef). NFC-
+    // normalized UTF-8; ordering at the boundary is canonical byte order.
+    type relation-ref = string;
+    type role-ref = string;
+    type rule-ref = string;
+
+    // A role's binding: a node reference or an immutable value
+    // (brix_rt::value::RoleValue).
+    variant role-value {
+        node(node-id),
+        value(canon-bytes),
+    }
+
+    // One role binding within a tuple. The list of these, sorted by
+    // `role`, is a `brix_rt::value::EdgeRoleTuple`.
+    record role-binding {
+        role: role-ref,
+        value: role-value,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The delta vocabulary. Mirrors brix_rt::delta one-for-one.
+// ---------------------------------------------------------------------------
+interface delta {
+    use types.{
+        edge-id, canon-row, data-revision, site-id, match-digest,
+        relation-ref, rule-ref,
+    };
+
+    // brix_rt::delta::DeltaOp<CanonRow>.
+    variant delta-op {
+        insert(canon-row),
+        retract(canon-row),
+    }
+
+    // brix_rt::delta::DeltaBatch<CanonRow>. `ops` arrive in canonical order;
+    // the guest must not re-sort (conformance I.1: incremental == full
+    // recompute bit-for-bit).
+    record delta-batch {
+        at: data-revision,
+        ops: list<delta-op>,
+    }
+
+    // brix_rt::delta::DeltaSourceKind.
+    variant delta-source-kind {
+        rule(source-rule),
+        protocol(relation-ref),
+    }
+    record source-rule {
+        rule: rule-ref,
+        site: option<site-id>,
+    }
+
+    // brix_rt::delta::DeltaSource.
+    record delta-source {
+        relation: relation-ref,
+        kind: delta-source-kind,
+    }
+
+    // brix_rt::delta::SupportRecord.
+    record support-record {
+        edge: edge-id,
+        rule: rule-ref,
+        match-digest: match-digest,
+    }
+
+    // brix_rt::delta::SupportOp.
+    variant support-op {
+        add(support-record),
+        remove(support-record),
+    }
+
+    // brix_rt::delta::Emission<CanonRow>.
+    record emission {
+        edge: edge-id,
+        row: canon-row,
+        supports: list<support-op>,
+    }
+
+    // brix_rt::delta::RuleErrorEmission (Part III §9).
+    record rule-error {
+        site: site-id,
+        partial-match: match-digest,
+        error: canon-row,
+    }
+
+    // brix_rt::delta::DeltaOutput<CanonRow> — "emissions + support ops out."
+    record delta-output {
+        emissions: list<emission>,
+        support-ops: list<support-op>,
+        errors: list<rule-error>,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host capabilities a guest may import (Part VII §4). Capabilities are
+// affine and host-issued; a guest receives an opaque handle and may only do
+// what the handle's scope permits. Only `net` is fleshed out here (the
+// HTTP-notify Driver needs it); the rest are named so the world's shape is
+// visible, to be filled in as the wasmtime host lands.
+// ---------------------------------------------------------------------------
+interface capabilities {
+    // Net<HostPattern> (Part VII §4). The host validated the pattern when it
+    // issued the handle; the guest cannot widen it.
+    resource net {
+        // Perform one outbound request. Returns the response status + body,
+        // or a structured error the guest turns into a Failed/Cancelled
+        // outcome (Appendix H) — never a panic.
+        request: func(req: http-request) -> result<http-response, net-error>;
+    }
+
+    record http-request {
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+    variant net-error {
+        // The host refused the target as outside the capability's scope.
+        forbidden(string),
+        // Transport failure; the string is a diagnostic, not control flow.
+        transport(string),
+        // The host cancelled the in-flight request (lease expiry / shutdown).
+        cancelled,
+    }
+
+    // Console capability (Part VII §4) — dev/scenario logging only.
+    resource console {
+        log: func(message: string);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The worlds. `delta-rule` is what a tier-B compiled rule exports;
+// `driver` is what a guest Driver exports plus the capabilities it imports.
+// Both export the same `apply` shape — that is the single-definition point.
+// ---------------------------------------------------------------------------
+
+// Tier-B rule: pure delta function, no capabilities (Part VII: inside the
+// walls everything is pure — a rule touches no boundary).
+world delta-rule {
+    use delta.{delta-source, delta-batch, delta-output};
+
+    // The source this rule answers to; the host reads it once at load.
+    export source: func() -> delta-source;
+
+    // "typed batches in, emissions + support ops out."
+    export apply: func(batch: delta-batch) -> delta-output;
+}
+
+// Guest Driver: same `apply` contract, plus imported capabilities it may use
+// while producing outcomes for a protocol's Desired requests (Part VII §3,
+// Appendix H). `brix-driver-rs` wraps this into `on_request` ergonomics.
+world driver {
+    import capabilities;
+    use delta.{delta-source, delta-batch, delta-output};
+
+    export source: func() -> delta-source;
+    export apply: func(batch: delta-batch) -> delta-output;
+}
