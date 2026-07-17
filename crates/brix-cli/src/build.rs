@@ -159,8 +159,15 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
     if cache_hit {
         eprintln!("brix: cache hit ({})", cache_key.to_hex());
     } else {
-        let files =
-            brixc::emit::assemble_workspace(located.manifest.name.as_str(), &relations, &rules);
+        let runtime_path = camino::Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("brix-rt");
+        let files = brixc::emit::assemble_workspace_with_runtime(
+            located.manifest.name.as_str(),
+            &relations,
+            &rules,
+            runtime_path.as_str(),
+        );
         write_files(&cache_dir, &files)?;
         run_cargo_build(&cache_dir, profile)?;
     }
@@ -196,6 +203,10 @@ fn write_files(root: &Utf8Path, files: &BTreeMap<Utf8PathBuf, String>) -> std::i
 fn run_cargo_build(cache_dir: &Utf8Path, profile: Profile) -> Result<(), BuildError> {
     let mut cmd = Command::new("cargo");
     cmd.arg("build");
+    // Generated workspaces are built only from the already-resolved local
+    // toolchain graph.  Do not let a cache build acquire a fresh registry
+    // version (or depend on network availability) behind the caller's back.
+    cmd.arg("--offline");
     if matches!(profile, Profile::Serve) {
         cmd.arg("--release");
     }

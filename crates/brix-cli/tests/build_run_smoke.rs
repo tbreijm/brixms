@@ -4,7 +4,8 @@
 //! the only way to exercise `main.rs`'s dispatch and the real `cargo`
 //! invocation end to end.
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use camino::Utf8PathBuf;
 
@@ -113,6 +114,47 @@ fn diagnostic_formats_and_exit_codes_are_public_contract() {
     let usage = brix(&["build"]);
     assert_eq!(usage.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&usage.stderr).contains("expected a source file"));
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn generated_binary_consumes_a_transaction_stream_and_emits_canon_dump() {
+    let root = tmp_dir("runtime-stream");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("world.brix");
+    std::fs::write(&source_path, FIXTURE).unwrap();
+
+    let build_out = brix(&["build", source_path.as_str()]);
+    assert!(build_out.status.success());
+    let cache_entry = std::fs::read_dir(root.join(".brix-cache"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let binary = Utf8PathBuf::from_path_buf(cache_entry)
+        .unwrap()
+        .join("target")
+        .join("debug")
+        .join(format!("smoke_build{}", std::env::consts::EXE_SUFFIX));
+
+    let mut child = Command::new(binary)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"+ Input 68656c6c6f\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.starts_with("1 "), "{stdout}");
+    assert!(stdout.contains("brix: generated workspace OK"), "{stdout}");
 
     std::fs::remove_dir_all(&root).ok();
 }
