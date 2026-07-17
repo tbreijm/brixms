@@ -171,7 +171,12 @@ impl Scheduler {
     /// newly published settled revision.
     pub fn commit(&mut self, transaction: Transaction) -> &Settled {
         let revision = self.settled.revision.next();
-        let mut pending: BTreeMap<RelationRef, Vec<DeltaOp<CanonRow>>> = BTreeMap::new();
+        // Every phase receives the revision's accumulated deltas. A phase may
+        // add more deltas while it reaches its own positive fixed point; those
+        // additions are then available to every later phase, never to an
+        // earlier one. This is the Appendix-F ordering contract in runtime
+        // form and keeps same-phase recursion distinct from stratification.
+        let mut changes: BTreeMap<RelationRef, Vec<DeltaOp<CanonRow>>> = BTreeMap::new();
 
         for operation in transaction.ops {
             match operation {
@@ -180,7 +185,7 @@ impl Scheduler {
                     let extent = self.settled.extents.entry(relation.clone()).or_default();
                     if extent.insert(edge, row.clone()).is_none() {
                         self.direct.insert((relation.clone(), edge));
-                        pending
+                        changes
                             .entry(relation)
                             .or_default()
                             .push(DeltaOp::Insert(row));
@@ -194,7 +199,7 @@ impl Scheduler {
                     if !has_support(&self.supports, &relation, edge) {
                         if let Some(extent) = self.settled.extents.get_mut(&relation) {
                             if let Some(removed) = extent.remove(&edge) {
-                                pending
+                                changes
                                     .entry(relation)
                                     .or_default()
                                     .push(DeltaOp::Retract(removed));
@@ -207,41 +212,59 @@ impl Scheduler {
 
         self.settled.revision = revision;
         self.settled.errors.clear();
-        while let Some((relation, operations)) = pending.pop_first() {
-            let outputs: Vec<_> = self
-                .rules
-                .iter_mut()
-                .filter(|registered| registered.implementation.source().relation == relation)
-                .map(|registered| {
-                    (
-                        registered.target.clone(),
-                        source_rule(registered.implementation.source()),
-                        registered.implementation.apply(DeltaBatch {
-                            at: revision,
-                            ops: operations.clone(),
-                        }),
-                    )
-                })
-                .collect();
-            for (target, rule, output) in outputs {
-                for error in output.errors {
-                    self.settled.errors.push(SettledRuleError {
-                        rule: rule.clone(),
-                        error,
-                    });
-                }
-                for emission in output.emissions {
-                    for support in emission.supports {
-                        self.apply_support(
-                            support,
-                            &target,
-                            Some(emission.row.clone()),
-                            &mut pending,
-                        );
+        let phases: BTreeSet<u32> = self.rules.iter().map(|rule| rule.phase).collect();
+        for phase in phases {
+            let mut pending = changes.clone();
+            while let Some((relation, operations)) = pending.pop_first() {
+                let outputs: Vec<_> = self
+                    .rules
+                    .iter_mut()
+                    .filter(|registered| {
+                        registered.phase == phase
+                            && registered.implementation.source().relation == relation
+                    })
+                    .map(|registered| {
+                        (
+                            registered.target.clone(),
+                            source_rule(registered.implementation.source()),
+                            registered.implementation.apply(DeltaBatch {
+                                at: revision,
+                                ops: operations.clone(),
+                            }),
+                        )
+                    })
+                    .collect();
+                for (target, rule, output) in outputs {
+                    for error in output.errors {
+                        self.settled.errors.push(SettledRuleError {
+                            rule: rule.clone(),
+                            error,
+                        });
                     }
-                }
-                for support in output.support_ops {
-                    self.apply_support(support, &target, None, &mut pending);
+                    for emission in output.emissions {
+                        for support in emission.supports {
+                            if let Some((relation, operation)) =
+                                self.apply_support(support, &target, Some(emission.row.clone()))
+                            {
+                                pending
+                                    .entry(relation.clone())
+                                    .or_default()
+                                    .push(operation.clone());
+                                changes.entry(relation).or_default().push(operation);
+                            }
+                        }
+                    }
+                    for support in output.support_ops {
+                        if let Some((relation, operation)) =
+                            self.apply_support(support, &target, None)
+                        {
+                            pending
+                                .entry(relation.clone())
+                                .or_default()
+                                .push(operation.clone());
+                            changes.entry(relation).or_default().push(operation);
+                        }
+                    }
                 }
             }
         }
@@ -259,14 +282,11 @@ impl Scheduler {
         operation: SupportOp,
         target: &RelationRef,
         row: Option<CanonRow>,
-        pending: &mut BTreeMap<RelationRef, Vec<DeltaOp<CanonRow>>>,
-    ) {
+    ) -> Option<(RelationRef, DeltaOp<CanonRow>)> {
         match operation {
             SupportOp::Add(record) => {
                 let support = SupportRef::of(record.edge, &record.rule, record.match_digest);
-                let Some(row) = row else {
-                    return;
-                };
+                let row = row?;
                 if self
                     .supports
                     .insert(support, (target.clone(), record.edge, row.clone()))
@@ -274,32 +294,25 @@ impl Scheduler {
                 {
                     let extent = self.settled.extents.entry(target.clone()).or_default();
                     if extent.insert(record.edge, row.clone()).is_none() {
-                        pending
-                            .entry(target.clone())
-                            .or_default()
-                            .push(DeltaOp::Insert(row));
+                        return Some((target.clone(), DeltaOp::Insert(row)));
                     }
                 }
             }
             SupportOp::Remove(record) => {
                 let support = SupportRef::of(record.edge, &record.rule, record.match_digest);
-                let Some((relation, edge, row)) = self.supports.remove(&support) else {
-                    return;
-                };
+                let (relation, edge, row) = self.supports.remove(&support)?;
                 if !self.direct.contains(&(relation.clone(), edge))
                     && !has_support(&self.supports, &relation, edge)
                 {
                     if let Some(extent) = self.settled.extents.get_mut(&relation) {
                         if extent.remove(&edge).is_some() {
-                            pending
-                                .entry(relation)
-                                .or_default()
-                                .push(DeltaOp::Retract(row));
+                            return Some((relation, DeltaOp::Retract(row)));
                         }
                     }
                 }
             }
         }
+        None
     }
 }
 
@@ -350,6 +363,7 @@ mod tests {
     struct Echo {
         source: DeltaSource,
         rule: RuleRef,
+        target: RelationRef,
     }
 
     impl DeltaAbi for Echo {
@@ -364,7 +378,7 @@ mod tests {
             for operation in batch.ops {
                 match operation {
                     DeltaOp::Insert(row) => {
-                        let edge = edge_for_row(&RelationRef::from("Derived"), &row);
+                        let edge = edge_for_row(&self.target, &row);
                         let digest = MatchDigest::of(&self.rule, &row.0);
                         output.emissions.push(Emission {
                             edge,
@@ -377,7 +391,7 @@ mod tests {
                         });
                     }
                     DeltaOp::Retract(row) => {
-                        let edge = edge_for_row(&RelationRef::from("Derived"), &row);
+                        let edge = edge_for_row(&self.target, &row);
                         output.support_ops.push(SupportOp::Remove(SupportRecord {
                             edge,
                             rule: self.rule.clone(),
@@ -404,6 +418,7 @@ mod tests {
                     },
                 },
                 rule: RuleRef::from("Copy"),
+                target: RelationRef::from("Derived"),
             }),
         );
         scheduler
@@ -432,5 +447,52 @@ mod tests {
         let settled = scheduler.commit(Transaction::new(b"t2").assert("Input", row));
         assert_eq!(settled.extents[&RelationRef::from("Input")].len(), 1);
         assert_eq!(settled.extents[&RelationRef::from("Derived")].len(), 1);
+    }
+
+    #[test]
+    fn later_phase_output_never_reenters_an_earlier_phase() {
+        let mut scheduler = Scheduler::new();
+        // This deliberately backward registration would be rejected by
+        // brix-phase for a real program. It proves the scheduler itself also
+        // respects the phase barrier rather than accidentally looping over
+        // newly created higher-phase rows in an earlier phase.
+        scheduler.register_rule(
+            0,
+            "Skipped",
+            Box::new(Echo {
+                source: DeltaSource {
+                    relation: RelationRef::from("Intermediate"),
+                    kind: DeltaSourceKind::Rule {
+                        rule: RuleRef::from("TooEarly"),
+                        site: None,
+                    },
+                },
+                rule: RuleRef::from("TooEarly"),
+                target: RelationRef::from("Skipped"),
+            }),
+        );
+        scheduler.register_rule(
+            1,
+            "Intermediate",
+            Box::new(Echo {
+                source: DeltaSource {
+                    relation: RelationRef::from("Input"),
+                    kind: DeltaSourceKind::Rule {
+                        rule: RuleRef::from("Later"),
+                        site: None,
+                    },
+                },
+                rule: RuleRef::from("Later"),
+                target: RelationRef::from("Intermediate"),
+            }),
+        );
+
+        let settled =
+            scheduler.commit(Transaction::new(b"t").assert("Input", CanonRow(b"x".to_vec())));
+        assert_eq!(settled.extents[&RelationRef::from("Intermediate")].len(), 1);
+        assert!(settled
+            .extents
+            .get(&RelationRef::from("Skipped"))
+            .is_none_or(BTreeMap::is_empty));
     }
 }

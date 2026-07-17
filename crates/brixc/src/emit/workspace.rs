@@ -284,8 +284,9 @@ fn runtime_rs(rules: &[RuleDesc]) -> String {
             continue;
         };
         registrations.push_str(&format!(
-            "    scheduler.register_rule(0, {target:?}, Box::new(IdentityRule {{ source: DeltaSource {{ relation: RelationRef::from({source:?}), kind: DeltaSourceKind::Rule {{ rule: RuleRef::from({name:?}), site: None }} }}, target: RelationRef::from({target:?}), rule: RuleRef::from({name:?}) }}));\n",
+            "    scheduler.register_rule({phase}, {target:?}, Box::new(IdentityRule {{ source: DeltaSource {{ relation: RelationRef::from({source:?}), kind: DeltaSourceKind::Rule {{ rule: RuleRef::from({name:?}), site: None }} }}, target: RelationRef::from({target:?}), rule: RuleRef::from({name:?}) }}));\n",
             name = rule.name,
+            phase = rule.phase,
         ));
     }
     format!(
@@ -377,11 +378,19 @@ mod tests {
 
     #[test]
     fn runtime_workspace_links_brix_rt_and_reads_transactions() {
-        let files = assemble_workspace_with_runtime("demo.logistics", &[], &[], "../brix-rt");
+        let rules = [RuleDesc {
+            name: "Copy".into(),
+            delta_sources: vec!["Input".into()],
+            target_relation: Some("Output".into()),
+            identity_source: Some("Input".into()),
+            phase: 7,
+        }];
+        let files = assemble_workspace_with_runtime("demo.logistics", &[], &rules, "../brix-rt");
         assert!(
             files[&Utf8PathBuf::from("Cargo.toml")].contains("brix-rt = { path = \"../brix-rt\" }")
         );
         assert!(files[&Utf8PathBuf::from("src/main.rs")].contains("brix_rt::stream::run_text"));
+        assert!(files[&Utf8PathBuf::from("src/runtime.rs")].contains("scheduler.register_rule(7"));
     }
 
     #[test]

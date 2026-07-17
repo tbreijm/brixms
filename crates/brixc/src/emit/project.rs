@@ -4,6 +4,8 @@
 //! itself has no relations field, by design: brix-ir never invents
 //! schema), rules from `Lowered.source.rules`.
 
+use std::collections::BTreeMap;
+
 use brix_ir::core::{Head, Rule};
 use brix_ir::frontend::RelationSchema;
 use brix_ir::pattern::{Arg, Clause, ReadKind, RoleArg};
@@ -20,7 +22,49 @@ use super::{ColumnDesc, RelationDesc, RuleDesc};
 /// — never from hash-map iteration order.
 pub fn project(lowered: &Lowered) -> (Vec<RelationDesc>, Vec<RuleDesc>) {
     let relations = lowered.resolver.relations().map(project_relation).collect();
-    let rules = lowered.source.rules.iter().map(project_rule).collect();
+    let rules = lowered
+        .source
+        .rules
+        .iter()
+        .map(|rule| project_rule(rule, 0))
+        .collect();
+    (relations, rules)
+}
+
+/// Project a phase-assigned program for native execution. Unlike the
+/// descriptor-only [`project`] helper, this carries the compiler's Appendix-F
+/// phase order into the generated scheduler registrations.
+pub fn project_phased(phased: &crate::phase::Phased) -> (Vec<RelationDesc>, Vec<RuleDesc>) {
+    let phase_by_rule: BTreeMap<_, _> = phased
+        .phases
+        .iter()
+        .flat_map(|phase| {
+            phase
+                .rules
+                .iter()
+                .map(move |rule| (rule.as_str(), phase.id as u32))
+        })
+        .collect();
+    let relations = phased
+        .lowered
+        .resolver
+        .relations()
+        .map(project_relation)
+        .collect();
+    let rules = phased
+        .lowered
+        .source
+        .rules
+        .iter()
+        .map(|rule| {
+            project_rule(
+                rule,
+                *phase_by_rule
+                    .get(rule.name.as_str())
+                    .expect("phase assignment must include every lowered rule"),
+            )
+        })
+        .collect();
     (relations, rules)
 }
 
@@ -39,7 +83,7 @@ fn project_relation(schema: &RelationSchema) -> RelationDesc {
     }
 }
 
-fn project_rule(rule: &Rule) -> RuleDesc {
+fn project_rule(rule: &Rule, phase: u32) -> RuleDesc {
     let target_relation = match &rule.head {
         Head::Tuple { relation, .. } => Some(relation.to_string()),
         Head::Node { .. } | Head::Mask { .. } => None,
@@ -59,6 +103,7 @@ fn project_rule(rule: &Rule) -> RuleDesc {
             .collect(),
         identity_source: identity_source(rule),
         target_relation,
+        phase,
     }
 }
 
@@ -98,6 +143,8 @@ fn same_identity_role((head, body): (&RoleArg, &RoleArg)) -> bool {
 mod tests {
     use super::*;
     use crate::lower::lower_file;
+    use crate::phase::AstPhase;
+    use crate::pipeline::PhaseAssign;
     use brix_ast::parse_file;
 
     fn lower_flagship() -> Lowered {
@@ -139,5 +186,23 @@ mod tests {
         let (_, rules) = project(&lowered);
         assert_eq!(rules[0].target_relation.as_deref(), Some("Output"));
         assert_eq!(rules[0].identity_source.as_deref(), Some("Input"));
+    }
+
+    #[test]
+    fn phased_projection_preserves_every_phase_assignment() {
+        let phased = AstPhase.assign_phases(lower_flagship()).unwrap();
+        let (_, rules) = project_phased(&phased);
+        for phase in &phased.phases {
+            for rule in &phase.rules {
+                assert_eq!(
+                    rules
+                        .iter()
+                        .find(|candidate| candidate.name == *rule)
+                        .unwrap()
+                        .phase,
+                    phase.id as u32
+                );
+            }
+        }
     }
 }

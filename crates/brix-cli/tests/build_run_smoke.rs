@@ -15,6 +15,12 @@ rel Input { value: I64 } key(value)\n\
 rel Output { value: I64 } key(value)\n\
 derive R: Output(value: value) from { Input(value) }\n";
 
+const UNSUPPORTED_FIXTURE: &str = "package smoke.unsupported @ 0.1.0\n\
+rel Input { value: I64 } key(value)\n\
+rel Other { value: I64 } key(value)\n\
+rel Output { value: I64 } key(value)\n\
+derive Join: Output(value: value) from { Input(value); Other(value) }\n";
+
 fn tmp_dir(tag: &str) -> Utf8PathBuf {
     let mut p =
         Utf8PathBuf::from_path_buf(std::env::temp_dir()).expect("system temp dir must be UTF-8");
@@ -114,6 +120,22 @@ fn diagnostic_formats_and_exit_codes_are_public_contract() {
     let usage = brix(&["build"]);
     assert_eq!(usage.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&usage.stderr).contains("expected a source file"));
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn build_fails_closed_when_a_rule_has_no_runtime_lowering() {
+    let root = tmp_dir("unsupported-runtime-rule");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("world.brix");
+    std::fs::write(&source_path, UNSUPPORTED_FIXTURE).unwrap();
+
+    let output = brix(&["build", source_path.as_str(), "--diagnostic-format", "json"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("BRX5001"), "{stdout}");
+    assert!(stdout.contains("Join"), "{stdout}");
 
     std::fs::remove_dir_all(&root).ok();
 }

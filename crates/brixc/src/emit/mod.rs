@@ -27,7 +27,7 @@ mod project;
 mod rust_type;
 mod workspace;
 
-pub use project::project;
+pub use project::{project, project_phased};
 pub use rust_type::rust_type_of;
 pub use workspace::{assemble_workspace, assemble_workspace_with_runtime, sanitize_crate_name};
 
@@ -72,6 +72,22 @@ pub struct RuleDesc {
     /// layout. This is the first native semantic delta shape; other rules
     /// stay fail-closed until their join plan is emitted.
     pub identity_source: Option<String>,
+    /// Appendix-F phase assigned to this rule. Rules in one phase settle to a
+    /// positive fixed point before any later phase sees their changes.
+    pub phase: u32,
+}
+
+/// Rules that the current native runtime emitter cannot yet represent. A
+/// successful build must register every rule; silently omitting a join, mask,
+/// node, or expression rule would create a binary with observably wrong
+/// semantics. The compiler therefore fails closed until each shape has a
+/// proven runtime lowering.
+pub fn unsupported_runtime_rules(rules: &[RuleDesc]) -> Vec<String> {
+    rules
+        .iter()
+        .filter(|rule| rule.target_relation.is_none() || rule.identity_source.is_none())
+        .map(|rule| rule.name.clone())
+        .collect()
 }
 
 /// The determinism header stamped at the root of every generated crate. This is
@@ -306,6 +322,7 @@ mod tests {
             delta_sources: vec!["OrderStatus".into(), "Delivered".into()],
             target_relation: None,
             identity_source: None,
+            phase: 0,
         };
         let s = format_tokens(emit_rule_module(&rule));
         assert!(s.contains("mod rule_waiting"));
@@ -321,6 +338,7 @@ mod tests {
             delta_sources: vec!["OrderStatus".into()],
             target_relation: None,
             identity_source: None,
+            phase: 0,
         }];
         let a = emit_crate_root(&rels, &rules);
         let b = emit_crate_root(&rels, &rules);
@@ -329,5 +347,17 @@ mod tests {
         // And it is a parseable Rust file (format_tokens would have wrapped an
         // error in a comment otherwise).
         assert!(!a.contains("produced invalid Rust"));
+    }
+
+    #[test]
+    fn runtime_emission_fails_closed_for_non_identity_rules() {
+        let rules = [RuleDesc {
+            name: "Join".into(),
+            delta_sources: vec!["Input".into(), "Other".into()],
+            target_relation: Some("Output".into()),
+            identity_source: None,
+            phase: 0,
+        }];
+        assert_eq!(unsupported_runtime_rules(&rules), vec!["Join"]);
     }
 }
