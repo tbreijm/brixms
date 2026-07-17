@@ -178,6 +178,17 @@ pub enum Ty {
     },
     /// An unsolved inference variable.
     Var(TyVar),
+    /// An error-recovery marker: some check already failed at this
+    /// expression (unknown field, non-`Result` `?`, arity mismatch, ground
+    /// dimension conflict, unresolved call, ...) and there is no real type
+    /// to report. Distinct from [`Ty::Var`] on purpose: a `Var` is a real
+    /// substitution variable a unifier may legitimately bind, while `Error`
+    /// must never enter the substitution — every error-recovery site used
+    /// to return the same sentinel `Ty::Var(TyVar(u32::MAX))`, which *is*
+    /// bindable, so binding it at one failure site silently leaked that
+    /// binding into every other, unrelated failure site (#15 PR2). `Error`
+    /// unifies with nothing but itself, so each failure stays isolated.
+    Error,
 }
 
 impl Ty {
@@ -261,6 +272,7 @@ impl fmt::Display for Ty {
                 write!(f, ") -> {ret} {effects}")
             }
             Ty::Var(v) => write!(f, "{v}"),
+            Ty::Error => write!(f, "<error>"),
         }
     }
 }

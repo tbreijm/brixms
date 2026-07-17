@@ -48,6 +48,8 @@ pub mod frontend;
 pub mod ident;
 pub mod infer;
 pub mod pattern;
+pub mod reflect;
 pub mod site;
+pub mod solve;
 pub mod traits;
 pub mod types;
