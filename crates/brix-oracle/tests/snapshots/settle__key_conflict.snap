@@ -1,0 +1,11 @@
+---
+source: crates/brix-oracle/tests/settle.rs
+expression: render(&settled)
+---
+revision 1
+  A:
+    { amount: 100, order: "ord-1" }
+  B:
+    { amount: 200, order: "ord-1" }
+  KeyConflict:
+    ComputedPrice (2 candidates)

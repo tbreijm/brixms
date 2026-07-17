@@ -1,0 +1,13 @@
+---
+source: crates/brix-oracle/tests/settle.rs
+expression: render(store.current())
+---
+revision 1
+  BaseAmount:
+    { amount: 500, order: Node(86fe4d0e) }
+  ComputedPrice:
+    { amount: 500, order: Node(86fe4d0e) }
+  EffectivePrice:
+    { amount: 500, order: Node(86fe4d0e) }
+  Order:
+    { ref: "ord-1" }

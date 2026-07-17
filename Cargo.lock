@@ -76,6 +76,11 @@ version = "0.0.0"
 [[package]]
 name = "brix-conformance"
 version = "0.0.0"
+dependencies = [
+ "brix-canon",
+ "brix-oracle",
+ "insta",
+]
 
 [[package]]
 name = "brix-diag"
@@ -92,6 +97,10 @@ version = "0.0.0"
 [[package]]
 name = "brix-oracle"
 version = "0.0.0"
+dependencies = [
+ "brix-canon",
+ "insta",
+]
 
 [[package]]
 name = "brix-phase"
