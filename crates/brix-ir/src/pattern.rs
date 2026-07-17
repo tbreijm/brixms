@@ -25,6 +25,17 @@ pub enum Lit {
     /// A canonicalized `f64` bit pattern (NaN already folded to one pattern per
     /// Part V §8). Never dereferenced as a float inside brix-ir.
     F64Bits(u64),
+    /// An enum-variant literal (mismatch B): `ty` names the declared enum
+    /// (`Tier`, `Status`, ...), `ordinal` is the variant's zero-based
+    /// declaration-order index — the App. G canonical encoding ("enums
+    /// encode by declaration-order ordinal"), never the variant's name. A
+    /// `Str` encoding would poison canonical semantics here: two variants
+    /// renamed but not reordered must compare/encode identically to
+    /// consumers that only see the ordinal.
+    Enum {
+        ty: QualIdent,
+        ordinal: u32,
+    },
 }
 
 impl fmt::Display for Lit {
@@ -35,6 +46,7 @@ impl fmt::Display for Lit {
             Lit::Int(i) => write!(f, "{i}"),
             Lit::Str(s) => write!(f, "{s:?}"),
             Lit::F64Bits(bits) => write!(f, "f64:0x{bits:016x}"),
+            Lit::Enum { ty, ordinal } => write!(f, "{ty}#{ordinal}"),
         }
     }
 }
@@ -480,6 +492,32 @@ mod tests {
             !vars.contains(&Ident::new("d")),
             "without exports no bindings (Part IV §3)"
         );
+    }
+
+    #[test]
+    fn enum_lit_displays_type_and_ordinal_not_the_variant_name() {
+        // Mismatch (B): the encoding is the ordinal, never the surface name.
+        let l = Lit::Enum {
+            ty: q("Tier"),
+            ordinal: 1,
+        };
+        assert_eq!(l.to_string(), "Tier#1");
+    }
+
+    #[test]
+    fn enum_lit_as_an_edge_arg_round_trips_through_display() {
+        let p = Pattern::new(vec![Clause::Edge {
+            bind: None,
+            relation: q("OrderStatus"),
+            args: vec![RoleArg {
+                role: Ident::new("value"),
+                arg: Arg::Lit(Lit::Enum {
+                    ty: q("Status"),
+                    ordinal: 0,
+                }),
+            }],
+        }]);
+        assert_eq!(p.to_string(), "OrderStatus(value: Status#0)");
     }
 
     #[test]
