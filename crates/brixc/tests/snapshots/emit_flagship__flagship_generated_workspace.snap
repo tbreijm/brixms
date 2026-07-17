@@ -1,0 +1,801 @@
+---
+source: crates/brixc/tests/emit_flagship.rs
+expression: workspace
+---
+#![deny(unsafe_code)]
+#![deny(clippy::disallowed_types)]
+#![deny(clippy::float_arithmetic)]
+pub mod rel_assign_order__chosen {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct AssignOrderChosenRow {
+        pub order: OrderId,
+        pub vehicle: VehicleId,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(OrderId), AssignOrderChosenRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &AssignOrderChosenRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_assign_order__no_capacity {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct AssignOrderNoCapacityRow {
+        pub order: OrderId,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(OrderId), AssignOrderNoCapacityRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &AssignOrderNoCapacityRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_assign_order_request {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct AssignOrderrequestRow {
+        pub order: OrderId,
+        pub weight: Quantity,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(OrderId), AssignOrderrequestRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &AssignOrderrequestRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_client {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct ClientRow {
+        pub code: String,
+        pub tier: Tier,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(String), ClientRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &ClientRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_computed_price {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct ComputedPriceRow {
+        pub order: OrderId,
+        pub amount: Money,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(OrderId), ComputedPriceRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &ComputedPriceRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_delivered {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct DeliveredRow {
+        pub id: EventId,
+        pub order: OrderId,
+        pub at: Instant,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(EventId), DeliveredRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &DeliveredRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_distance {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct DistanceRow {
+        pub from: LocationId,
+        pub to: LocationId,
+        pub length: Quantity,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(LocationId, LocationId), DistanceRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &DistanceRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_effective_price {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct EffectivePriceRow {
+        pub order: OrderId,
+        pub amount: Money,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(OrderId), EffectivePriceRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &EffectivePriceRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_late_risk {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct LateRiskRow {
+        pub order: OrderId,
+        pub risk: Probability,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(OrderId), LateRiskRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &LateRiskRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_location {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct LocationRow {
+        pub code: String,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(String), LocationRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &LocationRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_manual_price {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct ManualPriceRow {
+        pub order: OrderId,
+        pub amount: Money,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(OrderId), ManualPriceRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &ManualPriceRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_move {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct MoveRow {
+        pub order: OrderId,
+        pub vehicle: VehicleId,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(OrderId), MoveRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &MoveRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_notify_ops__failed {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct NotifyOpsFailedRow {
+        pub order: OrderId,
+        pub reason: String,
+        pub retryable: bool,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(OrderId), NotifyOpsFailedRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &NotifyOpsFailedRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_notify_ops__sent {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct NotifyOpsSentRow {
+        pub order: OrderId,
+        pub at: Instant,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(OrderId), NotifyOpsSentRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &NotifyOpsSentRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_notify_ops_request {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct NotifyOpsrequestRow {
+        pub order: OrderId,
+        pub risk: Probability,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(OrderId), NotifyOpsrequestRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &NotifyOpsrequestRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_order {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct OrderRow {
+        pub r#ref: String,
+        pub client: ClientId,
+        pub from: LocationId,
+        pub to: LocationId,
+        pub weight: Quantity,
+        pub due: Instant,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(String), OrderRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &OrderRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_order_status {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct OrderStatusRow {
+        pub order: OrderId,
+        pub value: Status,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(OrderId), OrderStatusRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &OrderStatusRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_tariff {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct TariffRow {
+        pub class: VehicleClass,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(VehicleClass), TariffRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &TariffRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_tariff_rate {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct TariffRateRow {
+        pub tariff: TariffId,
+        pub rate: Decimal,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(TariffId), TariffRateRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &TariffRateRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_unassigned {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct UnassignedRow {
+        pub order: OrderId,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(OrderId), UnassignedRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &UnassignedRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_vehicle {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct VehicleRow {
+        pub plate: String,
+        pub class: VehicleClass,
+        pub capacity: Quantity,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(String), VehicleRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &VehicleRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rel_brix_sim__now {
+    use super::*;
+    use std::collections::BTreeMap;
+    /// One hyperedge of `#row_ident`: roles are columns.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct brixsimNowRow {
+        pub at: Instant,
+    }
+    /// Canon-ordered primary store. Iteration order is canon byte order
+    /// of the key (BTreeMap), which is what every observable order in a
+    /// BrixMS semantic path must be.
+    #[derive(Default)]
+    pub struct Store {
+        rows: BTreeMap<(), brixsimNowRow>,
+    }
+    impl Store {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Iterate rows in canonical order.
+        pub fn iter(&self) -> impl Iterator<Item = &brixsimNowRow> {
+            self.rows.values()
+        }
+        pub fn len(&self) -> usize {
+            self.rows.len()
+        }
+        pub fn is_empty(&self) -> bool {
+            self.rows.is_empty()
+        }
+    }
+}
+pub mod rule_waiting {
+    use super::*;
+    ///Semi-naive delta of `Waiting` driven by a change to `Delivered`.
+    pub fn delta_from_delivered() {
+        todo!("delta body emitted once brix-ir join plans land")
+    }
+    ///Semi-naive delta of `Waiting` driven by a change to `Move`.
+    pub fn delta_from_move() {
+        todo!("delta body emitted once brix-ir join plans land")
+    }
+    ///Semi-naive delta of `Waiting` driven by a change to `OrderStatus`.
+    pub fn delta_from_order_status() {
+        todo!("delta body emitted once brix-ir join plans land")
+    }
+}
+pub mod rule_request_assignment {
+    use super::*;
+    ///Semi-naive delta of `RequestAssignment` driven by a change to `Unassigned`.
+    pub fn delta_from_unassigned() {
+        todo!("delta body emitted once brix-ir join plans land")
+    }
+}
+pub mod rule_assign {
+    use super::*;
+    ///Semi-naive delta of `Assign` driven by a change to `AssignOrder.Chosen`.
+    pub fn delta_from_assign_order__chosen() {
+        todo!("delta body emitted once brix-ir join plans land")
+    }
+}
+pub mod rule_price_order {
+    use super::*;
+    ///Semi-naive delta of `PriceOrder` driven by a change to `Distance`.
+    pub fn delta_from_distance() {
+        todo!("delta body emitted once brix-ir join plans land")
+    }
+    ///Semi-naive delta of `PriceOrder` driven by a change to `Move`.
+    pub fn delta_from_move() {
+        todo!("delta body emitted once brix-ir join plans land")
+    }
+    ///Semi-naive delta of `PriceOrder` driven by a change to `TariffRate`.
+    pub fn delta_from_tariff_rate() {
+        todo!("delta body emitted once brix-ir join plans land")
+    }
+}
+pub mod rule_override {
+    use super::*;
+    ///Semi-naive delta of `Override` driven by a change to `ComputedPrice`.
+    pub fn delta_from_computed_price() {
+        todo!("delta body emitted once brix-ir join plans land")
+    }
+    ///Semi-naive delta of `Override` driven by a change to `ManualPrice`.
+    pub fn delta_from_manual_price() {
+        todo!("delta body emitted once brix-ir join plans land")
+    }
+}
+pub mod rule_from_manual {
+    use super::*;
+    ///Semi-naive delta of `FromManual` driven by a change to `ManualPrice`.
+    pub fn delta_from_manual_price() {
+        todo!("delta body emitted once brix-ir join plans land")
+    }
+}
+pub mod rule_from_computed {
+    use super::*;
+    ///Semi-naive delta of `FromComputed` driven by a change to `ComputedPrice`.
+    pub fn delta_from_computed_price() {
+        todo!("delta body emitted once brix-ir join plans land")
+    }
+}
+pub mod rule_risk {
+    use super::*;
+    ///Semi-naive delta of `Risk` driven by a change to `Unassigned`.
+    pub fn delta_from_unassigned() {
+        todo!("delta body emitted once brix-ir join plans land")
+    }
+    ///Semi-naive delta of `Risk` driven by a change to `brix.sim.Now`.
+    pub fn delta_from_brix_sim__now() {
+        todo!("delta body emitted once brix-ir join plans land")
+    }
+}
+pub mod rule_escalate {
+    use super::*;
+    ///Semi-naive delta of `Escalate` driven by a change to `LateRisk`.
+    pub fn delta_from_late_risk() {
+        todo!("delta body emitted once brix-ir join plans land")
+    }
+}

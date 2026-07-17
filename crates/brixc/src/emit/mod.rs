@@ -23,6 +23,12 @@
 //! brix-ir merges, the descriptors are populated from IR instead of by hand and
 //! the token-emitting bodies fill in; the module boundaries do not move.
 
+mod project;
+mod rust_type;
+
+pub use project::project;
+pub use rust_type::rust_type_of;
+
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
@@ -77,10 +83,10 @@ pub fn determinism_header() -> TokenStream {
 /// the `RelationStore`-style accessors the runtime and reflection consume.
 pub fn emit_relation_module(rel: &RelationDesc) -> TokenStream {
     let mod_name = format_ident!("rel_{}", to_snake(&rel.name));
-    let row_ident = format_ident!("{}Row", rel.name);
+    let row_ident = format_ident!("{}Row", to_pascal_ident(&rel.name));
 
     let fields = rel.columns.iter().map(|c| {
-        let name = format_ident!("{}", to_snake(&c.name));
+        let name = safe_ident(&to_snake(&c.name));
         let ty: TokenStream = c
             .rust_type
             .parse()
@@ -200,7 +206,11 @@ pub fn emit_crate_root(relations: &[RelationDesc], rules: &[RuleDesc]) -> String
     format_tokens(tokens)
 }
 
-/// snake_case a PascalCase / mixed identifier for module and fn names.
+/// snake_case a PascalCase / mixed identifier for module and fn names. A
+/// real Core IR relation name can be dotted (a protocol's synthesized
+/// `Protocol.Outcome` relation, e.g. `AssignOrder.Chosen`) — any character
+/// that can't stand in a Rust identifier becomes `_` rather than being
+/// passed through into an invalid `format_ident!` call.
 fn to_snake(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     for (i, ch) in s.chars().enumerate() {
@@ -209,11 +219,36 @@ fn to_snake(s: &str) -> String {
                 out.push('_');
             }
             out.push(ch.to_ascii_lowercase());
-        } else {
+        } else if ch.is_ascii_alphanumeric() || ch == '_' {
             out.push(ch);
+        } else {
+            out.push('_');
         }
     }
     out
+}
+
+/// Strip qualifier separators from a dotted relation name for use in a
+/// PascalCase Rust identifier. Segments are already PascalCase, so
+/// straight concatenation reads naturally: `AssignOrder.Chosen` ->
+/// `AssignOrderChosen`.
+fn to_pascal_ident(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect()
+}
+
+/// Build an ident from `s`, escaping it as a raw identifier (`r#ref`) if
+/// `s` collides with a Rust keyword — a real role name can be exactly one
+/// (`key ref: String`, Part IV §1, is legal BrixMS and a reserved word in
+/// Rust). Unprefixed `format_ident!` idents (`rel_`/`rule_`/`delta_from_`)
+/// never hit this since the prefix always makes them non-keywords.
+fn safe_ident(s: &str) -> proc_macro2::Ident {
+    if syn::parse_str::<syn::Ident>(s).is_ok() {
+        format_ident!("{}", s)
+    } else {
+        format_ident!("r#{}", s)
+    }
 }
 
 #[cfg(test)]
