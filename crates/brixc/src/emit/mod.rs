@@ -23,10 +23,12 @@
 //! brix-ir merges, the descriptors are populated from IR instead of by hand and
 //! the token-emitting bodies fill in; the module boundaries do not move.
 
+mod native;
 mod project;
 mod rust_type;
 mod workspace;
 
+pub use native::project_program;
 pub use project::{project, project_phased};
 pub use rust_type::rust_type_of;
 pub use workspace::{assemble_workspace, assemble_workspace_with_runtime, sanitize_crate_name};
