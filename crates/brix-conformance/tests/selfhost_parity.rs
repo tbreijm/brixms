@@ -29,46 +29,10 @@ use brix_rt::engine::{Program, Store, Transaction};
 use brixc::pipeline::PhaseAssign;
 use brixc::{emit, lower_file, AstPhase};
 
+use brix_conformance::typecorpus::{
+    NATIVE_ROLE_BINDINGS_FIXTURE, NATIVE_ROLE_LIT_MISMATCH_FIXTURE,
+};
 use brix_conformance::typefacts;
-
-/// The smallest fixture (#15 slice-1 ruling): a two-role body clause with
-/// both roles bound to variables. `reflect.rs` records exactly two
-/// `Fact::HasType(Subject::Binding)` facts for it (`count`, `label`) — the
-/// native package, driven only by the `RoleVar` facts `role_arg` now emits,
-/// must derive `FactId`-for-`FactId` the same two.
-const FIXTURE_ROLE_BINDINGS: &str = r#"
-package t @ 1.0.0
-
-rel Input { count: Int; label: String } key(count)
-rel Output { count: Int } key(count)
-
-derive Copy: Output(count: count) from {
-    Input(count, label)
-}
-"#;
-
-/// The twin fixture: `label`'s role argument is a literal of the wrong
-/// class (`Int` where the schema declares `String`) instead of a variable.
-/// `count` stays a plain variable so the rule head (`Output`, keyed on
-/// `count`) still binds cleanly — the #15 ruling explicitly allows mismatch
-/// on `count` *or* `label`; `label` is chosen here so the twin doesn't also
-/// need to work around an unrelated unbound-head-key Appendix-E finding.
-/// `reflect.rs` raises exactly one `ConflictKind::Mismatch` for this, at
-/// `Subject::Binding { declaration: "Copy", name: "label" }` (`role_arg`'s
-/// existing behavior, unchanged by this slice) — the native package's
-/// `LitRoleMismatch` rule, driven by the new `RoleLit` fact, must derive
-/// exactly one oriented `MismatchConflict` row that decodes back to the
-/// identical (subject, expect, found, scope).
-const FIXTURE_ROLE_LIT_MISMATCH: &str = r#"
-package t @ 1.0.0
-
-rel Input { count: Int; label: String } key(count)
-rel Output { count: Int } key(count)
-
-derive Copy: Output(count: count) from {
-    Input(count: count, label: 5)
-}
-"#;
 
 const PACKAGE_SRC: &str = include_str!("../../../packages/brix.type/brix.type.brix");
 
@@ -127,7 +91,7 @@ fn no_constraint_based_rejection_in_the_package_source() {
 
 #[test]
 fn smallest_fixture_two_role_bindings_agree_fact_id_for_fact_id() {
-    let report = analyze_source(FIXTURE_ROLE_BINDINGS);
+    let report = analyze_source(NATIVE_ROLE_BINDINGS_FIXTURE);
 
     // Sanity on the reference side first: exactly two `HasType(Binding)`
     // facts, matching the #15 slice-1 "smallest first fixture" spec.
@@ -188,7 +152,7 @@ fn smallest_fixture_two_role_bindings_agree_fact_id_for_fact_id() {
 
 #[test]
 fn twin_fixture_derives_exactly_one_oriented_mismatch_conflict() {
-    let report = analyze_source(FIXTURE_ROLE_LIT_MISMATCH);
+    let report = analyze_source(NATIVE_ROLE_LIT_MISMATCH_FIXTURE);
 
     let reflect_conflicts: Vec<&TypeConflict> = report
         .conflicts
