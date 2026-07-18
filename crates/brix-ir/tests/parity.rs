@@ -59,6 +59,7 @@ use brix_ir::ident::{Ident, QualIdent};
 use brix_ir::infer::{infer_source, TypeError};
 use brix_ir::pattern::{Arg, Clause, Lit, Pattern, RoleArg};
 use brix_ir::reflect::{analyze, ConflictKind, Fact, Subject};
+use brix_ir::site::SiteId;
 use brix_ir::types::{
     dimensions_div, money_dimensions, quantity_dimensions, IntWidth, Row, RowField, Ty, TyVar,
 };
@@ -91,24 +92,19 @@ fn infer_category(error: &TypeError) -> Category {
 /// `reflect::ConflictKind` -> `Category`, per the #15 PR3 rewiring: the
 /// harness now maps from the frozen [`ConflictKind`] enum instead of the old
 /// free-text `operation` string. The map is 1:1 and exhaustive over
-/// `ConflictKind`'s six variants: `Mismatch->Mismatch`, `Arity->Arity`,
+/// `ConflictKind`'s seven variants: `Mismatch->Mismatch`, `Arity->Arity`,
 /// `UnknownField->UnknownField`, `NonBool->NonBoolGuard`, `Occurs->Occurs`,
-/// `Dimension->Dimension`.
+/// `Dimension->Dimension`, `TryNonResult->TryNonResult`.
 ///
-/// One documented gap this rewiring accepts rather than papers over:
-/// `ConflictKind` (frozen exactly as specified by the #15 PR3 design ruling)
-/// has no dedicated try/non-`Result` variant, so `reflect.rs`'s `?`-postfix
-/// type failure now reports `ConflictKind::Mismatch` (folded in alongside
-/// ordinary unify mismatches) rather than the `Category::TryNonResult`
-/// `infer.rs` raises via its own dedicated `TypeError::TryNonResult`. That
-/// would be a genuine category-set mismatch if any fixture below exercised a
-/// `try`-on-non-`Result` conflict — none currently do (`Category::TryNonResult`
-/// is otherwise unused from the `reflect` side of this file), so the gap is
-/// latent, not exercised, and is called out here rather than silently
-/// dropped. A future PR that widens `ConflictKind` (or gives `try` its own
-/// variant) should close it; until then this is an explicitly accepted,
-/// documented divergence from #15 PR2's original 1:1 `TryNonResult<->"try"`
-/// mapping.
+/// `TryNonResult` was appended to `ConflictKind` (after the initial PR 3
+/// freeze) specifically to restore this 1:1 mapping: a `?` postfix over a
+/// non-`Result` type used to fold into `ConflictKind::Mismatch`, which broke
+/// category-set parity against `infer.rs`'s dedicated
+/// `TypeError::TryNonResult` (`infer.rs:274`) for any `try`-on-non-`Result`
+/// program — latent only because no fixture exercised it. The
+/// `try_non_result_agrees` fixture below exists to prove that gap is closed,
+/// not just relabeled: it fails loudly (category-set mismatch) if `reflect`
+/// and `infer` ever disagree on this shape again.
 fn reflect_category(kind: &ConflictKind) -> Category {
     match kind {
         ConflictKind::Mismatch { .. } => Category::Mismatch,
@@ -117,6 +113,7 @@ fn reflect_category(kind: &ConflictKind) -> Category {
         ConflictKind::NonBool { .. } => Category::NonBoolGuard,
         ConflictKind::Occurs { .. } => Category::Occurs,
         ConflictKind::Dimension { .. } => Category::Dimension,
+        ConflictKind::TryNonResult { .. } => Category::TryNonResult,
     }
 }
 
@@ -706,4 +703,38 @@ fn constraint_role_mismatch_agrees() {
         derived: false,
     });
     assert_parity("constraint_role_mismatch", &source, &resolver);
+}
+
+/// Fixture 11: a `?` postfix applied to a non-`Result` value (mirrors what
+/// triggers `infer.rs:274`'s dedicated `TypeError::TryNonResult`). Added
+/// alongside `reflect::ConflictKind::TryNonResult` specifically to close a
+/// latent category-set gap: before that variant existed, `reflect.rs` folded
+/// this shape into `ConflictKind::Mismatch`, which would have broken parity
+/// against `infer.rs`'s dedicated category the moment any program hit it —
+/// this fixture proves the two checkers now agree, not just that the
+/// variant compiles.
+#[test]
+fn try_non_result_agrees() {
+    let o = Origins::new("TryNonResult");
+    let inner = o.lit(Ty::Int(IntWidth::Int), Lit::Int(1));
+    let try_expr = Expr::new(
+        o.ty_var(),
+        ExprKind::Try {
+            inner,
+            site: SiteId::derive(&Ident::new("TryNonResult"), 0),
+        },
+    )
+    .with_origin(o.next_origin());
+    let source = FrontendSource {
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("TryNonResult"),
+            params: vec![],
+            body: Pattern::default(),
+            yields: try_expr,
+            result: o.ty_var(),
+        }],
+    };
+    assert_parity("try_non_result", &source, &TableResolver::new());
 }

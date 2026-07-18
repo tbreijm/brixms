@@ -293,12 +293,38 @@ pub struct Derivation {
 /// category map for how the two vocabularies line up.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ConflictKind {
-    Mismatch { left: Ty, right: Ty },
-    Arity { expected: u32, found: u32 },
-    UnknownField { field: Ident },
-    NonBool { found: Ty },
-    Occurs { var: TyVar, into: Ty },
-    Dimension { op: String, left: Ty, right: Ty },
+    Mismatch {
+        left: Ty,
+        right: Ty,
+    },
+    Arity {
+        expected: u32,
+        found: u32,
+    },
+    UnknownField {
+        field: Ident,
+    },
+    NonBool {
+        found: Ty,
+    },
+    Occurs {
+        var: TyVar,
+        into: Ty,
+    },
+    Dimension {
+        op: String,
+        left: Ty,
+        right: Ty,
+    },
+    /// A `?` postfix applied to a non-`Result` type (mirrors `infer.rs`'s
+    /// dedicated `TypeError::TryNonResult`). Appended last, after the PR 3
+    /// freeze, so the five earlier variants' `write_conflict` ordinals are
+    /// unchanged; see the parity harness's `try_non_result_agrees` fixture
+    /// for why this needed its own variant rather than folding into
+    /// `Mismatch`.
+    TryNonResult {
+        found: Ty,
+    },
 }
 
 /// A derived incompatibility. It is intentionally distinct from a kernel key
@@ -337,6 +363,7 @@ pub fn write_conflict(conflict: &TypeConflict, w: &mut CanonWriter) {
             left.canon_write(w);
             right.canon_write(w);
         }),
+        ConflictKind::TryNonResult { found } => w.write_enum(6, |w| found.canon_write(w)),
     }
 }
 
@@ -433,7 +460,9 @@ impl Reflect {
                     *left = solve::resolve(&subst, left.clone());
                     *right = solve::resolve(&subst, right.clone());
                 }
-                ConflictKind::NonBool { found } => *found = solve::resolve(&subst, found.clone()),
+                ConflictKind::NonBool { found } | ConflictKind::TryNonResult { found } => {
+                    *found = solve::resolve(&subst, found.clone());
+                }
                 ConflictKind::Occurs { into, .. } => *into = solve::resolve(&subst, into.clone()),
                 ConflictKind::Dimension { left, right, .. } => {
                     *left = solve::resolve(&subst, left.clone());
@@ -1010,20 +1039,9 @@ impl Reflect {
                     Ty::Result(ok, _) => (*ok, id),
                     found => {
                         if !matches!(found, Ty::Var(_)) {
-                            // `ConflictKind` has no dedicated try/non-Result
-                            // variant (the frozen PR 3 shape lists exactly six
-                            // kinds); this folds into `Mismatch` against the
-                            // canonical `Result<_,_>` shape, same honest
-                            // payload the old `"try"` conflict carried.
                             self.conflict(
                                 subject.clone(),
-                                ConflictKind::Mismatch {
-                                    left: Ty::Result(
-                                        Box::new(Ty::Var(TyVar(0))),
-                                        Box::new(Ty::Var(TyVar(1))),
-                                    ),
-                                    right: found,
-                                },
+                                ConflictKind::TryNonResult { found },
                                 vec![id],
                             );
                         }
