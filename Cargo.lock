@@ -139,9 +139,12 @@ dependencies = [
 name = "brix-conformance"
 version = "0.0.0"
 dependencies = [
+ "brix-ast",
  "brix-canon",
+ "brix-ir",
  "brix-oracle",
  "brix-rt",
+ "brixc",
  "insta",
 ]
 

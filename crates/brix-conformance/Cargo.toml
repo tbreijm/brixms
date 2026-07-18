@@ -8,10 +8,13 @@ repository.workspace = true
 
 [dependencies]
 brix-canon = { path = "../brix-canon" }
+brix-ir = { path = "../brix-ir" }
 brix-oracle = { path = "../brix-oracle" }
 brix-rt = { path = "../brix-rt" }
 
 [dev-dependencies]
+brix-ast = { path = "../brix-ast" }
+brixc = { path = "../brixc" }
 insta = { workspace = true }
 
 [lints]

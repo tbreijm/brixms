@@ -268,6 +268,34 @@ pub enum Fact {
         operator: String,
         scope: ScopeId,
     },
+
+    // --- structural (input) facts, appended after the PR 3/3.5 freeze ---
+    /// Native `brix.type` vertical slice 1 (#15): which *variable* occupies
+    /// a relation role, at `subject` (the binding the variable is unified
+    /// against — same [`Subject::Binding`] shape [`Reflect::bind`] uses).
+    /// Structural and scope-free like [`Fact::SchemaRole`] — an operator's
+    /// role assignment doesn't depend on typing assumptions — appended here
+    /// rather than reordered next to `SchemaRole` because the fact schema is
+    /// append-only past the PR 3 freeze. Emitted from [`Reflect::role_arg`].
+    RoleVar {
+        subject: Subject,
+        relation: QualIdent,
+        role: Ident,
+    },
+    /// The literal counterpart of [`Fact::RoleVar`]: a role matched against
+    /// a literal rather than bound to a variable, with the literal's own
+    /// class (`ty = `[`lit_ty`]`(lit)`) recorded structurally so a native
+    /// rule can compare it against the role's declared [`Fact::SchemaRole`]
+    /// type without re-deriving it. `subject` mirrors the existing
+    /// [`ConflictKind::Mismatch`] this arm's caller already raises on a
+    /// mismatch: `Subject::Binding { declaration, name: role }` (no
+    /// variable exists to name, so the role name stands in for it).
+    RoleLit {
+        subject: Subject,
+        relation: QualIdent,
+        role: Ident,
+        ty: Ty,
+    },
 }
 
 /// The one canonical encoder `FactId::derive` uses. Never a second fact
@@ -341,6 +369,26 @@ pub fn write_fact(fact: &Fact, w: &mut CanonWriter) {
             subject.canon_write(w);
             scope.canon_write(w);
             w.write_str(operator);
+        }),
+        Fact::RoleVar {
+            subject,
+            relation,
+            role,
+        } => w.write_enum(10, |w| {
+            subject.canon_write(w);
+            relation.canon_write(w);
+            role.canon_write(w);
+        }),
+        Fact::RoleLit {
+            subject,
+            relation,
+            role,
+            ty,
+        } => w.write_enum(11, |w| {
+            subject.canon_write(w);
+            relation.canon_write(w);
+            role.canon_write(w);
+            ty.canon_write(w);
         }),
     }
 }
@@ -596,7 +644,12 @@ impl Reflect {
                 | Fact::RowTail { .. }
                 | Fact::DimTerm { .. }
                 | Fact::RequiresBool { .. }
-                | Fact::Applies { .. } => {}
+                | Fact::Applies { .. }
+                | Fact::RoleVar { .. } => {}
+                // `ty` here is always `lit_ty(lit)` — a concrete literal
+                // class (`Unit`/`Bool`/`Int`/`Str`/`F64`/`Enum`) that never
+                // contains a `TyVar`, so there is nothing to resolve.
+                Fact::RoleLit { .. } => {}
             }
         }
         for conflict in &mut self.draft_conflicts {
@@ -953,7 +1006,7 @@ impl Reflect {
                                     },
                                     vec![],
                                 );
-                                self.role_arg(declaration, arg, ty.clone(), env);
+                                self.role_arg(declaration, relation, arg, ty.clone(), env);
                             }
                         }
                     }
@@ -978,7 +1031,7 @@ impl Reflect {
                                     },
                                     vec![],
                                 );
-                                self.role_arg(declaration, arg, ty.clone(), env);
+                                self.role_arg(declaration, &relation, arg, ty.clone(), env);
                             }
                         }
                     }
@@ -1015,16 +1068,52 @@ impl Reflect {
         }
     }
 
-    fn role_arg(&mut self, declaration: &Ident, arg: &RoleArg, expected: Ty, env: &mut Env) {
+    /// `relation` identifies the schema role `arg.role` is drawn from — the
+    /// caller already resolved it to emit [`Fact::SchemaRole`]; this method
+    /// additionally records exactly which variable (or literal) occupies
+    /// that role (#15 native `brix.type` vertical slice 1: [`Fact::RoleVar`]
+    /// / [`Fact::RoleLit`]), in addition to the existing bind/mismatch
+    /// behavior below, which is unchanged.
+    fn role_arg(
+        &mut self,
+        declaration: &Ident,
+        relation: &QualIdent,
+        arg: &RoleArg,
+        expected: Ty,
+        env: &mut Env,
+    ) {
         match &arg.arg {
-            Arg::Var(name) => self.bind(declaration, name, expected, env, vec![]),
+            Arg::Var(name) => {
+                self.bind(declaration, name, expected, env, vec![]);
+                let subject = Subject::Binding {
+                    declaration: declaration.clone(),
+                    name: name.clone(),
+                };
+                self.fact(
+                    Fact::RoleVar {
+                        subject,
+                        relation: relation.clone(),
+                        role: arg.role.clone(),
+                    },
+                    vec![],
+                );
+            }
             Arg::Lit(lit) => {
                 let found = lit_ty(lit);
+                let subject = Subject::Binding {
+                    declaration: declaration.clone(),
+                    name: arg.role.clone(),
+                };
+                self.fact(
+                    Fact::RoleLit {
+                        subject: subject.clone(),
+                        relation: relation.clone(),
+                        role: arg.role.clone(),
+                        ty: found.clone(),
+                    },
+                    vec![],
+                );
                 if found != expected {
-                    let subject = Subject::Binding {
-                        declaration: declaration.clone(),
-                        name: arg.role.clone(),
-                    };
                     self.conflict(
                         subject,
                         ConflictKind::Mismatch {
