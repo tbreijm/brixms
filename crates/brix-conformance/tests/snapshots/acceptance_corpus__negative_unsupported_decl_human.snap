@@ -1,0 +1,5 @@
+---
+source: crates/brix-conformance/tests/acceptance_corpus.rs
+expression: "reached.diagnostics.render_format(brix_diag::DiagnosticFormat::Human, &src,\n&label)"
+---
+lower/unsupported_decl.brix:13:11: error[BRX-LOW-0001]: this expression form is unsupported in v0

@@ -1,0 +1,13 @@
+// Negative fixture (issue #45): a type error. `when` guards must be `Bool`
+// (Appendix E); guarding on the `I64` value `v` directly must fail
+// deterministically with BRX-IR-0005 during static checking, not silently
+// coerce or drop the guard.
+package neg.type @ 0.1.0
+
+rel Input { value: I64 } key(value)
+rel Output { value: I64 } key(value)
+
+derive R: Output(value: v) from {
+  Input(value: v)
+  when v
+}

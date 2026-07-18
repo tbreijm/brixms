@@ -141,6 +141,8 @@ version = "0.0.0"
 dependencies = [
  "brix-ast",
  "brix-canon",
+ "brix-cli",
+ "brix-diag",
  "brix-ir",
  "brix-oracle",
  "brix-rt",

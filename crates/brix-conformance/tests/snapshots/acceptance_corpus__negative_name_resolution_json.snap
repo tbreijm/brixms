@@ -1,0 +1,5 @@
+---
+source: crates/brix-conformance/tests/acceptance_corpus.rs
+expression: "reached.diagnostics.render_format(brix_diag::DiagnosticFormat::Json, &src,\n&label)"
+---
+{"diagnostics":[{"code":"BRX-LOW-0003","severity":"error","message":"unresolved name `unboundName`","path":"lower/name_resolution.brix","span":{"start":443,"end":454},"startLine":12,"startColumn":15,"endLine":12,"endColumn":26,"structure":null,"labels":[]}]}

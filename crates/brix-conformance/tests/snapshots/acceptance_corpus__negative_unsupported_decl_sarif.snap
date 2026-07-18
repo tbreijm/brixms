@@ -1,0 +1,5 @@
+---
+source: crates/brix-conformance/tests/acceptance_corpus.rs
+expression: "reached.diagnostics.render_format(brix_diag::DiagnosticFormat::Sarif, &src,\n&label)"
+---
+{"$schema":"https://json.schemastore.org/sarif-2.1.0.json","runs":[{"results":[{"level":"error","locations":[{"physicalLocation":{"artifactLocation":{"uri":"lower/unsupported_decl.brix"},"region":{"endColumn":29,"endLine":13,"startColumn":11,"startLine":13}}}],"message":{"text":"this expression form is unsupported in v0"},"properties":{"structure":null},"ruleId":"BRX-LOW-0001"}],"tool":{"driver":{"name":"brix","rules":[{"id":"BRX-LOW-0001","shortDescription":{"text":"this expression form is unsupported in v0"}}]}}}],"version":"2.1.0"}

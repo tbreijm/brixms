@@ -1,0 +1,5 @@
+---
+source: crates/brix-conformance/tests/acceptance_corpus.rs
+expression: "reached.diagnostics.render_format(brix_diag::DiagnosticFormat::Human, &src,\n&label)"
+---
+check/effect_violation.brix:12:1: error[BRX-IR-0006]: rule R is not pure: an effect atom reaches its body/head (Appendix E `pure(B, H)`)

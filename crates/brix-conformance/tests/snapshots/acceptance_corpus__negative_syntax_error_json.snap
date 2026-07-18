@@ -1,0 +1,5 @@
+---
+source: crates/brix-conformance/tests/acceptance_corpus.rs
+expression: "reached.diagnostics.render_format(brix_diag::DiagnosticFormat::Json, &src,\n&label)"
+---
+{"diagnostics":[{"code":"BRX-AST-0001","severity":"error","message":"expected `}`, found end of file","path":"parse/syntax_error.brix","span":{"start":310,"end":310},"startLine":7,"startColumn":1,"endLine":7,"endColumn":1,"structure":null,"labels":[]}]}

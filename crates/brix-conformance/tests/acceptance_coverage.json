@@ -1,0 +1,149 @@
+{
+  "1-one-world-several-disciplines": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "1-stocks-flows-and-auxiliaries": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "19-2-common-reasoning-records": {
+    "lower": { "pass": 0, "fail": 1 }
+  },
+  "19-3-logic": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "19-4-mathematics": {
+    "lower": { "pass": 0, "fail": 1 }
+  },
+  "19-6-native-language-model-support": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "2-declaration": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "2-derived-relations-and-rules": {
+    "lower": { "pass": 0, "fail": 1 }
+  },
+  "2-transactions": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "21-2-observations-and-claims": {
+    "lower": { "pass": 0, "fail": 1 }
+  },
+  "21-6-decision-intelligence": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "21-7-workflows-and-human-tasks": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "22-1-the-component-thesis": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "24-1-unified-external-apis": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "26-11-trust-profiles-and-threat-model": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "26-2-model-validity-envelopes": {
+    "lower": { "pass": 0, "fail": 1 },
+    "phase": { "pass": 2, "fail": 0 }
+  },
+  "26-3-corrections-retroactive-truth-and-historica": {
+    "lower": { "pass": 0, "fail": 1 },
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "26-4-canonical-brix-interchange": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "26-6-transaction-and-consistency-profiles": {
+    "phase": { "pass": 2, "fail": 0 }
+  },
+  "26-7-failure-cancellation-and-uncertain-external": {
+    "phase": { "pass": 2, "fail": 0 }
+  },
+  "26-8-reproducibility-tiers": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "27-10-tuning-and-experiments": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "27-12-predictions-calibration-and-decision-thres": {
+    "lower": { "pass": 0, "fail": 1 },
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "27-13-evaluation-explainability-and-fairness": {
+    "lower": { "pass": 0, "fail": 1 }
+  },
+  "27-15-declarative-visualization-and-reports": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "27-18-data-science-bricks": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "27-2-relation-frames": {
+    "phase": { "pass": 2, "fail": 0 }
+  },
+  "27-3-typed-missingness-and-data-quality": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "27-4-immutable-cleaning-and-preparation-recipes": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "27-5-factors-and-statistical-formulas": {
+    "phase": { "pass": 2, "fail": 0 }
+  },
+  "27-6-feature-semantics": {
+    "lower": { "pass": 0, "fail": 1 },
+    "phase": { "pass": 2, "fail": 0 }
+  },
+  "27-7-immutable-datasets-and-temporal-correctness": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "27-8-estimator-and-workflow-contracts": {
+    "phase": { "pass": 2, "fail": 0 }
+  },
+  "3-lowering": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "3-pattern-language": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "4-aggregation": {
+    "lower": { "pass": 0, "fail": 1 },
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "4-invocation": {
+    "lower": { "pass": 0, "fail": 1 }
+  },
+  "5-authority": {
+    "lower": { "pass": 0, "fail": 1 }
+  },
+  "6-the-mask-primitive": {
+    "phase": { "pass": 1, "fail": 0 }
+  },
+  "build-run-tiny": {
+    "run": { "pass": 1, "fail": 0 }
+  },
+  "negative-effect-violation": {
+    "check": { "pass": 0, "fail": 1 }
+  },
+  "negative-name-resolution": {
+    "lower": { "pass": 0, "fail": 1 }
+  },
+  "negative-phase-cycle": {
+    "phase": { "pass": 0, "fail": 1 }
+  },
+  "negative-syntax-error": {
+    "parse": { "pass": 0, "fail": 1 }
+  },
+  "negative-type-error": {
+    "check": { "pass": 0, "fail": 1 }
+  },
+  "negative-unsupported-declaration": {
+    "lower": { "pass": 0, "fail": 1 }
+  },
+  "part-i-the-flagship-program": {
+    "build": { "pass": 1, "fail": 0 },
+    "phase": { "pass": 1, "fail": 0 }
+  }
+}

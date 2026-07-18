@@ -1,0 +1,15 @@
+// Negative fixture (issue #45): an effect violation. `derive` rule bodies
+// must be pure (Appendix E `pure(B, H)`); calling `noisy`, whose declared
+// effect row carries `console`, from inside rule `R`'s body must fail
+// deterministically with BRX-IR-0006, not silently execute the effect.
+package neg.effect @ 0.1.0
+
+fn noisy(x: I64) -> I64 ! { console } = x
+
+rel Input { value: I64 } key(value)
+rel Output { value: I64 } key(value)
+
+derive R: Output(value: y) from {
+  Input(value: v)
+  let y = noisy(v)
+}

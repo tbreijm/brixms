@@ -81,6 +81,23 @@ jobs:
       - name: Errata fixtures + oracle/compiled-engine differential
         run: cargo test -p brix-conformance
 
+  acceptance:
+    name: acceptance
+    # Already covered by `cargo test --workspace` in the `test` job above;
+    # broken out as its own named check (issue #45's "CI fails when spec
+    # coverage, support status, or expected diagnostics drift without an
+    # explicit fixture update") so the spec-derived acceptance corpus (52
+    # spec fixtures + 6 negative fixtures + the committed coverage report)
+    # has a distinct, always-visible signal, same rationale as `conformance`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Toolchain (pinned via rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Spec-derived acceptance corpus (parse/lower/check/phase + negative fixtures + coverage report)
+        run: cargo test -p brix-conformance --test acceptance_corpus
+
   cargo-deny:
     name: cargo-deny
     runs-on: ubuntu-latest

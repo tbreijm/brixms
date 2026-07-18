@@ -1,0 +1,30 @@
+// Negative fixture (issue #45): a phase cycle. Three rules each read a
+// different relation `without` (Appendix E: `without` reads are strict —
+// they must be fully settled before the rule fires) in a ring: A negates
+// RC, B negates RA, C negates RB. Every `without` witness variable is
+// separately bound by `Seed`, so this is not a name-resolution/absence-
+// witness failure — it is a genuine non-monotone cycle across three phase
+// components (RA -> RB -> RC -> RA), which phase assignment must reject
+// deterministically with BRX4001 rather than silently picking an
+// (unsound) evaluation order.
+package neg.cycle @ 0.1.0
+
+rel Seed { x: I64 } key(x)
+rel RA { x: I64 } key(x)
+rel RB { x: I64 } key(x)
+rel RC { x: I64 } key(x)
+
+derive A: RA(x: x) from {
+  Seed(x: x)
+  without { RC(x: x) }
+}
+
+derive B: RB(x: x) from {
+  Seed(x: x)
+  without { RA(x: x) }
+}
+
+derive C: RC(x: x) from {
+  Seed(x: x)
+  without { RB(x: x) }
+}
