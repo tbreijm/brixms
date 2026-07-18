@@ -9,7 +9,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use brix_canon::{CanonWriter, Canonical, ClaimId, Digest, Domain, EdgeId, NodeId};
 
 /// A runtime value occurring in a relation row or rule environment.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// `PartialEq`/`Eq`/`PartialOrd`/`Ord`/`Hash` are hand-implemented, not
+/// derived (see [`Value::key`]): `Enum`'s `name` field must **not**
+/// participate in identity. Appendix G is explicit that enums encode by
+/// declaration-order ordinal, never the variant's name — two `Value::Enum`s
+/// with the same `(ty, ordinal)` are the same value regardless of what
+/// display name each was constructed with. A derived comparison would make
+/// otherwise-identical enum values silently fail to unify whenever their
+/// `name` strings happened to differ, exactly like the bug this crate's
+/// sibling `brix_oracle::value::Value` had before issue #24 fixed it —
+/// caught here proactively, before any adapter drove real enum literals
+/// through this engine.
+#[derive(Clone, Debug)]
 pub enum Value {
     Nat(u64),
     Int(i64),
@@ -26,7 +38,41 @@ pub enum Value {
     Unit,
 }
 
+/// The identity-relevant projection of a [`Value`] — everything
+/// `PartialEq`/`Ord`/`Hash` actually key on. Exists solely to give `Enum`
+/// an identity of `(ty, ordinal)`, excluding `name`, without hand-writing
+/// five structurally-identical trait impls (`derive` handles this one).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum ValueKey<'a> {
+    Nat(u64),
+    Int(i64),
+    Bool(bool),
+    Str(&'a str),
+    Node(NodeId),
+    Edge(EdgeId),
+    Claim(ClaimId),
+    Enum { ty: &'a str, ordinal: u32 },
+    Unit,
+}
+
 impl Value {
+    fn key(&self) -> ValueKey<'_> {
+        match self {
+            Value::Nat(n) => ValueKey::Nat(*n),
+            Value::Int(n) => ValueKey::Int(*n),
+            Value::Bool(b) => ValueKey::Bool(*b),
+            Value::Str(s) => ValueKey::Str(s.as_str()),
+            Value::Node(id) => ValueKey::Node(*id),
+            Value::Edge(id) => ValueKey::Edge(*id),
+            Value::Claim(id) => ValueKey::Claim(*id),
+            Value::Enum { ty, ordinal, .. } => ValueKey::Enum {
+                ty,
+                ordinal: *ordinal,
+            },
+            Value::Unit => ValueKey::Unit,
+        }
+    }
+
     pub fn as_i128(&self) -> Option<i128> {
         match self {
             Self::Nat(value) => Some(*value as i128),
@@ -40,6 +86,30 @@ impl Value {
             Self::Bool(value) => Some(*value),
             _ => None,
         }
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+impl Eq for Value {}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Value {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key().cmp(&other.key())
+    }
+}
+
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key().hash(state)
     }
 }
 
@@ -622,8 +692,35 @@ fn record_history(state: &mut GroundState, relation: &str, row: Row, claim: Clai
 pub struct Settled {
     pub at_revision: u64,
     pub extents: BTreeMap<String, Extent>,
-    pub masked: BTreeMap<String, BTreeSet<Vec<u8>>>,
+    /// The same candidates as `extents`, but *before* mask filtering — a
+    /// masked row's own support/claim provenance must still appear in the
+    /// dump (Appendix I.1: "...including error edges, KeyConflicts, masks,
+    /// and provenance answers") even though the row itself is hidden from
+    /// `extents`. Mirrors the oracle's `all_candidates`/`live` split
+    /// (`brix-oracle/src/eval.rs`), which keeps exactly this distinction.
+    all_extents: BTreeMap<String, Extent>,
+    pub masked: Vec<MaskRecord>,
     pub violations: Vec<Violation>,
+}
+
+/// One masked row: `Masked(target, by, atPhase, atRevision)` (Appendix A,
+/// Part III §6) — the same family the oracle's `MaskedEdge` records. `by` is
+/// the edge that caused the masking (the rule head's `reason` role); before
+/// this fix the native evaluator computed `by` (`eval.rs`'s oracle
+/// equivalent has always read it) but discarded it, so masks never reached
+/// the dump at all (`dump_bytes` wrote a hardcoded empty list).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MaskRecord {
+    /// The masked row's own key bytes within its relation's extent. Used
+    /// only to filter live candidates during settlement (`visible_extents`);
+    /// not written to the canonical dump, which identifies the row via
+    /// `target` instead.
+    row_key: Vec<u8>,
+    pub target: EdgeId,
+    pub by: EdgeId,
+    pub relation: String,
+    pub rule: String,
+    pub at_phase: u32,
 }
 
 /// A sealed constraint failure over one final match.
@@ -634,9 +731,12 @@ pub struct Violation {
 }
 
 /// Canonical settled dump compatible with the oracle's basic relation,
-/// support, claim, and violation layout. Provenance families that the current
-/// native subset cannot yet produce are emitted as empty canonical lists;
-/// retaining their positions makes this an ABI extension rather than a second
+/// support, claim, mask, and violation layout. Key conflicts and rule
+/// errors are still emitted as empty canonical lists: the native engine
+/// currently hard-rejects transactions on key conflicts and panics on
+/// partial-fn failure instead of producing these families (see this crate's
+/// `OWNER.md` / the issue #10 PR body for the tracked follow-up). Retaining
+/// their positions makes this an ABI extension rather than a second
 /// generated-binary format.
 pub fn dump_bytes(settled: &Settled, program: &Program) -> Vec<u8> {
     let mut writer = CanonWriter::new();
@@ -654,7 +754,7 @@ pub fn dump_bytes(settled: &Settled, program: &Program) -> Vec<u8> {
 
     let mut supports = Vec::new();
     let mut claims = Vec::new();
-    for (relation, extent) in &settled.extents {
+    for (relation, extent) in &settled.all_extents {
         let def = &program.relations[relation];
         for record in extent.values() {
             let edge = def.digest(&record.row);
@@ -691,8 +791,18 @@ pub fn dump_bytes(settled: &Settled, program: &Program) -> Vec<u8> {
         writer.write_bytes(claim.digest().as_bytes());
         writer.write_uint(settled.at_revision);
     }
-    // masks, key conflicts, rule errors
-    writer.write_uint(0);
+    let mut masks = settled.masked.clone();
+    masks.sort();
+    writer.write_uint(masks.len() as u64);
+    for mask in &masks {
+        writer.write_bytes(mask.target.digest().as_bytes());
+        writer.write_bytes(mask.by.digest().as_bytes());
+        writer.write_tag(&mask.relation);
+        writer.write_tag(&mask.rule);
+        writer.write_uint(mask.at_phase as u64);
+        writer.write_uint(settled.at_revision);
+    }
+    // key conflicts, rule errors
     writer.write_uint(0);
     writer.write_uint(0);
     writer.write_uint(settled.violations.len() as u64);
@@ -947,7 +1057,7 @@ pub fn settle(program: &Program, ground: &GroundState, at_revision: u64) -> Sett
             )
         })
         .collect();
-    let mut masked: BTreeMap<String, BTreeSet<Vec<u8>>> = BTreeMap::new();
+    let mut masked: Vec<MaskRecord> = Vec::new();
     let phases: BTreeSet<u32> = program.rules.values().map(|rule| rule.phase).collect();
     for phase in phases {
         loop {
@@ -987,22 +1097,34 @@ pub fn settle(program: &Program, ground: &GroundState, at_revision: u64) -> Sett
                         }
                     }
                     Head::Mask {
-                        relation, target, ..
+                        relation,
+                        target,
+                        reason,
                     } => {
                         let relation_def = &program.relations[relation];
                         let extent = candidates.get(relation).cloned().unwrap_or_default();
                         for env in envs {
-                            let Value::Edge(edge) = env[target] else {
+                            let Value::Edge(target_edge) = env[target] else {
                                 panic!("mask target is an edge reference")
                             };
-                            if let Some((key, _)) = extent
-                                .iter()
-                                .find(|(_, record)| relation_def.edge_id(&record.row) == edge)
-                            {
-                                changed |= masked
-                                    .entry(relation.clone())
-                                    .or_default()
-                                    .insert(key.clone());
+                            let Value::Edge(by_edge) = env[reason] else {
+                                panic!("mask reason is an edge reference")
+                            };
+                            if let Some((key, _)) = extent.iter().find(|(_, record)| {
+                                relation_def.edge_id(&record.row) == target_edge
+                            }) {
+                                let record = MaskRecord {
+                                    row_key: key.clone(),
+                                    target: target_edge,
+                                    by: by_edge,
+                                    relation: relation.clone(),
+                                    rule: rule.id.clone(),
+                                    at_phase: phase,
+                                };
+                                if !masked.contains(&record) {
+                                    masked.push(record);
+                                    changed = true;
+                                }
                             }
                         }
                     }
@@ -1033,6 +1155,7 @@ pub fn settle(program: &Program, ground: &GroundState, at_revision: u64) -> Sett
     Settled {
         at_revision,
         extents: visible,
+        all_extents: candidates,
         masked,
         violations,
     }
@@ -1040,14 +1163,25 @@ pub fn settle(program: &Program, ground: &GroundState, at_revision: u64) -> Sett
 
 fn visible_extents(
     candidates: &BTreeMap<String, Extent>,
-    masked: &BTreeMap<String, BTreeSet<Vec<u8>>>,
+    masked: &[MaskRecord],
 ) -> BTreeMap<String, Extent> {
+    let masked_keys: BTreeMap<&str, BTreeSet<&[u8]>> =
+        masked.iter().fold(BTreeMap::new(), |mut acc, record| {
+            acc.entry(record.relation.as_str())
+                .or_default()
+                .insert(&record.row_key);
+            acc
+        });
     candidates
         .iter()
         .map(|(relation, extent)| {
             let visible = extent
                 .iter()
-                .filter(|(key, _)| !masked.get(relation).is_some_and(|keys| keys.contains(*key)))
+                .filter(|(key, _)| {
+                    !masked_keys
+                        .get(relation.as_str())
+                        .is_some_and(|keys| keys.contains(key.as_slice()))
+                })
                 .map(|(key, record)| (key.clone(), record.clone()))
                 .collect();
             (relation.clone(), visible)
@@ -1310,6 +1444,31 @@ mod tests {
     }
 
     #[test]
+    fn enum_display_name_does_not_change_value_identity() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let a = Value::Enum {
+            ty: "Status".into(),
+            ordinal: 1,
+            name: "Open".into(),
+        };
+        let b = Value::Enum {
+            ty: "Status".into(),
+            ordinal: 1,
+            name: "renamed for display".into(),
+        };
+        assert_eq!(a, b);
+        assert_eq!(a.cmp(&b), std::cmp::Ordering::Equal);
+        let hash = |v: &Value| {
+            let mut hasher = DefaultHasher::new();
+            v.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash(&a), hash(&b));
+    }
+
+    #[test]
     fn transaction_is_atomic_on_an_entity_field_conflict() {
         let mut program = Program::default();
         program.relations.insert("Client".into(), entity());
@@ -1383,5 +1542,142 @@ mod tests {
         let ground = apply_transaction(&program, &GroundState::default(), &txn).unwrap();
         let settled = settle(&program, &ground, 1);
         assert_eq!(settled.extents["Output"].len(), 1);
+    }
+
+    #[test]
+    fn masked_row_is_hidden_and_recorded_with_its_cause() {
+        // `Source` is *derived* (not ground) so its masked row still carries
+        // a `Support`, not just a `Claim` — this is what the flagship's own
+        // `Override` (masking `ComputedPrice`, itself derived by
+        // `PriceOrder`) exercises, and what caught the real gap this test
+        // guards: `dump_bytes` used to collect supports/claims by walking
+        // only the post-mask `extents`, silently dropping a masked row's
+        // provenance from the dump entirely (Appendix I.1 requires masked
+        // rows' provenance to still appear).
+        let ground_relation = |name: &str| Relation {
+            name: name.into(),
+            kind: RelationKind::Ground,
+            roles: vec!["value".into()],
+            key: vec!["value".into()],
+            open: false,
+        };
+        let mut program = Program::default();
+        program
+            .relations
+            .insert("Raw".into(), ground_relation("Raw"));
+        program
+            .relations
+            .insert("Cause".into(), ground_relation("Cause"));
+        program.relations.insert(
+            "Source".into(),
+            Relation {
+                name: "Source".into(),
+                kind: RelationKind::Derived,
+                roles: vec!["value".into()],
+                key: vec!["value".into()],
+                open: false,
+            },
+        );
+        program.rules.insert(
+            "Derive".into(),
+            Rule {
+                id: "Derive".into(),
+                phase: 0,
+                head: Head::Tuple {
+                    relation: "Source".into(),
+                    args: vec![("value".into(), Term::Var("value".into()))],
+                },
+                body: vec![Clause::Edge {
+                    relation: "Raw".into(),
+                    bind_id: None,
+                    args: vec![("value".into(), Term::Var("value".into()))],
+                }],
+            },
+        );
+        program.rules.insert(
+            "MaskIt".into(),
+            Rule {
+                id: "MaskIt".into(),
+                phase: 0,
+                head: Head::Mask {
+                    relation: "Source".into(),
+                    target: "s".into(),
+                    reason: "c".into(),
+                },
+                body: vec![
+                    Clause::Edge {
+                        relation: "Source".into(),
+                        bind_id: Some("s".into()),
+                        args: vec![("value".into(), Term::Var("v".into()))],
+                    },
+                    Clause::Edge {
+                        relation: "Cause".into(),
+                        bind_id: Some("c".into()),
+                        args: vec![],
+                    },
+                ],
+            },
+        );
+        let txn = Transaction {
+            intent: b"mask".to_vec(),
+            ops: vec![
+                TransactionOp::Assert {
+                    relation: "Raw".into(),
+                    row: Row(BTreeMap::from([("value".into(), Value::Int(1))])),
+                },
+                TransactionOp::Assert {
+                    relation: "Cause".into(),
+                    row: Row(BTreeMap::from([("value".into(), Value::Int(99))])),
+                },
+            ],
+        };
+        let ground = apply_transaction(&program, &GroundState::default(), &txn).unwrap();
+        let settled = settle(&program, &ground, 1);
+
+        assert!(settled.extents["Source"].is_empty());
+        assert_eq!(settled.masked.len(), 1);
+        let mask = &settled.masked[0];
+        assert_eq!(mask.relation, "Source");
+        assert_eq!(mask.rule, "MaskIt");
+        assert_eq!(mask.at_phase, 0);
+        let source_row = Row(BTreeMap::from([("value".into(), Value::Int(1))]));
+        assert_eq!(
+            mask.target,
+            program.relations["Source"].edge_id(&source_row)
+        );
+        assert_eq!(
+            mask.by,
+            program.relations["Cause"]
+                .edge_id(&Row(BTreeMap::from([("value".into(), Value::Int(99))])))
+        );
+
+        // The masked row is gone from the live extent...
+        assert!(settled.extents["Source"].is_empty());
+        // ...but its derivation support must still be retained for the dump
+        // (this is the fix: `all_extents` is pre-mask, `extents` post-mask).
+        let all_source = &settled.all_extents["Source"];
+        assert_eq!(all_source.len(), 1);
+        let record = all_source.values().next().unwrap();
+        assert_eq!(record.supports.len(), 1);
+        assert_eq!(record.supports.iter().next().unwrap().rule, "Derive");
+
+        // The dump's mask family must actually carry the record, not the
+        // hardcoded-empty placeholder this replaced.
+        let bytes = dump_bytes(&settled, &program);
+        let empty_masks = {
+            let mut empty = settled.clone();
+            empty.masked.clear();
+            dump_bytes(&empty, &program)
+        };
+        assert_ne!(bytes, empty_masks);
+
+        // And the masked row's support must appear in the dump too — not
+        // just its mask record (the bug this test was rewritten to catch).
+        let bytes_without_all_extents_support = {
+            let mut without = settled.clone();
+            without.all_extents.get_mut("Source").unwrap().clear();
+            dump_bytes(&without, &program)
+        };
+        assert_ne!(bytes, bytes_without_all_extents_support);
     }
 }
