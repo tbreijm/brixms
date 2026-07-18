@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "brix-builder"
+version = "0.1.0"
+description = "Compiler-grounded local actor-critic package agent for BrixMS"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+  "pydantic>=2.8,<3",
+]
+
+[project.optional-dependencies]
+mlx = ["mlx-lm>=0.26"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+brix-builder = "brix_builder.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/brix_builder"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

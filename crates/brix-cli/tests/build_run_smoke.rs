@@ -120,6 +120,15 @@ fn diagnostic_formats_and_exit_codes_are_public_contract() {
     );
     assert!(json_output.contains("BRX-AST-"), "{json_output}");
 
+    let check_json = brix(&["check", source_path.as_str(), "--diagnostic-format", "json"]);
+    assert_eq!(check_json.status.code(), Some(1));
+    let check_output = String::from_utf8_lossy(&check_json.stdout);
+    assert!(
+        check_output.starts_with("{\"diagnostics\":"),
+        "{check_output}"
+    );
+    assert!(check_output.contains("BRX-AST-"), "{check_output}");
+
     let sarif = brix(&["build", source_path.as_str(), "--diagnostic-format=sarif"]);
     assert_eq!(sarif.status.code(), Some(1));
     let sarif_output = String::from_utf8_lossy(&sarif.stdout);
@@ -132,6 +141,37 @@ fn diagnostic_formats_and_exit_codes_are_public_contract() {
     let usage = brix(&["build"]);
     assert_eq!(usage.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&usage.stderr).contains("expected a source file"));
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn check_is_non_emitting_and_fmt_supports_check_and_write() {
+    let root = tmp_dir("check-fmt");
+    std::fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("world.brix");
+    let unformatted = "package smoke.format @ 0.1.0\nrel Input {value:I64} key(value)\n";
+    std::fs::write(&source_path, unformatted).unwrap();
+
+    let checked = brix(&["check", source_path.as_str()]);
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert!(!root.join(".brix-cache").exists());
+
+    let fmt_check = brix(&["fmt", source_path.as_str(), "--check"]);
+    assert_eq!(fmt_check.status.code(), Some(1));
+
+    let fmt_write = brix(&["fmt", source_path.as_str(), "--write"]);
+    assert!(fmt_write.status.success());
+    let formatted = std::fs::read_to_string(&source_path).unwrap();
+    assert_ne!(formatted, unformatted);
+
+    let fmt_check = brix(&["fmt", source_path.as_str(), "--check"]);
+    assert!(fmt_check.status.success());
+    assert!(!root.join(".brix-cache").exists());
 
     std::fs::remove_dir_all(&root).ok();
 }
