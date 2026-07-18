@@ -66,6 +66,19 @@ pub const UNRESOLVED_TYPE: &str = "BRX-LOW-0012";
 pub const COMPOUND_UNIT: &str = "BRX-LOW-0013";
 /// `BRX-IR-0005` — an expression failed HM/ground-dimension type checking.
 pub const TYPE_ERROR: &str = "BRX-IR-0005";
+/// `BRX-IR-0006` — Appendix E `pure(B, H)` violated: an impure effect atom
+/// reaches the rule's body/head.
+pub const RULE_IMPURE: &str = "BRX-IR-0006";
+/// `BRX-IR-0007` — Appendix E `det(B, H)` violated.
+pub const RULE_NONDETERMINISTIC: &str = "BRX-IR-0007";
+/// `BRX-IR-0008` — Appendix E `nondiverge(B, H)` violated.
+pub const RULE_DIVERGENT: &str = "BRX-IR-0008";
+/// `BRX-IR-0009` — Appendix E `keys(H) ⊆ Bindings` violated: a derived-node
+/// head's `keyed by (...)` ident is not bound by the body.
+pub const UNBOUND_HEAD_KEY: &str = "BRX-IR-0009";
+/// `BRX-IR-0010` — Appendix E mask-head side condition violated: `target`/
+/// `reason` is not an edge-bound alias produced by the body.
+pub const MASK_REF_NOT_EDGE_BOUND: &str = "BRX-IR-0010";
 
 pub fn error(code: &'static str, span: Span, msg: impl Into<String>) -> Diagnostic {
     Diagnostic::error(code, span, msg)
@@ -92,6 +105,13 @@ pub fn render_finding(finding: &Finding, meta: &LowerMeta) -> Diagnostic {
         Finding::UnknownRelation { in_rule, .. } => (decl_span(meta, in_rule), "BRX-IR-0003"),
         Finding::OrdinaryFnOnDerivedRel { in_rule, .. } => {
             (decl_span(meta, in_rule), "BRX-IR-0004")
+        }
+        Finding::ImpureRule { rule } => (decl_span(meta, rule), RULE_IMPURE),
+        Finding::NondeterministicRule { rule } => (decl_span(meta, rule), RULE_NONDETERMINISTIC),
+        Finding::DivergentRule { rule } => (decl_span(meta, rule), RULE_DIVERGENT),
+        Finding::UnboundHeadKey { rule, .. } => (decl_span(meta, rule), UNBOUND_HEAD_KEY),
+        Finding::MaskRefNotEdgeBound { rule, .. } => {
+            (decl_span(meta, rule), MASK_REF_NOT_EDGE_BOUND)
         }
     };
     Diagnostic::error(code, span, finding.to_string())

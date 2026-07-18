@@ -3,12 +3,13 @@
 //! that *can* run before a full frontend — they need only resolved schema
 //! facts, which [`crate::frontend::TableResolver`] supplies today.
 
-use crate::core::Rule;
+use crate::core::{Expr, ExprKind, Head, Rule};
 use crate::frontend::{RelationSchema, SchemaResolver};
 use crate::ident::{Ident, QualIdent};
 use crate::pattern::{ReadKind, RelRead};
 use crate::types::{check_key_canonical, KeyCanonicalError};
 use core::fmt;
+use std::collections::BTreeSet;
 
 /// A static-semantics finding. brix-ir emits these as structured values; the
 /// diag lane renders them (this crate does not depend on brix-diag to keep the
@@ -33,6 +34,24 @@ pub enum Finding {
     /// sites come from the caller's aggregate-read list, so this is raised when
     /// a derived relation is consumed non-strictly by such a call.
     OrdinaryFnOnDerivedRel { relation: QualIdent, in_rule: Ident },
+    /// Appendix E `pure(B, H)` violated: an impure effect atom is present in
+    /// the rule's combined body/head effect row.
+    ImpureRule { rule: Ident },
+    /// Appendix E `det(B, H)` violated: a non-deterministic effect atom
+    /// (`random`/`clock`/`net`/`fs`/`solver`) or an open effect tail is
+    /// present.
+    NondeterministicRule { rule: Ident },
+    /// Appendix E `nondiverge(B, H)` violated: `diverge` is reachable from
+    /// the rule, either as an effect-row atom or via a called fn whose
+    /// signature declares `may_diverge`.
+    DivergentRule { rule: Ident },
+    /// Appendix E `keys(H) ⊆ Bindings` violated: a `keyed by (...)` ident on
+    /// a derived-node head is not among the values the body binds.
+    UnboundHeadKey { rule: Ident, key: Ident },
+    /// Appendix E mask-head side condition violated: `mask(target) by
+    /// reason`'s `target`/`reason` is not an edge-bound alias (`x @
+    /// R(...)`) produced by the rule body.
+    MaskRefNotEdgeBound { rule: Ident, var: Ident },
 }
 
 impl fmt::Display for Finding {
@@ -54,8 +73,151 @@ impl fmt::Display for Finding {
                 f,
                 "ordinary fn consumes graph-derived {relation} in rule {in_rule} (use an aggregate fn)"
             ),
+            Finding::ImpureRule { rule } => write!(
+                f,
+                "rule {rule} is not pure: an effect atom reaches its body/head (Appendix E `pure(B, H)`)"
+            ),
+            Finding::NondeterministicRule { rule } => write!(
+                f,
+                "rule {rule} is not deterministic: a non-deterministic effect atom or open effect tail is present (Appendix E `det(B, H)`)"
+            ),
+            Finding::DivergentRule { rule } => write!(
+                f,
+                "rule {rule} may diverge: `diverge` is reachable from its body (Appendix E `nondiverge(B, H)`)"
+            ),
+            Finding::UnboundHeadKey { rule, key } => write!(
+                f,
+                "rule {rule}'s head key `{key}` is not bound by its body (Appendix E `keys(H) ⊆ Bindings`)"
+            ),
+            Finding::MaskRefNotEdgeBound { rule, var } => write!(
+                f,
+                "rule {rule}'s mask head references `{var}`, which is not an edge-bound alias in its body (Appendix E mask-head side condition)"
+            ),
         }
     }
+}
+
+/// Appendix E rule-side-condition judgments computed once by walking a
+/// rule's body, and consumed by both this module's own [`Finding`]s and
+/// [`crate::reflect`]'s mirrored `ConflictKind`s — the same "one algorithm,
+/// two observers" split [`crate::solve`] uses for the type algebra, so the
+/// trusted checker and the reflective analyzer cannot silently diverge on
+/// what counts as a violation.
+#[derive(Default, Debug)]
+pub struct CallEffects {
+    /// Whether any fn called from the body declares `may_diverge` (Appendix
+    /// E `nondiverge`), independent of whether the rule's own `EffectRow`
+    /// also carries a `diverge` atom.
+    pub diverges: bool,
+    /// Relations read inside a `Comprehension` passed as an argument to an
+    /// `aggregate fn` call (Appendix E `Aggregate call`: "in-rule use ⇒
+    /// strict dep on every relation in extent(S)") — feeds
+    /// [`crate::pattern::Pattern::read_set`]'s `aggregate_reads` parameter.
+    pub aggregate_reads: BTreeSet<QualIdent>,
+    /// Relations read inside a `Comprehension` passed to an *ordinary*
+    /// (non-aggregate) fn call, where the relation is graph-derived
+    /// (Appendix E `Ordinary fn`: "in-rule use on graph-derived Rel:
+    /// ERROR").
+    pub ordinary_on_derived: BTreeSet<QualIdent>,
+}
+
+/// Walk every expression in `rule`'s body, classifying calls into a
+/// [`CallEffects`] per the Appendix E `Aggregate call`/`Ordinary fn`/
+/// `nondiverge` judgments.
+pub fn scan_rule_calls(rule: &Rule, resolver: &impl SchemaResolver) -> CallEffects {
+    let mut acc = CallEffects::default();
+    for expr in rule.body.body_exprs() {
+        scan_expr(expr, resolver, &mut acc);
+    }
+    acc
+}
+
+fn scan_expr(expr: &Expr, resolver: &impl SchemaResolver, acc: &mut CallEffects) {
+    match &*expr.kind {
+        ExprKind::Call { func, args } => {
+            if let Some(sig) = resolver.function(func) {
+                if sig.may_diverge {
+                    acc.diverges = true;
+                }
+                for arg in args {
+                    if let ExprKind::Comprehension { pattern, .. } = &*arg.kind {
+                        let relations: BTreeSet<QualIdent> = pattern
+                            .read_set(&[])
+                            .into_iter()
+                            .map(|r| r.relation)
+                            .collect();
+                        if sig.is_aggregate {
+                            acc.aggregate_reads.extend(relations);
+                        } else {
+                            for relation in relations {
+                                if resolver
+                                    .relation(&relation)
+                                    .map(|s| s.derived)
+                                    .unwrap_or(false)
+                                {
+                                    acc.ordinary_on_derived.insert(relation);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for arg in args {
+                scan_expr(arg, resolver, acc);
+            }
+        }
+        ExprKind::Field { base, .. } => scan_expr(base, resolver, acc),
+        ExprKind::Record { fields } => {
+            for (_, value) in fields {
+                scan_expr(value, resolver, acc);
+            }
+        }
+        ExprKind::If { cond, then, els } => {
+            scan_expr(cond, resolver, acc);
+            scan_expr(then, resolver, acc);
+            scan_expr(els, resolver, acc);
+        }
+        ExprKind::Try { inner, .. } => scan_expr(inner, resolver, acc),
+        ExprKind::Comprehension { pattern, yields } => {
+            for e in pattern.body_exprs() {
+                scan_expr(e, resolver, acc);
+            }
+            if let Some(y) = yields {
+                scan_expr(y, resolver, acc);
+            }
+        }
+        ExprKind::Var(_) | ExprKind::Lit(_) => {}
+    }
+}
+
+/// `keyed_by` idents (Appendix E `keys(H) ⊆ Bindings`) not present among the
+/// body's exported bindings, for a `Head::Node`. Empty for any other head
+/// shape.
+pub fn unbound_head_keys(rule: &Rule) -> Vec<Ident> {
+    let Head::Node { keyed_by, .. } = &rule.head else {
+        return Vec::new();
+    };
+    let bound = rule.body.bound_vars();
+    keyed_by
+        .iter()
+        .filter(|k| !bound.contains(k))
+        .cloned()
+        .collect()
+}
+
+/// `target`/`reason` idents (Appendix E mask-head side condition) not
+/// present among the body's edge-ref bindings, for a `Head::Mask`. Empty for
+/// any other head shape.
+pub fn unbound_mask_refs(rule: &Rule) -> Vec<Ident> {
+    let Head::Mask { target, reason } = &rule.head else {
+        return Vec::new();
+    };
+    let refs = rule.body.edge_refs();
+    [target, reason]
+        .into_iter()
+        .filter(|v| !refs.contains(v))
+        .cloned()
+        .collect()
 }
 
 /// Canonical-in-key checking over a relation schema (Appendix E `Key`). Each
@@ -87,7 +249,9 @@ pub fn check_relation_keys(schema: &RelationSchema) -> Vec<Finding> {
 /// Uses the rule's classified read-set, so it composes the pattern analysis.
 pub fn check_rule_absence(rule: &Rule, resolver: &impl SchemaResolver) -> Vec<Finding> {
     let mut out = Vec::new();
-    for RelRead { relation, kind } in rule.body.read_set(&[]) {
+    let calls = scan_rule_calls(rule, resolver);
+    let aggregate_reads: Vec<QualIdent> = calls.aggregate_reads.into_iter().collect();
+    for RelRead { relation, kind } in rule.body.read_set(&aggregate_reads) {
         if kind != ReadKind::Strict {
             continue;
         }
@@ -109,9 +273,75 @@ pub fn check_rule_absence(rule: &Rule, resolver: &impl SchemaResolver) -> Vec<Fi
     out
 }
 
-/// Run all schema-dependent checks over one rule.
+/// Rule-level effect-discipline check (Appendix E `pure(B, H)` / `det(B, H)`
+/// / `nondiverge(B, H)`): the rule's combined effect row (already unioned
+/// over body/head by lowering, see [`crate::core::Rule::effect_flags`]) must
+/// carry no impure atom, no non-deterministic atom or open tail, and no
+/// reachable `diverge` — the last also checked directly against every
+/// called fn's [`crate::frontend::FnSignature::may_diverge`], not only the
+/// effect row, since the two are independent fields on a hand-built
+/// signature.
+pub fn check_rule_effects(rule: &Rule, resolver: &impl SchemaResolver) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let flags = rule.effect_flags();
+    let calls = scan_rule_calls(rule, resolver);
+    if !flags.pure {
+        out.push(Finding::ImpureRule {
+            rule: rule.name.clone(),
+        });
+    }
+    if !flags.det {
+        out.push(Finding::NondeterministicRule {
+            rule: rule.name.clone(),
+        });
+    }
+    if !flags.nondiverge || calls.diverges {
+        out.push(Finding::DivergentRule {
+            rule: rule.name.clone(),
+        });
+    }
+    out
+}
+
+/// Derived-node head key check (Appendix E `keys(H) ⊆ Bindings`).
+pub fn check_rule_head_keys(rule: &Rule) -> Vec<Finding> {
+    unbound_head_keys(rule)
+        .into_iter()
+        .map(|key| Finding::UnboundHeadKey {
+            rule: rule.name.clone(),
+            key,
+        })
+        .collect()
+}
+
+/// Mask-head edge-ref check (Appendix E mask-head side condition).
+pub fn check_rule_mask_head(rule: &Rule) -> Vec<Finding> {
+    unbound_mask_refs(rule)
+        .into_iter()
+        .map(|var| Finding::MaskRefNotEdgeBound {
+            rule: rule.name.clone(),
+            var,
+        })
+        .collect()
+}
+
+/// Run all schema-dependent checks over one rule: absence/witness (`Without`),
+/// the effect-discipline triple (`pure`/`det`/`nondiverge`), derived-node
+/// head keys, mask-head edge refs, and ordinary-fn-on-derived-relation
+/// (Appendix E `Rule`, `Ordinary fn`).
 pub fn check_rule(rule: &Rule, resolver: &impl SchemaResolver) -> Vec<Finding> {
-    check_rule_absence(rule, resolver)
+    let mut out = check_rule_absence(rule, resolver);
+    out.extend(check_rule_effects(rule, resolver));
+    out.extend(check_rule_head_keys(rule));
+    out.extend(check_rule_mask_head(rule));
+    let calls = scan_rule_calls(rule, resolver);
+    for relation in calls.ordinary_on_derived {
+        out.push(Finding::OrdinaryFnOnDerivedRel {
+            relation,
+            in_rule: rule.name.clone(),
+        });
+    }
+    out
 }
 
 #[cfg(test)]
@@ -237,5 +467,290 @@ mod tests {
             effects: EffectRow::empty(),
         };
         assert!(check_rule(&rule, &resolver).is_empty());
+    }
+
+    #[test]
+    fn impure_rule_effect_row_is_flagged() {
+        use crate::effects::Effect;
+
+        let rule = Rule {
+            name: Ident::new("Loud"),
+            head: Head::Tuple {
+                relation: QualIdent::from("Out"),
+                args: vec![],
+            },
+            body: Pattern::default(),
+            effects: EffectRow::from_atoms([Effect::Console]),
+        };
+        let findings = check_rule(&rule, &TableResolver::new());
+        assert!(findings
+            .iter()
+            .any(|f| matches!(f, Finding::ImpureRule { .. })));
+        // `console` is not one of the non-determinism-flagging atoms and
+        // carries no `diverge` — only `pure` fails.
+        assert!(!findings
+            .iter()
+            .any(|f| matches!(f, Finding::NondeterministicRule { .. })));
+        assert!(!findings
+            .iter()
+            .any(|f| matches!(f, Finding::DivergentRule { .. })));
+    }
+
+    #[test]
+    fn diverging_called_fn_is_flagged_even_without_a_diverge_atom() {
+        use crate::core::{Expr, ExprKind};
+        use crate::frontend::FnSignature;
+
+        let rule = Rule {
+            name: Ident::new("Spins"),
+            head: Head::Tuple {
+                relation: QualIdent::from("Out"),
+                args: vec![],
+            },
+            body: Pattern::new(vec![Clause::Let {
+                binds: Ident::new("x"),
+                expr: Expr::new(
+                    Ty::Int(crate::types::IntWidth::Int),
+                    ExprKind::Call {
+                        func: QualIdent::from("loopForever"),
+                        args: vec![],
+                    },
+                ),
+            }]),
+            // Deliberately empty: `may_diverge` on the signature is the only
+            // signal here, proving the check does not rely solely on the
+            // effect row.
+            effects: EffectRow::empty(),
+        };
+        let resolver = TableResolver::new().with_function(FnSignature {
+            name: QualIdent::from("loopForever"),
+            params: vec![],
+            ret: Ty::Int(crate::types::IntWidth::Int),
+            effects: EffectRow::empty(),
+            is_aggregate: false,
+            may_diverge: true,
+        });
+        let findings = check_rule(&rule, &resolver);
+        assert!(findings
+            .iter()
+            .any(|f| matches!(f, Finding::DivergentRule { .. })));
+    }
+
+    #[test]
+    fn unbound_head_key_is_flagged() {
+        let rule = Rule {
+            name: Ident::new("Mint"),
+            head: Head::Node {
+                var: Ident::new("n"),
+                entity: Ident::new("Widget"),
+                args: vec![],
+                keyed_by: vec![Ident::new("missing")],
+            },
+            body: Pattern::default(),
+            effects: EffectRow::empty(),
+        };
+        let findings = check_rule(&rule, &TableResolver::new());
+        assert!(findings.iter().any(
+            |f| matches!(f, Finding::UnboundHeadKey { key, .. } if key.as_str() == "missing")
+        ));
+    }
+
+    #[test]
+    fn bound_head_key_passes() {
+        let rule = Rule {
+            name: Ident::new("Mint"),
+            head: Head::Node {
+                var: Ident::new("n"),
+                entity: Ident::new("Widget"),
+                args: vec![],
+                keyed_by: vec![Ident::new("o")],
+            },
+            body: Pattern::new(vec![edge("Order", &[("id", "o")])]),
+            effects: EffectRow::empty(),
+        };
+        assert!(check_rule(&rule, &TableResolver::new())
+            .iter()
+            .all(|f| !matches!(f, Finding::UnboundHeadKey { .. })));
+    }
+
+    #[test]
+    fn mask_head_referencing_non_edge_bound_var_is_flagged() {
+        let rule = Rule {
+            name: Ident::new("Override"),
+            head: Head::Mask {
+                target: Ident::new("price"),
+                reason: Ident::new("manual"),
+            },
+            body: Pattern::default(),
+            effects: EffectRow::empty(),
+        };
+        let findings = check_rule(&rule, &TableResolver::new());
+        let flagged: Vec<&Ident> = findings
+            .iter()
+            .filter_map(|f| match f {
+                Finding::MaskRefNotEdgeBound { var, .. } => Some(var),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(flagged.len(), 2);
+    }
+
+    #[test]
+    fn mask_head_with_edge_bound_refs_passes() {
+        let rule = Rule {
+            name: Ident::new("Override"),
+            head: Head::Mask {
+                target: Ident::new("price"),
+                reason: Ident::new("manual"),
+            },
+            body: Pattern::new(vec![
+                Clause::Edge {
+                    bind: Some(Ident::new("price")),
+                    relation: QualIdent::from("ComputedPrice"),
+                    args: vec![],
+                },
+                Clause::Edge {
+                    bind: Some(Ident::new("manual")),
+                    relation: QualIdent::from("ManualPrice"),
+                    args: vec![],
+                },
+            ]),
+            effects: EffectRow::empty(),
+        };
+        assert!(check_rule(&rule, &TableResolver::new())
+            .iter()
+            .all(|f| !matches!(f, Finding::MaskRefNotEdgeBound { .. })));
+    }
+
+    #[test]
+    fn ordinary_fn_on_derived_rel_is_flagged() {
+        use crate::core::{Expr, ExprKind};
+        use crate::frontend::FnSignature;
+
+        let comprehension = Expr::new(
+            Ty::rel(crate::types::Row::closed(vec![])),
+            ExprKind::Comprehension {
+                pattern: Pattern::new(vec![edge("ComputedPrice", &[("order", "o")])]),
+                yields: None,
+            },
+        );
+        let rule = Rule {
+            name: Ident::new("Summary"),
+            head: Head::Tuple {
+                relation: QualIdent::from("Out"),
+                args: vec![],
+            },
+            body: Pattern::new(vec![Clause::Let {
+                binds: Ident::new("total"),
+                expr: Expr::new(
+                    Ty::Int(crate::types::IntWidth::Int),
+                    ExprKind::Call {
+                        func: QualIdent::from("sumUp"),
+                        args: vec![comprehension],
+                    },
+                ),
+            }]),
+            effects: EffectRow::empty(),
+        };
+        let resolver = TableResolver::new()
+            .with_relation(rel(
+                "ComputedPrice",
+                vec![("order", Ty::NodeRef(Ident::new("Order")))],
+                &[],
+                true,
+            ))
+            .with_function(FnSignature {
+                name: QualIdent::from("sumUp"),
+                params: vec![Ty::rel(crate::types::Row::closed(vec![]))],
+                ret: Ty::Int(crate::types::IntWidth::Int),
+                effects: EffectRow::empty(),
+                is_aggregate: false,
+                may_diverge: false,
+            });
+        // `derived` defaults to `false` from the shared `rel(...)` helper —
+        // patch it to `true` (graph-derived) to exercise the violation.
+        let derived_resolver = TableResolver::new()
+            .with_relation(RelationSchema {
+                derived: true,
+                ..rel(
+                    "ComputedPrice",
+                    vec![("order", Ty::NodeRef(Ident::new("Order")))],
+                    &[],
+                    true,
+                )
+            })
+            .with_function(FnSignature {
+                name: QualIdent::from("sumUp"),
+                params: vec![Ty::rel(crate::types::Row::closed(vec![]))],
+                ret: Ty::Int(crate::types::IntWidth::Int),
+                effects: EffectRow::empty(),
+                is_aggregate: false,
+                may_diverge: false,
+            });
+        assert!(check_rule(&rule, &resolver)
+            .iter()
+            .all(|f| !matches!(f, Finding::OrdinaryFnOnDerivedRel { .. })));
+        assert!(check_rule(&rule, &derived_resolver)
+            .iter()
+            .any(|f| matches!(f, Finding::OrdinaryFnOnDerivedRel { .. })));
+    }
+
+    #[test]
+    fn aggregate_fn_on_derived_rel_is_not_flagged() {
+        use crate::core::{Expr, ExprKind};
+        use crate::frontend::FnSignature;
+
+        let comprehension = Expr::new(
+            Ty::rel(crate::types::Row::closed(vec![])),
+            ExprKind::Comprehension {
+                pattern: Pattern::new(vec![edge("ComputedPrice", &[("order", "o")])]),
+                yields: None,
+            },
+        );
+        let rule = Rule {
+            name: Ident::new("Summary"),
+            head: Head::Tuple {
+                relation: QualIdent::from("Out"),
+                args: vec![],
+            },
+            body: Pattern::new(vec![Clause::Let {
+                binds: Ident::new("total"),
+                expr: Expr::new(
+                    Ty::Int(crate::types::IntWidth::Int),
+                    ExprKind::Call {
+                        func: QualIdent::from("count"),
+                        args: vec![comprehension],
+                    },
+                ),
+            }]),
+            effects: EffectRow::empty(),
+        };
+        let resolver = TableResolver::new()
+            .with_relation(RelationSchema {
+                derived: true,
+                ..rel(
+                    "ComputedPrice",
+                    vec![("order", Ty::NodeRef(Ident::new("Order")))],
+                    &[],
+                    true,
+                )
+            })
+            .with_function(FnSignature {
+                name: QualIdent::from("count"),
+                params: vec![Ty::rel(crate::types::Row::closed(vec![]))],
+                ret: Ty::Int(crate::types::IntWidth::Int),
+                effects: EffectRow::empty(),
+                is_aggregate: true,
+                may_diverge: false,
+            });
+        let findings = check_rule(&rule, &resolver);
+        assert!(findings
+            .iter()
+            .all(|f| !matches!(f, Finding::OrdinaryFnOnDerivedRel { .. })));
+        // The relation is classified as an aggregate read (Appendix E
+        // `Aggregate call`), not silently dropped.
+        assert!(scan_rule_calls(&rule, &resolver)
+            .aggregate_reads
+            .contains(&QualIdent::from("ComputedPrice")));
     }
 }
