@@ -3,7 +3,10 @@
 **Lane:** oracle
 **Crates:** brix-oracle, brix-conformance
 **Spec requirements:** Part III (kernel semantics); Part I (flagship); Appendix I (conformance)
-**Conformance:** G1: flagship parses/checks/runs end-to-end on the oracle; oracle then frozen
+**Conformance:** G1 reached (issue #24, `crates/brix-oracle/tests/flagship.rs`): the
+flagship parses, checks (via `brixc::lower_file`), and runs end-to-end on the oracle
+through `frontend::program_from_source`, with `why` answering from oracle provenance.
+**The oracle is now frozen — changes only through `spec/errata/`.**
 
 ## Contract
 The semantic authority; design goal is BORING. Single-threaded; extents as BTreeMap<CanonBytes, Row>; full fixpoint phase by phase per revision; masks, key conflicts, error edges, constraints, snapshot-isolated transactions, naive protocol lifecycle, sim clock as state. brix-conformance: differential harness (oracle vs engine, canon bytes bit-for-bit) starts here.

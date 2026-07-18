@@ -1,0 +1,53 @@
+---
+source: crates/brix-oracle/tests/flagship.rs
+expression: render(&settled)
+---
+revision 1
+  AssignOrder.Chosen:
+    { order: Node(1a1d723e), vehicle: Node(d0cf2b3b) }
+    { order: Node(e3b8875f), vehicle: Node(77ba795f) }
+  AssignOrder.request:
+    { order: Node(ef844832), weight: 800 }
+  Client:
+    { code: "ACME", tier: Key }
+  ComputedPrice:
+    { amount: 9360, order: Node(1a1d723e) }
+  Distance:
+    { from: Node(be77d7d4), length: 78, to: Node(2db18343) }
+  EffectivePrice:
+    { amount: 9360, order: Node(1a1d723e) }
+    { amount: 9500, order: Node(e3b8875f) }
+  LateRisk:
+    { order: Node(ef844832), risk: 10000 }
+  Location:
+    { code: "AMS" }
+    { code: "RTM" }
+  ManualPrice:
+    { amount: 9500, order: Node(e3b8875f) }
+  Move:
+    { order: Node(1a1d723e), vehicle: Node(d0cf2b3b) }
+    { order: Node(e3b8875f), vehicle: Node(77ba795f) }
+  NotifyOps.request:
+    { order: Node(ef844832), risk: 10000 }
+  Order:
+    { client: Node(b77dc560), due: 2, from: Node(be77d7d4), ref: "ord-3", to: Node(2db18343), weight: 800 }
+    { client: Node(b77dc560), due: 20, from: Node(be77d7d4), ref: "ord-1", to: Node(2db18343), weight: 1500 }
+    { client: Node(b77dc560), due: 100, from: Node(be77d7d4), ref: "ord-2", to: Node(2db18343), weight: 3000 }
+  OrderStatus:
+    { order: Node(1a1d723e), value: Open }
+    { order: Node(e3b8875f), value: Open }
+    { order: Node(ef844832), value: Open }
+  Tariff:
+    { class: Standard }
+    { class: SUV }
+  TariffRate:
+    { rate: 120, tariff: Node(7fc02188) }
+    { rate: 165, tariff: Node(419b4ee3) }
+  Unassigned:
+    { order: Node(ef844832) }
+  Vehicle:
+    { capacity: 2000, class: Standard, plate: "V-01" }
+    { capacity: 3500, class: SUV, plate: "V-02" }
+  brix.sim.Now:
+    { at: 12 }
+  Masked: 1
