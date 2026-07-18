@@ -50,6 +50,16 @@
 //!   schemes must be α-normalized (canonical renaming) before digesting** —
 //!   the scheme-level analogue of zonk-before-digest this module already
 //!   follows for `Ty` payloads (see [`Reflect::zonk`]'s doc).
+//!
+//! #15 PR5 (§19.1 "The epistemic type system" / §27.3 "Typed missingness")
+//! adds [`ConflictKind::EpistemicErasure`], appended after the PR 4 freeze
+//! (new `write_conflict` ordinal, every earlier variant unchanged): the
+//! shared [`crate::solve::step`] algebra now names a forbidden
+//! epistemic-to-plain conversion (`Estimate<T> -/-> T`,
+//! `Missing<T> -/-> T`, `Probability -/-> Bool`) instead of folding it into
+//! [`ConflictKind::Mismatch`], and both checkers observe the identical
+//! [`crate::solve::Step::Erasure`] the same way they already observe every
+//! other shared `Step`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -435,6 +445,16 @@ pub enum ConflictKind {
     OrdinaryFnOnDerivedRel {
         relation: QualIdent,
     },
+    /// #15 PR5 (§19.1 / conformance I.22.2): an implicit conversion from an
+    /// epistemic-status-bearing type (`Estimate<T>`, `Missing<T>`,
+    /// `Probability`) to its plain payload type (or, for `Probability`,
+    /// `Bool`) was attempted — mirrors [`crate::infer::TypeError::EpistemicErasure`].
+    /// Appended last, after the PR 4 freeze, so every earlier variant's
+    /// `write_conflict` ordinal is unchanged.
+    EpistemicErasure {
+        from: Ty,
+        to: Ty,
+    },
 }
 
 /// A derived incompatibility. It is intentionally distinct from a kernel key
@@ -484,6 +504,10 @@ pub fn write_conflict(conflict: &TypeConflict, w: &mut CanonWriter) {
         ConflictKind::OrdinaryFnOnDerivedRel { relation } => {
             w.write_enum(12, |w| relation.canon_write(w))
         }
+        ConflictKind::EpistemicErasure { from, to } => w.write_enum(13, |w| {
+            from.canon_write(w);
+            to.canon_write(w);
+        }),
     }
 }
 
@@ -598,6 +622,10 @@ impl Reflect {
                 | ConflictKind::UnboundHeadKey { .. }
                 | ConflictKind::MaskRefNotEdgeBound { .. }
                 | ConflictKind::OrdinaryFnOnDerivedRel { .. } => {}
+                ConflictKind::EpistemicErasure { from, to } => {
+                    *from = solve::resolve(&subst, from.clone());
+                    *to = solve::resolve(&subst, to.clone());
+                }
             }
         }
     }
@@ -756,6 +784,11 @@ impl Reflect {
                     left: expected,
                     right: found,
                 },
+                because,
+            ),
+            Step::Erasure(from, to) => self.conflict(
+                subject,
+                ConflictKind::EpistemicErasure { from, to },
                 because,
             ),
         }
@@ -1756,6 +1789,69 @@ mod tests {
 
         let mut cx = Reflect::default();
         cx.unify(subject, Ty::F64, Ty::Probability, vec![]);
+        assert!(cx.draft_conflicts.is_empty());
+    }
+
+    /// #15 PR5: `Estimate<T>` unified against its own plain payload type is
+    /// a named [`ConflictKind::EpistemicErasure`], not a generic
+    /// [`ConflictKind::Mismatch`] — the two checkers must agree it is the
+    /// *erasure* category (see `parity.rs`'s `estimate_to_plain_erasure_agrees`
+    /// for the full cross-checker fixture).
+    #[test]
+    fn reflective_estimate_to_plain_is_named_epistemic_erasure() {
+        let subject = Subject::Binding {
+            declaration: Ident::new("Test"),
+            name: Ident::new("x"),
+        };
+        let mut cx = Reflect::default();
+        cx.unify(
+            subject,
+            Ty::Estimate(Box::new(Ty::Int(IntWidth::Int))),
+            Ty::Int(IntWidth::Int),
+            vec![],
+        );
+        assert_eq!(cx.draft_conflicts.len(), 1);
+        assert!(matches!(
+            cx.draft_conflicts[0].kind,
+            ConflictKind::EpistemicErasure { .. }
+        ));
+    }
+
+    /// #15 PR5: `Missing<T>` must not silently coerce to `T` (conformance
+    /// I.22.2) — same named erasure family as `Estimate<T>`/`Probability`.
+    #[test]
+    fn reflective_missing_to_plain_is_named_epistemic_erasure() {
+        let subject = Subject::Binding {
+            declaration: Ident::new("Test"),
+            name: Ident::new("x"),
+        };
+        let mut cx = Reflect::default();
+        cx.unify(subject, Ty::missing(Ty::Bool), Ty::Bool, vec![]);
+        assert_eq!(cx.draft_conflicts.len(), 1);
+        match &cx.draft_conflicts[0].kind {
+            ConflictKind::EpistemicErasure { from, to } => {
+                assert_eq!(*from, Ty::missing(Ty::Bool));
+                assert_eq!(*to, Ty::Bool);
+            }
+            other => panic!("expected EpistemicErasure, got {other:?}"),
+        }
+    }
+
+    /// #15 PR5: two `Missing<T>`s over the same payload type unify cleanly
+    /// — `Missing<T>` is a real, unifiable type, not just an erasure trap.
+    #[test]
+    fn reflective_missing_of_equal_inner_type_unifies_cleanly() {
+        let subject = Subject::Binding {
+            declaration: Ident::new("Test"),
+            name: Ident::new("x"),
+        };
+        let mut cx = Reflect::default();
+        cx.unify(
+            subject,
+            Ty::missing(Ty::Bool),
+            Ty::missing(Ty::Bool),
+            vec![],
+        );
         assert!(cx.draft_conflicts.is_empty());
     }
 

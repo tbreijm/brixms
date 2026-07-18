@@ -214,6 +214,30 @@ pub enum Ty {
     /// `Estimate<T> = { value, error, confidence, method }` (Part V §7).
     Estimate(Box<Ty>),
     /// A structural, row-typed anonymous record (Part V §3).
+    ///
+    /// #15 PR5 ruling (§19.2 "Common reasoning records"): `Interval<T>`,
+    /// `Grounded<T>`, and `Suggestion<T>` need **no new `Ty` constructor**,
+    /// unlike `Estimate<T>` above. They are ordinary `Record` rows whose
+    /// shape happens to match §19.2's declarations (`Interval<T> = {
+    /// lower: T, upper: T }`, `Grounded<T> = { value: T, evidence:
+    /// Set<EvidenceRef>, inference: reasoning.RunRef }`, `Suggestion<T> = {
+    /// candidate: T, score: Estimate<Real>, evidence: Set<EvidenceRef>,
+    /// producer: reasoning.ReasonerRef }`) — a resolver that declares those
+    /// field types already gets a working, row-typed `Interval`/`Grounded`/
+    /// `Suggestion` for free from the existing row machinery, with no
+    /// change to this enum. `Estimate<T>` earned its own variant because
+    /// v1's checkers (`solve::step`'s `Estimate`-specific occurs/resolve
+    /// descent, the §19.1 erasure table) need to recognize it *by type*,
+    /// not by row shape; nothing in the v1 lowered subset constructs an
+    /// `Interval`/`Grounded`/`Suggestion` value yet (no `.brix` fixture, no
+    /// lowering path), so there is no structural-erasure check to write for
+    /// them either — `Ty::Record` carries no nominal tag, so "is this
+    /// record actually an `Interval<T>`" is undecidable without one, and
+    /// adding a name-carrying wrapper *only* to support an erasure check
+    /// nothing yet exercises would be exactly the un-asked-for generality
+    /// #15's "only add what the v1 lowered subset actually exercises"
+    /// scoping rule forbids. Revisit if/when a lowering path actually
+    /// produces one of these three record shapes.
     Record(Box<Row>),
     Fn {
         params: Vec<Ty>,
@@ -233,6 +257,28 @@ pub enum Ty {
     /// binding into every other, unrelated failure site (#15 PR2). `Error`
     /// unifies with nothing but itself, so each failure stays isolated.
     Error,
+    /// `Missing<T>` (Part XXVII §27.3 "Typed missingness and data quality"):
+    /// one of several semantically distinct absent-value statuses
+    /// (`Present(T)`, `NotObserved`, `NotApplicable`, `Unknown`, `Redacted`,
+    /// `Invalid(DataFinding)`, `Pending`) instead of one ambiguous sentinel.
+    /// Unlike `Estimate<T>` (a fixed-shape record), `Missing<T>` is a
+    /// nominal, non-parametric-in-the-existing-sense *enum* over `T` — the
+    /// existing [`Ty::Enum`] is deliberately non-parametric (it names a
+    /// closed, ground set of variants declared once), so it cannot express
+    /// "the same variant set, reparameterized by an arbitrary payload type
+    /// `T`" the way `Missing<T>` needs. #15 PR5 adds this as its own `Ty`
+    /// family for exactly that reason — a genuine new spec-backed type
+    /// shape, not a local convenience extension (this module's own doc:
+    /// "new scalar families are a spec change").
+    ///
+    /// §19.1's epistemic non-erasure table has no `Missing<T>` row, but
+    /// conformance I.22.2 ("preserves NotObserved…Pending without implicit
+    /// coercion") states the identical discipline for it: a `Missing<T>`
+    /// must never implicitly launder into a bare `T` (or vice versa) —
+    /// [`crate::solve::step`] raises the same
+    /// [`crate::solve::Step::Erasure`] family of conflict for this as it
+    /// does for `Estimate<T> -/-> T` and `Probability -/-> Bool`.
+    Missing(Box<Ty>),
 }
 
 impl Ty {
@@ -247,6 +293,9 @@ impl Ty {
     }
     pub fn record(row: Row) -> Ty {
         Ty::Record(Box::new(row))
+    }
+    pub fn missing(t: Ty) -> Ty {
+        Ty::Missing(Box::new(t))
     }
 }
 
@@ -317,6 +366,7 @@ impl fmt::Display for Ty {
             }
             Ty::Var(v) => write!(f, "{v}"),
             Ty::Error => write!(f, "<error>"),
+            Ty::Missing(t) => write!(f, "Missing<{t}>"),
         }
     }
 }
@@ -385,6 +435,10 @@ impl Canonical for Ty {
             }),
             Ty::Var(v) => w.write_enum(34, |w| v.canon_write(w)),
             Ty::Error => w.write_enum(35, |_| {}),
+            // Appended after the PR 3 freeze (#15 PR5) — new ordinal, every
+            // earlier arm's encoding unchanged, per the "additive enum
+            // ordinals only" rule.
+            Ty::Missing(t) => w.write_enum(36, |w| t.canon_write(w)),
         }
     }
 }
@@ -511,6 +565,23 @@ pub enum KeyCanonicalError {
     RelInKey {
         path: String,
     },
+    /// `Missing<T>` (§27.3) is never admissible in key position, regardless
+    /// of `T` — **unconditional**, not descend-and-check like `Estimate<T>`'s
+    /// float ban. This is a deliberately different ruling from `Estimate`'s:
+    /// `Estimate<F64>` is barred from keys only because the *float inside*
+    /// is barred (`Estimate<Int>` is fine in a key — see
+    /// `estimate_int_is_key_canonical` below); the wrapper itself doesn't
+    /// launder anything. `Missing<T>` is barred *as a wrapper*, even for
+    /// `Missing<Int>`: a key identifies a row deterministically, and
+    /// `Missing<T>`'s whole purpose is to represent a value that may be
+    /// `NotObserved`/`NotApplicable`/`Unknown`/`Redacted`/`Invalid`/`Pending`
+    /// — categorically indeterminate material, not a scalar identity, the
+    /// same reasoning Appendix E's `Key` judgment already applies to
+    /// `Rel<S>` (`RelInKey` above): a first-class status value, not key
+    /// material, independent of what it wraps.
+    MissingInKey {
+        path: String,
+    },
 }
 
 impl fmt::Display for KeyCanonicalError {
@@ -527,6 +598,12 @@ impl fmt::Display for KeyCanonicalError {
             }
             KeyCanonicalError::RelInKey { path } => {
                 write!(f, "{path}: Rel<S> is not admissible key material")
+            }
+            KeyCanonicalError::MissingInKey { path } => {
+                write!(
+                    f,
+                    "{path}: Missing<T> is not admissible key material (§27.3)"
+                )
             }
         }
     }
@@ -552,6 +629,9 @@ fn walk_key(ty: &Ty, path: &str, out: &mut Vec<KeyCanonicalError>) {
         Ty::Fn { .. } => out.push(KeyCanonicalError::FnTypeInKey { path: path.into() }),
         Ty::Var(_) => out.push(KeyCanonicalError::UnresolvedTypeVar { path: path.into() }),
         Ty::Rel(_) => out.push(KeyCanonicalError::RelInKey { path: path.into() }),
+        // Unconditional, not descend-and-check — see `MissingInKey`'s doc
+        // for why this differs from `Estimate<T>`'s treatment just below.
+        Ty::Missing(_) => out.push(KeyCanonicalError::MissingInKey { path: path.into() }),
         Ty::Estimate(t) => walk_key(t, &format!("{path}.value"), out),
         Ty::Option(t) | Ty::List(t) | Ty::Vector(t) | Ty::Set(t) | Ty::Bag(t) => {
             walk_key(t, &format!("{path}.0"), out)
@@ -597,9 +677,17 @@ fn walk_value(ty: &Ty, path: &str, out: &mut Vec<KeyCanonicalError>) {
     match ty {
         Ty::Fn { .. } => out.push(KeyCanonicalError::FnTypeInKey { path: path.into() }),
         Ty::Var(_) => out.push(KeyCanonicalError::UnresolvedTypeVar { path: path.into() }),
-        Ty::Estimate(t) | Ty::Option(t) | Ty::List(t) | Ty::Vector(t) | Ty::Set(t) | Ty::Bag(t) => {
-            walk_value(t, &format!("{path}.0"), out)
-        }
+        Ty::Estimate(t)
+        | Ty::Option(t)
+        | Ty::List(t)
+        | Ty::Vector(t)
+        | Ty::Set(t)
+        | Ty::Bag(t)
+        // `Missing<T>` is fine as an ordinary *value* (descend into `T`,
+        // same as `Estimate`/`Option`) — only key position is
+        // unconditionally barred (`walk_key` above), matching the
+        // Estimate<F64> value-vs-key split this module already documents.
+        | Ty::Missing(t) => walk_value(t, &format!("{path}.0"), out),
         Ty::Result(a, b) => {
             walk_value(a, &format!("{path}.ok"), out);
             walk_value(b, &format!("{path}.err"), out);
@@ -707,6 +795,37 @@ mod tests {
             ty: Ty::Enum(crate::ident::QualIdent::simple("VehicleClass")),
         }]);
         assert!(check_key_canonical(&Ty::record(row)).is_ok());
+    }
+
+    #[test]
+    fn missing_display_shows_the_inner_type() {
+        assert_eq!(
+            Ty::missing(Ty::Int(IntWidth::I64)).to_string(),
+            "Missing<I64>"
+        );
+    }
+
+    #[test]
+    fn missing_is_never_key_canonical_even_for_an_otherwise_key_canonical_inner_type() {
+        // Unconditional ruling (unlike `Estimate<T>`'s float-only ban):
+        // `Missing<Int>` is still barred, even though `Int` alone is fine.
+        let err = check_key_canonical(&Ty::missing(Ty::Int(IntWidth::I64))).unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert!(matches!(err[0], KeyCanonicalError::MissingInKey { .. }));
+    }
+
+    #[test]
+    fn missing_is_value_canonical_when_its_inner_type_is() {
+        assert!(check_value_canonical(&Ty::missing(Ty::Int(IntWidth::I64))).is_ok());
+    }
+
+    #[test]
+    fn missing_float_is_value_canonical_but_never_key_canonical() {
+        // Descends for the value-domain bound (mirrors `Estimate<F64>`) but
+        // is barred from keys regardless, for the wrapper's own reason, not
+        // (only) the float's.
+        assert!(check_value_canonical(&Ty::missing(Ty::F64)).is_ok());
+        assert!(check_key_canonical(&Ty::missing(Ty::F64)).is_err());
     }
 
     #[test]

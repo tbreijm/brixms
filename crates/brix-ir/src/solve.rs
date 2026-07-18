@@ -48,6 +48,13 @@ pub fn resolve(subst: &BTreeMap<TyVar, Ty>, ty: Ty) -> Ty {
         Ty::Result(a, b) => Ty::Result(Box::new(resolve(subst, *a)), Box::new(resolve(subst, *b))),
         Ty::Record(row) => Ty::record(resolve_row(subst, *row)),
         Ty::Rel(row) => Ty::rel(resolve_row(subst, *row)),
+        // #15 PR5: `Missing<T>` must zonk `T` the same way `Option<T>` does,
+        // so a `Missing<?t>` solved via `Step::Descend` (below) actually
+        // shows its resolved inner type at the top level too — the parity
+        // harness's type-mirror check needs the *fully* zonked `Expr.ty`,
+        // not just a zonked top-level shape with an unresolved var hiding
+        // one layer down.
+        Ty::Missing(t) => Ty::missing(resolve(subst, *t)),
         other => other,
     }
 }
@@ -73,9 +80,13 @@ fn resolve_row(subst: &BTreeMap<TyVar, Ty>, row: Row) -> Row {
 pub fn occurs(v: TyVar, ty: &Ty, subst: &BTreeMap<TyVar, Ty>) -> bool {
     match ty {
         Ty::Var(x) => *x == v || subst.get(x).is_some_and(|bound| occurs(v, bound, subst)),
-        Ty::Option(x) | Ty::List(x) | Ty::Vector(x) | Ty::Set(x) | Ty::Bag(x) | Ty::Estimate(x) => {
-            occurs(v, x, subst)
-        }
+        Ty::Option(x)
+        | Ty::List(x)
+        | Ty::Vector(x)
+        | Ty::Set(x)
+        | Ty::Bag(x)
+        | Ty::Estimate(x)
+        | Ty::Missing(x) => occurs(v, x, subst),
         Ty::Result(a, b) | Ty::Map(a, b) => occurs(v, a, subst) || occurs(v, b, subst),
         Ty::Record(row) | Ty::Rel(row) => row.fields.iter().any(|f| occurs(v, &f.ty, subst)),
         _ => false,
@@ -101,6 +112,15 @@ pub enum Step {
     Rows(Row, Row),
     /// The two sides are incompatible.
     Mismatch(Ty, Ty),
+    /// #15 PR5 (§19.1 "The epistemic type system" / conformance I.22.2): one
+    /// side is an epistemic-status-bearing type (`Estimate<T>`,
+    /// `Missing<T>`, or `Probability`) and the other is its "plain" payload
+    /// type (or, for `Probability`, `Bool`) — an implicit conversion the
+    /// spec's erasure table forbids outright, distinct from an ordinary
+    /// [`Step::Mismatch`] between two unrelated types. `from` is always the
+    /// epistemic side, `to` the plain side, regardless of which operand
+    /// order the caller unified in — see [`epistemic_erasure`].
+    Erasure(Ty, Ty),
 }
 
 /// Classify one unification step between two already-`resolve`d types.
@@ -149,7 +169,55 @@ pub fn step(a: Ty, b: Ty) -> Step {
         (Ty::Result(a_ok, a_err), Ty::Result(b_ok, b_err)) => {
             Step::Descend(vec![(*a_ok, *b_ok), (*a_err, *b_err)])
         }
-        (expected, found) => Step::Mismatch(expected, found),
+        // `Missing<T> ~ Missing<U>` descends into `T ~ U`, same shape as
+        // `Option`/`Result` above — two `Missing`s over compatible payloads
+        // unify structurally; they only become a forbidden erasure when one
+        // side is `Missing<T>` and the other is a *plain*, non-`Missing`
+        // type (handled by the `epistemic_erasure` fallback below).
+        (Ty::Missing(a), Ty::Missing(b)) => Step::Descend(vec![(*a, *b)]),
+        (expected, found) => match epistemic_erasure(&expected, &found) {
+            Some((from, to)) => Step::Erasure(from, to),
+            None => Step::Mismatch(expected, found),
+        },
+    }
+}
+
+/// Classify whether unifying `a` against `b` — in *either* operand order —
+/// attempts one of the §19.1 forbidden epistemic-status erasures (extended
+/// by #15 PR5 / conformance I.22.2 to cover `Missing<T>` the same way):
+/// implicitly converting `Estimate<T>`/`Missing<T>` to a plain, non-wrapped
+/// type, or `Probability` to `Bool`. Returns `(from, to)` with `from`
+/// always the epistemic side and `to` the plain side, so callers don't have
+/// to know which of `a`/`b` was "expected" vs "found" for the diagnostic to
+/// come out named correctly in both directions — this is what lets both
+/// [`crate::infer`] and [`crate::reflect`] report the identical erasure
+/// regardless of which order their own call sites happen to pass operands
+/// in (unify order is not itself part of the frozen parity contract).
+///
+/// Deliberately narrow: two *different* epistemic wrappers (e.g.
+/// `Estimate<T>` against `Missing<T>`, or `Probability` against
+/// `Estimate<Bool>`) are an ordinary [`Step::Mismatch`], not an erasure —
+/// neither side is "plain," so nothing is being laundered into an
+/// unprotected type. `Var`/`Error` are also never "plain" here: both have
+/// their own absorption/binding semantics (handled by earlier arms in
+/// [`step`]), so they must never be misreported as an erasure target.
+fn epistemic_erasure(a: &Ty, b: &Ty) -> Option<(Ty, Ty)> {
+    fn is_plain(t: &Ty) -> bool {
+        !matches!(
+            t,
+            Ty::Var(_) | Ty::Error | Ty::Estimate(_) | Ty::Missing(_) | Ty::Probability
+        )
+    }
+    match (a, b) {
+        (Ty::Estimate(_), other) | (Ty::Missing(_), other) if is_plain(other) => {
+            Some((a.clone(), b.clone()))
+        }
+        (other, Ty::Estimate(_)) | (other, Ty::Missing(_)) if is_plain(other) => {
+            Some((b.clone(), a.clone()))
+        }
+        (Ty::Probability, Ty::Bool) => Some((a.clone(), b.clone())),
+        (Ty::Bool, Ty::Probability) => Some((b.clone(), a.clone())),
+        _ => None,
     }
 }
 
@@ -365,6 +433,86 @@ mod tests {
             matches!(step(Ty::Error, Ty::Var(v)), Step::Done),
             "step(Error, Var) must absorb to Done, never Bind"
         );
+    }
+
+    #[test]
+    fn estimate_to_plain_is_an_erasure_not_a_generic_mismatch() {
+        match step(
+            Ty::Estimate(Box::new(Ty::Int(IntWidth::Int))),
+            Ty::Int(IntWidth::Int),
+        ) {
+            Step::Erasure(from, to) => {
+                assert_eq!(from, Ty::Estimate(Box::new(Ty::Int(IntWidth::Int))));
+                assert_eq!(to, Ty::Int(IntWidth::Int));
+            }
+            _ => panic!("expected Erasure, got a different Step"),
+        }
+        // Symmetric: the epistemic side may be either operand.
+        match step(
+            Ty::Int(IntWidth::Int),
+            Ty::Estimate(Box::new(Ty::Int(IntWidth::Int))),
+        ) {
+            Step::Erasure(from, to) => {
+                assert_eq!(from, Ty::Estimate(Box::new(Ty::Int(IntWidth::Int))));
+                assert_eq!(to, Ty::Int(IntWidth::Int));
+            }
+            _ => panic!("expected Erasure in the reversed operand order too"),
+        }
+    }
+
+    #[test]
+    fn probability_to_bool_is_an_erasure_distinct_from_the_probability_f64_bridge() {
+        match step(Ty::Probability, Ty::Bool) {
+            Step::Erasure(from, to) => {
+                assert_eq!(from, Ty::Probability);
+                assert_eq!(to, Ty::Bool);
+            }
+            _ => panic!("expected Erasure for Probability ~ Bool"),
+        }
+        // The F64 bridge is untouched by this — a different pairing.
+        assert!(matches!(step(Ty::Probability, Ty::F64), Step::Done));
+    }
+
+    #[test]
+    fn missing_to_plain_is_an_erasure_no_implicit_coercion() {
+        match step(Ty::missing(Ty::Bool), Ty::Bool) {
+            Step::Erasure(from, to) => {
+                assert_eq!(from, Ty::missing(Ty::Bool));
+                assert_eq!(to, Ty::Bool);
+            }
+            _ => panic!("expected Erasure for Missing<Bool> ~ Bool"),
+        }
+    }
+
+    #[test]
+    fn cross_epistemic_wrappers_are_a_plain_mismatch_not_an_erasure() {
+        // Neither side is "plain," so this is not laundering anything —
+        // it must stay an ordinary Mismatch.
+        match step(
+            Ty::Estimate(Box::new(Ty::Int(IntWidth::Int))),
+            Ty::missing(Ty::Int(IntWidth::Int)),
+        ) {
+            Step::Mismatch(_, _) => {}
+            _ => panic!(
+                "expected a plain Mismatch for two different epistemic wrappers, got a different Step"
+            ),
+        }
+    }
+
+    #[test]
+    fn missing_of_equal_inner_type_unifies_cleanly() {
+        assert!(matches!(
+            step(Ty::missing(Ty::Bool), Ty::missing(Ty::Bool)),
+            Step::Done
+        ));
+    }
+
+    #[test]
+    fn missing_descends_to_solve_its_inner_variable() {
+        match step(Ty::missing(Ty::Var(TyVar(70))), Ty::missing(Ty::Bool)) {
+            Step::Descend(pairs) => assert_eq!(pairs, vec![(Ty::Var(TyVar(70)), Ty::Bool)]),
+            _ => panic!("expected Missing<T> ~ Missing<U> to descend into T ~ U"),
+        }
     }
 
     #[test]
