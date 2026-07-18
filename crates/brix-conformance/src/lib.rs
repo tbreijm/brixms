@@ -29,6 +29,7 @@ pub mod fixture;
 pub mod fixtures;
 pub mod oracle_engine;
 pub mod translate;
+pub mod typefacts;
 
 pub use compiled_engine::CompiledEngine;
 pub use fixture::{Engine, Fixture, RevDump, RunOutput};

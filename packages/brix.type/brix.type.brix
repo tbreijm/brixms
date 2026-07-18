@@ -1,0 +1,69 @@
+// Native `brix.type` — vertical slice 1 (#15).
+//
+// Shadow-mode differential companion to `brix_ir::reflect::analyze`. This
+// package never runs against a real user transaction: `brix-conformance`'s
+// exporter (`crates/brix-conformance/src/typefacts.rs`) flattens a subset of
+// `reflect::analyze`'s structural facts into opaque canonical tokens
+// (`Value::Str(hex(digest))`), asserts them as Ground rows here, settles this
+// package in-process, and maps the derived rows back through a token table to
+// `FactId`s for a literal set-equality comparison against `reflect.rs`'s own
+// report. See `crates/brix-conformance/tests/selfhost_parity.rs`.
+//
+// R1 (opaque tokens): every role below is `String` — a hex-encoded digest the
+// exporter computed. Rules only join on and copy these tokens; they never
+// construct or interpret one.
+//
+// R3 (scope from day one): every derived-judgment relation carries a `scope`
+// column, joined against the `RootScope` singleton the exporter seeds with
+// `ScopeId::root()`'s own token — post-gate scoped-world rulings change rule
+// *bodies*, never these schemas.
+//
+// Conflicts are derived rows (`MismatchConflict`), never `constraint`
+// violations: this package is shadow-mode only and must never reject a
+// transaction or gate a build.
+
+package brix.type @ 0.1.0
+
+// --- exported structural facts (Ground, asserted by the exporter) ---
+
+// Fact::RoleVar { subject, relation, role } — which variable occupies a
+// relation role.
+rel RoleVar { subject: String; relation: String; role: String } key(subject, relation, role)
+
+// Fact::RoleLit { subject, relation, role, ty } — a role matched against a
+// literal, with the literal's own class.
+rel RoleLit { subject: String; relation: String; role: String; ty: String } key(subject, relation, role)
+
+// Fact::SchemaRole { relation, role, ty } — a relation's declared role type.
+rel SchemaRole { relation: String; role: String; ty: String } key(relation, role)
+
+// The well-known root assumption context (`ScopeId::root()`), tokenized once
+// by the exporter and asserted as a singleton every derived judgment joins.
+rel RootScope { scope: String } key(scope)
+
+// --- derived judgments ---
+
+// Mirrors Fact::HasType { subject, ty, scope }.
+rel HasType { subject: String; ty: String; scope: String } key(subject, ty, scope)
+
+// A derived conflict row (never a `constraint`): a literal in a role whose
+// class disagrees with the role's declared type.
+rel MismatchConflict { subject: String; expect: String; found: String; scope: String } key(subject, expect, found, scope)
+
+// TypeOfRoleBinding: RoleVar ⋈ SchemaRole ⋈ RootScope → HasType.
+derive TypeOfRoleBinding: HasType(subject: subject, ty: ty, scope: scope) from {
+    RoleVar(subject: subject, relation: relation, role: role)
+    SchemaRole(relation: relation, role: role, ty: ty)
+    RootScope(scope: scope)
+}
+
+// LitRoleMismatch: RoleLit ⋈ SchemaRole ⋈ RootScope, when expect != found →
+// MismatchConflict. `expect` (the declared role type) is written first,
+// `found` (the literal's own class) second — the same orientation
+// `reflect.rs`'s `role_arg` uses for `ConflictKind::Mismatch { left, right }`.
+derive LitRoleMismatch: MismatchConflict(subject: subject, expect: expect, found: found, scope: scope) from {
+    RoleLit(subject: subject, relation: relation, role: role, ty: found)
+    SchemaRole(relation: relation, role: role, ty: expect)
+    RootScope(scope: scope)
+    when expect != found
+}
