@@ -130,6 +130,7 @@ dependencies = [
  "brix-canon",
  "brix-diag",
  "brix-oracle",
+ "brix-rt",
  "brixc",
  "brixpkg",
  "camino",

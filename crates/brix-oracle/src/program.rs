@@ -173,6 +173,13 @@ pub enum Expr {
     Count(Vec<Clause>),
     /// `sum(from { ... } yield expr)`.
     Sum(Vec<Clause>, Box<Expr>),
+    /// `if cond { then } else { els }` — needed to evaluate function bodies
+    /// compiled from source (issue #47; the flagship's `surcharge` is one `if`).
+    If {
+        cond: Box<Expr>,
+        then: Box<Expr>,
+        els: Box<Expr>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -242,6 +249,17 @@ pub type TotalFn = fn(&[Value]) -> Value;
 /// payload for the failing site (Part III §9).
 pub type PartialFn = fn(&[Value]) -> Result<Value, Value>;
 
+/// A function compiled from BrixMS source (issue #47): parameter names plus a
+/// body [`Expr`] the evaluator runs by binding actuals into a fresh env. Lets a
+/// total fn execute from source instead of a hand-registered [`TotalFn`], and
+/// is resolved *before* the `fns` table in [`crate::eval`], so a source-defined
+/// fn shadows a registered one of the same name.
+#[derive(Clone, Debug)]
+pub struct FnDef {
+    pub params: Vec<Var>,
+    pub body: Expr,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Program {
     pub relations: BTreeMap<RelName, RelationDef>,
@@ -249,6 +267,8 @@ pub struct Program {
     pub constraints: BTreeMap<ConstraintId, Constraint>,
     pub fns: BTreeMap<FnName, TotalFn>,
     pub partial_fns: BTreeMap<FnName, PartialFn>,
+    /// Functions compiled from source (issue #47).
+    pub fn_defs: BTreeMap<FnName, FnDef>,
 }
 
 impl Program {

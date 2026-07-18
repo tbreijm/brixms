@@ -155,6 +155,21 @@ pub fn program_from_source(
     program.fns = fns.fns;
     program.partial_fns = fns.partial_fns;
 
+    // Functions compiled from source (issue #47): the oracle evaluates the
+    // lowered body directly, so a total fn need not be hand-registered in the
+    // `FnLibrary`. A body form the oracle expr language can't represent is a
+    // hard error here (it should have been left unlowered by brixc).
+    for def in &source.functions {
+        let body = convert_expr(&def.body)?;
+        program.fn_defs.insert(
+            def.name.to_string(),
+            crate::program::FnDef {
+                params: def.params.iter().map(|(p, _)| p.to_string()).collect(),
+                body,
+            },
+        );
+    }
+
     for name in &relations_seen {
         let schema = resolver
             .relation(name)
@@ -387,7 +402,11 @@ fn convert_expr(e: &IrExpr) -> Result<Expr, AdapterError> {
         },
         ExprKind::Field { .. } => Err(AdapterError::Unsupported("ExprKind::Field")),
         ExprKind::Record { .. } => Err(AdapterError::Unsupported("ExprKind::Record")),
-        ExprKind::If { .. } => Err(AdapterError::Unsupported("ExprKind::If")),
+        ExprKind::If { cond, then, els } => Ok(Expr::If {
+            cond: Box::new(convert_expr(cond)?),
+            then: Box::new(convert_expr(then)?),
+            els: Box::new(convert_expr(els)?),
+        }),
         ExprKind::Comprehension { .. } => Err(AdapterError::Unsupported("ExprKind::Comprehension")),
     }
 }

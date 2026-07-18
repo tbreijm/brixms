@@ -70,6 +70,23 @@ pub fn program(program: &oracle::Program) -> rt::Program {
         .iter()
         .map(|(id, c)| (id.clone(), constraint(c)))
         .collect();
+    // Functions compiled from source (issue #47) carry a translatable body, so
+    // unlike hand-registered `fns`/`partial_fns` (opaque native pointers) they
+    // DO cross the oracle->rt boundary — the differential harness runs the same
+    // compiled body on both engines.
+    let fn_defs = program
+        .fn_defs
+        .iter()
+        .map(|(name, def)| {
+            (
+                name.clone(),
+                rt::FnDef {
+                    params: def.params.clone(),
+                    body: expr(&def.body),
+                },
+            )
+        })
+        .collect();
 
     rt::Program {
         relations,
@@ -77,6 +94,7 @@ pub fn program(program: &oracle::Program) -> rt::Program {
         constraints,
         fns: BTreeMap::new(),
         partial_fns: BTreeMap::new(),
+        fn_defs,
     }
 }
 
@@ -189,6 +207,11 @@ fn expr(e: &oracle::Expr) -> rt::Expr {
         oracle::Expr::Try(name, args) => {
             rt::Expr::Try(name.clone(), args.iter().map(expr).collect())
         }
+        oracle::Expr::If { cond, then, els } => rt::Expr::If {
+            cond: Box::new(expr(cond)),
+            then: Box::new(expr(then)),
+            els: Box::new(expr(els)),
+        },
         oracle::Expr::Count(_) | oracle::Expr::Sum(_, _) => panic!(
             "translate::expr: aggregate expressions (Count/Sum) have no brix_rt::engine::Expr \
              equivalent — no current fixture should reach this"

@@ -303,6 +303,7 @@ pub fn flagship_pricing_mutation() -> TypeFixture {
     };
 
     let source = FrontendSource {
+        functions: Vec::new(),
         rules: vec![],
         constraints: vec![capacity],
         queries: vec![query],
@@ -345,6 +346,7 @@ pub fn flagship_pricing_mutation() -> TypeFixture {
 pub fn non_bool_guard() -> TypeFixture {
     let o = Origins::new("R");
     let source = FrontendSource {
+        functions: Vec::new(),
         rules: vec![Rule {
             name: Ident::new("R"),
             // A tuple head, not a mask head — the guard-typing shape this
@@ -377,6 +379,7 @@ pub fn non_bool_guard() -> TypeFixture {
 pub fn arity_mismatch() -> TypeFixture {
     let o = Origins::new("Arity");
     let source = FrontendSource {
+        functions: Vec::new(),
         rules: vec![],
         constraints: vec![],
         queries: vec![Query {
@@ -410,6 +413,7 @@ pub fn arity_mismatch() -> TypeFixture {
 /// the same shape through a `Constraint` body.
 pub fn role_mismatch() -> TypeFixture {
     let source = FrontendSource {
+        functions: Vec::new(),
         rules: vec![Rule {
             name: Ident::new("RoleGuard"),
             head: Head::Tuple {
@@ -454,6 +458,7 @@ pub fn field_failure() -> TypeFixture {
         ty: Ty::Int(IntWidth::Int),
     }]));
     let source = FrontendSource {
+        functions: Vec::new(),
         rules: vec![],
         constraints: vec![],
         queries: vec![Query {
@@ -482,6 +487,7 @@ pub fn occurs_check() -> TypeFixture {
     let o = Origins::new("Occurs");
     let v = TyVar(9100);
     let source = FrontendSource {
+        functions: Vec::new(),
         rules: vec![],
         constraints: vec![],
         queries: vec![Query {
@@ -514,6 +520,7 @@ pub fn occurs_check() -> TypeFixture {
 pub fn closed_row_extra_field() -> TypeFixture {
     let o = Origins::new("ClosedRow");
     let source = FrontendSource {
+        functions: Vec::new(),
         rules: vec![],
         constraints: vec![],
         queries: vec![Query {
@@ -546,6 +553,7 @@ pub fn closed_row_extra_field() -> TypeFixture {
 pub fn open_row_extra_field() -> TypeFixture {
     let o = Origins::new("OpenRow");
     let source = FrontendSource {
+        functions: Vec::new(),
         rules: vec![],
         constraints: vec![],
         queries: vec![Query {
@@ -581,6 +589,7 @@ pub fn open_row_extra_field() -> TypeFixture {
 pub fn constraint_non_bool_guard() -> TypeFixture {
     let o = Origins::new("Guard");
     let source = FrontendSource {
+        functions: Vec::new(),
         rules: vec![],
         constraints: vec![Constraint {
             name: Ident::new("Guard"),
@@ -605,6 +614,7 @@ pub fn constraint_non_bool_guard() -> TypeFixture {
 /// `Constraint` body rather than a `Rule` body (mirrors fixture 4's shape).
 pub fn constraint_role_mismatch() -> TypeFixture {
     let source = FrontendSource {
+        functions: Vec::new(),
         rules: vec![],
         constraints: vec![Constraint {
             name: Ident::new("RoleGuard"),
@@ -650,6 +660,7 @@ pub fn try_non_result() -> TypeFixture {
     )
     .with_origin(o.next_origin());
     let source = FrontendSource {
+        functions: Vec::new(),
         rules: vec![],
         constraints: vec![],
         queries: vec![Query {
@@ -801,6 +812,7 @@ pub fn rule_ordinary_fn_on_derived_rel() -> RuleFixture {
 pub fn estimate_to_plain_erasure() -> TypeFixture {
     let o = Origins::new("Erasure");
     let source = FrontendSource {
+        functions: Vec::new(),
         rules: vec![],
         constraints: vec![],
         queries: vec![Query {
@@ -834,6 +846,7 @@ pub fn estimate_to_plain_erasure() -> TypeFixture {
 pub fn probability_to_bool_erasure() -> TypeFixture {
     let o = Origins::new("Erasure");
     let source = FrontendSource {
+        functions: Vec::new(),
         rules: vec![],
         constraints: vec![],
         queries: vec![Query {
@@ -862,6 +875,7 @@ pub fn probability_to_bool_erasure() -> TypeFixture {
 pub fn missing_to_plain_implicit_coercion() -> TypeFixture {
     let o = Origins::new("Erasure");
     let source = FrontendSource {
+        functions: Vec::new(),
         rules: vec![],
         constraints: vec![],
         queries: vec![Query {
@@ -891,6 +905,7 @@ pub fn missing_to_plain_implicit_coercion() -> TypeFixture {
 pub fn missing_well_typed_flow() -> TypeFixture {
     let o = Origins::new("MissingFlow");
     let source = FrontendSource {
+        functions: Vec::new(),
         rules: vec![],
         constraints: vec![],
         queries: vec![Query {
