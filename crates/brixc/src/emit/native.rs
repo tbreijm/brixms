@@ -63,6 +63,22 @@ pub fn project_program(phased: &Phased) -> Program {
             },
         );
     }
+    // Functions compiled from source (issue #47): project each lowered FnDef
+    // into a runtime fn-def the evaluator runs directly. A body form the
+    // runtime can't yet represent (`convert_expr` returns `None`) is skipped —
+    // the fn then falls back to its hand-registered native impl, if any.
+    for def in &phased.lowered.source.functions {
+        let Some(body) = convert_expr(&def.body) else {
+            continue;
+        };
+        program.fn_defs.insert(
+            def.name.to_string(),
+            engine::FnDef {
+                params: def.params.iter().map(|(p, _)| p.to_string()).collect(),
+                body,
+            },
+        );
+    }
     for constraint in &phased.lowered.source.constraints {
         program.constraints.insert(
             constraint.name.to_string(),
@@ -176,6 +192,11 @@ fn convert_expr(expr: &IrExpr) -> Option<engine::Expr> {
             )),
             _ => None,
         },
+        ExprKind::If { cond, then, els } => Some(engine::Expr::If {
+            cond: Box::new(convert_expr(cond)?),
+            then: Box::new(convert_expr(then)?),
+            els: Box::new(convert_expr(els)?),
+        }),
         _ => None,
     }
 }

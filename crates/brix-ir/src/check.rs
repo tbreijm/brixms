@@ -3,7 +3,8 @@
 //! that *can* run before a full frontend — they need only resolved schema
 //! facts, which [`crate::frontend::TableResolver`] supplies today.
 
-use crate::core::{Expr, ExprKind, Head, Rule};
+use crate::core::{Expr, ExprKind, FnDef, Head, Rule};
+use crate::effects::{Effect, EffectRow};
 use crate::frontend::{RelationSchema, SchemaResolver};
 use crate::ident::{Ident, QualIdent};
 use crate::pattern::{ReadKind, RelRead};
@@ -52,6 +53,14 @@ pub enum Finding {
     /// reason`'s `target`/`reason` is not an edge-bound alias (`x @
     /// R(...)`) produced by the rule body.
     MaskRefNotEdgeBound { rule: Ident, var: Ident },
+    /// A user function's body realizes an effect its declared `! { ... }` row
+    /// does not permit (issue #47 / Part V): the body calls a fn whose effects
+    /// are not a subset of the declaration. Purity/effect containment for
+    /// function bodies, the analog of [`Finding::ImpureRule`] for rules.
+    UndeclaredFnEffect { function: Ident, effect: Effect },
+    /// A `total` function's body can fail — it uses `?` (a failure site) — but
+    /// only a `partial fn` may fail (Part V §5). Totality violation.
+    TotalFnFallible { function: Ident },
 }
 
 impl fmt::Display for Finding {
@@ -92,6 +101,14 @@ impl fmt::Display for Finding {
             Finding::MaskRefNotEdgeBound { rule, var } => write!(
                 f,
                 "rule {rule}'s mask head references `{var}`, which is not an edge-bound alias in its body (Appendix E mask-head side condition)"
+            ),
+            Finding::UndeclaredFnEffect { function, effect } => write!(
+                f,
+                "function {function} realizes effect `{effect}` not permitted by its declared effect row (Part V effect containment)"
+            ),
+            Finding::TotalFnFallible { function } => write!(
+                f,
+                "total function {function} can fail (`?`); only a `partial fn` may fail (Part V §5)"
             ),
         }
     }
@@ -342,6 +359,75 @@ pub fn check_rule(rule: &Rule, resolver: &impl SchemaResolver) -> Vec<Finding> {
         });
     }
     out
+}
+
+/// Function-body static checks (issue #47), the [`check_rule`] analog for a
+/// user [`FnDef`]: **effect containment** (the body's realized effects must be
+/// a subset of the declared `! { ... }` row) and **totality** (a `total` fn
+/// body must not use `?`). Type checking of the body is done by
+/// [`crate::infer::infer_source`]; this covers the effect/totality judgments.
+pub fn check_function(def: &FnDef, resolver: &impl SchemaResolver) -> Vec<Finding> {
+    let function = Ident::new(def.name.to_string());
+    let mut realized = EffectRow::empty();
+    let mut has_try = false;
+    walk_fn_body(&def.body, resolver, &mut realized, &mut has_try);
+
+    let mut out = Vec::new();
+    let declared = def.effects.atoms();
+    for atom in realized.atoms() {
+        if !declared.contains(atom) {
+            out.push(Finding::UndeclaredFnEffect {
+                function: function.clone(),
+                effect: atom.clone(),
+            });
+        }
+    }
+    if !def.is_partial && has_try {
+        out.push(Finding::TotalFnFallible { function });
+    }
+    out
+}
+
+/// Walk a function body, unioning every called fn's declared effect row into
+/// `realized` and flagging any `?` failure site — the raw material for
+/// [`check_function`]'s effect-containment and totality judgments.
+fn walk_fn_body(
+    expr: &Expr,
+    resolver: &impl SchemaResolver,
+    realized: &mut EffectRow,
+    has_try: &mut bool,
+) {
+    match &*expr.kind {
+        ExprKind::Call { func, args } => {
+            if let Some(sig) = resolver.function(func) {
+                *realized = realized.combine(&sig.effects);
+            }
+            for a in args {
+                walk_fn_body(a, resolver, realized, has_try);
+            }
+        }
+        ExprKind::Try { inner, .. } => {
+            *has_try = true;
+            walk_fn_body(inner, resolver, realized, has_try);
+        }
+        ExprKind::Field { base, .. } => walk_fn_body(base, resolver, realized, has_try),
+        ExprKind::Record { fields } => {
+            for (_, e) in fields {
+                walk_fn_body(e, resolver, realized, has_try);
+            }
+        }
+        ExprKind::If { cond, then, els } => {
+            walk_fn_body(cond, resolver, realized, has_try);
+            walk_fn_body(then, resolver, realized, has_try);
+            walk_fn_body(els, resolver, realized, has_try);
+        }
+        ExprKind::Comprehension { yields, .. } => {
+            if let Some(y) = yields {
+                walk_fn_body(y, resolver, realized, has_try);
+            }
+        }
+        ExprKind::Var(_) | ExprKind::Lit(_) => {}
+    }
 }
 
 #[cfg(test)]

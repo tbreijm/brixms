@@ -326,6 +326,44 @@ impl fmt::Display for Query {
     }
 }
 
+/// A user-defined function definition with a lowered, checked body (Part V).
+///
+/// Core IR historically carried only a function *signature* (see
+/// [`crate::frontend::FnSignature`]); a `fn` body was never lowered, so the
+/// flagship's `surcharge`/`riskModel` had to be hand-registered natively. This
+/// node carries the body so it can be type/effect/totality-checked here and
+/// executed from source (issue #47). `params` keeps parameter *names* (the
+/// signature has only types) so a body checker/interpreter can bind them.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FnDef {
+    pub name: QualIdent,
+    pub params: Vec<(Ident, Ty)>,
+    pub ret: Ty,
+    /// The declared effect row (`! { ... }`); the body's *realized* effects
+    /// must be a subset of it (Appendix E), checked in `check`.
+    pub effects: EffectRow,
+    /// A `partial fn` (may fail via `?`, returns `Result`). A `total` fn body
+    /// must not use `?` — enforced in `check`.
+    pub is_partial: bool,
+    pub body: Expr,
+}
+
+impl fmt::Display for FnDef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_partial {
+            write!(f, "partial ")?;
+        }
+        write!(f, "fn {}(", self.name)?;
+        for (i, (name, ty)) in self.params.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{name}: {ty}")?;
+        }
+        write!(f, ") -> {} {} = {}", self.ret, self.effects, self.body.kind)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,6 +415,22 @@ mod tests {
         // A pure rule satisfies all Appendix E side conditions.
         let flags = rule.effect_flags();
         assert!(flags.pure && flags.det && flags.nondiverge);
+    }
+
+    #[test]
+    fn fn_def_display_shows_signature_and_body() {
+        let def = FnDef {
+            name: QualIdent::from("bump"),
+            params: vec![(Ident::new("x"), Ty::Int(crate::types::IntWidth::Int))],
+            ret: Ty::Int(crate::types::IntWidth::Int),
+            effects: EffectRow::empty(),
+            is_partial: false,
+            body: Expr::new(
+                Ty::Int(crate::types::IntWidth::Int),
+                ExprKind::Var(Ident::new("x")),
+            ),
+        };
+        assert_eq!(def.to_string(), "fn bump(x: Int) -> Int !{} = x");
     }
 
     #[test]

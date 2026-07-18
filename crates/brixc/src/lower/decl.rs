@@ -37,11 +37,21 @@ pub fn lower_decls(
                 .push(lower_constraint(cd, resolver, meta, diags)),
             Decl::Query(qd) => source.queries.push(lower_query(qd, resolver, meta, diags)),
 
+            // A user `fn` body: lowered to a checked Core IR `FnDef` so it can
+            // execute from source (issue #47). Only total, expression-bodied
+            // functions are lowered in Slice 1; block-bodied / partial fns
+            // return `None` and stay on the hand-registered path (deferred to
+            // Slice 2), exactly as before.
+            Decl::Fn(f) => {
+                if let Some(def) = lower_fn(f, resolver, meta, diags) {
+                    source.functions.push(def);
+                }
+            }
+
             // Schema-producing decls: fully handled by pass 1 already.
             Decl::Entity(_)
             | Decl::Rel(_)
             | Decl::Protocol(_)
-            | Decl::Fn(_)
             | Decl::Enum(_)
             | Decl::Type(_)
             | Decl::Measure(_)
@@ -372,5 +382,82 @@ fn lower_query(
         body,
         yields,
         result,
+    }
+}
+
+/// Lower a user `fn` body into a checked Core IR [`core::FnDef`] (issue #47).
+///
+/// Slice 1 handles only **total, expression-bodied** functions (`fn f(..) -> T
+/// = <expr>`): these reuse the whole rule-body expression-lowering engine
+/// ([`expr::lower_expr`]), with the parameters seeded into scope exactly as
+/// [`lower_query`] seeds query params. Block-bodied (`{ .. }`) or `partial`
+/// functions return `None` — they are *not* an error (that would break the
+/// flagship's `riskModel`); they simply stay unlowered and hand-registered
+/// until Slice 2 grows blocks / partial-result / runtime provenance.
+fn lower_fn(
+    f: &ast::FnDecl,
+    resolver: &ProgramResolver,
+    meta: &mut LowerMeta,
+    diags: &mut Vec<Diagnostic>,
+) -> Option<core::FnDef> {
+    let body_expr = match &f.body {
+        Some(ast::FnBody::Expr(e)) if !f.partial => e,
+        _ => return None,
+    };
+    let qi = QualIdent::simple(f.name.text.clone());
+    // Pass 1 already built and recorded the signature (lowered param/ret types,
+    // effect row); reuse it so the FnDef agrees with what the checker sees.
+    let sig = resolver.function(&qi)?.clone();
+    let params: Vec<(IrIdent, Ty)> = f
+        .params
+        .iter()
+        .map(|p| IrIdent::new(p.name.text.clone()))
+        .zip(sig.params.iter().cloned())
+        .collect();
+    let name_ir = IrIdent::new(f.name.text.clone());
+    meta.set_decl_span(name_ir.clone(), f.span);
+    let mut ctx = BodyCtx::new(name_ir, resolver, meta, diags);
+    for (p, _) in &params {
+        ctx.bound.insert(p.clone());
+    }
+    let body = expr::lower_expr(&mut ctx, body_expr);
+    drop(ctx);
+
+    // Slice 1 defers any body that needs unit-constructor evaluation: a
+    // `Measured` literal like `3500 kg` / `150 EUR` lowers to a `brix.units.*`
+    // call whose runtime *value* scaling (e.g. `150 EUR` -> integer cents) is
+    // Slice-2 work. The flagship's `surcharge` hits this, so it stays on its
+    // hand-registered native path rather than executing an unevaluable body.
+    if body_uses_unit_ctor(&body) {
+        return None;
+    }
+
+    Some(core::FnDef {
+        name: qi,
+        params,
+        ret: sig.ret,
+        effects: sig.effects,
+        is_partial: f.partial,
+        body,
+    })
+}
+
+/// Whether a lowered function body calls a `brix.units.*` unit constructor —
+/// the Slice-1 deferral predicate (see [`lower_fn`]).
+fn body_uses_unit_ctor(expr: &core::Expr) -> bool {
+    match &*expr.kind {
+        core::ExprKind::Call { func, args } => {
+            func.to_string().starts_with("brix.units.") || args.iter().any(body_uses_unit_ctor)
+        }
+        core::ExprKind::If { cond, then, els } => {
+            body_uses_unit_ctor(cond) || body_uses_unit_ctor(then) || body_uses_unit_ctor(els)
+        }
+        core::ExprKind::Field { base, .. } => body_uses_unit_ctor(base),
+        core::ExprKind::Record { fields } => fields.iter().any(|(_, e)| body_uses_unit_ctor(e)),
+        core::ExprKind::Try { inner, .. } => body_uses_unit_ctor(inner),
+        core::ExprKind::Comprehension { yields, .. } => {
+            yields.as_ref().is_some_and(body_uses_unit_ctor)
+        }
+        core::ExprKind::Var(_) | core::ExprKind::Lit(_) => false,
     }
 }

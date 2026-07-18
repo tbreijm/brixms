@@ -272,6 +272,13 @@ pub enum Expr {
     BinOp(BinOp, Box<Expr>, Box<Expr>),
     Call(String, Vec<Expr>),
     Try(String, Vec<Expr>),
+    /// `if cond { then } else { els }` — needed to execute compiled function
+    /// bodies (issue #47); the flagship's `surcharge` is a single `if`.
+    If {
+        cond: Box<Expr>,
+        then: Box<Expr>,
+        els: Box<Expr>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -328,6 +335,16 @@ pub struct Constraint {
 pub type TotalFn = fn(&[Value]) -> Value;
 pub type PartialFn = fn(&[Value]) -> Result<Value, Value>;
 
+/// A user function compiled from source (issue #47): its parameter names and a
+/// body expression the evaluator runs by binding actuals into a fresh `Env`.
+/// This is what lets `surcharge` (and other total fns) execute from their
+/// BrixMS source instead of a hand-registered native [`TotalFn`] pointer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FnDef {
+    pub params: Vec<String>,
+    pub body: Expr,
+}
+
 /// A complete generated runtime program. Function pointers are generated
 /// native code; they are not dynamically interpreted host callbacks.
 #[derive(Clone, Default)]
@@ -337,6 +354,10 @@ pub struct Program {
     pub constraints: BTreeMap<String, Constraint>,
     pub fns: BTreeMap<String, TotalFn>,
     pub partial_fns: BTreeMap<String, PartialFn>,
+    /// Functions compiled from source (issue #47). Resolved *before* the
+    /// [`fns`]/`builtin_total` fallback in [`eval_expr`], so a source-defined
+    /// fn shadows any native builtin of the same name.
+    pub fn_defs: BTreeMap<String, FnDef>,
 }
 
 /// One live candidate row and its ground/derived sources.  The native
@@ -1300,6 +1321,17 @@ fn eval_expr(program: &Program, env: &Env, expr: &Expr) -> Value {
                 .iter()
                 .map(|arg| eval_expr(program, env, arg))
                 .collect::<Vec<_>>();
+            // A function compiled from source (issue #47) resolves first: bind
+            // actuals to its parameter names in a fresh env and run its body.
+            if let Some(def) = program.fn_defs.get(name) {
+                let call_env: Env = def
+                    .params
+                    .iter()
+                    .cloned()
+                    .zip(args.iter().cloned())
+                    .collect();
+                return eval_expr(program, &call_env, &def.body);
+            }
             match program
                 .fns
                 .get(name)
@@ -1310,6 +1342,11 @@ fn eval_expr(program: &Program, env: &Env, expr: &Expr) -> Value {
                 None => panic!("unregistered total function `{name}`"),
             }
         }
+        Expr::If { cond, then, els } => match eval_expr(program, env, cond) {
+            Value::Bool(true) => eval_expr(program, env, then),
+            Value::Bool(false) => eval_expr(program, env, els),
+            other => panic!("`if` condition must be Bool, got {other:?}"),
+        },
         Expr::Try(name, args) => {
             let args = args
                 .iter()

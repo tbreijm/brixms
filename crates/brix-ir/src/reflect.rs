@@ -1647,6 +1647,7 @@ mod tests {
             result: Ty::Var(TyVar(11)),
         };
         let source = FrontendSource {
+            functions: Vec::new(),
             rules: vec![],
             constraints: vec![],
             queries: vec![query],
@@ -1677,6 +1678,7 @@ mod tests {
             ty: Ty::Int(IntWidth::Int),
         }]));
         let source = FrontendSource {
+            functions: Vec::new(),
             rules: vec![],
             constraints: vec![],
             queries: vec![
@@ -1727,6 +1729,7 @@ mod tests {
     #[test]
     fn reflective_constraints_comprehensions_and_call_arity_are_checked() {
         let source = FrontendSource {
+            functions: Vec::new(),
             rules: vec![],
             constraints: vec![Constraint {
                 name: Ident::new("Guard"),
@@ -1795,6 +1798,7 @@ mod tests {
     fn reflective_unifier_solves_variables_detects_cycles_and_admits_open_rows() {
         let variable = TyVar(40);
         let source = FrontendSource {
+            functions: Vec::new(),
             rules: vec![],
             constraints: vec![],
             queries: vec![Query {
@@ -1950,6 +1954,7 @@ mod tests {
     fn reflective_dimension_vs_variable_solves() {
         let km = Ty::Quantity(Ident::new("Kilometre"));
         let source = FrontendSource {
+            functions: Vec::new(),
             rules: vec![],
             constraints: vec![],
             queries: vec![Query {
@@ -2020,6 +2025,7 @@ mod tests {
             result: Ty::Var(TyVar(11)),
         };
         let source = FrontendSource {
+            functions: Vec::new(),
             rules: vec![],
             constraints: vec![],
             queries: vec![query],

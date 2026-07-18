@@ -15,7 +15,7 @@
 //! frontend's job. Everything returned is owned/clonable so brix-ir's IR does
 //! not borrow from the AST arena.
 
-use crate::core::{Constraint, Query, Rule};
+use crate::core::{Constraint, FnDef, Query, Rule};
 use crate::effects::EffectRow;
 use crate::ident::{Ident, QualIdent};
 use crate::types::Ty;
@@ -86,6 +86,9 @@ pub struct FrontendSource {
     pub rules: Vec<Rule>,
     pub constraints: Vec<Constraint>,
     pub queries: Vec<Query>,
+    /// User-defined functions with lowered bodies (issue #47). Empty for
+    /// programs whose functions are all builtins or (pre-#47) hand-registered.
+    pub functions: Vec<FnDef>,
 }
 
 impl FrontendSource {

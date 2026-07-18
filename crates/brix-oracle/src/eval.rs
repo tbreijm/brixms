@@ -109,14 +109,30 @@ fn eval_expr(env: &Env, expr: &Expr, ctx: &Ctx) -> Value {
         Expr::Const(c) => c.clone(),
         Expr::BinOp(op, a, b) => eval_binop(*op, &eval_expr(env, a, ctx), &eval_expr(env, b, ctx)),
         Expr::Call(name, args) => {
+            let vals: Vec<Value> = args.iter().map(|a| eval_expr(env, a, ctx)).collect();
+            // A function compiled from source (issue #47) resolves first: bind
+            // actuals to its parameter names and evaluate its body.
+            if let Some(def) = ctx.program.fn_defs.get(name) {
+                let call_env: Env = def
+                    .params
+                    .iter()
+                    .cloned()
+                    .zip(vals.iter().cloned())
+                    .collect();
+                return eval_expr(&call_env, &def.body, ctx);
+            }
             let f = *ctx
                 .program
                 .fns
                 .get(name)
                 .unwrap_or_else(|| panic!("unregistered fn `{name}`"));
-            let vals: Vec<Value> = args.iter().map(|a| eval_expr(env, a, ctx)).collect();
             f(&vals)
         }
+        Expr::If { cond, then, els } => match eval_expr(env, cond, ctx) {
+            Value::Bool(true) => eval_expr(env, then, ctx),
+            Value::Bool(false) => eval_expr(env, els, ctx),
+            other => panic!("`if` condition must be Bool, got {other:?}"),
+        },
         Expr::Try(name, args) => {
             // Only legal directly under `Clause::Let`; if reached here (a
             // nested `?`) evaluate best-effort by unwrapping.
