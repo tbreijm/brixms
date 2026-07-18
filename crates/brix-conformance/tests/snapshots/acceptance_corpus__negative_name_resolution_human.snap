@@ -1,0 +1,5 @@
+---
+source: crates/brix-conformance/tests/acceptance_corpus.rs
+expression: "reached.diagnostics.render_format(brix_diag::DiagnosticFormat::Human, &src,\n&label)"
+---
+lower/name_resolution.brix:12:15: error[BRX-LOW-0003]: unresolved name `unboundName`

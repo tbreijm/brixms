@@ -1,0 +1,5 @@
+---
+source: crates/brix-conformance/tests/acceptance_corpus.rs
+expression: "reached.diagnostics.render_format(brix_diag::DiagnosticFormat::Human, &src,\n&label)"
+---
+check/type_error.brix:1:1: error[BRX-IR-0005]: when guard must be Bool, found I64

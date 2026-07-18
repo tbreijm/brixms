@@ -1,0 +1,5 @@
+---
+source: crates/brix-conformance/tests/acceptance_corpus.rs
+expression: "reached.diagnostics.render_format(brix_diag::DiagnosticFormat::Json, &src,\n&label)"
+---
+{"diagnostics":[{"code":"BRX-LOW-0001","severity":"error","message":"this expression form is unsupported in v0","path":"lower/unsupported_decl.brix","span":{"start":493,"end":511},"startLine":13,"startColumn":11,"endLine":13,"endColumn":29,"structure":null,"labels":[]}]}

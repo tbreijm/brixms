@@ -1,0 +1,5 @@
+---
+source: crates/brix-conformance/tests/acceptance_corpus.rs
+expression: "reached.diagnostics.render_format(brix_diag::DiagnosticFormat::Human, &src,\n&label)"
+---
+parse/syntax_error.brix:7:1: error[BRX-AST-0001]: expected `}`, found end of file

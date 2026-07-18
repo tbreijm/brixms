@@ -1,0 +1,5 @@
+---
+source: crates/brix-conformance/tests/acceptance_corpus.rs
+expression: "reached.diagnostics.render_format(brix_diag::DiagnosticFormat::Sarif, &src,\n&label)"
+---
+{"$schema":"https://json.schemastore.org/sarif-2.1.0.json","runs":[{"results":[{"level":"error","locations":[{"physicalLocation":{"artifactLocation":{"uri":"phase/phase_cycle.brix"},"region":{"endColumn":1,"endLine":1,"startColumn":1,"startLine":1}}}],"message":{"text":"cycle through a non-monotone edge: A -> B (non-monotone edge closes a cycle across several phase components); witness: A -> B -> C -> A"},"properties":{"structure":{"from":"A","path":["A","B","C","A"],"reason":"non-monotone edge closes a cycle across several phase components","to":"B"}},"ruleId":"BRX4001"}],"tool":{"driver":{"name":"brix","rules":[{"id":"BRX4001","shortDescription":{"text":"cycle through a non-monotone edge: A -> B (non-monotone edge closes a cycle across several phase components); witness: A -> B -> C -> A"}}]}}}],"version":"2.1.0"}
