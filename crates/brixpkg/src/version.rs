@@ -12,8 +12,8 @@
 use std::fmt;
 use std::str::FromStr;
 
-pub use pubgrub::range::Range as VersionRange;
-pub use pubgrub::version::SemanticVersion as Version;
+pub use pubgrub::Ranges as VersionRange;
+pub use pubgrub::SemanticVersion as Version;
 
 /// A package version requirement as written in a manifest's `[dependencies]`
 /// table, e.g. `"^1.2.3"`, `"~1.2.3"`, `"=1.2.3"`, `">=1.2.0, <2.0.0"`, `"*"`.
@@ -192,11 +192,11 @@ impl VersionReq {
     /// Lower to the [`VersionRange`] pubgrub resolves against.
     pub fn to_range(&self) -> VersionRange<Version> {
         match &self.range {
-            RangeExpr::Any => VersionRange::any(),
-            RangeExpr::Exact(v) => VersionRange::exact(*v),
+            RangeExpr::Any => VersionRange::full(),
+            RangeExpr::Exact(v) => VersionRange::singleton(*v),
             RangeExpr::Caret(v) => caret_range(*v),
             RangeExpr::Tilde(v) => tilde_range(*v),
-            RangeExpr::Bounds(cs) => cs.iter().fold(VersionRange::any(), |acc, c| {
+            RangeExpr::Bounds(cs) => cs.iter().fold(VersionRange::full(), |acc, c| {
                 let bound = match c.op {
                     Op::Ge => VersionRange::higher_than(c.version),
                     Op::Gt => VersionRange::higher_than(c.version.bump_patch()),
@@ -312,11 +312,11 @@ mod tests {
     fn parses_bare_and_prefixed_versions() {
         assert_eq!(
             VersionReq::parse("1.2.3").unwrap().to_range(),
-            VersionRange::exact(Version::new(1, 2, 3))
+            VersionRange::singleton(Version::new(1, 2, 3))
         );
         assert_eq!(
             VersionReq::parse("=1.2.3").unwrap().to_range(),
-            VersionRange::exact(Version::new(1, 2, 3))
+            VersionRange::singleton(Version::new(1, 2, 3))
         );
     }
 

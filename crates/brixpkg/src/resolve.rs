@@ -16,9 +16,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use camino::Utf8PathBuf;
-use pubgrub::error::PubGrubError;
-use pubgrub::report::{DefaultStringReporter, Reporter};
-use pubgrub::solver::{resolve as pubgrub_resolve, OfflineDependencyProvider};
+use pubgrub::{
+    resolve as pubgrub_resolve, DefaultStringReporter, OfflineDependencyProvider, PubGrubError,
+    Reporter,
+};
 
 use crate::digest::ContentDigest;
 use crate::lock::{LockEntry, LockSource, Lockfile, LOCK_FORMAT_VERSION};
@@ -90,8 +91,7 @@ pub fn resolve(
     //    with their (registry) dependencies too, so pubgrub sees a complete
     //    graph; the *content* of a path package just isn't fetched from the
     //    registry.
-    let mut provider: OfflineDependencyProvider<PubName, Version> =
-        OfflineDependencyProvider::new();
+    let mut provider: Provider = OfflineDependencyProvider::new();
 
     // The registry deps we still need to enumerate versions for.
     let mut to_load: Vec<PackageName> = Vec::new();
@@ -211,7 +211,7 @@ fn registry_dep_names(manifest: &Manifest) -> BTreeSet<PackageName> {
 }
 
 fn add_manifest_edges(
-    provider: &mut OfflineDependencyProvider<PubName, Version>,
+    provider: &mut Provider,
     manifest: &Manifest,
     path_deps: &BTreeMap<PackageName, PathPackage>,
     to_load: &mut Vec<PackageName>,
@@ -231,7 +231,7 @@ fn add_manifest_edges(
                         .get(dep)
                         .map(|p| p.manifest.version)
                         .unwrap_or_else(Version::zero);
-                    crate::version::VersionRange::exact(version)
+                    crate::version::VersionRange::singleton(version)
                 }
             };
             (PubName(dep.clone()), range)
@@ -240,7 +240,7 @@ fn add_manifest_edges(
     provider.add_dependencies(PubName(manifest.name.clone()), manifest.version, deps);
 }
 
-fn map_pubgrub_error(err: PubGrubError<PubName, Version>) -> ResolveError {
+fn map_pubgrub_error(err: PubGrubError<Provider>) -> ResolveError {
     match err {
         PubGrubError::NoSolution(mut tree) => {
             tree.collapse_no_versions();
@@ -249,6 +249,13 @@ fn map_pubgrub_error(err: PubGrubError<PubName, Version>) -> ResolveError {
         other => ResolveError::Solver(format!("{other:?}")),
     }
 }
+
+/// The concrete `OfflineDependencyProvider` this crate resolves against —
+/// named so `PubGrubError<Provider>` and friends don't need to spell out the
+/// full generic shape at every call site (pubgrub 0.4 parameterizes errors
+/// and results over the whole provider type, not `(Package, Version)`
+/// separately).
+type Provider = OfflineDependencyProvider<PubName, crate::version::VersionRange<Version>>;
 
 /// Newtype wrapping [`PackageName`] to satisfy pubgrub's `Package` bound
 /// (`Clone + Eq + Hash + Debug + Display`). Kept private: the `Hash` impl this
