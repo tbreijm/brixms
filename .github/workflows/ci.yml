@@ -65,6 +65,22 @@ jobs:
           fi
           echo "Frozen artifacts stable across repeated runs."
 
+  conformance:
+    name: conformance
+    # Already covered by `cargo test --workspace` in the `test` job above;
+    # broken out as its own named check (issue #11 / Ring0 §1.10's "starts
+    # Day 1, never stops") so oracle == compiled-engine drift has a distinct,
+    # always-visible signal as this suite grows (differential fuzz, more
+    # fixtures) instead of being buried in the general test job.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Toolchain (pinned via rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Errata fixtures + oracle/compiled-engine differential
+        run: cargo test -p brix-conformance
+
   cargo-deny:
     name: cargo-deny
     runs-on: ubuntu-latest

@@ -24,9 +24,12 @@
 //! already pinned by `brix-ir/src/types.rs`'s own test,
 //! `estimate_f64_is_value_canonical_but_not_key_canonical`.
 
+pub mod compiled_engine;
 pub mod fixture;
 pub mod fixtures;
 pub mod oracle_engine;
+pub mod translate;
 
+pub use compiled_engine::CompiledEngine;
 pub use fixture::{Engine, Fixture, RevDump, RunOutput};
 pub use oracle_engine::OracleEngine;

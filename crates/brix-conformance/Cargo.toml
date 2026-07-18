@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 brix-canon = { path = "../brix-canon" }
 brix-oracle = { path = "../brix-oracle" }
+brix-rt = { path = "../brix-rt" }
 
 [dev-dependencies]
 insta = { workspace = true }
