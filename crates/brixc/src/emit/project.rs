@@ -4,9 +4,11 @@
 //! itself has no relations field, by design: brix-ir never invents
 //! schema), rules from `Lowered.source.rules`.
 
-use brix_ir::core::Rule;
+use std::collections::BTreeMap;
+
+use brix_ir::core::{Head, Rule};
 use brix_ir::frontend::RelationSchema;
-use brix_ir::pattern::ReadKind;
+use brix_ir::pattern::{Arg, Clause, ReadKind, RoleArg};
 
 use crate::lower::Lowered;
 
@@ -20,7 +22,49 @@ use super::{ColumnDesc, RelationDesc, RuleDesc};
 /// — never from hash-map iteration order.
 pub fn project(lowered: &Lowered) -> (Vec<RelationDesc>, Vec<RuleDesc>) {
     let relations = lowered.resolver.relations().map(project_relation).collect();
-    let rules = lowered.source.rules.iter().map(project_rule).collect();
+    let rules = lowered
+        .source
+        .rules
+        .iter()
+        .map(|rule| project_rule(rule, 0))
+        .collect();
+    (relations, rules)
+}
+
+/// Project a phase-assigned program for native execution. Unlike the
+/// descriptor-only [`project`] helper, this carries the compiler's Appendix-F
+/// phase order into the generated scheduler registrations.
+pub fn project_phased(phased: &crate::phase::Phased) -> (Vec<RelationDesc>, Vec<RuleDesc>) {
+    let phase_by_rule: BTreeMap<_, _> = phased
+        .phases
+        .iter()
+        .flat_map(|phase| {
+            phase
+                .rules
+                .iter()
+                .map(move |rule| (rule.as_str(), phase.id as u32))
+        })
+        .collect();
+    let relations = phased
+        .lowered
+        .resolver
+        .relations()
+        .map(project_relation)
+        .collect();
+    let rules = phased
+        .lowered
+        .source
+        .rules
+        .iter()
+        .map(|rule| {
+            project_rule(
+                rule,
+                *phase_by_rule
+                    .get(rule.name.as_str())
+                    .expect("phase assignment must include every lowered rule"),
+            )
+        })
+        .collect();
     (relations, rules)
 }
 
@@ -39,7 +83,11 @@ fn project_relation(schema: &RelationSchema) -> RelationDesc {
     }
 }
 
-fn project_rule(rule: &Rule) -> RuleDesc {
+fn project_rule(rule: &Rule, phase: u32) -> RuleDesc {
+    let target_relation = match &rule.head {
+        Head::Tuple { relation, .. } => Some(relation.to_string()),
+        Head::Node { .. } | Head::Mask { .. } => None,
+    };
     RuleDesc {
         name: rule.name.to_string(),
         delta_sources: rule
@@ -53,13 +101,50 @@ fn project_rule(rule: &Rule) -> RuleDesc {
             .filter(|r| r.kind != ReadKind::History)
             .map(|r| r.relation.to_string())
             .collect(),
+        identity_source: identity_source(rule),
+        target_relation,
+        phase,
     }
+}
+
+/// Recognize the one rule form that can already be emitted as a native delta
+/// without a join plan: `Target(r: x, ...) <- Source(r: x, ...)`.  The role
+/// names and bound variables must agree exactly, so reusing the canonical row
+/// bytes is semantics-preserving rather than a heuristic.
+fn identity_source(rule: &Rule) -> Option<String> {
+    let Head::Tuple {
+        relation: _,
+        args: head_args,
+    } = &rule.head
+    else {
+        return None;
+    };
+    let [Clause::Edge {
+        relation,
+        args: body_args,
+        ..
+    }] = rule.body.clauses.as_slice()
+    else {
+        return None;
+    };
+    (head_args.len() == body_args.len() && head_args.iter().zip(body_args).all(same_identity_role))
+        .then(|| relation.to_string())
+}
+
+fn same_identity_role((head, body): (&RoleArg, &RoleArg)) -> bool {
+    head.role == body.role
+        && matches!(
+            (&head.arg, &body.arg),
+            (Arg::Var(head_var), Arg::Var(body_var)) if head_var == body_var
+        )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lower::lower_file;
+    use crate::phase::AstPhase;
+    use crate::pipeline::PhaseAssign;
     use brix_ast::parse_file;
 
     fn lower_flagship() -> Lowered {
@@ -90,5 +175,34 @@ mod tests {
             assert_eq!(a.key, b.key);
         }
         assert_eq!(rule_a.len(), rule_b.len());
+    }
+
+    #[test]
+    fn identity_rule_is_marked_for_native_delta_emission() {
+        let (file, parse_diags) = brix_ast::parse_file(
+            "package t @ 1.0.0\nrel Input { value: Int } key(value)\nrel Output { value: Int } key(value)\nderive R: Output(value: value) from { Input(value) }\n",
+        );
+        let lowered = crate::lower::lower_file(&file, &parse_diags);
+        let (_, rules) = project(&lowered);
+        assert_eq!(rules[0].target_relation.as_deref(), Some("Output"));
+        assert_eq!(rules[0].identity_source.as_deref(), Some("Input"));
+    }
+
+    #[test]
+    fn phased_projection_preserves_every_phase_assignment() {
+        let phased = AstPhase.assign_phases(lower_flagship()).unwrap();
+        let (_, rules) = project_phased(&phased);
+        for phase in &phased.phases {
+            for rule in &phase.rules {
+                assert_eq!(
+                    rules
+                        .iter()
+                        .find(|candidate| candidate.name == *rule)
+                        .unwrap()
+                        .phase,
+                    phase.id as u32
+                );
+            }
+        }
     }
 }

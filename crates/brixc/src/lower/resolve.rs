@@ -45,6 +45,16 @@ pub enum UnitClass {
     Money(IrIdent),
 }
 
+/// Transaction semantics retained alongside the schema so native runtime
+/// projection does not have to guess every relation is ground.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeRelationKind {
+    Entity,
+    Ground,
+    State,
+    Event,
+}
+
 /// Which enum (if any) declares a given bare variant name, for the
 /// unqualified-variant case (design: "In general expr pos, unqualified
 /// variant must be unique across enums in scope else error").
@@ -71,6 +81,7 @@ pub struct ProgramResolver {
     /// this is the enumerable mirror that makes that possible without
     /// widening brix-ir's public surface beyond mismatches (A)/(B).
     relations_by_name: BTreeMap<QualIdent, RelationSchema>,
+    relation_kinds: BTreeMap<QualIdent, RuntimeRelationKind>,
     entities: std::collections::BTreeSet<QualIdent>,
     enums: BTreeMap<QualIdent, Vec<IrIdent>>,
     type_ns: BTreeMap<QualIdent, TypeNsEntry>,
@@ -89,6 +100,9 @@ impl ProgramResolver {
     }
 
     pub fn with_relation(mut self, schema: RelationSchema) -> Self {
+        self.relation_kinds
+            .entry(schema.name.clone())
+            .or_insert(RuntimeRelationKind::Ground);
         self.relations_by_name
             .insert(schema.name.clone(), schema.clone());
         self.table = self.table.with_relation(schema);
@@ -112,9 +126,23 @@ impl ProgramResolver {
     }
 
     pub fn with_entity(mut self, name: QualIdent) -> Self {
+        self.relation_kinds
+            .insert(name.clone(), RuntimeRelationKind::Entity);
         self.type_ns.insert(name.clone(), TypeNsEntry::Entity);
         self.entities.insert(name);
         self
+    }
+
+    pub fn with_relation_kind(mut self, name: QualIdent, kind: RuntimeRelationKind) -> Self {
+        self.relation_kinds.insert(name, kind);
+        self
+    }
+
+    pub fn relation_kind(&self, name: &QualIdent) -> RuntimeRelationKind {
+        self.relation_kinds
+            .get(name)
+            .copied()
+            .unwrap_or(RuntimeRelationKind::Ground)
     }
 
     pub fn with_enum(mut self, name: QualIdent, variants: Vec<IrIdent>) -> Self {
