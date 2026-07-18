@@ -48,7 +48,9 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use brix_ir::core::{Expr, ExprKind, ExprOrigin, Head, Query, Rule, SourceRange};
+use brix_ir::core::{
+    Constraint, Expr, ExprKind, ExprOrigin, Head, Query, Rule, Severity, SourceRange,
+};
 use brix_ir::effects::EffectRow;
 use brix_ir::frontend::{
     FnSignature, FrontendSource, RelationSchema, SchemaResolver, TableResolver,
@@ -209,6 +211,9 @@ fn assert_parity(label: &str, source: &FrontendSource, resolver: &impl SchemaRes
     for rule in &bootstrap.rules {
         collect_expr_types(&rule.body, &mut infer_types);
     }
+    for constraint in &bootstrap.constraints {
+        collect_expr_types(&constraint.body, &mut infer_types);
+    }
     for query in &bootstrap.queries {
         collect_expr_types(&query.body, &mut infer_types);
         collect_expr_type(&query.yields, &mut infer_types);
@@ -327,19 +332,31 @@ impl Origins {
     }
 }
 
-/// Fixture 1 (#15 acceptance): the flagship pricing computation
-/// (`rate * length + surcharge`) mutated to `rate / length + surcharge`,
-/// the same one-character dimension-breaking mutation
-/// `crates/brixc/tests/lower_flagship.rs::
+/// Fixture 1 (#15 acceptance, upgraded by #33): the flagship pricing
+/// computation (`rate * length + surcharge`) mutated to
+/// `rate / length + surcharge`, the same one-character dimension-breaking
+/// mutation `crates/brixc/tests/lower_flagship.rs::
 /// flagship_pricing_multiply_to_divide_mutation_is_one_dimension_error`
 /// exercises end-to-end through the real `.brix` fixture and lowering
 /// pipeline. This is the identical `Money<EUR>/Kilometre` rate shape at the
 /// brix-ir level (no brixc/AST dependency available from this crate).
+///
+/// #33 closed the `infer_source`-never-visits-`constraints` coverage gap
+/// (see the module doc and fixture 4's doc), so this fixture now also
+/// carries the flagship's actual `Capacity` constraint body —
+/// `Move(order: o, vehicle: v); o: Order { weight: w }; v: Vehicle { capacity: cap }; when w > cap`
+/// — verbatim from `0001-part-i-the-flagship-program.brix`. Both checkers
+/// were verified clean on the real lowered flagship's `Capacity` constraint
+/// (`brix_ir::infer::infer_source` / `brix_ir::reflect::analyze` over
+/// `brixc::lower_file`'s output), so this fixture asserts that same clean
+/// verdict stays true at the brix-ir level, alongside the still-conflicting
+/// pricing mutation.
 #[test]
 fn flagship_pricing_mutation_agrees() {
     let o = Origins::new("Price");
     let eur = Ident::new("EUR");
     let km = Ident::new("Kilometre");
+    let mass = Ident::new("Mass");
     let rate = Ty::Dimensioned(dimensions_div(
         &money_dimensions(&eur),
         &quantity_dimensions(&km),
@@ -361,12 +378,85 @@ fn flagship_pricing_mutation_agrees() {
         ),
         result: o.ty_var(),
     };
+
+    // Reuses `o`, not a second `Origins`: two `Origins` instances both start
+    // their placeholder-`TyVar` counter at the same 100_000 offset (see
+    // `Origins::ty_var`'s doc), which is fine when each fixture has exactly
+    // one, but two in the same fixture collide across declarations — this
+    // constraint's `w`/`cap` would alias the query's `rate`/`length` inside
+    // the single `Infer`/`Reflect` `subst` `infer_source`/`analyze` share
+    // for the whole source. Real lowered programs never hit this (`brixc`
+    // assigns globally-unique `TyVar`s); this is purely a hand-built-fixture
+    // hazard.
+    let capacity = Constraint {
+        name: Ident::new("Capacity"),
+        severity: Severity::Strict,
+        body: Pattern::new(vec![
+            Clause::Edge {
+                bind: None,
+                relation: QualIdent::from("Move"),
+                args: vec![
+                    RoleArg {
+                        role: Ident::new("order"),
+                        arg: Arg::Var(Ident::new("o")),
+                    },
+                    RoleArg {
+                        role: Ident::new("vehicle"),
+                        arg: Arg::Var(Ident::new("v")),
+                    },
+                ],
+            },
+            Clause::Entity {
+                var: Ident::new("o"),
+                entity: Ident::new("Order"),
+                fields: vec![RoleArg {
+                    role: Ident::new("weight"),
+                    arg: Arg::Var(Ident::new("w")),
+                }],
+            },
+            Clause::Entity {
+                var: Ident::new("v"),
+                entity: Ident::new("Vehicle"),
+                fields: vec![RoleArg {
+                    role: Ident::new("capacity"),
+                    arg: Arg::Var(Ident::new("cap")),
+                }],
+            },
+            Clause::When(o.op("gt", vec![o.var("w"), o.var("cap")])),
+        ]),
+    };
+
     let source = FrontendSource {
         rules: vec![],
-        constraints: vec![],
+        constraints: vec![capacity],
         queries: vec![query],
     };
-    assert_parity("flagship_pricing_mutation", &source, &TableResolver::new());
+    let resolver = TableResolver::new()
+        .with_relation(RelationSchema {
+            name: QualIdent::from("Move"),
+            roles: vec![
+                (Ident::new("order"), Ty::NodeRef(Ident::new("Order"))),
+                (Ident::new("vehicle"), Ty::NodeRef(Ident::new("Vehicle"))),
+            ],
+            key: vec![Ident::new("order")],
+            model_closed: true,
+            derived: false,
+        })
+        .with_relation(RelationSchema {
+            name: QualIdent::from("Order"),
+            roles: vec![(Ident::new("weight"), Ty::Quantity(mass.clone()))],
+            key: vec![],
+            model_closed: true,
+            derived: false,
+        })
+        .with_relation(RelationSchema {
+            name: QualIdent::from("Vehicle"),
+            roles: vec![(Ident::new("capacity"), Ty::Quantity(mass))],
+            key: vec![],
+            model_closed: true,
+            derived: false,
+        });
+    assert_parity("flagship_pricing_mutation", &source, &resolver);
 }
 
 /// Fixture 2: a `when` guard whose expression is not `Bool`.
@@ -421,13 +511,15 @@ fn arity_mismatch_agrees() {
 /// Fixture 4: an edge clause's literal role argument does not match the
 /// relation schema's declared role type.
 ///
-/// Uses a `Rule`, not a `Constraint`: `infer_source` does not visit
-/// `FrontendSource::constraints` at all (only `rules`/`queries`) while
-/// `reflect::analyze` does — a real, independently-discovered divergence
-/// this harness caught, but a *coverage* gap (which declarations get
-/// checked), not one of the five unification-algebra divergences #15 PR2
-/// scopes. Left for a follow-up PR; flagged in the PR report rather than
-/// fixed here or silently routed around.
+/// Uses a `Rule`, not a `Constraint`, purely for fixture variety —
+/// `constraint_non_bool_guard_agrees` and `constraint_role_mismatch_agrees`
+/// below now exercise the same shapes through `Constraint` bodies. (Issue
+/// #33 closed the coverage gap this comment used to document:
+/// `infer_source` did not visit `FrontendSource::constraints` at all, only
+/// `rules`/`queries`, while `reflect::analyze` did — a real,
+/// independently-discovered divergence this harness caught, but a
+/// *coverage* gap, not one of the five unification-algebra divergences #15
+/// PR2 scopes.)
 #[test]
 fn role_mismatch_agrees() {
     let source = FrontendSource {
@@ -567,4 +659,58 @@ fn open_row_extra_field_is_admitted() {
         }],
     };
     assert_parity("open_row_extra_field", &source, &TableResolver::new());
+}
+
+/// Fixture 9 (#33): a `when` guard whose expression is not `Bool`, this time
+/// inside a `Constraint` body rather than a `Rule` body — the exact shape
+/// `infer_source` used to silently skip entirely (it never visited
+/// `FrontendSource::constraints`) while `reflect::analyze` caught it. Proves
+/// `Infer::constraint` runs the same guard check `Infer::pattern` already
+/// gives `Infer::rule`.
+#[test]
+fn constraint_non_bool_guard_agrees() {
+    let o = Origins::new("Guard");
+    let source = FrontendSource {
+        rules: vec![],
+        constraints: vec![Constraint {
+            name: Ident::new("Guard"),
+            severity: Severity::Strict,
+            body: Pattern::new(vec![Clause::When(
+                o.lit(Ty::Int(IntWidth::Int), Lit::Int(1)),
+            )]),
+        }],
+        queries: vec![],
+    };
+    assert_parity("constraint_non_bool_guard", &source, &TableResolver::new());
+}
+
+/// Fixture 10 (#33): an edge clause's literal role argument does not match
+/// the relation schema's declared role type, this time inside a
+/// `Constraint` body rather than a `Rule` body (mirrors fixture 4's shape).
+#[test]
+fn constraint_role_mismatch_agrees() {
+    let source = FrontendSource {
+        rules: vec![],
+        constraints: vec![Constraint {
+            name: Ident::new("RoleGuard"),
+            severity: Severity::Strict,
+            body: Pattern::new(vec![Clause::Edge {
+                bind: None,
+                relation: QualIdent::from("R"),
+                args: vec![RoleArg {
+                    role: Ident::new("n"),
+                    arg: Arg::Lit(Lit::Bool(true)),
+                }],
+            }]),
+        }],
+        queries: vec![],
+    };
+    let resolver = TableResolver::new().with_relation(RelationSchema {
+        name: QualIdent::from("R"),
+        roles: vec![(Ident::new("n"), Ty::Int(IntWidth::Int))],
+        key: vec![],
+        model_closed: true,
+        derived: false,
+    });
+    assert_parity("constraint_role_mismatch", &source, &resolver);
 }

@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::core::{Expr, ExprKind, Head, Query, Rule};
+use crate::core::{Constraint, Expr, ExprKind, Head, Query, Rule};
 use crate::frontend::{FrontendSource, SchemaResolver};
 use crate::ident::{Ident, QualIdent};
 use crate::pattern::{Arg, Clause, Lit, Pattern, RoleArg};
@@ -82,6 +82,9 @@ pub fn infer_source(source: &mut FrontendSource, resolver: &impl SchemaResolver)
     for rule in &mut source.rules {
         cx.rule(rule, resolver);
     }
+    for constraint in &mut source.constraints {
+        cx.constraint(constraint, resolver);
+    }
     for query in &mut source.queries {
         cx.query(query, resolver);
     }
@@ -101,6 +104,17 @@ impl Infer {
         self.pattern(&mut rule.body, &mut env, resolver);
         self.head(&rule.head, &env, resolver);
         self.zonk_pattern(&mut rule.body);
+    }
+    /// Mirrors [`Infer::rule`] minus the `head` call: a [`Constraint`] body
+    /// is a bare [`Pattern`] with no head to check against a relation
+    /// schema (`crate::core::Constraint` has `{ name, severity, body }`).
+    /// Matches `reflect::Reflect::constraint`'s traversal exactly, closing
+    /// the #15 PR2 coverage gap where `infer_source` never visited
+    /// `FrontendSource::constraints` at all.
+    fn constraint(&mut self, constraint: &mut Constraint, resolver: &impl SchemaResolver) {
+        let mut env = Env::new();
+        self.pattern(&mut constraint.body, &mut env, resolver);
+        self.zonk_pattern(&mut constraint.body);
     }
     fn query(&mut self, query: &mut Query, resolver: &impl SchemaResolver) {
         let mut env: Env = query.params.iter().cloned().collect();
