@@ -52,6 +52,7 @@
 //! trait — see `CONTRIBUTING.md`.
 
 pub mod delta;
+pub mod engine;
 pub mod graph;
 pub mod ids;
 pub mod mvcc;
