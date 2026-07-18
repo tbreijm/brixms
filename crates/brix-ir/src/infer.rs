@@ -46,6 +46,15 @@ pub enum TypeError {
         var: TyVar,
         in_ty: Ty,
     },
+    /// #15 PR5 (§19.1 / conformance I.22.2): an implicit conversion from an
+    /// epistemic-status-bearing type (`Estimate<T>`, `Missing<T>`,
+    /// `Probability`) to its plain payload type (or, for `Probability`,
+    /// `Bool`) was attempted. Distinct from [`TypeError::Mismatch`] so the
+    /// diagnostic names the erasure — see [`crate::solve::Step::Erasure`].
+    EpistemicErasure {
+        from: Ty,
+        to: Ty,
+    },
 }
 
 impl core::fmt::Display for TypeError {
@@ -73,6 +82,10 @@ impl core::fmt::Display for TypeError {
             Self::Occurs { var, in_ty } => {
                 write!(f, "occurs check failed: {var} occurs in {in_ty}")
             }
+            Self::EpistemicErasure { from, to } => write!(
+                f,
+                "epistemic status erasure: {from} cannot implicitly convert to {to}"
+            ),
         }
     }
 }
@@ -428,6 +441,7 @@ impl Infer {
             Step::Mismatch(expected, found) => {
                 self.errors.push(TypeError::Mismatch { expected, found })
             }
+            Step::Erasure(from, to) => self.errors.push(TypeError::EpistemicErasure { from, to }),
         }
     }
     fn bind(&mut self, v: TyVar, t: Ty) {
@@ -572,6 +586,34 @@ mod tests {
             "{errors:?}"
         );
     }
+    #[test]
+    fn estimate_result_unified_against_plain_expected_is_an_epistemic_erasure() {
+        let mut source = FrontendSource {
+            rules: vec![],
+            constraints: vec![],
+            queries: vec![Query {
+                name: Ident::new("Erasure"),
+                params: vec![(
+                    Ident::new("x"),
+                    Ty::Estimate(Box::new(Ty::Int(crate::types::IntWidth::Int))),
+                )],
+                body: Pattern::default(),
+                yields: var("x", Ty::Var(TyVar(20))),
+                result: Ty::rel(Row::closed(vec![crate::types::RowField {
+                    name: Ident::new("value"),
+                    ty: Ty::Int(crate::types::IntWidth::Int),
+                }])),
+            }],
+        };
+        let errors = infer_source(&mut source, &TableResolver::new());
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, TypeError::EpistemicErasure { .. })),
+            "{errors:?}"
+        );
+    }
+
     #[test]
     fn rejects_non_bool_guard_and_bad_arity_without_cascade() {
         let mut source = FrontendSource {

@@ -92,6 +92,10 @@ enum Category {
     TryNonResult,
     NonBoolGuard,
     Occurs,
+    /// #15 PR5: §19.1 / conformance I.22.2's forbidden epistemic-to-plain
+    /// erasure (`Estimate<T>`/`Missing<T>` -/-> `T`, `Probability` -/->
+    /// `Bool`) — a named category, not folded into `Mismatch`.
+    EpistemicErasure,
 }
 
 fn infer_category(error: &TypeError) -> Category {
@@ -103,15 +107,17 @@ fn infer_category(error: &TypeError) -> Category {
         TypeError::NonBoolGuard { .. } => Category::NonBoolGuard,
         TypeError::TryNonResult { .. } => Category::TryNonResult,
         TypeError::Occurs { .. } => Category::Occurs,
+        TypeError::EpistemicErasure { .. } => Category::EpistemicErasure,
     }
 }
 
 /// `reflect::ConflictKind` -> `Category`, per the #15 PR3 rewiring: the
 /// harness now maps from the frozen [`ConflictKind`] enum instead of the old
 /// free-text `operation` string. The map is 1:1 and exhaustive over the
-/// seven *type-inference* variants: `Mismatch->Mismatch`, `Arity->Arity`,
+/// eight *type-inference* variants: `Mismatch->Mismatch`, `Arity->Arity`,
 /// `UnknownField->UnknownField`, `NonBool->NonBoolGuard`, `Occurs->Occurs`,
-/// `Dimension->Dimension`, `TryNonResult->TryNonResult`.
+/// `Dimension->Dimension`, `TryNonResult->TryNonResult`, `EpistemicErasure->
+/// EpistemicErasure` (#15 PR5).
 ///
 /// `TryNonResult` was appended to `ConflictKind` (after the initial PR 3
 /// freeze) specifically to restore this 1:1 mapping: a `?` postfix over a
@@ -138,6 +144,7 @@ fn reflect_category(kind: &ConflictKind) -> Option<Category> {
         ConflictKind::Occurs { .. } => Some(Category::Occurs),
         ConflictKind::Dimension { .. } => Some(Category::Dimension),
         ConflictKind::TryNonResult { .. } => Some(Category::TryNonResult),
+        ConflictKind::EpistemicErasure { .. } => Some(Category::EpistemicErasure),
         ConflictKind::ImpureRule
         | ConflictKind::NondeterministicRule
         | ConflictKind::DivergentRule
@@ -293,7 +300,7 @@ fn finding_category(finding: &Finding) -> Option<RuleCategory> {
 }
 
 /// `reflect::ConflictKind` -> `RuleCategory`, the mirror-side counterpart of
-/// `finding_category`. `None` for the seven type-inference variants (those
+/// `finding_category`. `None` for the eight type-inference variants (those
 /// belong to `reflect_category`/`Category` instead).
 fn conflict_rule_category(kind: &ConflictKind) -> Option<RuleCategory> {
     match kind {
@@ -309,7 +316,8 @@ fn conflict_rule_category(kind: &ConflictKind) -> Option<RuleCategory> {
         | ConflictKind::NonBool { .. }
         | ConflictKind::Occurs { .. }
         | ConflictKind::Dimension { .. }
-        | ConflictKind::TryNonResult { .. } => None,
+        | ConflictKind::TryNonResult { .. }
+        | ConflictKind::EpistemicErasure { .. } => None,
     }
 }
 
@@ -964,4 +972,144 @@ fn rule_ordinary_fn_on_derived_rel_agrees() {
             may_diverge: false,
         });
     assert_rule_side_condition_parity("rule_ordinary_fn_on_derived_rel", &rule, &resolver);
+}
+
+/// Fixture 16 (#15 PR5, §19.1): `Estimate<T>` unified against its own plain
+/// payload type (`query.result` declares `{value: Int}`, but the yielded
+/// param is `Estimate<Int>`) is a named erasure, not a generic mismatch —
+/// both checkers must land the conflict in the `EpistemicErasure` category.
+#[test]
+fn estimate_to_plain_erasure_agrees() {
+    let o = Origins::new("Erasure");
+    let source = FrontendSource {
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("Erasure"),
+            params: vec![(
+                Ident::new("x"),
+                Ty::Estimate(Box::new(Ty::Int(IntWidth::Int))),
+            )],
+            body: Pattern::default(),
+            yields: o.var("x"),
+            result: Ty::rel(Row::closed(vec![RowField {
+                name: Ident::new("value"),
+                ty: Ty::Int(IntWidth::Int),
+            }])),
+        }],
+    };
+    assert_parity("estimate_to_plain_erasure", &source, &TableResolver::new());
+
+    let report = analyze(&source, &TableResolver::new());
+    assert!(
+        report
+            .conflicts
+            .iter()
+            .any(|c| matches!(c.kind, ConflictKind::EpistemicErasure { .. })),
+        "expected an EpistemicErasure conflict: {report:#?}"
+    );
+}
+
+/// Fixture 17 (#15 PR5, §19.1): `Probability` unified against `Bool` is a
+/// named erasure — distinct from (and must not be confused with) the
+/// separate, deliberately-kept `Probability ~ F64` v1 bridge exercised by
+/// `flagship_pricing_mutation_agrees`'s `Escalate`-shaped guard elsewhere in
+/// the flagship.
+#[test]
+fn probability_to_bool_erasure_agrees() {
+    let o = Origins::new("Erasure");
+    let source = FrontendSource {
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("Erasure"),
+            params: vec![(Ident::new("p"), Ty::Probability)],
+            body: Pattern::default(),
+            yields: o.var("p"),
+            result: Ty::rel(Row::closed(vec![RowField {
+                name: Ident::new("value"),
+                ty: Ty::Bool,
+            }])),
+        }],
+    };
+    assert_parity(
+        "probability_to_bool_erasure",
+        &source,
+        &TableResolver::new(),
+    );
+
+    let report = analyze(&source, &TableResolver::new());
+    assert!(
+        report
+            .conflicts
+            .iter()
+            .any(|c| matches!(c.kind, ConflictKind::EpistemicErasure { .. })),
+        "expected an EpistemicErasure conflict: {report:#?}"
+    );
+}
+
+/// Fixture 18 (#15 PR5, §27.3 / conformance I.22.2): `Missing<T>` must not
+/// silently coerce to `T` — same named `EpistemicErasure` family as
+/// `Estimate<T>`/`Probability` above, not a generic mismatch.
+#[test]
+fn missing_to_plain_implicit_coercion_is_an_erasure() {
+    let o = Origins::new("Erasure");
+    let source = FrontendSource {
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("Erasure"),
+            params: vec![(Ident::new("m"), Ty::missing(Ty::Bool))],
+            body: Pattern::default(),
+            yields: o.var("m"),
+            result: Ty::rel(Row::closed(vec![RowField {
+                name: Ident::new("value"),
+                ty: Ty::Bool,
+            }])),
+        }],
+    };
+    assert_parity(
+        "missing_to_plain_implicit_coercion",
+        &source,
+        &TableResolver::new(),
+    );
+
+    let report = analyze(&source, &TableResolver::new());
+    assert!(
+        report
+            .conflicts
+            .iter()
+            .any(|c| matches!(c.kind, ConflictKind::EpistemicErasure { .. })),
+        "expected an EpistemicErasure conflict: {report:#?}"
+    );
+}
+
+/// Fixture 19 (#15 PR5, §27.3): a well-typed `Missing<T>` flow — the yielded
+/// param and the declared result agree on the identical `Missing<Int>` type,
+/// no coercion attempted — both checkers must accept it with zero
+/// conflicts.
+#[test]
+fn missing_well_typed_flow_agrees() {
+    let o = Origins::new("MissingFlow");
+    let source = FrontendSource {
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("MissingFlow"),
+            params: vec![(Ident::new("m"), Ty::missing(Ty::Int(IntWidth::Int)))],
+            body: Pattern::default(),
+            yields: o.var("m"),
+            result: Ty::rel(Row::closed(vec![RowField {
+                name: Ident::new("value"),
+                ty: Ty::missing(Ty::Int(IntWidth::Int)),
+            }])),
+        }],
+    };
+    assert_parity("missing_well_typed_flow", &source, &TableResolver::new());
+
+    let report = analyze(&source, &TableResolver::new());
+    assert!(report.is_consistent(), "{report:#?}");
+    let mut bootstrap = source.clone();
+    let errors = infer_source(&mut bootstrap, &TableResolver::new());
+    assert!(errors.is_empty(), "{errors:?}");
 }
