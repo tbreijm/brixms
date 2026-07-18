@@ -319,6 +319,86 @@ impl Pattern {
         out
     }
 
+    /// The edge-reference bindings this pattern exports (Appendix E
+    /// `EdgeRefs(B)`): only the `e @ R(...)` / `history e @ R(...)` alias
+    /// bindings, *not* ordinary role-argument bindings — [`bound_vars`]
+    /// mixes both together, which is right for typing but wrong for the
+    /// mask-head side condition (`target, reason ∈ EdgeRefs(B)`), which only
+    /// admits genuine edge aliases. Scoping mirrors `bound_vars`: `without`/
+    /// `exists`/`when`/`let` export nothing, `optional`/`cross` export
+    /// through, `any` exports the per-case intersection.
+    ///
+    /// [`bound_vars`]: Pattern::bound_vars
+    pub fn edge_refs(&self) -> Vec<Ident> {
+        let mut out = Vec::new();
+        self.collect_edge_refs(&mut out);
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn collect_edge_refs(&self, out: &mut Vec<Ident>) {
+        for clause in &self.clauses {
+            match clause {
+                Clause::Edge { bind, .. } | Clause::History { bind, .. } => {
+                    if let Some(b) = bind {
+                        out.push(b.clone());
+                    }
+                }
+                Clause::Optional(p) | Clause::Cross(p) => p.collect_edge_refs(out),
+                Clause::Any(cases) => {
+                    if let Some((first, rest)) = cases.split_first() {
+                        let mut common = first.edge_refs();
+                        for case in rest {
+                            let cv = case.edge_refs();
+                            common.retain(|v| cv.contains(v));
+                        }
+                        out.extend(common);
+                    }
+                }
+                Clause::Entity { .. }
+                | Clause::Let { .. }
+                | Clause::When(_)
+                | Clause::Exists(_)
+                | Clause::Without(_) => {}
+            }
+        }
+    }
+
+    /// Every expression appearing in this pattern's `let`/`when` clauses,
+    /// recursing into every nested clause shape (unlike [`bound_vars`]'s
+    /// exported-bindings scoping, side-condition checks over Appendix E
+    /// `Rule` need to see every expression the body evaluates, including
+    /// ones inside `without`/`exists`). Does not descend into a
+    /// [`crate::core::ExprKind::Comprehension`]'s own nested pattern —
+    /// callers that need the full expression tree recurse into those
+    /// themselves once they reach a `Comprehension` node.
+    ///
+    /// [`bound_vars`]: Pattern::bound_vars
+    pub fn body_exprs(&self) -> Vec<&crate::core::Expr> {
+        let mut out = Vec::new();
+        self.collect_body_exprs(&mut out);
+        out
+    }
+
+    fn collect_body_exprs<'a>(&'a self, out: &mut Vec<&'a crate::core::Expr>) {
+        for clause in &self.clauses {
+            match clause {
+                Clause::Let { expr, .. } => out.push(expr),
+                Clause::When(expr) => out.push(expr),
+                Clause::Any(cases) => {
+                    for c in cases {
+                        c.collect_body_exprs(out);
+                    }
+                }
+                Clause::Exists(p) | Clause::Without(p) | Clause::Optional(p) | Clause::Cross(p) => {
+                    p.collect_body_exprs(out)
+                }
+                Clause::Edge { .. } | Clause::Entity { .. } | Clause::History { .. } => {}
+            }
+        }
+    }
+
     fn collect_reads(&self, ctx: ReadContext, out: &mut Vec<RelRead>) {
         for clause in &self.clauses {
             match clause {
@@ -510,6 +590,48 @@ mod tests {
             }],
         }]);
         assert_eq!(p.to_string(), "OrderStatus(value: Status#0)");
+    }
+
+    #[test]
+    fn edge_refs_excludes_role_argument_bindings() {
+        let p = Pattern::new(vec![Clause::Edge {
+            bind: Some(Ident::new("e")),
+            relation: q("ComputedPrice"),
+            args: vec![RoleArg {
+                role: Ident::new("order"),
+                arg: Arg::Var(Ident::new("o")),
+            }],
+        }]);
+        let refs = p.edge_refs();
+        assert_eq!(refs, vec![Ident::new("e")]);
+        // `o` is a bound_var but not an edge ref.
+        assert!(p.bound_vars().contains(&Ident::new("o")));
+    }
+
+    #[test]
+    fn edge_refs_is_empty_when_no_alias_is_bound() {
+        let p = Pattern::new(vec![edge("ComputedPrice", &[("order", "o")])]);
+        assert!(p.edge_refs().is_empty());
+    }
+
+    #[test]
+    fn body_exprs_collects_let_and_when_recursively() {
+        use crate::core::{Expr, ExprKind};
+        use crate::types::IntWidth;
+
+        let let_expr = Expr::new(Ty::Int(IntWidth::Int), ExprKind::Lit(Lit::Int(1)));
+        let when_expr = Expr::new(Ty::Bool, ExprKind::Lit(Lit::Bool(true)));
+        let p = Pattern::new(vec![
+            Clause::Let {
+                binds: Ident::new("x"),
+                expr: let_expr.clone(),
+            },
+            Clause::Without(Pattern::new(vec![Clause::When(when_expr.clone())])),
+        ]);
+        let exprs = p.body_exprs();
+        assert_eq!(exprs.len(), 2);
+        assert!(exprs.contains(&&let_expr));
+        assert!(exprs.contains(&&when_expr));
     }
 
     #[test]

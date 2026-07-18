@@ -44,9 +44,26 @@ use core::fmt;
 /// A stable, declaration-local subject in the reflective fact graph.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Subject {
-    Binding { declaration: Ident, name: Ident },
-    Expr { origin: ExprOrigin },
-    Head { declaration: Ident, role: Ident },
+    Binding {
+        declaration: Ident,
+        name: Ident,
+    },
+    Expr {
+        origin: ExprOrigin,
+    },
+    Head {
+        declaration: Ident,
+        role: Ident,
+    },
+    /// A whole rule declaration, as a unit — the subject Appendix E rule
+    /// side-condition conflicts (#15 PR4: `pure`/`det`/`nondiverge`,
+    /// `keys(H) ⊆ Bindings`, mask-head, `Ordinary fn`) attach to, since
+    /// those judgments are over the rule as a whole rather than any one
+    /// binding/expr/head-role. Appended after the PR 3 freeze — new
+    /// ordinal, existing arms' encodings unchanged.
+    Rule {
+        declaration: Ident,
+    },
 }
 
 impl Canonical for Subject {
@@ -67,6 +84,7 @@ impl Canonical for Subject {
                 declaration.canon_write(w);
                 role.canon_write(w);
             }),
+            Subject::Rule { declaration } => w.write_enum(3, |w| declaration.canon_write(w)),
         }
     }
 }
@@ -325,6 +343,31 @@ pub enum ConflictKind {
     TryNonResult {
         found: Ty,
     },
+    /// #15 PR4: Appendix E `pure(B, H)` violated — mirrors
+    /// [`crate::check::Finding::ImpureRule`]. Subject is a
+    /// [`Subject::Rule`].
+    ImpureRule,
+    /// #15 PR4: Appendix E `det(B, H)` violated — mirrors
+    /// [`crate::check::Finding::NondeterministicRule`].
+    NondeterministicRule,
+    /// #15 PR4: Appendix E `nondiverge(B, H)` violated — mirrors
+    /// [`crate::check::Finding::DivergentRule`].
+    DivergentRule,
+    /// #15 PR4: Appendix E `keys(H) ⊆ Bindings` violated — mirrors
+    /// [`crate::check::Finding::UnboundHeadKey`].
+    UnboundHeadKey {
+        key: Ident,
+    },
+    /// #15 PR4: Appendix E mask-head side condition violated — mirrors
+    /// [`crate::check::Finding::MaskRefNotEdgeBound`].
+    MaskRefNotEdgeBound {
+        var: Ident,
+    },
+    /// #15 PR4: Appendix E `Ordinary fn` violated — mirrors
+    /// [`crate::check::Finding::OrdinaryFnOnDerivedRel`].
+    OrdinaryFnOnDerivedRel {
+        relation: QualIdent,
+    },
 }
 
 /// A derived incompatibility. It is intentionally distinct from a kernel key
@@ -364,6 +407,14 @@ pub fn write_conflict(conflict: &TypeConflict, w: &mut CanonWriter) {
             right.canon_write(w);
         }),
         ConflictKind::TryNonResult { found } => w.write_enum(6, |w| found.canon_write(w)),
+        ConflictKind::ImpureRule => w.write_enum(7, |_| {}),
+        ConflictKind::NondeterministicRule => w.write_enum(8, |_| {}),
+        ConflictKind::DivergentRule => w.write_enum(9, |_| {}),
+        ConflictKind::UnboundHeadKey { key } => w.write_enum(10, |w| key.canon_write(w)),
+        ConflictKind::MaskRefNotEdgeBound { var } => w.write_enum(11, |w| var.canon_write(w)),
+        ConflictKind::OrdinaryFnOnDerivedRel { relation } => {
+            w.write_enum(12, |w| relation.canon_write(w))
+        }
     }
 }
 
@@ -469,6 +520,14 @@ impl Reflect {
                     *right = solve::resolve(&subst, right.clone());
                 }
                 ConflictKind::Arity { .. } | ConflictKind::UnknownField { .. } => {}
+                // #15 PR4: no `Ty` payload to resolve — Appendix E rule
+                // side-condition conflicts carry only `Ident`/`QualIdent`.
+                ConflictKind::ImpureRule
+                | ConflictKind::NondeterministicRule
+                | ConflictKind::DivergentRule
+                | ConflictKind::UnboundHeadKey { .. }
+                | ConflictKind::MaskRefNotEdgeBound { .. }
+                | ConflictKind::OrdinaryFnOnDerivedRel { .. } => {}
             }
         }
     }
@@ -675,6 +734,53 @@ impl Reflect {
         let mut env = Env::new();
         self.pattern(&rule.name, &rule.body, &mut env, resolver);
         self.head(&rule.name, &rule.head, &env, resolver);
+        self.rule_side_conditions(rule, resolver);
+    }
+
+    /// #15 PR4: mirror [`crate::check::check_rule`]'s Appendix E rule
+    /// side-condition checks (`pure`/`det`/`nondiverge`, `keys(H) ⊆
+    /// Bindings`, mask-head, `Ordinary fn`) as [`TypeConflict`]s, using the
+    /// exact same shared judgments (`crate::check::scan_rule_calls`,
+    /// `unbound_head_keys`, `unbound_mask_refs`, and
+    /// `Rule::effect_flags`) the trusted checker uses — "one algorithm, two
+    /// observers," same as [`crate::solve`] for the type algebra, so the
+    /// two checkers cannot silently diverge on what counts as a violation.
+    fn rule_side_conditions(&mut self, rule: &Rule, resolver: &impl SchemaResolver) {
+        let subject = Subject::Rule {
+            declaration: rule.name.clone(),
+        };
+        let flags = rule.effect_flags();
+        let calls = crate::check::scan_rule_calls(rule, resolver);
+        if !flags.pure {
+            self.conflict(subject.clone(), ConflictKind::ImpureRule, vec![]);
+        }
+        if !flags.det {
+            self.conflict(subject.clone(), ConflictKind::NondeterministicRule, vec![]);
+        }
+        if !flags.nondiverge || calls.diverges {
+            self.conflict(subject.clone(), ConflictKind::DivergentRule, vec![]);
+        }
+        for key in crate::check::unbound_head_keys(rule) {
+            self.conflict(
+                subject.clone(),
+                ConflictKind::UnboundHeadKey { key },
+                vec![],
+            );
+        }
+        for var in crate::check::unbound_mask_refs(rule) {
+            self.conflict(
+                subject.clone(),
+                ConflictKind::MaskRefNotEdgeBound { var },
+                vec![],
+            );
+        }
+        for relation in calls.ordinary_on_derived {
+            self.conflict(
+                subject.clone(),
+                ConflictKind::OrdinaryFnOnDerivedRel { relation },
+                vec![],
+            );
+        }
     }
 
     fn query(&mut self, query: &Query, resolver: &impl SchemaResolver) {

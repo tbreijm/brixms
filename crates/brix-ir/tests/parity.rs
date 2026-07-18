@@ -44,14 +44,31 @@
 //! lowered programs never hit this — `brixc`'s lowering assigns a fresh
 //! `TyVar` and a real source-derived `ExprOrigin` per node — so `Origins`
 //! below exists purely to make hand-built fixtures behave like real ones.
+//!
+//! # #15 PR4: a second, independent parity axis
+//!
+//! Appendix E's *rule side conditions* (`pure`/`det`/`nondiverge`,
+//! `keys(H) ⊆ Bindings`, mask-head, `Ordinary fn`) are not type-inference
+//! judgments — `infer_source` has no notion of them at all, only
+//! `brix_ir::check::check_rule` (the trusted checker) and
+//! `brix_ir::reflect::analyze` (mirrored onto `ConflictKind`, #15 PR4) do.
+//! So these get their own `RuleCategory`/`assert_rule_side_condition_parity`
+//! axis below, entirely separate from `Category`/`assert_parity` — folding
+//! them into the type-inference axis would either force `infer_source` to
+//! grow Appendix-E-rule-side-condition checking it was never meant to have,
+//! or force every existing type-parity fixture to also satisfy Appendix E
+//! (two of them, `non_bool_guard_agrees`/`role_mismatch_agrees`, use a
+//! `Head::Mask`/`Head::Tuple` shape chosen only for what they test, not for
+//! Appendix E compliance).
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
+use brix_ir::check::{check_rule, Finding};
 use brix_ir::core::{
     Constraint, Expr, ExprKind, ExprOrigin, Head, Query, Rule, Severity, SourceRange,
 };
-use brix_ir::effects::EffectRow;
+use brix_ir::effects::{Effect, EffectRow};
 use brix_ir::frontend::{
     FnSignature, FrontendSource, RelationSchema, SchemaResolver, TableResolver,
 };
@@ -91,8 +108,8 @@ fn infer_category(error: &TypeError) -> Category {
 
 /// `reflect::ConflictKind` -> `Category`, per the #15 PR3 rewiring: the
 /// harness now maps from the frozen [`ConflictKind`] enum instead of the old
-/// free-text `operation` string. The map is 1:1 and exhaustive over
-/// `ConflictKind`'s seven variants: `Mismatch->Mismatch`, `Arity->Arity`,
+/// free-text `operation` string. The map is 1:1 and exhaustive over the
+/// seven *type-inference* variants: `Mismatch->Mismatch`, `Arity->Arity`,
 /// `UnknownField->UnknownField`, `NonBool->NonBoolGuard`, `Occurs->Occurs`,
 /// `Dimension->Dimension`, `TryNonResult->TryNonResult`.
 ///
@@ -105,15 +122,28 @@ fn infer_category(error: &TypeError) -> Category {
 /// `try_non_result_agrees` fixture below exists to prove that gap is closed,
 /// not just relabeled: it fails loudly (category-set mismatch) if `reflect`
 /// and `infer` ever disagree on this shape again.
-fn reflect_category(kind: &ConflictKind) -> Category {
+///
+/// Returns `None` for the #15 PR4 Appendix E rule side-condition variants
+/// (`ImpureRule`..`OrdinaryFnOnDerivedRel`): those have no `infer.rs`
+/// counterpart at all (`infer_source` does no Appendix E rule-side-condition
+/// checking — only `check_rule` and `reflect::analyze` do), so this
+/// type-inference-parity axis must not count them; they get their own
+/// `RuleCategory`/`assert_rule_side_condition_parity` axis below.
+fn reflect_category(kind: &ConflictKind) -> Option<Category> {
     match kind {
-        ConflictKind::Mismatch { .. } => Category::Mismatch,
-        ConflictKind::Arity { .. } => Category::Arity,
-        ConflictKind::UnknownField { .. } => Category::UnknownField,
-        ConflictKind::NonBool { .. } => Category::NonBoolGuard,
-        ConflictKind::Occurs { .. } => Category::Occurs,
-        ConflictKind::Dimension { .. } => Category::Dimension,
-        ConflictKind::TryNonResult { .. } => Category::TryNonResult,
+        ConflictKind::Mismatch { .. } => Some(Category::Mismatch),
+        ConflictKind::Arity { .. } => Some(Category::Arity),
+        ConflictKind::UnknownField { .. } => Some(Category::UnknownField),
+        ConflictKind::NonBool { .. } => Some(Category::NonBoolGuard),
+        ConflictKind::Occurs { .. } => Some(Category::Occurs),
+        ConflictKind::Dimension { .. } => Some(Category::Dimension),
+        ConflictKind::TryNonResult { .. } => Some(Category::TryNonResult),
+        ConflictKind::ImpureRule
+        | ConflictKind::NondeterministicRule
+        | ConflictKind::DivergentRule
+        | ConflictKind::UnboundHeadKey { .. }
+        | ConflictKind::MaskRefNotEdgeBound { .. }
+        | ConflictKind::OrdinaryFnOnDerivedRel { .. } => None,
     }
 }
 
@@ -186,7 +216,7 @@ fn assert_parity(label: &str, source: &FrontendSource, resolver: &impl SchemaRes
     let reflect_categories: BTreeSet<Category> = report
         .conflicts
         .iter()
-        .map(|c| reflect_category(&c.kind))
+        .filter_map(|c| reflect_category(&c.kind))
         .collect();
     assert_eq!(
         infer_categories, reflect_categories,
@@ -229,6 +259,89 @@ fn assert_parity(label: &str, source: &FrontendSource, resolver: &impl SchemaRes
             "{label}: type-mirror mismatch at {origin:?}: infer={ty}, reflect={reflected}"
         );
     }
+}
+
+/// #15 PR4's parity vocabulary: Appendix E rule side-condition categories,
+/// mirroring `Category` above but for the `check_rule`/`reflect::analyze`
+/// axis (see the module doc's "a second, independent parity axis" section).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum RuleCategory {
+    Impure,
+    Nondeterministic,
+    Divergent,
+    UnboundHeadKey,
+    MaskRefNotEdgeBound,
+    OrdinaryFnOnDerivedRel,
+}
+
+/// `check::Finding` -> `RuleCategory`. `None` for findings outside this
+/// PR's scope (`NonCanonicalKey`/`AbsenceWithoutWitness`/`UnknownRelation`
+/// predate #15 PR4 and have no `ConflictKind` mirror to compare against).
+fn finding_category(finding: &Finding) -> Option<RuleCategory> {
+    match finding {
+        Finding::ImpureRule { .. } => Some(RuleCategory::Impure),
+        Finding::NondeterministicRule { .. } => Some(RuleCategory::Nondeterministic),
+        Finding::DivergentRule { .. } => Some(RuleCategory::Divergent),
+        Finding::UnboundHeadKey { .. } => Some(RuleCategory::UnboundHeadKey),
+        Finding::MaskRefNotEdgeBound { .. } => Some(RuleCategory::MaskRefNotEdgeBound),
+        Finding::OrdinaryFnOnDerivedRel { .. } => Some(RuleCategory::OrdinaryFnOnDerivedRel),
+        Finding::NonCanonicalKey { .. }
+        | Finding::AbsenceWithoutWitness { .. }
+        | Finding::UnknownRelation { .. } => None,
+    }
+}
+
+/// `reflect::ConflictKind` -> `RuleCategory`, the mirror-side counterpart of
+/// `finding_category`. `None` for the seven type-inference variants (those
+/// belong to `reflect_category`/`Category` instead).
+fn conflict_rule_category(kind: &ConflictKind) -> Option<RuleCategory> {
+    match kind {
+        ConflictKind::ImpureRule => Some(RuleCategory::Impure),
+        ConflictKind::NondeterministicRule => Some(RuleCategory::Nondeterministic),
+        ConflictKind::DivergentRule => Some(RuleCategory::Divergent),
+        ConflictKind::UnboundHeadKey { .. } => Some(RuleCategory::UnboundHeadKey),
+        ConflictKind::MaskRefNotEdgeBound { .. } => Some(RuleCategory::MaskRefNotEdgeBound),
+        ConflictKind::OrdinaryFnOnDerivedRel { .. } => Some(RuleCategory::OrdinaryFnOnDerivedRel),
+        ConflictKind::Mismatch { .. }
+        | ConflictKind::Arity { .. }
+        | ConflictKind::UnknownField { .. }
+        | ConflictKind::NonBool { .. }
+        | ConflictKind::Occurs { .. }
+        | ConflictKind::Dimension { .. }
+        | ConflictKind::TryNonResult { .. } => None,
+    }
+}
+
+/// Run both `check_rule` (trusted) and `reflect::analyze` (reflective) over
+/// one rule and assert they agree: at least one Appendix E finding fires,
+/// and the two checkers' category *sets* (not sequences — same reasoning as
+/// `assert_parity`) are identical.
+fn assert_rule_side_condition_parity(label: &str, rule: &Rule, resolver: &impl SchemaResolver) {
+    let findings = check_rule(rule, resolver);
+    let source = FrontendSource {
+        rules: vec![rule.clone()],
+        constraints: vec![],
+        queries: vec![],
+    };
+    let report = analyze(&source, resolver);
+
+    let finding_categories: BTreeSet<RuleCategory> =
+        findings.iter().filter_map(finding_category).collect();
+    let conflict_categories: BTreeSet<RuleCategory> = report
+        .conflicts
+        .iter()
+        .filter_map(|c| conflict_rule_category(&c.kind))
+        .collect();
+
+    assert!(
+        !finding_categories.is_empty(),
+        "{label}: expected at least one Appendix E finding, got none: {findings:#?}"
+    );
+    assert_eq!(
+        finding_categories, conflict_categories,
+        "{label}: category-set mismatch\nfindings: {findings:#?}\nconflicts: {:#?}",
+        report.conflicts
+    );
 }
 
 /// Hands out distinct `ExprOrigin`s (and, via [`Origins::ty_var`], distinct
@@ -456,9 +569,13 @@ fn non_bool_guard_agrees() {
     let source = FrontendSource {
         rules: vec![Rule {
             name: Ident::new("R"),
-            head: Head::Mask {
-                target: Ident::new("a"),
-                reason: Ident::new("b"),
+            // A tuple head, not a mask head — the guard-typing shape this
+            // fixture exercises is orthogonal to the mask-head side
+            // condition (#15 PR4), and a mask head here would need `a`/`b`
+            // edge-bound to stay green under `MaskRefNotEdgeBound`.
+            head: Head::Tuple {
+                relation: QualIdent::from("Out"),
+                args: vec![],
             },
             body: Pattern::new(vec![Clause::When(
                 o.lit(Ty::Int(IntWidth::Int), Lit::Int(1)),
@@ -515,9 +632,12 @@ fn role_mismatch_agrees() {
     let source = FrontendSource {
         rules: vec![Rule {
             name: Ident::new("RoleGuard"),
-            head: Head::Mask {
-                target: Ident::new("t"),
-                reason: Ident::new("r"),
+            // A tuple head, not a mask head — see `non_bool_guard_agrees`'s
+            // comment; the role-mismatch shape under test is orthogonal to
+            // the #15 PR4 mask-head side condition.
+            head: Head::Tuple {
+                relation: QualIdent::from("Out"),
+                args: vec![],
             },
             body: Pattern::new(vec![Clause::Edge {
                 bind: None,
@@ -737,4 +857,110 @@ fn try_non_result_agrees() {
         }],
     };
     assert_parity("try_non_result", &source, &TableResolver::new());
+}
+
+/// Fixture 12 (#15 PR4): Appendix E `pure(B, H)` violated — the rule's
+/// effect row carries an impure atom (`console`, which is neither
+/// `panic` nor `diverge`, so `det`/`nondiverge` stay satisfied and only
+/// `pure` fails).
+#[test]
+fn rule_impure_effect_row_agrees() {
+    let rule = Rule {
+        name: Ident::new("Loud"),
+        head: Head::Tuple {
+            relation: QualIdent::from("Out"),
+            args: vec![],
+        },
+        body: Pattern::default(),
+        effects: EffectRow::from_atoms([Effect::Console]),
+    };
+    assert_rule_side_condition_parity("rule_impure_effect_row", &rule, &TableResolver::new());
+}
+
+/// Fixture 13 (#15 PR4): Appendix E `keys(H) ⊆ Bindings` violated — a
+/// derived-node head's `keyed by (...)` ident is not among the body's
+/// bound values.
+#[test]
+fn rule_unbound_head_key_agrees() {
+    let rule = Rule {
+        name: Ident::new("Mint"),
+        head: Head::Node {
+            var: Ident::new("n"),
+            entity: Ident::new("Widget"),
+            args: vec![],
+            keyed_by: vec![Ident::new("missing")],
+        },
+        body: Pattern::default(),
+        effects: EffectRow::empty(),
+    };
+    assert_rule_side_condition_parity("rule_unbound_head_key", &rule, &TableResolver::new());
+}
+
+/// Fixture 14 (#15 PR4): Appendix E mask-head side condition violated —
+/// `mask(target) by reason` where neither `target` nor `reason` is an
+/// edge-bound alias produced by the body.
+#[test]
+fn rule_mask_ref_not_edge_bound_agrees() {
+    let rule = Rule {
+        name: Ident::new("Override"),
+        head: Head::Mask {
+            target: Ident::new("price"),
+            reason: Ident::new("manual"),
+        },
+        body: Pattern::default(),
+        effects: EffectRow::empty(),
+    };
+    assert_rule_side_condition_parity("rule_mask_ref_not_edge_bound", &rule, &TableResolver::new());
+}
+
+/// Fixture 15 (#15 PR4): Appendix E `Ordinary fn` violated — a non-
+/// `aggregate` fn call consumes a graph-derived `Rel` (a `Comprehension`
+/// over a relation the schema marks `derived: true`) inside a rule body.
+#[test]
+fn rule_ordinary_fn_on_derived_rel_agrees() {
+    let o = Origins::new("Summary");
+    let comprehension = Expr::new(
+        Ty::rel(Row::closed(vec![])),
+        ExprKind::Comprehension {
+            pattern: Pattern::new(vec![Clause::Edge {
+                bind: None,
+                relation: QualIdent::from("ComputedPrice"),
+                args: vec![RoleArg {
+                    role: Ident::new("order"),
+                    arg: Arg::Var(Ident::new("o")),
+                }],
+            }]),
+            yields: None,
+        },
+    )
+    .with_origin(o.next_origin());
+    let rule = Rule {
+        name: Ident::new("Summary"),
+        head: Head::Tuple {
+            relation: QualIdent::from("Out"),
+            args: vec![],
+        },
+        body: Pattern::new(vec![Clause::Let {
+            binds: Ident::new("total"),
+            expr: o.call("sumUp", vec![comprehension]),
+        }]),
+        effects: EffectRow::empty(),
+    };
+    let resolver = TableResolver::new()
+        .with_relation(RelationSchema {
+            name: QualIdent::from("ComputedPrice"),
+            roles: vec![(Ident::new("order"), Ty::NodeRef(Ident::new("Order")))],
+            key: vec![],
+            model_closed: true,
+            derived: true,
+        })
+        .with_function(FnSignature {
+            name: QualIdent::from("sumUp"),
+            params: vec![Ty::rel(Row::closed(vec![]))],
+            ret: Ty::Int(IntWidth::Int),
+            effects: EffectRow::empty(),
+            is_aggregate: false,
+            may_diverge: false,
+        });
+    assert_rule_side_condition_parity("rule_ordinary_fn_on_derived_rel", &rule, &resolver);
 }
