@@ -207,6 +207,7 @@ dependencies = [
  "brix-diag",
  "brix-ir",
  "brix-phase",
+ "brix-rt",
  "brixpkg",
  "camino",
  "insta",
