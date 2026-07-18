@@ -206,7 +206,26 @@ fn eval_body_inner(clauses: &[Clause], mut envs: Vec<Env>, ctx: &Ctx) -> Vec<Env
                     for record in extent.values() {
                         if let Some(mut new_env) = unify(env, args, &record.row) {
                             if let Some(v) = bind_id {
-                                new_env.insert(v.clone(), def.ref_value(&record.row));
+                                let ref_value = def.ref_value(&record.row);
+                                // `bind_id` joins like any other variable: if
+                                // `v` is already bound (e.g. from an earlier
+                                // clause's role-arg — `Move(vehicle: v)` then
+                                // `v: Vehicle { ... }`, the flagship's own
+                                // `PriceOrder`/`Capacity` pattern), this
+                                // record only matches when its identity
+                                // agrees with that binding. Previously this
+                                // unconditionally overwrote `v`, silently
+                                // turning an intended join into an
+                                // unconstrained iteration over every row of
+                                // `rel` — caught by issue #24's flagship
+                                // acceptance test tripping a `Capacity`
+                                // violation that shouldn't have fired.
+                                match new_env.get(v) {
+                                    Some(existing) if *existing != ref_value => continue,
+                                    _ => {
+                                        new_env.insert(v.clone(), ref_value);
+                                    }
+                                }
                             }
                             out.push(new_env);
                         }

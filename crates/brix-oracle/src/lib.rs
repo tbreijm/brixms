@@ -12,15 +12,16 @@
 //!
 //! # The IR-facing interface
 //!
-//! `brix-ir` (Core IR) is a sibling lane and is not on this branch. Rather
-//! than block, this crate defines its own minimal typed IR — see
-//! [`program`] — general enough that a `brix-ir -> Program` lowering is a
-//! thin adapter later, and small enough to hand-build directly in Rust for
-//! tests (see `tests/` and the fixtures `brix-conformance` builds against
-//! it). [`phase::infer_phases`] runs Appendix F's phase inference directly
-//! over that IR so the oracle proves itself standalone; a precomputed phase
-//! list from `brix-phase` can be substituted at the [`eval::settle`] call
-//! site once that lane lands.
+//! This crate defines its own minimal typed IR — see [`program`] — general
+//! enough that a `brix-ir -> Program` lowering is a thin adapter, and small
+//! enough to hand-build directly in Rust for tests (see `tests/` and the
+//! fixtures `brix-conformance` builds against it). That adapter is
+//! [`frontend::program_from_source`] (issue #24, Ring 0 G1): the flagship
+//! program parses, lowers, and settles on the oracle through it, replacing
+//! hand-built `dsl.rs` construction as the *only* path a real program takes
+//! to reach the oracle. [`phase::infer_phases`] runs Appendix F's phase
+//! inference directly over `Program` so the oracle proves itself standalone
+//! of `brix-phase`'s own lane-neutral input shape.
 //!
 //! # Module map
 //!
@@ -31,6 +32,7 @@
 //!   `RelationDef` + `Row` (Part III §3, Appendix G).
 //! - [`program`] — the IR-facing interface: relations, rules-as-patterns,
 //!   constraints.
+//! - [`frontend`] — the `brix-ir` `FrontendSource -> Program` adapter.
 //! - [`phase`] — Appendix F phase inference.
 //! - [`eval`] — the settlement fixpoint: positive recursion, stratified
 //!   negation, masks, key-conflict withdrawal, error edges, constraints.
@@ -42,6 +44,7 @@
 pub mod dsl;
 pub mod dump;
 pub mod eval;
+pub mod frontend;
 pub mod identity;
 pub mod phase;
 pub mod program;

@@ -16,6 +16,8 @@
 //! Every `Value` implements [`Canonical`] so rows built from `Value`s hash
 //! and order exactly the way Appendix G requires downstream.
 
+use std::sync::Arc;
+
 use brix_canon::{CanonWriter, Canonical, ClaimId, Digest, EdgeId, NodeId};
 
 /// A value bound to a role or a rule variable.
@@ -23,7 +25,21 @@ use brix_canon::{CanonWriter, Canonical, ClaimId, Digest, EdgeId, NodeId};
 /// Variant order below is this crate's own canonical tag ABI (an
 /// oracle-internal encoding, not Appendix G's user-facing enum encoding).
 /// Reordering variants changes the tag bytes and is a canon-relevant change.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// `PartialEq`/`Eq`/`PartialOrd`/`Ord`/`Hash` are hand-implemented, not
+/// derived (see [`Value::key`]): `Enum`'s `name` field must **not**
+/// participate in identity. Appendix G is explicit that "enums encode by
+/// declaration-order ordinal, never the variant's name" (quoted verbatim
+/// in `brix_ir::pattern::Lit::Enum`'s own doc) — two `Value::Enum`s with
+/// the same `(ty, ordinal)` are the same value regardless of what display
+/// name each was constructed with. A derived comparison would make
+/// otherwise-identical enum values silently fail to unify whenever their
+/// `name` strings happened to differ — exactly what broke `OrderStatus
+/// (order: o, value: Open)`-style literal matches the first time a real,
+/// mechanically-adapted program (issue #24) exercised this path (a
+/// hand-built `dsl.rs` program's literals and row data always used the
+/// same hand-picked name string, so the bug had no way to surface before).
+#[derive(Clone, Debug)]
 pub enum Value {
     /// Unsigned natural, e.g. counts, ordinals, epoch instants.
     Nat(u64),
@@ -38,18 +54,59 @@ pub enum Value {
     Edge(EdgeId),
     /// `ClaimRef<R>` (Part III §3): opaque, retry-stable ground-assertion id.
     Claim(ClaimId),
-    /// A closed enum value: type name, declaration-order ordinal (the ABI,
-    /// Appendix G), and variant name (carried for readable dumps/why-output).
+    /// A closed enum value: type name and declaration-order ordinal (the
+    /// ABI, Appendix G) are the value's identity; `name` is carried
+    /// *purely* for readable dumps/why-output and never affects equality,
+    /// ordering, hashing, or canonical bytes (see the type's own doc).
+    /// Owned (`Arc<str>`, cheap to clone) rather than `&'static str`: a
+    /// program built mechanically from parsed source (issue #24) recovers
+    /// these strings from the source text at adapt time, not from string
+    /// literals baked into the binary.
     Enum {
-        ty: &'static str,
+        ty: Arc<str>,
         ordinal: u32,
-        name: &'static str,
+        name: Arc<str>,
     },
     /// The unit value, used by nullary outcomes and marker roles.
     Unit,
 }
 
+/// The identity-relevant projection of a [`Value`] — everything
+/// `PartialEq`/`Ord`/`Hash`/`Canonical` actually key on. Exists solely to
+/// give `Enum` an identity of `(ty, ordinal)`, excluding `name`, without
+/// hand-writing five structurally-identical trait impls (`derive` handles
+/// this one).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum ValueKey<'a> {
+    Nat(u64),
+    Int(i64),
+    Bool(bool),
+    Str(&'a str),
+    Node(NodeId),
+    Edge(EdgeId),
+    Claim(ClaimId),
+    Enum { ty: &'a str, ordinal: u32 },
+    Unit,
+}
+
 impl Value {
+    fn key(&self) -> ValueKey<'_> {
+        match self {
+            Value::Nat(n) => ValueKey::Nat(*n),
+            Value::Int(n) => ValueKey::Int(*n),
+            Value::Bool(b) => ValueKey::Bool(*b),
+            Value::Str(s) => ValueKey::Str(s.as_str()),
+            Value::Node(id) => ValueKey::Node(*id),
+            Value::Edge(id) => ValueKey::Edge(*id),
+            Value::Claim(id) => ValueKey::Claim(*id),
+            Value::Enum { ty, ordinal, .. } => ValueKey::Enum {
+                ty,
+                ordinal: *ordinal,
+            },
+            Value::Unit => ValueKey::Unit,
+        }
+    }
+
     /// Best-effort ordering helper for numeric comparisons in guards
     /// (`when risk > 0.8`-style expressions use `Value::Int`/`Value::Nat`
     /// in the oracle's expression language — see `program::Expr`).
@@ -66,6 +123,30 @@ impl Value {
             Value::Bool(b) => Some(*b),
             _ => None,
         }
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        self.key() == other.key()
+    }
+}
+impl Eq for Value {}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Value {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.key().cmp(&other.key())
+    }
+}
+
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key().hash(state)
     }
 }
 
@@ -100,11 +181,12 @@ impl Canonical for Value {
                 w.write_uint(6);
                 w.write_bytes(id.digest().as_bytes());
             }
-            Value::Enum { ty, ordinal, name } => {
+            // `name` is deliberately not written: Appendix G's canonical
+            // enum encoding is `(ty, ordinal)` only (see the type's doc).
+            Value::Enum { ty, ordinal, .. } => {
                 w.write_uint(7);
                 w.write_tag(ty);
                 w.write_uint(*ordinal as u64);
-                w.write_tag(name);
             }
             Value::Unit => {
                 w.write_uint(8);
