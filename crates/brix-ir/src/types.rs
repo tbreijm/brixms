@@ -15,6 +15,7 @@
 //! is where a *value* would appear, and it stores IEEE bit patterns, not `f64`).
 
 use crate::ident::{Ident, QualIdent};
+use brix_canon::{CanonWriter, Canonical};
 use core::fmt;
 
 /// One ground dimension exponent. Dimension names include a currency where
@@ -23,6 +24,18 @@ use core::fmt;
 pub struct Dimension {
     pub name: Ident,
     pub exponent: i32,
+}
+
+/// Canonical byte encoding for one dimension exponent (#15 PR3 fact export:
+/// [`Fact::DimTerm`](crate::reflect::Fact::DimTerm) hashes these). `Dimensions`
+/// vectors are already maintained in sorted, zero-pruned canonical order by
+/// [`dimensions_combine`], so encoding as a plain sequence (via the blanket
+/// `Vec<T: Canonical>` impl) is order-faithful without a second sort here.
+impl Canonical for Dimension {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        self.name.canon_write(w);
+        w.write_int(self.exponent as i64);
+    }
 }
 
 /// Canonical, sorted exponent vector for a ground dimension.
@@ -75,6 +88,12 @@ impl fmt::Display for TyVar {
     }
 }
 
+impl Canonical for TyVar {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        w.write_uint(self.0 as u64);
+    }
+}
+
 /// Fixed-width and arbitrary-precision integer families (Part V §2).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 #[allow(non_camel_case_types)]
@@ -112,6 +131,31 @@ impl fmt::Display for IntWidth {
             Int => "Int",
             Nat => "Nat",
         })
+    }
+}
+
+impl Canonical for IntWidth {
+    /// Ordinal is declaration order (App. G enum rule); this is an internal
+    /// digest-identity encoding (#15 PR3), not a spec-frozen wire ABI, so it
+    /// only has to be stable *within* one `canon/1` build, same as
+    /// [`Ty::canon_write`]'s ordinals below.
+    fn canon_write(&self, w: &mut CanonWriter) {
+        use IntWidth::*;
+        let ordinal: u8 = match self {
+            I8 => 0,
+            I16 => 1,
+            I32 => 2,
+            I64 => 3,
+            I128 => 4,
+            U8 => 5,
+            U16 => 6,
+            U32 => 7,
+            U64 => 8,
+            U128 => 9,
+            Int => 10,
+            Nat => 11,
+        };
+        w.write_uint(ordinal as u64);
     }
 }
 
@@ -277,6 +321,74 @@ impl fmt::Display for Ty {
     }
 }
 
+/// Digest-identity encoding for `Ty` (#15 PR3: `reflect::Fact` payloads embed
+/// `Ty` directly, and `FactId::derive` needs a canonical byte string for
+/// "same fact ⇒ same digest"). Every variant is enum-tagged by declaration
+/// order (App. G's ordinal rule for enums), so this is a straightforward
+/// structural walk — no key-position float ban applies here (App. G's "no
+/// floats in key positions" governs *values*; `F32`/`F64` here are type
+/// *tags*, and this module's own doc already establishes that `Ty` never
+/// carries a float value).
+impl Canonical for Ty {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        match self {
+            Ty::Unit => w.write_enum(0, |_| {}),
+            Ty::Bool => w.write_enum(1, |_| {}),
+            Ty::Char => w.write_enum(2, |_| {}),
+            Ty::Str => w.write_enum(3, |_| {}),
+            Ty::Bytes => w.write_enum(4, |_| {}),
+            Ty::Int(width) => w.write_enum(5, |w| width.canon_write(w)),
+            Ty::Decimal { precision, scale } => w.write_enum(6, |w| {
+                w.write_uint(*precision as u64);
+                w.write_uint(*scale as u64);
+            }),
+            Ty::F32 => w.write_enum(7, |_| {}),
+            Ty::F64 => w.write_enum(8, |_| {}),
+            Ty::Instant => w.write_enum(9, |_| {}),
+            Ty::Duration => w.write_enum(10, |_| {}),
+            Ty::Date => w.write_enum(11, |_| {}),
+            Ty::TimeOfDay => w.write_enum(12, |_| {}),
+            Ty::TimeZone => w.write_enum(13, |_| {}),
+            Ty::Option(t) => w.write_enum(14, |w| t.canon_write(w)),
+            Ty::Result(ok, err) => w.write_enum(15, |w| {
+                ok.canon_write(w);
+                err.canon_write(w);
+            }),
+            Ty::List(t) => w.write_enum(16, |w| t.canon_write(w)),
+            Ty::Vector(t) => w.write_enum(17, |w| t.canon_write(w)),
+            Ty::Set(t) => w.write_enum(18, |w| t.canon_write(w)),
+            Ty::Map(k, v) => w.write_enum(19, |w| {
+                k.canon_write(w);
+                v.canon_write(w);
+            }),
+            Ty::Bag(t) => w.write_enum(20, |w| t.canon_write(w)),
+            Ty::Rel(row) => w.write_enum(21, |w| row.canon_write(w)),
+            Ty::NodeRef(id) => w.write_enum(22, |w| id.canon_write(w)),
+            Ty::EdgeRef(id) => w.write_enum(23, |w| id.canon_write(w)),
+            Ty::ClaimRef(id) => w.write_enum(24, |w| id.canon_write(w)),
+            Ty::Enum(q) => w.write_enum(25, |w| q.canon_write(w)),
+            Ty::Quantity(id) => w.write_enum(26, |w| id.canon_write(w)),
+            Ty::Money(id) => w.write_enum(27, |w| id.canon_write(w)),
+            Ty::Dimensioned(dims) => w.write_enum(28, |w| dims.canon_write(w)),
+            Ty::Probability => w.write_enum(29, |_| {}),
+            Ty::EventId => w.write_enum(30, |_| {}),
+            Ty::Estimate(t) => w.write_enum(31, |w| t.canon_write(w)),
+            Ty::Record(row) => w.write_enum(32, |w| row.canon_write(w)),
+            Ty::Fn {
+                params,
+                ret,
+                effects,
+            } => w.write_enum(33, |w| {
+                params.canon_write(w);
+                ret.canon_write(w);
+                effects.canon_write(w);
+            }),
+            Ty::Var(v) => w.write_enum(34, |w| v.canon_write(w)),
+            Ty::Error => w.write_enum(35, |_| {}),
+        }
+    }
+}
+
 /// One field of a [`Row`].
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct RowField {
@@ -294,12 +406,43 @@ pub enum RowTail {
     Open(TyVar),
 }
 
+impl Canonical for RowTail {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        match self {
+            RowTail::Closed => w.write_enum(0, |_| {}),
+            RowTail::Open(v) => w.write_enum(1, |w| v.canon_write(w)),
+        }
+    }
+}
+
 /// A record / relation-pattern row: the schema `S` in `Rel<S>`, an entity's
 /// attribute set, or a rule's pattern-bound role subset.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Row {
     pub fields: Vec<RowField>,
     pub tail: RowTail,
+}
+
+impl Canonical for RowField {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        self.name.canon_write(w);
+        self.ty.canon_write(w);
+    }
+}
+
+/// App. G "records/rows: fields sorted by canonical field-name bytes" —
+/// delegates to [`CanonWriter::write_record`] (which does the sort) rather
+/// than [`Row::canonical_field_order`], so there is exactly one place that
+/// implements the sort rule.
+impl Canonical for Row {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        w.write_record(
+            self.fields
+                .iter()
+                .map(|field| (field.name.as_str().to_owned(), field.ty.canon_bytes())),
+        );
+        self.tail.canon_write(w);
+    }
 }
 
 impl Row {

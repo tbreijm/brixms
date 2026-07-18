@@ -10,6 +10,7 @@
 //! sub-expressions) is set union of atoms and of tails.
 
 use crate::ident::Ident;
+use brix_canon::{CanonWriter, Canonical};
 use core::fmt;
 
 /// A kernel effect atom (Part V §4). Some atoms are scoped (`net<S>`,
@@ -62,6 +63,26 @@ impl Effect {
     }
 }
 
+/// Digest-identity encoding (#15 PR3: `Ty::Fn` embeds an `EffectRow`, and
+/// `Ty` is `Canonical` so `reflect::Fact` payloads that carry a function type
+/// hash deterministically). Ordinal matches [`Effect::ordinal`].
+impl Canonical for Effect {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        match self {
+            Effect::Net(s) => w.write_enum(0, |w| s.canon_write(w)),
+            Effect::Fs(s) => w.write_enum(1, |w| s.canon_write(w)),
+            Effect::Clock => w.write_enum(2, |_| {}),
+            Effect::Random => w.write_enum(3, |_| {}),
+            Effect::Console => w.write_enum(4, |_| {}),
+            Effect::GraphRead(s) => w.write_enum(5, |w| s.canon_write(w)),
+            Effect::GraphWrite(s) => w.write_enum(6, |w| s.canon_write(w)),
+            Effect::Panic => w.write_enum(7, |_| {}),
+            Effect::Diverge => w.write_enum(8, |_| {}),
+            Effect::Solver(s) => w.write_enum(9, |w| s.canon_write(w)),
+        }
+    }
+}
+
 impl fmt::Display for Effect {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -83,6 +104,12 @@ impl fmt::Display for Effect {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Scope(pub Ident);
 
+impl Canonical for Scope {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        self.0.canon_write(w);
+    }
+}
+
 impl fmt::Display for Scope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
@@ -93,6 +120,12 @@ impl fmt::Display for Scope {
 /// Effects are polymorphic (Part V §4); a real inferencer would unify these.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct EffectVar(pub u32);
+
+impl Canonical for EffectVar {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        w.write_uint(self.0 as u64);
+    }
+}
 
 impl fmt::Display for EffectVar {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -178,6 +211,16 @@ impl EffectRow {
 
 fn cmp_effect(a: &Effect, b: &Effect) -> core::cmp::Ordering {
     a.ordinal().cmp(&b.ordinal()).then_with(|| a.cmp(b))
+}
+
+impl Canonical for EffectRow {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        // `atoms` is already sorted/deduped canonical order (see `insert`),
+        // so a plain sequence write is order-faithful, same reasoning as
+        // `Dimension`'s `Vec` encoding.
+        w.write_list(self.atoms.iter().map(|a| a.canon_bytes()));
+        self.tail.canon_write(w);
+    }
 }
 
 impl fmt::Display for EffectRow {

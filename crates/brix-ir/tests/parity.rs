@@ -58,7 +58,7 @@ use brix_ir::frontend::{
 use brix_ir::ident::{Ident, QualIdent};
 use brix_ir::infer::{infer_source, TypeError};
 use brix_ir::pattern::{Arg, Clause, Lit, Pattern, RoleArg};
-use brix_ir::reflect::{analyze, Fact, Subject};
+use brix_ir::reflect::{analyze, ConflictKind, Fact, Subject};
 use brix_ir::types::{
     dimensions_div, money_dimensions, quantity_dimensions, IntWidth, Row, RowField, Ty, TyVar,
 };
@@ -88,42 +88,35 @@ fn infer_category(error: &TypeError) -> Category {
     }
 }
 
-/// `reflect::TypeConflict::operation` -> `Category`, per the #15 PR2
-/// category map: `Mismatch<->{unify,if,call,query-result,role,head}`,
-/// `Dimension<->{add,sub,mul,div,eq,ne,lt,le,gt,ge}`, `Arity<->arity`,
-/// `UnknownField<->field`, `TryNonResult<->try`, `NonBoolGuard<->when`,
-/// `Occurs<->occurs`.
+/// `reflect::ConflictKind` -> `Category`, per the #15 PR3 rewiring: the
+/// harness now maps from the frozen [`ConflictKind`] enum instead of the old
+/// free-text `operation` string. The map is 1:1 and exhaustive over
+/// `ConflictKind`'s six variants: `Mismatch->Mismatch`, `Arity->Arity`,
+/// `UnknownField->UnknownField`, `NonBool->NonBoolGuard`, `Occurs->Occurs`,
+/// `Dimension->Dimension`.
 ///
-/// Two documented departures from a literal reading of the map, both
-/// verified against the actual call sites in `reflect.rs`:
-/// - `"when"` has exactly one call site (`pattern()`'s guard check) and it
-///   is the direct analog of `infer.rs`'s dedicated `NonBoolGuard` variant,
-///   so it maps there, not to `Mismatch`.
-/// - `"row"` (row-*shape* mismatch) is folded into `UnknownField` alongside
-///   `"field"` (single-field lookup miss): `infer.rs` raises the same
-///   `TypeError::UnknownField` for both call sites (see
-///   `Infer::unify_rows`), so collapsing `reflect.rs`'s finer-grained
-///   `field`/`row` split is required for the sets to line up — it is a
-///   legitimate taxonomy difference in each checker's *observation*, not a
-///   divergence in `solve::match_rows`, the one row-matching algorithm both
-///   now call.
-/// - `"and"`/`"or"`/`"not"` are plain `unify(..., op, ...)` call sites with
-///   no more specific context, exactly like `"unify"` itself, so they fold
-///   into `Mismatch` for the same reason.
-fn reflect_category(operation: &str) -> Category {
-    match operation {
-        "unify" | "if" | "call" | "query-result" | "role" | "head" | "and" | "or" | "not" => {
-            Category::Mismatch
-        }
-        "add" | "sub" | "mul" | "div" | "eq" | "ne" | "lt" | "le" | "gt" | "ge" => {
-            Category::Dimension
-        }
-        "arity" => Category::Arity,
-        "field" | "row" => Category::UnknownField,
-        "try" => Category::TryNonResult,
-        "when" => Category::NonBoolGuard,
-        "occurs" => Category::Occurs,
-        other => panic!("parity harness: unmapped reflect.rs conflict operation {other:?}"),
+/// One documented gap this rewiring accepts rather than papers over:
+/// `ConflictKind` (frozen exactly as specified by the #15 PR3 design ruling)
+/// has no dedicated try/non-`Result` variant, so `reflect.rs`'s `?`-postfix
+/// type failure now reports `ConflictKind::Mismatch` (folded in alongside
+/// ordinary unify mismatches) rather than the `Category::TryNonResult`
+/// `infer.rs` raises via its own dedicated `TypeError::TryNonResult`. That
+/// would be a genuine category-set mismatch if any fixture below exercised a
+/// `try`-on-non-`Result` conflict — none currently do (`Category::TryNonResult`
+/// is otherwise unused from the `reflect` side of this file), so the gap is
+/// latent, not exercised, and is called out here rather than silently
+/// dropped. A future PR that widens `ConflictKind` (or gives `try` its own
+/// variant) should close it; until then this is an explicitly accepted,
+/// documented divergence from #15 PR2's original 1:1 `TryNonResult<->"try"`
+/// mapping.
+fn reflect_category(kind: &ConflictKind) -> Category {
+    match kind {
+        ConflictKind::Mismatch { .. } => Category::Mismatch,
+        ConflictKind::Arity { .. } => Category::Arity,
+        ConflictKind::UnknownField { .. } => Category::UnknownField,
+        ConflictKind::NonBool { .. } => Category::NonBoolGuard,
+        ConflictKind::Occurs { .. } => Category::Occurs,
+        ConflictKind::Dimension { .. } => Category::Dimension,
     }
 }
 
@@ -196,7 +189,7 @@ fn assert_parity(label: &str, source: &FrontendSource, resolver: &impl SchemaRes
     let reflect_categories: BTreeSet<Category> = report
         .conflicts
         .iter()
-        .map(|c| reflect_category(&c.operation))
+        .map(|c| reflect_category(&c.kind))
         .collect();
     assert_eq!(
         infer_categories, reflect_categories,
