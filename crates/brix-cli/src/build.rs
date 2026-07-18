@@ -86,6 +86,79 @@ pub struct BuildOutcome {
     pub cache_hit: bool,
 }
 
+/// The result of a successful static/semantic check.
+///
+/// `check` deliberately stops before planning, code generation, and Cargo. It
+/// is the narrow compiler oracle used by editors and local package agents.
+pub struct CheckOutcome {
+    pub source_path: Utf8PathBuf,
+}
+
+/// Parse, lower, type/effect-check, and phase-check a package without emitting
+/// or executing anything.
+pub fn check(operand: &str) -> Result<CheckOutcome, BuildError> {
+    let located = package::locate(operand).map_err(BuildError::Locate)?;
+    let source = std::fs::read_to_string(&located.source_path)?;
+    let (file, parse_diags) = parse_file(&source);
+    if parse_diags.has_errors() {
+        return Err(BuildError::Diagnostics(DiagnosticReport {
+            source,
+            path: located.source_path.to_string(),
+            diagnostics: parse_diags,
+        }));
+    }
+
+    let lowered = brixc::lower_file(&file, &parse_diags);
+    if lowered.has_errors() {
+        return Err(BuildError::Diagnostics(DiagnosticReport {
+            source,
+            path: located.source_path.to_string(),
+            diagnostics: Diagnostics::from_items(lowered.diags),
+        }));
+    }
+
+    match AstPhase.assign_phases(lowered) {
+        Ok(_) => Ok(CheckOutcome {
+            source_path: located.source_path,
+        }),
+        Err(PipelineError::Diagnostic { diagnostic, .. }) => {
+            Err(BuildError::Diagnostics(DiagnosticReport {
+                source,
+                path: located.source_path.to_string(),
+                diagnostics: Diagnostics::from_items(vec![diagnostic]),
+            }))
+        }
+        Err(error) => Err(BuildError::Phase(error)),
+    }
+}
+
+/// Canonical source produced by the real BrixMS parser/formatter.
+pub struct FormatOutcome {
+    pub source_path: Utf8PathBuf,
+    pub formatted: String,
+    pub changed: bool,
+}
+
+/// Parse and canonically format a package entry source without writing it.
+pub fn format(operand: &str) -> Result<FormatOutcome, BuildError> {
+    let located = package::locate(operand).map_err(BuildError::Locate)?;
+    let source = std::fs::read_to_string(&located.source_path)?;
+    let (file, parse_diags) = parse_file(&source);
+    if parse_diags.has_errors() {
+        return Err(BuildError::Diagnostics(DiagnosticReport {
+            source,
+            path: located.source_path.to_string(),
+            diagnostics: parse_diags,
+        }));
+    }
+    let formatted = brix_ast::format_file(&file);
+    Ok(FormatOutcome {
+        source_path: located.source_path,
+        changed: formatted != source,
+        formatted,
+    })
+}
+
 /// Run the full pipeline for the package named by `operand` (parse -> lower
 /// -> phase-assign -> emit), write the generated workspace, and `cargo
 /// build` it — unless `brixc::CacheKey` says a matching build already

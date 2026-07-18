@@ -9,5 +9,7 @@
 pub mod args;
 pub mod build;
 pub mod package;
+pub mod quality;
 pub mod scaffold;
+pub mod test;
 pub mod toolchain;
