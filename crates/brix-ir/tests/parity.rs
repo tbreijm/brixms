@@ -244,6 +244,7 @@ fn assert_parity(label: &str, source: &FrontendSource, resolver: &impl SchemaRes
         if let Fact::HasType {
             subject: Subject::Expr { origin },
             ty,
+            ..
         } = &derivation.fact
         {
             reflect_types.insert(*origin, ty.clone());

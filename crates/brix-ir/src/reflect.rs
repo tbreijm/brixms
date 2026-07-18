@@ -27,6 +27,29 @@
 //! - [`TypeConflict`] carries the origin [`Subject`] plus an honest
 //!   per-kind [`ConflictKind`] payload — no fabricated types, no empty
 //!   `because` sets.
+//!
+//! #15 PR3.5 amends the just-frozen schema, narrowly, before it gets an
+//! external consumer: derived judgment facts now carry an assumption-context
+//! **scope** as digested payload content, not envelope structure. The
+//! invariants this establishes, for every future extension of this module:
+//! - **unscoped fact kinds assert root-world judgments.** The structural
+//!   (input) facts above never carry [`ScopeId`] — an operator tag, a schema
+//!   role, a row shape don't depend on typing assumptions, so they are
+//!   scope-invariant / root-world by construction;
+//! - **any future assumption-dependent fact kind MUST carry scope inside
+//!   its digested payload.** Scope is judgment *content* — it participates
+//!   in [`FactId::derive`]'s hash — never something bolted on afterward;
+//! - **scope may never be expressed solely as a relation over [`FactId`]s.**
+//!   A `DerivedUnder(FactId, ScopeId)` side-relation would re-introduce the
+//!   world-aliasing content-addressing exists to kill (one `FactId` meaning
+//!   two different judgments depending which side-relation rows happen to
+//!   be present) — scope belongs in the fact's own hashed bytes;
+//! - **[`ScopeId`] is content-addressed with a constant root.** Never a
+//!   counter — see [`ScopeId::root`]'s doc for why;
+//! - (forward note, applies once candidate schemes exist) **candidate
+//!   schemes must be α-normalized (canonical renaming) before digesting** —
+//!   the scheme-level analogue of zonk-before-digest this module already
+//!   follows for `Ty` payloads (see [`Reflect::zonk`]'s doc).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -86,6 +109,38 @@ impl Canonical for Subject {
             }),
             Subject::Rule { declaration } => w.write_enum(3, |w| declaration.canon_write(w)),
         }
+    }
+}
+
+/// Opaque, content-addressed identity for the assumption context (a "world")
+/// a derived judgment fact holds under (#15 PR3.5). **Content-addressed over
+/// the assumption context, never a counter** — a counter would make
+/// [`FactId`]s run-order-dependent, defeating the whole point of content
+/// addressing. [`ScopeId::root`] is the well-known constant for the empty
+/// assumption context; `reflect.rs` writes it everywhere today, since there
+/// is no scope machinery (trees, hypotheses) yet — only the constant root
+/// threaded through so the schema doesn't need to change identity meaning
+/// again once a scoped checker exists. See the module freeze-comment
+/// invariant list for the discipline this enforces.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct ScopeId(Digest);
+
+impl ScopeId {
+    /// The constant root scope: the digest of the empty assumption context.
+    /// Derived the same deterministic way as [`FactId::derive`]/
+    /// [`crate::site::SiteId::derive`]/[`crate::core::ExprId::derive`] — a
+    /// canon-encoded marker hashed under `Domain::Value` — so it is stable
+    /// across calls, processes, and builds.
+    pub fn root() -> Self {
+        let mut w = CanonWriter::new();
+        w.write_tag("brix.ir.reflect.ScopeId.root");
+        ScopeId(w.digest(Domain::Value))
+    }
+}
+
+impl Canonical for ScopeId {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        w.write_bytes(self.0.as_bytes());
     }
 }
 
@@ -192,13 +247,16 @@ pub enum Fact {
     HasType {
         subject: Subject,
         ty: Ty,
+        scope: ScopeId,
     },
     RequiresBool {
         subject: Subject,
+        scope: ScopeId,
     },
     Applies {
         subject: Subject,
         operator: String,
+        scope: ScopeId,
     },
 }
 
@@ -256,13 +314,22 @@ pub fn write_fact(fact: &Fact, w: &mut CanonWriter) {
             dimension.canon_write(w);
             w.write_int(*exponent as i64);
         }),
-        Fact::HasType { subject, ty } => w.write_enum(7, |w| {
+        Fact::HasType { subject, ty, scope } => w.write_enum(7, |w| {
             subject.canon_write(w);
+            scope.canon_write(w);
             ty.canon_write(w);
         }),
-        Fact::RequiresBool { subject } => w.write_enum(8, |w| subject.canon_write(w)),
-        Fact::Applies { subject, operator } => w.write_enum(9, |w| {
+        Fact::RequiresBool { subject, scope } => w.write_enum(8, |w| {
             subject.canon_write(w);
+            scope.canon_write(w);
+        }),
+        Fact::Applies {
+            subject,
+            operator,
+            scope,
+        } => w.write_enum(9, |w| {
+            subject.canon_write(w);
+            scope.canon_write(w);
             w.write_str(operator);
         }),
     }
@@ -377,6 +444,7 @@ pub struct TypeConflict {
     pub subject: Subject,
     pub kind: ConflictKind,
     pub because: BTreeSet<FactId>,
+    pub scope: ScopeId,
 }
 
 /// Canonical encoder for [`TypeConflict`], mirroring [`write_fact`]'s shape
@@ -386,6 +454,7 @@ pub struct TypeConflict {
 /// can reuse this the same way it reuses `write_fact`.
 pub fn write_conflict(conflict: &TypeConflict, w: &mut CanonWriter) {
     conflict.subject.canon_write(w);
+    conflict.scope.canon_write(w);
     match &conflict.kind {
         ConflictKind::Mismatch { left, right } => w.write_enum(0, |w| {
             left.canon_write(w);
@@ -468,6 +537,7 @@ struct DraftConflict {
     subject: Subject,
     kind: ConflictKind,
     because: Vec<usize>,
+    scope: ScopeId,
 }
 
 #[derive(Default)]
@@ -541,7 +611,7 @@ impl Reflect {
             .drafts
             .iter()
             .filter_map(|draft| match &draft.fact {
-                Fact::HasType { subject, ty } => Some((draft.id, subject.clone(), ty.clone())),
+                Fact::HasType { subject, ty, .. } => Some((draft.id, subject.clone(), ty.clone())),
                 _ => None,
             })
             .collect();
@@ -616,6 +686,7 @@ impl Reflect {
                     .iter()
                     .filter_map(|positional| id_map.get(positional).copied())
                     .collect(),
+                scope: draft.scope,
             })
             .collect();
         ReflectiveReport { facts, conflicts }
@@ -639,6 +710,11 @@ impl Reflect {
         id
     }
 
+    /// The one conflict-recording entry point — also the single place that
+    /// stamps [`ScopeId::root`] onto every [`TypeConflict`] today (#15
+    /// PR3.5). Every `reflect.rs` conflict is currently a root-world
+    /// judgment; a future scoped checker would thread a real `ScopeId`
+    /// through here instead of the constant.
     fn conflict(&mut self, subject: Subject, kind: ConflictKind, because: Vec<usize>) {
         let because: Vec<usize> = because
             .into_iter()
@@ -648,6 +724,7 @@ impl Reflect {
             subject,
             kind,
             because,
+            scope: ScopeId::root(),
         });
     }
 
@@ -794,6 +871,7 @@ impl Reflect {
                 Fact::HasType {
                     subject,
                     ty: ty.clone(),
+                    scope: ScopeId::root(),
                 },
                 vec![],
             );
@@ -884,6 +962,7 @@ impl Reflect {
                     self.fact(
                         Fact::RequiresBool {
                             subject: subject.clone(),
+                            scope: ScopeId::root(),
                         },
                         vec![evidence],
                     );
@@ -950,6 +1029,7 @@ impl Reflect {
             Fact::HasType {
                 subject,
                 ty: ty.clone(),
+                scope: ScopeId::root(),
             },
             because,
         );
@@ -994,6 +1074,7 @@ impl Reflect {
                 Fact::HasType {
                     subject: subject.clone(),
                     ty: expected.clone(),
+                    scope: ScopeId::root(),
                 },
                 vec![because],
             );
@@ -1195,6 +1276,7 @@ impl Reflect {
             Fact::HasType {
                 subject,
                 ty: ty.clone(),
+                scope: ScopeId::root(),
             },
             vec![because],
         );
@@ -1230,6 +1312,7 @@ impl Reflect {
             Fact::Applies {
                 subject: subject.clone(),
                 operator: func.to_string(),
+                scope: ScopeId::root(),
             },
             deps.clone(),
         );
@@ -1801,6 +1884,52 @@ mod tests {
         assert_eq!(
             a, b,
             "identical source must export a structurally identical report"
+        );
+    }
+
+    /// #15 PR3.5: `ScopeId::root()` is a constant, not a counter — stable
+    /// across independent calls — and scope genuinely participates in
+    /// `FactId`'s digest: two `HasType` facts identical except for `scope`
+    /// must not collide into the same `FactId`. If this ever fails after a
+    /// refactor, `scope` has been dropped from (or moved outside) the
+    /// digested payload, silently re-introducing the world-aliasing that
+    /// content-addressed scope exists to kill.
+    #[test]
+    fn scope_id_root_is_stable_and_genuinely_participates_in_fact_identity() {
+        assert_eq!(
+            ScopeId::root(),
+            ScopeId::root(),
+            "ScopeId::root() must be a well-known constant, stable across calls"
+        );
+
+        let subject = Subject::Binding {
+            declaration: Ident::new("Test"),
+            name: Ident::new("x"),
+        };
+        let root_fact = Fact::HasType {
+            subject: subject.clone(),
+            ty: Ty::Int(IntWidth::Int),
+            scope: ScopeId::root(),
+        };
+        let mut w = CanonWriter::new();
+        w.write_tag("some-other-scope");
+        let other_scope = ScopeId(w.digest(Domain::Value));
+        assert_ne!(
+            other_scope,
+            ScopeId::root(),
+            "test fixture must exercise a genuinely different scope"
+        );
+        let other_scoped_fact = Fact::HasType {
+            subject,
+            ty: Ty::Int(IntWidth::Int),
+            scope: other_scope,
+        };
+
+        assert_ne!(
+            FactId::derive(&root_fact),
+            FactId::derive(&other_scoped_fact),
+            "facts identical except for scope must produce different FactIds \
+             — otherwise scope is not really inside the digest"
         );
     }
 }
