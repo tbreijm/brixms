@@ -1,9 +1,10 @@
 //! Checked Core IR projected into the runtime-owned semantic IR.
 
-use brix_ir::core::{Expr as IrExpr, ExprKind, Head as IrHead};
+use brix_ir::core::{Expr as IrExpr, ExprKind, Head as IrHead, Severity as IrSeverity};
 use brix_ir::pattern::{Arg, Clause as IrClause, Lit, RoleArg};
 use brix_rt::engine::{self, Program, Relation, RelationKind};
 
+use crate::lower::RuntimeRelationKind;
 use crate::phase::Phased;
 
 /// Project relation schemas first. Rule/body lowering is added alongside the
@@ -20,7 +21,12 @@ pub fn project_program(phased: &Phased) -> Program {
                 kind: if schema.derived {
                     RelationKind::Derived
                 } else {
-                    RelationKind::Ground
+                    match phased.lowered.resolver.relation_kind(&schema.name) {
+                        RuntimeRelationKind::Entity => RelationKind::Entity,
+                        RuntimeRelationKind::Ground => RelationKind::Ground,
+                        RuntimeRelationKind::State => RelationKind::State,
+                        RuntimeRelationKind::Event => RelationKind::Event,
+                    }
                 },
                 roles: schema
                     .roles
@@ -49,6 +55,25 @@ pub fn project_program(phased: &Phased) -> Program {
                 phase,
                 head,
                 body: rule
+                    .body
+                    .clauses
+                    .iter()
+                    .filter_map(convert_clause)
+                    .collect(),
+            },
+        );
+    }
+    for constraint in &phased.lowered.source.constraints {
+        program.constraints.insert(
+            constraint.name.to_string(),
+            engine::Constraint {
+                id: constraint.name.to_string(),
+                severity: match constraint.severity {
+                    IrSeverity::Advisory => engine::Severity::Advisory,
+                    IrSeverity::Strict => engine::Severity::Strict,
+                    IrSeverity::Audit => engine::Severity::Audit,
+                },
+                body: constraint
                     .body
                     .clauses
                     .iter()
@@ -132,8 +157,44 @@ fn convert_expr(expr: &IrExpr) -> Option<engine::Expr> {
     match &*expr.kind {
         ExprKind::Var(value) => Some(engine::Expr::Var(value.to_string())),
         ExprKind::Lit(value) => convert_lit(value).map(engine::Expr::Const),
+        ExprKind::Call { func, args } => {
+            let args = args.iter().map(convert_expr).collect::<Option<Vec<_>>>()?;
+            let name = func.to_string();
+            if let (Some(operator), [left, right]) = (binop_for(&name), args.as_slice()) {
+                return Some(engine::Expr::BinOp(
+                    operator,
+                    Box::new(left.clone()),
+                    Box::new(right.clone()),
+                ));
+            }
+            Some(engine::Expr::Call(name, args))
+        }
+        ExprKind::Try { inner, .. } => match &*inner.kind {
+            ExprKind::Call { func, args } => Some(engine::Expr::Try(
+                func.to_string(),
+                args.iter().map(convert_expr).collect::<Option<Vec<_>>>()?,
+            )),
+            _ => None,
+        },
         _ => None,
     }
+}
+
+fn binop_for(name: &str) -> Option<engine::BinOp> {
+    Some(match name {
+        "brix.ops.add" => engine::BinOp::Add,
+        "brix.ops.sub" => engine::BinOp::Sub,
+        "brix.ops.mul" => engine::BinOp::Mul,
+        "brix.ops.eq" => engine::BinOp::Eq,
+        "brix.ops.ne" => engine::BinOp::Ne,
+        "brix.ops.lt" => engine::BinOp::Lt,
+        "brix.ops.le" => engine::BinOp::Le,
+        "brix.ops.gt" => engine::BinOp::Gt,
+        "brix.ops.ge" => engine::BinOp::Ge,
+        "brix.ops.and" => engine::BinOp::And,
+        "brix.ops.or" => engine::BinOp::Or,
+        _ => return None,
+    })
 }
 
 fn convert_lit(literal: &Lit) -> Option<engine::Value> {

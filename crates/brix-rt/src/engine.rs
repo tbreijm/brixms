@@ -320,6 +320,76 @@ pub struct Transaction {
     pub ops: Vec<TransactionOp>,
 }
 
+/// A native program store: transactions are applied atomically to ground
+/// state, then the compiler-projected program is settled before publication.
+/// This is deliberately separate from the legacy `CanonRow` delta scheduler;
+/// generated binaries execute this typed IR directly.
+pub struct Store {
+    program: Program,
+    ground: GroundState,
+    next_revision: u64,
+    current: Settled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommitError {
+    Transaction(TransactionError),
+    StrictViolation { at_revision: u64 },
+}
+
+impl std::fmt::Display for CommitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transaction(error) => write!(f, "transaction failed: {error}"),
+            Self::StrictViolation { at_revision } => {
+                write!(
+                    f,
+                    "strict constraint violated at candidate revision {at_revision}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for CommitError {}
+
+impl Store {
+    pub fn new(program: Program) -> Self {
+        let ground = GroundState::default();
+        let current = settle(&program, &ground, 0);
+        Self {
+            program,
+            ground,
+            next_revision: 1,
+            current,
+        }
+    }
+
+    pub fn current(&self) -> &Settled {
+        &self.current
+    }
+
+    pub fn current_dump(&self) -> Vec<u8> {
+        dump_bytes(&self.current, &self.program)
+    }
+
+    pub fn commit(&mut self, transaction: &Transaction) -> Result<&Settled, CommitError> {
+        let ground = apply_transaction(&self.program, &self.ground, transaction)
+            .map_err(CommitError::Transaction)?;
+        let revision = self.next_revision;
+        let settled = settle(&self.program, &ground, revision);
+        if !settled.strict_ok(&self.program) {
+            return Err(CommitError::StrictViolation {
+                at_revision: revision,
+            });
+        }
+        self.ground = ground;
+        self.current = settled;
+        self.next_revision += 1;
+        Ok(&self.current)
+    }
+}
+
 impl Transaction {
     pub fn new(intent: impl Into<Vec<u8>>) -> Self {
         Self {
@@ -561,6 +631,292 @@ pub struct Settled {
 pub struct Violation {
     pub constraint: String,
     pub match_digest: Digest,
+}
+
+/// Canonical settled dump compatible with the oracle's basic relation,
+/// support, claim, and violation layout. Provenance families that the current
+/// native subset cannot yet produce are emitted as empty canonical lists;
+/// retaining their positions makes this an ABI extension rather than a second
+/// generated-binary format.
+pub fn dump_bytes(settled: &Settled, program: &Program) -> Vec<u8> {
+    let mut writer = CanonWriter::new();
+    writer.write_uint(settled.at_revision);
+    writer.write_uint(settled.extents.len() as u64);
+    for (relation, extent) in &settled.extents {
+        writer.write_tag(relation);
+        writer.write_uint(extent.len() as u64);
+        for record in extent.values() {
+            record.row.canon_write(&mut writer);
+            writer.write_uint(record.claims.len() as u64);
+            writer.write_uint(record.supports.len() as u64);
+        }
+    }
+
+    let mut supports = Vec::new();
+    let mut claims = Vec::new();
+    for (relation, extent) in &settled.extents {
+        let def = &program.relations[relation];
+        for record in extent.values() {
+            let edge = def.digest(&record.row);
+            supports.extend(record.supports.iter().map(|support| {
+                (
+                    edge,
+                    relation.as_str(),
+                    support.rule.as_str(),
+                    support.match_digest,
+                )
+            }));
+            claims.extend(
+                record
+                    .claims
+                    .iter()
+                    .map(|claim| (edge, relation.as_str(), *claim)),
+            );
+        }
+    }
+    supports.sort();
+    writer.write_uint(supports.len() as u64);
+    for (edge, relation, rule, match_digest) in supports {
+        writer.write_bytes(edge.as_bytes());
+        writer.write_tag(relation);
+        writer.write_tag(rule);
+        writer.write_bytes(match_digest.as_bytes());
+        writer.write_uint(settled.at_revision);
+    }
+    claims.sort();
+    writer.write_uint(claims.len() as u64);
+    for (edge, relation, claim) in claims {
+        writer.write_bytes(edge.as_bytes());
+        writer.write_tag(relation);
+        writer.write_bytes(claim.digest().as_bytes());
+        writer.write_uint(settled.at_revision);
+    }
+    // masks, key conflicts, rule errors
+    writer.write_uint(0);
+    writer.write_uint(0);
+    writer.write_uint(0);
+    writer.write_uint(settled.violations.len() as u64);
+    for violation in &settled.violations {
+        writer.write_tag(&violation.constraint);
+        writer.write_bytes(violation.match_digest.as_bytes());
+        writer.write_uint(settled.at_revision);
+    }
+    writer.finish()
+}
+
+pub fn dump_digest(settled: &Settled, program: &Program) -> Digest {
+    Digest::of(Domain::Value, &dump_bytes(settled, program))
+}
+
+/// Execute a blank-line-delimited typed transaction stream. Each operation is
+/// `assert|ensure|set|event Relation role=value,...`; values use explicit
+/// canonical tags (`int:7`, `nat:7`, `bool:true`, `str:hello`, `unit`, or
+/// `enum:Type#0`). One canonical dump is returned for every published
+/// revision as `revision digest hex-bytes`.
+pub fn run_text(program: Program, input: &str) -> Result<String, StreamError> {
+    let mut store = Store::new(program);
+    let mut transaction = Transaction::new(stream_intent(0));
+    let mut ordinal = 0usize;
+    let mut has_operations = false;
+    let mut output = String::new();
+    for (line_number, raw) in input.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() {
+            if has_operations {
+                commit_text(&mut output, &mut store, &transaction)?;
+                ordinal += 1;
+                transaction = Transaction::new(stream_intent(ordinal));
+                has_operations = false;
+            }
+            continue;
+        }
+        if line.starts_with('#') {
+            continue;
+        }
+        transaction
+            .ops
+            .push(parse_operation(line, line_number + 1)?);
+        has_operations = true;
+    }
+    if has_operations {
+        commit_text(&mut output, &mut store, &transaction)?;
+    }
+    Ok(output)
+}
+
+fn commit_text(
+    output: &mut String,
+    store: &mut Store,
+    transaction: &Transaction,
+) -> Result<(), StreamError> {
+    store
+        .commit(transaction)
+        .map_err(|error| StreamError::Commit(error.to_string()))?;
+    let settled = store.current();
+    let bytes = store.current_dump();
+    output.push_str(&format!(
+        "{} {} {}\n",
+        settled.at_revision,
+        Digest::of(Domain::Value, &bytes).to_hex(),
+        encode_hex(&bytes)
+    ));
+    Ok(())
+}
+
+fn parse_operation(line: &str, line_number: usize) -> Result<TransactionOp, StreamError> {
+    let mut fields = line.split_ascii_whitespace();
+    let operation = fields.next().ok_or(StreamError::InvalidLine {
+        line: line_number,
+        message: "missing operation",
+    })?;
+    let relation = fields.next().ok_or(StreamError::InvalidLine {
+        line: line_number,
+        message: "missing relation",
+    })?;
+    let row_fields = fields.next().ok_or(StreamError::InvalidLine {
+        line: line_number,
+        message: "missing row",
+    })?;
+    if fields.next().is_some() {
+        return Err(StreamError::InvalidLine {
+            line: line_number,
+            message: "expected an operation, relation, and row",
+        });
+    }
+    let row = parse_row(row_fields, line_number)?;
+    let relation = relation.to_owned();
+    match operation {
+        "assert" => Ok(TransactionOp::Assert { relation, row }),
+        "ensure" => Ok(TransactionOp::Ensure { relation, row }),
+        "set" => Ok(TransactionOp::Set { relation, row }),
+        "event" => Ok(TransactionOp::Event { relation, row }),
+        _ => Err(StreamError::InvalidLine {
+            line: line_number,
+            message: "operation must be assert, ensure, set, or event",
+        }),
+    }
+}
+
+fn parse_row(fields: &str, line_number: usize) -> Result<Row, StreamError> {
+    let mut row = BTreeMap::new();
+    for field in fields.split(',') {
+        let (role, value) = field.split_once('=').ok_or(StreamError::InvalidLine {
+            line: line_number,
+            message: "row fields must be role=value",
+        })?;
+        if role.is_empty() || row.contains_key(role) {
+            return Err(StreamError::InvalidLine {
+                line: line_number,
+                message: "row roles must be non-empty and unique",
+            });
+        }
+        row.insert(role.to_owned(), parse_value(value, line_number)?);
+    }
+    Ok(Row(row))
+}
+
+fn parse_value(input: &str, line_number: usize) -> Result<Value, StreamError> {
+    let invalid = || StreamError::InvalidLine {
+        line: line_number,
+        message: "invalid typed value",
+    };
+    if input == "unit" {
+        return Ok(Value::Unit);
+    }
+    if let Some(value) = input.strip_prefix("int:") {
+        return value.parse().map(Value::Int).map_err(|_| invalid());
+    }
+    if let Some(value) = input.strip_prefix("nat:") {
+        return value.parse().map(Value::Nat).map_err(|_| invalid());
+    }
+    if let Some(value) = input.strip_prefix("bool:") {
+        return value.parse().map(Value::Bool).map_err(|_| invalid());
+    }
+    if let Some(value) = input.strip_prefix("str:") {
+        return Ok(Value::Str(value.into()));
+    }
+    if let Some(value) = input.strip_prefix("enum:") {
+        let (ty, ordinal) = value.split_once('#').ok_or_else(invalid)?;
+        let ordinal = ordinal.parse().map_err(|_| invalid())?;
+        return Ok(Value::Enum {
+            ty: ty.into(),
+            ordinal,
+            name: ordinal.to_string(),
+        });
+    }
+    if let Some(value) = input.strip_prefix("node:") {
+        return decode_digest(value, line_number).map(|digest| Value::Node(NodeId(digest)));
+    }
+    if let Some(value) = input.strip_prefix("edge:") {
+        return decode_digest(value, line_number).map(|digest| Value::Edge(EdgeId(digest)));
+    }
+    Err(invalid())
+}
+
+fn decode_digest(input: &str, line_number: usize) -> Result<Digest, StreamError> {
+    if input.len() != 64 {
+        return Err(StreamError::InvalidLine {
+            line: line_number,
+            message: "identity values must contain 64 hexadecimal characters",
+        });
+    }
+    let mut bytes = [0u8; 32];
+    for (slot, pair) in bytes.iter_mut().zip(input.as_bytes().chunks_exact(2)) {
+        let Some(high) = hex_nibble(pair[0]) else {
+            return Err(StreamError::InvalidLine {
+                line: line_number,
+                message: "identity values must be hexadecimal",
+            });
+        };
+        let Some(low) = hex_nibble(pair[1]) else {
+            return Err(StreamError::InvalidLine {
+                line: line_number,
+                message: "identity values must be hexadecimal",
+            });
+        };
+        *slot = (high << 4) | low;
+    }
+    Ok(Digest::from_bytes(bytes))
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StreamError {
+    InvalidLine { line: usize, message: &'static str },
+    Commit(String),
+}
+
+impl std::fmt::Display for StreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidLine { line, message } => write!(f, "stream line {line}: {message}"),
+            Self::Commit(message) => write!(f, "transaction rejected: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for StreamError {}
+
+fn stream_intent(ordinal: usize) -> Vec<u8> {
+    format!("brix-stdin-{ordinal}").into_bytes()
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 impl Settled {
@@ -805,20 +1161,69 @@ fn eval_expr(program: &Program, env: &Env, expr: &Expr) -> Value {
             &eval_expr(program, env, left),
             &eval_expr(program, env, right),
         ),
-        Expr::Call(name, args) => program.fns[name](
-            &args
+        Expr::Call(name, args) => {
+            let args = args
                 .iter()
                 .map(|arg| eval_expr(program, env, arg))
-                .collect::<Vec<_>>(),
-        ),
-        Expr::Try(name, args) => program.partial_fns[name](
-            &args
+                .collect::<Vec<_>>();
+            match program
+                .fns
+                .get(name)
+                .copied()
+                .or_else(|| builtin_total(name))
+            {
+                Some(function) => function(&args),
+                None => panic!("unregistered total function `{name}`"),
+            }
+        }
+        Expr::Try(name, args) => {
+            let args = args
                 .iter()
                 .map(|arg| eval_expr(program, env, arg))
-                .collect::<Vec<_>>(),
-        )
-        .expect("unhandled partial function failure"),
+                .collect::<Vec<_>>();
+            match program
+                .partial_fns
+                .get(name)
+                .copied()
+                .or_else(|| builtin_partial(name))
+            {
+                Some(function) => function(&args).expect("unhandled partial function failure"),
+                None => panic!("unregistered partial function `{name}`"),
+            }
+        }
     }
+}
+
+fn builtin_total(name: &str) -> Option<TotalFn> {
+    (name == "surcharge").then_some(|args| {
+        let weight = args
+            .first()
+            .and_then(Value::as_i128)
+            .expect("surcharge expects a numeric weight");
+        Value::Int(if weight > 3_500 { 15_000 } else { 0 })
+    })
+}
+
+fn builtin_partial(name: &str) -> Option<PartialFn> {
+    (name == "riskModel").then_some(|args| {
+        let due = args
+            .first()
+            .and_then(Value::as_i128)
+            .expect("riskModel expects numeric due time");
+        let now = args
+            .get(1)
+            .and_then(Value::as_i128)
+            .expect("riskModel expects numeric current time");
+        let remaining = due - now;
+        // Probability is represented as basis points in the runtime's
+        // integer-only semantic path.
+        let risk = if remaining <= 0 {
+            10_000
+        } else {
+            ((24 - remaining).clamp(0, 24) * 10_000 / 24) as i64
+        };
+        Ok(Value::Int(risk))
+    })
 }
 
 fn eval_binop(operator: BinOp, left: &Value, right: &Value) -> Value {

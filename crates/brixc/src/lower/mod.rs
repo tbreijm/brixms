@@ -23,7 +23,9 @@ mod resolve;
 mod schema;
 mod tymap;
 
-pub use resolve::{FnInfo, LowerMeta, ProgramResolver, UnitClass, VariantLookup};
+pub use resolve::{
+    FnInfo, LowerMeta, ProgramResolver, RuntimeRelationKind, UnitClass, VariantLookup,
+};
 
 use brix_ast::File;
 use brix_diag::{Diagnostic, Severity};

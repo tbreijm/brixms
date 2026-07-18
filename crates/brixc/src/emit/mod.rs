@@ -73,25 +73,12 @@ pub struct RuleDesc {
     pub target_relation: Option<String>,
     /// A mechanically verified identity rule: one edge read whose variable
     /// bindings are reproduced unchanged by a tuple head with the same role
-    /// layout. This is the first native semantic delta shape; other rules
-    /// stay fail-closed until their join plan is emitted.
+    /// layout. Retained as a codegen planning hint; native `Program`
+    /// execution also handles joins and the other checked rule forms.
     pub identity_source: Option<String>,
     /// Appendix-F phase assigned to this rule. Rules in one phase settle to a
     /// positive fixed point before any later phase sees their changes.
     pub phase: u32,
-}
-
-/// Rules that the current native runtime emitter cannot yet represent. A
-/// successful build must register every rule; silently omitting a join, mask,
-/// node, or expression rule would create a binary with observably wrong
-/// semantics. The compiler therefore fails closed until each shape has a
-/// proven runtime lowering.
-pub fn unsupported_runtime_rules(rules: &[RuleDesc]) -> Vec<String> {
-    rules
-        .iter()
-        .filter(|rule| rule.target_relation.is_none() || rule.identity_source.is_none())
-        .map(|rule| rule.name.clone())
-        .collect()
 }
 
 /// The determinism header stamped at the root of every generated crate. This is
@@ -351,17 +338,5 @@ mod tests {
         // And it is a parseable Rust file (format_tokens would have wrapped an
         // error in a comment otherwise).
         assert!(!a.contains("produced invalid Rust"));
-    }
-
-    #[test]
-    fn runtime_emission_fails_closed_for_non_identity_rules() {
-        let rules = [RuleDesc {
-            name: "Join".into(),
-            delta_sources: vec!["Input".into(), "Other".into()],
-            target_relation: Some("Output".into()),
-            identity_source: None,
-            phase: 0,
-        }];
-        assert_eq!(unsupported_runtime_rules(&rules), vec!["Join"]);
     }
 }

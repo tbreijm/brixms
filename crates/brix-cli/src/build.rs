@@ -15,7 +15,7 @@ use std::process::Command;
 
 use brix_ast::parse_file;
 use brix_canon::{Digest, Domain};
-use brix_diag::{CanonValue, Diagnostic, DiagnosticFormat, Diagnostics, Span};
+use brix_diag::{DiagnosticFormat, Diagnostics};
 use brixc::pipeline::PhaseAssign;
 use brixc::{AstPhase, CacheInputs, CacheKey, PipelineError, Profile};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -127,31 +127,6 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
     // This runtime-owned IR is generated alongside the typed-store scaffold.
     // The binary never reconstructs schema from untyped transaction input.
     let native_program = brixc::emit::project_program(&phased);
-    let unsupported_rules = brixc::emit::unsupported_runtime_rules(&rules);
-    if !unsupported_rules.is_empty() {
-        return Err(BuildError::Diagnostics(DiagnosticReport {
-            source,
-            path: located.source_path.to_string(),
-            diagnostics: Diagnostics::from_items(vec![Diagnostic::error(
-                "BRX5001",
-                Span::empty(0),
-                format!(
-                    "native runtime code generation does not yet support rule(s): {}",
-                    unsupported_rules.join(", ")
-                ),
-            )
-            .with_structure(CanonValue::Object(BTreeMap::from([(
-                "unsupportedRules".to_owned(),
-                CanonValue::List(
-                    unsupported_rules
-                        .into_iter()
-                        .map(CanonValue::String)
-                        .collect(),
-                ),
-            )])))]),
-        }));
-    }
-
     let crate_name = brixc::emit::sanitize_crate_name(located.manifest.name.as_str());
 
     let canonical_source = Digest::of(Domain::Value, brix_ast::format_file(&file).as_bytes());

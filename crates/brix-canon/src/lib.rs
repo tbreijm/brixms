@@ -105,6 +105,13 @@ impl Digest {
         &self.0
     }
 
+    /// Construct a digest received through a canon-framed external boundary.
+    /// This does not hash or validate the bytes; callers must use it only for
+    /// an already domain-correct identity such as a `node:<hex>` stream value.
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// Lowercase hex, the canonical human/text rendering used in diagnostics and
     /// `brix why` output.
     pub fn to_hex(&self) -> String {

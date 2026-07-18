@@ -129,6 +129,7 @@ dependencies = [
  "brix-ast",
  "brix-canon",
  "brix-diag",
+ "brix-oracle",
  "brixc",
  "brixpkg",
  "camino",

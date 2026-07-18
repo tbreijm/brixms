@@ -94,6 +94,23 @@ pub fn emit_native_program(program: &NativeProgram) -> String {
                 .join(", "),
         ));
     }
+    for constraint in program.constraints.values() {
+        let severity = match constraint.severity {
+            brix_rt::engine::Severity::Advisory => "Advisory",
+            brix_rt::engine::Severity::Strict => "Strict",
+            brix_rt::engine::Severity::Audit => "Audit",
+        };
+        out.push_str(&format!(
+            "    program.constraints.insert({id:?}.into(), brix_rt::engine::Constraint {{ id: {id:?}.into(), severity: brix_rt::engine::Severity::{severity}, body: vec![{body}] }});\n",
+            id = constraint.id,
+            body = constraint
+                .body
+                .iter()
+                .map(emit_native_clause)
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+    }
     out.push_str("    program\n}\n");
     out
 }
@@ -131,11 +148,42 @@ fn emit_native_expr(expr: &NativeExpr) -> String {
         NativeExpr::Const(value) => {
             format!("brix_rt::engine::Expr::Const({})", emit_native_value(value))
         }
-        // `project_program` intentionally omits unsupported expression forms;
-        // this assertion keeps a later widening from silently dropping one.
-        NativeExpr::BinOp(..) | NativeExpr::Call(..) | NativeExpr::Try(..) => {
-            panic!("native program emission does not yet support computed expressions")
-        }
+        NativeExpr::BinOp(operator, left, right) => format!(
+            "brix_rt::engine::Expr::BinOp({}, Box::new({}), Box::new({}))",
+            emit_native_binop(*operator),
+            emit_native_expr(left),
+            emit_native_expr(right),
+        ),
+        NativeExpr::Call(name, args) => format!(
+            "brix_rt::engine::Expr::Call({name:?}.into(), vec![{}])",
+            args.iter()
+                .map(emit_native_expr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        NativeExpr::Try(name, args) => format!(
+            "brix_rt::engine::Expr::Try({name:?}.into(), vec![{}])",
+            args.iter()
+                .map(emit_native_expr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+fn emit_native_binop(operator: brix_rt::engine::BinOp) -> &'static str {
+    match operator {
+        brix_rt::engine::BinOp::Add => "brix_rt::engine::BinOp::Add",
+        brix_rt::engine::BinOp::Sub => "brix_rt::engine::BinOp::Sub",
+        brix_rt::engine::BinOp::Mul => "brix_rt::engine::BinOp::Mul",
+        brix_rt::engine::BinOp::Eq => "brix_rt::engine::BinOp::Eq",
+        brix_rt::engine::BinOp::Ne => "brix_rt::engine::BinOp::Ne",
+        brix_rt::engine::BinOp::Lt => "brix_rt::engine::BinOp::Lt",
+        brix_rt::engine::BinOp::Le => "brix_rt::engine::BinOp::Le",
+        brix_rt::engine::BinOp::Gt => "brix_rt::engine::BinOp::Gt",
+        brix_rt::engine::BinOp::Ge => "brix_rt::engine::BinOp::Ge",
+        brix_rt::engine::BinOp::And => "brix_rt::engine::BinOp::And",
+        brix_rt::engine::BinOp::Or => "brix_rt::engine::BinOp::Or",
     }
 }
 
@@ -245,10 +293,7 @@ fn assemble_workspace_inner(
         main_rs(relations, runtime_path.is_some()),
     );
     if runtime_path.is_some() {
-        files.insert(
-            Utf8PathBuf::from("src").join("runtime.rs"),
-            runtime_rs(rules),
-        );
+        let _ = rules;
     }
 
     files
@@ -402,22 +447,15 @@ fn main_rs(relations: &[RelationDesc], runtime_linked: bool) -> String {
         "    let mut input = String::new();\n\
          \x20\x20\x20\x20std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)\n\
          \x20\x20\x20\x20\x20\x20\x20\x20.expect(\"read transaction stream\");\n\
-         \x20\x20\x20\x20let mut scheduler = brix_rt::scheduler::Scheduler::new();\n\
-         \x20\x20\x20\x20runtime::register(&mut scheduler);\n\
-         \x20\x20\x20\x20match brix_rt::stream::run_text(&mut scheduler, &input) {\n\
-         \x20\x20\x20\x20\x20\x20Ok(dumps) => print!(\"{}\", brix_rt::stream::render_dumps(&dumps)),\n\
+         \x20\x20\x20\x20match brix_rt::engine::run_text(native_program::native_program(), &input) {\n\
+         \x20\x20\x20\x20\x20\x20Ok(dumps) => print!(\"{}\", dumps),\n\
          \x20\x20\x20\x20\x20\x20Err(error) => { eprintln!(\"brix: invalid transaction stream: {error}\"); std::process::exit(1); }\n\
          \x20\x20\x20\x20}\n"
     } else {
         ""
     };
     let runtime_module = if runtime_linked {
-        "mod native_program;\nmod runtime;\n"
-    } else {
-        ""
-    };
-    let native_program = if runtime_linked {
-        "    let _native_program = native_program::native_program();\n"
+        "mod native_program;\n"
     } else {
         ""
     };
@@ -430,57 +468,8 @@ fn main_rs(relations: &[RelationDesc], runtime_linked: bool) -> String {
          \n\
          fn main() {{\n\
         {checks}\
-         {native_program}\
          {runtime}\
          \x20\x20\x20\x20println!(\"brix: generated workspace OK\");\n\
-         }}\n"
-    )
-}
-
-fn runtime_rs(rules: &[RuleDesc]) -> String {
-    let mut registrations = String::new();
-    for rule in rules {
-        let (Some(target), Some(source)) = (&rule.target_relation, &rule.identity_source) else {
-            continue;
-        };
-        registrations.push_str(&format!(
-            "    scheduler.register_rule({phase}, {target:?}, Box::new(IdentityRule {{ source: DeltaSource {{ relation: RelationRef::from({source:?}), kind: DeltaSourceKind::Rule {{ rule: RuleRef::from({name:?}), site: None }} }}, target: RelationRef::from({target:?}), rule: RuleRef::from({name:?}) }}));\n",
-            name = rule.name,
-            phase = rule.phase,
-        ));
-    }
-    format!(
-        "// @generated by brixc — native delta registrations.\n\
-         use brix_rt::delta::{{CanonRow, DeltaAbi, DeltaBatch, DeltaOp, DeltaOutput, DeltaSource, DeltaSourceKind, Emission, SupportOp, SupportRecord}};\n\
-         use brix_rt::ids::{{MatchDigest, RelationRef, RuleRef}};\n\
-         use brix_rt::scheduler::{{edge_for_row, Scheduler}};\n\
-         \n\
-         struct IdentityRule {{ source: DeltaSource, target: RelationRef, rule: RuleRef }}\n\
-         \n\
-         impl DeltaAbi for IdentityRule {{\n\
-         \x20\x20\x20\x20type Row = CanonRow;\n\
-         \x20\x20\x20\x20fn source(&self) -> &DeltaSource {{ &self.source }}\n\
-         \x20\x20\x20\x20fn apply(&mut self, batch: DeltaBatch<CanonRow>) -> DeltaOutput<CanonRow> {{\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20let mut output = DeltaOutput::empty();\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20for operation in batch.ops {{\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20match operation {{\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20DeltaOp::Insert(row) => {{\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20let edge = edge_for_row(&self.target, &row);\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20let match_digest = MatchDigest::of(&self.rule, &row.0);\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20output.emissions.push(Emission {{ edge, row, supports: vec![SupportOp::Add(SupportRecord {{ edge, rule: self.rule.clone(), match_digest }})] }});\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20}},\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20DeltaOp::Retract(row) => {{\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20let edge = edge_for_row(&self.target, &row);\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20output.support_ops.push(SupportOp::Remove(SupportRecord {{ edge, rule: self.rule.clone(), match_digest: MatchDigest::of(&self.rule, &row.0) }}));\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20}},\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20}}\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20}}\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20output\n\
-         \x20\x20\x20\x20}}\n\
-         }}\n\
-         \n\
-         pub fn register(scheduler: &mut Scheduler) {{\n\
-         {registrations}\
          }}\n"
     )
 }
@@ -555,8 +544,7 @@ mod tests {
         assert!(
             files[&Utf8PathBuf::from("Cargo.toml")].contains("brix-rt = { path = \"../brix-rt\" }")
         );
-        assert!(files[&Utf8PathBuf::from("src/main.rs")].contains("brix_rt::stream::run_text"));
-        assert!(files[&Utf8PathBuf::from("src/runtime.rs")].contains("scheduler.register_rule(7"));
+        assert!(files[&Utf8PathBuf::from("src/main.rs")].contains("brix_rt::engine::run_text"));
         assert!(files.contains_key(&Utf8PathBuf::from("src/native_program.rs")));
     }
 

@@ -20,3 +20,6 @@ camino = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+brix-oracle = { path = "../brix-oracle" }
