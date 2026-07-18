@@ -1,4 +1,5 @@
-// Native `brix.type` — vertical slice 1 (#15).
+// Native `brix.type` — vertical slice 1 (#15), amended by slice 2
+// (var-at-two-roles, Fable ruling comment 5012408628).
 //
 // Shadow-mode differential companion to `brix_ir::reflect::analyze`. This
 // package never runs against a real user transaction: `brix-conformance`'s
@@ -10,8 +11,9 @@
 // report. See `crates/brix-conformance/tests/selfhost_parity.rs`.
 //
 // R1 (opaque tokens): every role below is `String` — a hex-encoded digest the
-// exporter computed. Rules only join on and copy these tokens; they never
-// construct or interpret one.
+// exporter computed — except `RoleVar.ordinal`, the package's first `Int`
+// column (slice 2): plain structure, not a token. Rules only join on and
+// copy these; they never construct or interpret one.
 //
 // R3 (scope from day one): every derived-judgment relation carries a `scope`
 // column, joined against the `RootScope` singleton the exporter seeds with
@@ -26,9 +28,17 @@ package brix.type @ 0.1.0
 
 // --- exported structural facts (Ground, asserted by the exporter) ---
 
-// Fact::RoleVar { subject, relation, role } — which variable occupies a
-// relation role.
-rel RoleVar { subject: String; relation: String; role: String } key(subject, relation, role)
+// Fact::RoleVar { subject, relation, role, ordinal } — which variable
+// occupies a relation role, plus the zero-based occurrence index of this
+// role-binding among this variable's role-bindings in one declaration
+// (#15 native slice 2, var-at-two-roles ruling: first occurrence, ordinal
+// 0, types the var; a var bound at the same role twice now exports two
+// distinct rows instead of colliding). `ordinal` in the key is not
+// optional: without it, a var at the same role twice would export two rows
+// equal on (subject, relation, role) differing only in ordinal, which
+// `brix-rt::engine` would hard-reject as a GroundKeyConflict — violating
+// shadow mode's "never rejects" bar.
+rel RoleVar { subject: String; relation: String; role: String; ordinal: Int } key(subject, relation, role, ordinal)
 
 // Fact::RoleLit { subject, relation, role, ty } — a role matched against a
 // literal, with the literal's own class.
@@ -50,9 +60,12 @@ rel HasType { subject: String; ty: String; scope: String } key(subject, ty, scop
 // class disagrees with the role's declared type.
 rel MismatchConflict { subject: String; expect: String; found: String; scope: String } key(subject, expect, found, scope)
 
-// TypeOfRoleBinding: RoleVar ⋈ SchemaRole ⋈ RootScope → HasType.
+// TypeOfRoleBinding: RoleVar ⋈ SchemaRole ⋈ RootScope → HasType. Only the
+// FIRST role-binding of a variable types it (env-order first-wins, #15
+// var-at-two-roles ruling). `ordinal: 0` is a constant join, not a guard —
+// the rule set stays monotone.
 derive TypeOfRoleBinding: HasType(subject: subject, ty: ty, scope: scope) from {
-    RoleVar(subject: subject, relation: relation, role: role)
+    RoleVar(subject: subject, relation: relation, role: role, ordinal: 0)
     SchemaRole(relation: relation, role: role, ty: ty)
     RootScope(scope: scope)
 }
@@ -64,6 +77,22 @@ derive TypeOfRoleBinding: HasType(subject: subject, ty: ty, scope: scope) from {
 derive LitRoleMismatch: MismatchConflict(subject: subject, expect: expect, found: found, scope: scope) from {
     RoleLit(subject: subject, relation: relation, role: role, ty: found)
     SchemaRole(relation: relation, role: role, ty: expect)
+    RootScope(scope: scope)
+    when expect != found
+}
+
+// VarRoleMismatch: the first occurrence's declared type vs ANY occurrence's
+// declared type, oriented (first, later) — the same orientation
+// reflect.rs's bind/unify records (#15 var-at-two-roles ruling). The
+// degenerate self-pair (the second RoleVar row IS the ordinal-0 row)
+// self-cancels via `when expect != found`: a variable has exactly one
+// ordinal-0 role-binding, so no `k != 0` guard is needed. Later-vs-later
+// pairs are correctly never derived — only ordinal 0 ever plays `expect`.
+derive VarRoleMismatch: MismatchConflict(subject: subject, expect: expect, found: found, scope: scope) from {
+    RoleVar(subject: subject, relation: r0, role: q0, ordinal: 0)
+    SchemaRole(relation: r0, role: q0, ty: expect)
+    RoleVar(subject: subject, relation: rk, role: qk, ordinal: k)
+    SchemaRole(relation: rk, role: qk, ty: found)
     RootScope(scope: scope)
     when expect != found
 }
