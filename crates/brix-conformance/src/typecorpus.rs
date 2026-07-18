@@ -972,6 +972,69 @@ derive Copy: Output(count: count) from {
 }
 "#;
 
+/// The var-at-two-roles native-slice fixture (#15 slice 2 ruling, Fable
+/// comment 5012408628, §5 "Confused" program): the var `count` is
+/// role-bound at `Input.count` (`Int`, ordinal 0) then `Input.label`
+/// (`String`, ordinal 1). `reflect.rs` records `RoleVar { ordinal: 0 }` and
+/// `RoleVar { ordinal: 1 }`, exactly **one** `Fact::HasType` at the binding
+/// (`count : Int`, the first occurrence), and exactly **one**
+/// `ConflictKind::Mismatch { left: Int, right: Str }` — never two contradictory
+/// `HasType`s and never a clean bill of health, the pre-slice-2 native bug
+/// this fixture exists to catch. The head `Output(count: count)` unifies
+/// `Int ~ Int` cleanly (the env holds `T0 = Int`), so this is the only
+/// conflict.
+pub const NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE: &str = r#"
+package t @ 1.0.0
+
+rel Input { count: Int; label: String } key(count)
+rel Output { count: Int } key(count)
+
+derive Confused: Output(count: count) from {
+    Input(count: count, label: count)
+}
+"#;
+
+/// The same-role-twice native-slice fixture (#15 slice 2 ruling follow-up
+/// corpus): a var role-bound at the *same* role twice. Before slice 2, the
+/// two `RoleVar` facts were byte-identical (no `ordinal`) and collapsed to
+/// one `FactId` — this fixture proves the duplicate no longer collapses (2
+/// distinct `RoleVar` rows, ordinals 0 and 1), that exactly **one**
+/// `HasType` still results (both occurrences declare the same `Int` role
+/// type, so `T0 == T1` and no conflict is raised), and — the sharper native
+/// regression the ordinal-keyed `RoleVar` key exists to prevent — that the
+/// export commits cleanly with **zero** `GroundKeyConflict`s (the two rows
+/// are equal on `(subject, relation, role)` but differ on `ordinal`, which
+/// is part of the key).
+pub const NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE: &str = r#"
+package t @ 1.0.0
+
+rel Pair { first: Int; second: Int } key(first)
+rel Out { first: Int } key(first)
+
+derive Doubled: Out(first: n) from {
+    Pair(first: n, second: n)
+}
+"#;
+
+/// The three-role native-slice fixture (#15 slice 2 ruling follow-up
+/// corpus, §4 "multiplicity check"): a var role-bound at three roles with
+/// declared types `Int, String, Bool` in traversal order. `reflect.rs`
+/// records one `HasType` (`T0 = Int`) and exactly two oriented conflicts —
+/// `Mismatch { left: Int, right: Str }` and `Mismatch { left: Int, right:
+/// Bool }` — and, critically, **never** `Mismatch { left: Str, right: Bool
+/// }`: later-vs-later pairs are structurally never derived, by either
+/// checker.
+pub const NATIVE_VAR_THREE_ROLES_FIXTURE: &str = r#"
+package t @ 1.0.0
+
+rel Triple { a: Int; b: String; c: Bool } key(a)
+rel Out3 { a: Int } key(a)
+
+derive Triplet: Out3(a: x) from {
+    Triple(a: x, b: x, c: x)
+}
+"#;
+
 /// All 15 type-inference-axis fixtures, in corpus order. Convenience for
 /// consumers that want to iterate the whole axis rather than naming each
 /// fixture function individually.

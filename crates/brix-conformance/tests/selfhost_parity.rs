@@ -22,15 +22,19 @@ use std::collections::BTreeSet;
 
 use brix_ast::parse_file;
 use brix_canon::CanonWriter;
+use brix_ir::ident::Ident;
 use brix_ir::reflect::{
-    analyze, write_conflict, ConflictKind, Fact, FactId, Subject, TypeConflict,
+    analyze, write_conflict, ConflictKind, Fact, FactId, ReflectiveReport, Subject, TypeConflict,
 };
-use brix_rt::engine::{Program, Store, Transaction};
+use brix_ir::types::{IntWidth, Ty};
+use brix_rt::engine::{Extent, Program, Store, Transaction};
 use brixc::pipeline::PhaseAssign;
 use brixc::{emit, lower_file, AstPhase};
 
 use brix_conformance::typecorpus::{
     NATIVE_ROLE_BINDINGS_FIXTURE, NATIVE_ROLE_LIT_MISMATCH_FIXTURE,
+    NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE, NATIVE_VAR_THREE_ROLES_FIXTURE,
+    NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
 };
 use brix_conformance::typefacts;
 
@@ -67,6 +71,74 @@ fn compiled_package() -> Program {
         .assign_phases(lowered)
         .expect("brix.type package must be well-stratified (Appendix F)");
     emit::project_program(&phased)
+}
+
+/// Canonical `write_conflict` bytes for one [`TypeConflict`] — the atom the
+/// #15 slice-2 ruling's set-comparison rule operates over (extends PR2's
+/// "categories compared as canonical sets, never sequences" discipline to
+/// the conflict-byte comparison this harness makes).
+fn conflict_bytes(conflict: &TypeConflict) -> Vec<u8> {
+    let mut w = CanonWriter::new();
+    write_conflict(conflict, &mut w);
+    w.finish()
+}
+
+/// A **set** of canonical conflict bytes, never a sequence — two conflicts
+/// with identical `(subject, kind, scope)` collapse under canonical bytes,
+/// matching the native `MismatchConflict` relation's own set semantics by
+/// key (#15 slice-2 ruling §1).
+fn conflict_byte_set<'a>(
+    conflicts: impl IntoIterator<Item = &'a TypeConflict>,
+) -> BTreeSet<Vec<u8>> {
+    conflicts.into_iter().map(conflict_bytes).collect()
+}
+
+/// Every `Mismatch`-kind conflict `reflect::analyze` recorded.
+fn reflect_mismatches(report: &ReflectiveReport) -> Vec<&TypeConflict> {
+    report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::Mismatch { .. }))
+        .collect()
+}
+
+/// Resolve every row of a settled `MismatchConflict` extent back to a
+/// comparable [`TypeConflict`] via the exporter's token table — the native
+/// counterpart of [`reflect_mismatches`].
+fn native_mismatches(tokens: &typefacts::TokenTable, extent: &Extent) -> Vec<TypeConflict> {
+    extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_mismatch(tokens, &record.row).expect(
+                "every derived MismatchConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::Mismatch {
+                    left: resolved.expect,
+                    right: resolved.found,
+                },
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect()
+}
+
+/// Every `Fact::RoleVar` `reflect::analyze` recorded, subject+ordinal only
+/// (enough to assert traversal-order occurrence indices without depending on
+/// the rest of the fact's shape).
+fn role_var_ordinals(report: &ReflectiveReport) -> Vec<u32> {
+    let mut ordinals: Vec<u32> = report
+        .facts
+        .iter()
+        .filter_map(|derivation| match &derivation.fact {
+            Fact::RoleVar { ordinal, .. } => Some(*ordinal),
+            _ => None,
+        })
+        .collect();
+    ordinals.sort_unstable();
+    ordinals
 }
 
 #[test]
@@ -154,19 +226,14 @@ fn smallest_fixture_two_role_bindings_agree_fact_id_for_fact_id() {
 fn twin_fixture_derives_exactly_one_oriented_mismatch_conflict() {
     let report = analyze_source(NATIVE_ROLE_LIT_MISMATCH_FIXTURE);
 
-    let reflect_conflicts: Vec<&TypeConflict> = report
-        .conflicts
-        .iter()
-        .filter(|conflict| matches!(conflict.kind, ConflictKind::Mismatch { .. }))
-        .collect();
+    let reflect_conflicts = reflect_mismatches(&report);
     assert_eq!(
         reflect_conflicts.len(),
         1,
         "reflect.rs must record exactly one Mismatch conflict for the twin fixture; got {reflect_conflicts:?}"
     );
-    let reflect_conflict = reflect_conflicts[0];
     assert_eq!(
-        reflect_conflict.subject,
+        reflect_conflicts[0].subject,
         Subject::Binding {
             declaration: brix_ir::ident::Ident::new("Copy"),
             name: brix_ir::ident::Ident::new("label"),
@@ -193,29 +260,291 @@ fn twin_fixture_derives_exactly_one_oriented_mismatch_conflict() {
         "native package must derive exactly one oriented MismatchConflict row"
     );
 
-    let record = mismatch_extent.values().next().unwrap();
-    let resolved = typefacts::resolve_mismatch(&export.tokens, &record.row)
-        .expect("the derived MismatchConflict row's tokens must resolve through the token table");
+    let native_conflicts = native_mismatches(&export.tokens, mismatch_extent);
 
-    let native_conflict = TypeConflict {
-        subject: resolved.subject,
-        kind: ConflictKind::Mismatch {
-            left: resolved.expect,
-            right: resolved.found,
+    // #15 slice-2 ruling: conflicts compare as canonical-byte **sets**, never
+    // one-vs-one — this generalizes cleanly to the singleton case here.
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived MismatchConflict set must be canonical-byte-identical \
+         to reflect.rs's own conflict set (same subject, same orientation, same scope)"
+    );
+}
+
+/// #15 slice-2 ruling (Fable comment 5012408628, §5 "Confused"): a var
+/// role-bound at two roles with disagreeing declared types (`Int` then
+/// `String`) must derive exactly one `HasType` (typed by the FIRST
+/// occurrence) and exactly one oriented `Mismatch` — never two contradictory
+/// root-world `HasType`s and never a clean bill of health, which is what the
+/// pre-slice-2 native package derived for this exact program.
+#[test]
+fn var_two_roles_mismatch_yields_one_has_type_and_one_oriented_mismatch() {
+    let report = analyze_source(NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE);
+
+    // Reference side, exact expectations from the ruling.
+    assert_eq!(
+        role_var_ordinals(&report),
+        vec![0, 1],
+        "reflect.rs must record two RoleVar facts for `count`, ordinals 0 and 1"
+    );
+
+    let has_type_bindings: Vec<&Fact> = report
+        .facts
+        .iter()
+        .filter(|derivation| {
+            matches!(
+                &derivation.fact,
+                Fact::HasType {
+                    subject: Subject::Binding { .. },
+                    ..
+                }
+            )
+        })
+        .map(|derivation| &derivation.fact)
+        .collect();
+    assert_eq!(
+        has_type_bindings,
+        vec![&Fact::HasType {
+            subject: Subject::Binding {
+                declaration: Ident::new("Confused"),
+                name: Ident::new("count"),
+            },
+            ty: Ty::Int(IntWidth::Int),
+            scope: brix_ir::reflect::ScopeId::root(),
+        }],
+        "reflect.rs must record exactly one HasType(Binding) fact, typed by \
+         the FIRST occurrence (Int), never a second contradictory HasType"
+    );
+
+    let reflect_conflicts = reflect_mismatches(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one Mismatch conflict; got {reflect_conflicts:?}"
+    );
+    assert_eq!(
+        reflect_conflicts[0].kind,
+        ConflictKind::Mismatch {
+            left: Ty::Int(IntWidth::Int),
+            right: Ty::Str,
         },
-        because: BTreeSet::new(),
-        scope: resolved.scope,
-    };
+        "the conflict must be oriented against the first occurrence (Int), not later-vs-later"
+    );
+    assert!(
+        !report.is_consistent(),
+        "a var-at-two-roles disagreement must make the reference report inconsistent"
+    );
 
-    let mut native_bytes = CanonWriter::new();
-    write_conflict(&native_conflict, &mut native_bytes);
-    let mut reflect_bytes = CanonWriter::new();
-    write_conflict(reflect_conflict, &mut reflect_bytes);
+    // Native side.
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-var-two-roles-mismatch".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let has_type_extent = settled
+        .extents
+        .get("HasType")
+        .expect("brix.type package must declare a HasType relation");
+    assert_eq!(
+        has_type_extent.len(),
+        1,
+        "native package must derive exactly one HasType row, not two contradictory ones"
+    );
+    let native_has_type_id = {
+        let record = has_type_extent.values().next().unwrap();
+        let fact = typefacts::resolve_has_type(&export.tokens, &record.row)
+            .expect("the derived HasType row's tokens must resolve through the token table");
+        FactId::derive(&fact)
+    };
+    let reflect_has_type_id = report
+        .facts
+        .iter()
+        .find(|derivation| {
+            matches!(
+                &derivation.fact,
+                Fact::HasType {
+                    subject: Subject::Binding { .. },
+                    ..
+                }
+            )
+        })
+        .expect("reflect.rs must have recorded the Binding HasType above")
+        .id;
+    assert_eq!(
+        native_has_type_id, reflect_has_type_id,
+        "the native-derived HasType must be FactId-equal to reflect.rs's own"
+    );
+
+    let mismatch_extent = settled
+        .extents
+        .get("MismatchConflict")
+        .expect("brix.type package must declare a MismatchConflict relation");
+    assert_eq!(
+        mismatch_extent.len(),
+        1,
+        "native package must derive exactly one MismatchConflict row"
+    );
+    let native_conflicts = native_mismatches(&export.tokens, mismatch_extent);
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived MismatchConflict must canonical-byte-equal reflect.rs's own"
+    );
+}
+
+/// #15 slice-2 ruling follow-up corpus: a var role-bound at the *same* role
+/// twice. Before slice-2, the two `RoleVar` facts were byte-identical (no
+/// `ordinal`) and collapsed to one `FactId`, silently under-reporting the
+/// program. This proves the duplicate no longer collapses, that agreeing
+/// occurrences still yield exactly one `HasType` and zero conflicts, and —
+/// the sharper native regression the ordinal-keyed `RoleVar` key exists to
+/// prevent — that the export still commits cleanly (no `GroundKeyConflict`).
+#[test]
+fn var_same_role_twice_yields_two_role_var_rows_one_has_type_zero_conflicts() {
+    let report = analyze_source(NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE);
 
     assert_eq!(
-        native_bytes.finish(),
-        reflect_bytes.finish(),
-        "the native-derived MismatchConflict must be canonical-byte-identical \
-         to reflect.rs's own conflict (same subject, same orientation, same scope)"
+        role_var_ordinals(&report),
+        vec![0, 1],
+        "reflect.rs must record two distinct RoleVar facts (ordinals 0, 1) \
+         for a var bound at the same role twice, not one collapsed fact"
+    );
+
+    let has_type_bindings = report
+        .facts
+        .iter()
+        .filter(|derivation| {
+            matches!(
+                &derivation.fact,
+                Fact::HasType {
+                    subject: Subject::Binding { .. },
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(
+        has_type_bindings, 1,
+        "agreeing same-role-twice occurrences must still yield exactly one HasType"
+    );
+    assert!(
+        reflect_mismatches(&report).is_empty(),
+        "agreeing occurrences must not raise a Mismatch conflict"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-var-same-role-twice".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store.commit(&txn).expect(
+        "exported facts must commit cleanly — the ordinal-keyed RoleVar key must not \
+         raise a GroundKeyConflict on a var bound at the same role twice",
+    );
+
+    let role_var_extent = settled
+        .extents
+        .get("RoleVar")
+        .expect("brix.type package must declare a RoleVar relation");
+    assert_eq!(
+        role_var_extent.len(),
+        2,
+        "the two per-occurrence RoleVar rows must both be present, not collapsed"
+    );
+
+    let has_type_extent = settled
+        .extents
+        .get("HasType")
+        .expect("brix.type package must declare a HasType relation");
+    assert_eq!(
+        has_type_extent.len(),
+        1,
+        "native package must derive exactly one HasType row"
+    );
+
+    let mismatch_extent = settled
+        .extents
+        .get("MismatchConflict")
+        .expect("brix.type package must declare a MismatchConflict relation");
+    assert_eq!(
+        mismatch_extent.len(),
+        0,
+        "native package must derive zero MismatchConflict rows for agreeing occurrences"
+    );
+}
+
+/// #15 slice-2 ruling follow-up corpus (§4 multiplicity check): a var
+/// role-bound at three roles, declared `Int, String, Bool` in traversal
+/// order. Exactly one `HasType` (Int) and exactly two oriented conflicts —
+/// `(Int, Str)` and `(Int, Bool)` — and, critically, never `(Str, Bool)`:
+/// later-vs-later pairs are structurally never derived, by either checker.
+#[test]
+fn var_three_roles_yields_two_oriented_mismatches_never_later_vs_later() {
+    let report = analyze_source(NATIVE_VAR_THREE_ROLES_FIXTURE);
+
+    assert_eq!(
+        role_var_ordinals(&report),
+        vec![0, 1, 2],
+        "reflect.rs must record three RoleVar facts, ordinals 0, 1, 2"
+    );
+
+    let reflect_conflicts = reflect_mismatches(&report);
+    let reflect_kinds: BTreeSet<(Ty, Ty)> = reflect_conflicts
+        .iter()
+        .map(|conflict| match &conflict.kind {
+            ConflictKind::Mismatch { left, right } => (left.clone(), right.clone()),
+            other => panic!("expected a Mismatch conflict, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        reflect_kinds,
+        BTreeSet::from([
+            (Ty::Int(IntWidth::Int), Ty::Str),
+            (Ty::Int(IntWidth::Int), Ty::Bool),
+        ]),
+        "reflect.rs must derive exactly the two oriented (first, later) pairs, \
+         never the later-vs-later (Str, Bool) pair"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-var-three-roles".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let has_type_extent = settled
+        .extents
+        .get("HasType")
+        .expect("brix.type package must declare a HasType relation");
+    assert_eq!(
+        has_type_extent.len(),
+        1,
+        "native package must derive exactly one HasType row"
+    );
+
+    let mismatch_extent = settled
+        .extents
+        .get("MismatchConflict")
+        .expect("brix.type package must declare a MismatchConflict relation");
+    assert_eq!(
+        mismatch_extent.len(),
+        2,
+        "native package must derive exactly two oriented MismatchConflict rows"
+    );
+    let native_conflicts = native_mismatches(&export.tokens, mismatch_extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived MismatchConflict set must canonical-byte-equal reflect.rs's own, \
+         and by this equality never contain the (Str, Bool) later-vs-later pair"
     );
 }

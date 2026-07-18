@@ -4,20 +4,26 @@
 //!
 //! `reflect::analyze` produces content-addressed, `Ty`/`Subject`-shaped
 //! facts. The native package only ever runs an `engine::Store` — its rows
-//! are `String -> engine::Value`, and the only comparable/joinable `Value`
-//! this slice uses is `Value::Str` (structural `Eq`/`Ne`, already
-//! implemented). So this module never hands a `Subject`/`Ty` to the engine
-//! directly: it flattens each to an **opaque canonical token**
-//! (`Value::Str(hex(digest))`, the same content-addressing style
-//! `FactId::derive`/`ScopeId::root` already use) and records a `token ->
-//! (Subject|Ty|ScopeId)` side table ([`TokenTable`]) so the harness can map
-//! a derived row's tokens back to the original values and call
+//! are `String -> engine::Value`, and this module never hands a
+//! `Subject`/`Ty` to the engine directly: it flattens each to an **opaque
+//! canonical token** (`Value::Str(hex(digest))`, the same content-addressing
+//! style `FactId::derive`/`ScopeId::root` already use) and records a `token
+//! -> (Subject|Ty|ScopeId)` side table ([`TokenTable`]) so the harness can
+//! map a derived row's tokens back to the original values and call
 //! `FactId::derive` itself — literal `FactId` set equality, no second
 //! encoder (R1/R2 of the #15 slice-1 ruling).
 //!
+//! #15 native slice 2 (var-at-two-roles, Fable ruling comment 5012408628)
+//! adds the package's first non-`Str` column: `Fact::RoleVar::ordinal` is
+//! plain structure (a zero-based occurrence index), exported as
+//! `Value::Int` directly rather than tokenized — R1 still holds, since rules
+//! only ever match it against a literal (`ordinal: 0`) or copy it, never
+//! construct or interpret one.
+//!
 //! Rules in `packages/brix.type/brix.type.brix` only ever *join on* and
-//! *copy* these tokens; they never construct or interpret one — that
-//! discipline lives entirely on this side of the bridge.
+//! *copy* these tokens (and the `ordinal` int); they never construct or
+//! interpret one — that discipline lives entirely on this side of the
+//! bridge.
 
 use std::collections::BTreeMap;
 
@@ -127,6 +133,7 @@ pub fn export(report: &ReflectiveReport) -> Export {
                 subject,
                 relation,
                 role,
+                ordinal,
             } => {
                 let row = Row(BTreeMap::from([
                     (
@@ -135,6 +142,12 @@ pub fn export(report: &ReflectiveReport) -> Export {
                     ),
                     ("relation".to_string(), relation_token(relation)),
                     ("role".to_string(), role_token(role)),
+                    // #15 native slice 2: the package's first non-`Str`
+                    // column. R1 (opaque tokens) is intact — an ordinal is
+                    // plain structure the exporter asserts, matched against
+                    // a literal by the package's rules, never a
+                    // constructed/interpreted token.
+                    ("ordinal".to_string(), Value::Int(*ordinal as i64)),
                 ]));
                 ops.push(TransactionOp::Assert {
                     relation: "RoleVar".to_string(),

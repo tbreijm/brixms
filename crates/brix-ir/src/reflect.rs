@@ -277,10 +277,27 @@ pub enum Fact {
     /// role assignment doesn't depend on typing assumptions — appended here
     /// rather than reordered next to `SchemaRole` because the fact schema is
     /// append-only past the PR 3 freeze. Emitted from [`Reflect::role_arg`].
+    ///
+    /// `ordinal` is #15 native slice 2's var-at-two-roles amendment (Fable
+    /// ruling, comment 5012408628): the zero-based occurrence index of this
+    /// *variable's* role-bindings within one declaration's body, in
+    /// [`Reflect::pattern`] traversal order — first occurrence ⇔ `ordinal ==
+    /// 0`. This is a **payload-breaking amendment to the frozen kind 10**:
+    /// every existing `RoleVar` `FactId` re-derives. Justified the same way
+    /// PR 3.5's scope amendment was — every consumer is in-repo and
+    /// recomputes both sides per run — and it is load-bearing: without it, a
+    /// variable bound at the same role twice collapses to one indistinguishable
+    /// `FactId` (silently under-reporting the program), and the native
+    /// package's `TypeOfRoleBinding`/`VarRoleMismatch` rules have no
+    /// structural way to prefer the first occurrence. See the module's PR
+    /// 3.5 freeze-comment invariant list: identity-relevant content lives in
+    /// the fact's own hashed bytes, never solely as a relation over
+    /// `FactId`s — the reason this is in-payload rather than a side fact.
     RoleVar {
         subject: Subject,
         relation: QualIdent,
         role: Ident,
+        ordinal: u32,
     },
     /// The literal counterpart of [`Fact::RoleVar`]: a role matched against
     /// a literal rather than bound to a variable, with the literal's own
@@ -374,10 +391,12 @@ pub fn write_fact(fact: &Fact, w: &mut CanonWriter) {
             subject,
             relation,
             role,
+            ordinal,
         } => w.write_enum(10, |w| {
             subject.canon_write(w);
             relation.canon_write(w);
             role.canon_write(w);
+            w.write_uint(*ordinal as u64);
         }),
         Fact::RoleLit {
             subject,
@@ -617,6 +636,19 @@ struct Reflect {
     drafts: Vec<Draft>,
     draft_conflicts: Vec<DraftConflict>,
     subst: BTreeMap<TyVar, Ty>,
+    /// #15 native slice 2: the per-(declaration, variable) occurrence
+    /// counter [`Fact::RoleVar::ordinal`] records. Keyed by the pair rather
+    /// than threaded as a fresh `BTreeMap<Ident, u32>` argument through
+    /// every `pattern`/`role_arg` call site (including the `Comprehension`
+    /// boundary in [`Reflect::expr`], which forks a *local* `Env` but stays
+    /// within the same declaration) — `declaration` in the key makes this
+    /// equivalent to a map reset at the start of each `rule`/`constraint`/
+    /// `query` call, since no two declarations share an `Ident`, while
+    /// avoiding a parameter added to every intermediate signature. Read in
+    /// [`Reflect::role_arg`]'s `Arg::Var` arm, in [`Reflect::pattern`]
+    /// traversal order (the single sequential traversal this checker
+    /// already performs).
+    role_ordinals: BTreeMap<(Ident, Ident), u32>,
 }
 
 impl Reflect {
@@ -1089,11 +1121,18 @@ impl Reflect {
                     declaration: declaration.clone(),
                     name: name.clone(),
                 };
+                let counter = self
+                    .role_ordinals
+                    .entry((declaration.clone(), name.clone()))
+                    .or_insert(0);
+                let ordinal = *counter;
+                *counter += 1;
                 self.fact(
                     Fact::RoleVar {
                         subject,
                         relation: relation.clone(),
                         role: arg.role.clone(),
+                        ordinal,
                     },
                     vec![],
                 );
