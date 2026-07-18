@@ -124,6 +124,9 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
         Err(error) => return Err(BuildError::Phase(error)),
     };
     let (relations, rules) = brixc::emit::project_phased(&phased);
+    // This runtime-owned IR is generated alongside the typed-store scaffold.
+    // The binary never reconstructs schema from untyped transaction input.
+    let native_program = brixc::emit::project_program(&phased);
     let unsupported_rules = brixc::emit::unsupported_runtime_rules(&rules);
     if !unsupported_rules.is_empty() {
         return Err(BuildError::Diagnostics(DiagnosticReport {
@@ -191,6 +194,7 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
             &relations,
             &rules,
             runtime_path.as_str(),
+            &native_program,
         );
         write_files(&cache_dir, &files)?;
         run_cargo_build(&cache_dir, profile)?;

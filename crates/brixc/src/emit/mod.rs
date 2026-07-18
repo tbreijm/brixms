@@ -31,7 +31,9 @@ mod workspace;
 pub use native::project_program;
 pub use project::{project, project_phased};
 pub use rust_type::rust_type_of;
-pub use workspace::{assemble_workspace, assemble_workspace_with_runtime, sanitize_crate_name};
+pub use workspace::{
+    assemble_workspace, assemble_workspace_with_runtime, emit_native_program, sanitize_crate_name,
+};
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
