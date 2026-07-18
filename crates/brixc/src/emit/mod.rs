@@ -23,13 +23,17 @@
 //! brix-ir merges, the descriptors are populated from IR instead of by hand and
 //! the token-emitting bodies fill in; the module boundaries do not move.
 
+mod native;
 mod project;
 mod rust_type;
 mod workspace;
 
-pub use project::project;
+pub use native::project_program;
+pub use project::{project, project_phased};
 pub use rust_type::rust_type_of;
-pub use workspace::{assemble_workspace, sanitize_crate_name};
+pub use workspace::{
+    assemble_workspace, assemble_workspace_with_runtime, emit_native_program, sanitize_crate_name,
+};
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -64,6 +68,17 @@ pub struct RuleDesc {
     /// The relations this rule reads; each becomes a delta source and thus one
     /// `delta_from_*` function.
     pub delta_sources: Vec<String>,
+    /// The relation this rule emits when it has a tuple head. `None` for
+    /// node/mask heads, whose runtime lowering remains a separate path.
+    pub target_relation: Option<String>,
+    /// A mechanically verified identity rule: one edge read whose variable
+    /// bindings are reproduced unchanged by a tuple head with the same role
+    /// layout. Retained as a codegen planning hint; native `Program`
+    /// execution also handles joins and the other checked rule forms.
+    pub identity_source: Option<String>,
+    /// Appendix-F phase assigned to this rule. Rules in one phase settle to a
+    /// positive fixed point before any later phase sees their changes.
+    pub phase: u32,
 }
 
 /// The determinism header stamped at the root of every generated crate. This is
@@ -296,6 +311,9 @@ mod tests {
         let rule = RuleDesc {
             name: "Waiting".into(),
             delta_sources: vec!["OrderStatus".into(), "Delivered".into()],
+            target_relation: None,
+            identity_source: None,
+            phase: 0,
         };
         let s = format_tokens(emit_rule_module(&rule));
         assert!(s.contains("mod rule_waiting"));
@@ -309,6 +327,9 @@ mod tests {
         let rules = [RuleDesc {
             name: "Waiting".into(),
             delta_sources: vec!["OrderStatus".into()],
+            target_relation: None,
+            identity_source: None,
+            phase: 0,
         }];
         let a = emit_crate_root(&rels, &rules);
         let b = emit_crate_root(&rels, &rules);

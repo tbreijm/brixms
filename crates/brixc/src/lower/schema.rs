@@ -15,7 +15,9 @@ use brix_ir::ident::{Ident as IrIdent, QualIdent};
 use brix_ir::types::Ty;
 
 use super::diag;
-use super::resolve::{seed_prelude, FnInfo, LowerMeta, ProgramResolver, UnitClass};
+use super::resolve::{
+    seed_prelude, FnInfo, LowerMeta, ProgramResolver, RuntimeRelationKind, UnitClass,
+};
 use super::tymap::{lower_type, TyPos};
 
 pub fn build(
@@ -208,6 +210,12 @@ fn build_schemas(
                 let model_closed = !matches!(r.kind, RelKind::Open);
                 meta.set_relation_span(qi.clone(), r.span);
                 meta.set_decl_span(IrIdent::new(r.name.text.clone()), r.span);
+                let runtime_kind = match r.kind {
+                    RelKind::Ground | RelKind::Open => RuntimeRelationKind::Ground,
+                    RelKind::State => RuntimeRelationKind::State,
+                    RelKind::Event => RuntimeRelationKind::Event,
+                };
+                resolver = resolver.with_relation_kind(qi.clone(), runtime_kind);
                 resolver = resolver.with_relation(RelationSchema {
                     name: qi,
                     roles,
