@@ -14,7 +14,7 @@ use std::fmt;
 use std::process::Command;
 
 use brix_ast::parse_file;
-use brix_canon::{Digest, Domain};
+use brix_canon::{CanonWriter, Digest, Domain};
 use brix_diag::{DiagnosticFormat, Diagnostics};
 use brixc::pipeline::PhaseAssign;
 use brixc::{AstPhase, CacheInputs, CacheKey, PipelineError, Profile};
@@ -230,22 +230,40 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
         .join(profile_dir)
         .join(format!("{crate_name}{}", std::env::consts::EXE_SUFFIX));
 
-    let cache_hit = binary_path.exists();
+    // Emit the generated workspace unconditionally — it is pure, fast codegen
+    // (no `cargo`), and having the exact file set in hand is what lets us
+    // decide a cache *hit* safely (issue #41 / spec §26.8 "cache corruption or
+    // an incomplete cache entry cannot be treated as a successful build
+    // artifact"): a hit requires not just that the binary exists, but that the
+    // completion marker (written last) carries the expected file-set digest and
+    // that every generated source on disk still matches byte for byte. An
+    // interrupted or tampered cache entry therefore rebuilds rather than being
+    // trusted.
+    let runtime_path = camino::Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("brix-rt");
+    let files = brixc::emit::assemble_workspace_with_runtime(
+        located.manifest.name.as_str(),
+        &relations,
+        &rules,
+        runtime_path.as_str(),
+        &native_program,
+    );
+    let files_digest_hex = digest_of_files(&files).to_hex();
+
+    let cache_hit = cache_entry_is_valid(&cache_dir, &binary_path, &files, &files_digest_hex);
     if cache_hit {
         eprintln!("brix: cache hit ({})", cache_key.to_hex());
     } else {
-        let runtime_path = camino::Utf8Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("brix-rt");
-        let files = brixc::emit::assemble_workspace_with_runtime(
-            located.manifest.name.as_str(),
-            &relations,
-            &rules,
-            runtime_path.as_str(),
-            &native_program,
-        );
+        // Drop any stale marker first, so an interrupted rebuild never leaves a
+        // marker that would validate a half-written entry.
+        let marker = cache_dir.join(CACHE_MARKER);
+        std::fs::remove_file(&marker).ok();
         write_files(&cache_dir, &files)?;
         run_cargo_build(&cache_dir, profile)?;
+        // The completion marker is written LAST: its presence, carrying the
+        // file-set digest, is the atomic "this entry is complete" signal.
+        std::fs::write(&marker, &files_digest_hex)?;
     }
 
     Ok(BuildOutcome {
@@ -253,6 +271,53 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
         binary_path,
         cache_hit,
     })
+}
+
+/// Filename of the cache-completion marker written inside each `.brix-cache`
+/// entry after a successful build (see [`cache_entry_is_valid`]).
+const CACHE_MARKER: &str = ".brix-manifest";
+
+/// A canonical digest over the full generated file set (each path plus its
+/// contents, in `BTreeMap` order — length-prefixed via [`CanonWriter`] so no
+/// concatenation ambiguity can collide two different file sets). Stored in the
+/// completion marker and re-derived on every build to validate a candidate hit.
+fn digest_of_files(files: &BTreeMap<Utf8PathBuf, String>) -> Digest {
+    let mut w = CanonWriter::new();
+    for (path, contents) in files {
+        w.write_str(path.as_str());
+        w.write_bytes(contents.as_bytes());
+    }
+    w.digest(Domain::Value)
+}
+
+/// Whether an on-disk cache entry may be trusted as a completed, uncorrupted
+/// build for `files`. Requires all three: the built binary exists, the
+/// completion marker is present with exactly `expected_hex` (written only after
+/// a successful `cargo build`, so an interrupted build leaves no valid marker),
+/// and every generated source on disk is byte-identical to what we would emit
+/// now (so a truncated or tampered entry is rebuilt, never trusted). Reads only
+/// the small generated sources, not the `cargo` target tree, so a warm hit stays
+/// fast.
+fn cache_entry_is_valid(
+    cache_dir: &Utf8Path,
+    binary_path: &Utf8Path,
+    files: &BTreeMap<Utf8PathBuf, String>,
+    expected_hex: &str,
+) -> bool {
+    if !binary_path.exists() {
+        return false;
+    }
+    match std::fs::read_to_string(cache_dir.join(CACHE_MARKER)) {
+        Ok(found) if found == expected_hex => {}
+        _ => return false,
+    }
+    for (rel, contents) in files {
+        match std::fs::read_to_string(cache_dir.join(rel)) {
+            Ok(on_disk) if &on_disk == contents => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// `build` the package named by `operand`, then execute the produced
