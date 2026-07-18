@@ -47,12 +47,14 @@
 
 pub mod cache;
 pub mod emit;
+pub mod incremental;
 pub mod lower;
 pub mod phase;
 pub mod pipeline;
 pub mod plan;
 
 pub use cache::{CacheInputs, CacheKey, Profile, ToolchainId};
+pub use incremental::{IncrementalCompiler, IncrementalProgress, IncrementalUnit};
 pub use lower::{lower_file, AstFrontend, AstLower, Lowered};
 pub use phase::{AstPhase, Phased};
 pub use pipeline::{PipelineError, Stage};

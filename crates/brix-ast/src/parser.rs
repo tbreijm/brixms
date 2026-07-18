@@ -22,10 +22,19 @@ use crate::span::Span;
 
 /// Parse a whole source file. Always returns a tree; inspect the returned
 /// [`Diagnostics`] for errors.
+pub const DEFAULT_MAX_PARSE_DEPTH: u16 = 512;
+
 pub fn parse_file(src: &str) -> (File, Diagnostics) {
+    parse_file_with_limit(src, DEFAULT_MAX_PARSE_DEPTH)
+}
+
+/// Parse with an explicit nesting budget. Long-lived callers such as an
+/// editor/daemon can choose a tighter resource boundary for untrusted text
+/// without changing ordinary grammar behavior.
+pub fn parse_file_with_limit(src: &str, max_depth: u16) -> (File, Diagnostics) {
     let raw = lex(src);
     let tokens: Vec<Token> = raw.into_iter().filter(|t| !is_trivia(t.kind)).collect();
-    let mut p = Parser::new(src, tokens);
+    let mut p = Parser::new(src, tokens, max_depth);
     let file = p.file();
     (file, p.diags)
 }
@@ -37,6 +46,11 @@ struct Parser<'s> {
     diags: Diagnostics,
     /// Guards against pathological non-advancing loops during recovery.
     fuel: u32,
+    /// Active recursive grammar frames. This bounds the hand-written parser's
+    /// use of the process stack on adversarial nesting.
+    depth: u16,
+    max_depth: u16,
+    depth_reported: bool,
     /// Suppresses the `Ident { ... }` struct-literal heuristic in `postfix`
     /// while set. Scoped around parsing `if`/`match`'s condition/scrutinee:
     /// `if cond { ... }` must not read a bare-identifier `cond` immediately
@@ -101,15 +115,41 @@ const DECL_STARTS: &[&str] = &[
 ];
 
 impl<'s> Parser<'s> {
-    fn new(src: &'s str, tokens: Vec<Token>) -> Self {
+    fn new(src: &'s str, tokens: Vec<Token>, max_depth: u16) -> Self {
         Parser {
             src,
             tokens,
             pos: 0,
             diags: Diagnostics::new(),
             fuel: 0,
+            depth: 0,
+            max_depth,
+            depth_reported: false,
             no_struct_lit: false,
         }
+    }
+
+    fn enter_depth(&mut self, production: &'static str) -> bool {
+        if self.depth >= self.max_depth {
+            if !self.depth_reported {
+                self.depth_reported = true;
+                self.diags.push(Diagnostic::error(
+                    "BRX-AST-0003",
+                    self.cur_span(),
+                    format!(
+                        "maximum parser nesting depth ({}) exceeded while parsing {production}",
+                        self.max_depth
+                    ),
+                ));
+            }
+            return false;
+        }
+        self.depth += 1;
+        true
+    }
+
+    fn leave_depth(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
     }
 
     /// Parse `self.expr()` with the struct-literal heuristic suppressed
@@ -739,14 +779,22 @@ impl<'s> Parser<'s> {
     // ---- pattern block / clauses --------------------------------------
 
     fn block(&mut self) -> Block {
+        if !self.enter_depth("a pattern block") {
+            return Block {
+                span: self.cur_span(),
+                clauses: Vec::new(),
+            };
+        }
         let mut clauses = Vec::new();
         let lb = match self.expect(TokKind::LBrace, "`{`") {
             Some(t) => t,
             None => {
-                return Block {
+                let block = Block {
                     span: self.cur_span(),
                     clauses,
-                }
+                };
+                self.leave_depth();
+                return block;
             }
         };
         let mut end = lb.span;
@@ -771,10 +819,12 @@ impl<'s> Parser<'s> {
         if let Some(rb) = self.expect(TokKind::RBrace, "`}`") {
             end = rb.span;
         }
-        Block {
+        let block = Block {
             span: lb.span.to(end),
             clauses,
-        }
+        };
+        self.leave_depth();
+        block
     }
 
     fn clause(&mut self) -> Clause {
@@ -2114,14 +2164,22 @@ impl<'s> Parser<'s> {
 
     /// `{ LooseItem* }` — a structurally-parsed item list (see ast docs).
     fn loose_block(&mut self) -> LooseBlock {
+        if !self.enter_depth("a loose block") {
+            return LooseBlock {
+                span: self.cur_span(),
+                items: Vec::new(),
+            };
+        }
         let mut items = Vec::new();
         let lb = match self.expect(TokKind::LBrace, "`{`") {
             Some(t) => t,
             None => {
-                return LooseBlock {
+                let block = LooseBlock {
                     span: self.cur_span(),
                     items,
-                }
+                };
+                self.leave_depth();
+                return block;
             }
         };
         loop {
@@ -2140,10 +2198,12 @@ impl<'s> Parser<'s> {
             .expect(TokKind::RBrace, "`}`")
             .map(|t| t.span)
             .unwrap_or(lb.span);
-        LooseBlock {
+        let block = LooseBlock {
             span: lb.span.to(end),
             items,
-        }
+        };
+        self.leave_depth();
+        block
     }
 
     /// A single loose item: a sequence of expression/atom "parts" and nested
@@ -2327,6 +2387,19 @@ impl<'s> Parser<'s> {
     // ---- types --------------------------------------------------------
 
     fn type_(&mut self) -> Type {
+        if !self.enter_depth("a type") {
+            let span = self.cur_span();
+            return Type {
+                span,
+                kind: TypeKind::Named {
+                    path: Path {
+                        segments: Vec::new(),
+                        span,
+                    },
+                    args: Vec::new(),
+                },
+            };
+        }
         let mut lhs = self.type_atom();
         // compound unit `T / U`
         while self.at(TokKind::Slash) {
@@ -2337,6 +2410,7 @@ impl<'s> Parser<'s> {
                 kind: TypeKind::Div(Box::new(lhs), Box::new(rhs)),
             };
         }
+        self.leave_depth();
         lhs
     }
 
@@ -2400,6 +2474,12 @@ impl<'s> Parser<'s> {
     /// operators from crossing a newline (used inside loose items so two
     /// lines don't accidentally merge).
     fn expr_bp(&mut self, min_bp: u8, line_bounded: bool) -> Expr {
+        if !self.enter_depth("an expression") {
+            return Expr {
+                span: self.cur_span(),
+                kind: Box::new(ExprKind::Error(String::new())),
+            };
+        }
         let mut lhs = self.unary(line_bounded);
         loop {
             if line_bounded && self.newline_ahead() {
@@ -2442,11 +2522,18 @@ impl<'s> Parser<'s> {
                 kind: Box::new(kind),
             };
         }
+        self.leave_depth();
         lhs
     }
 
     fn unary(&mut self, line_bounded: bool) -> Expr {
-        match self.cur() {
+        if !self.enter_depth("a unary expression") {
+            return Expr {
+                span: self.cur_span(),
+                kind: Box::new(ExprKind::Error(String::new())),
+            };
+        }
+        let expr = match self.cur() {
             Some(TokKind::Minus) => {
                 let t = self.bump();
                 let e = self.unary(line_bounded);
@@ -2470,7 +2557,9 @@ impl<'s> Parser<'s> {
                 }
             }
             _ => self.postfix(line_bounded),
-        }
+        };
+        self.leave_depth();
+        expr
     }
 
     fn postfix(&mut self, line_bounded: bool) -> Expr {
@@ -3370,4 +3459,34 @@ fn unescape(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn depth_limit_is_a_single_recoverable_diagnostic() {
+        let source = "package t @ 1.0.0\n\
+derive D: Output(value: value) from { Input(value: (((((1))))) }\n";
+        let (_file, diagnostics) = parse_file_with_limit(source, 4);
+        let depth_errors: Vec<_> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "BRX-AST-0003")
+            .collect();
+        assert_eq!(depth_errors.len(), 1, "{diagnostics:?}");
+    }
+
+    #[test]
+    fn ordinary_nesting_stays_below_the_default_budget() {
+        let source = "package t @ 1.0.0\n\
+derive D: Output(value: value) from { Input(value: (((((1))))) }\n";
+        let (_file, diagnostics) = parse_file(source);
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "BRX-AST-0003"),
+            "{diagnostics:?}"
+        );
+    }
 }
