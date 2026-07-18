@@ -71,7 +71,17 @@ impl Canonical for Profile {
     }
 }
 
-/// The four determinism inputs, gathered before hashing.
+/// The hermetic build-input contract (issue #41, spec §26.8 / conformance §I):
+/// these four fields are the **complete** identity of a build. Two builds that
+/// agree on all of them must produce byte-identical generated artifacts and
+/// identical canonical results; two that differ in any one must not share a
+/// cache slot. The G3 five-tuple *{canonical source, lockfile, compiler/runtime
+/// toolchain version, profile, target}* maps here exactly — `target` lives
+/// inside [`ToolchainId`] alongside the brixc/rustc versions. Nothing else may
+/// enter the key: no wall-clock, no absolute paths, no ambient environment (see
+/// this module's header). Adding a genuinely new determinism input means adding
+/// a field here *and* to [`CacheKey::compute`]'s hashed sequence — never
+/// consulting state outside this struct.
 #[derive(Clone, Debug)]
 pub struct CacheInputs {
     /// Digest of the canonical (`brix fmt`) source of the whole program. Supplied

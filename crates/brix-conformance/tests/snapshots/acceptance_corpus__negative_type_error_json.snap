@@ -1,0 +1,5 @@
+---
+source: crates/brix-conformance/tests/acceptance_corpus.rs
+expression: "reached.diagnostics.render_format(brix_diag::DiagnosticFormat::Json, &src,\n&label)"
+---
+{"diagnostics":[{"code":"BRX-IR-0005","severity":"error","message":"when guard must be Bool, found I64","path":"check/type_error.brix","span":{"start":0,"end":0},"startLine":1,"startColumn":1,"endLine":1,"endColumn":1,"structure":null,"labels":[]}]}

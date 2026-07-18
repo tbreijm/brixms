@@ -81,6 +81,41 @@ jobs:
       - name: Errata fixtures + oracle/compiled-engine differential
         run: cargo test -p brix-conformance
 
+  acceptance:
+    name: acceptance
+    # Already covered by `cargo test --workspace` in the `test` job above;
+    # broken out as its own named check (issue #45's "CI fails when spec
+    # coverage, support status, or expected diagnostics drift without an
+    # explicit fixture update") so the spec-derived acceptance corpus (52
+    # spec fixtures + 6 negative fixtures + the committed coverage report)
+    # has a distinct, always-visible signal, same rationale as `conformance`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Toolchain (pinned via rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Spec-derived acceptance corpus (parse/lower/check/phase + negative fixtures + coverage report)
+        run: cargo test -p brix-conformance --test acceptance_corpus
+
+  reproducibility:
+    name: reproducibility
+    # Issue #41 (G3): the in-repo proxy for the two-machine reproducibility gate.
+    # Deterministic emit (byte-identical generated workspace), cache-integrity
+    # fail-closed (a corrupted/incomplete cache entry is rebuilt, never trusted),
+    # and deterministic artifact-size budgets. The heavier two-clean-builds
+    # byte-identity check is `#[ignore]`d (two full `cargo build`s); the
+    # two-machine comparison itself is a release-infra concern (#46), not this
+    # job. Broken out as its own signal, same rationale as `conformance`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Toolchain (pinned via rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Reproducible emit + cache-integrity + deterministic budgets
+        run: cargo test -p brix-cli --test reproducibility
+
   cargo-deny:
     name: cargo-deny
     runs-on: ubuntu-latest

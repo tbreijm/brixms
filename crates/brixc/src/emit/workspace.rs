@@ -111,6 +111,16 @@ pub fn emit_native_program(program: &NativeProgram) -> String {
                 .join(", "),
         ));
     }
+    // Functions compiled from source (issue #47): serialize each fn-def so the
+    // generated binary carries the body and executes it, rather than depending
+    // on a hand-registered native `builtin_total`.
+    for (name, def) in &program.fn_defs {
+        out.push_str(&format!(
+            "    program.fn_defs.insert({name:?}.into(), brix_rt::engine::FnDef {{ params: vec!{params:?}.into_iter().map(str::to_owned).collect(), body: {body} }});\n",
+            params = def.params,
+            body = emit_native_expr(&def.body),
+        ));
+    }
     out.push_str("    program\n}\n");
     out
 }
@@ -167,6 +177,12 @@ fn emit_native_expr(expr: &NativeExpr) -> String {
                 .map(emit_native_expr)
                 .collect::<Vec<_>>()
                 .join(", ")
+        ),
+        NativeExpr::If { cond, then, els } => format!(
+            "brix_rt::engine::Expr::If {{ cond: Box::new({}), then: Box::new({}), els: Box::new({}) }}",
+            emit_native_expr(cond),
+            emit_native_expr(then),
+            emit_native_expr(els),
         ),
     }
 }

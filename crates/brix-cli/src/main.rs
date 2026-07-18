@@ -1,8 +1,9 @@
 //! brix-cli — new/build/run/repl/test/sim/fmt/why/whynot/explain verbs.
 //! Ring 0 lane owner: see OWNER.md. Spec: ../../spec/BrixMS_v9_0.md
 //!
-//! Only `build`/`run` are wired to real logic (issue #9); every other verb
-//! is a legible "not yet implemented" rather than silently accepted.
+//! `check`/`fmt`/`build`/`run` are wired to real logic. `test` and `quality`
+//! run compiler checks, then fail closed until their dedicated engines exist;
+//! every other verb is a legible "not yet implemented" rather than accepted.
 
 use brix_cli::args::{parse, Invocation, ParsedArgs};
 use brix_diag::DiagnosticFormat;
@@ -26,11 +27,167 @@ fn main() {
 
 fn dispatch(p: &ParsedArgs) -> i32 {
     match p.verb.as_str() {
+        "check" => run_check(p),
+        "fmt" => run_fmt(p),
+        "test" => run_test(p),
+        "quality" => run_quality(p),
         "build" => run_build(p),
         "run" => run_run(p),
         other => {
             eprintln!("brix: `{other}` is not yet implemented (try `brix --help`)");
             EXIT_USAGE
+        }
+    }
+}
+
+fn run_test(p: &ParsedArgs) -> i32 {
+    let format = match diagnostic_format(p) {
+        Ok(format) => format,
+        Err(message) => {
+            eprintln!("brix test: {message}");
+            return EXIT_USAGE;
+        }
+    };
+    let Some(operand) = p.operand() else {
+        eprintln!("brix test: expected a source file or package path");
+        return EXIT_USAGE;
+    };
+    if p.options
+        .keys()
+        .any(|key| key.as_str() != "diagnostic-format")
+    {
+        eprintln!("brix test: unsupported option");
+        return EXIT_USAGE;
+    }
+
+    let selectors = p.positionals[1..].to_vec();
+    match brix_cli::test::run(operand, &selectors) {
+        Ok(outcome) => {
+            println!(
+                "brix: {} tests passed for {}",
+                outcome.passed, outcome.source_path
+            );
+            EXIT_SUCCESS
+        }
+        Err(error) => {
+            report_error("test", &error, format);
+            EXIT_FAILURE
+        }
+    }
+}
+
+fn run_check(p: &ParsedArgs) -> i32 {
+    let format = match diagnostic_format(p) {
+        Ok(format) => format,
+        Err(message) => {
+            eprintln!("brix check: {message}");
+            return EXIT_USAGE;
+        }
+    };
+    let Some(operand) = p.operand() else {
+        eprintln!("brix check: expected a source file or package path");
+        return EXIT_USAGE;
+    };
+    match brix_cli::build::check(operand) {
+        Ok(outcome) => {
+            println!("brix: checked {}", outcome.source_path);
+            EXIT_SUCCESS
+        }
+        Err(e) => {
+            report_error("check", &e, format);
+            EXIT_FAILURE
+        }
+    }
+}
+
+fn run_fmt(p: &ParsedArgs) -> i32 {
+    if p.flag("write") && p.flag("check") {
+        eprintln!("brix fmt: --write and --check are mutually exclusive");
+        return EXIT_USAGE;
+    }
+    let Some(operand) = p.operand() else {
+        eprintln!("brix fmt: expected a source file or package path");
+        return EXIT_USAGE;
+    };
+    match brix_cli::build::format(operand) {
+        Ok(outcome) if p.flag("check") && outcome.changed => {
+            eprintln!(
+                "brix fmt: {} is not canonically formatted",
+                outcome.source_path
+            );
+            EXIT_FAILURE
+        }
+        Ok(outcome) if p.flag("write") => {
+            match std::fs::write(&outcome.source_path, outcome.formatted) {
+                Ok(()) => {
+                    println!("brix: formatted {}", outcome.source_path);
+                    EXIT_SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("brix fmt: I/O error: {error}");
+                    EXIT_FAILURE
+                }
+            }
+        }
+        Ok(outcome) => {
+            print!("{}", outcome.formatted);
+            EXIT_SUCCESS
+        }
+        Err(e) => {
+            report_error("fmt", &e, DiagnosticFormat::Human);
+            EXIT_FAILURE
+        }
+    }
+}
+
+fn run_quality(p: &ParsedArgs) -> i32 {
+    let format = match diagnostic_format(p) {
+        Ok(format) => format,
+        Err(message) => {
+            eprintln!("brix quality: {message}");
+            return EXIT_USAGE;
+        }
+    };
+    let profile = match p.value("profile") {
+        None => brix_cli::quality::QualityProfile::Standard,
+        Some(value) => match brix_cli::quality::QualityProfile::parse(value) {
+            Some(profile) => profile,
+            None => {
+                eprintln!(
+                    "brix quality: unsupported profile `{value}` (expected prototype, standard, production, or critical)"
+                );
+                return EXIT_USAGE;
+            }
+        },
+    };
+    let Some(operand) = p.operand() else {
+        eprintln!("brix quality: expected a source file or package path");
+        return EXIT_USAGE;
+    };
+    if p.positionals.len() != 1 {
+        eprintln!("brix quality: expected exactly one source file or package path");
+        return EXIT_USAGE;
+    }
+    if p.options
+        .keys()
+        .any(|key| !matches!(key.as_str(), "profile" | "diagnostic-format"))
+    {
+        eprintln!("brix quality: unsupported option");
+        return EXIT_USAGE;
+    }
+
+    match brix_cli::quality::evaluate(operand, profile) {
+        Ok(outcome) => {
+            println!(
+                "brix: quality {} passed for {}",
+                outcome.profile.as_str(),
+                outcome.source_path
+            );
+            EXIT_SUCCESS
+        }
+        Err(error) => {
+            report_error("quality", &error, format);
+            EXIT_FAILURE
         }
     }
 }
@@ -107,10 +264,15 @@ fn print_help() {
     println!(
         "brix: BrixMS toolchain (Ring 0)\n\n\
          Usage:\n\
+         \x20\x20brix check <path>   Parse and run static/semantic checks\n\
+         \x20\x20brix fmt <path>     Print canonical source (--write or --check)\n\
+         \x20\x20brix test <path> [selector ...]  Check, then execute selected tests\n\
+         \x20\x20brix quality <path> Run compiler checks and the selected quality profile\n\
          \x20\x20brix build <path>   Compile a package/source file to a Rust workspace\n\
          \x20\x20brix run <path>     Build, then execute the produced binary\n\
          \n\
-         Build/run accept --diagnostic-format human|json|sarif. Exit codes: 0 success,\n\
+         Check/test/quality/build/run accept --diagnostic-format human|json|sarif. Quality accepts\n\
+         --profile prototype|standard|production|critical (default: standard). Exit codes: 0 success,\n\
          1 build/runtime failure, 2 command-line usage error.\n"
     );
 }

@@ -1,0 +1,6 @@
+// Negative fixture (issue #45): a syntax error. An unclosed `rel` body
+// forces the parser to hit end-of-file while still expecting `}` — this
+// must fail deterministically at the Parse phase with BRX-AST-0001, never
+// silently produce a partial/empty declaration.
+package neg.syntax @ 0.1.0
+rel Input {

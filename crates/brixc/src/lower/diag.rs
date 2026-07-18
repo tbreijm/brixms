@@ -79,6 +79,12 @@ pub const UNBOUND_HEAD_KEY: &str = "BRX-IR-0009";
 /// `BRX-IR-0010` — Appendix E mask-head side condition violated: `target`/
 /// `reason` is not an edge-bound alias produced by the body.
 pub const MASK_REF_NOT_EDGE_BOUND: &str = "BRX-IR-0010";
+/// `BRX-IR-0011` — a function body realizes an effect its declared `! { ... }`
+/// row does not permit (Part V effect containment; issue #47).
+pub const UNDECLARED_FN_EFFECT: &str = "BRX-IR-0011";
+/// `BRX-IR-0012` — a `total` function body can fail (`?`); only a `partial fn`
+/// may fail (Part V §5; issue #47).
+pub const TOTAL_FN_FALLIBLE: &str = "BRX-IR-0012";
 
 pub fn error(code: &'static str, span: Span, msg: impl Into<String>) -> Diagnostic {
     Diagnostic::error(code, span, msg)
@@ -113,6 +119,10 @@ pub fn render_finding(finding: &Finding, meta: &LowerMeta) -> Diagnostic {
         Finding::MaskRefNotEdgeBound { rule, .. } => {
             (decl_span(meta, rule), MASK_REF_NOT_EDGE_BOUND)
         }
+        Finding::UndeclaredFnEffect { function, .. } => {
+            (decl_span(meta, function), UNDECLARED_FN_EFFECT)
+        }
+        Finding::TotalFnFallible { function } => (decl_span(meta, function), TOTAL_FN_FALLIBLE),
     };
     Diagnostic::error(code, span, finding.to_string())
 }

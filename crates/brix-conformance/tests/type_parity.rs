@@ -240,6 +240,7 @@ fn assert_rule_side_condition_parity(fixture: &RuleFixture) {
 
     let findings = check_rule(rule, resolver);
     let source = brix_ir::frontend::FrontendSource {
+        functions: Vec::new(),
         rules: vec![rule.clone()],
         constraints: vec![],
         queries: vec![],
@@ -282,7 +283,11 @@ fn finding_category(finding: &Finding) -> Option<RuleCategory> {
         Finding::OrdinaryFnOnDerivedRel { .. } => Some(RuleCategory::OrdinaryFnOnDerivedRel),
         Finding::NonCanonicalKey { .. }
         | Finding::AbsenceWithoutWitness { .. }
-        | Finding::UnknownRelation { .. } => None,
+        | Finding::UnknownRelation { .. }
+        // Function-body checks (issue #47) are outside the rule-category axis
+        // and have no reflective `ConflictKind` mirror.
+        | Finding::UndeclaredFnEffect { .. }
+        | Finding::TotalFnFallible { .. } => None,
     }
 }
 

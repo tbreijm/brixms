@@ -14,6 +14,8 @@ brix-rt = { path = "../brix-rt" }
 
 [dev-dependencies]
 brix-ast = { path = "../brix-ast" }
+brix-cli = { path = "../brix-cli" }
+brix-diag = { path = "../brix-diag" }
 brixc = { path = "../brixc" }
 insta = { workspace = true }
 

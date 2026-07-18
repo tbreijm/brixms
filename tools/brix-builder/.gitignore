@@ -1,0 +1,6 @@
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+adapters/
+data/brix-builder/*.jsonl

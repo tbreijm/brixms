@@ -1,0 +1,5 @@
+---
+source: crates/brix-conformance/tests/acceptance_corpus.rs
+expression: "reached.diagnostics.render_format(brix_diag::DiagnosticFormat::Sarif, &src,\n&label)"
+---
+{"$schema":"https://json.schemastore.org/sarif-2.1.0.json","runs":[{"results":[{"level":"error","locations":[{"physicalLocation":{"artifactLocation":{"uri":"check/type_error.brix"},"region":{"endColumn":1,"endLine":1,"startColumn":1,"startLine":1}}}],"message":{"text":"when guard must be Bool, found I64"},"properties":{"structure":null},"ruleId":"BRX-IR-0005"}],"tool":{"driver":{"name":"brix","rules":[{"id":"BRX-IR-0005","shortDescription":{"text":"when guard must be Bool, found I64"}}]}}}],"version":"2.1.0"}

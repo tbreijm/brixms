@@ -1,0 +1,13 @@
+// Negative fixture (issue #45): a name-resolution error. `unboundName` is
+// not a bound pattern variable, a declared fn/const, or an enum variant, so
+// lowering must fail deterministically with BRX-LOW-0003 — never silently
+// drop the `let` or the rule that contains it.
+package neg.name @ 0.1.0
+
+rel Input { value: I64 } key(value)
+rel Output { value: I64 } key(value)
+
+derive R: Output(value: v) from {
+  Input(value: v)
+  let x = v + unboundName
+}

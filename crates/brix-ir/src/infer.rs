@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::core::{Constraint, Expr, ExprKind, Head, Query, Rule};
+use crate::core::{Constraint, Expr, ExprKind, FnDef, Head, Query, Rule};
 use crate::frontend::{FrontendSource, SchemaResolver};
 use crate::ident::{Ident, QualIdent};
 use crate::pattern::{Arg, Clause, Lit, Pattern, RoleArg};
@@ -101,6 +101,9 @@ pub fn infer_source(source: &mut FrontendSource, resolver: &impl SchemaResolver)
     for query in &mut source.queries {
         cx.query(query, resolver);
     }
+    for function in &mut source.functions {
+        cx.function(function, resolver);
+    }
     cx.errors
 }
 
@@ -146,6 +149,19 @@ impl Infer {
         self.zonk_pattern(&mut query.body);
         self.zonk_expr(&mut query.yields);
         query.result = self.resolve(query.result.clone());
+    }
+    /// Infer/check a user function body (issue #47). Seeds the env from the
+    /// declared parameters (mirroring [`Infer::query`]'s param seeding), infers
+    /// the body expression, and unifies its type against the declared return
+    /// type — so a body that computes the wrong type is a `Mismatch`. Only
+    /// total, expression-bodied functions reach here in Slice 1 (partial /
+    /// block bodies are rejected at lowering).
+    fn function(&mut self, def: &mut FnDef, resolver: &impl SchemaResolver) {
+        let mut env: Env = def.params.iter().cloned().collect();
+        let body_ty = self.expr(&mut def.body, &mut env, resolver);
+        self.unify(def.ret.clone(), body_ty);
+        self.zonk_expr(&mut def.body);
+        def.ret = self.resolve(def.ret.clone());
     }
     fn pattern(&mut self, pattern: &mut Pattern, env: &mut Env, resolver: &impl SchemaResolver) {
         for clause in &mut pattern.clauses {
@@ -572,6 +588,7 @@ mod tests {
             result: Ty::Var(TyVar(4)),
         };
         let mut source = FrontendSource {
+            functions: Vec::new(),
             rules: vec![],
             constraints: vec![],
             queries: vec![q],
@@ -589,6 +606,7 @@ mod tests {
     #[test]
     fn estimate_result_unified_against_plain_expected_is_an_epistemic_erasure() {
         let mut source = FrontendSource {
+            functions: Vec::new(),
             rules: vec![],
             constraints: vec![],
             queries: vec![Query {
@@ -617,6 +635,7 @@ mod tests {
     #[test]
     fn rejects_non_bool_guard_and_bad_arity_without_cascade() {
         let mut source = FrontendSource {
+            functions: Vec::new(),
             rules: vec![Rule {
                 name: Ident::new("R"),
                 head: Head::Mask {

@@ -87,5 +87,10 @@ fn walk_expr(e: &Expr, out: &mut Vec<brix_phase::ReadSite>) {
             walk_clauses(clauses, true, None, out);
             walk_expr(yield_expr, out);
         }
+        Expr::If { cond, then, els } => {
+            walk_expr(cond, out);
+            walk_expr(then, out);
+            walk_expr(els, out);
+        }
     }
 }

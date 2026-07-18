@@ -1,0 +1,14 @@
+// Negative fixture (issue #45): an unsupported/invalid construct. `match`
+// inside a rule-body expression is explicitly not part of v0 lowering
+// (`crates/brixc/src/lower/diag.rs`'s `UNSUPPORTED_V0`), so this must fail
+// closed with BRX-LOW-0001 rather than silently compiling to something
+// else or dropping the rule.
+package neg.unsupported @ 0.1.0
+
+rel Input { value: I64 } key(value)
+rel Output { value: I64 } key(value)
+
+derive R: Output(value: y) from {
+  Input(value: v)
+  let y = match v { _ => v }
+}

@@ -1,0 +1,5 @@
+---
+source: crates/brix-conformance/tests/acceptance_corpus.rs
+expression: "reached.diagnostics.render_format(brix_diag::DiagnosticFormat::Sarif, &src,\n&label)"
+---
+{"$schema":"https://json.schemastore.org/sarif-2.1.0.json","runs":[{"results":[{"level":"error","locations":[{"physicalLocation":{"artifactLocation":{"uri":"check/effect_violation.brix"},"region":{"endColumn":2,"endLine":15,"startColumn":1,"startLine":12}}}],"message":{"text":"rule R is not pure: an effect atom reaches its body/head (Appendix E `pure(B, H)`)"},"properties":{"structure":null},"ruleId":"BRX-IR-0006"}],"tool":{"driver":{"name":"brix","rules":[{"id":"BRX-IR-0006","shortDescription":{"text":"rule R is not pure: an effect atom reaches its body/head (Appendix E `pure(B, H)`)"}}]}}}],"version":"2.1.0"}

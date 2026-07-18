@@ -29,7 +29,7 @@ pub use resolve::{
 
 use brix_ast::File;
 use brix_diag::{Diagnostic, Severity};
-use brix_ir::check::{check_relation_keys, check_rule};
+use brix_ir::check::{check_function, check_relation_keys, check_rule};
 use brix_ir::frontend::FrontendSource;
 use brix_ir::infer::infer_source;
 
@@ -78,6 +78,11 @@ pub fn lower_file(file: &File, parse_diags: &brix_ast::Diagnostics) -> Lowered {
     }
     for error in infer_source(&mut source, &resolver) {
         diags.push(diag::render_type_error(&error));
+    }
+    for function in &source.functions {
+        for finding in check_function(function, &resolver) {
+            diags.push(diag::render_finding(&finding, &meta));
+        }
     }
 
     Lowered {

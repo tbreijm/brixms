@@ -1,0 +1,5 @@
+---
+source: crates/brix-conformance/tests/acceptance_corpus.rs
+expression: "reached.diagnostics.render_format(brix_diag::DiagnosticFormat::Human, &src,\n&label)"
+---
+phase/phase_cycle.brix:1:1: error[BRX4001]: cycle through a non-monotone edge: A -> B (non-monotone edge closes a cycle across several phase components); witness: A -> B -> C -> A
