@@ -58,7 +58,8 @@ use brix_ir::frontend::{
 use brix_ir::ident::{Ident, QualIdent};
 use brix_ir::infer::{infer_source, TypeError};
 use brix_ir::pattern::{Arg, Clause, Lit, Pattern, RoleArg};
-use brix_ir::reflect::{analyze, Fact, Subject};
+use brix_ir::reflect::{analyze, ConflictKind, Fact, Subject};
+use brix_ir::site::SiteId;
 use brix_ir::types::{
     dimensions_div, money_dimensions, quantity_dimensions, IntWidth, Row, RowField, Ty, TyVar,
 };
@@ -88,42 +89,31 @@ fn infer_category(error: &TypeError) -> Category {
     }
 }
 
-/// `reflect::TypeConflict::operation` -> `Category`, per the #15 PR2
-/// category map: `Mismatch<->{unify,if,call,query-result,role,head}`,
-/// `Dimension<->{add,sub,mul,div,eq,ne,lt,le,gt,ge}`, `Arity<->arity`,
-/// `UnknownField<->field`, `TryNonResult<->try`, `NonBoolGuard<->when`,
-/// `Occurs<->occurs`.
+/// `reflect::ConflictKind` -> `Category`, per the #15 PR3 rewiring: the
+/// harness now maps from the frozen [`ConflictKind`] enum instead of the old
+/// free-text `operation` string. The map is 1:1 and exhaustive over
+/// `ConflictKind`'s seven variants: `Mismatch->Mismatch`, `Arity->Arity`,
+/// `UnknownField->UnknownField`, `NonBool->NonBoolGuard`, `Occurs->Occurs`,
+/// `Dimension->Dimension`, `TryNonResult->TryNonResult`.
 ///
-/// Two documented departures from a literal reading of the map, both
-/// verified against the actual call sites in `reflect.rs`:
-/// - `"when"` has exactly one call site (`pattern()`'s guard check) and it
-///   is the direct analog of `infer.rs`'s dedicated `NonBoolGuard` variant,
-///   so it maps there, not to `Mismatch`.
-/// - `"row"` (row-*shape* mismatch) is folded into `UnknownField` alongside
-///   `"field"` (single-field lookup miss): `infer.rs` raises the same
-///   `TypeError::UnknownField` for both call sites (see
-///   `Infer::unify_rows`), so collapsing `reflect.rs`'s finer-grained
-///   `field`/`row` split is required for the sets to line up — it is a
-///   legitimate taxonomy difference in each checker's *observation*, not a
-///   divergence in `solve::match_rows`, the one row-matching algorithm both
-///   now call.
-/// - `"and"`/`"or"`/`"not"` are plain `unify(..., op, ...)` call sites with
-///   no more specific context, exactly like `"unify"` itself, so they fold
-///   into `Mismatch` for the same reason.
-fn reflect_category(operation: &str) -> Category {
-    match operation {
-        "unify" | "if" | "call" | "query-result" | "role" | "head" | "and" | "or" | "not" => {
-            Category::Mismatch
-        }
-        "add" | "sub" | "mul" | "div" | "eq" | "ne" | "lt" | "le" | "gt" | "ge" => {
-            Category::Dimension
-        }
-        "arity" => Category::Arity,
-        "field" | "row" => Category::UnknownField,
-        "try" => Category::TryNonResult,
-        "when" => Category::NonBoolGuard,
-        "occurs" => Category::Occurs,
-        other => panic!("parity harness: unmapped reflect.rs conflict operation {other:?}"),
+/// `TryNonResult` was appended to `ConflictKind` (after the initial PR 3
+/// freeze) specifically to restore this 1:1 mapping: a `?` postfix over a
+/// non-`Result` type used to fold into `ConflictKind::Mismatch`, which broke
+/// category-set parity against `infer.rs`'s dedicated
+/// `TypeError::TryNonResult` (`infer.rs:274`) for any `try`-on-non-`Result`
+/// program — latent only because no fixture exercised it. The
+/// `try_non_result_agrees` fixture below exists to prove that gap is closed,
+/// not just relabeled: it fails loudly (category-set mismatch) if `reflect`
+/// and `infer` ever disagree on this shape again.
+fn reflect_category(kind: &ConflictKind) -> Category {
+    match kind {
+        ConflictKind::Mismatch { .. } => Category::Mismatch,
+        ConflictKind::Arity { .. } => Category::Arity,
+        ConflictKind::UnknownField { .. } => Category::UnknownField,
+        ConflictKind::NonBool { .. } => Category::NonBoolGuard,
+        ConflictKind::Occurs { .. } => Category::Occurs,
+        ConflictKind::Dimension { .. } => Category::Dimension,
+        ConflictKind::TryNonResult { .. } => Category::TryNonResult,
     }
 }
 
@@ -196,7 +186,7 @@ fn assert_parity(label: &str, source: &FrontendSource, resolver: &impl SchemaRes
     let reflect_categories: BTreeSet<Category> = report
         .conflicts
         .iter()
-        .map(|c| reflect_category(&c.operation))
+        .map(|c| reflect_category(&c.kind))
         .collect();
     assert_eq!(
         infer_categories, reflect_categories,
@@ -713,4 +703,38 @@ fn constraint_role_mismatch_agrees() {
         derived: false,
     });
     assert_parity("constraint_role_mismatch", &source, &resolver);
+}
+
+/// Fixture 11: a `?` postfix applied to a non-`Result` value (mirrors what
+/// triggers `infer.rs:274`'s dedicated `TypeError::TryNonResult`). Added
+/// alongside `reflect::ConflictKind::TryNonResult` specifically to close a
+/// latent category-set gap: before that variant existed, `reflect.rs` folded
+/// this shape into `ConflictKind::Mismatch`, which would have broken parity
+/// against `infer.rs`'s dedicated category the moment any program hit it —
+/// this fixture proves the two checkers now agree, not just that the
+/// variant compiles.
+#[test]
+fn try_non_result_agrees() {
+    let o = Origins::new("TryNonResult");
+    let inner = o.lit(Ty::Int(IntWidth::Int), Lit::Int(1));
+    let try_expr = Expr::new(
+        o.ty_var(),
+        ExprKind::Try {
+            inner,
+            site: SiteId::derive(&Ident::new("TryNonResult"), 0),
+        },
+    )
+    .with_origin(o.next_origin());
+    let source = FrontendSource {
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("TryNonResult"),
+            params: vec![],
+            body: Pattern::default(),
+            yields: try_expr,
+            result: o.ty_var(),
+        }],
+    };
+    assert_parity("try_non_result", &source, &TableResolver::new());
 }

@@ -13,15 +13,33 @@
 //! this module supplies only the *observation*: it records [`Fact`]s with
 //! [`Derivation`] provenance and [`TypeConflict`]s instead of mutating
 //! `Expr.ty` and accumulating a flat error list.
+//!
+//! #15 PR3 freezes the fact schema a future native `brix.type` analysis
+//! package targets:
+//! - identity is **content-addressed** ([`FactId`], a `brix_canon::Digest`
+//!   over the fact's own bytes — not a positional index), so the same fact
+//!   hashes the same way across runs and across a future native derivation;
+//! - the structural (input) facts — [`Fact::ExprKindIs`], [`Fact::ExprChild`],
+//!   [`Fact::SchemaRole`], [`Fact::FnSig`], [`Fact::RowField`],
+//!   [`Fact::RowTail`], [`Fact::DimTerm`] — sit alongside the derived
+//!   (output) facts, so the program itself, not just the checker's verdicts,
+//!   is present as facts;
+//! - [`TypeConflict`] carries the origin [`Subject`] plus an honest
+//!   per-kind [`ConflictKind`] payload — no fabricated types, no empty
+//!   `because` sets.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::{Constraint, Expr, ExprKind, ExprOrigin, Head, Query, Rule};
 use crate::frontend::{FrontendSource, SchemaResolver};
 use crate::ident::{Ident, QualIdent};
 use crate::pattern::{Arg, Clause, Lit, Pattern, RoleArg};
 use crate::solve::{self, DimBinaryStep, DimStep, Step};
-use crate::types::{IntWidth, Row, Ty, TyVar};
+use crate::types::{
+    money_dimensions, quantity_dimensions, Dimensions, IntWidth, Row, RowField, RowTail, Ty, TyVar,
+};
+use brix_canon::{CanonWriter, Canonical, Digest, Domain};
+use core::fmt;
 
 /// A stable, declaration-local subject in the reflective fact graph.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -31,36 +49,327 @@ pub enum Subject {
     Head { declaration: Ident, role: Ident },
 }
 
-/// One derivable relation in the future `brix.type` package.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Fact {
-    HasType { subject: Subject, ty: Ty },
-    RequiresBool { subject: Subject },
-    Applies { subject: Subject, operator: String },
+impl Canonical for Subject {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        match self {
+            Subject::Binding { declaration, name } => w.write_enum(0, |w| {
+                declaration.canon_write(w);
+                name.canon_write(w);
+            }),
+            // Identity is the expression's own content-addressed `ExprId`
+            // digest (declaration + source range, see `core::ExprId::derive`)
+            // — sufficient and already collision-resistant, so there is no
+            // need to also fold in `range` here.
+            Subject::Expr { origin } => w.write_enum(1, |w| {
+                w.write_bytes(origin.id.digest().as_bytes());
+            }),
+            Subject::Head { declaration, role } => w.write_enum(2, |w| {
+                declaration.canon_write(w);
+                role.canon_write(w);
+            }),
+        }
+    }
 }
 
-/// A fact plus the earlier facts from which it follows. IDs are append-only,
-/// deterministic within a single `analyze` run, and therefore work as
-/// compact provenance handles. (Content-addressed fact IDs are PR 3's job —
-/// this positional scheme is an explicitly accepted stopgap for this PR.)
+/// The closed operator-tag projection of [`ExprKind`] (Core IR's expression
+/// discriminants), carried by [`Fact::ExprKindIs`]. Kept as its own small
+/// enum rather than re-exporting `ExprKind` because a fact payload should be
+/// a plain tag, not a recursive structure the digest would have to walk.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum ExprKindTag {
+    Var,
+    Lit,
+    Call,
+    Field,
+    Record,
+    If,
+    Try,
+    Comprehension,
+}
+
+impl ExprKindTag {
+    fn of(kind: &ExprKind) -> Self {
+        match kind {
+            ExprKind::Var(_) => ExprKindTag::Var,
+            ExprKind::Lit(_) => ExprKindTag::Lit,
+            ExprKind::Call { .. } => ExprKindTag::Call,
+            ExprKind::Field { .. } => ExprKindTag::Field,
+            ExprKind::Record { .. } => ExprKindTag::Record,
+            ExprKind::If { .. } => ExprKindTag::If,
+            ExprKind::Try { .. } => ExprKindTag::Try,
+            ExprKind::Comprehension { .. } => ExprKindTag::Comprehension,
+        }
+    }
+}
+
+impl Canonical for ExprKindTag {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        let ordinal: u8 = match self {
+            ExprKindTag::Var => 0,
+            ExprKindTag::Lit => 1,
+            ExprKindTag::Call => 2,
+            ExprKindTag::Field => 3,
+            ExprKindTag::Record => 4,
+            ExprKindTag::If => 5,
+            ExprKindTag::Try => 6,
+            ExprKindTag::Comprehension => 7,
+        };
+        w.write_uint(ordinal as u64);
+    }
+}
+
+/// One derivable relation in the future `brix.type` package. Open enum: PR 4
+/// (Appendix E rule side conditions) and PR 5 (epistemic/`Missing`) add
+/// variants here without touching the identity/provenance/encoder envelope
+/// ([`FactId`], [`Derivation`], [`write_fact`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Fact {
+    // --- structural (input) facts: the program itself, as facts ---
+    /// The operator tag of an `Expr` node.
+    ExprKindIs {
+        subject: Subject,
+        kind: ExprKindTag,
+    },
+    /// A direct parent → child edge in an expression tree, at `ordinal`
+    /// among the parent's children. Replaces the `path: Vec<u32>` this
+    /// module used to compute during traversal and then discard —
+    /// transitive paths are recoverable by walking these edges.
+    ExprChild {
+        parent: Subject,
+        ordinal: u32,
+        child: Subject,
+    },
+    /// A relation's declared role type, as resolved from the schema.
+    SchemaRole {
+        relation: QualIdent,
+        role: Ident,
+        ty: Ty,
+    },
+    /// A called function's resolved signature.
+    FnSig {
+        function: Ident,
+        params: Vec<Ty>,
+        result: Ty,
+        is_aggregate: bool,
+    },
+    /// One field of a subject's resolved record/relation row type.
+    RowField {
+        subject: Subject,
+        field: Ident,
+        ty: Ty,
+    },
+    /// A subject's resolved row openness (row-polymorphism tail).
+    RowTail {
+        subject: Subject,
+        open: bool,
+    },
+    /// One ground-dimension exponent term of a subject's resolved type.
+    DimTerm {
+        subject: Subject,
+        dimension: Ident,
+        exponent: i32,
+    },
+
+    // --- derived (output) facts ---
+    HasType {
+        subject: Subject,
+        ty: Ty,
+    },
+    RequiresBool {
+        subject: Subject,
+    },
+    Applies {
+        subject: Subject,
+        operator: String,
+    },
+}
+
+/// The one canonical encoder `FactId::derive` uses. Never a second fact
+/// encoder — later PRs and #20's coverage-matrix work extend this match
+/// rather than writing their own. Content is `kind tag ++ payload` per
+/// variant; the payload for most variants starts with the fact's own
+/// `Subject`.
+pub fn write_fact(fact: &Fact, w: &mut CanonWriter) {
+    match fact {
+        Fact::ExprKindIs { subject, kind } => w.write_enum(0, |w| {
+            subject.canon_write(w);
+            kind.canon_write(w);
+        }),
+        Fact::ExprChild {
+            parent,
+            ordinal,
+            child,
+        } => w.write_enum(1, |w| {
+            parent.canon_write(w);
+            w.write_uint(*ordinal as u64);
+            child.canon_write(w);
+        }),
+        Fact::SchemaRole { relation, role, ty } => w.write_enum(2, |w| {
+            relation.canon_write(w);
+            role.canon_write(w);
+            ty.canon_write(w);
+        }),
+        Fact::FnSig {
+            function,
+            params,
+            result,
+            is_aggregate,
+        } => w.write_enum(3, |w| {
+            function.canon_write(w);
+            params.canon_write(w);
+            result.canon_write(w);
+            w.write_bool(*is_aggregate);
+        }),
+        Fact::RowField { subject, field, ty } => w.write_enum(4, |w| {
+            subject.canon_write(w);
+            field.canon_write(w);
+            ty.canon_write(w);
+        }),
+        Fact::RowTail { subject, open } => w.write_enum(5, |w| {
+            subject.canon_write(w);
+            w.write_bool(*open);
+        }),
+        Fact::DimTerm {
+            subject,
+            dimension,
+            exponent,
+        } => w.write_enum(6, |w| {
+            subject.canon_write(w);
+            dimension.canon_write(w);
+            w.write_int(*exponent as i64);
+        }),
+        Fact::HasType { subject, ty } => w.write_enum(7, |w| {
+            subject.canon_write(w);
+            ty.canon_write(w);
+        }),
+        Fact::RequiresBool { subject } => w.write_enum(8, |w| subject.canon_write(w)),
+        Fact::Applies { subject, operator } => w.write_enum(9, |w| {
+            subject.canon_write(w);
+            w.write_str(operator);
+        }),
+    }
+}
+
+/// Content-addressed fact identity: `Hash(Value domain, write_fact(fact))`.
+/// Two structurally identical facts — even derived independently, even in
+/// separate `analyze` runs — get the same id, mirroring
+/// [`crate::site::SiteId::derive`] and [`crate::core::ExprId::derive`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct FactId(Digest);
+
+impl FactId {
+    /// Derive the id from a fact's own canonical bytes ([`write_fact`]).
+    /// Must only be called with a **resolved** fact — see the module-level
+    /// note on why `analyze` computes ids in a finalization pass after
+    /// solving, not during traversal.
+    pub fn derive(fact: &Fact) -> Self {
+        let mut w = CanonWriter::new();
+        write_fact(fact, &mut w);
+        FactId(w.digest(Domain::Value))
+    }
+
+    pub fn digest(&self) -> Digest {
+        self.0
+    }
+}
+
+impl fmt::Display for FactId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "fact:{}", &self.0.to_hex()[..12])
+    }
+}
+
+/// A fact plus the earlier facts from which it follows, as a canonical set
+/// of content-addressed ids (not a positional sequence).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Derivation {
-    pub id: usize,
+    pub id: FactId,
     pub fact: Fact,
-    pub because: Vec<usize>,
+    pub because: BTreeSet<FactId>,
+}
+
+/// The honest, per-kind payload of a derived incompatibility. Distinct from
+/// [`crate::infer::TypeError`] — see the module doc and the parity harness's
+/// category map for how the two vocabularies line up.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum ConflictKind {
+    Mismatch {
+        left: Ty,
+        right: Ty,
+    },
+    Arity {
+        expected: u32,
+        found: u32,
+    },
+    UnknownField {
+        field: Ident,
+    },
+    NonBool {
+        found: Ty,
+    },
+    Occurs {
+        var: TyVar,
+        into: Ty,
+    },
+    Dimension {
+        op: String,
+        left: Ty,
+        right: Ty,
+    },
+    /// A `?` postfix applied to a non-`Result` type (mirrors `infer.rs`'s
+    /// dedicated `TypeError::TryNonResult`). Appended last, after the PR 3
+    /// freeze, so the five earlier variants' `write_conflict` ordinals are
+    /// unchanged; see the parity harness's `try_non_result_agrees` fixture
+    /// for why this needed its own variant rather than folding into
+    /// `Mismatch`.
+    TryNonResult {
+        found: Ty,
+    },
 }
 
 /// A derived incompatibility. It is intentionally distinct from a kernel key
 /// conflict: competing provisional facts can be legitimate while solving.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TypeConflict {
-    pub operation: String,
-    pub left: Ty,
-    pub right: Ty,
-    pub because: Vec<usize>,
+    pub subject: Subject,
+    pub kind: ConflictKind,
+    pub because: BTreeSet<FactId>,
 }
 
-/// Saturated facts and explainable conflicts for a Core source.
+/// Canonical encoder for [`TypeConflict`], mirroring [`write_fact`]'s shape
+/// (kind tag ++ payload, subject-first). Conflicts are not themselves
+/// content-addressed (no `ConflictId` exists), but a byte-stable encoding is
+/// what the determinism golden test needs, and #20's coverage-matrix work
+/// can reuse this the same way it reuses `write_fact`.
+pub fn write_conflict(conflict: &TypeConflict, w: &mut CanonWriter) {
+    conflict.subject.canon_write(w);
+    match &conflict.kind {
+        ConflictKind::Mismatch { left, right } => w.write_enum(0, |w| {
+            left.canon_write(w);
+            right.canon_write(w);
+        }),
+        ConflictKind::Arity { expected, found } => w.write_enum(1, |w| {
+            w.write_uint(*expected as u64);
+            w.write_uint(*found as u64);
+        }),
+        ConflictKind::UnknownField { field } => w.write_enum(2, |w| field.canon_write(w)),
+        ConflictKind::NonBool { found } => w.write_enum(3, |w| found.canon_write(w)),
+        ConflictKind::Occurs { var, into } => w.write_enum(4, |w| {
+            var.canon_write(w);
+            into.canon_write(w);
+        }),
+        ConflictKind::Dimension { op, left, right } => w.write_enum(5, |w| {
+            w.write_str(op);
+            left.canon_write(w);
+            right.canon_write(w);
+        }),
+        ConflictKind::TryNonResult { found } => w.write_enum(6, |w| found.canon_write(w)),
+    }
+}
+
+/// Saturated facts and explainable conflicts for a Core source. The
+/// content-addressed form only — internal positional bookkeeping never
+/// escapes [`analyze`].
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct ReflectiveReport {
     pub facts: Vec<Derivation>,
@@ -90,45 +399,196 @@ pub fn analyze(source: &FrontendSource, resolver: &impl SchemaResolver) -> Refle
     for query in &source.queries {
         cx.query(query, resolver);
     }
-    cx.normalize_facts();
-    cx.report
+    cx.finish()
+}
+
+/// One fact recorded during traversal, still keyed by a positional index
+/// (append-only within one `analyze` run — cheap provenance handle while
+/// solving is in progress). [`Reflect::finalize`] turns these into
+/// content-addressed [`Derivation`]s once every `Ty` is resolved.
+struct Draft {
+    id: usize,
+    fact: Fact,
+    because: Vec<usize>,
+}
+
+/// The conflict-side counterpart of [`Draft`].
+struct DraftConflict {
+    subject: Subject,
+    kind: ConflictKind,
+    because: Vec<usize>,
 }
 
 #[derive(Default)]
 struct Reflect {
-    report: ReflectiveReport,
+    drafts: Vec<Draft>,
+    draft_conflicts: Vec<DraftConflict>,
     subst: BTreeMap<TyVar, Ty>,
 }
 
 impl Reflect {
-    fn normalize_facts(&mut self) {
+    /// Re-resolve every `Ty` payload recorded during traversal against the
+    /// final substitution. Must run **after** traversal completes: a content
+    /// digest taken mid-solve would hash an unresolved `TyVar`, and the same
+    /// source could then export different `FactId`s depending on traversal
+    /// order — the opposite of "same fact ⇒ same digest."
+    fn zonk(&mut self) {
         let subst = self.subst.clone();
-        for derivation in &mut self.report.facts {
-            if let Fact::HasType { ty, .. } = &mut derivation.fact {
-                *ty = solve::resolve(&subst, ty.clone());
+        for draft in &mut self.drafts {
+            match &mut draft.fact {
+                Fact::HasType { ty, .. } | Fact::SchemaRole { ty, .. } => {
+                    *ty = solve::resolve(&subst, ty.clone());
+                }
+                Fact::FnSig { params, result, .. } => {
+                    for param in params.iter_mut() {
+                        *param = solve::resolve(&subst, param.clone());
+                    }
+                    *result = solve::resolve(&subst, result.clone());
+                }
+                Fact::ExprKindIs { .. }
+                | Fact::ExprChild { .. }
+                | Fact::RowField { .. }
+                | Fact::RowTail { .. }
+                | Fact::DimTerm { .. }
+                | Fact::RequiresBool { .. }
+                | Fact::Applies { .. } => {}
+            }
+        }
+        for conflict in &mut self.draft_conflicts {
+            match &mut conflict.kind {
+                ConflictKind::Mismatch { left, right } => {
+                    *left = solve::resolve(&subst, left.clone());
+                    *right = solve::resolve(&subst, right.clone());
+                }
+                ConflictKind::NonBool { found } | ConflictKind::TryNonResult { found } => {
+                    *found = solve::resolve(&subst, found.clone());
+                }
+                ConflictKind::Occurs { into, .. } => *into = solve::resolve(&subst, into.clone()),
+                ConflictKind::Dimension { left, right, .. } => {
+                    *left = solve::resolve(&subst, left.clone());
+                    *right = solve::resolve(&subst, right.clone());
+                }
+                ConflictKind::Arity { .. } | ConflictKind::UnknownField { .. } => {}
             }
         }
     }
 
+    /// Derive [`Fact::RowField`]/[`Fact::RowTail`]/[`Fact::DimTerm`] facts
+    /// from every (already zonked) [`Fact::HasType`]'s resolved type. Runs
+    /// after [`Reflect::zonk`] so the decomposed row/dimension shape is the
+    /// final, solved one.
+    fn augment_structural_facts(&mut self) {
+        let snapshot: Vec<(usize, Subject, Ty)> = self
+            .drafts
+            .iter()
+            .filter_map(|draft| match &draft.fact {
+                Fact::HasType { subject, ty } => Some((draft.id, subject.clone(), ty.clone())),
+                _ => None,
+            })
+            .collect();
+        for (origin_id, subject, ty) in snapshot {
+            if let Ty::Record(row) | Ty::Rel(row) = &ty {
+                for field in &row.fields {
+                    self.fact(
+                        Fact::RowField {
+                            subject: subject.clone(),
+                            field: field.name.clone(),
+                            ty: field.ty.clone(),
+                        },
+                        vec![origin_id],
+                    );
+                }
+                let open = matches!(row.tail, RowTail::Open(_));
+                self.fact(
+                    Fact::RowTail {
+                        subject: subject.clone(),
+                        open,
+                    },
+                    vec![origin_id],
+                );
+            }
+            if let Some(dims) = ty_dimensions(&ty) {
+                for dim in dims {
+                    self.fact(
+                        Fact::DimTerm {
+                            subject: subject.clone(),
+                            dimension: dim.name,
+                            exponent: dim.exponent,
+                        },
+                        vec![origin_id],
+                    );
+                }
+            }
+        }
+    }
+
+    /// Assign canonical [`FactId`]s over the resolved drafts and rebuild
+    /// every `because` from positional indices into a [`BTreeSet<FactId>`].
+    /// Safe as a single forward pass: traversal only ever records a `because`
+    /// referencing an *already-created* draft (ids are handed out in
+    /// strictly increasing append order and used only after creation), so by
+    /// the time draft `i` is processed, `id_map` already holds every id it
+    /// can reference.
+    fn finalize(self) -> ReflectiveReport {
+        let mut id_map: BTreeMap<usize, FactId> = BTreeMap::new();
+        let mut facts = Vec::with_capacity(self.drafts.len());
+        for draft in self.drafts {
+            let id = FactId::derive(&draft.fact);
+            id_map.insert(draft.id, id);
+            let because: BTreeSet<FactId> = draft
+                .because
+                .iter()
+                .filter_map(|positional| id_map.get(positional).copied())
+                .collect();
+            facts.push(Derivation {
+                id,
+                fact: draft.fact,
+                because,
+            });
+        }
+        let conflicts = self
+            .draft_conflicts
+            .into_iter()
+            .map(|draft| TypeConflict {
+                subject: draft.subject,
+                kind: draft.kind,
+                because: draft
+                    .because
+                    .iter()
+                    .filter_map(|positional| id_map.get(positional).copied())
+                    .collect(),
+            })
+            .collect();
+        ReflectiveReport { facts, conflicts }
+    }
+
+    /// The traversal-to-report pipeline: zonk, derive structural facts from
+    /// the zonked types, then assign content-addressed ids.
+    fn finish(mut self) -> ReflectiveReport {
+        self.zonk();
+        self.augment_structural_facts();
+        self.finalize()
+    }
+
     fn fact(&mut self, fact: Fact, because: Vec<usize>) -> usize {
-        let id = self.report.facts.len();
+        let id = self.drafts.len();
         let because: Vec<usize> = because
             .into_iter()
             .filter(|dependency| *dependency != NO_FACT)
             .collect();
-        self.report.facts.push(Derivation { id, fact, because });
+        self.drafts.push(Draft { id, fact, because });
         id
     }
 
-    fn conflict(&mut self, operation: &str, left: Ty, right: Ty, because: Vec<usize>) {
-        self.report.conflicts.push(TypeConflict {
-            operation: operation.to_owned(),
-            left,
-            right,
-            because: because
-                .into_iter()
-                .filter(|dependency| *dependency != NO_FACT)
-                .collect(),
+    fn conflict(&mut self, subject: Subject, kind: ConflictKind, because: Vec<usize>) {
+        let because: Vec<usize> = because
+            .into_iter()
+            .filter(|dependency| *dependency != NO_FACT)
+            .collect();
+        self.draft_conflicts.push(DraftConflict {
+            subject,
+            kind,
+            because,
         });
     }
 
@@ -141,29 +601,44 @@ impl Reflect {
     /// types"; this method is only the *observation* — record a `Fact`
     /// binding or a [`TypeConflict`] — the algorithm itself never lives
     /// here (see [`crate::infer::Infer::unify`] for the other observer).
-    fn unify(&mut self, expected: Ty, found: Ty, operation: &str, because: Vec<usize>) {
+    /// `subject` is the origin a resulting conflict should be attributed to.
+    fn unify(&mut self, subject: Subject, expected: Ty, found: Ty, because: Vec<usize>) {
         let expected = self.resolve(expected);
         let found = self.resolve(found);
         match solve::step(expected, found) {
             Step::Done => {}
-            Step::Bind(variable, ty) => self.bind_ty(variable, ty, because),
-            Step::Rows(left, right) => self.unify_rows(left, right, operation, because),
+            Step::Bind(variable, ty) => self.bind_ty(subject, variable, ty, because),
+            Step::Rows(left, right) => self.unify_rows(subject, left, right, because),
             Step::Descend(pairs) => {
                 for (left, right) in pairs {
-                    self.unify(left, right, operation, because.clone());
+                    self.unify(subject.clone(), left, right, because.clone());
                 }
             }
-            Step::Mismatch(expected, found) => self.conflict(operation, expected, found, because),
+            Step::Mismatch(expected, found) => self.conflict(
+                subject,
+                ConflictKind::Mismatch {
+                    left: expected,
+                    right: found,
+                },
+                because,
+            ),
         }
     }
 
-    fn bind_ty(&mut self, variable: TyVar, ty: Ty, because: Vec<usize>) {
+    fn bind_ty(&mut self, subject: Subject, variable: TyVar, ty: Ty, because: Vec<usize>) {
         let ty = self.resolve(ty);
         if ty == Ty::Var(variable) {
             return;
         }
         if solve::occurs(variable, &ty, &self.subst) {
-            self.conflict("occurs", Ty::Var(variable), ty, because);
+            self.conflict(
+                subject,
+                ConflictKind::Occurs {
+                    var: variable,
+                    into: ty,
+                },
+                because,
+            );
         } else {
             self.subst.insert(variable, ty);
         }
@@ -171,28 +646,34 @@ impl Reflect {
 
     /// Row symmetry ruling: [`solve::match_rows`] checks both directions,
     /// so `{a} ~ closed {a,b}` is a mismatch regardless of which side is
-    /// `left`/`right`.
-    fn unify_rows(&mut self, left: Row, right: Row, operation: &str, because: Vec<usize>) {
+    /// `left`/`right`. Each missing field is its own honest
+    /// [`ConflictKind::UnknownField`] — mirrors `infer.rs`'s
+    /// `Infer::unify_rows`, which raises one `TypeError::UnknownField` per
+    /// field rather than one conflict per side.
+    fn unify_rows(&mut self, subject: Subject, left: Row, right: Row, because: Vec<usize>) {
         let matched = solve::match_rows(&left, &right);
         for (a, b) in matched.pairs {
-            self.unify(a, b, operation, because.clone());
+            self.unify(subject.clone(), a, b, because.clone());
         }
-        if !matched.missing_in_right.is_empty() {
+        for field in matched.missing_in_right {
             self.conflict(
-                "row",
-                Ty::record(left.clone()),
-                Ty::record(right.clone()),
+                subject.clone(),
+                ConflictKind::UnknownField { field },
                 because.clone(),
             );
         }
-        if !matched.missing_in_left.is_empty() {
-            self.conflict("row", Ty::record(left), Ty::record(right), because);
+        for field in matched.missing_in_left {
+            self.conflict(
+                subject.clone(),
+                ConflictKind::UnknownField { field },
+                because.clone(),
+            );
         }
     }
 
     fn rule(&mut self, rule: &Rule, resolver: &impl SchemaResolver) {
         let mut env = Env::new();
-        self.pattern(&rule.name, &rule.body, &mut env, resolver, &mut vec![]);
+        self.pattern(&rule.name, &rule.body, &mut env, resolver);
         self.head(&rule.name, &rule.head, &env, resolver);
     }
 
@@ -212,33 +693,24 @@ impl Reflect {
             );
             env.insert(name.clone(), (ty.clone(), id));
         }
-        self.pattern(&query.name, &query.body, &mut env, resolver, &mut vec![]);
-        let (yielded, evidence) =
-            self.expr(&query.name, &query.yields, &env, resolver, &mut vec![]);
+        self.pattern(&query.name, &query.body, &mut env, resolver);
+        let (yielded, evidence) = self.expr(&query.name, &query.yields, &env, resolver);
         let expected = Ty::rel(match yielded {
             Ty::Record(row) => *row,
-            ty => Row::closed(vec![crate::types::RowField {
+            ty => Row::closed(vec![RowField {
                 name: Ident::new("value"),
                 ty,
             }]),
         });
-        self.unify(
-            query.result.clone(),
-            expected,
-            "query-result",
-            vec![evidence],
-        );
+        let subject = Subject::Expr {
+            origin: query.yields.origin,
+        };
+        self.unify(subject, query.result.clone(), expected, vec![evidence]);
     }
 
     fn constraint(&mut self, constraint: &Constraint, resolver: &impl SchemaResolver) {
         let mut env = Env::new();
-        self.pattern(
-            &constraint.name,
-            &constraint.body,
-            &mut env,
-            resolver,
-            &mut vec![],
-        );
+        self.pattern(&constraint.name, &constraint.body, &mut env, resolver);
     }
 
     fn pattern(
@@ -247,10 +719,8 @@ impl Reflect {
         pattern: &Pattern,
         env: &mut Env,
         resolver: &impl SchemaResolver,
-        path: &mut Vec<u32>,
     ) {
-        for (ordinal, clause) in pattern.clauses.iter().enumerate() {
-            path.push(ordinal as u32);
+        for clause in &pattern.clauses {
             match clause {
                 Clause::Edge { relation, args, .. } | Clause::History { relation, args, .. } => {
                     if let Some(schema) = resolver.relation(relation) {
@@ -258,6 +728,14 @@ impl Reflect {
                             if let Some((_, ty)) =
                                 schema.roles.iter().find(|(name, _)| name == &arg.role)
                             {
+                                self.fact(
+                                    Fact::SchemaRole {
+                                        relation: relation.clone(),
+                                        role: arg.role.clone(),
+                                        ty: ty.clone(),
+                                    },
+                                    vec![],
+                                );
                                 self.role_arg(declaration, arg, ty.clone(), env);
                             }
                         }
@@ -269,40 +747,53 @@ impl Reflect {
                     fields,
                 } => {
                     self.bind(declaration, var, Ty::NodeRef(entity.clone()), env, vec![]);
-                    if let Some(schema) = resolver.relation(&QualIdent::simple(entity.as_str())) {
+                    let relation = QualIdent::simple(entity.as_str());
+                    if let Some(schema) = resolver.relation(&relation) {
                         for arg in fields {
                             if let Some((_, ty)) =
                                 schema.roles.iter().find(|(name, _)| name == &arg.role)
                             {
+                                self.fact(
+                                    Fact::SchemaRole {
+                                        relation: relation.clone(),
+                                        role: arg.role.clone(),
+                                        ty: ty.clone(),
+                                    },
+                                    vec![],
+                                );
                                 self.role_arg(declaration, arg, ty.clone(), env);
                             }
                         }
                     }
                 }
                 Clause::Let { binds, expr } => {
-                    let (ty, evidence) = self.expr(declaration, expr, env, resolver, path);
+                    let (ty, evidence) = self.expr(declaration, expr, env, resolver);
                     self.bind(declaration, binds, ty, env, vec![evidence]);
                 }
                 Clause::When(expr) => {
-                    let (ty, evidence) = self.expr(declaration, expr, env, resolver, path);
+                    let (ty, evidence) = self.expr(declaration, expr, env, resolver);
                     let subject = Subject::Expr {
                         origin: expr.origin,
                     };
-                    self.fact(Fact::RequiresBool { subject }, vec![evidence]);
+                    self.fact(
+                        Fact::RequiresBool {
+                            subject: subject.clone(),
+                        },
+                        vec![evidence],
+                    );
                     if ty != Ty::Bool && !matches!(ty, Ty::Var(_)) {
-                        self.conflict("when", Ty::Bool, ty, vec![evidence]);
+                        self.conflict(subject, ConflictKind::NonBool { found: ty }, vec![evidence]);
                     }
                 }
                 Clause::Any(cases) => {
                     for case in cases {
-                        self.pattern(declaration, case, env, resolver, path);
+                        self.pattern(declaration, case, env, resolver);
                     }
                 }
                 Clause::Exists(p) | Clause::Without(p) | Clause::Optional(p) | Clause::Cross(p) => {
-                    self.pattern(declaration, p, env, resolver, path)
+                    self.pattern(declaration, p, env, resolver)
                 }
             }
-            path.pop();
         }
     }
 
@@ -312,7 +803,18 @@ impl Reflect {
             Arg::Lit(lit) => {
                 let found = lit_ty(lit);
                 if found != expected {
-                    self.conflict("role", expected, found, vec![]);
+                    let subject = Subject::Binding {
+                        declaration: declaration.clone(),
+                        name: arg.role.clone(),
+                    };
+                    self.conflict(
+                        subject,
+                        ConflictKind::Mismatch {
+                            left: expected,
+                            right: found,
+                        },
+                        vec![],
+                    );
                 }
             }
         }
@@ -327,7 +829,11 @@ impl Reflect {
         because: Vec<usize>,
     ) {
         if let Some((old, old_fact)) = env.get(name).cloned() {
-            self.unify(old, ty, "unify", vec![old_fact]);
+            let subject = Subject::Binding {
+                declaration: declaration.clone(),
+                name: name.clone(),
+            };
+            self.unify(subject, old, ty, vec![old_fact]);
             return;
         }
         let subject = Subject::Binding {
@@ -366,17 +872,26 @@ impl Reflect {
                 Arg::Var(name) => env.get(name).cloned().unwrap_or((Ty::Error, NO_FACT)),
                 Arg::Lit(lit) => (lit_ty(lit), NO_FACT),
             };
+            let subject = Subject::Head {
+                declaration: declaration.clone(),
+                role: arg.role.clone(),
+            };
+            self.fact(
+                Fact::SchemaRole {
+                    relation: relation.clone(),
+                    role: arg.role.clone(),
+                    ty: expected.clone(),
+                },
+                vec![],
+            );
             let head_fact = self.fact(
                 Fact::HasType {
-                    subject: Subject::Head {
-                        declaration: declaration.clone(),
-                        role: arg.role.clone(),
-                    },
+                    subject: subject.clone(),
                     ty: expected.clone(),
                 },
                 vec![because],
             );
-            self.unify(expected.clone(), found, "head", vec![head_fact, because]);
+            self.unify(subject, expected.clone(), found, vec![head_fact, because]);
         }
     }
 
@@ -386,11 +901,17 @@ impl Reflect {
         expr: &Expr,
         env: &Env,
         resolver: &impl SchemaResolver,
-        path: &mut Vec<u32>,
     ) -> (Ty, usize) {
         let subject = Subject::Expr {
             origin: expr.origin,
         };
+        self.fact(
+            Fact::ExprKindIs {
+                subject: subject.clone(),
+                kind: ExprKindTag::of(&expr.kind),
+            },
+            vec![],
+        );
         let (ty, because) = match &*expr.kind {
             ExprKind::Var(name) => env.get(name).cloned().unwrap_or((expr.ty.clone(), NO_FACT)),
             ExprKind::Lit(lit) => (lit_ty(lit), NO_FACT),
@@ -398,10 +919,18 @@ impl Reflect {
                 let mut row = Vec::new();
                 let mut deps = Vec::new();
                 for (ordinal, (name, value)) in fields.iter().enumerate() {
-                    path.push(ordinal as u32);
-                    let (ty, id) = self.expr(declaration, value, env, resolver, path);
-                    path.pop();
-                    row.push(crate::types::RowField {
+                    let (ty, id) = self.expr(declaration, value, env, resolver);
+                    self.fact(
+                        Fact::ExprChild {
+                            parent: subject.clone(),
+                            ordinal: ordinal as u32,
+                            child: Subject::Expr {
+                                origin: value.origin,
+                            },
+                        },
+                        vec![],
+                    );
+                    row.push(RowField {
                         name: name.clone(),
                         ty,
                     });
@@ -413,21 +942,27 @@ impl Reflect {
                 )
             }
             ExprKind::Field { base, field } => {
-                path.push(0);
-                let (base_ty, id) = self.expr(declaration, base, env, resolver, path);
-                path.pop();
+                let (base_ty, id) = self.expr(declaration, base, env, resolver);
+                self.fact(
+                    Fact::ExprChild {
+                        parent: subject.clone(),
+                        ordinal: 0,
+                        child: Subject::Expr {
+                            origin: base.origin,
+                        },
+                    },
+                    vec![],
+                );
                 match self.resolve(base_ty) {
                     Ty::Record(row) | Ty::Rel(row) => {
                         if let Some(found) = row.fields.iter().find(|x| &x.name == field) {
                             (found.ty.clone(), id)
                         } else {
                             self.conflict(
-                                "field",
-                                Ty::Record(Box::new(Row::closed(vec![crate::types::RowField {
-                                    name: field.clone(),
-                                    ty: Ty::Var(TyVar(0)),
-                                }]))),
-                                Ty::Record(row),
+                                subject.clone(),
+                                ConflictKind::UnknownField {
+                                    field: field.clone(),
+                                },
                                 vec![id],
                             );
                             (Ty::Error, id)
@@ -436,9 +971,10 @@ impl Reflect {
                     found => {
                         if !matches!(found, Ty::Var(_)) {
                             self.conflict(
-                                "field",
-                                Ty::Record(Box::new(Row::closed(vec![]))),
-                                found,
+                                subject.clone(),
+                                ConflictKind::UnknownField {
+                                    field: field.clone(),
+                                },
                                 vec![id],
                             );
                         }
@@ -447,34 +983,65 @@ impl Reflect {
                 }
             }
             ExprKind::If { cond, then, els } => {
-                path.push(0);
-                let (cond_ty, cond_id) = self.expr(declaration, cond, env, resolver, path);
-                path.pop();
-                self.unify(Ty::Bool, cond_ty, "if", vec![cond_id]);
-                path.push(1);
-                let (then_ty, then_id) = self.expr(declaration, then, env, resolver, path);
-                path.pop();
-                path.push(2);
-                let (else_ty, else_id) = self.expr(declaration, els, env, resolver, path);
-                path.pop();
-                self.unify(then_ty.clone(), else_ty, "if", vec![then_id, else_id]);
+                let (cond_ty, cond_id) = self.expr(declaration, cond, env, resolver);
+                self.fact(
+                    Fact::ExprChild {
+                        parent: subject.clone(),
+                        ordinal: 0,
+                        child: Subject::Expr {
+                            origin: cond.origin,
+                        },
+                    },
+                    vec![],
+                );
+                self.unify(subject.clone(), Ty::Bool, cond_ty, vec![cond_id]);
+                let (then_ty, then_id) = self.expr(declaration, then, env, resolver);
+                self.fact(
+                    Fact::ExprChild {
+                        parent: subject.clone(),
+                        ordinal: 1,
+                        child: Subject::Expr {
+                            origin: then.origin,
+                        },
+                    },
+                    vec![],
+                );
+                let (else_ty, else_id) = self.expr(declaration, els, env, resolver);
+                self.fact(
+                    Fact::ExprChild {
+                        parent: subject.clone(),
+                        ordinal: 2,
+                        child: Subject::Expr { origin: els.origin },
+                    },
+                    vec![],
+                );
+                self.unify(
+                    subject.clone(),
+                    then_ty.clone(),
+                    else_ty,
+                    vec![then_id, else_id],
+                );
                 (self.resolve(then_ty), then_id)
             }
             ExprKind::Try { inner, .. } => {
-                path.push(0);
-                let (inner_ty, id) = self.expr(declaration, inner, env, resolver, path);
-                path.pop();
+                let (inner_ty, id) = self.expr(declaration, inner, env, resolver);
+                self.fact(
+                    Fact::ExprChild {
+                        parent: subject.clone(),
+                        ordinal: 0,
+                        child: Subject::Expr {
+                            origin: inner.origin,
+                        },
+                    },
+                    vec![],
+                );
                 match self.resolve(inner_ty) {
                     Ty::Result(ok, _) => (*ok, id),
                     found => {
                         if !matches!(found, Ty::Var(_)) {
                             self.conflict(
-                                "try",
-                                Ty::Result(
-                                    Box::new(Ty::Var(TyVar(0))),
-                                    Box::new(Ty::Var(TyVar(1))),
-                                ),
-                                found,
+                                subject.clone(),
+                                ConflictKind::TryNonResult { found },
                                 vec![id],
                             );
                         }
@@ -484,17 +1051,24 @@ impl Reflect {
             }
             ExprKind::Comprehension { pattern, yields } => {
                 let mut nested = env.clone();
-                self.pattern(declaration, pattern, &mut nested, resolver, path);
+                self.pattern(declaration, pattern, &mut nested, resolver);
                 let (row, evidence) = match yields {
                     Some(yielded) => {
-                        path.push(0);
-                        let (ty, evidence) =
-                            self.expr(declaration, yielded, &nested, resolver, path);
-                        path.pop();
+                        let (ty, evidence) = self.expr(declaration, yielded, &nested, resolver);
+                        self.fact(
+                            Fact::ExprChild {
+                                parent: subject.clone(),
+                                ordinal: 0,
+                                child: Subject::Expr {
+                                    origin: yielded.origin,
+                                },
+                            },
+                            vec![],
+                        );
                         match ty {
                             Ty::Record(row) => (*row, evidence),
                             ty => (
-                                Row::closed(vec![crate::types::RowField {
+                                Row::closed(vec![RowField {
                                     name: Ident::new("value"),
                                     ty,
                                 }]),
@@ -507,7 +1081,7 @@ impl Reflect {
                 (Ty::rel(row), evidence)
             }
             ExprKind::Call { func, args } => {
-                self.call(expr.origin, declaration, func, args, env, resolver, path)
+                self.call(expr.origin, declaration, func, args, env, resolver)
             }
         };
         let ty = self.resolve(ty);
@@ -521,7 +1095,6 @@ impl Reflect {
         (ty, id)
     }
 
-    #[allow(clippy::too_many_arguments)] // Traversal context is explicit while this prototype stays standalone.
     fn call(
         &mut self,
         origin: ExprOrigin,
@@ -530,39 +1103,63 @@ impl Reflect {
         args: &[Expr],
         env: &Env,
         resolver: &impl SchemaResolver,
-        path: &mut Vec<u32>,
     ) -> (Ty, usize) {
+        let subject = Subject::Expr { origin };
         let mut arg_types = Vec::new();
         let mut deps = Vec::new();
         for (ordinal, arg) in args.iter().enumerate() {
-            path.push(ordinal as u32);
-            let (ty, id) = self.expr(declaration, arg, env, resolver, path);
-            path.pop();
+            let (ty, id) = self.expr(declaration, arg, env, resolver);
+            self.fact(
+                Fact::ExprChild {
+                    parent: subject.clone(),
+                    ordinal: ordinal as u32,
+                    child: Subject::Expr { origin: arg.origin },
+                },
+                vec![],
+            );
             arg_types.push(ty);
             deps.push(id);
         }
-        let subject = Subject::Expr { origin };
         let op_fact = self.fact(
             Fact::Applies {
-                subject,
+                subject: subject.clone(),
                 operator: func.to_string(),
             },
             deps.clone(),
         );
         if let Some(op) = func.to_string().strip_prefix("brix.ops.") {
-            return (self.operator(op, &arg_types, &deps), op_fact);
+            return (self.operator(subject, op, &arg_types, &deps), op_fact);
         }
         if let Some(sig) = resolver.function(func) {
+            self.fact(
+                Fact::FnSig {
+                    function: Ident::new(func.to_string()),
+                    params: sig.params.clone(),
+                    result: sig.ret.clone(),
+                    is_aggregate: sig.is_aggregate,
+                },
+                vec![],
+            );
             if sig.params.len() != arg_types.len() {
                 self.conflict(
-                    "arity",
-                    Ty::Int(IntWidth::Nat),
-                    Ty::Int(IntWidth::Nat),
+                    subject,
+                    ConflictKind::Arity {
+                        expected: sig.params.len() as u32,
+                        found: arg_types.len() as u32,
+                    },
                     deps,
                 );
             } else {
-                for ((expected, found), dep) in sig.params.iter().zip(arg_types).zip(deps) {
-                    self.unify(expected.clone(), found, "call", vec![dep]);
+                for i in 0..sig.params.len() {
+                    let arg_subject = Subject::Expr {
+                        origin: args[i].origin,
+                    };
+                    self.unify(
+                        arg_subject,
+                        sig.params[i].clone(),
+                        arg_types[i].clone(),
+                        vec![deps[i]],
+                    );
                 }
             }
             return (sig.ret.clone(), op_fact);
@@ -579,33 +1176,51 @@ impl Reflect {
     /// [`solve::DimStep`] into their own record of what happened, and this
     /// PR's parity harness (`crates/brix-ir/tests/parity.rs`) asserts
     /// their zonked/mirrored types agree even on a conflicting expression.
-    fn same_dimension(&mut self, operation: &str, a: &Ty, b: &Ty, deps: &[usize]) -> Ty {
+    fn same_dimension(
+        &mut self,
+        subject: Subject,
+        operation: &str,
+        a: &Ty,
+        b: &Ty,
+        deps: &[usize],
+    ) -> Ty {
         match solve::same_dimension_step(a, b) {
             DimStep::Ok(t) => t,
             DimStep::Conflict => {
-                self.conflict(operation, a.clone(), b.clone(), deps.to_vec());
+                self.conflict(
+                    subject,
+                    ConflictKind::Dimension {
+                        op: operation.to_owned(),
+                        left: a.clone(),
+                        right: b.clone(),
+                    },
+                    deps.to_vec(),
+                );
                 Ty::Error
             }
             DimStep::Solve(x, y) => {
-                self.unify(x.clone(), y, operation, deps.to_vec());
+                self.unify(subject, x.clone(), y, deps.to_vec());
                 x
             }
         }
     }
 
-    fn operator(&mut self, op: &str, args: &[Ty], deps: &[usize]) -> Ty {
-        if args.len() != if matches!(op, "not" | "neg") { 1 } else { 2 } {
+    fn operator(&mut self, subject: Subject, op: &str, args: &[Ty], deps: &[usize]) -> Ty {
+        let want = if matches!(op, "not" | "neg") { 1 } else { 2 };
+        if args.len() != want {
             self.conflict(
-                "arity",
-                Ty::Int(IntWidth::Nat),
-                Ty::Int(IntWidth::Nat),
+                subject,
+                ConflictKind::Arity {
+                    expected: want as u32,
+                    found: args.len() as u32,
+                },
                 deps.to_vec(),
             );
             return Ty::Error;
         }
         match op {
             "add" | "sub" | "eq" | "ne" | "lt" | "le" | "gt" | "ge" => {
-                let result = self.same_dimension(op, &args[0], &args[1], deps);
+                let result = self.same_dimension(subject, op, &args[0], &args[1], deps);
                 if matches!(op, "eq" | "ne" | "lt" | "le" | "gt" | "ge") {
                     Ty::Bool
                 } else {
@@ -615,27 +1230,51 @@ impl Reflect {
             "mul" | "div" => match solve::dimension_binary_step(&args[0], &args[1], op == "mul") {
                 DimBinaryStep::Ok(t) => t,
                 DimBinaryStep::Conflict => {
-                    self.conflict(op, args[0].clone(), args[1].clone(), deps.to_vec());
+                    self.conflict(
+                        subject,
+                        ConflictKind::Dimension {
+                            op: op.to_owned(),
+                            left: args[0].clone(),
+                            right: args[1].clone(),
+                        },
+                        deps.to_vec(),
+                    );
                     Ty::Error
                 }
                 DimBinaryStep::Solve(x, y) => {
-                    self.unify(x.clone(), y, op, deps.to_vec());
+                    self.unify(subject, x.clone(), y, deps.to_vec());
                     x
                 }
             },
             "and" | "or" => {
                 for (ty, dep) in args.iter().zip(deps) {
-                    self.unify(Ty::Bool, ty.clone(), op, vec![*dep]);
+                    self.unify(subject.clone(), Ty::Bool, ty.clone(), vec![*dep]);
                 }
                 Ty::Bool
             }
             "not" => {
-                self.unify(Ty::Bool, args[0].clone(), op, deps.to_vec());
+                self.unify(subject, Ty::Bool, args[0].clone(), deps.to_vec());
                 Ty::Bool
             }
             "neg" => args[0].clone(),
             _ => Ty::Error,
         }
+    }
+}
+
+/// The dimension vector a resolved `Ty` denotes, if any — used by
+/// [`Reflect::augment_structural_facts`] to emit [`Fact::DimTerm`]s for
+/// `Money`/`Quantity` (single-term dimension vectors, via the same
+/// `money_dimensions`/`quantity_dimensions` helpers `solve` uses) as well as
+/// already-compound `Dimensioned` types. Judgment call: only the top-level
+/// type is decomposed (not, say, a `Dimensioned` nested inside an `Option`),
+/// matching the granularity `Fact::RowField`/`Fact::RowTail` use for rows.
+fn ty_dimensions(ty: &Ty) -> Option<Dimensions> {
+    match ty {
+        Ty::Money(currency) => Some(money_dimensions(currency)),
+        Ty::Quantity(measure) => Some(quantity_dimensions(measure)),
+        Ty::Dimensioned(dims) => Some(dims.clone()),
+        _ => None,
     }
 }
 
@@ -713,13 +1352,16 @@ mod tests {
             1,
             "{errors:?}"
         );
-        assert_eq!(report.conflicts[0].operation, "add");
+        match &report.conflicts[0].kind {
+            ConflictKind::Dimension { op, .. } => assert_eq!(op, "add"),
+            other => panic!("expected a Dimension conflict, got {other:?}"),
+        }
         assert!(!report.conflicts[0].because.is_empty());
     }
 
     #[test]
     fn reflective_query_result_and_unknown_field_match_bootstrap_rejections() {
-        let record = Ty::record(Row::closed(vec![crate::types::RowField {
+        let record = Ty::record(Row::closed(vec![RowField {
             name: Ident::new("present"),
             ty: Ty::Int(IntWidth::Int),
         }]));
@@ -732,7 +1374,7 @@ mod tests {
                     params: vec![],
                     body: Pattern::default(),
                     yields: Expr::new(Ty::Int(IntWidth::Int), ExprKind::Lit(Lit::Int(1))),
-                    result: Ty::rel(Row::closed(vec![crate::types::RowField {
+                    result: Ty::rel(Row::closed(vec![RowField {
                         name: Ident::new("value"),
                         ty: Ty::Bool,
                     }])),
@@ -758,11 +1400,11 @@ mod tests {
         assert!(report
             .conflicts
             .iter()
-            .any(|conflict| conflict.operation == "query-result"));
+            .any(|conflict| matches!(conflict.kind, ConflictKind::Mismatch { .. })));
         assert!(report
             .conflicts
             .iter()
-            .any(|conflict| conflict.operation == "field"));
+            .any(|conflict| matches!(conflict.kind, ConflictKind::UnknownField { .. })));
         assert!(errors
             .iter()
             .any(|error| matches!(error, TypeError::Mismatch { .. })));
@@ -827,11 +1469,11 @@ mod tests {
         assert!(report
             .conflicts
             .iter()
-            .any(|conflict| conflict.operation == "when"));
+            .any(|conflict| matches!(conflict.kind, ConflictKind::NonBool { .. })));
         assert!(report
             .conflicts
             .iter()
-            .any(|conflict| conflict.operation == "arity"));
+            .any(|conflict| matches!(conflict.kind, ConflictKind::Arity { .. })));
         assert!(report
             .facts
             .iter()
@@ -849,7 +1491,7 @@ mod tests {
                 params: vec![(Ident::new("x"), Ty::Var(variable))],
                 body: Pattern::default(),
                 yields: var("x"),
-                result: Ty::rel(Row::closed(vec![crate::types::RowField {
+                result: Ty::rel(Row::closed(vec![RowField {
                     name: Ident::new("value"),
                     ty: Ty::Int(IntWidth::Int),
                 }])),
@@ -865,42 +1507,49 @@ mod tests {
             }
         )));
 
+        let cycle_subject = Subject::Binding {
+            declaration: Ident::new("Cycle"),
+            name: Ident::new("x"),
+        };
         let mut cycle = Reflect::default();
         cycle.unify(
+            cycle_subject,
             Ty::Var(variable),
             Ty::option(Ty::Var(variable)),
-            "test",
             vec![],
         );
         assert!(cycle
-            .report
-            .conflicts
+            .draft_conflicts
             .iter()
-            .any(|conflict| conflict.operation == "occurs"));
+            .any(|conflict| matches!(conflict.kind, ConflictKind::Occurs { .. })));
 
+        let rows_subject = Subject::Binding {
+            declaration: Ident::new("Rows"),
+            name: Ident::new("r"),
+        };
         let mut rows = Reflect::default();
         rows.unify(
+            rows_subject,
             Ty::record(Row::open(
-                vec![crate::types::RowField {
+                vec![RowField {
                     name: Ident::new("x"),
                     ty: Ty::Int(IntWidth::Int),
                 }],
                 TyVar(41),
             )),
             Ty::record(Row::closed(vec![
-                crate::types::RowField {
+                RowField {
                     name: Ident::new("x"),
                     ty: Ty::Int(IntWidth::Int),
                 },
-                crate::types::RowField {
+                RowField {
                     name: Ident::new("y"),
                     ty: Ty::Bool,
                 },
             ])),
-            "test",
             vec![],
         );
-        assert!(rows.report.conflicts.is_empty(), "{:#?}", rows.report);
+        assert!(rows.draft_conflicts.is_empty());
     }
 
     /// The Probability↔F64 bridge (ruling: kept in both checkers) used to
@@ -908,13 +1557,17 @@ mod tests {
     /// the two checkers cannot silently re-diverge on it.
     #[test]
     fn reflective_probability_f64_bridge_matches_bootstrap_checker() {
+        let subject = Subject::Binding {
+            declaration: Ident::new("Test"),
+            name: Ident::new("x"),
+        };
         let mut cx = Reflect::default();
-        cx.unify(Ty::Probability, Ty::F64, "test", vec![]);
-        assert!(cx.report.conflicts.is_empty(), "{:#?}", cx.report);
+        cx.unify(subject.clone(), Ty::Probability, Ty::F64, vec![]);
+        assert!(cx.draft_conflicts.is_empty());
 
         let mut cx = Reflect::default();
-        cx.unify(Ty::F64, Ty::Probability, "test", vec![]);
-        assert!(cx.report.conflicts.is_empty(), "{:#?}", cx.report);
+        cx.unify(subject, Ty::F64, Ty::Probability, vec![]);
+        assert!(cx.draft_conflicts.is_empty());
     }
 
     /// Dimension-vs-variable ruling: a variable side must solve, not
@@ -933,7 +1586,7 @@ mod tests {
                 ],
                 body: Pattern::default(),
                 yields: op("add", vec![var("a"), var("b")]),
-                result: Ty::rel(Row::closed(vec![crate::types::RowField {
+                result: Ty::rel(Row::closed(vec![RowField {
                     name: Ident::new("value"),
                     ty: km,
                 }])),
@@ -947,14 +1600,101 @@ mod tests {
     /// `?t := Int`, not report a top-level mismatch.
     #[test]
     fn reflective_option_descent_solves_the_inner_variable() {
+        let subject = Subject::Binding {
+            declaration: Ident::new("Test"),
+            name: Ident::new("x"),
+        };
         let mut cx = Reflect::default();
         cx.unify(
+            subject,
             Ty::option(Ty::Int(IntWidth::Int)),
             Ty::option(Ty::Var(TyVar(60))),
-            "test",
             vec![],
         );
-        assert!(cx.report.conflicts.is_empty(), "{:#?}", cx.report);
+        assert!(cx.draft_conflicts.is_empty());
         assert_eq!(cx.resolve(Ty::Var(TyVar(60))), Ty::Int(IntWidth::Int));
+    }
+
+    /// #15 PR3: `FactId` is a pure function of a fact's own content (subject,
+    /// kind tag, and payload), so re-running `analyze` on identical input
+    /// must export byte-identical facts, `because` sets, and conflicts — no
+    /// dependence on allocation addresses, hash-map iteration, or any other
+    /// run-to-run nondeterminism.
+    #[test]
+    fn golden_export_is_byte_identical_across_two_independent_analyze_runs() {
+        let eur = Ident::new("EUR");
+        let km = Ident::new("Kilometre");
+        let rate = Ty::Dimensioned(dimensions_div(
+            &money_dimensions(&eur),
+            &quantity_dimensions(&km),
+        ));
+        let query = Query {
+            name: Ident::new("Price"),
+            params: vec![
+                (Ident::new("rate"), rate),
+                (Ident::new("length"), Ty::Quantity(km)),
+                (Ident::new("surcharge"), Ty::Money(eur)),
+            ],
+            body: Pattern::default(),
+            yields: op(
+                "add",
+                vec![
+                    op("div", vec![var("rate"), var("length")]),
+                    var("surcharge"),
+                ],
+            ),
+            result: Ty::Var(TyVar(11)),
+        };
+        let source = FrontendSource {
+            rules: vec![],
+            constraints: vec![],
+            queries: vec![query],
+        };
+        let resolver = crate::frontend::TableResolver::new();
+
+        fn export(report: &ReflectiveReport) -> Vec<u8> {
+            let mut w = CanonWriter::new();
+            w.write_uint(report.facts.len() as u64);
+            for derivation in &report.facts {
+                w.write_bytes(derivation.id.digest().as_bytes());
+                write_fact(&derivation.fact, &mut w);
+                w.write_uint(derivation.because.len() as u64);
+                for because in &derivation.because {
+                    w.write_bytes(because.digest().as_bytes());
+                }
+            }
+            w.write_uint(report.conflicts.len() as u64);
+            for conflict in &report.conflicts {
+                write_conflict(conflict, &mut w);
+                w.write_uint(conflict.because.len() as u64);
+                for because in &conflict.because {
+                    w.write_bytes(because.digest().as_bytes());
+                }
+            }
+            w.finish()
+        }
+
+        let a = analyze(&source, &resolver);
+        let b = analyze(&source, &resolver);
+        assert!(!a.facts.is_empty());
+        assert!(!a.conflicts.is_empty(), "fixture must exercise a conflict");
+        // Structural facts actually landed, not just the derived HasType ones.
+        assert!(a
+            .facts
+            .iter()
+            .any(|d| matches!(d.fact, Fact::ExprKindIs { .. })));
+        assert!(a
+            .facts
+            .iter()
+            .any(|d| matches!(d.fact, Fact::DimTerm { .. })));
+        assert_eq!(
+            export(&a),
+            export(&b),
+            "identical source must export identical bytes"
+        );
+        assert_eq!(
+            a, b,
+            "identical source must export a structurally identical report"
+        );
     }
 }
