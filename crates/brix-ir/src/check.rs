@@ -203,6 +203,10 @@ fn scan_expr(expr: &Expr, resolver: &impl SchemaResolver, acc: &mut CallEffects)
                 scan_expr(y, resolver, acc);
             }
         }
+        ExprKind::Let { value, body, .. } => {
+            scan_expr(value, resolver, acc);
+            scan_expr(body, resolver, acc);
+        }
         ExprKind::Var(_) | ExprKind::Lit(_) => {}
     }
 }
@@ -425,6 +429,10 @@ fn walk_fn_body(
             if let Some(y) = yields {
                 walk_fn_body(y, resolver, realized, has_try);
             }
+        }
+        ExprKind::Let { value, body, .. } => {
+            walk_fn_body(value, resolver, realized, has_try);
+            walk_fn_body(body, resolver, realized, has_try);
         }
         ExprKind::Var(_) | ExprKind::Lit(_) => {}
     }

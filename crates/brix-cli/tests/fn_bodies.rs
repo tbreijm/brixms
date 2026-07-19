@@ -196,6 +196,78 @@ derive R: Fee(id: i, amount: a) from { Order(id: i, weight: w); let a = fee(w) }
     );
 }
 
+/// Issue #47 Slice 2: a total, **block-bodied** fn with a `let`-statement
+/// sequence and a **block-bodied `if`** (both `then` and `else` blocks)
+/// compiles from source and executes identically on both engines.
+#[test]
+fn block_bodied_fn_compiled_from_source_matches_oracle() {
+    const BLOCK_SRC: &str = "package t @ 0.1.0\n\
+rel Input { value: Int } key(value)\n\
+rel Output { value: Int } key(value)\n\
+fn step(x: Int) -> Int {\n\
+  let a = x + 1\n\
+  let b = a + a\n\
+  if b > 10 { b } else { 0 }\n\
+}\n\
+derive R: Output(value: y) from { Input(value: v); let y = step(v) }\n";
+
+    let (file, diags) = parse_file(BLOCK_SRC);
+    assert!(!diags.has_errors(), "must parse: {diags:?}");
+    let lowered = lower_file(&file, &diags);
+    assert!(
+        !lowered.has_errors(),
+        "block-bodied fn must lower + check cleanly: {:#?}",
+        lowered.diags
+    );
+    assert!(
+        lowered
+            .source
+            .functions
+            .iter()
+            .any(|f| f.name.to_string() == "step"),
+        "step must be lowered to a FnDef (block body -> nested lets)"
+    );
+    let phased = AstPhase
+        .assign_phases(lowered)
+        .expect("fixture must be well-stratified");
+
+    // value 7 -> a=8, b=16, 16>10 -> 16 (then-block); value 2 -> a=3, b=6,
+    // 6>10 false -> 0 (else-block). Exercises both block arms.
+    let oracle_program = program_from_source(
+        &phased.lowered.source,
+        &phased.lowered.resolver,
+        &kinds(&phased.lowered),
+        FnLibrary::new(),
+    )
+    .expect("adapts to oracle");
+    let mut store = OracleStore::new(oracle_program).expect("stratified");
+    let settled = store
+        .commit(
+            &OracleTxn::new(b"brix-stdin-0".to_vec())
+                .assert("Input", row(&[("value", Value::Int(7))]))
+                .assert("Input", row(&[("value", Value::Int(2))])),
+        )
+        .expect("commits");
+    let oracle_hex = hex(&dump_bytes(settled));
+
+    let rt_program = brixc::emit::project_program(&phased);
+    let out = brix_rt::engine::run_text(
+        rt_program,
+        "assert Input value=int:7\nassert Input value=int:2\n",
+    )
+    .expect("runtime runs");
+    let rt_hex = out
+        .lines()
+        .next()
+        .and_then(|line| line.split_ascii_whitespace().nth(2))
+        .expect("dump line");
+
+    assert_eq!(
+        rt_hex, oracle_hex,
+        "a block-bodied fn (let sequence + block-if) must match the oracle"
+    );
+}
+
 /// Diagnostic codes raised by lowering + checking `src`.
 fn codes(src: &str) -> Vec<String> {
     let (file, diags) = parse_file(src);

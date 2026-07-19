@@ -92,5 +92,9 @@ fn walk_expr(e: &Expr, out: &mut Vec<brix_phase::ReadSite>) {
             walk_expr(then, out);
             walk_expr(els, out);
         }
+        Expr::Let { value, body, .. } => {
+            walk_expr(value, out);
+            walk_expr(body, out);
+        }
     }
 }

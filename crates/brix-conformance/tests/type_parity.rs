@@ -136,6 +136,10 @@ fn collect_expr_type(expr: &Expr, out: &mut BTreeMap<ExprOrigin, Ty>) {
                 collect_expr_type(y, out);
             }
         }
+        ExprKind::Let { value, body, .. } => {
+            collect_expr_type(value, out);
+            collect_expr_type(body, out);
+        }
         ExprKind::Var(_) | ExprKind::Lit(_) => {}
     }
 }

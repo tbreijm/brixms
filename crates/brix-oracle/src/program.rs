@@ -180,6 +180,13 @@ pub enum Expr {
         then: Box<Expr>,
         els: Box<Expr>,
     },
+    /// `let name = value in body` — a compiled function block's binding
+    /// (issue #47 Slice 2).
+    Let {
+        name: Var,
+        value: Box<Expr>,
+        body: Box<Expr>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

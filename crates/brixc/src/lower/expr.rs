@@ -311,6 +311,9 @@ pub fn lower_expr(ctx: &mut BodyCtx, e: &ast::Expr) -> IrExpr {
             lower_if(ctx, cond, then, else_.as_ref(), e.span)
         }
         ast::ExprKind::Paren(inner) => lower_expr(ctx, inner),
+        // A block in expression position — the `else { … }` arm of a block
+        // `if`, or a nested block (issue #47 Slice 2).
+        ast::ExprKind::Block(block) => lower_fn_block(ctx, block),
         ast::ExprKind::From { block, yield_ } => lower_comprehension(ctx, block, yield_.as_ref()),
         ast::ExprKind::Ellipsis => {
             ctx.diags.push(diag::error(
@@ -713,24 +716,83 @@ fn lower_field(ctx: &mut BodyCtx, base: &ast::Expr, name: &ast::Ident) -> IrExpr
     poison(ctx.meta)
 }
 
+/// Lower a function block `{ let a = x; ...; tail }` into nested `let … in`
+/// Core IR (issue #47 Slice 2): each `let` statement becomes an
+/// [`ExprKind::Let`] binding whose scope is the rest of the block, and the
+/// block's final expression statement is the value.
+pub fn lower_fn_block(ctx: &mut BodyCtx, block: &ast::FnBlock) -> IrExpr {
+    lower_stmts(ctx, &block.stmts, block.span)
+}
+
+fn lower_stmts(ctx: &mut BodyCtx, stmts: &[ast::Stmt], span: Span) -> IrExpr {
+    match stmts {
+        // The block's value is its final expression statement.
+        [ast::Stmt::Expr(tail)] => lower_expr(ctx, tail),
+        // `let name = value; <rest>` -> `let name = value in <rest>`.
+        [ast::Stmt::Let {
+            pattern,
+            value,
+            span: let_span,
+        }, rest @ ..] => {
+            // The value is lowered before `name` enters scope — it names this
+            // binding's result, not an input (mirrors `lower_let_clause`).
+            let value_ir = lower_expr(ctx, value);
+            let name = match &*pattern.kind {
+                ast::ExprKind::Ident(p) if p.segments.len() == 1 => {
+                    IrIdent::new(p.segments[0].text.clone())
+                }
+                _ => {
+                    ctx.diags.push(diag::error(
+                        diag::UNSUPPORTED_V0,
+                        pattern.span,
+                        "destructuring `let` patterns are unsupported in v0",
+                    ));
+                    return poison(ctx.meta);
+                }
+            };
+            if !ctx.bound.insert(name.clone()) {
+                ctx.diags.push(diag::error(
+                    diag::LET_REBINDS,
+                    *let_span,
+                    format!("`let {name}` rebinds an already-bound name (no shadowing)"),
+                ));
+            }
+            let body = lower_stmts(ctx, rest, span);
+            IrExpr::new(
+                body.ty.clone(),
+                ExprKind::Let {
+                    name,
+                    value: value_ir,
+                    body,
+                },
+            )
+        }
+        // The parser already reported this statement.
+        [ast::Stmt::Error(..), ..] => poison(ctx.meta),
+        // Empty block or a non-final bare expression statement: deferred
+        // (`riskModel`'s blocks are `let*` followed by a single expression).
+        _ => {
+            ctx.diags.push(diag::error(
+                diag::UNSUPPORTED_V0,
+                span,
+                "a function block must be zero or more `let`s followed by one expression in v0",
+            ));
+            poison(ctx.meta)
+        }
+    }
+}
+
 fn lower_if(
     ctx: &mut BodyCtx,
     cond: &ast::Expr,
     then: &ast::IfBody,
     else_: Option<&ast::Expr>,
-    span: Span,
+    _span: Span,
 ) -> IrExpr {
     let c = lower_expr(ctx, cond);
     let then_e = match then {
         ast::IfBody::Then(e) => lower_expr(ctx, e),
-        ast::IfBody::Block(_) => {
-            ctx.diags.push(diag::error(
-                diag::UNSUPPORTED_V0,
-                span,
-                "block-bodied `if` is unsupported in v0",
-            ));
-            poison(ctx.meta)
-        }
+        ast::IfBody::Block(block) => lower_fn_block(ctx, block),
     };
     let els_e = match else_ {
         Some(e) => lower_expr(ctx, e),
@@ -803,6 +865,10 @@ fn collect_effects(e: &IrExpr, resolver: &ProgramResolver, acc: &mut EffectRow) 
             for (_, value) in fields {
                 collect_effects(value, resolver, acc);
             }
+        }
+        ExprKind::Let { value, body, .. } => {
+            collect_effects(value, resolver, acc);
+            collect_effects(body, resolver, acc);
         }
         ExprKind::Var(_) | ExprKind::Lit(_) => {}
     }

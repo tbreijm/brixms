@@ -387,23 +387,24 @@ fn lower_query(
 
 /// Lower a user `fn` body into a checked Core IR [`core::FnDef`] (issue #47).
 ///
-/// Slice 1 handles only **total, expression-bodied** functions (`fn f(..) -> T
-/// = <expr>`): these reuse the whole rule-body expression-lowering engine
-/// ([`expr::lower_expr`]), with the parameters seeded into scope exactly as
-/// [`lower_query`] seeds query params. Block-bodied (`{ .. }`) or `partial`
-/// functions return `None` — they are *not* an error (that would break the
-/// flagship's `riskModel`); they simply stay unlowered and hand-registered
-/// until Slice 2 grows blocks / partial-result / runtime provenance.
+/// Handles **total** functions, expression- or block-bodied (issue #47 Slices
+/// 1–2): a `fn f(..) -> T = <expr>` or `fn f(..) -> T { let .. ; <expr> }`.
+/// Both reuse the rule-body expression-lowering engine ([`expr::lower_expr`] /
+/// [`expr::lower_fn_block`]), with parameters seeded into scope exactly as
+/// [`lower_query`] seeds query params. `partial` fns and bodyless fns return
+/// `None` — *not* an error (that would break the flagship's `riskModel`); they
+/// stay unlowered and hand-registered until Slice 2 grows partial-result /
+/// runtime provenance.
 fn lower_fn(
     f: &ast::FnDecl,
     resolver: &ProgramResolver,
     meta: &mut LowerMeta,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<core::FnDef> {
-    let body_expr = match &f.body {
-        Some(ast::FnBody::Expr(e)) if !f.partial => e,
-        _ => return None,
-    };
+    if f.partial || f.body.is_none() {
+        return None;
+    }
+    let ast_body = f.body.as_ref()?;
     let qi = QualIdent::simple(f.name.text.clone());
     // Pass 1 already built and recorded the signature (lowered param/ret types,
     // effect row); reuse it so the FnDef agrees with what the checker sees.
@@ -420,7 +421,10 @@ fn lower_fn(
     for (p, _) in &params {
         ctx.bound.insert(p.clone());
     }
-    let body = expr::lower_expr(&mut ctx, body_expr);
+    let body = match ast_body {
+        ast::FnBody::Expr(e) => expr::lower_expr(&mut ctx, e),
+        ast::FnBody::Block(b) => expr::lower_fn_block(&mut ctx, b),
+    };
     drop(ctx);
 
     // A `Measured` *literal* (`3500 kg`, `150 EUR`) is now scaled at lowering
@@ -464,6 +468,9 @@ fn body_defers_unit_ctor(expr: &core::Expr) -> bool {
         core::ExprKind::Try { inner, .. } => body_defers_unit_ctor(inner),
         core::ExprKind::Comprehension { yields, .. } => {
             yields.as_ref().is_some_and(body_defers_unit_ctor)
+        }
+        core::ExprKind::Let { value, body, .. } => {
+            body_defers_unit_ctor(value) || body_defers_unit_ctor(body)
         }
         core::ExprKind::Var(_) | core::ExprKind::Lit(_) => false,
     }

@@ -133,6 +133,11 @@ fn eval_expr(env: &Env, expr: &Expr, ctx: &Ctx) -> Value {
             Value::Bool(false) => eval_expr(env, els, ctx),
             other => panic!("`if` condition must be Bool, got {other:?}"),
         },
+        Expr::Let { name, value, body } => {
+            let mut inner = env.clone();
+            inner.insert(name.clone(), eval_expr(env, value, ctx));
+            eval_expr(&inner, body, ctx)
+        }
         Expr::Try(name, args) => {
             // Only legal directly under `Clause::Let`; if reached here (a
             // nested `?`) evaluate best-effort by unwrapping.

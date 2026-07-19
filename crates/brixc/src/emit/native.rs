@@ -203,6 +203,11 @@ fn convert_expr(expr: &IrExpr) -> Option<engine::Expr> {
             then: Box::new(convert_expr(then)?),
             els: Box::new(convert_expr(els)?),
         }),
+        ExprKind::Let { name, value, body } => Some(engine::Expr::Let {
+            name: name.to_string(),
+            value: Box::new(convert_expr(value)?),
+            body: Box::new(convert_expr(body)?),
+        }),
         _ => None,
     }
 }

@@ -184,6 +184,11 @@ fn emit_native_expr(expr: &NativeExpr) -> String {
             emit_native_expr(then),
             emit_native_expr(els),
         ),
+        NativeExpr::Let { name, value, body } => format!(
+            "brix_rt::engine::Expr::Let {{ name: {name:?}.into(), value: Box::new({}), body: Box::new({}) }}",
+            emit_native_expr(value),
+            emit_native_expr(body),
+        ),
     }
 }
 
