@@ -182,6 +182,36 @@ interface capabilities {
     resource console {
         log: func(message: string);
     }
+
+    // ------------------------------------------------------------------
+    // Capability acquisition (Part VII §4: unforgeable, host-issued or
+    // attenuated).
+    //
+    // A `resource` type alone gives a guest no way to *obtain* an
+    // instance — the component model requires a handle to arrive as a
+    // function parameter or result. These functions are that arrival
+    // point, and the only one: a Driver never constructs a `net`/`console`
+    // value; it asks the host for the one it was granted.
+    //
+    // Contract (normative):
+    // - The *grant* is fixed per instantiation. `none` is not an error:
+    //   this Driver's manifest/scope does not grant the capability, and
+    //   the Driver treats calls needing it as out-of-scope (mirroring
+    //   `net-error.forbidden` one level up).
+    // - The answer is stable for the instance's lifetime: a host answers
+    //   `some` on every call or `none` on every call, never a mix.
+    //   Mid-instance revocation is expressed on the handle
+    //   (`net-error.cancelled` / `forbidden`), never by flipping to
+    //   `none`.
+    // - Calls may be repeated (e.g. once per `apply`); every returned
+    //   handle is a fresh owned handle onto the same grant, with the same
+    //   scope. Each handle is affine per component-model `own` semantics
+    //   — drop it when done.
+    // - The grant's scope (`Net<HostPattern>`) never crosses this
+    //   boundary; the guest learns it only through `forbidden` answers.
+    //   Capabilities do not serialize (Part VII §4).
+    get-net: func() -> option<net>;
+    get-console: func() -> option<console>;
 }
 
 // ---------------------------------------------------------------------------
