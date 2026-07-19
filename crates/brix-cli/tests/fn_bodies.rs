@@ -3,10 +3,10 @@
 //! identically on the oracle and the generated runtime — with **no**
 //! hand-registered native implementation on either side.
 //!
-//! `surcharge`/`riskModel` stay hand-registered for now (they need unit-value
-//! scaling / partial-result + runtime provenance, deferred to Slice 2); this
-//! fixture is the unit-free proof that the whole pipeline — lower → check →
-//! project → execute → oracle==generated — works end to end.
+//! Slice 1 proved the unit-free pipeline; Slice 1.5 adds unit-literal scaling
+//! (`150 EUR` -> 15000) so the flagship's `surcharge` compiles from source too.
+//! `riskModel` still stays hand-registered (partial-result + runtime provenance,
+//! deferred to Slice 2).
 
 use brix_ast::parse_file;
 use brix_oracle::dsl::row;
@@ -116,6 +116,83 @@ fn total_fn_compiled_from_source_matches_oracle_dump_for_dump() {
     assert_eq!(
         rt_hex, oracle_hex,
         "a fn compiled from source must settle identically on both engines"
+    );
+}
+
+/// Issue #47 Slice 1.5: a fn with **unit literals** (`3500 kg`, `150 EUR`)
+/// compiles from source — the money scale (`150 EUR` -> 15000) is folded at
+/// lowering and both engines agree. This is the faithful proof that the
+/// `surcharge` shape works, since the flagship's own orders never cross the
+/// 3500 kg threshold (so the `150 EUR` branch is never exercised there).
+#[test]
+fn money_unit_fn_compiled_from_source_matches_oracle() {
+    // `fee` is exactly `surcharge`'s shape. Driven with a heavy order (5000 kg
+    // -> 15000) and a light one (1000 kg -> 0).
+    const FEE_SRC: &str = "package t @ 0.1.0\n\
+rel Order { id: Int; weight: Quantity<Mass> } key(id)\n\
+rel Fee { id: Int; amount: Money<EUR> } key(id)\n\
+fn fee(w: Quantity<Mass>) -> Money<EUR> = if w > 3500 kg then 150 EUR else 0 EUR\n\
+derive R: Fee(id: i, amount: a) from { Order(id: i, weight: w); let a = fee(w) }\n";
+
+    let (file, diags) = parse_file(FEE_SRC);
+    assert!(!diags.has_errors(), "must parse: {diags:?}");
+    let lowered = lower_file(&file, &diags);
+    assert!(
+        !lowered.has_errors(),
+        "must lower + check cleanly (fee compiles from source): {:#?}",
+        lowered.diags
+    );
+    assert!(
+        lowered
+            .source
+            .functions
+            .iter()
+            .any(|f| f.name.to_string() == "fee"),
+        "fee must be lowered to a FnDef (unit literals folded, not deferred)"
+    );
+    let phased = AstPhase
+        .assign_phases(lowered)
+        .expect("fixture must be well-stratified");
+
+    // Two orders: 5000 kg (over threshold -> 15000) and 1000 kg (-> 0).
+    let stream = "assert Order id=int:1,weight=int:5000\nassert Order id=int:2,weight=int:1000\n";
+
+    // Oracle (empty FnLibrary — fee runs from source).
+    let oracle_program = program_from_source(
+        &phased.lowered.source,
+        &phased.lowered.resolver,
+        &kinds(&phased.lowered),
+        FnLibrary::new(),
+    )
+    .expect("adapts to oracle");
+    let mut store = OracleStore::new(oracle_program).expect("stratified");
+    let settled = store
+        .commit(
+            &OracleTxn::new(b"brix-stdin-0".to_vec())
+                .assert(
+                    "Order",
+                    row(&[("id", Value::Int(1)), ("weight", Value::Int(5000))]),
+                )
+                .assert(
+                    "Order",
+                    row(&[("id", Value::Int(2)), ("weight", Value::Int(1000))]),
+                ),
+        )
+        .expect("commits");
+    let oracle_hex = hex(&dump_bytes(settled));
+
+    // Generated runtime.
+    let rt_program = brixc::emit::project_program(&phased);
+    let out = brix_rt::engine::run_text(rt_program, stream).expect("runtime runs");
+    let rt_hex = out
+        .lines()
+        .next()
+        .and_then(|line| line.split_ascii_whitespace().nth(2))
+        .expect("dump line");
+
+    assert_eq!(
+        rt_hex, oracle_hex,
+        "a money-unit fn compiled from source (150 EUR -> 15000) must match the oracle"
     );
 }
 

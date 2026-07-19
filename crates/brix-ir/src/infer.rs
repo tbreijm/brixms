@@ -251,6 +251,9 @@ impl Infer {
         }
     }
     fn expr(&mut self, expr: &mut Expr, env: &mut Env, resolver: &impl SchemaResolver) -> Ty {
+        // The dimensioned type lowering assigned to this node, used to type
+        // unit constructors (`brix.units.*`) that brix-ir can't resolve itself.
+        let node_ty = expr.ty.clone();
         let ty = match &mut *expr.kind {
             ExprKind::Var(v) => env.get(v).cloned().unwrap_or_else(|| expr.ty.clone()),
             ExprKind::Lit(l) => self.lit(l),
@@ -320,7 +323,20 @@ impl Infer {
                     .unwrap_or_else(|| Row::closed(vec![]));
                 Ty::rel(row)
             }
-            ExprKind::Call { func, args } => self.call(func, args, env, resolver),
+            ExprKind::Call { func, args } => {
+                if func.to_string().starts_with("brix.units.") {
+                    // A unit constructor (`150 EUR`): lowering, which owns the
+                    // unit table, already gave this node its dimensioned type.
+                    // brix-ir can't resolve `brix.units.*`, so infer the args
+                    // for their own errors but trust the lowered type.
+                    for a in args.iter_mut() {
+                        self.expr(a, env, resolver);
+                    }
+                    node_ty.clone()
+                } else {
+                    self.call(func, args, env, resolver)
+                }
+            }
         };
         self.unify(expr.ty.clone(), ty.clone());
         expr.ty = self.resolve(ty.clone());

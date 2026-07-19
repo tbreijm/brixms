@@ -174,8 +174,14 @@ fn convert_expr(expr: &IrExpr) -> Option<engine::Expr> {
         ExprKind::Var(value) => Some(engine::Expr::Var(value.to_string())),
         ExprKind::Lit(value) => convert_lit(value).map(engine::Expr::Const),
         ExprKind::Call { func, args } => {
-            let args = args.iter().map(convert_expr).collect::<Option<Vec<_>>>()?;
             let name = func.to_string();
+            // A unit constructor (`brix.units.EUR`) is a typing-only wrapper:
+            // its arg was already scaled to the canonical minor unit at
+            // lowering (issue #47 Slice 1.5), so unwrap to the scaled value.
+            if name.starts_with("brix.units.") {
+                return convert_expr(args.first()?);
+            }
+            let args = args.iter().map(convert_expr).collect::<Option<Vec<_>>>()?;
             if let (Some(operator), [left, right]) = (binop_for(&name), args.as_slice()) {
                 return Some(engine::Expr::BinOp(
                     operator,

@@ -601,6 +601,16 @@ fn lower_ident(ctx: &mut BodyCtx, p: &ast::Path, span: Span) -> IrExpr {
 
 fn lower_measured(ctx: &mut BodyCtx, value: &ast::Expr, unit: &ast::Ident, span: Span) -> IrExpr {
     let v = lower_expr(ctx, value);
+    // Fold the unit's minor-unit scale into a literal value so `150 EUR`
+    // becomes the integer 15000 the runtime/oracle evaluate (issue #47 Slice
+    // 1.5). Only constant `Int` literals fold; a non-literal `x EUR` is left
+    // unscaled and its enclosing fn stays deferred (see `decl::lower_fn`).
+    let v = match (ctx.resolver.unit_scale(unit.text.as_str()), &*v.kind) {
+        (scale, ExprKind::Lit(Lit::Int(n))) if scale != 1 => {
+            IrExpr::new(v.ty.clone(), ExprKind::Lit(Lit::Int(n * scale))).with_origin(v.origin)
+        }
+        _ => v,
+    };
     let class = ctx.resolver.unit_class(unit.text.as_str()).cloned();
     let ctor = || {
         QualIdent::from_segments([

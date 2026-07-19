@@ -85,7 +85,10 @@ pub struct ProgramResolver {
     entities: std::collections::BTreeSet<QualIdent>,
     enums: BTreeMap<QualIdent, Vec<IrIdent>>,
     type_ns: BTreeMap<QualIdent, TypeNsEntry>,
-    units: BTreeMap<String, UnitClass>,
+    /// Unit name -> (dimension class, integer scale to its canonical minor
+    /// unit). The scale lets `lower_measured` fold `150 EUR` to the integer
+    /// 15000 (issue #47 Slice 1.5); most units are 1, `EUR` is 100 (cents).
+    units: BTreeMap<String, (UnitClass, i64)>,
     /// `use p.{a, b}` — bare name -> fully qualified target.
     import_map: BTreeMap<String, QualIdent>,
     /// `use p.q` (no `.{...}` items) — bare first-segment alias -> its
@@ -157,7 +160,19 @@ impl ProgramResolver {
     }
 
     pub fn with_unit(mut self, name: impl Into<String>, class: UnitClass) -> Self {
-        self.units.insert(name.into(), class);
+        self.units.insert(name.into(), (class, 1));
+        self
+    }
+
+    /// Register a unit with a non-unit integer scale to its canonical minor
+    /// unit (e.g. `EUR` = 100 cents). See [`Self::unit_scale`].
+    pub fn with_unit_scaled(
+        mut self,
+        name: impl Into<String>,
+        class: UnitClass,
+        scale: i64,
+    ) -> Self {
+        self.units.insert(name.into(), (class, scale));
         self
     }
 
@@ -187,7 +202,14 @@ impl ProgramResolver {
     }
 
     pub fn unit_class(&self, name: &str) -> Option<&UnitClass> {
-        self.units.get(name)
+        self.units.get(name).map(|(class, _)| class)
+    }
+
+    /// The integer scale from a unit to its canonical minor unit (default 1;
+    /// `EUR` = 100). `lower_measured` folds it into a `Measured` literal so
+    /// `150 EUR` becomes the integer 15000 the runtime/oracle expect.
+    pub fn unit_scale(&self, name: &str) -> i64 {
+        self.units.get(name).map(|(_, scale)| *scale).unwrap_or(1)
     }
 
     pub fn enum_variants(&self, name: &QualIdent) -> Option<&[IrIdent]> {
@@ -348,7 +370,12 @@ pub fn seed_prelude(resolver: ProgramResolver) -> ProgramResolver {
         .with_unit("km", UnitClass::Quantity(IrIdent::new("Kilometre")))
         .with_unit("hours", UnitClass::Duration)
         .with_unit("s", UnitClass::Duration)
-        .with_unit("EUR", UnitClass::Money(IrIdent::new("EUR")));
+        // Money's canonical minor unit is cents: `150 EUR` -> integer 15000.
+        // This ×100 is a convention (money-in-minor-units, matching the oracle
+        // `Value` docs and the transaction data), consolidated here as the one
+        // source of truth for `lower_measured`; a spec-level minor-unit
+        // declaration would ground it (issue #47 Slice 1.5).
+        .with_unit_scaled("EUR", UnitClass::Money(IrIdent::new("EUR")), 100);
 
     r = r.with_function(FnSignature {
         name: QualIdent::from("brix.math.clamp"),

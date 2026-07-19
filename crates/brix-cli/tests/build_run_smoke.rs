@@ -406,19 +406,10 @@ fn node_hex(program: &Program, rel: &str, key_row: brix_oracle::row::Row) -> Str
     program.relations[rel].node_id(&key_row).digest().to_hex()
 }
 
-/// Hand-transcribed from the flagship source's `surcharge`/`riskModel` fn
-/// declarations (Core IR carries no executable fn bodies, so nothing can
-/// derive these) — the same idiom and same functions as
-/// `crates/brix-oracle/tests/flagship.rs` (issue #24).
-fn surcharge(args: &[Value]) -> Value {
-    let weight_kg = args[0].as_i128().expect("surcharge: non-numeric weight");
-    if weight_kg > 3500 {
-        Value::Int(15_000)
-    } else {
-        Value::Int(0)
-    }
-}
-
+// `surcharge` is compiled from BrixMS source (issue #47 Slice 1.5) and runs via
+// `Program::fn_defs`, so it is no longer hand-registered. `riskModel` remains
+// hand-transcribed (still deferred) — same function as
+// `crates/brix-oracle/tests/flagship.rs` (issue #24).
 fn risk_model(args: &[Value]) -> Result<Value, Value> {
     let due = args[0].as_i128().expect("riskModel: non-numeric due");
     let now = args[1].as_i128().expect("riskModel: non-numeric now");
@@ -433,9 +424,7 @@ fn risk_model(args: &[Value]) -> Result<Value, Value> {
 }
 
 fn fn_library() -> FnLibrary {
-    FnLibrary::new()
-        .with_fn("surcharge", surcharge)
-        .with_partial_fn("riskModel", risk_model)
+    FnLibrary::new().with_partial_fn("riskModel", risk_model)
 }
 
 fn flagship_oracle_dump_and_stream(source: &str) -> (Vec<u8>, String) {
