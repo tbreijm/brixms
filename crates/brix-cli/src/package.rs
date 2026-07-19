@@ -23,6 +23,9 @@ pub struct LocatedPackage {
     pub manifest: Manifest,
     pub source_path: Utf8PathBuf,
     pub pkg_root: Utf8PathBuf,
+    /// Whether `manifest` was loaded from an on-disk `brix.toml` (as opposed
+    /// to synthesized from the source `package` declaration).
+    pub explicit_manifest: bool,
 }
 
 #[derive(Debug)]
@@ -91,6 +94,7 @@ pub fn locate(operand: &str) -> Result<LocatedPackage, LocateError> {
             manifest,
             source_path,
             pkg_root,
+            explicit_manifest: true,
         });
     }
 
@@ -108,20 +112,20 @@ pub fn locate(operand: &str) -> Result<LocatedPackage, LocateError> {
     ];
     let found = candidates.into_iter().find(|c| c.exists());
 
-    let (manifest, pkg_root) = match found {
+    let (manifest, pkg_root, explicit_manifest) = match found {
         Some(manifest_path) => {
             let manifest = load_manifest(&manifest_path)?;
             let pkg_root = manifest_path
                 .parent()
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| Utf8PathBuf::from("."));
-            (manifest, pkg_root)
+            (manifest, pkg_root, true)
         }
         None => {
             let src = std::fs::read_to_string(&source_path)?;
             let (file, _parse_diags) = parse_file(&src);
             let manifest = synthesize_manifest(&file, &source_path)?;
-            (manifest, file_dir)
+            (manifest, file_dir, false)
         }
     };
 
@@ -129,6 +133,7 @@ pub fn locate(operand: &str) -> Result<LocatedPackage, LocateError> {
         manifest,
         source_path,
         pkg_root,
+        explicit_manifest,
     })
 }
 

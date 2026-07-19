@@ -1,8 +1,7 @@
 //! brix-cli — new/build/run/repl/test/sim/fmt/why/whynot/explain verbs.
 //! Ring 0 lane owner: see OWNER.md. Spec: ../../spec/BrixMS_v9_0.md
 //!
-//! `check`/`fmt`/`build`/`run` are wired to real logic. `test` and `quality`
-//! run compiler checks, then fail closed until their dedicated engines exist;
+//! `check`/`fmt`/`build`/`run`/`test`/`quality` are wired to real logic;
 //! every other verb is a legible "not yet implemented" rather than accepted.
 
 use brix_cli::args::{parse, Invocation, ParsedArgs};

@@ -1,11 +1,10 @@
-//! Public CLI contract for the compiler-grounded, fail-closed quality gate.
+//! Public CLI contract for the compiler-grounded quality gate.
 
 use std::process::Command;
 
 use camino::Utf8PathBuf;
 
-const VALID: &str = "package smoke.quality @ 0.1.0\n\
-rel Input { value: I64 } key(value)\n";
+const VALID: &str = "package smoke.quality @ 0.1.0\n\nrel Input {\n  value: I64\n} key(value)\n";
 
 fn tmp_dir(tag: &str) -> Utf8PathBuf {
     let mut path =
@@ -29,12 +28,53 @@ fn brix(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn quality_is_public_and_fails_closed_with_structured_evidence() {
+fn quality_prototype_passes_on_valid_source() {
     let help = brix(&["--help"]);
     assert!(help.status.success());
     assert!(String::from_utf8_lossy(&help.stdout).contains("brix quality <path>"));
 
-    let root = tmp_dir("unavailable");
+    let root = tmp_dir("prototype");
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("world.brix");
+    std::fs::write(&source, VALID).unwrap();
+
+    let output = brix(&[
+        "quality",
+        source.as_str(),
+        "--profile",
+        "prototype",
+        "--diagnostic-format",
+        "json",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(!root.join(".brix-cache").exists());
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn quality_standard_passes_on_valid_source() {
+    let root = tmp_dir("standard");
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("world.brix");
+    std::fs::write(&source, VALID).unwrap();
+
+    let output = brix(&[
+        "quality",
+        source.as_str(),
+        "--profile",
+        "standard",
+        "--diagnostic-format",
+        "json",
+    ]);
+    assert!(output.status.success(), "{:?}", output.stderr);
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn quality_production_fails_without_explicit_manifest() {
+    let root = tmp_dir("production");
     std::fs::create_dir_all(&root).unwrap();
     let source = root.join("world.brix");
     std::fs::write(&source, VALID).unwrap();
@@ -50,9 +90,8 @@ fn quality_is_public_and_fails_closed_with_structured_evidence() {
     assert_eq!(output.status.code(), Some(1));
     let json = String::from_utf8_lossy(&output.stdout);
     assert!(json.starts_with("{\"diagnostics\":"), "{json}");
-    assert!(json.contains("BRX-QUALITY-0001"), "{json}");
-    assert!(json.contains("production"), "{json}");
-    assert!(json.contains("\"static_checks\":\"passed\""), "{json}");
+    assert!(json.contains("BRX-QUALITY-0002"), "{json}");
+    assert!(json.contains("package.explicit_manifest"), "{json}");
     assert!(!root.join(".brix-cache").exists());
 
     std::fs::remove_dir_all(&root).ok();
@@ -69,7 +108,8 @@ fn quality_preserves_compiler_diagnostics_before_its_gate() {
     assert_eq!(output.status.code(), Some(1));
     let json = String::from_utf8_lossy(&output.stdout);
     assert!(json.contains("BRX-AST-"), "{json}");
-    assert!(!json.contains("BRX-QUALITY-0001"), "{json}");
+    assert!(!json.contains("BRX-QUALITY-0002"), "{json}");
+    assert!(!json.contains("BRX-QUALITY-0003"), "{json}");
 
     std::fs::remove_dir_all(&root).ok();
 }
