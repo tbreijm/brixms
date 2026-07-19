@@ -277,11 +277,7 @@ impl HostNet for DriverHostState {
 }
 
 impl HostConsole for DriverHostState {
-    fn log(
-        &mut self,
-        self_: Resource<WitConsoleGuestBinding>,
-        message: String,
-    ) -> Result<()> {
+    fn log(&mut self, self_: Resource<WitConsoleGuestBinding>, message: String) -> Result<()> {
         let console = self
             .table
             .get(&self_)
@@ -467,10 +463,9 @@ impl DriverHost {
         let engine = Engine::default();
         let mut linker: Linker<DriverHostState> = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
-        Driver::add_to_linker::<DriverHostState, HasSelf<DriverHostState>>(
-            &mut linker,
-            |state| state,
-        )?;
+        Driver::add_to_linker::<DriverHostState, HasSelf<DriverHostState>>(&mut linker, |state| {
+            state
+        })?;
         Ok(DriverHost { engine, linker })
     }
 
