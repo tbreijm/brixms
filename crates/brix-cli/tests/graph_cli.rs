@@ -69,6 +69,11 @@ fn brix(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+#[ignore = "shells out to `cargo build` on a generated multi-package workspace \
+            twice (cold-compiles brix-rt) + runs it; slow — same convention as \
+            acceptance_corpus/reproducibility's heavy subprocess builds. The \
+            fast in-process cross-package proof lives in tests/graph.rs. Run \
+            with `--ignored`."]
 fn locked_multi_package_graph_builds_and_runs_through_the_cli() {
     let (root, source) = scaffold_app("ok", true);
 
