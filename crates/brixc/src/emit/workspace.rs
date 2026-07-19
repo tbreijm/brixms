@@ -197,6 +197,7 @@ fn emit_native_binop(operator: brix_rt::engine::BinOp) -> &'static str {
         brix_rt::engine::BinOp::Add => "brix_rt::engine::BinOp::Add",
         brix_rt::engine::BinOp::Sub => "brix_rt::engine::BinOp::Sub",
         brix_rt::engine::BinOp::Mul => "brix_rt::engine::BinOp::Mul",
+        brix_rt::engine::BinOp::Div => "brix_rt::engine::BinOp::Div",
         brix_rt::engine::BinOp::Eq => "brix_rt::engine::BinOp::Eq",
         brix_rt::engine::BinOp::Ne => "brix_rt::engine::BinOp::Ne",
         brix_rt::engine::BinOp::Lt => "brix_rt::engine::BinOp::Lt",

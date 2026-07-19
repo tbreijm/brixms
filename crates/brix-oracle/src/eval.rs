@@ -17,7 +17,7 @@ use brix_canon::{CanonWriter, Canonical, Digest, Domain, EdgeId};
 
 use crate::phase::Phase;
 use crate::program::{
-    BinOp, Clause, Expr, Head, Program, RelName, RelationDef, RuleId, Severity, Var,
+    BinOp, Clause, Expr, Head, Program, RelName, RelationDef, RuleId, Severity, TotalFn, Var,
 };
 use crate::provenance::{
     ClaimEdge, KeyConflictEdge, MaskedEdge, Provenance, RuleErrorEdge, SupportEdge, SupportRef,
@@ -121,12 +121,16 @@ fn eval_expr(env: &Env, expr: &Expr, ctx: &Ctx) -> Value {
                     .collect();
                 return eval_expr(&call_env, &def.body, ctx);
             }
-            let f = *ctx
+            match ctx
                 .program
                 .fns
                 .get(name)
-                .unwrap_or_else(|| panic!("unregistered fn `{name}`"));
-            f(&vals)
+                .copied()
+                .or_else(|| builtin_total(name))
+            {
+                Some(f) => f(&vals),
+                None => panic!("unregistered fn `{name}`"),
+            }
         }
         Expr::If { cond, then, els } => match eval_expr(env, cond, ctx) {
             Value::Bool(true) => eval_expr(env, then, ctx),
@@ -173,13 +177,17 @@ fn eval_expr(env: &Env, expr: &Expr, ctx: &Ctx) -> Value {
 fn eval_binop(op: BinOp, a: &Value, b: &Value) -> Value {
     use BinOp::*;
     match op {
-        Add | Sub | Mul => {
+        Add | Sub | Mul | Div => {
             let x = a.as_i128().expect("arithmetic on a non-numeric value");
             let y = b.as_i128().expect("arithmetic on a non-numeric value");
             let r = match op {
                 Add => x + y,
                 Sub => x - y,
                 Mul => x * y,
+                // Truncating toward zero (issue #47 Part 2 ruling) — floor
+                // for the non-negative operands every Ring 0 semantic path
+                // uses; no float `Value` is ever introduced.
+                Div => x / y,
                 _ => unreachable!(),
             };
             Value::Int(r.try_into().unwrap_or(i64::MAX))
@@ -200,6 +208,21 @@ fn eval_binop(op: BinOp, a: &Value, b: &Value) -> Value {
         And => Value::Bool(a.as_bool().unwrap_or(false) && b.as_bool().unwrap_or(false)),
         Or => Value::Bool(a.as_bool().unwrap_or(false) || b.as_bool().unwrap_or(false)),
     }
+}
+
+/// Native fallback for prelude-seeded functions Core IR carries no body
+/// for (`brixc::lower::resolve::seed_prelude`'s stub signatures), resolved
+/// *after* a caller-registered `FnLibrary` entry — mirrors `brix-rt`'s
+/// `builtin_total` seam. `brix.math.clamp(x, lo, hi)` is the one Part 2
+/// (issue #47) needs: integer clamp on basis-point `Value::Int`s, no float
+/// arithmetic (the fixed-point ruling).
+fn builtin_total(name: &str) -> Option<TotalFn> {
+    (name == "brix.math.clamp").then_some(|args: &[Value]| {
+        let x = args[0].as_i128().expect("clamp: non-numeric value");
+        let lo = args[1].as_i128().expect("clamp: non-numeric lo");
+        let hi = args[2].as_i128().expect("clamp: non-numeric hi");
+        Value::Int(x.max(lo).min(hi).try_into().unwrap_or(i64::MAX))
+    })
 }
 
 /// Evaluate a clause body against the current envs, without rule-error
