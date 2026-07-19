@@ -1365,14 +1365,12 @@ fn eval_expr(program: &Program, env: &Env, expr: &Expr) -> Value {
     }
 }
 
-fn builtin_total(name: &str) -> Option<TotalFn> {
-    (name == "surcharge").then_some(|args| {
-        let weight = args
-            .first()
-            .and_then(Value::as_i128)
-            .expect("surcharge expects a numeric weight");
-        Value::Int(if weight > 3_500 { 15_000 } else { 0 })
-    })
+/// Native total-function fallback. `surcharge` used to live here as a
+/// hand-transcription of its BrixMS source; it is now compiled from source
+/// (issue #47 Slice 1.5) and resolves via `Program::fn_defs`, so no builtin
+/// remains. Kept as the seam for any future host-provided total.
+fn builtin_total(_name: &str) -> Option<TotalFn> {
+    None
 }
 
 fn builtin_partial(name: &str) -> Option<PartialFn> {

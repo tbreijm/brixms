@@ -423,12 +423,11 @@ fn lower_fn(
     let body = expr::lower_expr(&mut ctx, body_expr);
     drop(ctx);
 
-    // Slice 1 defers any body that needs unit-constructor evaluation: a
-    // `Measured` literal like `3500 kg` / `150 EUR` lowers to a `brix.units.*`
-    // call whose runtime *value* scaling (e.g. `150 EUR` -> integer cents) is
-    // Slice-2 work. The flagship's `surcharge` hits this, so it stays on its
-    // hand-registered native path rather than executing an unevaluable body.
-    if body_uses_unit_ctor(&body) {
+    // A `Measured` *literal* (`3500 kg`, `150 EUR`) is now scaled at lowering
+    // and executes from source (issue #47 Slice 1.5). Only a *non-literal*
+    // unit value (`x EUR`), which cannot be constant-folded yet, still defers
+    // the whole function to its hand-registered path.
+    if body_defers_unit_ctor(&body) {
         return None;
     }
 
@@ -442,21 +441,29 @@ fn lower_fn(
     })
 }
 
-/// Whether a lowered function body calls a `brix.units.*` unit constructor —
-/// the Slice-1 deferral predicate (see [`lower_fn`]).
-fn body_uses_unit_ctor(expr: &core::Expr) -> bool {
+/// Whether a lowered function body contains an *unscalable* unit constructor —
+/// a `brix.units.*` call whose value is not a constant `Int` literal, so it
+/// couldn't be folded to the canonical minor unit at lowering. Such a body
+/// stays deferred to its hand-registered path (see [`lower_fn`]); a body whose
+/// unit literals are all constants executes from source.
+fn body_defers_unit_ctor(expr: &core::Expr) -> bool {
     match &*expr.kind {
         core::ExprKind::Call { func, args } => {
-            func.to_string().starts_with("brix.units.") || args.iter().any(body_uses_unit_ctor)
+            let unscalable = func.to_string().starts_with("brix.units.")
+                && !matches!(
+                    args.first().map(|a| &*a.kind),
+                    Some(core::ExprKind::Lit(brix_ir::pattern::Lit::Int(_)))
+                );
+            unscalable || args.iter().any(body_defers_unit_ctor)
         }
         core::ExprKind::If { cond, then, els } => {
-            body_uses_unit_ctor(cond) || body_uses_unit_ctor(then) || body_uses_unit_ctor(els)
+            body_defers_unit_ctor(cond) || body_defers_unit_ctor(then) || body_defers_unit_ctor(els)
         }
-        core::ExprKind::Field { base, .. } => body_uses_unit_ctor(base),
-        core::ExprKind::Record { fields } => fields.iter().any(|(_, e)| body_uses_unit_ctor(e)),
-        core::ExprKind::Try { inner, .. } => body_uses_unit_ctor(inner),
+        core::ExprKind::Field { base, .. } => body_defers_unit_ctor(base),
+        core::ExprKind::Record { fields } => fields.iter().any(|(_, e)| body_defers_unit_ctor(e)),
+        core::ExprKind::Try { inner, .. } => body_defers_unit_ctor(inner),
         core::ExprKind::Comprehension { yields, .. } => {
-            yields.as_ref().is_some_and(body_uses_unit_ctor)
+            yields.as_ref().is_some_and(body_defers_unit_ctor)
         }
         core::ExprKind::Var(_) | core::ExprKind::Lit(_) => false,
     }

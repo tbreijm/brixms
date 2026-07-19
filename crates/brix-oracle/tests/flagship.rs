@@ -53,19 +53,9 @@ fn kinds() -> KindTable {
     k
 }
 
-/// `surcharge(weight: Quantity<Mass>) -> Money<EUR> = if weight > 3500 kg
-/// then 150 EUR else 0 EUR` — hand-transcribed verbatim from the flagship
-/// source (fn bodies are never lowered into Core IR, so there is nothing
-/// to derive this from mechanically). Scaled-integer convention: Mass in
-/// whole kg, Money in cents (see the `frontend` module doc).
-fn surcharge(args: &[Value]) -> Value {
-    let weight_kg = args[0].as_i128().expect("surcharge: non-numeric weight");
-    if weight_kg > 3500 {
-        Value::Int(15_000)
-    } else {
-        Value::Int(0)
-    }
-}
+// `surcharge` is no longer hand-transcribed here: it is compiled from its
+// BrixMS source and executes via `Program::fn_defs` (issue #47 Slice 1.5), so
+// the `FnLibrary` only needs to supply `riskModel` (still deferred).
 
 /// `riskModel(due, now) -> Result<Probability, ValidationError>`:
 /// `let remaining = due - now; if remaining <= 0 hours { 1.0 } else {
@@ -86,9 +76,7 @@ fn risk_model(args: &[Value]) -> Result<Value, Value> {
 }
 
 fn fn_library() -> FnLibrary {
-    FnLibrary::new()
-        .with_fn("surcharge", surcharge)
-        .with_partial_fn("riskModel", risk_model)
+    FnLibrary::new().with_partial_fn("riskModel", risk_model)
 }
 
 fn node_ref(program: &brix_oracle::program::Program, rel: &str, key_row: Row) -> Value {

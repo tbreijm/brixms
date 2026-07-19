@@ -378,6 +378,14 @@ fn convert_expr(e: &IrExpr) -> Result<Expr, AdapterError> {
         ExprKind::Lit(lit) => Ok(Expr::Const(convert_lit(lit)?)),
         ExprKind::Call { func, args } => {
             let name = func.to_string();
+            // A unit constructor is a typing-only wrapper whose arg was scaled
+            // to minor units at lowering (issue #47 Slice 1.5); unwrap to it.
+            if name.starts_with("brix.units.") {
+                let inner = args
+                    .first()
+                    .ok_or(AdapterError::Unsupported("empty unit constructor"))?;
+                return convert_expr(inner);
+            }
             let oargs = args
                 .iter()
                 .map(convert_expr)
