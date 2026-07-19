@@ -46,7 +46,7 @@ unicode-normalization = "0.1"
 brix-canon = { path = "crates/brix-canon" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# wasmtime pulled in only by brix-rt / the Driver host when that lane lands it.
+# wasmtime: native Driver host in brix-rt (issue #27); target-gated there.
 wasmtime = { version = "27", features = ["component-model"] }
 # wasmtime-wasi: any wasm32-wasip2 guest (rustc's component-model target)
 # imports the standard WASI 0.2 worlds (wasi:io/poll, wasi:clocks, ...) from

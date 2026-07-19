@@ -15,12 +15,14 @@
 //! neither. The WIT file's own comments call this out as future work ("the
 //! rest are named ... to be filled in as the wasmtime host lands"). Landing
 //! this host requires closing that gap, so `get-net`/`get-console` free
-//! functions were added to the `capabilities` interface: the host issues (or
-//! withholds, as `none`) a capability once per instantiation, matching Part
-//! VII §4 ("unforgeable, host-issued or attenuated"). Nothing about *what a
-//! capability means* was invented — the resource shapes, methods, and error
-//! vocabulary are exactly what the WIT already specified; this is the
-//! mechanical wiring the WIT's own comments predicted would be needed.
+//! functions were added to the `capabilities` interface. The grant is fixed
+//! per instantiation and the answer is stable for the instance lifetime
+//! (repeatable `some`/`none`, fresh owned handles each call) — see the
+//! normative contract on those WIT functions (issue #27 design ruling).
+//! Nothing about *what a capability means* was invented — the resource
+//! shapes, methods, and error vocabulary are exactly what the WIT already
+//! specified; this is the mechanical wiring the WIT's own comments
+//! predicted would be needed.
 //!
 //! # Lease/cancel plumbing
 //!
