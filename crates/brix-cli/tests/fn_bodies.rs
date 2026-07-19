@@ -9,13 +9,16 @@
 //! deferred to Slice 2).
 
 use brix_ast::parse_file;
-use brix_oracle::dsl::row;
+use brix_oracle::dsl::{binop, edge_bind, evar, let_, row, rule, var};
 use brix_oracle::dump::dump_bytes;
 use brix_oracle::frontend::{program_from_source, FnLibrary, KindTable};
-use brix_oracle::program::RelKind;
+use brix_oracle::program::{
+    BinOp as OracleBinOp, Expr as OracleExpr, Program as OracleProgram, RelKind, RelationDef,
+};
 use brix_oracle::store::Store as OracleStore;
 use brix_oracle::txn::Transaction as OracleTxn;
 use brix_oracle::value::Value;
+use brix_rt::engine as rt;
 use brixc::lower::RuntimeRelationKind;
 use brixc::pipeline::PhaseAssign;
 use brixc::{lower_file, AstPhase};
@@ -266,6 +269,199 @@ derive R: Output(value: y) from { Input(value: v); let y = step(v) }\n";
         rt_hex, oracle_hex,
         "a block-bodied fn (let sequence + block-if) must match the oracle"
     );
+}
+
+/// Issue #47 Part 2: the fixed-point ruling's building blocks — `div`
+/// (`BinOp::Div`, truncating integer division) and `brix.math.clamp` (the
+/// prelude-seeded builtin total, issue #47 Part 2's `builtin_total`) —
+/// exercised directly at the basis-point-integer level `riskModel` itself
+/// needs, on both engines with **no** hand-registered `FnLibrary` entry
+/// (clamp resolves via `builtin_total` on both sides). Hand-built `Program`s
+/// (not compiled from BrixMS surface syntax) because the surface checker's
+/// `F64`/dimension algebra is a separate, larger piece of infra than this
+/// ruling covers (see the plan's Part 2 scope) — this proves the two
+/// *evaluators* agree, independent of that.
+///
+/// `(24 - remaining) * 10000 / 24` then clamped to `[0, 10000]` is exactly
+/// `riskModel`'s reconciled integer-floor form (mirrors
+/// `crates/brix-rt/src/engine.rs`'s `builtin_partial` and the reconciled
+/// oracle/CLI hand-regs). `remaining = 8` is the former divergence case:
+/// the old f64 round-half hand-reg gave 6667, the runtime's integer-floor
+/// gave 6666 — this fixture proves 6666 on both engines via the real `Div`/
+/// `clamp` evaluators, not a hand-transcription of either.
+#[test]
+fn div_and_clamp_evaluators_agree_on_riskmodels_reconciled_vectors() {
+    // remaining -> expected basis-point risk, per the reconciled formula.
+    // 8 is the former 6667-vs-6666 divergence; 30 and -10 exercise clamp's
+    // low/high saturation (a pre-clamp value outside [0, 10000]).
+    const VECTORS: &[(&str, i64, i64)] = &[
+        ("ord-0", 0, 10_000),
+        ("ord-8", 8, 6_666),
+        ("ord-24", 24, 0),
+        ("ord-30", 30, 0),
+        ("ord-neg10", -10, 10_000),
+    ];
+
+    // Self-check the vector table against the formula in plain Rust
+    // arithmetic, independent of either engine — the two engines agreeing
+    // with each other is meaningless if the shared vector table itself is
+    // wrong.
+    for (order_ref, remaining, expected) in VECTORS {
+        let bp = (((24 - remaining) * 10_000) / 24).clamp(0, 10_000);
+        assert_eq!(bp, *expected, "vector table self-check for {order_ref}");
+    }
+
+    // --- Oracle: hand-built Program, empty FnLibrary (clamp resolves via
+    // the new `builtin_total` fallback in `brix-oracle/src/eval.rs`). ---
+    let oracle_program = OracleProgram::new()
+        .with_relation(RelationDef::ground(
+            "Order",
+            &["ref", "remaining"],
+            &["ref"],
+        ))
+        .with_relation(RelationDef::derived("Risk", &["order", "risk"], &["order"]))
+        .with_rule(rule(
+            "Risk",
+            "Risk",
+            &[("order", var("o")), ("risk", var("risk"))],
+            vec![
+                edge_bind(
+                    "o",
+                    "Order",
+                    &[("ref", var("orderRef")), ("remaining", var("r"))],
+                ),
+                let_("risk", oracle_risk_expr()),
+            ],
+        ));
+    let mut store = OracleStore::new(oracle_program).expect("program is stratified");
+    let mut txn = OracleTxn::new(b"brix-stdin-0".to_vec());
+    for (order_ref, remaining, _) in VECTORS {
+        txn = txn.assert(
+            "Order",
+            row(&[
+                ("ref", Value::Str((*order_ref).into())),
+                ("remaining", Value::Int(*remaining)),
+            ]),
+        );
+    }
+    let settled = store.commit(&txn).expect("transaction commits");
+    let oracle_hex = hex(&dump_bytes(settled));
+
+    // --- Generated runtime: hand-built `engine::Program`, no `builtin_partial`
+    // involved — only `Div` and the `brix.math.clamp` `builtin_total`. ---
+    let mut rt_program = rt::Program::default();
+    rt_program.relations.insert(
+        "Order".to_string(),
+        rt::Relation {
+            name: "Order".to_string(),
+            kind: rt::RelationKind::Ground,
+            roles: vec!["ref".to_string(), "remaining".to_string()],
+            key: vec!["ref".to_string()],
+            open: false,
+        },
+    );
+    rt_program.relations.insert(
+        "Risk".to_string(),
+        rt::Relation {
+            name: "Risk".to_string(),
+            kind: rt::RelationKind::Derived,
+            roles: vec!["order".to_string(), "risk".to_string()],
+            key: vec!["order".to_string()],
+            open: false,
+        },
+    );
+    rt_program.rules.insert(
+        "Risk".to_string(),
+        rt::Rule {
+            id: "Risk".to_string(),
+            phase: 0,
+            head: rt::Head::Tuple {
+                relation: "Risk".to_string(),
+                args: vec![
+                    ("order".to_string(), rt::Term::Var("o".to_string())),
+                    ("risk".to_string(), rt::Term::Var("risk".to_string())),
+                ],
+            },
+            body: vec![
+                rt::Clause::Edge {
+                    relation: "Order".to_string(),
+                    bind_id: Some("o".to_string()),
+                    args: vec![
+                        ("ref".to_string(), rt::Term::Var("orderRef".to_string())),
+                        ("remaining".to_string(), rt::Term::Var("r".to_string())),
+                    ],
+                },
+                rt::Clause::Let("risk".to_string(), rt_risk_expr()),
+            ],
+        },
+    );
+    let mut stream = String::new();
+    for (order_ref, remaining, _) in VECTORS {
+        stream.push_str(&format!(
+            "assert Order ref=str:{order_ref},remaining=int:{remaining}\n"
+        ));
+    }
+    let out = rt::run_text(rt_program, &stream).expect("generated runtime runs the transaction");
+    let rt_hex = out
+        .lines()
+        .next()
+        .and_then(|line| line.split_ascii_whitespace().nth(2))
+        .expect("run_text emits a canonical dump line");
+
+    assert_eq!(
+        rt_hex, oracle_hex,
+        "div + clamp must settle identically on both engines for riskModel's reconciled vectors"
+    );
+}
+
+/// `(24 - remaining) * 10000 / 24` — the oracle side, `remaining` bound by
+/// the rule body's `edge_bind` to `r`.
+fn oracle_risk_expr() -> OracleExpr {
+    OracleExpr::Call(
+        "brix.math.clamp".to_string(),
+        vec![
+            binop(
+                OracleBinOp::Div,
+                binop(
+                    OracleBinOp::Mul,
+                    binop(
+                        OracleBinOp::Sub,
+                        OracleExpr::Const(Value::Int(24)),
+                        evar("r"),
+                    ),
+                    OracleExpr::Const(Value::Int(10_000)),
+                ),
+                OracleExpr::Const(Value::Int(24)),
+            ),
+            OracleExpr::Const(Value::Int(0)),
+            OracleExpr::Const(Value::Int(10_000)),
+        ],
+    )
+}
+
+/// Same formula as [`oracle_risk_expr`], built for the generated runtime's
+/// own `engine::Expr`/`engine::BinOp`.
+fn rt_risk_expr() -> rt::Expr {
+    rt::Expr::Call(
+        "brix.math.clamp".to_string(),
+        vec![
+            rt::Expr::BinOp(
+                rt::BinOp::Div,
+                Box::new(rt::Expr::BinOp(
+                    rt::BinOp::Mul,
+                    Box::new(rt::Expr::BinOp(
+                        rt::BinOp::Sub,
+                        Box::new(rt::Expr::Const(rt::Value::Int(24))),
+                        Box::new(rt::Expr::Var("r".to_string())),
+                    )),
+                    Box::new(rt::Expr::Const(rt::Value::Int(10_000))),
+                )),
+                Box::new(rt::Expr::Const(rt::Value::Int(24))),
+            ),
+            rt::Expr::Const(rt::Value::Int(0)),
+            rt::Expr::Const(rt::Value::Int(10_000)),
+        ],
+    )
 }
 
 /// Diagnostic codes raised by lowering + checking `src`.

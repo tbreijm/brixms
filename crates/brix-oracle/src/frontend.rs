@@ -351,15 +351,18 @@ fn convert_arg(arg: &Arg) -> Result<Term, AdapterError> {
 
 /// Functions the flagship's rule bodies call that map directly onto the
 /// oracle's native `BinOp` (evaluated natively by `eval_binop`, needing no
-/// hand-registered `FnLibrary` entry). `div`/`neg`/`not`/`in` have no
-/// oracle `BinOp` counterpart and fall through to an ordinary `Expr::Call`
-/// — unused by the flagship, but graceful (register a `FnLibrary` entry)
-/// rather than a hard adapter error if some other program needs them.
+/// hand-registered `FnLibrary` entry). `div` joined this list for issue
+/// #47 Part 2's fixed-point ruling (truncating integer division, no float
+/// `Value`). `neg`/`not`/`in` have no oracle `BinOp` counterpart and fall
+/// through to an ordinary `Expr::Call` — unused by the flagship, but
+/// graceful (register a `FnLibrary` entry) rather than a hard adapter
+/// error if some other program needs them.
 fn binop_for(func: &str) -> Option<BinOp> {
     Some(match func {
         "brix.ops.add" => BinOp::Add,
         "brix.ops.sub" => BinOp::Sub,
         "brix.ops.mul" => BinOp::Mul,
+        "brix.ops.div" => BinOp::Div,
         "brix.ops.eq" => BinOp::Eq,
         "brix.ops.ne" => BinOp::Ne,
         "brix.ops.lt" => BinOp::Lt,

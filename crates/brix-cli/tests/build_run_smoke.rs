@@ -408,7 +408,8 @@ fn node_hex(program: &Program, rel: &str, key_row: brix_oracle::row::Row) -> Str
 
 // `surcharge` is compiled from BrixMS source (issue #47 Slice 1.5) and runs via
 // `Program::fn_defs`, so it is no longer hand-registered. `riskModel` remains
-// hand-transcribed (still deferred) — same function as
+// hand-transcribed (still deferred) — same function, and same integer-floor
+// fixed-point ruling (issue #47 Part 2), as
 // `crates/brix-oracle/tests/flagship.rs` (issue #24).
 fn risk_model(args: &[Value]) -> Result<Value, Value> {
     let due = args[0].as_i128().expect("riskModel: non-numeric due");
@@ -417,8 +418,7 @@ fn risk_model(args: &[Value]) -> Result<Value, Value> {
     let risk = if remaining <= 0 {
         10_000i64
     } else {
-        let frac = 1.0 - (remaining as f64 / 24.0);
-        (frac.clamp(0.0, 1.0) * 10_000.0).round() as i64
+        (((24 - remaining).clamp(0, 24) * 10_000) / 24) as i64
     };
     Ok(Value::Int(risk))
 }
