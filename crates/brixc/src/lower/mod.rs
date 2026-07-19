@@ -93,6 +93,134 @@ pub fn lower_file(file: &File, parse_diags: &brix_ast::Diagnostics) -> Lowered {
     }
 }
 
+/// One dependency package to fold into a graph build (issue #42): its package
+/// name as segments (e.g. `["lib"]` or `["acme","lib"]`), its parsed entry
+/// file, and that file's parse diagnostics.
+pub struct DepPackage<'a> {
+    pub name_segments: Vec<String>,
+    pub file: &'a File,
+    pub parse_diags: &'a brix_ast::Diagnostics,
+}
+
+/// Lower a **locked package graph** into one checked [`Lowered`] (issue #42).
+///
+/// The **root** package keeps bare-name decls (identical to [`lower_file`], so
+/// every single-package program/test is unchanged); each **dependency** has
+/// its declared relations and compiled total functions re-registered under
+/// **package-qualified** names (`lib.Widget`, `lib.scale`) and merged into one
+/// resolver. The root's `use lib.{Widget, scale}` already rewrites those bare
+/// references to `lib.Widget`/`lib.scale` (via `process_uses`), so cross-package
+/// resolution "just works" against the qualified symbols. Dependencies are
+/// processed in package-name order for determinism.
+///
+/// Slice-1 scope: dependency exports are single-name relations (builtin role
+/// types) and self-contained total functions; dep-local nominal types, dep
+/// rules, and dotted/protocol exports are deferred.
+pub fn lower_graph(
+    root: &File,
+    root_parse_diags: &brix_ast::Diagnostics,
+    deps: &[DepPackage],
+) -> Lowered {
+    use brix_ir::core::FnDef;
+    use brix_ir::frontend::FnSignature;
+    use brix_ir::ident::{Ident as IrIdent, QualIdent};
+
+    let mut diags: Vec<Diagnostic> = root_parse_diags.iter().cloned().collect();
+    let mut meta = LowerMeta::default();
+
+    // Deterministic order, independent of how the caller/filesystem enumerated
+    // the graph.
+    let mut ordered: Vec<&DepPackage> = deps.iter().collect();
+    ordered.sort_by(|a, b| a.name_segments.cmp(&b.name_segments));
+
+    let mut resolver = resolve::seed_prelude(ProgramResolver::new());
+    let mut dep_fndefs: Vec<FnDef> = Vec::new();
+
+    for dep in &ordered {
+        // Lower and check the dependency in isolation (bare names, own
+        // prelude); its errors surface tagged into the graph's channel.
+        let dep_lowered = lower_file(dep.file, dep.parse_diags);
+        diags.extend(dep_lowered.diags.iter().cloned());
+
+        let qualify = |name: &str| -> QualIdent {
+            let mut segs: Vec<IrIdent> = dep
+                .name_segments
+                .iter()
+                .map(|s| IrIdent::new(s.clone()))
+                .collect();
+            segs.push(IrIdent::new(name.to_string()));
+            QualIdent::from_segments(segs)
+        };
+
+        // Dependency's own declared relations -> `pkg.Rel` (skip prelude
+        // `brix.*` and dotted/protocol-synth names, deferred).
+        for schema in dep_lowered.resolver.relations() {
+            if schema.name.segments().len() != 1 {
+                continue;
+            }
+            let bare = schema.name.segments()[0].as_str();
+            if bare.starts_with("brix") {
+                continue;
+            }
+            let qname = qualify(bare);
+            let kind = dep_lowered.resolver.relation_kind(&schema.name);
+            let mut qschema = schema.clone();
+            qschema.name = qname.clone();
+            resolver = resolver
+                .with_relation(qschema)
+                .with_relation_kind(qname, kind);
+        }
+
+        // Dependency's compiled total functions -> `pkg.fn`, bodies carried in.
+        for f in &dep_lowered.source.functions {
+            let qname = qualify(&f.name.to_string());
+            resolver = resolver.with_function(FnSignature {
+                name: qname.clone(),
+                params: f.params.iter().map(|(_, t)| t.clone()).collect(),
+                ret: f.ret.clone(),
+                is_aggregate: false,
+                may_diverge: f.effects.may_diverge(),
+                effects: f.effects.clone(),
+            });
+            let mut qf = f.clone();
+            qf.name = qname;
+            dep_fndefs.push(qf);
+        }
+    }
+
+    // Root package (bare names) on top of the prelude + dependency exports.
+    resolver = schema::build_onto(root, resolver, &mut meta, &mut diags);
+    let mut source = decl::lower_decls(root, &resolver, &mut meta, &mut diags);
+    source.functions.extend(dep_fndefs);
+
+    // Whole-graph checks over the merged source + resolver.
+    for schema in resolver.relations() {
+        for finding in check_relation_keys(schema) {
+            diags.push(diag::render_finding(&finding, &meta));
+        }
+    }
+    for rule in &source.rules {
+        for finding in check_rule(rule, &resolver) {
+            diags.push(diag::render_finding(&finding, &meta));
+        }
+    }
+    for error in infer_source(&mut source, &resolver) {
+        diags.push(diag::render_type_error(&error));
+    }
+    for function in &source.functions {
+        for finding in check_function(function, &resolver) {
+            diags.push(diag::render_finding(&finding, &meta));
+        }
+    }
+
+    Lowered {
+        source,
+        resolver,
+        meta,
+        diags,
+    }
+}
+
 /// The `Frontend` seam (design §"Seams"): parsing is total, so this is
 /// always `Ok`; parse diagnostics ride inside the artifact, not the
 /// `Result`.

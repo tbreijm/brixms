@@ -176,7 +176,26 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
         }));
     }
 
-    let lowered = brixc::lower_file(&file, &parse_diags);
+    // Lower the whole locked package graph (issue #42): a dependency-free
+    // package lowers its single root file exactly as before; with dependencies,
+    // parse each hydrated entry source and fold them into one program.
+    let dep_parsed: Vec<(brix_ast::File, brix_ast::Diagnostics)> =
+        located.deps.iter().map(|d| parse_file(&d.source)).collect();
+    let lowered = if located.deps.is_empty() {
+        brixc::lower_file(&file, &parse_diags)
+    } else {
+        let dep_packages: Vec<brixc::DepPackage> = located
+            .deps
+            .iter()
+            .zip(dep_parsed.iter())
+            .map(|(d, (dep_file, dep_diags))| brixc::DepPackage {
+                name_segments: d.name_segments.clone(),
+                file: dep_file,
+                parse_diags: dep_diags,
+            })
+            .collect();
+        brixc::lower_graph(&file, &parse_diags, &dep_packages)
+    };
     if lowered.has_errors() {
         return Err(BuildError::Diagnostics(DiagnosticReport {
             source,
@@ -203,11 +222,17 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
     let crate_name = brixc::emit::sanitize_crate_name(located.manifest.name.as_str());
 
     let canonical_source = Digest::of(Domain::Value, brix_ast::format_file(&file).as_bytes());
-    let lockfile = brixpkg::Lockfile {
-        format_version: brixpkg::LOCK_FORMAT_VERSION,
-        root: located.manifest.name.clone(),
-        entries: BTreeMap::new(),
-    };
+    // The resolved lockfile (real, with per-dependency content digests) when
+    // the package has dependencies — so a dependency change is a cache miss
+    // (issue #42) — else the empty placeholder for a single-file package.
+    let lockfile = located
+        .lockfile
+        .clone()
+        .unwrap_or_else(|| brixpkg::Lockfile {
+            format_version: brixpkg::LOCK_FORMAT_VERSION,
+            root: located.manifest.name.clone(),
+            entries: BTreeMap::new(),
+        });
     let toolchain = toolchain::detect().map_err(BuildError::Toolchain)?;
     let cache_inputs = CacheInputs {
         canonical_source,

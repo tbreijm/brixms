@@ -10,15 +10,20 @@
 //! wiring is separable, sizeable work outside this issue's scope, and a
 //! documented gap here beats a silent partial resolution.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use brix_ast::{parse_file, File};
-use brixpkg::{version::parse_version, Manifest, ManifestError, PackageName};
+use brixpkg::{
+    hydrate, resolve, version::parse_version, HydrateError, Lockfile, Manifest, ManifestError,
+    PackageName, Registry, RegistryError, ResolveError,
+};
 use camino::{Utf8Path, Utf8PathBuf};
 
 /// A located package: its manifest (real or synthesized), the entry source
-/// file to compile, and the directory build artifacts live under
-/// (`<pkg_root>/.brix-cache/...`).
+/// file to compile, the directory build artifacts live under
+/// (`<pkg_root>/.brix-cache/...`), and — for a package with dependencies
+/// (issue #42) — the resolved dependency graph plus its lockfile.
 pub struct LocatedPackage {
     pub manifest: Manifest,
     pub source_path: Utf8PathBuf,
@@ -26,6 +31,18 @@ pub struct LocatedPackage {
     /// Whether `manifest` was loaded from an on-disk `brix.toml` (as opposed
     /// to synthesized from the source `package` declaration).
     pub explicit_manifest: bool,
+    /// Resolved dependency graph: each dependency's package-name segments and
+    /// its entry source. Empty for a dependency-free package.
+    pub deps: Vec<GraphDep>,
+    /// The resolved lockfile — real when `deps` is non-empty (it feeds the
+    /// build cache key); `None` for a bare file / dependency-free package.
+    pub lockfile: Option<Lockfile>,
+}
+
+/// One resolved dependency's entry source (issue #42).
+pub struct GraphDep {
+    pub name_segments: Vec<String>,
+    pub source: String,
 }
 
 #[derive(Debug)]
@@ -34,9 +51,12 @@ pub enum LocateError {
     Io(std::io::Error),
     MissingEntrySource(Utf8PathBuf),
     ManifestParse(ManifestError),
-    DependenciesNotSupported,
     NoPackageDecl(Utf8PathBuf),
     BadPackageDecl { reason: String },
+    Registry(RegistryError),
+    Resolve(ResolveError),
+    Hydrate(HydrateError),
+    NonUtf8Source(PackageName),
 }
 
 impl fmt::Display for LocateError {
@@ -48,11 +68,12 @@ impl fmt::Display for LocateError {
                 write!(f, "package directory has no entry source file at {p}")
             }
             LocateError::ManifestParse(e) => write!(f, "malformed brix.toml: {e}"),
-            LocateError::DependenciesNotSupported => write!(
-                f,
-                "dependencies are not yet supported by `brix build` (brix.toml declares at \
-                 least one) — build a dependency-free package for now"
-            ),
+            LocateError::Registry(e) => write!(f, "opening the local registry: {e}"),
+            LocateError::Resolve(e) => write!(f, "resolving dependencies: {e:?}"),
+            LocateError::Hydrate(e) => write!(f, "loading the dependency graph: {e}"),
+            LocateError::NonUtf8Source(name) => {
+                write!(f, "dependency `{name}`'s entry source is not valid UTF-8")
+            }
             LocateError::NoPackageDecl(p) => {
                 write!(f, "{p} has no `package NAME @ VERSION` declaration and no brix.toml was found alongside it — cannot name the generated crate")
             }
@@ -90,12 +111,7 @@ pub fn locate(operand: &str) -> Result<LocatedPackage, LocateError> {
             return Err(LocateError::MissingEntrySource(source_path));
         }
         let manifest = load_manifest(&manifest_path)?;
-        return Ok(LocatedPackage {
-            manifest,
-            source_path,
-            pkg_root,
-            explicit_manifest: true,
-        });
+        return finish_located(manifest, source_path, pkg_root, true);
     }
 
     let source_path = path.to_path_buf();
@@ -129,21 +145,70 @@ pub fn locate(operand: &str) -> Result<LocatedPackage, LocateError> {
         }
     };
 
+    finish_located(manifest, source_path, pkg_root, explicit_manifest)
+}
+
+/// Assemble a [`LocatedPackage`], resolving + hydrating the dependency graph
+/// (issue #42) when the manifest declares dependencies. A dependency-free
+/// package carries an empty graph and no lockfile — the pre-#42 behavior.
+fn finish_located(
+    manifest: Manifest,
+    source_path: Utf8PathBuf,
+    pkg_root: Utf8PathBuf,
+    explicit_manifest: bool,
+) -> Result<LocatedPackage, LocateError> {
+    let (deps, lockfile) = if manifest.dependencies.is_empty() {
+        (Vec::new(), None)
+    } else {
+        let (deps, lockfile) = load_graph(&manifest, &pkg_root)?;
+        (deps, Some(lockfile))
+    };
     Ok(LocatedPackage {
         manifest,
         source_path,
         pkg_root,
         explicit_manifest,
+        deps,
+        lockfile,
     })
+}
+
+/// Resolve `manifest`'s dependencies against the package-local registry
+/// (`<pkg_root>/.brix/registry`) and hydrate every locked package's entry
+/// source — a fully offline, deterministic load (issue #42). Registry
+/// dependencies only in this slice; a path dependency surfaces as a clear
+/// hydrate error.
+fn load_graph(
+    manifest: &Manifest,
+    pkg_root: &Utf8Path,
+) -> Result<(Vec<GraphDep>, Lockfile), LocateError> {
+    let registry_root = pkg_root.join(".brix").join("registry");
+    let registry = Registry::open(&registry_root).map_err(LocateError::Registry)?;
+    // Path dependencies (caller-located, pre-digested) are deferred; register
+    // deps resolve against the local registry with no network access.
+    let path_deps = BTreeMap::new();
+    let lockfile = resolve(manifest, &registry, &path_deps).map_err(LocateError::Resolve)?;
+    let graph = hydrate(&lockfile, &registry, pkg_root).map_err(LocateError::Hydrate)?;
+
+    let entry = Utf8Path::new("src/world.brix");
+    let mut deps = Vec::new();
+    for (name, files) in &graph {
+        let bytes = files
+            .get(entry)
+            .ok_or_else(|| LocateError::MissingEntrySource(Utf8PathBuf::from(name.to_string())))?;
+        let source = String::from_utf8(bytes.clone())
+            .map_err(|_| LocateError::NonUtf8Source(name.clone()))?;
+        deps.push(GraphDep {
+            name_segments: name.to_string().split('.').map(str::to_string).collect(),
+            source,
+        });
+    }
+    Ok((deps, lockfile))
 }
 
 fn load_manifest(manifest_path: &Utf8Path) -> Result<Manifest, LocateError> {
     let text = std::fs::read_to_string(manifest_path)?;
-    let manifest = Manifest::parse(&text).map_err(LocateError::ManifestParse)?;
-    if !manifest.dependencies.is_empty() {
-        return Err(LocateError::DependenciesNotSupported);
-    }
-    Ok(manifest)
+    Manifest::parse(&text).map_err(LocateError::ManifestParse)
 }
 
 /// Synthesize an in-memory, zero-dependency manifest from the source
