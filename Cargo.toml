@@ -47,7 +47,16 @@ brix-canon = { path = "crates/brix-canon" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # wasmtime pulled in only by brix-rt / the Driver host when that lane lands it.
-wasmtime = "27"
+wasmtime = { version = "27", features = ["component-model"] }
+# wasmtime-wasi: any wasm32-wasip2 guest (rustc's component-model target)
+# imports the standard WASI 0.2 worlds (wasi:io/poll, wasi:clocks, ...) from
+# its own stdlib runtime support, independent of the delta-ABI's own
+# `capabilities` interface. The Driver host must satisfy those or components
+# fail to instantiate — see DEPS.md.
+wasmtime-wasi = "27"
+# wit-bindgen: guest-side (sdk/brix-driver-rs, wasm32 target only) mirror of
+# `wasmtime::component::bindgen!` above — see DEPS.md.
+wit-bindgen = "0.36"
 # toml: brixpkg manifest/lockfile parsing only — see DEPS.md.
 toml = "1.1"
 

@@ -182,6 +182,26 @@ interface capabilities {
     resource console {
         log: func(message: string);
     }
+
+    // ------------------------------------------------------------------
+    // Capability acquisition.
+    //
+    // A `resource` type alone gives a guest no way to *obtain* an instance —
+    // the component model requires a handle to arrive as a function
+    // parameter or result. The rest of this file (and Ring0_Build_Plan.md
+    // §1.7/§1.11) leaves that wiring as future work ("the rest are named in
+    // the WIT world for when their Drivers arrive"); landing the wasmtime
+    // host (issue #27) requires closing it, so these two functions are
+    // added here as the minimal, mechanical piece: the host issues (or
+    // withholds) a capability once per instantiation, matching Part VII §4
+    // ("unforgeable, host-issued or attenuated"). A Driver never constructs
+    // a `net`/`console` value itself; it only ever asks the host for the one
+    // it was granted. `none` is not an error — it means this Driver's
+    // manifest/scope does not grant that capability, and the Driver must
+    // treat every call needing it as out-of-scope (mirrors `net-error`'s
+    // `forbidden` case one level up).
+    get-net: func() -> option<net>;
+    get-console: func() -> option<console>;
 }
 
 // ---------------------------------------------------------------------------

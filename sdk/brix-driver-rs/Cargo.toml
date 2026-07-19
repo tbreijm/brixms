@@ -6,6 +6,16 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+# `cdylib` so `cargo build --target wasm32-wasip2` produces a real component
+# (rustc's wasm32-wasip2 backend emits the component binary format directly
+# for this crate-type — no `wasm-tools`/`cargo-component` postprocessing
+# needed); `rlib` so native `cargo test`/`cargo build` are unaffected. Only
+# `src/wasm_guest.rs` (`#[cfg(target_arch = "wasm32")]`) uses the `cdylib`
+# side; native builds produce an unused, empty cdylib artifact alongside the
+# normal rlib.
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 # The guest SDK re-exports the delta-ABI types from brix-rt so guest and host
 # cannot drift, and canon-encodes payloads through brix-canon (the one
@@ -13,6 +23,13 @@ repository.workspace = true
 # not third-party whitelist entries.
 brix-rt = { path = "../../crates/brix-rt" }
 brix-canon = { path = "../../crates/brix-canon" }
+
+# Guest-side (wasm32 only) component-model glue generated from
+# `sdk/driver-wit/delta-abi.wit`'s `driver` world — the mirror of
+# `wasmtime::component::bindgen!` on the host side (DEPS.md). Not needed,
+# and not pulled in, for native builds/tests of this crate.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wit-bindgen = { workspace = true }
 
 [lints]
 workspace = true

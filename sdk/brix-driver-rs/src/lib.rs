@@ -13,18 +13,25 @@
 //! [`Outcome`]; the SDK's [`run_batch`] adapter turns a whole batch of those
 //! into the ABI's `emissions + support ops out`.
 //!
-//! # Status: guest SDK sketch (Ring0 §1.11, Day-6 deliverable, previewed here)
+//! # Status
 //!
 //! The delta-ABI *types* are re-exported straight from `brix-rt` so the guest
-//! and host cannot drift. What is a **sketch** in this pass: the
-//! `wit-bindgen`-generated bindings for the `driver` world's imports/exports
-//! are not wired (that needs the wasmtime host + a bindings build step — see
-//! the crate-level note in `brix-rt/src/lib.rs` on the deferred wasmtime
-//! host). The capability surface a Driver calls is modeled here by the
-//! [`caps`] trait objects so `on_request` bodies are already written against
-//! the real shape; swapping the trait for the generated `capabilities`
-//! resource is mechanical when the host lands. The HTTP-notify example
-//! ([`http_notify`]) is the template Ring 1 copies.
+//! and host cannot drift. [`caps`] models the capability surface a Driver
+//! calls as plain Rust traits, so `on_request` bodies (like
+//! [`http_notify`]'s) are written and unit-tested against the real shape
+//! without any wasm toolchain in the loop.
+//!
+//! [`wasm_guest`] (`#[cfg(target_arch = "wasm32")]`, issue #27) is the
+//! `wit-bindgen`-generated bridge from that shape to the actual `driver`
+//! world's low-level component ABI: it implements the world's `Guest`
+//! export trait over [`http_notify::HttpNotifyDriver`] and [`run_batch`],
+//! and implements [`caps::Net`]/[`caps::Console`] over the generated
+//! imported-capability handles. Building this crate with `cargo build
+//! --target wasm32-wasip2` produces a real wasm component (rustc's
+//! wasm32-wasip2 backend emits the component binary format directly for a
+//! `cdylib` using wit-bindgen's guest macro — no `wasm-tools`/
+//! `cargo-component` postprocessing step); `crates/brix-rt/tests/driver_host.rs`
+//! is the host-side conformance test that loads and drives one.
 
 pub use brix_rt::delta::{
     CanonRow, DeltaBatch, DeltaOp, DeltaOutput, DeltaSource, DeltaSourceKind, Emission,
@@ -36,6 +43,8 @@ use brix_canon::EdgeId;
 
 pub mod caps;
 pub mod http_notify;
+#[cfg(target_arch = "wasm32")]
+pub mod wasm_guest;
 
 /// The typed result of handling one protocol request (Appendix H terminal
 /// outcomes). A Driver returns one of these from [`Driver::on_request`]; the

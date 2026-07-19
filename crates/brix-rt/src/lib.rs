@@ -38,9 +38,14 @@
 //! `TransactionId` and `LogOp` exist; the pipeline does not), protocol
 //! lifecycle engine (Appendix H's state machine — the Driver SDK sketch in
 //! `sdk/brix-driver-rs` shows the *shape* outcomes take; nothing drives the
-//! state machine yet), sim clock + event calendar, and the wasmtime Driver
-//! host (`wasmtime` is dependency-whitelisted for this lane in `DEPS.md` but
-//! not wired into `Cargo.toml` here — see that crate's notes).
+//! state machine yet), sim clock + event calendar.
+//!
+//! [`driver_host`] (issue #27, landed after the above) is the exception:
+//! the wasmtime Driver host instantiating `sdk/driver-wit/delta-abi.wit`'s
+//! `driver` world, with capability imports and lease/cancel plumbing at the
+//! capability boundary. See that module's docs for the capability-handle
+//! wiring it adds to the WIT (a documented, minimal gap-fill — see the
+//! comment on `capabilities.get-net`/`get-console` in the WIT file).
 //!
 //! # Discipline
 //!
@@ -52,6 +57,13 @@
 //! trait — see `CONTRIBUTING.md`.
 
 pub mod delta;
+// wasmtime is a native runtime; `sdk/brix-driver-rs` (which depends on this
+// crate for the delta-ABI types) also compiles to `wasm32-wasip2` as the
+// guest side of the same ABI, so this module — and its `wasmtime`/
+// `wasmtime-wasi` dependencies (target-gated the same way in `Cargo.toml`)
+// — is host-only.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod driver_host;
 pub mod engine;
 pub mod graph;
 pub mod ids;
