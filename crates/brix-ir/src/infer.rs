@@ -337,6 +337,15 @@ impl Infer {
                     self.call(func, args, env, resolver)
                 }
             }
+            ExprKind::Let { name, value, body } => {
+                // `let name = value in body` (issue #47 Slice 2): the binding
+                // is in scope for `body` only; the whole expression's type is
+                // `body`'s.
+                let value_ty = self.expr(value, env, resolver);
+                let mut inner = env.clone();
+                inner.insert(name.clone(), value_ty);
+                self.expr(body, &mut inner, resolver)
+            }
         };
         self.unify(expr.ty.clone(), ty.clone());
         expr.ty = self.resolve(ty.clone());
@@ -530,6 +539,10 @@ impl Infer {
                 if let Some(y) = yields {
                     self.zonk_expr(y)
                 }
+            }
+            ExprKind::Let { value, body, .. } => {
+                self.zonk_expr(value);
+                self.zonk_expr(body)
             }
             ExprKind::Var(_) | ExprKind::Lit(_) => {}
         }

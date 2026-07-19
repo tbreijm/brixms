@@ -307,6 +307,10 @@ fn assert_expr_is_ground(expr: &brix_ir::core::Expr, owner: &str) {
                 assert_expr_is_ground(yielded, owner);
             }
         }
+        brix_ir::core::ExprKind::Let { value, body, .. } => {
+            assert_expr_is_ground(value, owner);
+            assert_expr_is_ground(body, owner);
+        }
         brix_ir::core::ExprKind::Var(_) | brix_ir::core::ExprKind::Lit(_) => {}
     }
 }

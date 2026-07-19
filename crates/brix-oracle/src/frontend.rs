@@ -415,6 +415,11 @@ fn convert_expr(e: &IrExpr) -> Result<Expr, AdapterError> {
             then: Box::new(convert_expr(then)?),
             els: Box::new(convert_expr(els)?),
         }),
+        ExprKind::Let { name, value, body } => Ok(Expr::Let {
+            name: name.to_string(),
+            value: Box::new(convert_expr(value)?),
+            body: Box::new(convert_expr(body)?),
+        }),
         ExprKind::Comprehension { .. } => Err(AdapterError::Unsupported("ExprKind::Comprehension")),
     }
 }

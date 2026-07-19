@@ -279,6 +279,13 @@ pub enum Expr {
         then: Box<Expr>,
         els: Box<Expr>,
     },
+    /// `let name = value in body` — a compiled function block's binding
+    /// (issue #47 Slice 2).
+    Let {
+        name: String,
+        value: Box<Expr>,
+        body: Box<Expr>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1347,6 +1354,11 @@ fn eval_expr(program: &Program, env: &Env, expr: &Expr) -> Value {
             Value::Bool(false) => eval_expr(program, env, els),
             other => panic!("`if` condition must be Bool, got {other:?}"),
         },
+        Expr::Let { name, value, body } => {
+            let mut inner = env.clone();
+            inner.insert(name.clone(), eval_expr(program, env, value));
+            eval_expr(program, &inner, body)
+        }
         Expr::Try(name, args) => {
             let args = args
                 .iter()

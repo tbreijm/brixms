@@ -168,6 +168,7 @@ pub enum ExprKindTag {
     If,
     Try,
     Comprehension,
+    Let,
 }
 
 impl ExprKindTag {
@@ -181,6 +182,7 @@ impl ExprKindTag {
             ExprKind::If { .. } => ExprKindTag::If,
             ExprKind::Try { .. } => ExprKindTag::Try,
             ExprKind::Comprehension { .. } => ExprKindTag::Comprehension,
+            ExprKind::Let { .. } => ExprKindTag::Let,
         }
     }
 }
@@ -196,6 +198,7 @@ impl Canonical for ExprKindTag {
             ExprKindTag::If => 5,
             ExprKindTag::Try => 6,
             ExprKindTag::Comprehension => 7,
+            ExprKindTag::Let => 8,
         };
         w.write_uint(ordinal as u64);
     }
@@ -1430,6 +1433,33 @@ impl Reflect {
             }
             ExprKind::Call { func, args } => {
                 self.call(expr.origin, declaration, func, args, env, resolver)
+            }
+            ExprKind::Let { name, value, body } => {
+                let (value_ty, value_id) = self.expr(declaration, value, env, resolver);
+                self.fact(
+                    Fact::ExprChild {
+                        parent: subject.clone(),
+                        ordinal: 0,
+                        child: Subject::Expr {
+                            origin: value.origin,
+                        },
+                    },
+                    vec![],
+                );
+                let mut inner = env.clone();
+                inner.insert(name.clone(), (value_ty, value_id));
+                let (body_ty, body_id) = self.expr(declaration, body, &inner, resolver);
+                self.fact(
+                    Fact::ExprChild {
+                        parent: subject.clone(),
+                        ordinal: 1,
+                        child: Subject::Expr {
+                            origin: body.origin,
+                        },
+                    },
+                    vec![],
+                );
+                (body_ty, body_id)
             }
         };
         let ty = self.resolve(ty);

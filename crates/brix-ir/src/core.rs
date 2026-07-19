@@ -125,6 +125,14 @@ pub enum ExprKind {
         pattern: Pattern,
         yields: Option<Expr>,
     },
+    /// A `let name = value in body` binding — the desugaring of a function
+    /// body's `let`-statement sequence / block (issue #47 Slice 2). `body`'s
+    /// type is the enclosing expression's type.
+    Let {
+        name: Ident,
+        value: Expr,
+        body: Expr,
+    },
 }
 
 impl fmt::Display for Expr {
@@ -175,6 +183,9 @@ impl fmt::Display for ExprKind {
                     write!(f, " yield {}", y.kind)?;
                 }
                 Ok(())
+            }
+            ExprKind::Let { name, value, body } => {
+                write!(f, "let {name} = {} in {}", value.kind, body.kind)
             }
         }
     }
@@ -415,6 +426,25 @@ mod tests {
         // A pure rule satisfies all Appendix E side conditions.
         let flags = rule.effect_flags();
         assert!(flags.pure && flags.det && flags.nondiverge);
+    }
+
+    #[test]
+    fn let_in_display() {
+        let e = Expr::new(
+            Ty::Int(crate::types::IntWidth::Int),
+            ExprKind::Let {
+                name: Ident::new("a"),
+                value: Expr::new(
+                    Ty::Int(crate::types::IntWidth::Int),
+                    ExprKind::Var(Ident::new("x")),
+                ),
+                body: Expr::new(
+                    Ty::Int(crate::types::IntWidth::Int),
+                    ExprKind::Var(Ident::new("a")),
+                ),
+            },
+        );
+        assert_eq!(e.to_string(), "let a = x in a : Int");
     }
 
     #[test]

@@ -212,6 +212,11 @@ fn expr(e: &oracle::Expr) -> rt::Expr {
             then: Box::new(expr(then)),
             els: Box::new(expr(els)),
         },
+        oracle::Expr::Let { name, value, body } => rt::Expr::Let {
+            name: name.clone(),
+            value: Box::new(expr(value)),
+            body: Box::new(expr(body)),
+        },
         oracle::Expr::Count(_) | oracle::Expr::Sum(_, _) => panic!(
             "translate::expr: aggregate expressions (Count/Sum) have no brix_rt::engine::Expr \
              equivalent — no current fixture should reach this"
