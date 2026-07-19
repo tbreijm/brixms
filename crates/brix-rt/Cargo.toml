@@ -13,6 +13,16 @@ repository.workspace = true
 # [workspace.dependencies], not path deps between crates in this workspace.
 brix-canon = { path = "../brix-canon" }
 
+# The wasmtime Driver host (Ring0 §1.7, issue #27) — see DEPS.md. Confined to
+# the `driver_host` module (`#[cfg(not(target_arch = "wasm32"))]` in
+# `lib.rs`), and target-gated here too: `sdk/brix-driver-rs` depends on this
+# crate for the delta-ABI *types* and also compiles to `wasm32-wasip2` (the
+# guest side of the same ABI) — wasmtime is a native runtime and cannot be
+# part of that build, so it must not be an unconditional dependency.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }
+
 [dev-dependencies]
 proptest = { workspace = true }
 
