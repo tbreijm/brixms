@@ -28,6 +28,9 @@ pub struct LocatedPackage {
     pub manifest: Manifest,
     pub source_path: Utf8PathBuf,
     pub pkg_root: Utf8PathBuf,
+    /// Whether `manifest` was loaded from an on-disk `brix.toml` (as opposed
+    /// to synthesized from the source `package` declaration).
+    pub explicit_manifest: bool,
     /// Resolved dependency graph: each dependency's package-name segments and
     /// its entry source. Empty for a dependency-free package.
     pub deps: Vec<GraphDep>,
@@ -108,7 +111,7 @@ pub fn locate(operand: &str) -> Result<LocatedPackage, LocateError> {
             return Err(LocateError::MissingEntrySource(source_path));
         }
         let manifest = load_manifest(&manifest_path)?;
-        return finish_located(manifest, source_path, pkg_root);
+        return finish_located(manifest, source_path, pkg_root, true);
     }
 
     let source_path = path.to_path_buf();
@@ -125,24 +128,24 @@ pub fn locate(operand: &str) -> Result<LocatedPackage, LocateError> {
     ];
     let found = candidates.into_iter().find(|c| c.exists());
 
-    let (manifest, pkg_root) = match found {
+    let (manifest, pkg_root, explicit_manifest) = match found {
         Some(manifest_path) => {
             let manifest = load_manifest(&manifest_path)?;
             let pkg_root = manifest_path
                 .parent()
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| Utf8PathBuf::from("."));
-            (manifest, pkg_root)
+            (manifest, pkg_root, true)
         }
         None => {
             let src = std::fs::read_to_string(&source_path)?;
             let (file, _parse_diags) = parse_file(&src);
             let manifest = synthesize_manifest(&file, &source_path)?;
-            (manifest, file_dir)
+            (manifest, file_dir, false)
         }
     };
 
-    finish_located(manifest, source_path, pkg_root)
+    finish_located(manifest, source_path, pkg_root, explicit_manifest)
 }
 
 /// Assemble a [`LocatedPackage`], resolving + hydrating the dependency graph
@@ -152,6 +155,7 @@ fn finish_located(
     manifest: Manifest,
     source_path: Utf8PathBuf,
     pkg_root: Utf8PathBuf,
+    explicit_manifest: bool,
 ) -> Result<LocatedPackage, LocateError> {
     let (deps, lockfile) = if manifest.dependencies.is_empty() {
         (Vec::new(), None)
@@ -163,6 +167,7 @@ fn finish_located(
         manifest,
         source_path,
         pkg_root,
+        explicit_manifest,
         deps,
         lockfile,
     })
