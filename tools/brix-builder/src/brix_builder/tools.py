@@ -520,10 +520,10 @@ class BrixTools:
 
     @staticmethod
     def _classify_unimplemented(result: ToolResult, capability: str) -> ToolResult:
+        # `BRX-TEST-0001` is the stable code for unavailable scenario semantics.
+        # Quality unavailable evidence uses `BRX-QUALITY-0003`.
         combined = f"{result.data.get('stdout', '')}\n{result.data.get('stderr', '')}"
-        if "not yet implemented" in combined or any(
-            code in combined for code in ("BRX-QUALITY-0001", "BRX-TEST-0001")
-        ):
+        if "not yet implemented" in combined or "BRX-TEST-0001" in combined:
             return ToolResult(
                 False,
                 "unavailable",

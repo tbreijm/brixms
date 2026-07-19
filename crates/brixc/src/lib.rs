@@ -55,6 +55,6 @@ pub mod plan;
 
 pub use cache::{CacheInputs, CacheKey, Profile, ToolchainId};
 pub use incremental::{IncrementalCompiler, IncrementalProgress, IncrementalUnit};
-pub use lower::{lower_file, AstFrontend, AstLower, Lowered};
+pub use lower::{lower_file, lower_graph, AstFrontend, AstLower, DepPackage, Lowered};
 pub use phase::{AstPhase, Phased};
 pub use pipeline::{PipelineError, Stage};

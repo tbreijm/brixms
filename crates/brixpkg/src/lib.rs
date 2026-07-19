@@ -30,6 +30,7 @@
 //! an artifact. Every stable digest goes through `brix-canon`, never `toml`.
 
 pub mod digest;
+pub mod graph;
 pub mod lock;
 pub mod manifest;
 pub mod registry;
@@ -37,6 +38,7 @@ pub mod resolve;
 pub mod version;
 
 pub use digest::{tree_digest, ContentDigest};
+pub use graph::{hydrate, HydrateError, PackageFiles, PackageGraph, LOCKFILE_NAME};
 pub use lock::{LockEntry, LockSource, Lockfile, LOCK_FORMAT_VERSION};
 pub use manifest::{DependencySpec, Manifest, ManifestError};
 pub use registry::{IndexEntry, Registry, RegistryError};

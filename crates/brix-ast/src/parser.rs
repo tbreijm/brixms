@@ -1331,7 +1331,7 @@ impl<'s> Parser<'s> {
         let kw = self.bump();
         let name = self.ident("scenario name");
         self.expect(TokKind::LBrace, "`{`");
-        let mut seed = SeedDecl::Nat(0, name.span);
+        let mut seed: Option<SeedDecl> = None;
         let mut binds = Vec::new();
         let mut setup = None;
         let mut steps = Vec::new();
@@ -1345,14 +1345,17 @@ impl<'s> Parser<'s> {
             let before = self.pos;
             match self.cur_text() {
                 "seed" => {
+                    if seed.is_some() {
+                        self.error_here("duplicate `seed` declaration in scenario");
+                    }
                     let s = self.bump();
-                    if self.eat_kw("each") {
+                    seed = Some(if self.eat_kw("each") {
                         let e = self.expr();
-                        seed = SeedDecl::Each(e, s.span);
+                        SeedDecl::Each(e, s.span)
                     } else {
                         let n = self.nat();
-                        seed = SeedDecl::Nat(n, s.span);
-                    }
+                        SeedDecl::Nat(n, s.span)
+                    });
                 }
                 "bind" => binds.push(self.bind_decl()),
                 "setup" => {
@@ -1377,6 +1380,13 @@ impl<'s> Parser<'s> {
             .expect(TokKind::RBrace, "`}`")
             .map(|t| t.span)
             .unwrap_or(name.span);
+        let seed = match seed {
+            Some(seed) => seed,
+            None => {
+                self.error_here("scenario requires an explicit `seed` declaration");
+                SeedDecl::Nat(0, name.span)
+            }
+        };
         ScenarioDecl {
             span: kw.span.to(end),
             name,
