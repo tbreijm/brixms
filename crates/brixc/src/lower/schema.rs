@@ -25,7 +25,20 @@ pub fn build(
     meta: &mut LowerMeta,
     diags: &mut Vec<Diagnostic>,
 ) -> ProgramResolver {
-    let mut resolver = seed_prelude(ProgramResolver::new());
+    build_onto(file, seed_prelude(ProgramResolver::new()), meta, diags)
+}
+
+/// Run pass 1 over `file`, registering its decls into an **already-seeded**
+/// `resolver` rather than a fresh prelude. This is the seam `lower_graph`
+/// (issue #42) uses to fold a package's decls on top of a resolver that
+/// already carries the prelude plus every dependency package's qualified
+/// exports.
+pub fn build_onto(
+    file: &ast::File,
+    mut resolver: ProgramResolver,
+    meta: &mut LowerMeta,
+    diags: &mut Vec<Diagnostic>,
+) -> ProgramResolver {
     resolver = process_uses(file, resolver);
     resolver = register_names(file, resolver);
     resolver = register_aliases(file, resolver, meta, diags);
