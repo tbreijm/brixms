@@ -44,9 +44,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use wasmtime::component::{Component, Linker, Resource, ResourceTable};
+use wasmtime::component::{Component, HasSelf, Linker, Resource, ResourceTable};
 use wasmtime::{Engine, Result, Store};
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiView};
+use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 /// The wasmtime component-model bindings generated from
 /// `sdk/driver-wit/delta-abi.wit`'s `driver` world (path relative to this
@@ -57,14 +57,16 @@ mod bindings {
     wasmtime::component::bindgen!({
         world: "driver",
         path: "../../sdk/driver-wit",
-        async: false,
         // Back the `net`/`console` WIT resources directly with this
         // module's own host types instead of bindgen's opaque placeholder
         // enums, so `ResourceTable` stores (and returns) real data.
+        // (wasmtime 46+ uses `interface.resource` keys, not `interface/resource`.)
         with: {
-            "brixms:delta/capabilities/net": super::NetResource,
-            "brixms:delta/capabilities/console": super::ConsoleResource,
+            "brixms:delta/capabilities.net": super::NetResource,
+            "brixms:delta/capabilities.console": super::ConsoleResource,
         },
+        // Resource-table interactions (`drop`, etc.) can trap.
+        imports: { default: trappable },
     });
 }
 
@@ -233,12 +235,11 @@ impl DriverHostState {
 }
 
 impl WasiView for DriverHostState {
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
-    }
-
-    fn ctx(&mut self) -> &mut WasiCtx {
-        &mut self.wasi_ctx
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi_ctx,
+            table: &mut self.table,
+        }
     }
 }
 
@@ -252,23 +253,21 @@ pub struct NetResource(Arc<dyn NetCapability>);
 pub struct ConsoleResource(Arc<dyn ConsoleCapability>);
 
 impl HostNet for DriverHostState {
-    // No `wasmtime::Result` wrapper (unlike `drop` below, which always gets
-    // one): wit-bindgen only adds the trap-wrapper for opted-in trappable
-    // imports (not configured here), so a plain import's trait signature is
-    // exactly its WIT return type, `result<http-response, net-error>` ->
-    // `Result<HttpResponse, NetError>`.
+    // wasmtime 46 `imports: { default: trappable }` wraps every import in
+    // `wasmtime::Result` so resource-table failures can trap; the WIT
+    // `result<http-response, net-error>` stays as the inner `Result`.
     fn request(
         &mut self,
         self_: Resource<WitNetGuestBinding>,
         req: WitHttpRequest,
-    ) -> std::result::Result<WitHttpResponse, WitNetError> {
+    ) -> Result<std::result::Result<WitHttpResponse, WitNetError>> {
         // A missing table entry here would be a host bug (the guest can only
         // hold handles this host issued), so this trusts the table.
         let net = self
             .table
             .get(&self_)
             .expect("guest holds a net handle this host did not issue");
-        net.0.request(req)
+        Ok(net.0.request(req))
     }
 
     fn drop(&mut self, rep: Resource<WitNetGuestBinding>) -> Result<()> {
@@ -278,12 +277,17 @@ impl HostNet for DriverHostState {
 }
 
 impl HostConsole for DriverHostState {
-    fn log(&mut self, self_: Resource<WitConsoleGuestBinding>, message: String) {
+    fn log(
+        &mut self,
+        self_: Resource<WitConsoleGuestBinding>,
+        message: String,
+    ) -> Result<()> {
         let console = self
             .table
             .get(&self_)
             .expect("guest holds a console handle this host did not issue");
         console.0.log(message);
+        Ok(())
     }
 
     fn drop(&mut self, rep: Resource<WitConsoleGuestBinding>) -> Result<()> {
@@ -293,25 +297,20 @@ impl HostConsole for DriverHostState {
 }
 
 impl bindings::brixms::delta::capabilities::Host for DriverHostState {
-    // `option<net>`/`option<console>` return types (no explicit `result<>`)
-    // are not in wit-bindgen's "trappable" shape, so — unlike `request`/`log`
-    // above — these two are plain, unwrapped values: pushing a freshly
-    // granted capability into this instantiation's resource table cannot
-    // fail in practice (it fails only on `u32` handle-counter exhaustion).
-    fn get_net(&mut self) -> Option<Resource<WitNetGuestBinding>> {
-        self.grants.net.clone().map(|net| {
+    fn get_net(&mut self) -> Result<Option<Resource<WitNetGuestBinding>>> {
+        Ok(self.grants.net.clone().map(|net| {
             self.table
                 .push(NetResource(net))
                 .expect("resource table push cannot fail for a freshly issued net grant")
-        })
+        }))
     }
 
-    fn get_console(&mut self) -> Option<Resource<WitConsoleGuestBinding>> {
-        self.grants.console.clone().map(|console| {
+    fn get_console(&mut self) -> Result<Option<Resource<WitConsoleGuestBinding>>> {
+        Ok(self.grants.console.clone().map(|console| {
             self.table
                 .push(ConsoleResource(console))
                 .expect("resource table push cannot fail for a freshly issued console grant")
-        })
+        }))
     }
 }
 
@@ -467,8 +466,11 @@ impl DriverHost {
     pub fn new() -> Result<Self> {
         let engine = Engine::default();
         let mut linker: Linker<DriverHostState> = Linker::new(&engine);
-        wasmtime_wasi::add_to_linker_sync(&mut linker)?;
-        Driver::add_to_linker::<DriverHostState, DriverHostState>(&mut linker, |state| state)?;
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+        Driver::add_to_linker::<DriverHostState, HasSelf<DriverHostState>>(
+            &mut linker,
+            |state| state,
+        )?;
         Ok(DriverHost { engine, linker })
     }
 
