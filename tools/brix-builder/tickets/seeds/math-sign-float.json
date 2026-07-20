@@ -1,0 +1,24 @@
+{
+  "ticket_id": "math-sign-float",
+  "brief": "Extend brix.math.sign (src/sign.brix only — do not touch other domain modules). Add Float sign and Int/Float step helpers that compile today: `fn sign(x: Float) -> Float = if x < 0.0 then -1.0 else if x > 0.0 then 1.0 else 0.0`, `fn step(edge: Float, x: Float) -> Float = if x < edge then 0.0 else 1.0`, `fn step(edge: Int, x: Int) -> Int = if x < edge then 0 else 1`, `fn copySign(mag: Float, sign_src: Float) -> Float = if sign_src < 0.0 then -abs(mag) else abs(mag)`, `fn copySign(mag: Int, sign_src: Int) -> Int = if sign_src < 0 then -abs(mag) else abs(mag)`. Reuse existing `abs` in the same module. Do not invent `%`, `let`, Decimal, or units. Exact `fn`/`=` syntax, typed overloads, preserve existing decls. Host formats after check.",
+  "package_path": ".",
+  "write_allowlist": [
+    "src/sign.brix"
+  ],
+  "acceptance_gates": [
+    "format",
+    "check",
+    "test",
+    "quality",
+    "package_build"
+  ],
+  "max_iterations": 5,
+  "max_actions_per_role": 14,
+  "context_tokens": 8192,
+  "metadata": {
+    "package": "brix.math",
+    "module": "sign",
+    "kind": "stdlib-slice",
+    "slice": "sign-step"
+  }
+}

@@ -17,6 +17,14 @@ fn parse(src: &str) -> (brix_ast::File, brix_ast::Diagnostics) {
     parse_file(src)
 }
 
+fn diag_codes(lowered: &brixc::lower::PackageLowered) -> Vec<&'static str> {
+    lowered
+        .reports
+        .iter()
+        .flat_map(|r| r.diagnostics.iter().map(|d| d.code))
+        .collect()
+}
+
 #[test]
 fn submodule_decls_are_qualified_and_cross_module_calls_resolve() {
     let (entry_file, entry_diags) = parse(ENTRY);
@@ -204,4 +212,172 @@ fn package_decl_outside_the_entry_file_is_rejected() {
         .diagnostics
         .iter()
         .any(|d| d.code == "BRX-PKG-0001"));
+}
+
+// -- `reimport` (redesign: reimport + use-as aliases) -----------------------
+
+const ENTRY_WITH_REIMPORT_ALL: &str =
+    "package brix.mathtest @ 0.1.0\nmodule MathTest\nreimport order\n";
+const ENTRY_WITH_REIMPORT_SOME: &str =
+    "package brix.mathtest @ 0.1.0\nmodule MathTest\nreimport order.{min, clamp}\n";
+
+#[test]
+fn bare_reimport_promotes_every_export_of_the_target_submodule() {
+    let (entry_file, entry_diags) = parse(ENTRY_WITH_REIMPORT_ALL);
+    let (order_file, order_diags) = parse(ORDER);
+    let submodules = vec![SubmoduleInput {
+        qualifier: "order".to_string(),
+        file: &order_file,
+        parse_diags: &order_diags,
+    }];
+
+    let lowered = lower_package(&entry_file, &entry_diags, "src/world.brix", &submodules);
+    assert!(!lowered.has_errors(), "{:?}", diag_codes(&lowered));
+    assert_eq!(
+        lowered.reexports.get("min").map(|q| q.to_string()),
+        Some("order.min".to_string())
+    );
+    assert_eq!(
+        lowered.reexports.get("max").map(|q| q.to_string()),
+        Some("order.max".to_string())
+    );
+    assert_eq!(
+        lowered.reexports.get("clamp").map(|q| q.to_string()),
+        Some("order.clamp".to_string())
+    );
+}
+
+#[test]
+fn selective_reimport_promotes_only_the_listed_names() {
+    let (entry_file, entry_diags) = parse(ENTRY_WITH_REIMPORT_SOME);
+    let (order_file, order_diags) = parse(ORDER);
+    let submodules = vec![SubmoduleInput {
+        qualifier: "order".to_string(),
+        file: &order_file,
+        parse_diags: &order_diags,
+    }];
+
+    let lowered = lower_package(&entry_file, &entry_diags, "src/world.brix", &submodules);
+    assert!(!lowered.has_errors(), "{:?}", diag_codes(&lowered));
+    assert_eq!(
+        lowered.reexports.get("min").map(|q| q.to_string()),
+        Some("order.min".to_string())
+    );
+    assert_eq!(
+        lowered.reexports.get("clamp").map(|q| q.to_string()),
+        Some("order.clamp".to_string())
+    );
+    assert!(
+        !lowered.reexports.contains_key("max"),
+        "`max` was not listed, so it must not be published at the package root"
+    );
+}
+
+#[test]
+fn reimport_of_an_unknown_submodule_is_a_clean_diagnostic() {
+    const ENTRY_BAD: &str = "package brix.mathtest @ 0.1.0\nmodule MathTest\nreimport bogus\n";
+    let (entry_file, entry_diags) = parse(ENTRY_BAD);
+    let (order_file, order_diags) = parse(ORDER);
+    let submodules = vec![SubmoduleInput {
+        qualifier: "order".to_string(),
+        file: &order_file,
+        parse_diags: &order_diags,
+    }];
+
+    let lowered = lower_package(&entry_file, &entry_diags, "src/world.brix", &submodules);
+    assert!(lowered.has_errors());
+    let entry_report = &lowered.reports[0];
+    assert!(entry_report
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "BRX-PKG-0003"));
+    assert!(
+        lowered.reexports.is_empty(),
+        "an unknown target must not publish anything"
+    );
+}
+
+#[test]
+fn reimport_of_an_unknown_item_is_rejected_but_the_known_items_still_publish() {
+    const ENTRY_MIXED: &str =
+        "package brix.mathtest @ 0.1.0\nmodule MathTest\nreimport order.{min, nope}\n";
+    let (entry_file, entry_diags) = parse(ENTRY_MIXED);
+    let (order_file, order_diags) = parse(ORDER);
+    let submodules = vec![SubmoduleInput {
+        qualifier: "order".to_string(),
+        file: &order_file,
+        parse_diags: &order_diags,
+    }];
+
+    let lowered = lower_package(&entry_file, &entry_diags, "src/world.brix", &submodules);
+    assert!(lowered.has_errors());
+    let entry_report = &lowered.reports[0];
+    assert!(entry_report
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "BRX-PKG-0003"));
+    assert_eq!(
+        lowered.reexports.get("min").map(|q| q.to_string()),
+        Some("order.min".to_string()),
+        "the one valid item in the same reimport must still publish"
+    );
+    assert!(!lowered.reexports.contains_key("nope"));
+}
+
+#[test]
+fn reimport_outside_the_entry_file_is_rejected() {
+    let (entry_file, entry_diags) = parse(ENTRY);
+    const SNEAKY_REIMPORT: &str = "reimport order\nfn identity(x: Int) -> Int = x\n";
+    let (sneaky_file, sneaky_diags) = parse(SNEAKY_REIMPORT);
+    let (order_file, order_diags) = parse(ORDER);
+
+    let submodules = vec![
+        SubmoduleInput {
+            qualifier: "order".to_string(),
+            file: &order_file,
+            parse_diags: &order_diags,
+        },
+        SubmoduleInput {
+            qualifier: "sneaky".to_string(),
+            file: &sneaky_file,
+            parse_diags: &sneaky_diags,
+        },
+    ];
+
+    let lowered = lower_package(&entry_file, &entry_diags, "src/world.brix", &submodules);
+    assert!(lowered.has_errors());
+    let sneaky_report = lowered
+        .reports
+        .iter()
+        .find(|r| r.label == "src/sneaky.brix")
+        .expect("sneaky report present");
+    assert!(sneaky_report
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "BRX-PKG-0004"));
+}
+
+#[test]
+fn reimport_colliding_with_the_entry_files_own_declaration_is_a_hard_error() {
+    const ENTRY_CLASHING: &str =
+        "package brix.mathtest @ 0.1.0\nmodule MathTest\nreimport order.{min}\nfn min(x: Int) -> Int = x\n";
+    let (entry_file, entry_diags) = parse(ENTRY_CLASHING);
+    let (order_file, order_diags) = parse(ORDER);
+    let submodules = vec![SubmoduleInput {
+        qualifier: "order".to_string(),
+        file: &order_file,
+        parse_diags: &order_diags,
+    }];
+
+    let lowered = lower_package(&entry_file, &entry_diags, "src/world.brix", &submodules);
+    assert!(lowered.has_errors());
+    let entry_report = &lowered.reports[0];
+    assert!(entry_report
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "BRX-PKG-0005"));
+    assert!(
+        !lowered.reexports.contains_key("min"),
+        "a rejected reimport must not publish"
+    );
 }

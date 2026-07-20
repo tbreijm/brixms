@@ -198,15 +198,23 @@ pub(crate) fn fold_dependency(
     dep: &DepPackage,
     diags: &mut Vec<Diagnostic>,
 ) -> (ProgramResolver, Vec<brix_ir::core::FnDef>) {
-    use brix_ir::frontend::FnSignature;
+    use brix_ir::frontend::{FnSignature, SchemaResolver};
     use brix_ir::ident::{Ident as IrIdent, QualIdent};
+    use std::collections::BTreeMap;
 
     let mut dep_fndefs = Vec::new();
+    // Package-root re-exports (`reimport`, issue #93-style): captured from
+    // `PackageLowered` *before* `into_lowered()` discards everything that
+    // isn't shaped like a single-file `Lowered` — a dependency with no
+    // submodules can never declare a `reimport` (nothing to promote), so
+    // this stays empty on that branch.
+    let mut dep_reexports: BTreeMap<String, QualIdent> = BTreeMap::new();
     let dep_lowered = if dep.submodules.is_empty() {
         lower_file(dep.file, dep.parse_diags)
     } else {
-        package::lower_package(dep.file, dep.parse_diags, "<dependency>", dep.submodules)
-            .into_lowered()
+        let pkg = package::lower_package(dep.file, dep.parse_diags, "<dependency>", dep.submodules);
+        dep_reexports = pkg.reexports.clone();
+        pkg.into_lowered()
     };
     diags.extend(dep_lowered.diags.iter().cloned());
 
@@ -250,6 +258,33 @@ pub(crate) fn fold_dependency(
         let mut qf = f.clone();
         qf.name = qname;
         dep_fndefs.push(qf);
+    }
+
+    // Publish each `reimport`ed name at the package root too: the *same*
+    // already-lowered target signature(s)/body (there may be more than one
+    // typed overload, e.g. `order.clamp(Int, Int, Int)` and `(Float, Float,
+    // Float)`) under a second, shorter qualified name — `brix.math.clamp`
+    // alongside the target's own `brix.math.order.clamp` — never a cloned
+    // source declaration.
+    for (bare, target) in &dep_reexports {
+        let qname = qualify(&[IrIdent::new(bare.clone())]);
+        for sig in dep_lowered.resolver.functions(target) {
+            resolver = resolver.with_function(FnSignature {
+                name: qname.clone(),
+                params: sig.params.clone(),
+                ret: sig.ret.clone(),
+                is_aggregate: sig.is_aggregate,
+                may_diverge: sig.may_diverge,
+                effects: sig.effects.clone(),
+            });
+        }
+        for f in &dep_lowered.source.functions {
+            if f.name == *target {
+                let mut qf = f.clone();
+                qf.name = qname.clone();
+                dep_fndefs.push(qf);
+            }
+        }
     }
 
     (resolver, dep_fndefs)

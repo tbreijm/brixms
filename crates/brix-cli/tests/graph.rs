@@ -14,7 +14,7 @@ use brix_oracle::program::RelKind;
 use brix_oracle::store::Store as OracleStore;
 use brix_oracle::txn::Transaction as OracleTxn;
 use brix_oracle::value::Value;
-use brixc::lower::RuntimeRelationKind;
+use brixc::lower::{RuntimeRelationKind, SubmoduleInput};
 use brixc::pipeline::PhaseAssign;
 use brixc::{lower_graph, AstPhase, DepPackage};
 
@@ -145,5 +145,71 @@ fn cross_package_fn_executes_matching_oracle() {
     assert_eq!(
         rt_hex, oracle_hex,
         "a cross-package compiled fn must settle identically on both engines"
+    );
+}
+
+// -- `reimport`: a multi-file dependency's package-root facade --------------
+//
+// `lib` is itself multi-file (issue #42): its entry declares only `Widget`
+// and re-exports `ops`'s whole surface via `reimport ops` (issue-93-style
+// redesign), instead of copying `scale`'s body into `world.brix`. `app`
+// then reaches `scale` through the *flat* package-root path
+// (`use lib.{Widget, scale}`) exactly like a single-file dependency would —
+// the nested path (`lib.ops.scale`) stays reachable too, since `reimport`
+// only ever promotes, never removes.
+
+const LIB_ROOT_WITH_REIMPORT: &str =
+    "package lib @ 1.0.0\nreimport ops\nrel Widget { id: Int; n: Int } key(id)\n";
+const LIB_OPS: &str = "fn scale(x: Int) -> Int = x + x\n";
+
+const APP_FLAT_OVER_REIMPORT: &str = "package app @ 0.1.0\n\
+use lib.{Widget, scale}\n\
+rel Out { id: Int; v: Int } key(id)\n\
+derive R: Out(id: i, v: y) from { Widget(id: i, n: x); let y = scale(x) }\n";
+
+#[test]
+fn reimport_publishes_a_submodule_export_at_the_dependency_package_root() {
+    let (app_file, app_diags) = parse_file(APP_FLAT_OVER_REIMPORT);
+    let (lib_file, lib_diags) = parse_file(LIB_ROOT_WITH_REIMPORT);
+    let (ops_file, ops_diags) = parse_file(LIB_OPS);
+    assert!(
+        !app_diags.has_errors() && !lib_diags.has_errors() && !ops_diags.has_errors(),
+        "fixtures parse"
+    );
+
+    let submodules = vec![SubmoduleInput {
+        qualifier: "ops".to_string(),
+        file: &ops_file,
+        parse_diags: &ops_diags,
+    }];
+    let lowered = lower_graph(
+        &app_file,
+        &app_diags,
+        &[DepPackage {
+            name_segments: vec!["lib".to_string()],
+            file: &lib_file,
+            parse_diags: &lib_diags,
+            submodules: &submodules,
+        }],
+    );
+
+    assert!(
+        !lowered.has_errors(),
+        "app must resolve `scale` through lib's reimport facade: {:#?}",
+        lowered.diags
+    );
+    let names: Vec<String> = lowered
+        .source
+        .functions
+        .iter()
+        .map(|f| f.name.to_string())
+        .collect();
+    assert!(
+        names.contains(&"lib.scale".to_string()),
+        "the reimported package-root name must be published, got {names:?}"
+    );
+    assert!(
+        names.contains(&"lib.ops.scale".to_string()),
+        "the nested path must remain reachable too — reimport promotes, never removes, got {names:?}"
     );
 }

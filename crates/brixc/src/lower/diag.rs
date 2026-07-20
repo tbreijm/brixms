@@ -93,6 +93,24 @@ pub const PACKAGE_DECL_OUTSIDE_ROOT: &str = "BRX-PKG-0001";
 /// bare name (one module's export would silently shadow another's); the
 /// second declaration is rejected rather than picked arbitrarily.
 pub const DUPLICATE_EXPORT: &str = "BRX-PKG-0002";
+/// `BRX-PKG-0003` — a `reimport` in the package entry file names a
+/// submodule/item this package does not have (unknown qualifier, or an
+/// unknown bare name inside a submodule that *is* known).
+pub const UNKNOWN_REIMPORT_TARGET: &str = "BRX-PKG-0003";
+/// `BRX-PKG-0004` — `reimport` appears outside the package entry file
+/// (`src/world.brix`); only the entry may publish the package-root surface
+/// (mirrors [`PACKAGE_DECL_OUTSIDE_ROOT`]'s "entry only" rule).
+pub const REIMPORT_OUTSIDE_ROOT: &str = "BRX-PKG-0004";
+/// `BRX-PKG-0005` — two `reimport`s (or a `reimport` and an entry-file decl)
+/// publish the same package-root bare name from different targets.
+pub const DUPLICATE_REIMPORT: &str = "BRX-PKG-0005";
+/// `BRX-LOW-0014` — two `use` declarations in the same file claim the same
+/// local alias/prefix (whether introduced by an explicit `as Ident` or by
+/// the default last-segment alias of a bare `use path`) for different
+/// targets — the whole point of `as` is to let same-named symbols from
+/// different places coexist, so a colliding alias is a hard error rather
+/// than last-write-wins.
+pub const DUPLICATE_USE_ALIAS: &str = "BRX-LOW-0014";
 
 pub fn error(code: &'static str, span: Span, msg: impl Into<String>) -> Diagnostic {
     Diagnostic::error(code, span, msg)

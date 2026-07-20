@@ -1,0 +1,49 @@
+module Arith
+
+fn add(a: Int, b: Int) -> Int = a + b
+
+fn add(a: Float, b: Float) -> Float = a + b
+
+fn sub(a: Int, b: Int) -> Int = a - b
+
+fn sub(a: Float, b: Float) -> Float = a - b
+
+fn mul(a: Int, b: Int) -> Int = a * b
+
+fn mul(a: Float, b: Float) -> Float = a * b
+
+fn square(x: Int) -> Int = x * x
+
+fn square(x: Float) -> Float = x * x
+
+fn cube(x: Int) -> Int = x * x * x
+
+fn cube(x: Float) -> Float = x * x * x
+
+fn pow2(x: Int) -> Int = square(x)
+
+fn pow2(x: Float) -> Float = square(x)
+
+fn mid(a: Int, b: Int) -> Int = (a + b) / 2
+
+fn mid(a: Float, b: Float) -> Float = (a + b) / 2.0
+
+fn average(a: Int, b: Int) -> Int = mid(a, b)
+
+fn average(a: Float, b: Float) -> Float = mid(a, b)
+
+fn quot(a: Int, b: Int) -> Int = a / b
+
+fn quot(a: Float, b: Float) -> Float = a / b
+
+fn half(x: Int) -> Int = x / 2
+
+fn half(x: Float) -> Float = x / 2.0
+
+fn double(x: Int) -> Int = x * 2
+
+fn double(x: Float) -> Float = x * 2.0
+
+fn dist(a: Int, b: Int) -> Int = abs(a - b)
+
+fn dist(a: Float, b: Float) -> Float = abs(a - b)

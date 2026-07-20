@@ -5,7 +5,7 @@
 //! `constraint`/`query` bodies, fn bodies) — that is pass 2's job
 //! ([`crate::lower::decl`]).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use brix_ast::ast::{self, Decl, RelKind, RelMod, TypeKind};
 use brix_diag::Diagnostic;
@@ -39,7 +39,7 @@ pub fn build_onto(
     meta: &mut LowerMeta,
     diags: &mut Vec<Diagnostic>,
 ) -> ProgramResolver {
-    resolver = process_uses(file, resolver);
+    resolver = process_uses(file, resolver, diags);
     resolver = register_names(file, resolver);
     resolver = register_aliases(file, resolver, meta, diags);
     resolver = register_units(file, resolver);
@@ -47,7 +47,31 @@ pub fn build_onto(
     recompute_derived(file, resolver, meta)
 }
 
-fn process_uses(file: &ast::File, mut resolver: ProgramResolver) -> ProgramResolver {
+/// `use`'s effect on the decl-namespace resolver (design §"Pass 1"). Two
+/// independent shapes, each of which may additionally carry `as Ident`:
+///
+/// * bare prefix (`use brix.sim` / `use brix.math.order as Ord`) — the
+///   alias (explicit `as`, or else the path's own last segment) becomes a
+///   prefix over the whole path; `Alias.x` resolves through
+///   [`super::resolve::ProgramResolver::resolve_path`]'s existing
+///   multi-segment prefix fallback.
+/// * selective (`use brix.math.{clamp}` / `use lib.a.{min, max} as A`) —
+///   without `as`, each item's bare name is imported directly (unchanged
+///   v0 behavior); *with* `as`, the alias becomes a prefix over the base
+///   path instead (`A.min`/`A.max`, same mechanism as the bare-prefix
+///   case) — no bare `min`/`max` claim, precisely so `use lib.a.{min} as
+///   A` and `use lib.b.{min} as B` can coexist without colliding.
+///
+/// Two `use`s in one file claiming the same alias/prefix name (regardless
+/// of which shape introduced it) is a hard error: `as`'s entire purpose is
+/// letting identically-named symbols from different places coexist, so a
+/// colliding alias can never be silently last-write-wins.
+fn process_uses(
+    file: &ast::File,
+    mut resolver: ProgramResolver,
+    diags: &mut Vec<Diagnostic>,
+) -> ProgramResolver {
+    let mut claimed_aliases: BTreeMap<String, brix_ast::Span> = BTreeMap::new();
     for u in &file.uses {
         let base: Vec<IrIdent> = u
             .path
@@ -55,12 +79,25 @@ fn process_uses(file: &ast::File, mut resolver: ProgramResolver) -> ProgramResol
             .iter()
             .map(|s| IrIdent::new(s.text.clone()))
             .collect();
-        if u.items.is_empty() {
-            // `use brix.sim` (no `.{...}`): the last segment becomes a
-            // prefix alias for the whole qualified path.
-            if let Some(alias) = u.path.segments.last() {
-                resolver = resolver.with_prefix(alias.text.clone(), QualIdent::from_segments(base));
+        if u.items.is_empty() || u.alias.is_some() {
+            let Some(alias) = u.alias.as_ref().or_else(|| u.path.segments.last()) else {
+                continue;
+            };
+            if claimed_aliases
+                .insert(alias.text.clone(), alias.span)
+                .is_some()
+            {
+                diags.push(diag::error(
+                    diag::DUPLICATE_USE_ALIAS,
+                    alias.span,
+                    format!(
+                        "`{}` is already used as a local alias in this file",
+                        alias.text
+                    ),
+                ));
+                continue;
             }
+            resolver = resolver.with_prefix(alias.text.clone(), QualIdent::from_segments(base));
         } else {
             for item in &u.items {
                 let mut segs = base.clone();

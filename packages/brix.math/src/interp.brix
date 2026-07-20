@@ -1,0 +1,15 @@
+module Interp
+
+fn lerp(a: Float, b: Float, t: Float) -> Float = a + (b - a) * t
+
+fn scale(x: Float, k: Float) -> Float = x * k
+
+fn mix(a: Float, b: Float, t: Float) -> Float = lerp(a, b, clamp(t, 0.0, 1.0))
+
+fn invLerp(a: Float, b: Float, v: Float) -> Float = (v - a) / (b - a)
+
+fn remap(v: Float, a0: Float, a1: Float, b0: Float, b1: Float) -> Float = lerp(b0, b1, invLerp(a0, a1, v))
+
+fn smoothstep(edge0: Float, edge1: Float, x: Float) -> Float = saturate(invLerp(edge0, edge1, x)) * saturate(invLerp(edge0, edge1, x)) * (3.0 - 2.0 * saturate(invLerp(edge0, edge1, x)))
+
+fn approxEq(a: Float, b: Float, eps: Float) -> Bool = abs(a - b) <= eps
