@@ -233,6 +233,15 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
             root: located.manifest.name.clone(),
             entries: BTreeMap::new(),
         });
+    // Persist the resolved lockfile as a committed artifact (issue #44) so
+    // locked builds are reproducible and `brix publish` has a lockfile to
+    // verify. Only for packages with dependencies (an empty lockfile has no
+    // meaning on disk).
+    if located.lockfile.is_some() {
+        if let Ok(text) = lockfile.to_toml_string() {
+            let _ = std::fs::write(located.pkg_root.join(brixpkg::graph::LOCKFILE_NAME), text);
+        }
+    }
     let toolchain = toolchain::detect().map_err(BuildError::Toolchain)?;
     let cache_inputs = CacheInputs {
         canonical_source,
