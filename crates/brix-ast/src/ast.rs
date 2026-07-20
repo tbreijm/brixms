@@ -45,6 +45,10 @@ pub struct File {
     pub package: Option<PackageDecl>,
     pub module: Option<ModuleDecl>,
     pub uses: Vec<UseDecl>,
+    /// Package-root re-exports (`reimport`, entry file only — see
+    /// [`ReimportDecl`]). Empty for every non-entry submodule and for any
+    /// package that has not opted into promoting nested exports.
+    pub reimports: Vec<ReimportDecl>,
     pub decls: Vec<Decl>,
 }
 
@@ -66,6 +70,23 @@ pub struct UseDecl {
     pub span: Span,
     pub path: Path,
     pub items: Vec<Ident>, // non-empty only for the `.{ a, b }` form
+    /// `as Ident` — binds this use's local prefix to `alias` instead of the
+    /// path's own last segment (or, for the brace form, instead of each
+    /// item's bare name). Lets the same names from different modules
+    /// coexist locally (`use a.{min} as A` / `use b.{min} as B`).
+    pub alias: Option<Ident>,
+}
+
+/// A package-entry-only re-export (`reimport`): promotes a submodule's
+/// exports to the package-root export surface without cloning their
+/// bodies. Shares `UseDecl`'s path/brace shape; distinct type because its
+/// semantics (publish outward) and validity (entry file only) differ from
+/// `use` (alias inward).
+#[derive(Debug, Clone)]
+pub struct ReimportDecl {
+    pub span: Span,
+    pub path: Path,
+    pub items: Vec<Ident>, // non-empty only for the `.{ a, b }` form; empty = promote everything
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

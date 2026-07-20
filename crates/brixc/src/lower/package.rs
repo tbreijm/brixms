@@ -42,9 +42,9 @@
 //! error, which carries no span at all today — single-file or not) lands in
 //! the entry file's bucket.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use brix_ast::ast::Decl;
+use brix_ast::ast::{Decl, Path};
 use brix_ast::File;
 use brix_diag::{Diagnostic, Severity, Span};
 use brix_ir::check::{check_function, check_relation_keys, check_rule, Finding};
@@ -82,6 +82,15 @@ pub struct PackageLowered {
     /// One entry per input file (entry first, then submodules in qualifier
     /// order), even when it has no diagnostics.
     pub reports: Vec<FileReport>,
+    /// The package-root re-export surface published by the entry file's
+    /// `reimport`s (bare name -> fully qualified submodule target, e.g.
+    /// `"clamp" -> order.clamp`). Validated (unknown target / duplicate
+    /// root name already rejected into `reports`) but *not* yet
+    /// materialized as a `FnSignature`/`FnDef` — [`super::fold_dependency`]
+    /// does that, from the already-lowered target this map points at, only
+    /// when another package actually depends on this one. Empty when the
+    /// package declares no `reimport`s.
+    pub reexports: BTreeMap<String, QualIdent>,
 }
 
 impl PackageLowered {
@@ -162,6 +171,13 @@ pub fn lower_program(
         diags: Vec<Diagnostic>,
     }
 
+    // Each submodule's own bare-name surface (qualifier -> bare name ->
+    // declaring span), captured alongside the existing cross-file
+    // dedupe/auto-import pass below so `reimport` (processed after this
+    // loop) can validate its targets against exactly what a submodule
+    // exports, without a second walk of every file.
+    let mut per_submodule: BTreeMap<String, BTreeMap<String, Span>> = BTreeMap::new();
+
     let mut prepared: Vec<Prepared> = Vec::new();
     for sm in &ordered {
         let mut diags: Vec<Diagnostic> = sm.parse_diags.iter().cloned().collect();
@@ -175,17 +191,27 @@ pub fn lower_program(
                 ),
             ));
         }
+        for r in &sm.file.reimports {
+            diags.push(diag::error(
+                diag::REIMPORT_OUTSIDE_ROOT,
+                r.span,
+                format!(
+                    "`reimport` is only allowed in the package entry file; `src/{}.brix` may not declare one",
+                    sm.qualifier
+                ),
+            ));
+        }
         // Dedupe this file's own bare names first: two `fn` overloads
         // sharing one name (e.g. `min(Int, Int)` and `min(Float, Float)`
         // both in `order.brix`) are one bare-name claim, not two — only a
         // *different* file claiming an already-claimed name is the hard
         // error the module doc promises. Keeps the first occurrence's span
         // so a genuine cross-file collision still points somewhere real.
-        let mut this_file_names: std::collections::BTreeMap<String, Span> =
-            std::collections::BTreeMap::new();
+        let mut this_file_names: BTreeMap<String, Span> = BTreeMap::new();
         for (name, span) in decl_names_with_spans(sm.file) {
             this_file_names.entry(name).or_insert(span);
         }
+        per_submodule.insert(sm.qualifier.clone(), this_file_names.clone());
         for (name, span) in this_file_names {
             if claimed_bare.insert(name.clone()) {
                 resolver = resolver.with_import(
@@ -210,6 +236,8 @@ pub fn lower_program(
             diags,
         });
     }
+
+    let reexports = process_reimports(entry, &per_submodule, &mut entry_diags);
 
     // Pass 1 (all files): register every signature before lowering any body.
     resolver = schema::build_onto(entry, resolver, &mut meta, &mut entry_diags);
@@ -277,7 +305,99 @@ pub fn lower_program(
         resolver,
         meta,
         reports,
+        reexports,
     }
+}
+
+/// Validate the entry file's `reimport`s against `per_submodule` (each
+/// submodule's own bare-name surface, from the same walk that already
+/// dedupes cross-file exports) and return the package-root re-export map
+/// (bare name -> fully qualified submodule target) [`fold_dependency`]
+/// materializes. `reimport <qualifier>` (no `.{...}`) promotes every export
+/// `qualifier` has; `reimport <qualifier>.{a, b}` promotes only `a`/`b`.
+/// Unknown qualifiers/items and root-name collisions (with another
+/// `reimport` or with the entry file's own decls) are hard errors, pushed
+/// into `entry_diags` — never silently dropped or overwritten.
+fn process_reimports(
+    entry: &File,
+    per_submodule: &BTreeMap<String, BTreeMap<String, Span>>,
+    entry_diags: &mut Vec<Diagnostic>,
+) -> BTreeMap<String, QualIdent> {
+    let mut reexports: BTreeMap<String, QualIdent> = BTreeMap::new();
+    let mut claimed_root: BTreeMap<String, Span> =
+        decl_names_with_spans(entry).into_iter().collect();
+
+    for r in &entry.reimports {
+        if r.path.segments.len() != 1 {
+            entry_diags.push(diag::error(
+                diag::UNKNOWN_REIMPORT_TARGET,
+                r.path.span,
+                format!(
+                    "`reimport {}` does not name a package submodule (a reimport target is a single `src/<name>.brix` qualifier)",
+                    dotted(&r.path)
+                ),
+            ));
+            continue;
+        }
+        let qualifier = r.path.segments[0].text.clone();
+        let Some(exports) = per_submodule.get(&qualifier) else {
+            entry_diags.push(diag::error(
+                diag::UNKNOWN_REIMPORT_TARGET,
+                r.path.span,
+                format!(
+                    "`reimport {qualifier}`: no submodule `src/{qualifier}.brix` in this package"
+                ),
+            ));
+            continue;
+        };
+
+        let wanted: Vec<(String, Span)> = if r.items.is_empty() {
+            exports.iter().map(|(n, s)| (n.clone(), *s)).collect()
+        } else {
+            r.items
+                .iter()
+                .filter_map(|item| match exports.get(&item.text) {
+                    Some(_) => Some((item.text.clone(), item.span)),
+                    None => {
+                        entry_diags.push(diag::error(
+                            diag::UNKNOWN_REIMPORT_TARGET,
+                            item.span,
+                            format!("`{qualifier}` has no export named `{}`", item.text),
+                        ));
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        for (name, span) in wanted {
+            if claimed_root.contains_key(&name) {
+                entry_diags.push(diag::error(
+                    diag::DUPLICATE_REIMPORT,
+                    span,
+                    format!(
+                        "`{name}` is already published at the package root by another reimport or declaration"
+                    ),
+                ));
+                continue;
+            }
+            claimed_root.insert(name.clone(), span);
+            reexports.insert(
+                name.clone(),
+                QualIdent::from(format!("{qualifier}.{name}").as_str()),
+            );
+        }
+    }
+
+    reexports
+}
+
+fn dotted(path: &Path) -> String {
+    path.segments
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// A finding's own qualified/bare name, when it has one — used only to route

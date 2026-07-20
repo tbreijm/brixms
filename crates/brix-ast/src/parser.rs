@@ -95,6 +95,7 @@ const DECL_STARTS: &[&str] = &[
     "impl",
     "phase",
     "use",
+    "reimport",
     // extension keywords (outside Appendix D Decl):
     "logic",
     "system",
@@ -339,6 +340,10 @@ impl<'s> Parser<'s> {
         while self.at_kw("use") {
             uses.push(self.use_decl());
         }
+        let mut reimports = Vec::new();
+        while self.at_kw("reimport") {
+            reimports.push(self.reimport_decl());
+        }
         let mut decls = Vec::new();
         while !self.at_eof() {
             let before = self.pos;
@@ -360,6 +365,7 @@ impl<'s> Parser<'s> {
             package,
             module,
             uses,
+            reimports,
             decls,
         }
     }
@@ -454,7 +460,58 @@ impl<'s> Parser<'s> {
                 end = rb.span;
             }
         }
+        // `as Ident`: binds this use's local prefix to `alias` (design:
+        // lets the same bare names from different modules coexist locally
+        // instead of always claiming the path's own last segment / each
+        // item's bare name).
+        let alias = if self.at_kw("as") {
+            self.bump();
+            let id = self.ident("alias name");
+            end = id.span;
+            Some(id)
+        } else {
+            None
+        };
         UseDecl {
+            span: kw.span.to(end),
+            path,
+            items,
+            alias,
+        }
+    }
+
+    /// `reimport a.b` / `reimport a.b.{ x, y }` — package-entry-only
+    /// re-export (Appendix D extension: `Reimport := "reimport" QualIdent
+    /// ("." "{" Ident ("," Ident)* "}")?`). Shares `use`'s path/brace
+    /// parsing shape; no `as` form (publishing outward has no local
+    /// alias to bind).
+    fn reimport_decl(&mut self) -> ReimportDecl {
+        let kw = self.bump();
+        let path = self.qual_ident();
+        let mut items = Vec::new();
+        let mut end = path.span;
+        if self.at(TokKind::Dot) && self.nth(1) == Some(TokKind::LBrace) {
+            self.bump();
+        }
+        if self.at(TokKind::LBrace) {
+            let lb = self.bump();
+            end = lb.span;
+            if !self.at(TokKind::RBrace) {
+                loop {
+                    items.push(self.ident("reimported item"));
+                    if !self.eat(TokKind::Comma) {
+                        break;
+                    }
+                    if self.at(TokKind::RBrace) {
+                        break;
+                    }
+                }
+            }
+            if let Some(rb) = self.expect(TokKind::RBrace, "`}`") {
+                end = rb.span;
+            }
+        }
+        ReimportDecl {
             span: kw.span.to(end),
             path,
             items,
@@ -3498,5 +3555,76 @@ derive D: Output(value: value) from { Input(value: (((((1))))) }\n";
                 .all(|diagnostic| diagnostic.code != "BRX-AST-0003"),
             "{diagnostics:?}"
         );
+    }
+
+    #[test]
+    fn use_as_parses_both_the_prefix_and_selective_forms() {
+        let source = "use brix.math.order as Ord\n\
+use brix.math.order.{min, max} as O2\n\
+use brix.math.{clamp}\n";
+        let (file, diagnostics) = parse_file(source);
+        assert!(!diagnostics.has_errors(), "{diagnostics:?}");
+        assert_eq!(file.uses.len(), 3);
+
+        assert!(file.uses[0].items.is_empty());
+        assert_eq!(
+            file.uses[0].alias.as_ref().map(|a| a.text.as_str()),
+            Some("Ord")
+        );
+
+        assert_eq!(
+            file.uses[1]
+                .items
+                .iter()
+                .map(|i| i.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["min", "max"]
+        );
+        assert_eq!(
+            file.uses[1].alias.as_ref().map(|a| a.text.as_str()),
+            Some("O2")
+        );
+
+        assert!(file.uses[2].alias.is_none());
+    }
+
+    #[test]
+    fn reimport_parses_the_bare_and_brace_forms() {
+        let source = "package brix.math @ 0.1.0\n\
+module Math\n\
+reimport order\n\
+reimport sign.{abs, neg}\n";
+        let (file, diagnostics) = parse_file(source);
+        assert!(!diagnostics.has_errors(), "{diagnostics:?}");
+        assert_eq!(file.reimports.len(), 2);
+        assert!(file.reimports[0].items.is_empty());
+        assert_eq!(
+            file.reimports[1]
+                .items
+                .iter()
+                .map(|i| i.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["abs", "neg"]
+        );
+    }
+
+    #[test]
+    fn use_as_and_reimport_round_trip_through_fmt() {
+        let source = "use brix.math.order.{min, max} as Ord\n\
+use brix.math as Flat\n\
+\n\
+reimport order\n\
+reimport sign.{abs, neg}\n";
+        let (file, diagnostics) = parse_file(source);
+        assert!(!diagnostics.has_errors(), "{diagnostics:?}");
+        let once = crate::fmt::format_file(&file);
+        let (file2, diagnostics2) = parse_file(&once);
+        assert!(!diagnostics2.has_errors(), "{diagnostics2:?}");
+        let twice = crate::fmt::format_file(&file2);
+        assert_eq!(once, twice, "fmt of use-as/reimport must be idempotent");
+        assert!(once.contains("use brix.math.order.{min, max} as Ord"));
+        assert!(once.contains("use brix.math as Flat"));
+        assert!(once.contains("reimport order"));
+        assert!(once.contains("reimport sign.{abs, neg}"));
     }
 }

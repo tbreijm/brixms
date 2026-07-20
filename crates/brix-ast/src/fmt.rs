@@ -79,8 +79,13 @@ impl Formatter {
             self.blank();
         }
         for u in &file.uses {
+            let alias_suffix = u
+                .alias
+                .as_ref()
+                .map(|a| format!(" as {}", a.text))
+                .unwrap_or_default();
             if u.items.is_empty() {
-                self.line(&format!("use {}", path_str(&u.path)));
+                self.line(&format!("use {}{}", path_str(&u.path), alias_suffix));
             } else {
                 let items = u
                     .items
@@ -88,10 +93,31 @@ impl Formatter {
                     .map(|i| i.text.clone())
                     .collect::<Vec<_>>()
                     .join(", ");
-                self.line(&format!("use {}.{{{}}}", path_str(&u.path), items));
+                self.line(&format!(
+                    "use {}.{{{}}}{}",
+                    path_str(&u.path),
+                    items,
+                    alias_suffix
+                ));
             }
         }
         if !file.uses.is_empty() {
+            self.blank();
+        }
+        for r in &file.reimports {
+            if r.items.is_empty() {
+                self.line(&format!("reimport {}", path_str(&r.path)));
+            } else {
+                let items = r
+                    .items
+                    .iter()
+                    .map(|i| i.text.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.line(&format!("reimport {}.{{{}}}", path_str(&r.path), items));
+            }
+        }
+        if !file.reimports.is_empty() {
             self.blank();
         }
         for (i, d) in file.decls.iter().enumerate() {
