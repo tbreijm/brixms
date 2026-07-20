@@ -4,10 +4,11 @@
 
 use std::collections::BTreeMap;
 
-use brix_ast::parse_file;
+use brix_ast::ast::ScenarioDecl;
 use brix_diag::{CanonValue, Diagnostic, Diagnostics, Span};
 
 use crate::build::{self, BuildError, DiagnosticReport};
+use crate::lowering::{self, local_files};
 use crate::package;
 use crate::scenario::{
     self, resolve_selectors, scenario_evidence, scenarios_in_source_order, ScenarioRun,
@@ -29,28 +30,31 @@ pub struct TestOutcome {
 }
 
 /// Check a package with the real compiler, then execute selected scenarios.
+///
+/// Scenarios are gathered from every local file (issue #42: the entry plus
+/// each `src/*.brix` submodule, entry first) so a `scenario` declared in a
+/// domain submodule is exactly as selectable/executable as one in
+/// `world.brix` — selector ambiguity is judged across the whole package, not
+/// per file.
 pub fn run(operand: &str, selectors: &[String]) -> Result<TestOutcome, BuildError> {
     build::check(operand)?;
 
     let located = package::locate(operand).map_err(BuildError::Locate)?;
-    let source = std::fs::read_to_string(&located.source_path)?;
-    let (file, parse_diagnostics) = parse_file(&source);
-    if parse_diagnostics.has_errors() {
-        return Err(BuildError::Diagnostics(DiagnosticReport {
-            source,
-            path: located.source_path.to_string(),
-            diagnostics: parse_diagnostics,
-        }));
-    }
+    let entry_label = located.source_path.to_string();
+    let parsed = lowering::parse(&located)?;
+    let entry_source = parsed.entry.source.clone();
 
-    let scenarios = scenarios_in_source_order(&file);
+    let scenarios: Vec<&ScenarioDecl> = local_files(&parsed, &entry_label)
+        .into_iter()
+        .flat_map(|(_, pf)| scenarios_in_source_order(&pf.file))
+        .collect();
     let selected = match resolve_selectors(scenarios, selectors) {
         Ok(selected) => selected,
         Err(SelectorError::Unknown(name)) => {
             return Err(selector_diagnostic(
-                &source,
+                &entry_source,
                 &located.source_path,
-                &file,
+                &parsed.entry.file,
                 selectors,
                 SELECTOR_ERROR,
                 format!("unknown test selector `{name}`"),
@@ -58,9 +62,9 @@ pub fn run(operand: &str, selectors: &[String]) -> Result<TestOutcome, BuildErro
         }
         Err(SelectorError::Ambiguous) => {
             return Err(selector_diagnostic(
-                &source,
+                &entry_source,
                 &located.source_path,
-                &file,
+                &parsed.entry.file,
                 selectors,
                 SELECTOR_ERROR,
                 "scenario names are ambiguous or duplicated".into(),
@@ -86,7 +90,7 @@ pub fn run(operand: &str, selectors: &[String]) -> Result<TestOutcome, BuildErro
 
     if assertion_failed {
         return Err(test_diagnostic(
-            &source,
+            &entry_source,
             &located.source_path,
             selectors,
             "failed",
@@ -97,7 +101,7 @@ pub fn run(operand: &str, selectors: &[String]) -> Result<TestOutcome, BuildErro
     }
     if unavailable {
         return Err(test_diagnostic(
-            &source,
+            &entry_source,
             &located.source_path,
             selectors,
             "unavailable",

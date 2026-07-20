@@ -68,6 +68,7 @@ fn lower_app_over_lib() -> brixc::Lowered {
             name_segments: vec!["lib".to_string()],
             file: &lib_file,
             parse_diags: &lib_diags,
+            submodules: &[],
         }],
     )
 }

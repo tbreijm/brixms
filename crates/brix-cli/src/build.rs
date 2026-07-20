@@ -13,13 +13,13 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::process::Command;
 
-use brix_ast::parse_file;
 use brix_canon::{CanonWriter, Digest, Domain};
 use brix_diag::{DiagnosticFormat, Diagnostics};
 use brixc::pipeline::PhaseAssign;
-use brixc::{AstPhase, CacheInputs, CacheKey, PipelineError, Profile};
+use brixc::{AstPhase, CacheInputs, CacheKey, PackageLowered, PipelineError, Profile};
 use camino::{Utf8Path, Utf8PathBuf};
 
+use crate::lowering::{self, ParsedPackage};
 use crate::{package, toolchain};
 
 #[derive(Debug)]
@@ -27,6 +27,10 @@ pub enum BuildError {
     Locate(package::LocateError),
     Io(std::io::Error),
     Diagnostics(DiagnosticReport),
+    /// A multi-file package (issue #42) whose diagnostics span more than one
+    /// source file — one [`DiagnosticReport`] per file that has any,
+    /// rendered against that file's own text.
+    PackageDiagnostics(Vec<DiagnosticReport>),
     Phase(PipelineError),
     Toolchain(toolchain::ToolchainError),
     CargoBuildFailed(std::process::ExitStatus),
@@ -38,6 +42,15 @@ impl fmt::Display for BuildError {
             BuildError::Locate(e) => write!(f, "{e}"),
             BuildError::Io(e) => write!(f, "I/O error: {e}"),
             BuildError::Diagnostics(report) => f.write_str(&report.render(DiagnosticFormat::Human)),
+            BuildError::PackageDiagnostics(reports) => {
+                for (i, report) in reports.iter().enumerate() {
+                    if i > 0 {
+                        writeln!(f)?;
+                    }
+                    f.write_str(&report.render(DiagnosticFormat::Human))?;
+                }
+                Ok(())
+            }
             BuildError::Phase(e) => write!(f, "{e}"),
             BuildError::Toolchain(e) => write!(f, "{e}"),
             BuildError::CargoBuildFailed(status) => write!(f, "cargo build failed: {status}"),
@@ -66,9 +79,88 @@ impl BuildError {
     pub fn render(&self, format: DiagnosticFormat) -> String {
         match self {
             Self::Diagnostics(report) => report.render(format),
+            Self::PackageDiagnostics(reports) => reports
+                .iter()
+                .map(|r| r.render(format))
+                .collect::<Vec<_>>()
+                .join("\n"),
             _ => self.to_string(),
         }
     }
+}
+
+/// A single [`DiagnosticReport`] when only one file has diagnostics (the
+/// pre-#42 shape every existing caller/test matches on), else
+/// [`BuildError::PackageDiagnostics`]. Reports with no diagnostics at all
+/// are dropped first.
+fn error_from_reports(reports: Vec<DiagnosticReport>) -> BuildError {
+    let mut non_empty: Vec<DiagnosticReport> =
+        reports.into_iter().filter(|r| !r.diagnostics.is_empty()).collect();
+    if non_empty.len() <= 1 {
+        BuildError::Diagnostics(non_empty.pop().unwrap_or_else(|| DiagnosticReport {
+            source: String::new(),
+            path: String::new(),
+            diagnostics: Diagnostics::new(),
+        }))
+    } else {
+        BuildError::PackageDiagnostics(non_empty)
+    }
+}
+
+/// Every local file (entry + submodules, issue #42) whose own parse produced
+/// at least one error — checked *before* lowering, exactly like the
+/// single-file path always has: a fundamentally broken parse should not
+/// also run (and add noise from) lowering.
+fn parse_error_reports(parsed: &ParsedPackage, entry_label: &str) -> Vec<DiagnosticReport> {
+    let mut reports = Vec::new();
+    if parsed.entry.diags.has_errors() {
+        reports.push(DiagnosticReport {
+            source: parsed.entry.source.clone(),
+            path: entry_label.to_string(),
+            diagnostics: parsed.entry.diags.clone(),
+        });
+    }
+    for (qualifier, pf) in &parsed.submodules {
+        if pf.diags.has_errors() {
+            reports.push(DiagnosticReport {
+                source: pf.source.clone(),
+                path: format!("src/{qualifier}.brix"),
+                diagnostics: pf.diags.clone(),
+            });
+        }
+    }
+    reports
+}
+
+/// Render every [`PackageLowered`] file report against the source text it
+/// actually came from (entry vs. a specific local submodule — never a
+/// dependency, whose diagnostics are folded into the entry's own bucket, the
+/// pre-#42 behavior).
+fn lowered_diagnostic_reports(
+    lowered: PackageLowered,
+    parsed: &ParsedPackage,
+    entry_label: &str,
+) -> Vec<DiagnosticReport> {
+    lowered
+        .reports
+        .into_iter()
+        .filter_map(|r| {
+            let source = if r.label == entry_label {
+                parsed.entry.source.clone()
+            } else {
+                parsed
+                    .submodules
+                    .iter()
+                    .find(|(qualifier, _)| format!("src/{qualifier}.brix") == r.label)
+                    .map(|(_, pf)| pf.source.clone())?
+            };
+            Some(DiagnosticReport {
+                source,
+                path: r.label,
+                diagnostics: Diagnostics::from_items(r.diagnostics),
+            })
+        })
+        .collect()
 }
 
 impl std::error::Error for BuildError {}
@@ -95,36 +187,37 @@ pub struct CheckOutcome {
 }
 
 /// Parse, lower, type/effect-check, and phase-check a package without emitting
-/// or executing anything.
+/// or executing anything. Multi-file packages (issue #42) are checked as one
+/// program — the entry file, every local `src/*.brix` submodule, and the
+/// resolved dependency graph — with diagnostics attributed back to whichever
+/// file they actually came from.
 pub fn check(operand: &str) -> Result<CheckOutcome, BuildError> {
     let located = package::locate(operand).map_err(BuildError::Locate)?;
-    let source = std::fs::read_to_string(&located.source_path)?;
-    let (file, parse_diags) = parse_file(&source);
-    if parse_diags.has_errors() {
-        return Err(BuildError::Diagnostics(DiagnosticReport {
-            source,
-            path: located.source_path.to_string(),
-            diagnostics: parse_diags,
-        }));
+    let entry_label = located.source_path.to_string();
+    let parsed = lowering::parse(&located)?;
+
+    let parse_errors = parse_error_reports(&parsed, &entry_label);
+    if !parse_errors.is_empty() {
+        return Err(error_from_reports(parse_errors));
     }
 
-    let lowered = brixc::lower_file(&file, &parse_diags);
+    let lowered = lowering::lower(&parsed, &entry_label);
     if lowered.has_errors() {
-        return Err(BuildError::Diagnostics(DiagnosticReport {
-            source,
-            path: located.source_path.to_string(),
-            diagnostics: Diagnostics::from_items(lowered.diags),
-        }));
+        return Err(error_from_reports(lowered_diagnostic_reports(
+            lowered,
+            &parsed,
+            &entry_label,
+        )));
     }
 
-    match AstPhase.assign_phases(lowered) {
+    match AstPhase.assign_phases(lowered.into_lowered()) {
         Ok(_) => Ok(CheckOutcome {
             source_path: located.source_path,
         }),
         Err(PipelineError::Diagnostic { diagnostic, .. }) => {
             Err(BuildError::Diagnostics(DiagnosticReport {
-                source,
-                path: located.source_path.to_string(),
+                source: parsed.entry.source,
+                path: entry_label,
                 diagnostics: Diagnostics::from_items(vec![diagnostic]),
             }))
         }
@@ -141,22 +234,40 @@ pub struct FormatOutcome {
 
 /// Parse and canonically format a package entry source without writing it.
 pub fn format(operand: &str) -> Result<FormatOutcome, BuildError> {
+    Ok(format_all(operand)?.remove(0))
+}
+
+/// Parse and canonically format every local file in the package (issue #42:
+/// the entry plus every `src/*.brix` submodule), without writing any of
+/// them. Entry is always first, then submodules in qualifier order (matches
+/// [`package::locate`]'s discovery order).
+pub fn format_all(operand: &str) -> Result<Vec<FormatOutcome>, BuildError> {
     let located = package::locate(operand).map_err(BuildError::Locate)?;
-    let source = std::fs::read_to_string(&located.source_path)?;
-    let (file, parse_diags) = parse_file(&source);
-    if parse_diags.has_errors() {
-        return Err(BuildError::Diagnostics(DiagnosticReport {
-            source,
-            path: located.source_path.to_string(),
-            diagnostics: parse_diags,
-        }));
+    let entry_label = located.source_path.to_string();
+    let parsed = lowering::parse(&located)?;
+
+    let parse_errors = parse_error_reports(&parsed, &entry_label);
+    if !parse_errors.is_empty() {
+        return Err(error_from_reports(parse_errors));
     }
-    let formatted = brix_ast::format_file(&file);
-    Ok(FormatOutcome {
-        source_path: located.source_path,
-        changed: formatted != source,
-        formatted,
-    })
+
+    let mut outcomes = vec![{
+        let formatted = brix_ast::format_file(&parsed.entry.file);
+        FormatOutcome {
+            source_path: located.source_path.clone(),
+            changed: formatted != parsed.entry.source,
+            formatted,
+        }
+    }];
+    for (qualifier, pf) in &parsed.submodules {
+        let formatted = brix_ast::format_file(&pf.file);
+        outcomes.push(FormatOutcome {
+            source_path: located.pkg_root.join("src").join(format!("{qualifier}.brix")),
+            changed: formatted != pf.source,
+            formatted,
+        });
+    }
+    Ok(outcomes)
 }
 
 /// Run the full pipeline for the package named by `operand` (parse -> lower
@@ -165,51 +276,32 @@ pub fn format(operand: &str) -> Result<FormatOutcome, BuildError> {
 /// exists, in which case both are skipped entirely.
 pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError> {
     let located = package::locate(operand).map_err(BuildError::Locate)?;
-    let source = std::fs::read_to_string(&located.source_path)?;
+    let entry_label = located.source_path.to_string();
+    let parsed = lowering::parse(&located)?;
 
-    let (file, parse_diags) = parse_file(&source);
-    if parse_diags.has_errors() {
-        return Err(BuildError::Diagnostics(DiagnosticReport {
-            source,
-            path: located.source_path.to_string(),
-            diagnostics: parse_diags,
-        }));
+    let parse_errors = parse_error_reports(&parsed, &entry_label);
+    if !parse_errors.is_empty() {
+        return Err(error_from_reports(parse_errors));
     }
 
-    // Lower the whole locked package graph (issue #42): a dependency-free
-    // package lowers its single root file exactly as before; with dependencies,
-    // parse each hydrated entry source and fold them into one program.
-    let dep_parsed: Vec<(brix_ast::File, brix_ast::Diagnostics)> =
-        located.deps.iter().map(|d| parse_file(&d.source)).collect();
-    let lowered = if located.deps.is_empty() {
-        brixc::lower_file(&file, &parse_diags)
-    } else {
-        let dep_packages: Vec<brixc::DepPackage> = located
-            .deps
-            .iter()
-            .zip(dep_parsed.iter())
-            .map(|(d, (dep_file, dep_diags))| brixc::DepPackage {
-                name_segments: d.name_segments.clone(),
-                file: dep_file,
-                parse_diags: dep_diags,
-            })
-            .collect();
-        brixc::lower_graph(&file, &parse_diags, &dep_packages)
-    };
+    // Lower the whole locked package (issue #42): entry + local submodules +
+    // resolved dependency graph, one program. A single-file, dependency-free
+    // package lowers exactly as before.
+    let lowered = lowering::lower(&parsed, &entry_label);
     if lowered.has_errors() {
-        return Err(BuildError::Diagnostics(DiagnosticReport {
-            source,
-            path: located.source_path.to_string(),
-            diagnostics: Diagnostics::from_items(lowered.diags),
-        }));
+        return Err(error_from_reports(lowered_diagnostic_reports(
+            lowered,
+            &parsed,
+            &entry_label,
+        )));
     }
 
-    let phased = match AstPhase.assign_phases(lowered) {
+    let phased = match AstPhase.assign_phases(lowered.into_lowered()) {
         Ok(phased) => phased,
         Err(PipelineError::Diagnostic { diagnostic, .. }) => {
             return Err(BuildError::Diagnostics(DiagnosticReport {
-                source,
-                path: located.source_path.to_string(),
+                source: parsed.entry.source.clone(),
+                path: entry_label.clone(),
                 diagnostics: Diagnostics::from_items(vec![diagnostic]),
             }));
         }
@@ -221,7 +313,10 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
     let native_program = brixc::emit::project_program(&phased);
     let crate_name = brixc::emit::sanitize_crate_name(located.manifest.name.as_str());
 
-    let canonical_source = Digest::of(Domain::Value, brix_ast::format_file(&file).as_bytes());
+    // Cache identity hashes the *whole* source tree (issue #42), not just
+    // the entry — a submodule edit is a cache miss too, exactly like an
+    // entry edit always has been.
+    let canonical_source = canonical_source_digest(&parsed);
     // The resolved lockfile (real, with per-dependency content digests) when
     // the package has dependencies — so a dependency change is a cache miss
     // (issue #42) — else the empty placeholder for a single-file package.
@@ -301,6 +396,22 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
 /// Filename of the cache-completion marker written inside each `.brix-cache`
 /// entry after a successful build (see [`cache_entry_is_valid`]).
 const CACHE_MARKER: &str = ".brix-manifest";
+
+/// The cache-identity digest over a package's *whole* source tree (issue
+/// #42): the entry's canonical formatting, then every local submodule's
+/// (qualifier, canonical formatting) pair in qualifier order — each
+/// length-prefixed via [`CanonWriter`] so no concatenation ambiguity can
+/// collide two different trees. A single-file package (no submodules) hashes
+/// just its own entry, the pre-#42 shape.
+fn canonical_source_digest(parsed: &ParsedPackage) -> Digest {
+    let mut w = CanonWriter::new();
+    w.write_str(&brix_ast::format_file(&parsed.entry.file));
+    for (qualifier, pf) in &parsed.submodules {
+        w.write_str(qualifier);
+        w.write_str(&brix_ast::format_file(&pf.file));
+    }
+    w.digest(Domain::Value)
+}
 
 /// A canonical digest over the full generated file set (each path plus its
 /// contents, in `BTreeMap` order — length-prefixed via [`CanonWriter`] so no

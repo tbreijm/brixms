@@ -5,10 +5,10 @@
 use std::collections::BTreeMap;
 
 use brix_ast::ast::Decl;
-use brix_ast::parse_file;
 use brix_diag::{CanonValue, Diagnostic, Diagnostics, Span};
 
 use crate::build::{self, BuildError, DiagnosticReport};
+use crate::lowering::{self, local_files};
 use crate::package;
 use crate::scenario::{classify, ScenarioClass};
 
@@ -80,30 +80,45 @@ struct RuleResult {
     detail: String,
 }
 
+/// One local file's source, AST, canonical formatting, and lowering
+/// diagnostics — a rule is evaluated across every entry in this list, never
+/// just `world.brix` (issue #42: a `brix.math` submodule's coverage or
+/// formatting is exactly as load-bearing as the entry's).
+struct FileCtx<'a> {
+    source: &'a str,
+    file: &'a brix_ast::File,
+    formatted: String,
+    diags: &'a [Diagnostic],
+}
+
 /// Check the package with the compiler and evaluate the selected quality gate.
 pub fn evaluate(operand: &str, profile: QualityProfile) -> Result<QualityOutcome, BuildError> {
     let checked = build::check(operand)?;
     let located = package::locate(operand).map_err(BuildError::Locate)?;
-    let source = std::fs::read_to_string(&checked.source_path)?;
-    let (file, parse_diagnostics) = parse_file(&source);
-    if parse_diagnostics.has_errors() {
-        return Err(BuildError::Diagnostics(DiagnosticReport {
-            source,
-            path: checked.source_path.to_string(),
-            diagnostics: parse_diagnostics,
-        }));
-    }
+    let entry_label = located.source_path.to_string();
+    let parsed = lowering::parse(&located)?;
+    let lowered = lowering::lower(&parsed, &entry_label);
 
-    let formatted = brix_ast::format_file(&file);
-    let lowered = brixc::lower_file(&file, &parse_diagnostics);
-    let rules = evaluate_rules(
-        profile,
-        &located,
-        &file,
-        &source,
-        &formatted,
-        &lowered.diags,
-    );
+    let entry_source = parsed.entry.source.clone();
+    let files: Vec<FileCtx> = local_files(&parsed, &entry_label)
+        .into_iter()
+        .map(|(label, pf)| {
+            let diags = lowered
+                .reports
+                .iter()
+                .find(|r| r.label == label)
+                .map(|r| r.diagnostics.as_slice())
+                .unwrap_or(&[]);
+            FileCtx {
+                source: &pf.source,
+                file: &pf.file,
+                formatted: brix_ast::format_file(&pf.file),
+                diags,
+            }
+        })
+        .collect();
+
+    let rules = evaluate_rules(profile, &located, &files);
 
     let any_failed = rules.iter().any(|rule| rule.status == RuleStatus::Failed);
     let any_unavailable = rules
@@ -112,7 +127,7 @@ pub fn evaluate(operand: &str, profile: QualityProfile) -> Result<QualityOutcome
 
     if any_failed {
         return Err(quality_diagnostic(
-            &source,
+            &entry_source,
             &checked.source_path,
             profile,
             "failed",
@@ -123,7 +138,7 @@ pub fn evaluate(operand: &str, profile: QualityProfile) -> Result<QualityOutcome
     }
     if any_unavailable {
         return Err(quality_diagnostic(
-            &source,
+            &entry_source,
             &checked.source_path,
             profile,
             "unavailable",
@@ -142,10 +157,7 @@ pub fn evaluate(operand: &str, profile: QualityProfile) -> Result<QualityOutcome
 fn evaluate_rules(
     profile: QualityProfile,
     located: &package::LocatedPackage,
-    file: &brix_ast::File,
-    source: &str,
-    formatted: &str,
-    lowering_diags: &[brix_diag::Diagnostic],
+    files: &[FileCtx],
 ) -> Vec<RuleResult> {
     RULES
         .iter()
@@ -153,8 +165,8 @@ fn evaluate_rules(
         .map(|(id, min_profile)| RuleResult {
             id,
             min_profile: *min_profile,
-            status: evaluate_rule(id, located, file, source, formatted, lowering_diags),
-            detail: rule_detail(id, located, file, source, formatted, lowering_diags),
+            status: evaluate_rule(id, located, files),
+            detail: rule_detail(id, located, files),
         })
         .collect()
 }
@@ -191,25 +203,20 @@ fn profile_includes(required: QualityProfile, selected: QualityProfile) -> bool 
     )
 }
 
-fn evaluate_rule(
-    id: &str,
-    located: &package::LocatedPackage,
-    file: &brix_ast::File,
-    source: &str,
-    formatted: &str,
-    lowering_diags: &[brix_diag::Diagnostic],
-) -> RuleStatus {
+fn evaluate_rule(id: &str, located: &package::LocatedPackage, files: &[FileCtx]) -> RuleStatus {
     match id {
         "compiler.validity" => RuleStatus::Passed,
         "source.canonical_format" => {
-            if formatted == source {
+            if files.iter().all(|f| f.formatted == f.source) {
                 RuleStatus::Passed
             } else {
                 RuleStatus::Failed
             }
         }
         "package.identity" => {
-            let Some(package_decl) = file.package.as_ref() else {
+            // The entry file (always first, see `local_files`) is the only
+            // one allowed to carry a `package` decl.
+            let Some(package_decl) = files.first().and_then(|f| f.file.package.as_ref()) else {
                 return RuleStatus::Failed;
             };
             let source_name = package_decl
@@ -229,7 +236,7 @@ fn evaluate_rule(
                 RuleStatus::Failed
             }
         }
-        "compiler.semantic_coverage" => semantic_coverage_status(file, lowering_diags),
+        "compiler.semantic_coverage" => semantic_coverage_status(files),
         "package.explicit_manifest" => {
             if located.explicit_manifest {
                 RuleStatus::Passed
@@ -247,33 +254,24 @@ fn evaluate_rule(
     }
 }
 
-fn rule_detail(
-    id: &str,
-    located: &package::LocatedPackage,
-    file: &brix_ast::File,
-    source: &str,
-    formatted: &str,
-    lowering_diags: &[brix_diag::Diagnostic],
-) -> String {
+fn rule_detail(id: &str, located: &package::LocatedPackage, files: &[FileCtx]) -> String {
     match id {
         "compiler.validity" => "parse, lowering, type/effect, and phase checks passed".into(),
         "source.canonical_format" => {
-            if formatted == source {
+            if files.iter().all(|f| f.formatted == f.source) {
                 "source matches canonical formatter output".into()
             } else {
                 "source differs from canonical formatter output".into()
             }
         }
         "package.identity" => {
-            if evaluate_rule(id, located, file, source, formatted, lowering_diags)
-                == RuleStatus::Passed
-            {
+            if evaluate_rule(id, located, files) == RuleStatus::Passed {
                 "manifest identity matches source package declaration".into()
             } else {
                 "manifest identity does not match source package declaration".into()
             }
         }
-        "compiler.semantic_coverage" => match semantic_coverage_status(file, lowering_diags) {
+        "compiler.semantic_coverage" => match semantic_coverage_status(files) {
             RuleStatus::Passed => {
                 "every skipped declaration is an executable scenario covered by `brix test`".into()
             }
@@ -309,29 +307,29 @@ fn rule_detail(
     }
 }
 
-fn semantic_coverage_status(
-    file: &brix_ast::File,
-    lowering_diags: &[brix_diag::Diagnostic],
-) -> RuleStatus {
-    let skipped_spans = lowering_diags
-        .iter()
-        .filter(|diag| diag.code == DECL_SKIPPED)
-        .map(|diag| diag.span)
-        .collect::<Vec<_>>();
-    if skipped_spans.is_empty() {
-        return RuleStatus::Passed;
-    }
-    for decl in &file.decls {
-        if !skipped_spans.iter().any(|span| decl.span() == *span) {
+fn semantic_coverage_status(files: &[FileCtx]) -> RuleStatus {
+    for f in files {
+        let skipped_spans = f
+            .diags
+            .iter()
+            .filter(|diag| diag.code == DECL_SKIPPED)
+            .map(|diag| diag.span)
+            .collect::<Vec<_>>();
+        if skipped_spans.is_empty() {
             continue;
         }
-        match decl {
-            Decl::Scenario(scenario) => {
-                if !matches!(classify(scenario), ScenarioClass::Executable) {
-                    return RuleStatus::Unavailable;
-                }
+        for decl in &f.file.decls {
+            if !skipped_spans.iter().any(|span| decl.span() == *span) {
+                continue;
             }
-            _ => return RuleStatus::Unavailable,
+            match decl {
+                Decl::Scenario(scenario) => {
+                    if !matches!(classify(scenario), ScenarioClass::Executable) {
+                        return RuleStatus::Unavailable;
+                    }
+                }
+                _ => return RuleStatus::Unavailable,
+            }
         }
     }
     RuleStatus::Passed

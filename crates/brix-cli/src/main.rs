@@ -108,28 +108,43 @@ fn run_fmt(p: &ParsedArgs) -> i32 {
         eprintln!("brix fmt: expected a source file or package path");
         return EXIT_USAGE;
     };
-    match brix_cli::build::format(operand) {
-        Ok(outcome) if p.flag("check") && outcome.changed => {
-            eprintln!(
-                "brix fmt: {} is not canonically formatted",
-                outcome.source_path
-            );
-            EXIT_FAILURE
-        }
-        Ok(outcome) if p.flag("write") => {
-            match std::fs::write(&outcome.source_path, outcome.formatted) {
-                Ok(()) => {
-                    println!("brix: formatted {}", outcome.source_path);
-                    EXIT_SUCCESS
+    match brix_cli::build::format_all(operand) {
+        Ok(outcomes) if p.flag("check") => {
+            let unformatted: Vec<&str> = outcomes
+                .iter()
+                .filter(|o| o.changed)
+                .map(|o| o.source_path.as_str())
+                .collect();
+            if unformatted.is_empty() {
+                EXIT_SUCCESS
+            } else {
+                for path in &unformatted {
+                    eprintln!("brix fmt: {path} is not canonically formatted");
                 }
-                Err(error) => {
-                    eprintln!("brix fmt: I/O error: {error}");
-                    EXIT_FAILURE
-                }
+                EXIT_FAILURE
             }
         }
-        Ok(outcome) => {
-            print!("{}", outcome.formatted);
+        Ok(outcomes) if p.flag("write") => {
+            let mut ok = true;
+            for outcome in outcomes.into_iter().filter(|o| o.changed) {
+                match std::fs::write(&outcome.source_path, outcome.formatted) {
+                    Ok(()) => println!("brix: formatted {}", outcome.source_path),
+                    Err(error) => {
+                        eprintln!("brix fmt: I/O error: {error}");
+                        ok = false;
+                    }
+                }
+            }
+            if ok {
+                EXIT_SUCCESS
+            } else {
+                EXIT_FAILURE
+            }
+        }
+        Ok(outcomes) => {
+            for outcome in &outcomes {
+                print!("{}", outcome.formatted);
+            }
             EXIT_SUCCESS
         }
         Err(e) => {

@@ -85,6 +85,14 @@ pub const UNDECLARED_FN_EFFECT: &str = "BRX-IR-0011";
 /// `BRX-IR-0012` — a `total` function body can fail (`?`); only a `partial fn`
 /// may fail (Part V §5; issue #47).
 pub const TOTAL_FN_FALLIBLE: &str = "BRX-IR-0012";
+/// `BRX-PKG-0001` — a multi-file package's non-entry source (`src/<mod>.brix`)
+/// declares its own `package NAME @ VERSION`; only the package entry
+/// (`src/world.brix`) may carry package identity (issue #42).
+pub const PACKAGE_DECL_OUTSIDE_ROOT: &str = "BRX-PKG-0001";
+/// `BRX-PKG-0002` — two files in the same package export a decl of the same
+/// bare name (one module's export would silently shadow another's); the
+/// second declaration is rejected rather than picked arbitrarily.
+pub const DUPLICATE_EXPORT: &str = "BRX-PKG-0002";
 
 pub fn error(code: &'static str, span: Span, msg: impl Into<String>) -> Diagnostic {
     Diagnostic::error(code, span, msg)

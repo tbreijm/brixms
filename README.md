@@ -88,6 +88,11 @@ scenario Smoke {
 - **Entities and rels** are the two durable kernel primitives — nodes and
   typed-role edges. Everything else (revisions, rules, provenance) is built
   from the same two primitives under sealed schemas.
+- A package can grow beyond one file: any sibling `src/<name>.brix` is a real
+  submodule, published under the package-qualified path `pkg.<name>` (e.g.
+  `src/order.brix` in `brix.math` becomes `brix.math.order`, reachable via
+  `use brix.math.order.{…}` or a bare call from inside the same package).
+  `world.brix` is the only file allowed to declare `package NAME @ VERSION`.
 - **Settlement**: on every committed revision, the compiler resolves the rule
   dependency graph into phases and derives the least fixpoint of the program's
   rules over the base facts. A revision is published fully settled or not at

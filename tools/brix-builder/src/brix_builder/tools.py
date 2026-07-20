@@ -486,10 +486,34 @@ class BrixTools:
             )
 
     def _apply_canonical_fmt(self, materialized_root: Path) -> bool:
-        """Rewrite editable `.brix` overlay files to `brix fmt` stdout when safe."""
+        """Rewrite editable `.brix` overlay files to `brix fmt --write` output when safe.
+
+        A single `fmt <operand> --write` call formats and rewrites every local
+        file (issue #42: the entry plus every `src/*.brix` submodule) at its
+        real on-disk path in one pass — calling `fmt` per submodule file
+        instead would mis-resolve which file is "the entry" for that
+        invocation and mix unrelated files' rendered output together.
+        """
 
         binary = self.config.brix_binary
         if not binary.is_file():
+            return False
+        try:
+            operand = self.candidate.entry_operand(materialized_root)
+        except ToolError:
+            return False
+        try:
+            completed = subprocess.run(
+                [str(binary), "fmt", str(operand), "--write"],
+                cwd=materialized_root,
+                capture_output=True,
+                text=True,
+                timeout=self.config.request_timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False
+        if completed.returncode != 0:
             return False
         updated: dict[str, str] = {}
         for rel, content in self.candidate.contents().items():
@@ -499,19 +523,9 @@ class BrixTools:
             if not target.is_file():
                 continue
             try:
-                completed = subprocess.run(
-                    [str(binary), "fmt", str(target)],
-                    cwd=materialized_root,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.config.request_timeout_seconds,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired:
-                return False
-            if completed.returncode != 0:
-                return False
-            canonical = completed.stdout
+                canonical = target.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
             if canonical != content:
                 updated[rel] = canonical
         if not updated:
@@ -531,18 +545,22 @@ class BrixTools:
         """Exact diff toward canonical rendering, only for already-checking source.
 
         `brix fmt` exits 0 even on some invalid inputs and prints a truncated
-        recovery -- never treat that as a repair target.
+        recovery -- never treat that as a repair target. Covers every local
+        file (issue #42: the entry plus every `src/*.brix` submodule), not
+        just `src/world.brix` — one `fmt --write` call renders every file at
+        its real path, then each is diffed against the candidate's own text.
         """
 
-        target = materialized_root / "src" / "world.brix"
-        if not target.is_file():
-            return None
         binary = self.config.brix_binary
         if not binary.is_file():
             return None
         try:
+            operand = self.candidate.entry_operand(materialized_root)
+        except ToolError:
+            return None
+        try:
             completed = subprocess.run(
-                [str(binary), "fmt", str(target)],
+                [str(binary), "fmt", str(operand), "--write"],
                 cwd=materialized_root,
                 capture_output=True,
                 text=True,
@@ -553,18 +571,28 @@ class BrixTools:
             return None
         if completed.returncode != 0:
             return None
-        current = self.candidate.contents().get("src/world.brix", "")
-        canonical = completed.stdout
-        if current == canonical or not canonical.strip():
-            return None
-        return "".join(
-            difflib.unified_diff(
-                current.splitlines(keepends=True),
-                canonical.splitlines(keepends=True),
-                fromfile="candidate/src/world.brix",
-                tofile="canonical/src/world.brix",
+        chunks: list[str] = []
+        for rel, current in sorted(self.candidate.contents().items()):
+            if not rel.endswith(".brix"):
+                continue
+            target = materialized_root / rel
+            if not target.is_file():
+                continue
+            try:
+                canonical = target.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            if current == canonical or not canonical.strip():
+                continue
+            chunks.extend(
+                difflib.unified_diff(
+                    current.splitlines(keepends=True),
+                    canonical.splitlines(keepends=True),
+                    fromfile=f"candidate/{rel}",
+                    tofile=f"canonical/{rel}",
+                )
             )
-        )
+        return "".join(chunks) or None
 
     def test_candidate(self, action: TestCandidateAction) -> ToolResult:
         args = ["test"]

@@ -8,6 +8,7 @@
 
 pub mod args;
 pub mod build;
+pub mod lowering;
 pub mod package;
 pub mod quality;
 pub mod scaffold;

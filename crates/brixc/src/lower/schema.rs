@@ -79,7 +79,7 @@ fn register_names(file: &ast::File, mut resolver: ProgramResolver) -> ProgramRes
     for d in &file.decls {
         match d {
             Decl::Entity(e) => {
-                resolver = resolver.with_entity(QualIdent::simple(e.name.text.clone()));
+                resolver = resolver.with_entity(QualIdent::from(e.name.text.as_str()));
             }
             Decl::Enum(e) => {
                 let variants: Vec<IrIdent> = e
@@ -87,7 +87,7 @@ fn register_names(file: &ast::File, mut resolver: ProgramResolver) -> ProgramRes
                     .iter()
                     .map(|v| IrIdent::new(v.name.text.clone()))
                     .collect();
-                resolver = resolver.with_enum(QualIdent::simple(e.name.text.clone()), variants);
+                resolver = resolver.with_enum(QualIdent::from(e.name.text.as_str()), variants);
             }
             _ => {}
         }
@@ -111,12 +111,12 @@ fn register_aliases(
                         format!("type alias `{}` refers to itself", t.name.text),
                     ));
                     resolver = resolver.with_alias(
-                        QualIdent::simple(t.name.text.clone()),
+                        QualIdent::from(t.name.text.as_str()),
                         Ty::Var(meta.fresh_tyvar()),
                     );
                 } else {
                     let ty = lower_type(&t.value, TyPos::Role, &resolver, meta, diags);
-                    resolver = resolver.with_alias(QualIdent::simple(t.name.text.clone()), ty);
+                    resolver = resolver.with_alias(QualIdent::from(t.name.text.as_str()), ty);
                 }
                 meta.set_decl_span(IrIdent::new(t.name.text.clone()), t.span);
             }
@@ -134,7 +134,7 @@ fn register_aliases(
                     .collect();
                 let row = brix_ir::types::Row::closed(fields);
                 resolver =
-                    resolver.with_alias(QualIdent::simple(r.name.text.clone()), Ty::record(row));
+                    resolver.with_alias(QualIdent::from(r.name.text.as_str()), Ty::record(row));
                 meta.set_decl_span(IrIdent::new(r.name.text.clone()), r.span);
             }
             _ => {}
@@ -172,7 +172,7 @@ fn build_schemas(
     for d in &file.decls {
         match d {
             Decl::Entity(e) => {
-                let qi = QualIdent::simple(e.name.text.clone());
+                let qi = QualIdent::from(e.name.text.as_str());
                 let mut roles = Vec::new();
                 let mut key = Vec::new();
                 for f in &e.fields {
@@ -198,7 +198,7 @@ fn build_schemas(
                 meta.set_decl_span(IrIdent::new(e.name.text.clone()), e.span);
             }
             Decl::Rel(r) => {
-                let qi = QualIdent::simple(r.name.text.clone());
+                let qi = QualIdent::from(r.name.text.as_str());
                 let mut roles = Vec::new();
                 let mut key: Vec<IrIdent> = Vec::new();
                 for f in &r.roles {
@@ -292,7 +292,7 @@ fn build_schemas(
                 meta.set_decl_span(proto_name, p.span);
             }
             Decl::Fn(f) => {
-                let qi = QualIdent::simple(f.name.text.clone());
+                let qi = QualIdent::from(f.name.text.as_str());
                 let params: Vec<Ty> = f
                     .params
                     .iter()

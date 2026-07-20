@@ -137,6 +137,59 @@ fn locked_multi_package_graph_builds_and_runs_through_the_cli() {
     std::fs::remove_dir_all(&root).ok();
 }
 
+// Distinct from `LIB_SRC`: the multi-file lib's root carries only the
+// relation, so `scale` is exported exactly once — from `ops.brix` — and the
+// fixture doesn't trip the duplicate-export guard (`BRX-PKG-0002`).
+const LIB_WORLD_MULTI_SRC: &str =
+    "package lib @ 1.0.0\nrel Widget { id: Int; n: Int } key(id)\n";
+const LIB_OPS_SRC: &str = "fn scale(x: Int) -> Int = x + x\n";
+
+/// Same shape as `scaffold_app`, but `lib` is itself a **multi-file**
+/// package (issue #42): `src/world.brix` (its `rel Widget`) plus a local
+/// submodule `src/ops.brix` (`fn scale`). `app` reaches the submodule export
+/// through its package-qualified path, `use lib.ops.{scale}` — proving a
+/// multi-file *dependency* hydrates and lowers, not just a multi-file root.
+fn scaffold_app_with_multi_file_lib(tag: &str) -> (Utf8PathBuf, Utf8PathBuf) {
+    const APP_SRC_MULTI_LIB: &str = "package app @ 0.1.0\n\
+use lib.{Widget}\n\
+use lib.ops.{scale}\n\
+rel Out { id: Int; v: Int } key(id)\n\
+derive R: Out(id: i, v: y) from { Widget(id: i, n: x); let y = scale(x) }\n";
+
+    let root = tmp_dir(tag);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("brix.toml"), APP_TOML).unwrap();
+    let source_path = root.join("src").join("world.brix");
+    std::fs::write(&source_path, APP_SRC_MULTI_LIB).unwrap();
+
+    let registry = Registry::open(root.join(".brix").join("registry")).expect("registry opens");
+    let lib_manifest = Manifest::parse("[package]\nname = \"lib\"\nversion = \"1.0.0\"\n").unwrap();
+    let mut lib_files: BTreeMap<Utf8PathBuf, Vec<u8>> = BTreeMap::new();
+    lib_files.insert(
+        Utf8PathBuf::from("src/world.brix"),
+        LIB_WORLD_MULTI_SRC.as_bytes().to_vec(),
+    );
+    lib_files.insert(
+        Utf8PathBuf::from("src/ops.brix"),
+        LIB_OPS_SRC.as_bytes().to_vec(),
+    );
+    registry.publish(&lib_manifest, &lib_files).expect("publish lib");
+    (root, source_path)
+}
+
+#[test]
+fn a_multi_file_dependency_hydrates_and_lowers_through_check() {
+    let (root, source) = scaffold_app_with_multi_file_lib("multi-lib");
+    let out = brix(&["check", source.as_str()]);
+    assert!(
+        out.status.success(),
+        "checking a package whose dependency is itself multi-file failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
 #[test]
 fn missing_dependency_fails_closed() {
     // Registry created but `lib` never published — resolution has no solution.
