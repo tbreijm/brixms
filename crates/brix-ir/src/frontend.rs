@@ -239,6 +239,9 @@ mod tests {
         assert_eq!(overloads.len(), 2);
         assert_eq!(overloads[0].ret, Ty::Int(IntWidth::Int));
         assert_eq!(overloads[1].ret, Ty::F64);
-        assert_eq!(r.function(&QualIdent::from("clamp")).unwrap().ret, Ty::Int(IntWidth::Int));
+        assert_eq!(
+            r.function(&QualIdent::from("clamp")).unwrap().ret,
+            Ty::Int(IntWidth::Int)
+        );
     }
 }

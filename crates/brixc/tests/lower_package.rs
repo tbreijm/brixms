@@ -95,7 +95,12 @@ fn reordering_submodules_does_not_change_the_result() {
     assert!(!b.has_errors());
 
     let names = |p: &brixc::lower::PackageLowered| -> Vec<String> {
-        let mut v: Vec<String> = p.source.functions.iter().map(|f| f.name.to_string()).collect();
+        let mut v: Vec<String> = p
+            .source
+            .functions
+            .iter()
+            .map(|f| f.name.to_string())
+            .collect();
         v.sort();
         v
     };

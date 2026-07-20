@@ -23,12 +23,20 @@ impl ParsedFile {
     fn read(path: &Utf8Path) -> std::io::Result<Self> {
         let source = std::fs::read_to_string(path)?;
         let (file, diags) = parse_file(&source);
-        Ok(Self { source, file, diags })
+        Ok(Self {
+            source,
+            file,
+            diags,
+        })
     }
 
     fn from_source(source: String) -> Self {
         let (file, diags) = parse_file(&source);
-        Self { source, file, diags }
+        Self {
+            source,
+            file,
+            diags,
+        }
     }
 }
 
@@ -56,7 +64,12 @@ pub fn parse(located: &LocatedPackage) -> std::io::Result<ParsedPackage> {
     let submodules = located
         .submodules
         .iter()
-        .map(|s| (s.qualifier.clone(), ParsedFile::from_source(s.source.clone())))
+        .map(|s| {
+            (
+                s.qualifier.clone(),
+                ParsedFile::from_source(s.source.clone()),
+            )
+        })
         .collect();
     let deps = located
         .deps
@@ -67,7 +80,12 @@ pub fn parse(located: &LocatedPackage) -> std::io::Result<ParsedPackage> {
             submodules: dep
                 .submodules
                 .iter()
-                .map(|s| (s.qualifier.clone(), ParsedFile::from_source(s.source.clone())))
+                .map(|s| {
+                    (
+                        s.qualifier.clone(),
+                        ParsedFile::from_source(s.source.clone()),
+                    )
+                })
                 .collect(),
         })
         .collect();

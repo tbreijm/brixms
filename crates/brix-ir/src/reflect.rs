@@ -1551,10 +1551,8 @@ impl Reflect {
                 1 => matches.pop(),
                 _ => {
                     let best = matches.iter().map(|(_, _, s)| *s).max().unwrap_or(0);
-                    let mut top: Vec<_> = matches
-                        .into_iter()
-                        .filter(|(_, _, s)| *s == best)
-                        .collect();
+                    let mut top: Vec<_> =
+                        matches.into_iter().filter(|(_, _, s)| *s == best).collect();
                     if top.len() == 1 {
                         top.pop()
                     } else {

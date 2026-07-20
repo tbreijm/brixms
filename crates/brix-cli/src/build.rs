@@ -94,8 +94,10 @@ impl BuildError {
 /// [`BuildError::PackageDiagnostics`]. Reports with no diagnostics at all
 /// are dropped first.
 fn error_from_reports(reports: Vec<DiagnosticReport>) -> BuildError {
-    let mut non_empty: Vec<DiagnosticReport> =
-        reports.into_iter().filter(|r| !r.diagnostics.is_empty()).collect();
+    let mut non_empty: Vec<DiagnosticReport> = reports
+        .into_iter()
+        .filter(|r| !r.diagnostics.is_empty())
+        .collect();
     if non_empty.len() <= 1 {
         BuildError::Diagnostics(non_empty.pop().unwrap_or_else(|| DiagnosticReport {
             source: String::new(),
@@ -262,7 +264,10 @@ pub fn format_all(operand: &str) -> Result<Vec<FormatOutcome>, BuildError> {
     for (qualifier, pf) in &parsed.submodules {
         let formatted = brix_ast::format_file(&pf.file);
         outcomes.push(FormatOutcome {
-            source_path: located.pkg_root.join("src").join(format!("{qualifier}.brix")),
+            source_path: located
+                .pkg_root
+                .join("src")
+                .join(format!("{qualifier}.brix")),
             changed: formatted != pf.source,
             formatted,
         });

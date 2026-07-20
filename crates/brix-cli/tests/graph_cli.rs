@@ -140,8 +140,7 @@ fn locked_multi_package_graph_builds_and_runs_through_the_cli() {
 // Distinct from `LIB_SRC`: the multi-file lib's root carries only the
 // relation, so `scale` is exported exactly once — from `ops.brix` — and the
 // fixture doesn't trip the duplicate-export guard (`BRX-PKG-0002`).
-const LIB_WORLD_MULTI_SRC: &str =
-    "package lib @ 1.0.0\nrel Widget { id: Int; n: Int } key(id)\n";
+const LIB_WORLD_MULTI_SRC: &str = "package lib @ 1.0.0\nrel Widget { id: Int; n: Int } key(id)\n";
 const LIB_OPS_SRC: &str = "fn scale(x: Int) -> Int = x + x\n";
 
 /// Same shape as `scaffold_app`, but `lib` is itself a **multi-file**
@@ -173,7 +172,9 @@ derive R: Out(id: i, v: y) from { Widget(id: i, n: x); let y = scale(x) }\n";
         Utf8PathBuf::from("src/ops.brix"),
         LIB_OPS_SRC.as_bytes().to_vec(),
     );
-    registry.publish(&lib_manifest, &lib_files).expect("publish lib");
+    registry
+        .publish(&lib_manifest, &lib_files)
+        .expect("publish lib");
     (root, source_path)
 }
 

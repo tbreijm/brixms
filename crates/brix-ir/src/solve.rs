@@ -225,9 +225,7 @@ fn try_unify_mut(subst: &mut BTreeMap<TyVar, Ty>, a: Ty, b: Ty) -> bool {
                 true
             }
         }
-        Step::Descend(pairs) => pairs
-            .into_iter()
-            .all(|(x, y)| try_unify_mut(subst, x, y)),
+        Step::Descend(pairs) => pairs.into_iter().all(|(x, y)| try_unify_mut(subst, x, y)),
         Step::Rows(a, b) => {
             let matched = match_rows(&a, &b);
             if !matched.missing_in_left.is_empty() || !matched.missing_in_right.is_empty() {

@@ -39,7 +39,11 @@ fn check_sees_every_local_file_and_resolves_cross_module_calls() {
     fs::write(root.join("src/interp.brix"), INTERP).unwrap();
 
     let located = brix_cli::package::locate(root.as_str()).expect("locate");
-    assert_eq!(located.submodules.len(), 2, "world.brix is excluded from submodules");
+    assert_eq!(
+        located.submodules.len(),
+        2,
+        "world.brix is excluded from submodules"
+    );
 
     let outcome = brix_cli::build::check(root.as_str());
     assert!(
@@ -85,11 +89,7 @@ fn duplicate_bare_export_across_two_submodules_fails_closed() {
     fs::write(root.join("brix.toml"), MANIFEST).unwrap();
     fs::write(root.join("src/world.brix"), WORLD).unwrap();
     fs::write(root.join("src/order.brix"), ORDER).unwrap();
-    fs::write(
-        root.join("src/other.brix"),
-        "fn clamp(x: Int) -> Int = x\n",
-    )
-    .unwrap();
+    fs::write(root.join("src/other.brix"), "fn clamp(x: Int) -> Int = x\n").unwrap();
 
     let err = match brix_cli::build::check(root.as_str()) {
         Err(e) => e,
@@ -114,10 +114,7 @@ fn fmt_all_covers_the_entry_and_every_submodule() {
     let outcomes = brix_cli::build::format_all(root.as_str()).expect("format_all");
     assert_eq!(outcomes.len(), 3, "entry + 2 submodules");
     assert!(outcomes[0].source_path.ends_with("src/world.brix"));
-    let paths: Vec<String> = outcomes
-        .iter()
-        .map(|o| o.source_path.to_string())
-        .collect();
+    let paths: Vec<String> = outcomes.iter().map(|o| o.source_path.to_string()).collect();
     assert!(paths.iter().any(|p| p.ends_with("src/order.brix")));
     assert!(paths.iter().any(|p| p.ends_with("src/interp.brix")));
 
