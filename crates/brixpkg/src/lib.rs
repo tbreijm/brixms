@@ -38,7 +38,9 @@ pub mod resolve;
 pub mod version;
 
 pub use digest::{tree_digest, ContentDigest};
-pub use graph::{hydrate, HydrateError, PackageFiles, PackageGraph, LOCKFILE_NAME};
+pub use graph::{
+    check_acyclic, hydrate, Cycle, HydrateError, PackageFiles, PackageGraph, LOCKFILE_NAME,
+};
 pub use lock::{LockEntry, LockSource, Lockfile, LOCK_FORMAT_VERSION};
 pub use manifest::{DependencySpec, Manifest, ManifestError};
 pub use registry::{IndexEntry, Registry, RegistryError};

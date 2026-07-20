@@ -64,6 +64,14 @@ pub const UNRESOLVED_TYPE: &str = "BRX-LOW-0012";
 /// `BRX-LOW-0013` — mismatch (F): a compound unit type (`T / U`) has no
 /// `Ty` representation; lowered to `Ty::Var` with this warning.
 pub const COMPOUND_UNIT: &str = "BRX-LOW-0013";
+/// `BRX-LOW-0014` — a `use` item names a bare identifier that is either (a)
+/// ambiguous: imported to two different qualified targets by separate `use`
+/// items (issue #42 Slice 2, e.g. `use a.{Widget}` + `use b.{Widget}`), or
+/// (b) a duplicate export: imported while a root-local relation/entity/enum/
+/// fn/type of the same bare name is also declared in this file. Either way
+/// the bare name is not silently resolved to whichever `use` happened to be
+/// processed last — the reference must be qualified.
+pub const AMBIGUOUS_IMPORT: &str = "BRX-LOW-0014";
 /// `BRX-IR-0005` — an expression failed HM/ground-dimension type checking.
 pub const TYPE_ERROR: &str = "BRX-IR-0005";
 /// `BRX-IR-0006` — Appendix E `pure(B, H)` violated: an impure effect atom

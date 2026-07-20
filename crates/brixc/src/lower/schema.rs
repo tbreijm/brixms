@@ -39,7 +39,7 @@ pub fn build_onto(
     meta: &mut LowerMeta,
     diags: &mut Vec<Diagnostic>,
 ) -> ProgramResolver {
-    resolver = process_uses(file, resolver);
+    resolver = process_uses(file, resolver, diags);
     resolver = register_names(file, resolver);
     resolver = register_aliases(file, resolver, meta, diags);
     resolver = register_units(file, resolver);
@@ -47,7 +47,45 @@ pub fn build_onto(
     recompute_derived(file, resolver, meta)
 }
 
-fn process_uses(file: &ast::File, mut resolver: ProgramResolver) -> ProgramResolver {
+/// The bare names this file declares itself (entity/rel/enum/fn/type/record),
+/// independent of the resolver's state — used by [`process_uses`] to catch a
+/// `use` item that shadows a root-local declaration of the same name (issue
+/// #42 Slice 2's "duplicate export" case). Computed straight off the AST so
+/// the check does not depend on decl-registration order within pass 1.
+fn local_decl_names(file: &ast::File) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for d in &file.decls {
+        let name = match d {
+            Decl::Entity(e) => Some(&e.name),
+            Decl::Rel(r) => Some(&r.name),
+            Decl::Enum(e) => Some(&e.name),
+            Decl::Fn(f) => Some(&f.name),
+            Decl::Type(t) => Some(&t.name),
+            Decl::Record(r) => Some(&r.name),
+            _ => None,
+        };
+        if let Some(name) = name {
+            names.insert(name.text.clone());
+        }
+    }
+    names
+}
+
+/// Pass 1's `use`-item walk (design §"Pass 1"). Populates the import/prefix
+/// maps and, per issue #42 Slice 2, catches the two ways a bare imported
+/// name stops being safe to resolve silently: (a) **ambiguous** — two `use`
+/// items import the same bare name to different qualified targets, and (b)
+/// **duplicate export** — an imported bare name collides with a root-local
+/// declaration of the same name in this file. Both emit
+/// [`diag::AMBIGUOUS_IMPORT`] at the offending `use` item's span; lowering
+/// continues (error severity blocks a *clean* lower via `Lowered::has_errors`,
+/// same as every other `BRX-LOW-*` error).
+fn process_uses(
+    file: &ast::File,
+    mut resolver: ProgramResolver,
+    diags: &mut Vec<Diagnostic>,
+) -> ProgramResolver {
+    let locals = local_decl_names(file);
     for u in &file.uses {
         let base: Vec<IrIdent> = u
             .path
@@ -65,7 +103,39 @@ fn process_uses(file: &ast::File, mut resolver: ProgramResolver) -> ProgramResol
             for item in &u.items {
                 let mut segs = base.clone();
                 segs.push(IrIdent::new(item.text.clone()));
-                resolver = resolver.with_import(item.text.clone(), QualIdent::from_segments(segs));
+                let target = QualIdent::from_segments(segs);
+                let previous = resolver.imported_target(&item.text).cloned();
+                resolver = resolver.with_import(item.text.clone(), target.clone());
+
+                if resolver.is_ambiguous_import(&item.text) {
+                    let mut candidates: Vec<String> = Vec::new();
+                    if let Some(prev) = &previous {
+                        candidates.push(prev.to_string());
+                    }
+                    candidates.push(target.to_string());
+                    candidates.sort();
+                    candidates.dedup();
+                    diags.push(diag::error(
+                        diag::AMBIGUOUS_IMPORT,
+                        item.span,
+                        format!(
+                            "ambiguous import `{}`: could resolve to {}",
+                            item.text,
+                            candidates.join(" or ")
+                        ),
+                    ));
+                }
+
+                if locals.contains(&item.text) {
+                    diags.push(diag::error(
+                        diag::AMBIGUOUS_IMPORT,
+                        item.span,
+                        format!(
+                            "import `{}` collides with a local declaration of the same name in this file",
+                            item.text
+                        ),
+                    ));
+                }
             }
         }
     }
