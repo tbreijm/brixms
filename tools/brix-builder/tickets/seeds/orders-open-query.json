@@ -1,0 +1,14 @@
+{
+  "ticket_id": "seed-orders-open-query",
+  "brief": "Add a pure query that returns open orders (orders without a matching fulfillment event) without adding capabilities, state, or new entities.",
+  "package_path": ".",
+  "write_allowlist": ["src/*.brix", "src/**/*.brix"],
+  "acceptance_gates": ["format", "check", "test", "quality", "package_build"],
+  "max_iterations": 3,
+  "max_actions_per_role": 12,
+  "context_tokens": 8192,
+  "metadata": {
+    "domain": "order-management",
+    "kind": "read-only-query"
+  }
+}

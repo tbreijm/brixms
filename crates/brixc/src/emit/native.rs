@@ -217,6 +217,7 @@ fn binop_for(name: &str) -> Option<engine::BinOp> {
         "brix.ops.add" => engine::BinOp::Add,
         "brix.ops.sub" => engine::BinOp::Sub,
         "brix.ops.mul" => engine::BinOp::Mul,
+        "brix.ops.div" => engine::BinOp::Div,
         "brix.ops.eq" => engine::BinOp::Eq,
         "brix.ops.ne" => engine::BinOp::Ne,
         "brix.ops.lt" => engine::BinOp::Lt,

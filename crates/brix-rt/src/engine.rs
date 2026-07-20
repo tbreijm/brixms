@@ -255,6 +255,10 @@ pub enum BinOp {
     Add,
     Sub,
     Mul,
+    /// Truncating integer division (Rust `/` on `i128`; floor for the
+    /// non-negative operands every Ring 0 semantic path uses) — issue #47
+    /// Part 2's basis-point fixed-point ruling (no float `Value`).
+    Div,
     Eq,
     Ne,
     Lt,
@@ -1379,10 +1383,18 @@ fn eval_expr(program: &Program, env: &Env, expr: &Expr) -> Value {
 
 /// Native total-function fallback. `surcharge` used to live here as a
 /// hand-transcription of its BrixMS source; it is now compiled from source
-/// (issue #47 Slice 1.5) and resolves via `Program::fn_defs`, so no builtin
-/// remains. Kept as the seam for any future host-provided total.
-fn builtin_total(_name: &str) -> Option<TotalFn> {
-    None
+/// (issue #47 Slice 1.5) and resolves via `Program::fn_defs`. What remains
+/// is `brix.math.clamp(x, lo, hi)` — a prelude-seeded signature
+/// (`brixc::lower::resolve::seed_prelude`) with no source body to compile,
+/// so it stays a builtin: integer clamp on basis-point `Value::Int`s, per
+/// the issue #47 Part 2 fixed-point ruling (no float arithmetic).
+fn builtin_total(name: &str) -> Option<TotalFn> {
+    (name == "brix.math.clamp").then_some(|args: &[Value]| {
+        let x = args[0].as_i128().expect("clamp: non-numeric value");
+        let lo = args[1].as_i128().expect("clamp: non-numeric lo");
+        let hi = args[2].as_i128().expect("clamp: non-numeric hi");
+        Value::Int(x.max(lo).min(hi).try_into().unwrap_or(i64::MAX))
+    })
 }
 
 fn builtin_partial(name: &str) -> Option<PartialFn> {
@@ -1397,7 +1409,12 @@ fn builtin_partial(name: &str) -> Option<PartialFn> {
             .expect("riskModel expects numeric current time");
         let remaining = due - now;
         // Probability is represented as basis points in the runtime's
-        // integer-only semantic path.
+        // integer-only semantic path. This is the ground truth for the
+        // issue #47 Part 2 fixed-point ruling (integer-floor, no float
+        // `Value`) — the oracle's `risk_model` test hand-regs
+        // (`crates/brix-oracle/tests/flagship.rs`,
+        // `crates/brix-cli/tests/build_run_smoke.rs`) were reconciled to
+        // this exact form.
         let risk = if remaining <= 0 {
             10_000
         } else {
@@ -1410,7 +1427,7 @@ fn builtin_partial(name: &str) -> Option<PartialFn> {
 fn eval_binop(operator: BinOp, left: &Value, right: &Value) -> Value {
     use BinOp::*;
     match operator {
-        Add | Sub | Mul => {
+        Add | Sub | Mul | Div => {
             let (left, right) = (
                 left.as_i128().expect("numeric lhs"),
                 right.as_i128().expect("numeric rhs"),
@@ -1420,6 +1437,9 @@ fn eval_binop(operator: BinOp, left: &Value, right: &Value) -> Value {
                     Add => left + right,
                     Sub => left - right,
                     Mul => left * right,
+                    // Truncating toward zero (issue #47 Part 2 ruling) —
+                    // matches the oracle's `eval_binop`; no float `Value`.
+                    Div => left / right,
                     _ => unreachable!(),
                 }
                 .try_into()

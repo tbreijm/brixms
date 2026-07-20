@@ -1,0 +1,14 @@
+{
+  "ticket_id": "seed-approval-workflow-status-query",
+  "brief": "Add a query that reports the current status of each pending approval request. Do not add a new state relation, do not mutate ownership, and do not add a capability.",
+  "package_path": ".",
+  "write_allowlist": ["src/*.brix", "src/**/*.brix"],
+  "acceptance_gates": ["format", "check", "test", "quality", "package_build"],
+  "max_iterations": 3,
+  "max_actions_per_role": 12,
+  "context_tokens": 8192,
+  "metadata": {
+    "domain": "approval-workflow",
+    "kind": "read-only-query"
+  }
+}

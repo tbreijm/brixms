@@ -12,5 +12,6 @@ pub mod package;
 pub mod publish;
 pub mod quality;
 pub mod scaffold;
+pub mod scenario;
 pub mod test;
 pub mod toolchain;

@@ -1,0 +1,16 @@
+package brix.time @ 0.1.0
+module Time
+
+fn instant_of(seconds: Int) -> Int = seconds
+
+fn duration_of(seconds: Int) -> Int = seconds
+
+fn add(instant: Int, duration: Int) -> Int = instant + duration
+
+fn since(later: Int, earlier: Int) -> Int = later - earlier
+
+fn later(a: Int, b: Int) -> Bool = a > b
+
+fn earlier(a: Int, b: Int) -> Bool = a < b
+
+fn zero() -> Int = 0

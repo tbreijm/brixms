@@ -229,6 +229,7 @@ fn bin_op(op: oracle::BinOp) -> rt::BinOp {
         oracle::BinOp::Add => rt::BinOp::Add,
         oracle::BinOp::Sub => rt::BinOp::Sub,
         oracle::BinOp::Mul => rt::BinOp::Mul,
+        oracle::BinOp::Div => rt::BinOp::Div,
         oracle::BinOp::Eq => rt::BinOp::Eq,
         oracle::BinOp::Ne => rt::BinOp::Ne,
         oracle::BinOp::Lt => rt::BinOp::Lt,

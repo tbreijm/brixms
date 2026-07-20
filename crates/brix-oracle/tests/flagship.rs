@@ -62,6 +62,11 @@ fn kinds() -> KindTable {
 /// clamp(1.0 - remaining / 24 hours, 0.0, 1.0) }` — hand-transcribed from
 /// the flagship source, same reasoning as `surcharge`. `Instant` values
 /// are whole hours here; `Probability` is basis points (×10000).
+///
+/// Integer-floor fixed-point (issue #47 Part 2 ruling): truncating `i128`
+/// division, no float arithmetic — matches `brix-rt::engine::builtin_partial`
+/// bit-for-bit (previously this hand-reg used f64 round-half, disagreeing
+/// with the runtime by 1 bp at `remaining = 8`: 6667 vs 6666).
 fn risk_model(args: &[Value]) -> Result<Value, Value> {
     let due = args[0].as_i128().expect("riskModel: non-numeric due");
     let now = args[1].as_i128().expect("riskModel: non-numeric now");
@@ -69,8 +74,7 @@ fn risk_model(args: &[Value]) -> Result<Value, Value> {
     let risk = if remaining <= 0 {
         10_000i64
     } else {
-        let frac = 1.0 - (remaining as f64 / 24.0);
-        (frac.clamp(0.0, 1.0) * 10_000.0).round() as i64
+        (((24 - remaining).clamp(0, 24) * 10_000) / 24) as i64
     };
     Ok(Value::Int(risk))
 }

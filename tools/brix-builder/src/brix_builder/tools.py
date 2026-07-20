@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -66,19 +67,27 @@ class ToolError(RuntimeError):
 class CandidatePackage:
     """An in-memory overlay that is materialized only into temporary trees."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, write_allowlist: Iterable[str] | None = None):
         self.root = root.resolve()
         if not self.root.is_dir():
             raise ToolError(f"package root is not a directory: {self.root}")
         self.base = self._snapshot()
         self.overlay: dict[str, str] = {}
+        self.write_allowlist = tuple(write_allowlist or ())
         self.expected_change: dict[str, Any] = {}
         self.required_validation: list[str] = []
 
     def _snapshot(self) -> dict[str, str]:
         files: dict[str, str] = {}
         for path in sorted(self.root.rglob("*")):
-            if not path.is_file() or any(part in IGNORED_PARTS for part in path.parts):
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or any(part in IGNORED_PARTS for part in path.parts)
+            ):
+                continue
+            resolved = path.resolve()
+            if self.root != resolved and self.root not in resolved.parents:
                 continue
             rel = path.relative_to(self.root).as_posix()
             if self.allowed(rel):
@@ -99,11 +108,21 @@ class CandidatePackage:
             return False
         return path.suffix == ".brix" or path.name in ALLOWED_EXACT
 
+    def editable(self, rel: str) -> bool:
+        """Return whether a ticket may change this package-local path."""
+
+        if not self.allowed(rel):
+            return False
+        if not self.write_allowlist:
+            return True
+        path = PurePosixPath(rel)
+        return any(path.match(pattern) for pattern in self.write_allowlist)
+
     def propose(self, action: ProposePatchAction) -> ToolResult:
         proposed: dict[str, str] = {}
         for candidate in action.files:
             rel = PurePosixPath(candidate.path).as_posix()
-            if not self.allowed(rel):
+            if not self.editable(rel):
                 return ToolResult(
                     False,
                     "rejected",
@@ -114,7 +133,7 @@ class CandidatePackage:
         staged = self.contents() | proposed
         for edit in action.edits:
             rel = PurePosixPath(edit.path).as_posix()
-            if not self.allowed(rel):
+            if not self.editable(rel):
                 return ToolResult(
                     False,
                     "rejected",
@@ -188,6 +207,24 @@ class CandidatePackage:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
 
+    def restore(
+        self,
+        base: dict[str, str],
+        overlay: dict[str, str],
+        expected_change: dict[str, Any] | None = None,
+        required_validation: list[str] | None = None,
+    ) -> None:
+        """Restore a persisted inert candidate without touching the live package."""
+
+        if any(not self.allowed(rel) for rel in (*base, *overlay)):
+            raise ToolError("persisted candidate contains a path outside the package")
+        if any(not self.editable(rel) for rel in overlay):
+            raise ToolError("persisted candidate violates the ticket write allowlist")
+        self.base = dict(base)
+        self.overlay = dict(overlay)
+        self.expected_change = dict(expected_change or {})
+        self.required_validation = list(required_validation or [])
+
     def entry_operand(self, root: Path) -> Path:
         if (root / "brix.toml").exists() and (root / "src" / "world.brix").exists():
             return root
@@ -202,9 +239,11 @@ class CandidatePackage:
 
 
 class BrixTools:
-    def __init__(self, config: BuilderConfig):
+    def __init__(
+        self, config: BuilderConfig, write_allowlist: Iterable[str] | None = None
+    ):
         self.config = config.normalized()
-        self.candidate = CandidatePackage(self.config.root)
+        self.candidate = CandidatePackage(self.config.root, write_allowlist)
 
     def dispatch(self, action: Action) -> ToolResult:
         if isinstance(action, ProjectContextAction):
@@ -385,6 +424,15 @@ class BrixTools:
         return self._run_brix("check", "--diagnostic-format", "json")
 
     def format_candidate(self) -> ToolResult:
+        """Host-owned format gate.
+
+        When the candidate already typechecks, the host applies `brix fmt` to the
+        in-memory overlay (never the live package). That removes overnight format
+        thrash: the model should not spend turns copying whitespace. When the
+        candidate does not check, `brix fmt` can emit truncated garbage for
+        invalid syntax -- we refuse to surface that as a formatting_diff.
+        """
+
         with tempfile.TemporaryDirectory(prefix="brix-builder-format-") as temporary:
             root = Path(temporary)
             self.candidate.materialize(root)
@@ -392,7 +440,7 @@ class BrixTools:
                 operand = self.candidate.entry_operand(root)
             except ToolError as error:
                 return ToolResult(False, "configuration_error", message=str(error))
-            result = self._command(["fmt", str(operand), "--check"])
+            result = self._command(["fmt", str(operand), "--check"], cwd=root)
             if result.ok:
                 return ToolResult(
                     True,
@@ -400,15 +448,123 @@ class BrixTools:
                     data={**result.data, "diff": self.candidate.diff()},
                     message="candidate is canonically formatted; no source was rewritten",
                 )
+            check = self._command(
+                ["check", str(operand), "--diagnostic-format", "json"], cwd=root
+            )
+            if check.ok and self._apply_canonical_fmt(root):
+                return ToolResult(
+                    True,
+                    "canonical",
+                    data={"diff": self.candidate.diff(), "host_applied_fmt": True},
+                    message=(
+                        "host applied canonical fmt to the candidate overlay; "
+                        "live package files were not modified"
+                    ),
+                )
+            data = {**result.data, "diff": self.candidate.diff(), "checks": check.ok}
+            if check.ok:
+                formatting_diff = self._formatting_diff(root)
+                if formatting_diff is not None:
+                    data["formatting_diff"] = formatting_diff
             return ToolResult(
                 False,
                 "noncanonical",
-                data={**result.data, "diff": self.candidate.diff()},
+                data=data,
                 message=(
-                    "candidate is not canonically formatted; the host will not rewrite "
-                    "the whole file because that could expand an unrelated diff"
+                    "candidate is not canonically formatted. "
+                    + (
+                        "see data.formatting_diff for the host fmt target"
+                        if data.get("formatting_diff")
+                        else (
+                            "candidate does not yet check -- fix parse/type errors "
+                            "before formatting; do not trust partial fmt output"
+                            if not check.ok
+                            else "re-inspect canonical spacing around the declaration"
+                        )
+                    )
                 ),
             )
+
+    def _apply_canonical_fmt(self, materialized_root: Path) -> bool:
+        """Rewrite editable `.brix` overlay files to `brix fmt` stdout when safe."""
+
+        binary = self.config.brix_binary
+        if not binary.is_file():
+            return False
+        updated: dict[str, str] = {}
+        for rel, content in self.candidate.contents().items():
+            if not rel.endswith(".brix") or not self.candidate.editable(rel):
+                continue
+            target = materialized_root / rel
+            if not target.is_file():
+                continue
+            try:
+                completed = subprocess.run(
+                    [str(binary), "fmt", str(target)],
+                    cwd=materialized_root,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.config.request_timeout_seconds,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                return False
+            if completed.returncode != 0:
+                return False
+            canonical = completed.stdout
+            if canonical != content:
+                updated[rel] = canonical
+        if not updated:
+            return False
+        self.candidate.overlay.update(updated)
+        with tempfile.TemporaryDirectory(prefix="brix-builder-format-verify-") as tmp:
+            verify_root = Path(tmp)
+            self.candidate.materialize(verify_root)
+            try:
+                operand = self.candidate.entry_operand(verify_root)
+            except ToolError:
+                return False
+            verified = self._command(["fmt", str(operand), "--check"], cwd=verify_root)
+            return verified.ok
+
+    def _formatting_diff(self, materialized_root: Path) -> str | None:
+        """Exact diff toward canonical rendering, only for already-checking source.
+
+        `brix fmt` exits 0 even on some invalid inputs and prints a truncated
+        recovery -- never treat that as a repair target.
+        """
+
+        target = materialized_root / "src" / "world.brix"
+        if not target.is_file():
+            return None
+        binary = self.config.brix_binary
+        if not binary.is_file():
+            return None
+        try:
+            completed = subprocess.run(
+                [str(binary), "fmt", str(target)],
+                cwd=materialized_root,
+                capture_output=True,
+                text=True,
+                timeout=self.config.request_timeout_seconds,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return None
+        if completed.returncode != 0:
+            return None
+        current = self.candidate.contents().get("src/world.brix", "")
+        canonical = completed.stdout
+        if current == canonical or not canonical.strip():
+            return None
+        return "".join(
+            difflib.unified_diff(
+                current.splitlines(keepends=True),
+                canonical.splitlines(keepends=True),
+                fromfile="candidate/src/world.brix",
+                tofile="canonical/src/world.brix",
+            )
+        )
 
     def test_candidate(self, action: TestCandidateAction) -> ToolResult:
         args = ["test"]
@@ -483,9 +639,9 @@ class BrixTools:
                 operand = self.candidate.entry_operand(root)
             except ToolError as error:
                 return ToolResult(False, "configuration_error", message=str(error))
-            return self._command([args[0], str(operand), *args[1:]])
+            return self._command([args[0], str(operand), *args[1:]], cwd=root)
 
-    def _command(self, args: list[str]) -> ToolResult:
+    def _command(self, args: list[str], *, cwd: Path) -> ToolResult:
         binary = self.config.brix_binary
         if not binary.is_file():
             return ToolResult(
@@ -496,7 +652,7 @@ class BrixTools:
         try:
             completed = subprocess.run(
                 [str(binary), *args],
-                cwd=self.config.root,
+                cwd=cwd,
                 capture_output=True,
                 text=True,
                 timeout=self.config.request_timeout_seconds,
@@ -520,9 +676,16 @@ class BrixTools:
 
     @staticmethod
     def _classify_unimplemented(result: ToolResult, capability: str) -> ToolResult:
+        # Stable unavailable codes from the public CLI:
+        # - `BRX-TEST-0001` — scenario semantics not available
+        # - `BRX-QUALITY-0003` — required quality evidence unavailable
+        # Older stubs also emit `BRX-QUALITY-0001` / prose "not yet implemented".
         combined = f"{result.data.get('stdout', '')}\n{result.data.get('stderr', '')}"
-        if "not yet implemented" in combined or any(
-            code in combined for code in ("BRX-QUALITY-0001", "BRX-TEST-0001")
+        if (
+            "not yet implemented" in combined
+            or "BRX-TEST-0001" in combined
+            or "BRX-QUALITY-0001" in combined
+            or "BRX-QUALITY-0003" in combined
         ):
             return ToolResult(
                 False,

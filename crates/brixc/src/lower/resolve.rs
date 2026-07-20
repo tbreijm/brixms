@@ -283,8 +283,8 @@ impl SchemaResolver for ProgramResolver {
         self.table.relation(name)
     }
 
-    fn function(&self, name: &QualIdent) -> Option<&FnSignature> {
-        self.table.function(name)
+    fn functions(&self, name: &QualIdent) -> &[FnSignature] {
+        self.table.functions(name)
     }
 
     fn has_completeness_witness(&self, relation: &QualIdent) -> bool {
@@ -309,7 +309,8 @@ pub struct FnInfo {
 /// source spans, fn-only information, and the monotonic `TyVar` supply.
 #[derive(Default)]
 pub struct LowerMeta {
-    fn_info: BTreeMap<QualIdent, FnInfo>,
+    /// Overload list per function name (declaration order).
+    fn_info: BTreeMap<QualIdent, Vec<FnInfo>>,
     decl_spans: BTreeMap<IrIdent, Span>,
     relation_decl_spans: BTreeMap<QualIdent, Span>,
     role_spans: BTreeMap<(QualIdent, IrIdent), Span>,
@@ -350,11 +351,19 @@ impl LowerMeta {
     }
 
     pub fn set_fn_info(&mut self, name: QualIdent, info: FnInfo) {
-        self.fn_info.insert(name, info);
+        self.fn_info.entry(name).or_default().push(info);
     }
 
+    /// First declared `FnInfo` for `name` (compat). Prefer [`fn_info_for_arity`].
     pub fn fn_info(&self, name: &QualIdent) -> Option<&FnInfo> {
-        self.fn_info.get(name)
+        self.fn_info.get(name).and_then(|infos| infos.first())
+    }
+
+    /// Pick the overload whose parameter count matches `arity`.
+    pub fn fn_info_for_arity(&self, name: &QualIdent, arity: usize) -> Option<&FnInfo> {
+        self.fn_info
+            .get(name)
+            .and_then(|infos| infos.iter().find(|info| info.param_names.len() == arity))
     }
 }
 

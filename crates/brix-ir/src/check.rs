@@ -152,7 +152,12 @@ pub fn scan_rule_calls(rule: &Rule, resolver: &impl SchemaResolver) -> CallEffec
 fn scan_expr(expr: &Expr, resolver: &impl SchemaResolver, acc: &mut CallEffects) {
     match &*expr.kind {
         ExprKind::Call { func, args } => {
-            if let Some(sig) = resolver.function(func) {
+            // Conservative: union effects / flags across arity-matching overloads.
+            for sig in resolver
+                .functions(func)
+                .iter()
+                .filter(|sig| sig.params.len() == args.len())
+            {
                 if sig.may_diverge {
                     acc.diverges = true;
                 }
@@ -164,7 +169,7 @@ fn scan_expr(expr: &Expr, resolver: &impl SchemaResolver, acc: &mut CallEffects)
                             .map(|r| r.relation)
                             .collect();
                         if sig.is_aggregate {
-                            acc.aggregate_reads.extend(relations);
+                            acc.aggregate_reads.extend(relations.clone());
                         } else {
                             for relation in relations {
                                 if resolver
@@ -403,7 +408,11 @@ fn walk_fn_body(
 ) {
     match &*expr.kind {
         ExprKind::Call { func, args } => {
-            if let Some(sig) = resolver.function(func) {
+            for sig in resolver
+                .functions(func)
+                .iter()
+                .filter(|sig| sig.params.len() == args.len())
+            {
                 *realized = realized.combine(&sig.effects);
             }
             for a in args {

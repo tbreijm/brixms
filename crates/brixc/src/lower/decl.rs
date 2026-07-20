@@ -406,15 +406,37 @@ fn lower_fn(
     }
     let ast_body = f.body.as_ref()?;
     let qi = QualIdent::simple(f.name.text.clone());
-    // Pass 1 already built and recorded the signature (lowered param/ret types,
-    // effect row); reuse it so the FnDef agrees with what the checker sees.
-    let sig = resolver.function(&qi)?.clone();
+    // Lower *this* declaration's param/ret types from the AST. Looking up by
+    // name alone is wrong once typed overloads exist — pass 1 stores every
+    // overload, and the first match is not necessarily this body.
     let params: Vec<(IrIdent, Ty)> = f
         .params
         .iter()
-        .map(|p| IrIdent::new(p.name.text.clone()))
-        .zip(sig.params.iter().cloned())
+        .map(|p| {
+            (
+                IrIdent::new(p.name.text.clone()),
+                tymap::lower_type(&p.ty, TyPos::FnSig, resolver, meta, diags),
+            )
+        })
         .collect();
+    let ret = tymap::lower_type(&f.ret, TyPos::FnSig, resolver, meta, diags);
+    let effects = resolver
+        .functions(&qi)
+        .iter()
+        .find(|sig| {
+            sig.params == params.iter().map(|(_, t)| t.clone()).collect::<Vec<_>>()
+                && sig.ret == ret
+        })
+        .map(|sig| sig.effects.clone())
+        .unwrap_or_else(|| {
+            // Fall back to the pass-1 effect row for the first arity match.
+            resolver
+                .functions(&qi)
+                .iter()
+                .find(|sig| sig.params.len() == params.len())
+                .map(|sig| sig.effects.clone())
+                .unwrap_or_else(brix_ir::effects::EffectRow::empty)
+        });
     let name_ir = IrIdent::new(f.name.text.clone());
     meta.set_decl_span(name_ir.clone(), f.span);
     let mut ctx = BodyCtx::new(name_ir, resolver, meta, diags);
@@ -438,8 +460,8 @@ fn lower_fn(
     Some(core::FnDef {
         name: qi,
         params,
-        ret: sig.ret,
-        effects: sig.effects,
+        ret,
+        effects,
         is_partial: f.partial,
         body,
     })

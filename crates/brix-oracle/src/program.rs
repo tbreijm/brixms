@@ -194,6 +194,10 @@ pub enum BinOp {
     Add,
     Sub,
     Mul,
+    /// Truncating integer division (`i128` `/`; floor for the non-negative
+    /// operands every Ring 0 semantic path uses) — the ruling for issue #47
+    /// Part 2's basis-point fixed-point arithmetic (no float `Value`).
+    Div,
     Eq,
     Ne,
     Lt,

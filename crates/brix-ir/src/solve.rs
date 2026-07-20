@@ -182,6 +182,64 @@ pub fn step(a: Ty, b: Ty) -> Step {
     }
 }
 
+/// Trial-unify `a` against `b` into a *copy* of `subst`. Returns the extended
+/// substitution on success, or `None` on mismatch / occurs / erasure. Used by
+/// overload selection so failed candidates do not contaminate the live subst.
+pub fn try_unify(subst: &BTreeMap<TyVar, Ty>, a: Ty, b: Ty) -> Option<BTreeMap<TyVar, Ty>> {
+    let mut subst = subst.clone();
+    if try_unify_mut(&mut subst, a, b) {
+        Some(subst)
+    } else {
+        None
+    }
+}
+
+/// Trial-unify each `actual[i]` against `params[i]`. Arity must already match.
+pub fn try_unify_args(
+    subst: &BTreeMap<TyVar, Ty>,
+    actual: &[Ty],
+    params: &[Ty],
+) -> Option<BTreeMap<TyVar, Ty>> {
+    if actual.len() != params.len() {
+        return None;
+    }
+    let mut subst = subst.clone();
+    for (a, p) in actual.iter().cloned().zip(params.iter().cloned()) {
+        if !try_unify_mut(&mut subst, a, p) {
+            return None;
+        }
+    }
+    Some(subst)
+}
+
+fn try_unify_mut(subst: &mut BTreeMap<TyVar, Ty>, a: Ty, b: Ty) -> bool {
+    let a = resolve(subst, a);
+    let b = resolve(subst, b);
+    match step(a, b) {
+        Step::Done => true,
+        Step::Bind(v, t) => {
+            if occurs(v, &t, subst) {
+                false
+            } else {
+                subst.insert(v, t);
+                true
+            }
+        }
+        Step::Descend(pairs) => pairs.into_iter().all(|(x, y)| try_unify_mut(subst, x, y)),
+        Step::Rows(a, b) => {
+            let matched = match_rows(&a, &b);
+            if !matched.missing_in_left.is_empty() || !matched.missing_in_right.is_empty() {
+                return false;
+            }
+            matched
+                .pairs
+                .into_iter()
+                .all(|(x, y)| try_unify_mut(subst, x, y))
+        }
+        Step::Mismatch(_, _) | Step::Erasure(_, _) => false,
+    }
+}
+
 /// Classify whether unifying `a` against `b` — in *either* operand order —
 /// attempts one of the §19.1 forbidden epistemic-status erasures (extended
 /// by #15 PR5 / conformance I.22.2 to cover `Missing<T>` the same way):
