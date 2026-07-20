@@ -1,0 +1,50 @@
+package brix.math @ 0.1.0
+module Math
+
+fn abs(x: Int) -> Int = if x < 0 then -x else x
+
+fn abs(x: Float) -> Float = if x < 0.0 then -x else x
+
+fn min(a: Int, b: Int) -> Int = if a < b then a else b
+
+fn min(a: Float, b: Float) -> Float = if a < b then a else b
+
+fn max(a: Int, b: Int) -> Int = if a > b then a else b
+
+fn max(a: Float, b: Float) -> Float = if a > b then a else b
+
+fn clamp(x: Int, lo: Int, hi: Int) -> Int = min(max(x, lo), hi)
+
+fn clamp(x: Float, lo: Float, hi: Float) -> Float = min(max(x, lo), hi)
+
+fn sign(x: Int) -> Int = if x < 0 then -1 else if x > 0 then 1 else 0
+
+fn neg(x: Int) -> Int = -x
+
+fn neg(x: Float) -> Float = -x
+
+fn add(a: Int, b: Int) -> Int = a + b
+
+fn add(a: Float, b: Float) -> Float = a + b
+
+fn sub(a: Int, b: Int) -> Int = a - b
+
+fn sub(a: Float, b: Float) -> Float = a - b
+
+fn mul(a: Int, b: Int) -> Int = a * b
+
+fn mul(a: Float, b: Float) -> Float = a * b
+
+fn isNonNeg(x: Int) -> Bool = x >= 0
+
+fn isNonNeg(x: Float) -> Bool = x >= 0.0
+
+fn isPos(x: Int) -> Bool = x > 0
+
+fn isPos(x: Float) -> Bool = x > 0.0
+
+fn between(x: Int, lo: Int, hi: Int) -> Bool = x == clamp(x, lo, hi)
+
+fn between(x: Float, lo: Float, hi: Float) -> Bool = x == clamp(x, lo, hi)
+
+fn approxEq(a: Float, b: Float, eps: Float) -> Bool = abs(a - b) <= eps

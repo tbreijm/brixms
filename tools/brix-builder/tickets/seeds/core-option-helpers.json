@@ -1,0 +1,15 @@
+{
+  "ticket_id": "core-option-helpers",
+  "brief": "Extend brix.core with total pure Bool/Int helpers useful at call sites: `fn not_(x: Bool) -> Bool = if x then false else true`, `fn and_(a: Bool, b: Bool) -> Bool = if a then b else false`, `fn or_(a: Bool, b: Bool) -> Bool = if a then true else b`, `fn choose(cond: Bool, a: Int, b: Int) -> Int = if cond then a else b`, `fn choose(cond: Bool, a: Float, b: Float) -> Float = if cond then a else b` (typed overload). Exact `fn`/`=` syntax. Preserve Id/identity decls. Host formats after check.",
+  "package_path": ".",
+  "write_allowlist": ["src/*.brix", "src/**/*.brix"],
+  "acceptance_gates": ["format", "check", "test", "quality", "package_build"],
+  "max_iterations": 5,
+  "max_actions_per_role": 14,
+  "context_tokens": 8192,
+  "metadata": {
+    "package": "brix.core",
+    "kind": "stdlib-slice",
+    "slice": "bool-choose"
+  }
+}

@@ -1,0 +1,16 @@
+package brix.core @ 0.1.0
+module Core
+
+type Id = String
+
+fn id_of(value: String) -> Id = value
+
+fn id_eq(a: Id, b: Id) -> Bool = a == b
+
+fn identity(x: Int) -> Int = x
+
+fn identity(x: Float) -> Float = x
+
+fn identity(x: String) -> String = x
+
+fn identity(x: Bool) -> Bool = x

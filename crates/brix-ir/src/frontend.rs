@@ -66,8 +66,16 @@ pub trait SchemaResolver {
     /// brix-ir treats it as "cannot check" rather than crashing).
     fn relation(&self, name: &QualIdent) -> Option<&RelationSchema>;
 
-    /// Look up a function signature by qualified name.
-    fn function(&self, name: &QualIdent) -> Option<&FnSignature>;
+    /// All declared signatures for `name` (typed overloads), in declaration
+    /// order. Empty slice = unresolved. Call sites must select by arity +
+    /// argument types; see [`crate::infer`].
+    fn functions(&self, name: &QualIdent) -> &[FnSignature];
+
+    /// First declared signature for `name` (declaration order). Prefer
+    /// [`SchemaResolver::functions`] at typed call sites.
+    fn function(&self, name: &QualIdent) -> Option<&FnSignature> {
+        self.functions(name).first()
+    }
 
     /// Whether a `Complete(relation, partition, ...)` witness is in scope for
     /// an absence-sensitive read (Part III §7). Used to admit `without` /
@@ -124,11 +132,21 @@ impl TableResolver {
         self
     }
 
+    /// Register a function signature. Same-name declarations are kept as
+    /// typed overloads (declaration order preserved within the name group).
+    /// Identical param/ret shapes replace the prior entry so re-seeding a
+    /// prelude is idempotent.
     pub fn with_function(mut self, sig: FnSignature) -> Self {
-        match self.functions.binary_search_by(|f| f.name.cmp(&sig.name)) {
-            Ok(pos) => self.functions[pos] = sig,
-            Err(pos) => self.functions.insert(pos, sig),
+        let start = self.functions.partition_point(|f| f.name < sig.name);
+        let mut end = start;
+        while end < self.functions.len() && self.functions[end].name == sig.name {
+            if self.functions[end].params == sig.params && self.functions[end].ret == sig.ret {
+                self.functions[end] = sig;
+                return self;
+            }
+            end += 1;
         }
+        self.functions.insert(end, sig);
         self
     }
 
@@ -148,11 +166,13 @@ impl SchemaResolver for TableResolver {
             .map(|pos| &self.relations[pos])
     }
 
-    fn function(&self, name: &QualIdent) -> Option<&FnSignature> {
-        self.functions
-            .binary_search_by(|f| f.name.cmp(name))
-            .ok()
-            .map(|pos| &self.functions[pos])
+    fn functions(&self, name: &QualIdent) -> &[FnSignature] {
+        let start = self.functions.partition_point(|f| f.name < *name);
+        let mut end = start;
+        while end < self.functions.len() && self.functions[end].name == *name {
+            end += 1;
+        }
+        &self.functions[start..end]
     }
 
     fn has_completeness_witness(&self, relation: &QualIdent) -> bool {
@@ -188,5 +208,40 @@ mod tests {
         let r = TableResolver::new().with_witness(QualIdent::from("Delivered"));
         assert!(r.has_completeness_witness(&QualIdent::from("Delivered")));
         assert!(!r.has_completeness_witness(&QualIdent::from("Other")));
+    }
+
+    #[test]
+    fn same_name_functions_are_kept_as_overloads() {
+        use crate::effects::EffectRow;
+        use crate::types::IntWidth;
+        let r = TableResolver::new()
+            .with_function(FnSignature {
+                name: QualIdent::from("clamp"),
+                params: vec![
+                    Ty::Int(IntWidth::Int),
+                    Ty::Int(IntWidth::Int),
+                    Ty::Int(IntWidth::Int),
+                ],
+                ret: Ty::Int(IntWidth::Int),
+                effects: EffectRow::empty(),
+                is_aggregate: false,
+                may_diverge: false,
+            })
+            .with_function(FnSignature {
+                name: QualIdent::from("clamp"),
+                params: vec![Ty::F64, Ty::F64, Ty::F64],
+                ret: Ty::F64,
+                effects: EffectRow::empty(),
+                is_aggregate: false,
+                may_diverge: false,
+            });
+        let overloads = r.functions(&QualIdent::from("clamp"));
+        assert_eq!(overloads.len(), 2);
+        assert_eq!(overloads[0].ret, Ty::Int(IntWidth::Int));
+        assert_eq!(overloads[1].ret, Ty::F64);
+        assert_eq!(
+            r.function(&QualIdent::from("clamp")).unwrap().ret,
+            Ty::Int(IntWidth::Int)
+        );
     }
 }

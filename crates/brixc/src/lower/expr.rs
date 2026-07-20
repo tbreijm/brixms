@@ -451,11 +451,16 @@ fn lower_call(
         }
     };
 
-    let fn_info = ctx.meta.fn_info(&func).cloned();
     let mut lowered_args: Vec<IrExpr> = Vec::new();
     if let Some(p) = prefix {
         lowered_args.push(p);
     }
+    // Named-arg reordering needs param names; with overloads, pick by arity.
+    let fn_info = ctx
+        .meta
+        .fn_info_for_arity(&func, args.len())
+        .cloned()
+        .or_else(|| ctx.meta.fn_info(&func).cloned());
 
     let has_named = args.iter().any(is_true_named);
     if has_named {
@@ -510,11 +515,10 @@ fn lower_call(
         }
     }
 
-    let ret_ty = ctx
-        .resolver
-        .function(&func)
-        .map(|s| s.ret.clone())
-        .unwrap_or_else(|| Ty::Var(ctx.meta.fresh_tyvar()));
+    // Fresh return tyvar: typed overload selection happens in `infer`, which
+    // unifies this against the chosen signature's ret. Baking in the first
+    // overload's ret here would poison Int/Float twins.
+    let ret_ty = Ty::Var(ctx.meta.fresh_tyvar());
     IrExpr::new(
         ret_ty,
         ExprKind::Call {
@@ -842,7 +846,11 @@ pub fn effects_of(e: &IrExpr, resolver: &ProgramResolver) -> EffectRow {
 fn collect_effects(e: &IrExpr, resolver: &ProgramResolver, acc: &mut EffectRow) {
     match &*e.kind {
         ExprKind::Call { func, args } => {
-            if let Some(sig) = resolver.function(func) {
+            for sig in resolver
+                .functions(func)
+                .iter()
+                .filter(|sig| sig.params.len() == args.len())
+            {
                 *acc = acc.combine(&sig.effects);
             }
             for a in args {

@@ -1,0 +1,24 @@
+{
+  "ticket_id": "math-int-div-floor",
+  "brief": "Extend existing brix.math Int utilities. Add total pure helpers that compile with current Int `/` (truncating): `fn quot(a: Int, b: Int) -> Int = a / b` only if you can keep it total without division-by-zero \u2014 if the toolchain has no zero-guard, skip quot and instead add `fn square(x: Int) -> Int = x * x`, `fn cube(x: Int) -> Int = x * x * x`, `fn mid(a: Int, b: Int) -> Int = (a + b) / 2`. Exact `fn`/`=` syntax. Do not remove existing decls. No Decimal/units/mod. Host formats after check.",
+  "package_path": ".",
+  "write_allowlist": [
+    "src/*.brix",
+    "src/**/*.brix"
+  ],
+  "acceptance_gates": [
+    "format",
+    "check",
+    "test",
+    "quality",
+    "package_build"
+  ],
+  "max_iterations": 5,
+  "max_actions_per_role": 14,
+  "context_tokens": 8192,
+  "metadata": {
+    "package": "brix.math",
+    "kind": "stdlib-slice",
+    "slice": "int-extra"
+  }
+}

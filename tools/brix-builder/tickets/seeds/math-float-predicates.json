@@ -1,0 +1,24 @@
+{
+  "ticket_id": "math-float-predicates",
+  "brief": "Extend existing brix.math using typed overloads (same name for Int and Float). Add Float overloads if missing, plus `fn approxEq(a: Float, b: Float, eps: Float) -> Bool = abs(a - b) <= eps`. Do not invent absF/minF/clampInt suffixes \u2014 use overloaded abs/min/max/clamp. Exact `fn`/`=` syntax. Preserve existing decls. No Decimal/units. Host formats after check.",
+  "package_path": ".",
+  "write_allowlist": [
+    "src/*.brix",
+    "src/**/*.brix"
+  ],
+  "acceptance_gates": [
+    "format",
+    "check",
+    "test",
+    "quality",
+    "package_build"
+  ],
+  "max_iterations": 5,
+  "max_actions_per_role": 14,
+  "context_tokens": 8192,
+  "metadata": {
+    "package": "brix.math",
+    "kind": "stdlib-slice",
+    "slice": "approxEq-overload"
+  }
+}

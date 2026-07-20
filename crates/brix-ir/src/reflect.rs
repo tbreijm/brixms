@@ -1510,41 +1510,78 @@ impl Reflect {
         if let Some(op) = func.to_string().strip_prefix("brix.ops.") {
             return (self.operator(subject, op, &arg_types, &deps), op_fact);
         }
-        if let Some(sig) = resolver.function(func) {
-            self.fact(
-                Fact::FnSig {
-                    function: Ident::new(func.to_string()),
-                    params: sig.params.clone(),
-                    result: sig.ret.clone(),
-                    is_aggregate: sig.is_aggregate,
+        let candidates = resolver.functions(func);
+        if candidates.is_empty() {
+            return (Ty::Error, op_fact);
+        }
+        let arity_ok: Vec<_> = candidates
+            .iter()
+            .filter(|sig| sig.params.len() == arg_types.len())
+            .collect();
+        if arity_ok.is_empty() {
+            self.conflict(
+                subject,
+                ConflictKind::Arity {
+                    expected: candidates[0].params.len() as u32,
+                    found: arg_types.len() as u32,
                 },
-                vec![],
+                deps,
             );
-            if sig.params.len() != arg_types.len() {
-                self.conflict(
-                    subject,
-                    ConflictKind::Arity {
-                        expected: sig.params.len() as u32,
-                        found: arg_types.len() as u32,
-                    },
-                    deps,
-                );
-            } else {
-                for i in 0..sig.params.len() {
-                    let arg_subject = Subject::Expr {
-                        origin: args[i].origin,
-                    };
-                    self.unify(
-                        arg_subject,
-                        sig.params[i].clone(),
-                        arg_types[i].clone(),
-                        vec![deps[i]],
-                    );
+            return (Ty::Error, op_fact);
+        }
+        let mut matches = Vec::new();
+        for sig in &arity_ok {
+            if let Some(next) = solve::try_unify_args(&self.subst, &arg_types, &sig.params) {
+                let mut score = 0i32;
+                for (a, p) in arg_types.iter().zip(sig.params.iter()) {
+                    let a = solve::resolve(&next, a.clone());
+                    let p = solve::resolve(&next, p.clone());
+                    if a == p {
+                        score += 10;
+                    } else if !matches!(p, Ty::Var(_)) {
+                        score += 5;
+                    }
+                }
+                matches.push((*sig, next, score));
+            }
+        }
+        let Some((sig, next, _)) = ({
+            match matches.len() {
+                0 => None,
+                1 => matches.pop(),
+                _ => {
+                    let best = matches.iter().map(|(_, _, s)| *s).max().unwrap_or(0);
+                    let mut top: Vec<_> =
+                        matches.into_iter().filter(|(_, _, s)| *s == best).collect();
+                    if top.len() == 1 {
+                        top.pop()
+                    } else {
+                        None
+                    }
                 }
             }
-            return (sig.ret.clone(), op_fact);
-        }
-        (Ty::Error, op_fact)
+        }) else {
+            self.conflict(
+                subject,
+                ConflictKind::Mismatch {
+                    left: arg_types.first().cloned().unwrap_or(Ty::Error),
+                    right: arity_ok[0].params.first().cloned().unwrap_or(Ty::Error),
+                },
+                deps,
+            );
+            return (Ty::Error, op_fact);
+        };
+        self.subst = next;
+        self.fact(
+            Fact::FnSig {
+                function: Ident::new(func.to_string()),
+                params: sig.params.clone(),
+                result: sig.ret.clone(),
+                is_aggregate: sig.is_aggregate,
+            },
+            vec![],
+        );
+        (sig.ret.clone(), op_fact)
     }
 
     /// Dimension-vs-variable ruling: when one side of a same-dimension
