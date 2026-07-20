@@ -162,7 +162,7 @@ mod tests {
             b"package lib @ 1.0.0\nrel Widget { id: I64 } key(id)\n".to_vec(),
         );
         registry
-            .publish(&lib_manifest, &lib_files)
+            .publish(&lib_manifest, &lib_files, None)
             .expect("publish lib");
 
         let app = manifest(
@@ -187,7 +187,7 @@ mod tests {
             Utf8PathBuf::from("src/world.brix"),
             b"package lib @ 1.0.0\n".to_vec(),
         );
-        registry.publish(&lib_manifest, &lib_files).unwrap();
+        registry.publish(&lib_manifest, &lib_files, None).unwrap();
         let app = manifest(
             "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[dependencies]\nlib = \"^1.0.0\"\n",
         );

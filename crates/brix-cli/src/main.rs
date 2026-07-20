@@ -33,6 +33,9 @@ fn dispatch(p: &ParsedArgs) -> i32 {
         "quality" => run_quality(p),
         "build" => run_build(p),
         "run" => run_run(p),
+        "new" => run_new(p),
+        "publish" => run_publish(p),
+        "yank" => run_yank(p),
         other => {
             eprintln!("brix: `{other}` is not yet implemented (try `brix --help`)");
             EXIT_USAGE
@@ -237,6 +240,94 @@ fn run_run(p: &ParsedArgs) -> i32 {
     }
 }
 
+fn run_new(p: &ParsedArgs) -> i32 {
+    let Some(operand) = p.operand() else {
+        eprintln!("brix new: expected a target directory path");
+        return EXIT_USAGE;
+    };
+    let root = camino::Utf8Path::new(operand);
+    // Package name: `--name`, else the target directory's final segment.
+    let name = match p.value("name") {
+        Some(name) => name.to_string(),
+        None => match root.file_name() {
+            Some(seg) => seg.to_string(),
+            None => {
+                eprintln!("brix new: cannot derive a package name from `{operand}` (pass --name)");
+                return EXIT_USAGE;
+            }
+        },
+    };
+    match brix_cli::scaffold::write_skeleton(root, &name) {
+        Ok(()) => {
+            println!("brix: created package `{name}` at {operand}");
+            EXIT_SUCCESS
+        }
+        Err(error) => {
+            eprintln!("brix new: {error}");
+            EXIT_FAILURE
+        }
+    }
+}
+
+fn run_publish(p: &ParsedArgs) -> i32 {
+    let format = match diagnostic_format(p) {
+        Ok(format) => format,
+        Err(message) => {
+            eprintln!("brix publish: {message}");
+            return EXIT_USAGE;
+        }
+    };
+    let Some(operand) = p.operand() else {
+        eprintln!("brix publish: expected a package directory path");
+        return EXIT_USAGE;
+    };
+    match brix_cli::publish::publish(operand, p.value("registry")) {
+        Ok(outcome) => {
+            println!(
+                "brix: published {}@{} ({})",
+                outcome.name,
+                outcome.version,
+                outcome.digest.to_hex()
+            );
+            EXIT_SUCCESS
+        }
+        Err(error) => {
+            match format {
+                DiagnosticFormat::Human => eprintln!("brix publish: {error}"),
+                DiagnosticFormat::Json | DiagnosticFormat::Sarif => {
+                    println!("{}", error.render(format))
+                }
+            }
+            EXIT_FAILURE
+        }
+    }
+}
+
+fn run_yank(p: &ParsedArgs) -> i32 {
+    let Some(name) = p.operand() else {
+        eprintln!("brix yank: expected a package name");
+        return EXIT_USAGE;
+    };
+    let Some(version) = p.value("at") else {
+        eprintln!("brix yank: expected --at <version>");
+        return EXIT_USAGE;
+    };
+    let registry = match p.value("registry") {
+        Some(r) => r.to_string(),
+        None => ".brix/registry".to_string(),
+    };
+    match brix_cli::publish::yank(name, version, &registry) {
+        Ok(()) => {
+            println!("brix: yanked {name}@{version}");
+            EXIT_SUCCESS
+        }
+        Err(error) => {
+            eprintln!("brix yank: {error}");
+            EXIT_FAILURE
+        }
+    }
+}
+
 fn diagnostic_format(p: &ParsedArgs) -> Result<DiagnosticFormat, String> {
     match p.value("diagnostic-format") {
         None => Ok(DiagnosticFormat::Human),
@@ -270,6 +361,9 @@ fn print_help() {
          \x20\x20brix quality <path> Run compiler checks and the selected quality profile\n\
          \x20\x20brix build <path>   Compile a package/source file to a Rust workspace\n\
          \x20\x20brix run <path>     Build, then execute the produced binary\n\
+         \x20\x20brix new <path>     Scaffold a new package (--name <name>)\n\
+         \x20\x20brix publish <path> Publish a package to a registry (--registry <path>)\n\
+         \x20\x20brix yank <pkg> --at <version>   Yank a published version (--registry <path>)\n\
          \n\
          Check/test/quality/build/run accept --diagnostic-format human|json|sarif. Quality accepts\n\
          --profile prototype|standard|production|critical (default: standard). Exit codes: 0 success,\n\
