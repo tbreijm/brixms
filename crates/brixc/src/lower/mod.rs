@@ -19,10 +19,12 @@
 mod decl;
 mod diag;
 mod expr;
+mod package;
 mod resolve;
 mod schema;
 mod tymap;
 
+pub use package::{lower_package, lower_program, FileReport, PackageLowered, SubmoduleInput};
 pub use resolve::{
     FnInfo, LowerMeta, ProgramResolver, RuntimeRelationKind, UnitClass, VariantLookup,
 };
@@ -100,6 +102,10 @@ pub struct DepPackage<'a> {
     pub name_segments: Vec<String>,
     pub file: &'a File,
     pub parse_diags: &'a brix_ast::Diagnostics,
+    /// The dependency's own local submodules (issue #42), when it is itself
+    /// a multi-file package. Empty for a single-file dependency — the
+    /// pre-#42 shape, unchanged.
+    pub submodules: &'a [package::SubmoduleInput<'a>],
 }
 
 /// Lower a **locked package graph** into one checked [`Lowered`] (issue #42).
@@ -122,8 +128,6 @@ pub fn lower_graph(
     deps: &[DepPackage],
 ) -> Lowered {
     use brix_ir::core::FnDef;
-    use brix_ir::frontend::FnSignature;
-    use brix_ir::ident::{Ident as IrIdent, QualIdent};
 
     let mut diags: Vec<Diagnostic> = root_parse_diags.iter().cloned().collect();
     let mut meta = LowerMeta::default();
@@ -137,55 +141,9 @@ pub fn lower_graph(
     let mut dep_fndefs: Vec<FnDef> = Vec::new();
 
     for dep in &ordered {
-        // Lower and check the dependency in isolation (bare names, own
-        // prelude); its errors surface tagged into the graph's channel.
-        let dep_lowered = lower_file(dep.file, dep.parse_diags);
-        diags.extend(dep_lowered.diags.iter().cloned());
-
-        let qualify = |name: &str| -> QualIdent {
-            let mut segs: Vec<IrIdent> = dep
-                .name_segments
-                .iter()
-                .map(|s| IrIdent::new(s.clone()))
-                .collect();
-            segs.push(IrIdent::new(name.to_string()));
-            QualIdent::from_segments(segs)
-        };
-
-        // Dependency's own declared relations -> `pkg.Rel` (skip prelude
-        // `brix.*` and dotted/protocol-synth names, deferred).
-        for schema in dep_lowered.resolver.relations() {
-            if schema.name.segments().len() != 1 {
-                continue;
-            }
-            let bare = schema.name.segments()[0].as_str();
-            if bare.starts_with("brix") {
-                continue;
-            }
-            let qname = qualify(bare);
-            let kind = dep_lowered.resolver.relation_kind(&schema.name);
-            let mut qschema = schema.clone();
-            qschema.name = qname.clone();
-            resolver = resolver
-                .with_relation(qschema)
-                .with_relation_kind(qname, kind);
-        }
-
-        // Dependency's compiled total functions -> `pkg.fn`, bodies carried in.
-        for f in &dep_lowered.source.functions {
-            let qname = qualify(&f.name.to_string());
-            resolver = resolver.with_function(FnSignature {
-                name: qname.clone(),
-                params: f.params.iter().map(|(_, t)| t.clone()).collect(),
-                ret: f.ret.clone(),
-                is_aggregate: false,
-                may_diverge: f.effects.may_diverge(),
-                effects: f.effects.clone(),
-            });
-            let mut qf = f.clone();
-            qf.name = qname;
-            dep_fndefs.push(qf);
-        }
+        let (r, fndefs) = fold_dependency(resolver, dep, &mut diags);
+        resolver = r;
+        dep_fndefs.extend(fndefs);
     }
 
     // Root package (bare names) on top of the prelude + dependency exports.
@@ -219,6 +177,82 @@ pub fn lower_graph(
         meta,
         diags,
     }
+}
+
+/// Lower one dependency package in isolation (bare names, own prelude) and
+/// re-register its exported relations/functions under `pkg.name` onto
+/// `resolver` — the mechanism both [`lower_graph`] and
+/// [`package::lower_program`] (issue #42) share. Returns the updated
+/// resolver plus the dependency's compiled `FnDef`s (already renamed),
+/// which the caller folds into its own [`brix_ir::frontend::FrontendSource`].
+///
+/// Slice-1 scope: dependency exports are single-name relations (builtin role
+/// types) and self-contained total functions; dep-local nominal types, dep
+/// rules, and dotted/protocol relation exports are deferred. A dependency
+/// that is itself a multi-file package may already export dotted function
+/// names (`order.min`); those splice on as clean extra segments (not one
+/// dot-joined segment), so `use brix.math.order.{min}` resolves identically
+/// to a same-package reference.
+pub(crate) fn fold_dependency(
+    mut resolver: ProgramResolver,
+    dep: &DepPackage,
+    diags: &mut Vec<Diagnostic>,
+) -> (ProgramResolver, Vec<brix_ir::core::FnDef>) {
+    use brix_ir::frontend::FnSignature;
+    use brix_ir::ident::{Ident as IrIdent, QualIdent};
+
+    let mut dep_fndefs = Vec::new();
+    let dep_lowered = if dep.submodules.is_empty() {
+        lower_file(dep.file, dep.parse_diags)
+    } else {
+        package::lower_package(dep.file, dep.parse_diags, "<dependency>", dep.submodules)
+            .into_lowered()
+    };
+    diags.extend(dep_lowered.diags.iter().cloned());
+
+    let qualify = |name_segs: &[IrIdent]| -> QualIdent {
+        let mut segs: Vec<IrIdent> = dep
+            .name_segments
+            .iter()
+            .map(|s| IrIdent::new(s.clone()))
+            .collect();
+        segs.extend(name_segs.iter().cloned());
+        QualIdent::from_segments(segs)
+    };
+
+    for schema in dep_lowered.resolver.relations() {
+        if schema.name.segments().len() != 1 {
+            continue;
+        }
+        let bare = schema.name.segments()[0].as_str();
+        if bare.starts_with("brix") {
+            continue;
+        }
+        let qname = qualify(&[IrIdent::new(bare.to_string())]);
+        let kind = dep_lowered.resolver.relation_kind(&schema.name);
+        let mut qschema = schema.clone();
+        qschema.name = qname.clone();
+        resolver = resolver
+            .with_relation(qschema)
+            .with_relation_kind(qname, kind);
+    }
+
+    for f in &dep_lowered.source.functions {
+        let qname = qualify(f.name.segments());
+        resolver = resolver.with_function(FnSignature {
+            name: qname.clone(),
+            params: f.params.iter().map(|(_, t)| t.clone()).collect(),
+            ret: f.ret.clone(),
+            is_aggregate: false,
+            may_diverge: f.effects.may_diverge(),
+            effects: f.effects.clone(),
+        });
+        let mut qf = f.clone();
+        qf.name = qname;
+        dep_fndefs.push(qf);
+    }
+
+    (resolver, dep_fndefs)
 }
 
 /// The `Frontend` seam (design §"Seams"): parsing is total, so this is

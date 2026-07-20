@@ -405,7 +405,7 @@ fn lower_fn(
         return None;
     }
     let ast_body = f.body.as_ref()?;
-    let qi = QualIdent::simple(f.name.text.clone());
+    let qi = QualIdent::from(f.name.text.as_str());
     // Lower *this* declaration's param/ret types from the AST. Looking up by
     // name alone is wrong once typed overloads exist — pass 1 stores every
     // overload, and the first match is not necessarily this body.
