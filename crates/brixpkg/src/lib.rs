@@ -43,6 +43,6 @@ pub use graph::{
 };
 pub use lock::{LockEntry, LockSource, Lockfile, LOCK_FORMAT_VERSION};
 pub use manifest::{DependencySpec, Manifest, ManifestError};
-pub use registry::{IndexEntry, Registry, RegistryError};
+pub use registry::{Compat, IndexEntry, Registry, RegistryError};
 pub use resolve::{resolve, PathPackage, ResolveError};
 pub use version::{PackageName, Version, VersionReq};

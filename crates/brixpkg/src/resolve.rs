@@ -302,7 +302,7 @@ mod tests {
             Utf8PathBuf::from("world.brix"),
             format!("package {name} @ {version}").into_bytes(),
         );
-        reg.publish(&m, &files).unwrap();
+        reg.publish(&m, &files, None).unwrap();
     }
 
     #[test]

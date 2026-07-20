@@ -55,7 +55,7 @@ fn scaffold_app(tag: &str, publish_lib: bool) -> (Utf8PathBuf, Utf8PathBuf) {
             LIB_SRC.as_bytes().to_vec(),
         );
         registry
-            .publish(&lib_manifest, &lib_files)
+            .publish(&lib_manifest, &lib_files, None)
             .expect("publish lib");
     }
     (root, source_path)

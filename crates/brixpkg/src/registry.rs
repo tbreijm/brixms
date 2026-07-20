@@ -26,6 +26,18 @@ use crate::digest::{self, ContentDigest};
 use crate::manifest::{DependencySpec, Manifest};
 use crate::version::{parse_version, PackageName, Version, VersionReq};
 
+/// Compiler/toolchain compatibility metadata recorded at publish time, so a
+/// lockfile-pinned consumer can tell which toolchain produced a package
+/// (issue #44). Mirrors `brixc::cache::ToolchainId` but is defined here to keep
+/// brixpkg independent of the compiler crates. Canon compatibility is folded
+/// into `brixc_version` (there is no separate canon version).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Compat {
+    pub brixc_version: String,
+    pub rustc_version: String,
+    pub target: String,
+}
+
 /// One published version of one package, as recorded in that package's index
 /// file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +49,9 @@ pub struct IndexEntry {
     /// fetching every candidate package's blob.
     pub dependencies: BTreeMap<PackageName, VersionReq>,
     pub yanked: bool,
+    /// Toolchain that produced this version, if recorded (issue #44). `None`
+    /// for entries published before compat metadata existed.
+    pub compat: Option<Compat>,
 }
 
 /// A local content-addressed package registry.
@@ -145,6 +160,8 @@ struct RawIndexEntry {
     dependencies: BTreeMap<String, String>,
     #[serde(default)]
     yanked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compat: Option<Compat>,
 }
 
 impl Registry {
@@ -186,6 +203,7 @@ impl Registry {
         &self,
         manifest: &Manifest,
         files: &BTreeMap<Utf8PathBuf, Vec<u8>>,
+        compat: Option<Compat>,
     ) -> Result<ContentDigest, RegistryError> {
         let mut dependencies = BTreeMap::new();
         for (dep_name, spec) in &manifest.dependencies {
@@ -240,6 +258,7 @@ impl Registry {
                 .map(|(n, r)| (n.to_string(), r.to_string()))
                 .collect(),
             yanked: false,
+            compat,
         });
         // Keep the index sorted by version for reproducible diffs on disk.
         index.versions.sort_by(|a, b| a.version.cmp(&b.version));
@@ -292,6 +311,7 @@ impl Registry {
                     content_digest,
                     dependencies,
                     yanked: v.yanked,
+                    compat: v.compat,
                 })
             })
             .collect()
@@ -370,7 +390,7 @@ mod tests {
         let root = tmp_dir("publish-fetch");
         let reg = Registry::open(&root).unwrap();
         let m = manifest("a", "1.0.0");
-        let digest = reg.publish(&m, &files()).unwrap();
+        let digest = reg.publish(&m, &files(), None).unwrap();
         let fetched = reg.fetch(&digest).unwrap();
         assert_eq!(fetched, files());
         fs::remove_dir_all(&root).ok();
@@ -381,8 +401,8 @@ mod tests {
         let root = tmp_dir("idempotent");
         let reg = Registry::open(&root).unwrap();
         let m = manifest("a", "1.0.0");
-        let d1 = reg.publish(&m, &files()).unwrap();
-        let d2 = reg.publish(&m, &files()).unwrap();
+        let d1 = reg.publish(&m, &files(), None).unwrap();
+        let d2 = reg.publish(&m, &files(), None).unwrap();
         assert_eq!(d1, d2);
         fs::remove_dir_all(&root).ok();
     }
@@ -392,11 +412,11 @@ mod tests {
         let root = tmp_dir("immutable");
         let reg = Registry::open(&root).unwrap();
         let m = manifest("a", "1.0.0");
-        reg.publish(&m, &files()).unwrap();
+        reg.publish(&m, &files(), None).unwrap();
         let mut other = files();
         other.insert(Utf8PathBuf::from("extra.brix"), b"stuff".to_vec());
         assert!(matches!(
-            reg.publish(&m, &other),
+            reg.publish(&m, &other, None),
             Err(RegistryError::ImmutableVersionConflict { .. })
         ));
         fs::remove_dir_all(&root).ok();
@@ -407,12 +427,12 @@ mod tests {
         let root = tmp_dir("yank");
         let reg = Registry::open(&root).unwrap();
         let m = manifest("a", "1.0.0");
-        reg.publish(&m, &files()).unwrap();
+        reg.publish(&m, &files(), None).unwrap();
         reg.yank(&m.name, &m.version).unwrap();
         let versions = reg.versions(&m.name).unwrap();
         assert!(versions[0].yanked);
         assert!(matches!(
-            reg.publish(&m, &files()),
+            reg.publish(&m, &files(), None),
             Err(RegistryError::VersionYanked { .. })
         ));
         fs::remove_dir_all(&root).ok();
@@ -427,7 +447,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            reg.publish(&m, &files()),
+            reg.publish(&m, &files(), None),
             Err(RegistryError::PathDependencyNotPublishable { .. })
         ));
         fs::remove_dir_all(&root).ok();
@@ -441,7 +461,7 @@ mod tests {
             "[package]\nname = \"a\"\nversion = \"1.0.0\"\n[dependencies]\nb = \"^1.0.0\"\n",
         )
         .unwrap();
-        reg.publish(&m, &files()).unwrap();
+        reg.publish(&m, &files(), None).unwrap();
         let versions = reg.versions(&m.name).unwrap();
         assert_eq!(versions.len(), 1);
         assert!(versions[0]
