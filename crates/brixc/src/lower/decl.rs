@@ -428,7 +428,7 @@ fn lower_fn(
                 && sig.ret == ret
         })
         .map(|sig| sig.effects.clone())
-                .unwrap_or_else(|| {
+        .unwrap_or_else(|| {
             // Fall back to the pass-1 effect row for the first arity match.
             resolver
                 .functions(&qi)

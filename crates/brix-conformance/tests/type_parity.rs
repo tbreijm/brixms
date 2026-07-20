@@ -61,6 +61,11 @@ fn infer_category(error: &TypeError) -> Category {
         TypeError::TryNonResult { .. } => Category::TryNonResult,
         TypeError::Occurs { .. } => Category::Occurs,
         TypeError::EpistemicErasure { .. } => Category::EpistemicErasure,
+        // Overload resolution is a dedicated infer diagnostic; reflect reports
+        // the same failure as `ConflictKind::Mismatch`.
+        TypeError::NoMatchingOverload { .. } | TypeError::AmbiguousOverload { .. } => {
+            Category::Mismatch
+        }
     }
 }
 

@@ -431,10 +431,7 @@ impl Infer {
             }
             _ => {
                 let best = matches.iter().map(|(_, _, s)| *s).max().unwrap_or(0);
-                let top: Vec<_> = matches
-                    .into_iter()
-                    .filter(|(_, _, s)| *s == best)
-                    .collect();
+                let top: Vec<_> = matches.into_iter().filter(|(_, _, s)| *s == best).collect();
                 if top.len() != 1 {
                     self.errors.push(TypeError::AmbiguousOverload {
                         function: func.clone(),
@@ -749,7 +746,6 @@ mod tests {
         assert_eq!(source.functions[0].body.ty, Ty::Int(IntWidth::Int));
         assert_eq!(source.functions[1].body.ty, Ty::F64);
     }
-
 
     fn var(name: &str, ty: Ty) -> Expr {
         Expr::new(ty, ExprKind::Var(Ident::new(name)))
