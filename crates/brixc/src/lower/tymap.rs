@@ -273,6 +273,8 @@ fn builtin_ty(name: &str) -> Option<Ty> {
         "Nat" => Ty::Int(IntWidth::Nat),
         "F32" => Ty::F32,
         "F64" => Ty::F64,
+        // Surface synonym used by the flagship / Ring 1 packages; IR stores F64.
+        "Float" => Ty::F64,
         _ => return None,
     })
 }

@@ -1,0 +1,15 @@
+{
+  "ticket_id": "time-hours-helpers",
+  "brief": "Extend existing brix.time Int-second helpers. Add total pure conversions: `fn hours(n: Int) -> Int = n * 3600`, `fn minutes(n: Int) -> Int = n * 60`, `fn from_hours(seconds: Int) -> Int = seconds / 3600`, `fn from_minutes(seconds: Int) -> Int = seconds / 60`, `fn clamp_instant(t: Int, lo: Int, hi: Int) -> Int = if t < lo then lo else if t > hi then hi else t`. Exact `fn`/`=` syntax. Preserve existing decls. No type aliases Instant/Duration (they mismatch today). Host formats after check.",
+  "package_path": ".",
+  "write_allowlist": ["src/*.brix", "src/**/*.brix"],
+  "acceptance_gates": ["format", "check", "test", "quality", "package_build"],
+  "max_iterations": 5,
+  "max_actions_per_role": 14,
+  "context_tokens": 8192,
+  "metadata": {
+    "package": "brix.time",
+    "kind": "stdlib-slice",
+    "slice": "hours-minutes"
+  }
+}

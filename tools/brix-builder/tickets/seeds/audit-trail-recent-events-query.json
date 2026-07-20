@@ -1,0 +1,14 @@
+{
+  "ticket_id": "seed-audit-trail-recent-events-query",
+  "brief": "Add a query surfacing the most recent audit-trail events for a given subject id. The query must be read-only, must not expose fields outside the existing audit entity, and must not introduce a new relation.",
+  "package_path": ".",
+  "write_allowlist": ["src/*.brix", "src/**/*.brix"],
+  "acceptance_gates": ["check", "test", "quality", "package_build"],
+  "max_iterations": 2,
+  "max_actions_per_role": 10,
+  "context_tokens": 8192,
+  "metadata": {
+    "domain": "audit-trail",
+    "kind": "read-only-query"
+  }
+}

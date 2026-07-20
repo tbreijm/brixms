@@ -1,0 +1,15 @@
+{
+  "ticket_id": "math-int-float-lib",
+  "brief": "Grow brix.math into a real elementary numeric utilities module using typed overloads (same name for Int and Float). Exact `fn name(args) -> T = expr` syntax. Required: overloaded abs/min/max/clamp/neg/add/sub/mul/isNonNeg/isPos/between for Int and Float, plus Int-only sign. Flagship-shaped `clamp` on Float. Do not use absF/clampInt suffixes. No Decimal/units/`%`. Preserve existing decls; host formats after check.",
+  "package_path": ".",
+  "write_allowlist": ["src/*.brix", "src/**/*.brix"],
+  "acceptance_gates": ["format", "check", "test", "quality", "package_build"],
+  "max_iterations": 6,
+  "max_actions_per_role": 16,
+  "context_tokens": 8192,
+  "metadata": {
+    "package": "brix.math",
+    "kind": "stdlib-slice",
+    "slice": "int-float-utils"
+  }
+}

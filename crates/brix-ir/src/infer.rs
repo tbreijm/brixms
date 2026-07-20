@@ -32,6 +32,16 @@ pub enum TypeError {
         expected: usize,
         found: usize,
     },
+    /// No declared overload unifies with the actual argument types.
+    NoMatchingOverload {
+        function: QualIdent,
+        found: String,
+    },
+    /// Two or more overloads unify equally well with the actual arguments.
+    AmbiguousOverload {
+        function: QualIdent,
+        found: String,
+    },
     UnknownField {
         field: Ident,
         base: Ty,
@@ -76,6 +86,18 @@ impl core::fmt::Display for TypeError {
                 f,
                 "arity error: {function} expects {expected} arguments, got {found}"
             ),
+            Self::NoMatchingOverload { function, found } => {
+                write!(
+                    f,
+                    "no matching overload for {function} with argument types [{found}]"
+                )
+            }
+            Self::AmbiguousOverload { function, found } => {
+                write!(
+                    f,
+                    "ambiguous overload for {function} with argument types [{found}]"
+                )
+            }
             Self::UnknownField { field, base } => write!(f, "unknown field `{field}` on {base}"),
             Self::NonBoolGuard { found } => write!(f, "when guard must be Bool, found {found}"),
             Self::TryNonResult { found } => write!(f, "`?` requires Result<_, _>, found {found}"),
@@ -101,7 +123,10 @@ pub fn infer_source(source: &mut FrontendSource, resolver: &impl SchemaResolver)
     for query in &mut source.queries {
         cx.query(query, resolver);
     }
+    // Each function gets a fresh substitution so tyvars from one overload
+    // body cannot bind Int into a sibling Float overload (or vice versa).
     for function in &mut source.functions {
+        cx.subst.clear();
         cx.function(function, resolver);
     }
     cx.errors
@@ -366,21 +391,62 @@ impl Infer {
         if let Some(name) = op.strip_prefix("brix.ops.") {
             return self.operator(name, &actual);
         }
-        if let Some(sig) = resolver.function(func) {
-            if sig.params.len() != actual.len() {
-                self.errors.push(TypeError::Arity {
-                    function: func.clone(),
-                    expected: sig.params.len(),
-                    found: actual.len(),
-                });
-            } else {
-                for (a, e) in actual.iter().cloned().zip(sig.params.iter().cloned()) {
-                    self.unify(a, e);
-                }
-            }
-            return sig.ret.clone();
+        let candidates = resolver.functions(func);
+        if candidates.is_empty() {
+            return Ty::Error;
         }
-        Ty::Error
+        let arity_ok: Vec<_> = candidates
+            .iter()
+            .filter(|sig| sig.params.len() == actual.len())
+            .collect();
+        if arity_ok.is_empty() {
+            self.errors.push(TypeError::Arity {
+                function: func.clone(),
+                expected: candidates[0].params.len(),
+                found: actual.len(),
+            });
+            return Ty::Error;
+        }
+        let mut matches: Vec<(&crate::frontend::FnSignature, BTreeMap<TyVar, Ty>, i32)> =
+            Vec::new();
+        for sig in &arity_ok {
+            if let Some(next) = solve::try_unify_args(&self.subst, &actual, &sig.params) {
+                let score = overload_specificity(&next, &actual, &sig.params);
+                matches.push((*sig, next, score));
+            }
+        }
+        let found = format_arg_types(&self.subst, &actual);
+        match matches.len() {
+            0 => {
+                self.errors.push(TypeError::NoMatchingOverload {
+                    function: func.clone(),
+                    found,
+                });
+                Ty::Error
+            }
+            1 => {
+                let (sig, next, _) = matches.pop().unwrap();
+                self.subst = next;
+                sig.ret.clone()
+            }
+            _ => {
+                let best = matches.iter().map(|(_, _, s)| *s).max().unwrap_or(0);
+                let top: Vec<_> = matches
+                    .into_iter()
+                    .filter(|(_, _, s)| *s == best)
+                    .collect();
+                if top.len() != 1 {
+                    self.errors.push(TypeError::AmbiguousOverload {
+                        function: func.clone(),
+                        found,
+                    });
+                    return Ty::Error;
+                }
+                let (sig, next, _) = top.into_iter().next().unwrap();
+                self.subst = next;
+                sig.ret.clone()
+            }
+        }
     }
     fn operator(&mut self, name: &str, args: &[Ty]) -> Ty {
         if args.len() != if name == "not" || name == "neg" { 1 } else { 2 } {
@@ -565,12 +631,125 @@ impl Infer {
     }
 }
 
+/// Prefer ground, exact parameter matches over solutions that only work by
+/// binding free type variables (higher score wins).
+fn overload_specificity(subst: &BTreeMap<TyVar, Ty>, actual: &[Ty], params: &[Ty]) -> i32 {
+    let mut score = 0i32;
+    for (a, p) in actual.iter().zip(params.iter()) {
+        let a = solve::resolve(subst, a.clone());
+        let p = solve::resolve(subst, p.clone());
+        if a == p {
+            score += 10;
+        } else if !matches!(p, Ty::Var(_)) {
+            score += 5;
+        }
+    }
+    score
+}
+
+fn format_arg_types(subst: &BTreeMap<TyVar, Ty>, actual: &[Ty]) -> String {
+    actual
+        .iter()
+        .map(|t| solve::resolve(subst, t.clone()).to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Expr, ExprKind, Query};
-    use crate::frontend::TableResolver;
-    use crate::types::{dimensions_div, money_dimensions, quantity_dimensions};
+    use crate::core::{Expr, ExprKind, FnDef, Query};
+    use crate::effects::EffectRow;
+    use crate::frontend::{FnSignature, TableResolver};
+    use crate::types::{dimensions_div, money_dimensions, quantity_dimensions, IntWidth};
+
+    fn lit_int(n: i64) -> Expr {
+        Expr::new(
+            Ty::Int(IntWidth::Int),
+            ExprKind::Lit(crate::pattern::Lit::Int(n)),
+        )
+    }
+
+    fn lit_f64(bits: u64) -> Expr {
+        Expr::new(Ty::F64, ExprKind::Lit(crate::pattern::Lit::F64Bits(bits)))
+    }
+
+    fn var_ty(name: &str, ty: Ty) -> Expr {
+        Expr::new(ty.clone(), ExprKind::Var(Ident::new(name)))
+    }
+
+    #[test]
+    fn call_selects_int_vs_float_clamp_overload() {
+        let resolver = TableResolver::new()
+            .with_function(FnSignature {
+                name: QualIdent::from("clamp"),
+                params: vec![
+                    Ty::Int(IntWidth::Int),
+                    Ty::Int(IntWidth::Int),
+                    Ty::Int(IntWidth::Int),
+                ],
+                ret: Ty::Int(IntWidth::Int),
+                effects: EffectRow::empty(),
+                is_aggregate: false,
+                may_diverge: false,
+            })
+            .with_function(FnSignature {
+                name: QualIdent::from("clamp"),
+                params: vec![Ty::F64, Ty::F64, Ty::F64],
+                ret: Ty::F64,
+                effects: EffectRow::empty(),
+                is_aggregate: false,
+                may_diverge: false,
+            });
+        let mut source = FrontendSource {
+            functions: vec![
+                FnDef {
+                    name: QualIdent::from("demoI"),
+                    params: vec![(Ident::new("x"), Ty::Int(IntWidth::Int))],
+                    ret: Ty::Int(IntWidth::Int),
+                    effects: EffectRow::empty(),
+                    is_partial: false,
+                    body: Expr::new(
+                        Ty::Var(TyVar(0)),
+                        ExprKind::Call {
+                            func: QualIdent::from("clamp"),
+                            args: vec![
+                                var_ty("x", Ty::Int(IntWidth::Int)),
+                                lit_int(0),
+                                lit_int(10),
+                            ],
+                        },
+                    ),
+                },
+                FnDef {
+                    name: QualIdent::from("demoF"),
+                    params: vec![(Ident::new("x"), Ty::F64)],
+                    ret: Ty::F64,
+                    effects: EffectRow::empty(),
+                    is_partial: false,
+                    body: Expr::new(
+                        Ty::Var(TyVar(1)),
+                        ExprKind::Call {
+                            func: QualIdent::from("clamp"),
+                            args: vec![
+                                var_ty("x", Ty::F64),
+                                lit_f64(0.0f64.to_bits()),
+                                lit_f64(1.0f64.to_bits()),
+                            ],
+                        },
+                    ),
+                },
+            ],
+            rules: vec![],
+            constraints: vec![],
+            queries: vec![],
+        };
+        let errors = infer_source(&mut source, &resolver);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(source.functions[0].body.ty, Ty::Int(IntWidth::Int));
+        assert_eq!(source.functions[1].body.ty, Ty::F64);
+    }
+
 
     fn var(name: &str, ty: Ty) -> Expr {
         Expr::new(ty, ExprKind::Var(Ident::new(name)))

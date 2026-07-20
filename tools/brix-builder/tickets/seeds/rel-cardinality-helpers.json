@@ -1,0 +1,15 @@
+{
+  "ticket_id": "rel-cardinality-helpers",
+  "brief": "In brix.rel, add total pure Int helpers that packages can use when talking about relation sizes (no real Rel values yet — keep it Int-level). Exact `fn`/`=` syntax. Add: `fn isEmpty(n: Int) -> Bool = n == 0`, `fn nonempty(n: Int) -> Bool = n > 0`, `fn atLeast(n: Int, k: Int) -> Bool = n >= k`, `fn atMost(n: Int, k: Int) -> Bool = n <= k`, `fn exactly(n: Int, k: Int) -> Bool = n == k`. Do not add entities, capabilities, state, or fake Rel types. Host formats after check.",
+  "package_path": ".",
+  "write_allowlist": ["src/*.brix", "src/**/*.brix"],
+  "acceptance_gates": ["format", "check", "test", "quality", "package_build"],
+  "max_iterations": 5,
+  "max_actions_per_role": 14,
+  "context_tokens": 8192,
+  "metadata": {
+    "package": "brix.rel",
+    "kind": "stdlib-slice",
+    "slice": "cardinality-int"
+  }
+}

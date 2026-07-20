@@ -1,0 +1,14 @@
+{
+  "ticket_id": "seed-core-id-newtype",
+  "brief": "In brix.core, add `type Id = String` and a total pure constructor `fn id_of(value: String) -> Id = value` using that `fn`/`=` syntax (not `function`/`end`). Do not add entities, capabilities, or state. Keep the change inside src/world.brix. Let the host handle formatting after check passes.",
+  "package_path": ".",
+  "write_allowlist": ["src/*.brix", "src/**/*.brix"],
+  "acceptance_gates": ["format", "check", "test", "quality", "package_build"],
+  "max_iterations": 4,
+  "max_actions_per_role": 12,
+  "context_tokens": 8192,
+  "metadata": {
+    "package": "brix.core",
+    "kind": "newtype"
+  }
+}

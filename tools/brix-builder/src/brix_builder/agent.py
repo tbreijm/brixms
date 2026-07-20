@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import Any
 
 from pydantic import ValidationError
@@ -87,11 +89,19 @@ ROLE_INSTRUCTIONS = {
         "BrixMS-only patch and use compiler tools to repair it. For an existing file, "
         "emit propose_patch with files:[] and edits:[{path,old_text,new_text}], where "
         "old_text is one exact source anchor and new_text retains that anchor plus the "
-        "new BrixMS declaration. Do not keep searching once the needed declaration and "
+        "new BrixMS declaration. Total functions use "
+        "`fn name(args: Type) -> Ret = expr` (not `function`/`end`/`return`). "
+        "The host owns canonical formatting after a candidate checks -- do not burn "
+        "actions on whitespace. Do not keep searching once the needed declaration and "
         "a neighboring syntax example are present."
     ),
     "tester": "You are the tester/critic. Do not propose or format files. Challenge the candidate using checks, tests, and package builds; report missing coverage honestly.",
     "reviewer": "You are the semantic reviewer/critic. Do not propose or format files. Inspect the diff and impact for scope, capability, ownership, and unsupported claims.",
+    "critic": (
+        "You are the independent critic. Do not propose, format, or modify files. "
+        "Challenge the candidate with check, test, quality, diff, impact, and build "
+        "evidence. Report failed or unavailable gates honestly."
+    ),
 }
 
 ROLE_ACTIONS = {
@@ -116,6 +126,19 @@ ROLE_ACTIONS = {
         "quality_candidate",
         "finish",
     },
+    "critic": {
+        "project_context",
+        "find",
+        "inspect",
+        "read_source",
+        "check_candidate",
+        "test_candidate",
+        "quality_candidate",
+        "diff_candidate",
+        "impact_candidate",
+        "package_build",
+        "finish",
+    },
 }
 
 
@@ -128,6 +151,8 @@ class RoleRunner:
         ledger: EvidenceLedger,
         max_actions: int,
         context_tokens: int,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
+        seen_actions: set[str] | None = None,
     ):
         self.role = role
         self.model = model
@@ -135,6 +160,8 @@ class RoleRunner:
         self.ledger = ledger
         self.max_actions = max_actions
         self.context_tokens = context_tokens
+        self.event_sink = event_sink
+        self.seen_actions = seen_actions if seen_actions is not None else set()
 
     def run(self, brief: str, critic_context: str = "") -> RoleReport:
         schema = json.dumps(action_json_schema(), separators=(",", ":"))
@@ -198,19 +225,37 @@ class RoleRunner:
                 messages.extend(self._tool_exchange(raw, evidence, result))
                 continue
 
+            fingerprint = self._fingerprint(
+                action.model_dump(), self.role, self.tools.candidate.revision()
+            )
+            if fingerprint in self.seen_actions:
+                result = ToolResult(
+                    False,
+                    "duplicate_action",
+                    message="this exact typed action was already accepted for the ticket",
+                )
+                evidence = self.ledger.record(self.role, action.action, result)
+                self._emit(action.model_dump(), fingerprint, evidence)
+                messages.extend(self._tool_exchange(raw, evidence, result))
+                continue
+            self.seen_actions.add(fingerprint)
+
             if isinstance(action, FinishAction):
                 known = {item.id for item in self.ledger.items}
                 evidence_ids = [item for item in action.evidence_ids if item in known]
-                return RoleReport(
+                report = RoleReport(
                     role=self.role,
                     status=action.status,
                     summary=action.summary,
                     residual_obligations=action.residual_obligations,
                     evidence_ids=evidence_ids,
                 )
+                self._emit(action.model_dump(), fingerprint, None)
+                return report
 
             result = self.tools.dispatch(action)
             evidence = self.ledger.record(self.role, action.action, result)
+            self._emit(action.model_dump(), fingerprint, evidence)
             messages.extend(self._tool_exchange(raw, evidence, result))
             if self.role == "coder" and action.action in research_kinds:
                 research_actions += 1
@@ -232,6 +277,38 @@ class RoleRunner:
             summary=f"{self.role} did not produce a valid finish action within its action budget",
             residual_obligations=["role action budget exhausted"],
             evidence_ids=[],
+        )
+
+    @staticmethod
+    def _fingerprint(action: dict[str, Any], role: str, candidate_revision: str) -> str:
+        normalized = dict(action)
+        normalized.pop("reason", None)
+        payload = json.dumps(
+            {
+                "role": role,
+                "candidate_revision": candidate_revision,
+                "action": normalized,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    def _emit(
+        self,
+        action: dict[str, Any],
+        fingerprint: str,
+        evidence: Evidence | None,
+    ) -> None:
+        if self.event_sink is None:
+            return
+        self.event_sink(
+            {
+                "role": self.role,
+                "action": action,
+                "fingerprint": fingerprint,
+                "evidence": None if evidence is None else evidence,
+            }
         )
 
     def _task_prompt(self, brief: str, critic_context: str) -> str:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from brix_builder.actions import ProposePatchAction
 from brix_builder.config import BuilderConfig
 from brix_builder.tools import BrixTools, ToolResult
@@ -94,3 +96,54 @@ def test_exact_edit_changes_only_the_candidate(config: BuilderConfig) -> None:
     assert result.data["exact_edits"] == 1
     assert "note: String" in tools.candidate.diff()
     assert "note: String" not in (config.root / "src" / "world.brix").read_text()
+
+
+def test_format_gate_host_applies_canonical_fmt_when_check_passes(
+    package_root: Path, tmp_path: Path
+) -> None:
+    """Host owns whitespace once the candidate typechecks — no model turn needed."""
+
+    binary = tmp_path / "fmt-aware-brix"
+    binary.write_text(
+        "#!/usr/bin/env python3\n"
+        "import pathlib, sys\n"
+        "\n"
+        "def resolve(path: pathlib.Path) -> pathlib.Path:\n"
+        "    if path.is_dir():\n"
+        "        return path / 'src' / 'world.brix'\n"
+        "    return path\n"
+        "\n"
+        "def canonical(path: pathlib.Path) -> str:\n"
+        "    text = path.read_text(encoding='utf-8')\n"
+        "    while '\\n\\n\\n' in text:\n"
+        "        text = text.replace('\\n\\n\\n', '\\n\\n')\n"
+        "    return text\n"
+        "\n"
+        "verb = sys.argv[1]\n"
+        "path = resolve(pathlib.Path(sys.argv[2]))\n"
+        "if verb == 'check':\n"
+        "    raise SystemExit(0)\n"
+        "if verb == 'fmt':\n"
+        "    rendered = canonical(path)\n"
+        "    if '--check' in sys.argv:\n"
+        "        raise SystemExit(0 if path.read_text(encoding='utf-8') == rendered else 1)\n"
+        "    sys.stdout.write(rendered)\n"
+        "    raise SystemExit(0)\n"
+        "raise SystemExit(2)\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    tools = BrixTools(BuilderConfig(root=package_root, brix_binary=binary))
+    messy = (
+        "package demo.orders @ 0.1.0\n"
+        "entity Order { key id: String }\n"
+        "\n\n\n"
+        "fn noteOf(id: String) -> String = id\n"
+    )
+    tools.candidate.overlay["src/world.brix"] = messy
+    result = tools.format_candidate()
+    assert result.ok, result.message
+    assert result.status == "canonical"
+    assert result.data.get("host_applied_fmt") is True
+    assert "\n\n\n" not in tools.candidate.contents()["src/world.brix"]
+    assert "fn noteOf" in tools.candidate.contents()["src/world.brix"]
