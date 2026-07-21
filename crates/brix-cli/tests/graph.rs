@@ -16,7 +16,7 @@ use brix_oracle::txn::Transaction as OracleTxn;
 use brix_oracle::value::Value;
 use brixc::lower::RuntimeRelationKind;
 use brixc::pipeline::PhaseAssign;
-use brixc::{lower_graph, AstPhase, DepPackage};
+use brixc::{lower_file, lower_graph, merge_files, AstPhase, DepPackage};
 
 const LIB: &str = "package lib @ 1.0.0\n\
 rel Widget { id: Int; n: Int } key(id)\n\
@@ -356,5 +356,101 @@ enum Colour { Red; Green }\n";
         names(&a),
         names(&b),
         "reordering dependency decls must not change the exported symbol set"
+    );
+}
+
+// --- Issue #42 Slice 4: multi-file / multi-module packages -------------
+//
+// A package may span several `src/**/*.brix` files, each with its own `module`
+// header. In the flat-namespace model the files share one declaration space:
+// `merge_files` concatenates them (caller sorts by path for determinism) and a
+// nominal decl declared in two files is a duplicate export (BRX-LOW-0015).
+
+const MOD_CORE: &str = "package multi @ 0.1.0\n\
+module Core\n\
+rel Widget { id: Int; n: Int } key(id)\n";
+
+const MOD_API: &str = "package multi @ 0.1.0\n\
+module Api\n\
+rel Out { id: Int; v: Int } key(id)\n\
+derive R: Out(id: i, v: x) from { Widget(id: i, n: x) }\n";
+
+fn parse_ok(src: &str) -> (brix_ast::File, brix_ast::Diagnostics) {
+    let (file, diags) = parse_file(src);
+    assert!(!diags.has_errors(), "fixture parses: {:#?}", diags);
+    (file, diags)
+}
+
+#[test]
+fn multi_file_package_shares_a_flat_namespace() {
+    // `Api` references `Widget` declared in `Core`; after merge they lower as
+    // one program with no imports needed.
+    let (core, _) = parse_ok(MOD_CORE);
+    let (api, _) = parse_ok(MOD_API);
+    let (merged, dups) = merge_files(&[&core, &api]);
+    assert!(dups.is_empty(), "no duplicates expected: {:#?}", dups);
+
+    let (_, parse_diags) = parse_file(MOD_CORE);
+    let lowered = lower_file(&merged, &parse_diags);
+    assert!(
+        !lowered.has_errors(),
+        "a cross-file reference must resolve in the flat namespace: {:#?}",
+        lowered.diags
+    );
+    assert!(
+        lowered
+            .resolver
+            .relations()
+            .any(|r| r.name.to_string() == "Widget"),
+        "Widget from the other file must be in the merged program"
+    );
+}
+
+#[test]
+fn merge_is_independent_of_file_order() {
+    let (core, _) = parse_ok(MOD_CORE);
+    let (api, _) = parse_ok(MOD_API);
+    let a = merge_files(&[&core, &api]).0;
+    let b = merge_files(&[&api, &core]).0;
+    // Same decl set regardless of order (the caller's path sort fixes the
+    // canonical order; here we just assert order-independence of the set).
+    let names = |f: &brix_ast::File| {
+        let mut n: Vec<String> = f.decls.iter().map(|d| format!("{:?}", d.span())).collect();
+        n.sort();
+        n
+    };
+    assert_eq!(names(&a), names(&b));
+}
+
+#[test]
+fn duplicate_nominal_decl_across_files_is_flagged() {
+    let (core, _) = parse_ok(MOD_CORE);
+    let dup = "package multi @ 0.1.0\nmodule Other\nrel Widget { id: Int; n: Int } key(id)\n";
+    let (other, _) = parse_ok(dup);
+    let (_, dups) = merge_files(&[&core, &other]);
+    assert!(
+        dups.iter().any(|d| d.code == "BRX-LOW-0015"),
+        "a nominal decl declared in two files must be flagged: {:#?}",
+        dups
+    );
+    // Both occurrences are flagged (deterministic, one per site).
+    assert_eq!(
+        dups.iter().filter(|d| d.code == "BRX-LOW-0015").count(),
+        2,
+        "every occurrence of the duplicate name is reported"
+    );
+}
+
+#[test]
+fn function_overload_across_files_is_not_a_duplicate() {
+    let a = "package m @ 0.1.0\nmodule A\nfn f(x: Int) -> Int = x\n";
+    let b = "package m @ 0.1.0\nmodule B\nfn f(x: Float) -> Float = x\n";
+    let (fa, _) = parse_ok(a);
+    let (fb, _) = parse_ok(b);
+    let (_, dups) = merge_files(&[&fa, &fb]);
+    assert!(
+        dups.is_empty(),
+        "a repeated `fn` name is an overload, not a duplicate export: {:#?}",
+        dups
     );
 }

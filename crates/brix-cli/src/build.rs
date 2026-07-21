@@ -15,7 +15,7 @@ use std::process::Command;
 
 use brix_ast::parse_file;
 use brix_canon::{CanonWriter, Digest, Domain};
-use brix_diag::{DiagnosticFormat, Diagnostics};
+use brix_diag::{Diagnostic, DiagnosticFormat, Diagnostics};
 use brixc::pipeline::PhaseAssign;
 use brixc::{AstPhase, CacheInputs, CacheKey, PipelineError, Profile};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -167,7 +167,10 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
     let located = package::locate(operand).map_err(BuildError::Locate)?;
     let source = std::fs::read_to_string(&located.source_path)?;
 
-    let (file, parse_diags) = parse_file(&source);
+    // A package may span several `src/**/*.brix` files (issue #42 Slice 4). Parse
+    // the entry plus every additional module; a parse error in any of them is
+    // reported against that file's own source.
+    let (entry_file, parse_diags) = parse_file(&source);
     if parse_diags.has_errors() {
         return Err(BuildError::Diagnostics(DiagnosticReport {
             source,
@@ -175,27 +178,82 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
             diagnostics: parse_diags,
         }));
     }
+    let extra_parsed: Vec<(brix_ast::File, brix_ast::Diagnostics)> = located
+        .extra_sources
+        .iter()
+        .map(|s| parse_file(s))
+        .collect();
+    for ((_, diags), src) in extra_parsed.iter().zip(located.extra_sources.iter()) {
+        if diags.has_errors() {
+            return Err(BuildError::Diagnostics(DiagnosticReport {
+                source: src.clone(),
+                path: located.source_path.to_string(),
+                diagnostics: diags.clone(),
+            }));
+        }
+    }
+
+    // Merge the root package's files into one flat-namespace program; duplicate
+    // nominal declarations across the files surface as build errors.
+    let mut root_refs: Vec<&brix_ast::File> = vec![&entry_file];
+    root_refs.extend(extra_parsed.iter().map(|(f, _)| f));
+    let (file, mut merge_diags) = brixc::merge_files(&root_refs);
+
+    // Each dependency is likewise merged from its own source files.
+    let dep_merged: Vec<(
+        Vec<String>,
+        brix_ast::File,
+        brix_ast::Diagnostics,
+        Vec<Diagnostic>,
+    )> = located
+        .deps
+        .iter()
+        .map(|d| {
+            let mut parsed: Vec<(brix_ast::File, brix_ast::Diagnostics)> =
+                vec![parse_file(&d.source)];
+            parsed.extend(d.extra_sources.iter().map(|s| parse_file(s)));
+            let refs: Vec<&brix_ast::File> = parsed.iter().map(|(f, _)| f).collect();
+            let (merged, dups) = brixc::merge_files(&refs);
+            let parse_items: Vec<Diagnostic> = parsed
+                .iter()
+                .flat_map(|(_, dg)| dg.iter().cloned())
+                .collect();
+            (
+                d.name_segments.clone(),
+                merged,
+                Diagnostics::from_items(parse_items),
+                dups,
+            )
+        })
+        .collect();
+    for (_, _, _, dups) in &dep_merged {
+        merge_diags.extend(dups.iter().cloned());
+    }
 
     // Lower the whole locked package graph (issue #42): a dependency-free
-    // package lowers its single root file exactly as before; with dependencies,
-    // parse each hydrated entry source and fold them into one program.
-    let dep_parsed: Vec<(brix_ast::File, brix_ast::Diagnostics)> =
-        located.deps.iter().map(|d| parse_file(&d.source)).collect();
-    let lowered = if located.deps.is_empty() {
+    // package lowers its (possibly multi-file) root exactly as a single program;
+    // with dependencies, fold every merged package into one program.
+    let mut lowered = if dep_merged.is_empty() {
         brixc::lower_file(&file, &parse_diags)
     } else {
-        let dep_packages: Vec<brixc::DepPackage> = located
-            .deps
+        let dep_packages: Vec<brixc::DepPackage> = dep_merged
             .iter()
-            .zip(dep_parsed.iter())
-            .map(|(d, (dep_file, dep_diags))| brixc::DepPackage {
-                name_segments: d.name_segments.clone(),
-                file: dep_file,
-                parse_diags: dep_diags,
-            })
+            .map(
+                |(name_segments, dep_file, dep_diags, _)| brixc::DepPackage {
+                    name_segments: name_segments.clone(),
+                    file: dep_file,
+                    parse_diags: dep_diags,
+                },
+            )
             .collect();
         brixc::lower_graph(&file, &parse_diags, &dep_packages)
     };
+    // Duplicate-declaration diagnostics from the flat-namespace merge ride at
+    // the front of the channel (source order), ahead of lowering findings.
+    if !merge_diags.is_empty() {
+        merge_diags.extend(std::mem::take(&mut lowered.diags));
+        lowered.diags = merge_diags;
+    }
     if lowered.has_errors() {
         return Err(BuildError::Diagnostics(DiagnosticReport {
             source,

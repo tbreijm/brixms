@@ -31,6 +31,11 @@ pub struct LocatedPackage {
     /// Whether `manifest` was loaded from an on-disk `brix.toml` (as opposed
     /// to synthesized from the source `package` declaration).
     pub explicit_manifest: bool,
+    /// The root package's *additional* source files beyond `source_path`
+    /// (issue #42 Slice 4: a package may span several `src/**/*.brix` files).
+    /// Sorted by path so filesystem enumeration order can't affect the build;
+    /// empty for a single-file / bare-file package.
+    pub extra_sources: Vec<String>,
     /// Resolved dependency graph: each dependency's package-name segments and
     /// its entry source. Empty for a dependency-free package.
     pub deps: Vec<GraphDep>,
@@ -39,10 +44,13 @@ pub struct LocatedPackage {
     pub lockfile: Option<Lockfile>,
 }
 
-/// One resolved dependency's entry source (issue #42).
+/// One resolved dependency's source (issue #42). `source` is the entry file
+/// (`src/world.brix`); `extra_sources` are the dependency's other
+/// `src/**/*.brix` files, sorted by path (Slice 4 multi-file packages).
 pub struct GraphDep {
     pub name_segments: Vec<String>,
     pub source: String,
+    pub extra_sources: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -111,7 +119,9 @@ pub fn locate(operand: &str) -> Result<LocatedPackage, LocateError> {
             return Err(LocateError::MissingEntrySource(source_path));
         }
         let manifest = load_manifest(&manifest_path)?;
-        return finish_located(manifest, source_path, pkg_root, true);
+        // Additional package modules: every other `src/**/*.brix` file, sorted.
+        let extra_sources = read_extra_src_files(&pkg_root.join("src"), &source_path)?;
+        return finish_located(manifest, source_path, pkg_root, true, extra_sources);
     }
 
     let source_path = path.to_path_buf();
@@ -145,7 +155,15 @@ pub fn locate(operand: &str) -> Result<LocatedPackage, LocateError> {
         }
     };
 
-    finish_located(manifest, source_path, pkg_root, explicit_manifest)
+    // A bare `.brix` operand is a single file; a directory operand is handled
+    // above with multi-file discovery.
+    finish_located(
+        manifest,
+        source_path,
+        pkg_root,
+        explicit_manifest,
+        Vec::new(),
+    )
 }
 
 /// Assemble a [`LocatedPackage`], resolving + hydrating the dependency graph
@@ -156,6 +174,7 @@ fn finish_located(
     source_path: Utf8PathBuf,
     pkg_root: Utf8PathBuf,
     explicit_manifest: bool,
+    extra_sources: Vec<String>,
 ) -> Result<LocatedPackage, LocateError> {
     let (deps, lockfile) = if manifest.dependencies.is_empty() {
         (Vec::new(), None)
@@ -168,9 +187,46 @@ fn finish_located(
         source_path,
         pkg_root,
         explicit_manifest,
+        extra_sources,
         deps,
         lockfile,
     })
+}
+
+/// Read every `.brix` file under `src_dir` (recursively) except `entry`, sorted
+/// by path — the additional modules of a multi-file package (issue #42 Slice
+/// 4). Sorting makes the source set independent of filesystem enumeration
+/// order (determinism); a package with only its entry file yields an empty vec.
+fn read_extra_src_files(src_dir: &Utf8Path, entry: &Utf8Path) -> Result<Vec<String>, LocateError> {
+    let mut paths: Vec<Utf8PathBuf> = Vec::new();
+    collect_brix_files(src_dir, &mut paths)?;
+    paths.sort();
+    let mut sources = Vec::new();
+    for p in paths {
+        if p == entry {
+            continue;
+        }
+        sources.push(std::fs::read_to_string(&p)?);
+    }
+    Ok(sources)
+}
+
+/// Recursively collect every `*.brix` file under `dir` into `out`.
+fn collect_brix_files(dir: &Utf8Path, out: &mut Vec<Utf8PathBuf>) -> Result<(), LocateError> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = Utf8PathBuf::from_path_buf(entry.path())
+            .map_err(|_| LocateError::Io(std::io::Error::other("non-UTF-8 path")))?;
+        if path.is_dir() {
+            collect_brix_files(&path, out)?;
+        } else if path.extension() == Some("brix") {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// Resolve `manifest`'s dependencies against the package-local registry
@@ -198,9 +254,22 @@ fn load_graph(
             .ok_or_else(|| LocateError::MissingEntrySource(Utf8PathBuf::from(name.to_string())))?;
         let source = String::from_utf8(bytes.clone())
             .map_err(|_| LocateError::NonUtf8Source(name.clone()))?;
+        // A dependency's additional modules: every other `src/**/*.brix` file
+        // in its hydrated tree, in `BTreeMap` (sorted) order (issue #42 Slice
+        // 4). The tree is already content-verified against the lockfile digest.
+        let mut extra_sources = Vec::new();
+        for (path, bytes) in files {
+            if path == entry || path.extension() != Some("brix") || !path.starts_with("src") {
+                continue;
+            }
+            let src = String::from_utf8(bytes.clone())
+                .map_err(|_| LocateError::NonUtf8Source(name.clone()))?;
+            extra_sources.push(src);
+        }
         deps.push(GraphDep {
             name_segments: name.to_string().split('.').map(str::to_string).collect(),
             source,
+            extra_sources,
         });
     }
     Ok((deps, lockfile))
