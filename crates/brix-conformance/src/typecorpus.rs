@@ -1039,12 +1039,13 @@ derive Triplet: Out3(a: x) from {
 /// a single `when` clause whose condition (`flag`) is well-typed `Bool`, so
 /// `reflect.rs` records exactly one `Fact::RequiresBool` and zero `NonBool`
 /// conflicts for it. `flag` is bound by the preceding `Input` clause, so its
-/// type is known (`Bool`) by the time `Clause::When` types the guard — the
-/// same "well-typed guard" shape `unqualified_variant_in_general_expr_position_is_unique_when_only_one_enum_has_it`
-/// (`crates/brixc/tests/lower_units.rs`) exercises with a literal condition,
-/// here with a variable condition instead so the fixture also exercises a
-/// `RoleVar`/`HasType` binding alongside the guard. Exactly one `when`
-/// clause, so this produces exactly one `Fact::RequiresBool`.
+/// type is known (`Bool`) by the time `Clause::When` types the guard — unlike
+/// the ill-typed `when 1` guard `crates/brixc/tests/lower_units.rs`
+/// (`non_bool_when_guard_is_one_targeted_error`) rejects, this one is a clean `Bool` condition
+/// that raises no `NonBool` conflict. The guard is a variable rather than a
+/// literal, so the fixture also exercises a `RoleVar`/`HasType` binding
+/// alongside it. Exactly one `when` clause, so this produces exactly one
+/// `Fact::RequiresBool`.
 pub const NATIVE_WHEN_REQUIRES_BOOL_FIXTURE: &str = r#"
 package t @ 1.0.0
 
