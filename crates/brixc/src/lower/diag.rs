@@ -72,6 +72,13 @@ pub const COMPOUND_UNIT: &str = "BRX-LOW-0013";
 /// the bare name is not silently resolved to whichever `use` happened to be
 /// processed last — the reference must be qualified.
 pub const AMBIGUOUS_IMPORT: &str = "BRX-LOW-0014";
+/// `BRX-LOW-0015` — a nominal declaration (entity/rel/enum/type/record/
+/// protocol) with the same name is declared more than once in a package's
+/// merged source files (issue #42 Slice 4: multi-file packages share one flat
+/// namespace, so a duplicate nominal name across two files is a duplicate
+/// export, caught deterministically rather than silently last-wins). Function
+/// declarations are exempt — same name, different signature is an overload.
+pub const DUPLICATE_DECL: &str = "BRX-LOW-0015";
 /// `BRX-IR-0005` — an expression failed HM/ground-dimension type checking.
 pub const TYPE_ERROR: &str = "BRX-IR-0005";
 /// `BRX-IR-0006` — Appendix E `pure(B, H)` violated: an impure effect atom

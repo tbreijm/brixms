@@ -246,3 +246,43 @@ fn tampered_dependency_fails_closed() {
     );
     std::fs::remove_dir_all(&root).ok();
 }
+
+// --- Issue #42 Slice 4: multi-file packages ---------------------------
+
+/// A dependency-free package split across two `src/**/*.brix` files that both
+/// declare `rel Widget` is a duplicate export in the flat namespace. The build
+/// must fail deterministically at lowering (before any `cargo`), so this needs
+/// no build leg. Uses a *directory* operand so multi-file discovery runs.
+#[test]
+fn duplicate_decl_across_root_files_fails_closed() {
+    let root = tmp_dir("dupdecl");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("brix.toml"),
+        "[package]\nname = \"dup\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    // Entry module + a second module that redeclares the same nominal name.
+    std::fs::write(
+        root.join("src").join("world.brix"),
+        "package dup @ 0.1.0\nmodule World\nrel Widget { id: Int } key(id)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("other.brix"),
+        "package dup @ 0.1.0\nmodule Other\nrel Widget { id: Int } key(id)\n",
+    )
+    .unwrap();
+
+    let out = brix(&["build", root.as_str()]);
+    assert!(
+        !out.status.success(),
+        "a package with a duplicate nominal decl across files must fail"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("BRX-LOW-0015") || stderr.contains("duplicate declaration"),
+        "expected a duplicate-declaration error, got: {stderr}"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}

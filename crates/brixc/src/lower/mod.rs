@@ -102,6 +102,79 @@ pub struct DepPackage<'a> {
     pub parse_diags: &'a brix_ast::Diagnostics,
 }
 
+/// Merge the several source files of ONE package into a single [`File`] with a
+/// flat declaration namespace (issue #42 Slice 4). A package spread across
+/// `src/**/*.brix` compiles as if its files' `use` items and declarations were
+/// concatenated; the caller passes the files already sorted by path so
+/// filesystem enumeration order can never affect the result. The merged file
+/// keeps the first file's `package`/`module` header (headers on the others are
+/// flat-model metadata, not separate namespaces).
+///
+/// Returns the merged file plus any duplicate-declaration diagnostics: a
+/// *nominal* decl name (entity/rel/enum/type/record/protocol) declared in more
+/// than one place is a duplicate export (`BRX-LOW-0015`), flagged at every
+/// occurrence. Functions are exempt — a repeated `fn` name is an overload.
+pub fn merge_files(files: &[&File]) -> (File, Vec<Diagnostic>) {
+    use brix_ast::ast::Decl;
+
+    let mut uses = Vec::new();
+    let mut decls = Vec::new();
+    for f in files {
+        uses.extend(f.uses.iter().cloned());
+        decls.extend(f.decls.iter().cloned());
+    }
+
+    // A nominal decl's name, if it introduces one into the shared namespace.
+    // `fn` (overloadable) and structural/`Extension`/`Error` decls are skipped.
+    fn nominal_name(decl: &Decl) -> Option<&str> {
+        match decl {
+            Decl::Entity(d) => Some(d.name.text.as_str()),
+            Decl::Rel(d) => Some(d.name.text.as_str()),
+            Decl::Enum(d) => Some(d.name.text.as_str()),
+            Decl::Type(d) => Some(d.name.text.as_str()),
+            Decl::Record(d) => Some(d.name.text.as_str()),
+            Decl::Protocol(d) => Some(d.name.text.as_str()),
+            _ => None,
+        }
+    }
+
+    // Count nominal names across the whole package, then flag every occurrence
+    // of any name seen more than once (deterministic: decls are already in
+    // sorted-file then source order).
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for d in &decls {
+        if let Some(name) = nominal_name(d) {
+            *counts.entry(name).or_insert(0) += 1;
+        }
+    }
+    let mut diags = Vec::new();
+    for d in &decls {
+        if let Some(name) = nominal_name(d) {
+            if counts.get(name).copied().unwrap_or(0) > 1 {
+                diags.push(diag::error(
+                    diag::DUPLICATE_DECL,
+                    d.span(),
+                    format!("duplicate declaration `{name}` in this package's source files"),
+                ));
+            }
+        }
+    }
+
+    let span = files.first().map(|f| f.span).unwrap_or_default();
+    let package = files.first().and_then(|f| f.package.clone());
+    let module = files.first().and_then(|f| f.module.clone());
+    (
+        File {
+            span,
+            package,
+            module,
+            uses,
+            decls,
+        },
+        diags,
+    )
+}
+
 /// Rewrite nominal `Ty::Enum` references according to `rename` (a dependency's
 /// local enum name -> its package-qualified name), descending through every
 /// compound type. A dependency lowered in isolation types its relation roles
