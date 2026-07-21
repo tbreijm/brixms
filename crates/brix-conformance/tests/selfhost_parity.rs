@@ -32,9 +32,10 @@ use brixc::pipeline::PhaseAssign;
 use brixc::{emit, lower_file, AstPhase};
 
 use brix_conformance::typecorpus::{
-    NATIVE_ROLE_BINDINGS_FIXTURE, NATIVE_ROLE_LIT_MISMATCH_FIXTURE,
-    NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE, NATIVE_VAR_THREE_ROLES_FIXTURE,
-    NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE, NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
+    NATIVE_OPERATOR_APPLIES_FIXTURE, NATIVE_ROLE_BINDINGS_FIXTURE,
+    NATIVE_ROLE_LIT_MISMATCH_FIXTURE, NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE,
+    NATIVE_VAR_THREE_ROLES_FIXTURE, NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
+    NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
 };
 use brix_conformance::typefacts;
 
@@ -607,5 +608,65 @@ fn when_clause_derives_requires_bool_fact_id_for_fact_id() {
     assert_eq!(
         native, expected,
         "native-derived RequiresBool FactIds must equal reflect.rs's, FactId-for-FactId"
+    );
+}
+
+/// #15 native slice 4 (Applies): a single `x + 1` operator application.
+/// `reflect.rs`'s `Reflect::call` records `Fact::Applies { subject:
+/// Subject::Expr{origin}, operator: func.to_string(), scope: root }` for every
+/// call/operator node — a direct restatement, not a join. The native package
+/// reproduces it via the `OpApply` structural input the exporter now emits for
+/// `Fact::Applies`, re-derived through a `RootScope` join (`AppliesInRoot`).
+/// The `operator` string round-trips verbatim (it was never a token), so the
+/// derived `FactId` must match reflect's own.
+#[test]
+fn operator_application_derives_applies_fact_id_for_fact_id() {
+    let report = analyze_source(NATIVE_OPERATOR_APPLIES_FIXTURE);
+
+    let expected: BTreeSet<FactId> = report
+        .facts
+        .iter()
+        .filter(|derivation| matches!(&derivation.fact, Fact::Applies { .. }))
+        .map(|derivation| derivation.id)
+        .collect();
+    assert_eq!(
+        expected.len(),
+        1,
+        "reflect.rs must record exactly one Applies fact for the single-operator \
+         fixture; got {expected:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-operator-applies".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let applies_extent = settled
+        .extents
+        .get("Applies")
+        .expect("brix.type package must declare an Applies relation");
+    assert_eq!(
+        applies_extent.len(),
+        expected.len(),
+        "native package must derive exactly as many Applies rows as reflect.rs"
+    );
+
+    let native: BTreeSet<FactId> = applies_extent
+        .values()
+        .map(|record| {
+            let fact = typefacts::resolve_applies(&export.tokens, &record.row)
+                .expect("every derived Applies row's tokens must resolve through the token table");
+            FactId::derive(&fact)
+        })
+        .collect();
+
+    assert_eq!(
+        native, expected,
+        "native-derived Applies FactIds must equal reflect.rs's, FactId-for-FactId \
+         (including the verbatim operator string)"
     );
 }

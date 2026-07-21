@@ -55,6 +55,14 @@ rel RootScope { scope: String } key(scope)
 // structural input: an expr subject that a `when` clause requires to be Bool.
 rel WhenCond { subject: String } key(subject)
 
+// structural input: an expr subject that applies `operator` (#15 native
+// slice 4). Unlike every other column in this package, `operator` is a
+// *plain* string — `reflect.rs`'s `Fact::Applies::operator` is a
+// `func.to_string()`, not a `Subject`/`Ty`/`ScopeId`, so the exporter asserts
+// it verbatim rather than as a digest token. R1 still holds: the rule below
+// only copies it into `Applies`, never constructs or interprets it.
+rel OpApply { subject: String; operator: String } key(subject, operator)
+
 // --- derived judgments ---
 
 // Mirrors Fact::HasType { subject, ty, scope }.
@@ -62,6 +70,9 @@ rel HasType { subject: String; ty: String; scope: String } key(subject, ty, scop
 
 // derived, mirrors Fact::RequiresBool { subject, scope }.
 rel RequiresBool { subject: String; scope: String } key(subject, scope)
+
+// derived, mirrors Fact::Applies { subject, operator, scope }.
+rel Applies { subject: String; operator: String; scope: String } key(subject, operator, scope)
 
 // A derived conflict row (never a `constraint`): a literal in a role whose
 // class disagrees with the role's declared type.
@@ -114,5 +125,17 @@ derive VarRoleMismatch: MismatchConflict(subject: subject, expect: expect, found
 // Appendix-F stratified (#15 native slice 3 (RequiresBool)).
 derive RequiresBoolInRoot: RequiresBool(subject: subject, scope: scope) from {
     WhenCond(subject: subject)
+    RootScope(scope: scope)
+}
+
+// AppliesInRoot: OpApply ⋈ RootScope → Applies. Like RequiresBoolInRoot, a
+// direct restatement with no join beyond the root scope — `reflect.rs` emits
+// `Fact::Applies { subject: Subject::Expr{origin}, operator:
+// func.to_string(), scope: ScopeId::root() }` for every call/operator
+// application node (see `Reflect::call` in reflect.rs), before any arity or
+// signature resolution. Monotone (ground `OpApply` ⋈ ground `RootScope`), so
+// it stays Appendix-F stratified (#15 native slice 4 (Applies)).
+derive AppliesInRoot: Applies(subject: subject, operator: operator, scope: scope) from {
+    OpApply(subject: subject, operator: operator)
     RootScope(scope: scope)
 }

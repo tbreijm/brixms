@@ -1058,6 +1058,26 @@ derive Copy: Output(flag: flag) from {
 }
 "#;
 
+/// The operator-application native-slice fixture (#15 native slice 4,
+/// Applies): a single `x + 1` call in a `let` binding. `reflect.rs`'s
+/// `Reflect::call` records `Fact::Applies { subject: Subject::Expr{origin},
+/// operator: func.to_string(), scope: root }` for every call/operator node,
+/// so this well-typed `Int + Int` produces the operator `Applies` fact(s) the
+/// native `AppliesInRoot` rule mirrors. Kept to one visible operator call so
+/// the derived count is small and stable; the test computes the exact
+/// expected set from `reflect.rs` rather than hard-coding it.
+pub const NATIVE_OPERATOR_APPLIES_FIXTURE: &str = r#"
+package t @ 1.0.0
+
+rel Input { x: Int } key(x)
+rel Output { y: Int } key(y)
+
+derive Compute: Output(y: y) from {
+    Input(x: x)
+    let y = x + 1
+}
+"#;
+
 /// All 15 type-inference-axis fixtures, in corpus order. Convenience for
 /// consumers that want to iterate the whole axis rather than naming each
 /// fixture function individually.
