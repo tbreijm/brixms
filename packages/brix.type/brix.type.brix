@@ -1,5 +1,6 @@
 // Native `brix.type` — vertical slice 1 (#15), amended by slice 2
-// (var-at-two-roles, Fable ruling comment 5012408628).
+// (var-at-two-roles, Fable ruling comment 5012408628) and slice 3
+// (#15 native slice 3 (RequiresBool)).
 //
 // Shadow-mode differential companion to `brix_ir::reflect::analyze`. This
 // package never runs against a real user transaction: `brix-conformance`'s
@@ -51,10 +52,16 @@ rel SchemaRole { relation: String; role: String; ty: String } key(relation, role
 // by the exporter and asserted as a singleton every derived judgment joins.
 rel RootScope { scope: String } key(scope)
 
+// structural input: an expr subject that a `when` clause requires to be Bool.
+rel WhenCond { subject: String } key(subject)
+
 // --- derived judgments ---
 
 // Mirrors Fact::HasType { subject, ty, scope }.
 rel HasType { subject: String; ty: String; scope: String } key(subject, ty, scope)
+
+// derived, mirrors Fact::RequiresBool { subject, scope }.
+rel RequiresBool { subject: String; scope: String } key(subject, scope)
 
 // A derived conflict row (never a `constraint`): a literal in a role whose
 // class disagrees with the role's declared type.
@@ -95,4 +102,17 @@ derive VarRoleMismatch: MismatchConflict(subject: subject, expect: expect, found
     SchemaRole(relation: rk, role: qk, ty: found)
     RootScope(scope: scope)
     when expect != found
+}
+
+// RequiresBoolInRoot: WhenCond ⋈ RootScope → RequiresBool. A direct
+// restatement with no join beyond the root scope — `reflect.rs` emits
+// `Fact::RequiresBool { subject: Subject::Expr{origin}, scope:
+// ScopeId::root() }` for every `when` clause condition expression
+// unconditionally (see `Clause::When` in reflect.rs), regardless of whether
+// the condition itself later type-checks as `Bool`. This rule mirrors that:
+// it is monotone (ground `WhenCond` ⋈ ground `RootScope`), so it stays
+// Appendix-F stratified (#15 native slice 3 (RequiresBool)).
+derive RequiresBoolInRoot: RequiresBool(subject: subject, scope: scope) from {
+    WhenCond(subject: subject)
+    RootScope(scope: scope)
 }

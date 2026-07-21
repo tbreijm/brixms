@@ -1035,6 +1035,29 @@ derive Triplet: Out3(a: x) from {
 }
 "#;
 
+/// The `when`-clause native-slice fixture (#15 native slice 3, RequiresBool):
+/// a single `when` clause whose condition (`flag`) is well-typed `Bool`, so
+/// `reflect.rs` records exactly one `Fact::RequiresBool` and zero `NonBool`
+/// conflicts for it. `flag` is bound by the preceding `Input` clause, so its
+/// type is known (`Bool`) by the time `Clause::When` types the guard — unlike
+/// the ill-typed `when 1` guard `crates/brixc/tests/lower_units.rs`
+/// (`non_bool_when_guard_is_one_targeted_error`) rejects, this one is a clean `Bool` condition
+/// that raises no `NonBool` conflict. The guard is a variable rather than a
+/// literal, so the fixture also exercises a `RoleVar`/`HasType` binding
+/// alongside it. Exactly one `when` clause, so this produces exactly one
+/// `Fact::RequiresBool`.
+pub const NATIVE_WHEN_REQUIRES_BOOL_FIXTURE: &str = r#"
+package t @ 1.0.0
+
+rel Input { flag: Bool } key(flag)
+rel Output { flag: Bool } key(flag)
+
+derive Copy: Output(flag: flag) from {
+    Input(flag: flag)
+    when flag
+}
+"#;
+
 /// All 15 type-inference-axis fixtures, in corpus order. Convenience for
 /// consumers that want to iterate the whole axis rather than naming each
 /// fixture function individually.
