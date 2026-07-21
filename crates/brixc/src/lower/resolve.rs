@@ -12,7 +12,7 @@
 //! in-progress set only needs to answer "have I seen this name yet" while
 //! walking the AST left to right).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use brix_ast::ast;
 use brix_ast::Span;
@@ -91,6 +91,13 @@ pub struct ProgramResolver {
     units: BTreeMap<String, (UnitClass, i64)>,
     /// `use p.{a, b}` — bare name -> fully qualified target.
     import_map: BTreeMap<String, QualIdent>,
+    /// Bare names that were `use`-imported to two (or more) *different*
+    /// qualified targets (issue #42 Slice 2: ambiguous cross-package
+    /// imports — `use a.{Foo}` + `use b.{Foo}`). Populated by
+    /// [`Self::with_import`] itself, so this is true the moment a second,
+    /// conflicting `use` item is registered — it does not require a
+    /// separate resolution pass over every reference to notice the hazard.
+    ambiguous_imports: BTreeSet<String>,
     /// `use p.q` (no `.{...}` items) — bare first-segment alias -> its
     /// qualified prefix (design: "`use brix.sim` -> prefix sim.X ->
     /// brix.sim.X").
@@ -176,9 +183,41 @@ impl ProgramResolver {
         self
     }
 
+    /// Register a `use`-imported bare name -> qualified target. If `bare`
+    /// was already imported to a *different* target, this is a genuine
+    /// ambiguity (design: "ambiguous import"): the conflict is recorded in
+    /// [`Self::ambiguous_imports`] rather than silently letting the later
+    /// `use` win (the map is still updated last-wins underneath, purely so
+    /// `resolve_path` always has *some* qualified target to hand back —
+    /// "never fails" — but callers must check [`Self::is_ambiguous_import`]
+    /// before trusting that target).
     pub fn with_import(mut self, bare: impl Into<String>, target: QualIdent) -> Self {
-        self.import_map.insert(bare.into(), target);
+        let bare = bare.into();
+        if let Some(existing) = self.import_map.get(&bare) {
+            if *existing != target {
+                self.ambiguous_imports.insert(bare.clone());
+            }
+        }
+        self.import_map.insert(bare, target);
         self
+    }
+
+    /// The qualified target `bare` currently maps to via `use`, if any
+    /// (last-wins if ambiguous — see [`Self::is_ambiguous_import`]).
+    pub fn imported_target(&self, bare: &str) -> Option<&QualIdent> {
+        self.import_map.get(bare)
+    }
+
+    /// Whether `bare` was `use`-imported to two or more different qualified
+    /// targets (issue #42 Slice 2).
+    pub fn is_ambiguous_import(&self, bare: &str) -> bool {
+        self.ambiguous_imports.contains(bare)
+    }
+
+    /// Every bare name that was `use`-imported ambiguously, in sorted
+    /// (deterministic) order.
+    pub fn ambiguous_imports(&self) -> &BTreeSet<String> {
+        &self.ambiguous_imports
     }
 
     pub fn with_prefix(mut self, bare: impl Into<String>, target: QualIdent) -> Self {

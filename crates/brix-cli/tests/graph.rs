@@ -146,3 +146,101 @@ fn cross_package_fn_executes_matching_oracle() {
         "a cross-package compiled fn must settle identically on both engines"
     );
 }
+
+// --- Issue #42 Slice 2: ambiguous / colliding imports -----------------
+
+const LIB_A: &str = "package a @ 1.0.0\nrel Widget { id: Int } key(id)\n";
+const LIB_B: &str = "package b @ 1.0.0\nrel Widget { id: Int } key(id)\n";
+
+fn dep(name: &str, src: &'static str) -> (brix_ast::File, brix_ast::Diagnostics) {
+    let (file, diags) = parse_file(src);
+    assert!(!diags.has_errors(), "{name} fixture must parse cleanly");
+    (file, diags)
+}
+
+fn has_code(lowered: &brixc::Lowered, code: &str) -> bool {
+    lowered.diags.iter().any(|d| d.code == code)
+}
+
+/// Two dependencies (`a`, `b`) both export a relation named `Widget`; the
+/// root imports both bare names via two separate `use` items. Neither `use`
+/// silently wins — the ambiguity is reported with the stable `BRX-LOW-0014`
+/// code (issue #42 Slice 2), not resolved to whichever happened to be
+/// processed last.
+#[test]
+fn two_dependencies_exporting_the_same_bare_name_is_an_ambiguous_import() {
+    let (a_file, a_diags) = dep("a", LIB_A);
+    let (b_file, b_diags) = dep("b", LIB_B);
+    let app_src = "package app @ 0.1.0\nuse a.{Widget}\nuse b.{Widget}\n";
+    let (app_file, app_diags) = parse_file(app_src);
+    assert!(!app_diags.has_errors());
+
+    let lowered = lower_graph(
+        &app_file,
+        &app_diags,
+        &[
+            DepPackage {
+                name_segments: vec!["a".to_string()],
+                file: &a_file,
+                parse_diags: &a_diags,
+            },
+            DepPackage {
+                name_segments: vec!["b".to_string()],
+                file: &b_file,
+                parse_diags: &b_diags,
+            },
+        ],
+    );
+    assert!(
+        has_code(&lowered, "BRX-LOW-0014"),
+        "expected an ambiguous-import diagnostic, got: {:#?}",
+        lowered.diags
+    );
+}
+
+/// A `use` that imports a bare name already declared locally (the
+/// "duplicate export" case) is also flagged — importing `Widget` from `a`
+/// while the root itself declares a local `rel Widget` is a name collision,
+/// not a silently-shadowed import.
+#[test]
+fn import_colliding_with_a_local_declaration_is_flagged() {
+    let (a_file, a_diags) = dep("a", LIB_A);
+    let app_src = "package app @ 0.1.0\nuse a.{Widget}\nrel Widget { id: Int } key(id)\n";
+    let (app_file, app_diags) = parse_file(app_src);
+    assert!(!app_diags.has_errors());
+
+    let lowered = lower_graph(
+        &app_file,
+        &app_diags,
+        &[DepPackage {
+            name_segments: vec!["a".to_string()],
+            file: &a_file,
+            parse_diags: &a_diags,
+        }],
+    );
+    assert!(
+        has_code(&lowered, "BRX-LOW-0014"),
+        "expected an ambiguous/duplicate-export diagnostic, got: {:#?}",
+        lowered.diags
+    );
+}
+
+/// Regression guard: a single, non-colliding cross-package import still
+/// resolves and lowers cleanly (this is exactly `cross_package_graph_lowers_
+/// and_resolves_qualified_symbols`'s app/lib fixture, re-asserted here so the
+/// ambiguous-import checks above can never be read as "everything is now
+/// flagged").
+#[test]
+fn non_colliding_import_still_resolves_cleanly() {
+    let lowered = lower_app_over_lib();
+    assert!(
+        !lowered.has_errors(),
+        "a non-ambiguous cross-package import must still lower cleanly: {:#?}",
+        lowered.diags
+    );
+    assert!(
+        !has_code(&lowered, "BRX-LOW-0014"),
+        "a non-colliding import must never be flagged ambiguous: {:#?}",
+        lowered.diags
+    );
+}

@@ -155,6 +155,61 @@ fn missing_dependency_fails_closed() {
 }
 
 #[test]
+fn cyclic_dependency_fails_closed() {
+    // `app` depends on `a`; `a` depends on `b`; `b` depends back on `a` — a
+    // genuine package-dependency cycle (issue #42 Slice 2). `resolve`
+    // terminates and produces a lockfile (pubgrub is fine with a cyclic
+    // *version* graph); `hydrate`'s `check_acyclic` is what rejects it,
+    // before any compilation, so this needs no `cargo build` leg.
+    let root = tmp_dir("cyclic");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let app_toml =
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[dependencies]\na = \"^1.0.0\"\n";
+    std::fs::write(root.join("brix.toml"), app_toml).unwrap();
+    let source_path = root.join("src").join("world.brix");
+    std::fs::write(&source_path, "package app @ 0.1.0\n").unwrap();
+
+    let registry = Registry::open(root.join(".brix").join("registry")).expect("registry opens");
+    let a_manifest = Manifest::parse(
+        "[package]\nname = \"a\"\nversion = \"1.0.0\"\n[dependencies]\nb = \"^1.0.0\"\n",
+    )
+    .unwrap();
+    let mut a_files: BTreeMap<Utf8PathBuf, Vec<u8>> = BTreeMap::new();
+    a_files.insert(
+        Utf8PathBuf::from("src/world.brix"),
+        b"package a @ 1.0.0\n".to_vec(),
+    );
+    registry
+        .publish(&a_manifest, &a_files, None)
+        .expect("publish a");
+
+    let b_manifest = Manifest::parse(
+        "[package]\nname = \"b\"\nversion = \"1.0.0\"\n[dependencies]\na = \"^1.0.0\"\n",
+    )
+    .unwrap();
+    let mut b_files: BTreeMap<Utf8PathBuf, Vec<u8>> = BTreeMap::new();
+    b_files.insert(
+        Utf8PathBuf::from("src/world.brix"),
+        b"package b @ 1.0.0\n".to_vec(),
+    );
+    registry
+        .publish(&b_manifest, &b_files, None)
+        .expect("publish b");
+
+    let out = brix(&["build", source_path.as_str()]);
+    assert!(
+        !out.status.success(),
+        "a cyclic dependency graph must fail the build"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cycle"),
+        "expected a cycle error, got: {stderr}"
+    );
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn tampered_dependency_fails_closed() {
     let (root, source) = scaffold_app("tampered", true);
     // Corrupt the store blob so the fetched tree no longer matches its locked
