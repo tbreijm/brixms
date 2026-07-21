@@ -34,12 +34,15 @@ use brix_ir::types::Ty;
 use brix_rt::engine::{Row, TransactionOp, Value};
 
 /// What one opaque token decodes back to (#15 slice-1 R2: "exporter records
-/// a `token -> (Subject|Ty|ScopeId)` side table").
+/// a `token -> (Subject|Ty|ScopeId)` side table"). #15 native slice 6 adds
+/// `Ident` — the first token an identifier round-trips through, needed because
+/// `UnknownFieldConflict` surfaces the accessed `field` name in its output.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TokenValue {
     Subject(Subject),
     Ty(Ty),
     Scope(ScopeId),
+    Ident(Ident),
 }
 
 /// The `token -> origin value` side table an [`export`] run builds. The
@@ -72,11 +75,19 @@ impl TokenTable {
         }
     }
 
+    pub fn ident(&self, token: &str) -> Option<&Ident> {
+        match self.entries.get(token) {
+            Some(TokenValue::Ident(ident)) => Some(ident),
+            _ => None,
+        }
+    }
+
     fn record(&mut self, value: TokenValue) -> Value {
         let hex = match &value {
             TokenValue::Subject(subject) => digest_hex(subject),
             TokenValue::Ty(ty) => digest_hex(ty),
             TokenValue::Scope(scope) => digest_hex(scope),
+            TokenValue::Ident(ident) => digest_hex(ident),
         };
         self.entries.entry(hex.clone()).or_insert(value);
         Value::Str(hex)
@@ -134,9 +145,14 @@ pub struct Export {
 /// reflect's `!is_var` NonBool guard; `BoolType` seeds the `Ty::Bool` constant
 /// the rule tests against.
 ///
+/// `Fact::FieldAccess`/`Fact::RowField` are exported as the like-named inputs
+/// (#15 native slice 6): `FieldNotInRow` flags an accessed `field` as unknown
+/// by the *absence* of a matching `RowField` on the base (a `without` join) —
+/// the package's first negation.
+///
 /// Facts outside these slices' rules (`ExprKindIs`, `ExprChild`, `FnSig`,
-/// `RowField`, `RowTail`, `DimTerm`) are not exported — the native package
-/// doesn't consume them yet.
+/// `RowTail`, `DimTerm`) are not exported — the native package doesn't consume
+/// them yet.
 pub fn export(report: &ReflectiveReport) -> Export {
     let mut tokens = TokenTable::default();
     let mut ops = Vec::new();
@@ -256,6 +272,51 @@ pub fn export(report: &ReflectiveReport) -> Export {
                     row,
                 });
             }
+            // #15 native slice 6: the field-access site. `subject`/`field` are
+            // reverse-mappable tokens (both surface in the derived
+            // `UnknownFieldConflict`); `base` is opaque — it only joins against
+            // `RowField.subject`, never surfaced. `field` is recorded as an
+            // `Ident` token, the same digest a `RowField.field` gets, so the
+            // negation join lines up.
+            Fact::FieldAccess {
+                subject,
+                base,
+                field,
+            } => {
+                let row = Row(BTreeMap::from([
+                    (
+                        "subject".to_string(),
+                        tokens.record(TokenValue::Subject(subject.clone())),
+                    ),
+                    ("base".to_string(), opaque_token(base)),
+                    (
+                        "field".to_string(),
+                        tokens.record(TokenValue::Ident(field.clone())),
+                    ),
+                ]));
+                ops.push(TransactionOp::Assert {
+                    relation: "FieldAccess".to_string(),
+                    row,
+                });
+            }
+            // #15 native slice 6: the base's resolved row membership. Only
+            // `(subject, field)` matters for the UnknownField negation, so `ty`
+            // is dropped; both columns are opaque (neither is surfaced — the
+            // rule only uses this relation under `without`).
+            Fact::RowField {
+                subject,
+                field,
+                ty: _,
+            } => {
+                let row = Row(BTreeMap::from([
+                    ("subject".to_string(), opaque_token(subject)),
+                    ("field".to_string(), opaque_token(field)),
+                ]));
+                ops.push(TransactionOp::Assert {
+                    relation: "RowField".to_string(),
+                    row,
+                });
+            }
             _ => {}
         }
     }
@@ -363,6 +424,28 @@ pub fn resolve_non_bool(tokens: &TokenTable, row: &Row) -> Option<ResolvedNonBoo
     Some(ResolvedNonBool {
         subject,
         found,
+        scope,
+    })
+}
+
+/// The resolved shape of one derived `UnknownFieldConflict` row (#15 native
+/// slice 6) — like [`ResolvedMismatch`], not a `Fact`/`TypeConflict` by
+/// itself; the harness builds a comparable `ConflictKind::UnknownField`
+/// `TypeConflict` from it. `field` decodes through the token table's new
+/// `Ident` mapping.
+pub struct ResolvedUnknownField {
+    pub subject: Subject,
+    pub field: Ident,
+    pub scope: ScopeId,
+}
+
+pub fn resolve_unknown_field(tokens: &TokenTable, row: &Row) -> Option<ResolvedUnknownField> {
+    let subject = tokens.subject(token_str(row, "subject")?)?.clone();
+    let field = tokens.ident(token_str(row, "field")?)?.clone();
+    let scope = tokens.scope(token_str(row, "scope")?)?;
+    Some(ResolvedUnknownField {
+        subject,
+        field,
         scope,
     })
 }

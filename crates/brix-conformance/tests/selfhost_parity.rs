@@ -32,10 +32,10 @@ use brixc::pipeline::PhaseAssign;
 use brixc::{emit, lower_file, AstPhase};
 
 use brix_conformance::typecorpus::{
-    NATIVE_GUARD_NON_BOOL_FIXTURE, NATIVE_OPERATOR_APPLIES_FIXTURE, NATIVE_ROLE_BINDINGS_FIXTURE,
-    NATIVE_ROLE_LIT_MISMATCH_FIXTURE, NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE,
-    NATIVE_VAR_THREE_ROLES_FIXTURE, NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
-    NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
+    field_failure, NATIVE_GUARD_NON_BOOL_FIXTURE, NATIVE_OPERATOR_APPLIES_FIXTURE,
+    NATIVE_ROLE_BINDINGS_FIXTURE, NATIVE_ROLE_LIT_MISMATCH_FIXTURE,
+    NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE, NATIVE_VAR_THREE_ROLES_FIXTURE,
+    NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE, NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
 };
 use brix_conformance::typefacts;
 
@@ -736,5 +736,81 @@ fn non_bool_guard_derives_one_non_bool_conflict() {
         conflict_byte_set(reflect_conflicts.iter().copied()),
         "the native-derived NonBool conflict set must canonical-byte-equal reflect.rs's own \
          (same subject, same `found` type, same scope)"
+    );
+}
+
+/// #15 native slice 6 (UnknownField, field-access form): the package's FIRST
+/// negation. Uses the builder-based `field_failure` fixture — a `record.absent`
+/// access where the base row is `{present: Int}` — because brixc lowers
+/// `base.field` in a rule/derive/constraint body as a qualified `Path`, never
+/// an `ExprKind::Field` (that only surfaces in driver/match contexts reflect
+/// doesn't analyze), so the field-access form isn't expressible as `.brix`
+/// source through this harness. Building the fixture's report directly (as the
+/// 19 `type_parity` fixtures already do) still exercises the *real* native
+/// package. `reflect.rs`'s `ExprKind::Field` arm raises `UnknownField{absent}`
+/// (the base's row has `present`, not `absent`); the native `FieldNotInRow`
+/// rule derives the same conflict from the *absence* of `RowField(base, absent)`
+/// under `without` — proving stratified negation compiles, phase-assigns, and
+/// settles in the real engine, byte-for-byte with reflect. The base's genuine
+/// `RowField(base, present)` (which the `without` must NOT match) makes this a
+/// real discrimination, not a vacuous negation.
+#[test]
+fn unknown_field_access_derives_one_unknown_field_conflict() {
+    let fixture = field_failure();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts: Vec<&TypeConflict> = report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::UnknownField { .. }))
+        .collect();
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one UnknownField conflict for the `n.missing` \
+         fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-unknown-field".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let unknown_field_extent = settled
+        .extents
+        .get("UnknownFieldConflict")
+        .expect("brix.type package must declare an UnknownFieldConflict relation");
+    assert_eq!(
+        unknown_field_extent.len(),
+        1,
+        "native package must derive exactly one UnknownFieldConflict row"
+    );
+
+    let native_conflicts: Vec<TypeConflict> = unknown_field_extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_unknown_field(&export.tokens, &record.row).expect(
+                "every derived UnknownFieldConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::UnknownField {
+                    field: resolved.field,
+                },
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect();
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived UnknownField conflict set must canonical-byte-equal reflect.rs's own \
+         (same subject, same field name, same scope)"
     );
 }

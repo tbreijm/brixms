@@ -316,6 +316,20 @@ pub enum Fact {
         role: Ident,
         ty: Ty,
     },
+    /// #15 native slice 6 (UnknownField): a record/rel field-access expression
+    /// `base.field`, recorded structurally so a native rule can flag the field
+    /// as unknown when the base's resolved row (its [`Fact::RowField`]s) has no
+    /// matching entry. `subject` is the field-access expr's own
+    /// `Subject::Expr`; `base` is the accessed expression's `Subject::Expr`
+    /// (the same subject its [`Fact::RowField`]s hang off, via the base's
+    /// `HasType`); `field` is the accessed name. Appended after `RoleLit` past
+    /// the PR 3 freeze — append-only, no reorder. Emitted from
+    /// [`Reflect::expr`]'s `ExprKind::Field` arm.
+    FieldAccess {
+        subject: Subject,
+        base: Subject,
+        field: Ident,
+    },
 }
 
 /// The one canonical encoder `FactId::derive` uses. Never a second fact
@@ -411,6 +425,15 @@ pub fn write_fact(fact: &Fact, w: &mut CanonWriter) {
             relation.canon_write(w);
             role.canon_write(w);
             ty.canon_write(w);
+        }),
+        Fact::FieldAccess {
+            subject,
+            base,
+            field,
+        } => w.write_enum(12, |w| {
+            subject.canon_write(w);
+            base.canon_write(w);
+            field.canon_write(w);
         }),
     }
 }
@@ -680,6 +703,7 @@ impl Reflect {
                 | Fact::DimTerm { .. }
                 | Fact::RequiresBool { .. }
                 | Fact::Applies { .. }
+                | Fact::FieldAccess { .. }
                 | Fact::RoleVar { .. } => {}
                 // `ty` here is always `lit_ty(lit)` — a concrete literal
                 // class (`Unit`/`Bool`/`Int`/`Str`/`F64`/`Enum`) that never
@@ -1303,6 +1327,21 @@ impl Reflect {
                         },
                     },
                     vec![],
+                );
+                // #15 native slice 6: record the field-access structurally so a
+                // native rule can flag an unknown field by the *absence* of a
+                // matching `Fact::RowField` on the base. `base` names the
+                // accessed expression's subject — the same subject the base's
+                // `RowField`s hang off (via its `HasType`).
+                self.fact(
+                    Fact::FieldAccess {
+                        subject: subject.clone(),
+                        base: Subject::Expr {
+                            origin: base.origin,
+                        },
+                        field: field.clone(),
+                    },
+                    vec![id],
                 );
                 match self.resolve(base_ty) {
                     Ty::Record(row) | Ty::Rel(row) => {
