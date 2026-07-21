@@ -244,3 +244,117 @@ fn non_colliding_import_still_resolves_cleanly() {
         lowered.diags
     );
 }
+
+// --- Issue #42 Slice 3: broader cross-package exports ------------------
+//
+// Slice 1 only re-exported single-name relations + total fns. A dependency's
+// enums, `type` aliases, and protocol-synth relations (dotted names) now also
+// cross the package boundary under package-qualified names, so a root can
+// `use dep.{Colour, Meters, Assign, ...}` and get real nominal types + a
+// protocol.
+
+const LIB_BROAD: &str = "package lib @ 1.0.0\n\
+enum Colour { Red; Green }\n\
+type Meters = Int\n\
+rel Widget { id: Int; c: Colour; len: Meters } key(id)\n\
+protocol Assign { request { id: Int } key(id) outcome Chosen { who: Int } }\n\
+fn scale(x: Meters) -> Meters = x + x\n";
+
+const APP_BROAD: &str = "package app @ 0.1.0\n\
+use lib.{Widget, Colour, Meters, Assign, scale}\n\
+rel Out { id: Int; c: Colour; v: Meters } key(id)\n\
+derive R: Out(id: i, c: k, v: y) from { Widget(id: i, c: k, len: x); let y = scale(x) }\n";
+
+fn lower_over_lib(lib_src: &str) -> brixc::Lowered {
+    let (app_file, app_diags) = parse_file(APP_BROAD);
+    let (lib_file, lib_diags) = parse_file(lib_src);
+    assert!(
+        !app_diags.has_errors() && !lib_diags.has_errors(),
+        "broad-export fixtures parse"
+    );
+    lower_graph(
+        &app_file,
+        &app_diags,
+        &[DepPackage {
+            name_segments: vec!["lib".to_string()],
+            file: &lib_file,
+            parse_diags: &lib_diags,
+        }],
+    )
+}
+
+#[test]
+fn dependency_enum_alias_and_protocol_are_exported_qualified() {
+    let lowered = lower_over_lib(LIB_BROAD);
+    assert!(
+        !lowered.has_errors(),
+        "app must lower cleanly using the dependency's enum/alias/protocol: {:#?}",
+        lowered.diags
+    );
+
+    // Enum + alias arrive under package-qualified names (Slice 1 dropped these
+    // entirely — only relations/fns crossed the boundary).
+    assert!(
+        lowered
+            .resolver
+            .enums()
+            .any(|(n, _)| n.to_string() == "lib.Colour"),
+        "lib.Colour must be a qualified enum in the merged resolver"
+    );
+    assert!(
+        lowered
+            .resolver
+            .aliases()
+            .any(|(n, _)| n.to_string() == "lib.Meters"),
+        "lib.Meters must be a qualified alias in the merged resolver"
+    );
+
+    // Protocol-synth relations (dotted names) are now qualified, not skipped.
+    for want in ["lib.Assign.request", "lib.Assign.Chosen"] {
+        assert!(
+            lowered
+                .resolver
+                .relations()
+                .any(|r| r.name.to_string() == want),
+            "{want} must be a qualified protocol relation, got {:?}",
+            lowered
+                .resolver
+                .relations()
+                .map(|r| r.name.to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// Determinism (issue acceptance): reordering a dependency's declarations must
+/// not change which qualified symbols the graph exports.
+#[test]
+fn broader_exports_are_order_independent() {
+    let reordered = "package lib @ 1.0.0\n\
+fn scale(x: Meters) -> Meters = x + x\n\
+protocol Assign { request { id: Int } key(id) outcome Chosen { who: Int } }\n\
+type Meters = Int\n\
+rel Widget { id: Int; c: Colour; len: Meters } key(id)\n\
+enum Colour { Red; Green }\n";
+
+    let names = |lowered: &brixc::Lowered| -> Vec<String> {
+        let mut out: Vec<String> = lowered
+            .resolver
+            .relations()
+            .map(|r| r.name.to_string())
+            .chain(lowered.resolver.enums().map(|(n, _)| n.to_string()))
+            .chain(lowered.resolver.aliases().map(|(n, _)| n.to_string()))
+            .collect();
+        out.sort();
+        out
+    };
+
+    let a = lower_over_lib(LIB_BROAD);
+    let b = lower_over_lib(reordered);
+    assert!(!a.has_errors() && !b.has_errors());
+    assert_eq!(
+        names(&a),
+        names(&b),
+        "reordering dependency decls must not change the exported symbol set"
+    );
+}

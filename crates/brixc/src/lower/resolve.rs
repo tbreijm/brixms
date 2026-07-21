@@ -125,6 +125,29 @@ impl ProgramResolver {
         self.relations_by_name.values()
     }
 
+    /// Every registered entity type name, in canonical order. Slice 3 of
+    /// issue #42 re-exports a dependency's entity types package-qualified into
+    /// a graph build, so `lower_graph` needs to enumerate them (the enumerable
+    /// mirror `is_entity`'s point lookup can't provide).
+    pub fn entities(&self) -> impl Iterator<Item = &QualIdent> {
+        self.entities.iter()
+    }
+
+    /// Every registered enum, name + declaration-order variants, in canonical
+    /// order (issue #42 Slice 3: re-export a dependency's enums).
+    pub fn enums(&self) -> impl Iterator<Item = (&QualIdent, &[IrIdent])> {
+        self.enums.iter().map(|(n, vs)| (n, vs.as_slice()))
+    }
+
+    /// Every registered `type` alias, name + its 1-level-expanded type, in
+    /// canonical order (issue #42 Slice 3: re-export a dependency's aliases).
+    pub fn aliases(&self) -> impl Iterator<Item = (&QualIdent, &Ty)> {
+        self.type_ns.iter().filter_map(|(n, e)| match e {
+            TypeNsEntry::Alias(ty) => Some((n, ty)),
+            _ => None,
+        })
+    }
+
     pub fn with_function(mut self, sig: FnSignature) -> Self {
         self.table = self.table.with_function(sig);
         self
@@ -307,6 +330,17 @@ impl ProgramResolver {
                 return q.clone();
             }
             return QualIdent::simple(first);
+        }
+        // A `use dep.{Proto}` import can also rewrite the HEAD of a *dotted*
+        // reference: `Proto.request` -> `dep.Proto.request` (issue #42 Slice 3).
+        // This is what makes a dependency's protocol-synth relations
+        // (`Proto.request`, `Proto.<outcome>`) usable cross-package once they
+        // are re-registered package-qualified. Checked before `prefix_map` so
+        // an explicit `.{...}` import wins over a bare-prefix alias.
+        if let Some(target) = self.import_map.get(first) {
+            let mut full: Vec<IrIdent> = target.segments().to_vec();
+            full.extend(segs[1..].iter().map(|s| IrIdent::new(*s)));
+            return QualIdent::from_segments(full);
         }
         if let Some(prefix) = self.prefix_map.get(first) {
             let mut full: Vec<IrIdent> = prefix.segments().to_vec();
