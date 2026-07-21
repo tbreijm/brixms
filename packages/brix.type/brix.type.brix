@@ -206,3 +206,92 @@ derive FieldNotInRow: UnknownFieldConflict(subject: subject, field: field, scope
         RowField(subject: base, field: field)
     }
 }
+
+// --- #15 native slice 7 (Occurs): structural reachability, positive recursion ---
+//
+// `reflect::bind_ty` (reflect.rs ~909) resolves its `ty` argument fully
+// (`let ty = self.resolve(ty)`) BEFORE calling `solve::occurs` — so by the
+// time a bind attempt is worth recording, `target` is already substitution-
+// free. That turns the occurs-check into a pure structural question with no
+// substitution model to reproduce natively: "does the bound variable's own
+// token appear anywhere in the decomposition of `target`'s token?" — i.e.
+// transitive reachability over the tree `target` decomposes into.
+// `typefacts::decompose_ty` emits that decomposition (`TyChild` for the
+// unary/binary type families, `TyRowChild` for `Record`/`Rel` rows) for
+// every `Fact::BindAttempt`, mirroring `solve::occurs`'s own descent set
+// exactly.
+
+// structural input: one variable-binding attempt inside reflect's own
+// unification (`Step::Bind`, in `bind_ty`), recorded BEFORE the occurs-check
+// decides to commit or reject it — the package, not reflect, makes that call
+// natively, from `TyReaches` below. `target` is exported already resolved
+// (`bind_ty` resolves it first), so — like `ExprType` — this rule set needs
+// no native substitution/resolution step of its own. Imported from
+// reflect.rs's `Fact::BindAttempt`.
+rel BindAttempt { subject: String; var: String; target: String } key(subject, var, target)
+
+// structural input: a unary/binary-family structure edge in a decomposed
+// `Ty` — `parent`'s child at `ordinal` (0, or 0/1 for the two binary
+// families `Result`/`Map`) is `child`. Imported from
+// `typefacts::decompose_ty`'s walk of every `BindAttempt.target` (and of
+// `Ty::Var(var)` itself, a childless leaf that records a token but never
+// appears here as a `parent`).
+rel TyChild { parent: String; ordinal: Int; child: String } key(parent, ordinal, child)
+
+// structural input: a `Record`/`Rel` row-field structure edge in a
+// decomposed `Ty` — `parent`'s field named `field` has type `child`.
+// Imported the same way as `TyChild`, for the row-descent half of
+// `solve::occurs`'s descent set.
+rel TyRowChild { parent: String; field: String; child: String } key(parent, field, child)
+
+// A derived conflict row: an occurs-check failure — `var` appears
+// (transitively) inside `into`, the type reflect's `bind_ty` was about to
+// bind it to (mirrors reflect.rs's `ConflictKind::Occurs { var, into }`).
+rel OccursConflict { subject: String; var: String; into: String; scope: String } key(subject, var, into, scope)
+
+// derived: TyChild/TyRowChild uniformly restated as a plain edge (see
+// TyEdgeApp/TyEdgeRow below).
+rel TyEdge { parent: String; child: String } key(parent, child)
+
+// derived: the transitive closure of TyEdge (see TyReachesBase/TyReachesStep
+// below) — structural reachability inside one decomposed `Ty` tree.
+rel TyReaches { root: String; node: String } key(root, node)
+
+// TyEdge: TyChild/TyRowChild, uniformly restated as a plain parent -> child
+// edge — the two structurally distinct input shapes collapse into one edge
+// relation so `TyReaches` below only has to walk one thing. Each rule is a
+// direct restatement (no join beyond dropping the ordinal/field label), so
+// both stay monotone.
+derive TyEdgeApp: TyEdge(parent: p, child: c) from { TyChild(parent: p, ordinal: ord, child: c) }
+derive TyEdgeRow: TyEdge(parent: p, child: c) from { TyRowChild(parent: p, field: fld, child: c) }
+
+// TyReaches: the transitive closure of TyEdge — positive recursion, zero
+// negation. TyReachesBase and TyReachesStep co-produce the same relation, so
+// per brix-phase errata 0002 (predicate-level condensation) they condense
+// into ONE phase and settle together via fixed-point iteration, rather than
+// each needing its own later phase — the two rules below are mutually
+// recursive by design, not an accident the phase assignment has to route
+// around. Termination is structural, not merely assumed: every `Ty` reflect
+// exports is a finite tree (no cyclic `Ty` values exist — cycles are exactly
+// what THIS occurs-check exists to reject before one could ever be built),
+// so `TyChild`/`TyRowChild` describe a finite DAG and the closure below
+// reaches a fixed point in finitely many steps.
+derive TyReachesBase: TyReaches(root: p, node: c) from { TyEdge(parent: p, child: c) }
+derive TyReachesStep: TyReaches(root: p, node: c) from { TyEdge(parent: p, child: m) TyReaches(root: m, node: c) }
+
+// OccursDetected: BindAttempt ⋈ TyReaches ⋈ RootScope → OccursConflict. The
+// occurs-check itself, expressed with no negation at all: `var`'s bind
+// attempt conflicts exactly when `target`'s decomposition tree structurally
+// REACHES `var`'s own leaf token (`TyReaches(root: target, node: var)`) —
+// the equality that join depends on is `typefacts::decompose_ty`'s
+// contract that `Ty::Var(var)`'s token, decomposed on its own, is
+// byte-identical to that same node wherever it turns up while decomposing
+// `target`. Monotone (ground `BindAttempt` ⋈ derived-but-positive
+// `TyReaches` ⋈ ground `RootScope`), so — like every other rule in this
+// package — it stays Appendix-F stratified. Shadow mode: this is a `derive`,
+// never a `constraint`; it must never reject a transaction or gate a build.
+derive OccursDetected: OccursConflict(subject: subject, var: var, into: target, scope: scope) from {
+    BindAttempt(subject: subject, var: var, target: target)
+    TyReaches(root: target, node: var)
+    RootScope(scope: scope)
+}

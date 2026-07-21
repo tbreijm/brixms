@@ -330,6 +330,17 @@ pub enum Fact {
         base: Subject,
         field: Ident,
     },
+    /// #15 native slice 7 (Occurs): a variable-binding attempt inside reflect's
+    /// own unification (`Step::Bind`, in `bind_ty`), recorded BEFORE the
+    /// occurs-check decides to commit or reject it. `target` is exported already
+    /// resolved (bind_ty resolves it first) — structurally subst-free, like
+    /// HasType's post-inference ty. The first fact sourced from inside the
+    /// algorithm rather than source traversal.
+    BindAttempt {
+        subject: Subject,
+        var: TyVar,
+        target: Ty,
+    },
 }
 
 /// The one canonical encoder `FactId::derive` uses. Never a second fact
@@ -434,6 +445,15 @@ pub fn write_fact(fact: &Fact, w: &mut CanonWriter) {
             subject.canon_write(w);
             base.canon_write(w);
             field.canon_write(w);
+        }),
+        Fact::BindAttempt {
+            subject,
+            var,
+            target,
+        } => w.write_enum(13, |w| {
+            subject.canon_write(w);
+            var.canon_write(w);
+            target.canon_write(w);
         }),
     }
 }
@@ -709,6 +729,9 @@ impl Reflect {
                 // class (`Unit`/`Bool`/`Int`/`Str`/`F64`/`Enum`) that never
                 // contains a `TyVar`, so there is nothing to resolve.
                 Fact::RoleLit { .. } => {}
+                Fact::BindAttempt { target, .. } => {
+                    *target = solve::resolve(&subst, target.clone());
+                }
             }
         }
         for conflict in &mut self.draft_conflicts {
@@ -911,6 +934,14 @@ impl Reflect {
         if ty == Ty::Var(variable) {
             return;
         }
+        self.fact(
+            Fact::BindAttempt {
+                subject: subject.clone(),
+                var: variable,
+                target: ty.clone(),
+            },
+            because.clone(),
+        );
         if solve::occurs(variable, &ty, &self.subst) {
             self.conflict(
                 subject,
