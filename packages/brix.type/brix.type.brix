@@ -78,6 +78,17 @@ rel ExprType { subject: String; ty: String } key(subject, ty)
 // against a known token rather than constructing one (#15 native slice 5).
 rel BoolType { ty: String } key(ty)
 
+// structural input: a `base.field` field-access expression (#15 native slice
+// 6). `subject` is the access expr; `base` is the accessed expr (the subject
+// its `RowField`s hang off); `field` is the accessed name. Imported from
+// reflect.rs's `Fact::FieldAccess`.
+rel FieldAccess { subject: String; base: String; field: String } key(subject, base, field)
+
+// structural input: one `(subject, field)` membership of a subject's resolved
+// row (#15 native slice 6). Imported from reflect.rs's `Fact::RowField` with
+// its `ty` dropped — only membership matters for the UnknownField negation.
+rel RowField { subject: String; field: String } key(subject, field)
+
 // --- derived judgments ---
 
 // Mirrors Fact::HasType { subject, ty, scope }.
@@ -96,6 +107,10 @@ rel MismatchConflict { subject: String; expect: String; found: String; scope: St
 // A derived conflict row: a `when` guard whose resolved type is not `Bool`
 // (mirrors reflect.rs's `ConflictKind::NonBool { found }`).
 rel NonBoolConflict { subject: String; found: String; scope: String } key(subject, found, scope)
+
+// A derived conflict row: a `base.field` access whose base row has no such
+// field (mirrors reflect.rs's `ConflictKind::UnknownField { field }`).
+rel UnknownFieldConflict { subject: String; field: String; scope: String } key(subject, field, scope)
 
 // TypeOfRoleBinding: RoleVar ⋈ SchemaRole ⋈ RootScope → HasType. Only the
 // FIRST role-binding of a variable types it (env-order first-wins, #15
@@ -172,4 +187,22 @@ derive GuardNonBool: NonBoolConflict(subject: subject, found: found, scope: scop
     ExprType(subject: subject, ty: found)
     BoolType(ty: bool)
     when found != bool
+}
+
+// FieldNotInRow: FieldAccess ⋈ RootScope, when the base's resolved row has no
+// matching RowField → UnknownFieldConflict. The package's FIRST use of
+// negation: `reflect.rs`'s `ExprKind::Field` arm raises `UnknownField { field
+// }` when the accessed `field` is absent from the base's record/rel row (see
+// reflect.rs), which this rule expresses directly as the *absence* of a
+// `RowField(base, field)` under `without`. Stratified because the negated read
+// is of the ground `RowField` input (an earlier phase than this derivation) —
+// Appendix-F admits negation across a phase boundary (#15 native slice 6
+// (UnknownField, field-access form)). reflect ALSO raises UnknownField during
+// row unification; that form awaits the later unification machinery.
+derive FieldNotInRow: UnknownFieldConflict(subject: subject, field: field, scope: scope) from {
+    FieldAccess(subject: subject, base: base, field: field)
+    RootScope(scope: scope)
+    without {
+        RowField(subject: base, field: field)
+    }
 }
