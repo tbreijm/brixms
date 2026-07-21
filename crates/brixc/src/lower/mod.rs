@@ -77,7 +77,7 @@ pub fn lower_file(file: &File, parse_diags: &brix_ast::Diagnostics) -> Lowered {
         }
     }
     for error in infer_source(&mut source, &resolver) {
-        diags.push(diag::render_type_error(&error));
+        diags.push(diag::render_type_error(&error, &meta));
     }
     for function in &source.functions {
         for finding in check_function(function, &resolver) {
@@ -281,7 +281,19 @@ pub fn lower_graph(
         // Lower and check the dependency in isolation (bare names, own
         // prelude); its errors surface tagged into the graph's channel.
         let dep_lowered = lower_file(dep.file, dep.parse_diags);
-        diags.extend(dep_lowered.diags.iter().cloned());
+        // A dependency's diagnostics carry spans into ITS OWN source, which the
+        // build renders against the ROOT source — a wrong caret. Until the
+        // diagnostic renderer is source-aware (a diag-lane follow-up), attribute
+        // each to its package in the message and drop the cross-source span, so
+        // a dependency error reads honestly ("dependency `lib`: ...") rather
+        // than pointing at an unrelated root line (issue #42 Slice 5).
+        let dep_name = dep.name_segments.join(".");
+        diags.extend(dep_lowered.diags.iter().map(|d| {
+            let mut d = d.clone();
+            d.message = format!("dependency `{dep_name}`: {}", d.message);
+            d.span = brix_diag::Span::empty(0);
+            d
+        }));
 
         let qualify = |name: &str| -> QualIdent {
             let mut segs: Vec<IrIdent> = dep
@@ -415,7 +427,7 @@ pub fn lower_graph(
         }
     }
     for error in infer_source(&mut source, &resolver) {
-        diags.push(diag::render_type_error(&error));
+        diags.push(diag::render_type_error(&error, &meta));
     }
     for function in &source.functions {
         for finding in check_function(function, &resolver) {
