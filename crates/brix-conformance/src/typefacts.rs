@@ -114,21 +114,23 @@ pub struct Export {
     pub tokens: TokenTable,
 }
 
-/// Flatten a [`ReflectiveReport`]'s relevant structural facts
-/// (`Fact::RoleVar`/`Fact::RoleLit`/`Fact::SchemaRole`/`Fact::RequiresBool`)
+/// Flatten a [`ReflectiveReport`]'s relevant structural facts (`Fact::RoleVar`/
+/// `Fact::RoleLit`/`Fact::SchemaRole`/`Fact::RequiresBool`/`Fact::Applies`)
 /// into Ground `Assert` ops for `packages/brix.type/brix.type.brix`, plus the
 /// `RootScope` singleton (R3: every derived judgment joins the root scope
 /// from day one).
 ///
-/// `Fact::RequiresBool` is exported as `WhenCond` (#15 native slice 3): the
-/// native package re-derives `RequiresBool` from it via a `RootScope` join
-/// rather than importing `reflect.rs`'s own derived fact directly, matching
-/// how `RoleVar`/`RoleLit` feed `HasType`/`MismatchConflict`.
+/// `Fact::RequiresBool`/`Fact::Applies` are exported as `WhenCond`/`OpApply`
+/// (#15 native slices 3–4): the native package re-derives them via a
+/// `RootScope` join rather than importing `reflect.rs`'s own derived fact
+/// directly, matching how `RoleVar`/`RoleLit` feed `HasType`/`MismatchConflict`.
+/// `Applies`'s `operator` is a plain `func.to_string()`, not a
+/// `Subject`/`Ty`/`ScopeId`, so it is asserted verbatim (`Value::Str`) rather
+/// than tokenized — the rule only copies it, never interprets it (R1).
 ///
-/// Facts outside this slice's rules (`ExprKindIs`, `ExprChild`, `FnSig`,
-/// `RowField`, `RowTail`, `DimTerm`, and the derived `Applies` `reflect.rs`
-/// itself already produced) are not exported — the native package doesn't
-/// consume them yet.
+/// Facts outside these slices' rules (`ExprKindIs`, `ExprChild`, `FnSig`,
+/// `RowField`, `RowTail`, `DimTerm`) are not exported — the native package
+/// doesn't consume them yet.
 pub fn export(report: &ReflectiveReport) -> Export {
     let mut tokens = TokenTable::default();
     let mut ops = Vec::new();
@@ -203,6 +205,26 @@ pub fn export(report: &ReflectiveReport) -> Export {
                     row,
                 });
             }
+            Fact::Applies {
+                subject,
+                operator,
+                scope: _,
+            } => {
+                // `scope` is always root (seeded below). `operator` is a plain
+                // string, asserted verbatim rather than tokenized — the rule
+                // copies it, never interprets it (R1).
+                let row = Row(BTreeMap::from([
+                    (
+                        "subject".to_string(),
+                        tokens.record(TokenValue::Subject(subject.clone())),
+                    ),
+                    ("operator".to_string(), Value::Str(operator.clone())),
+                ]));
+                ops.push(TransactionOp::Assert {
+                    relation: "OpApply".to_string(),
+                    row,
+                });
+            }
             _ => {}
         }
     }
@@ -244,6 +266,21 @@ pub fn resolve_requires_bool(tokens: &TokenTable, row: &Row) -> Option<Fact> {
     let subject = tokens.subject(token_str(row, "subject")?)?.clone();
     let scope = tokens.scope(token_str(row, "scope")?)?;
     Some(Fact::RequiresBool { subject, scope })
+}
+
+/// Map one derived `Applies` row back to the `Fact::Applies` it represents
+/// (#15 native slice 4). `subject`/`scope` decode through the token table;
+/// `operator` is read back verbatim — it was never a token — matching how
+/// the exporter asserted it. `None` if a token is missing or doesn't decode.
+pub fn resolve_applies(tokens: &TokenTable, row: &Row) -> Option<Fact> {
+    let subject = tokens.subject(token_str(row, "subject")?)?.clone();
+    let operator = token_str(row, "operator")?.to_string();
+    let scope = tokens.scope(token_str(row, "scope")?)?;
+    Some(Fact::Applies {
+        subject,
+        operator,
+        scope,
+    })
 }
 
 /// The resolved shape of one derived `MismatchConflict` row — deliberately
