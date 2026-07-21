@@ -420,7 +420,7 @@ mod tests {
             Utf8PathBuf::from("src/world.brix"),
             b"package a @ 1.0.0\n".to_vec(),
         );
-        registry.publish(&a_manifest, &a_files).expect("publish a");
+        registry.publish(&a_manifest, &a_files, None).expect("publish a");
 
         let b_manifest = manifest(
             "[package]\nname = \"b\"\nversion = \"1.0.0\"\n[dependencies]\na = \"^1.0.0\"\n",
@@ -430,7 +430,7 @@ mod tests {
             Utf8PathBuf::from("src/world.brix"),
             b"package b @ 1.0.0\n".to_vec(),
         );
-        registry.publish(&b_manifest, &b_files).expect("publish b");
+        registry.publish(&b_manifest, &b_files, None).expect("publish b");
 
         let app = manifest(
             "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[dependencies]\na = \"^1.0.0\"\n",
