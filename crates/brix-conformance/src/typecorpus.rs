@@ -510,6 +510,49 @@ pub fn occurs_check() -> TypeFixture {
     }
 }
 
+/// Fixture 6.5 (#15 native slice 7): [`occurs_check`]'s row-descent
+/// counterpart — same shape (a `Query` forcing `unify(?v, <something
+/// containing ?v>)` through the public surface), but the something
+/// containing `?v` is reached by descending a `Rel` row rather than the
+/// `Option` unary family, exercising `TyRowChild`/row descent (a real
+/// soundness case `occurs_check`'s all-`Option` path can't reach — a native
+/// checker that only ever walked `TyChild` would silently miss an occurs
+/// failure buried inside a row field). `result` is `Rel<{value:
+/// Rel<{inner: ?v}>}>`, so `unify(Rel<{value: Rel<{inner: ?v}>}>, ?v)`
+/// forces `bind(v, Rel<{value: Rel<{inner: ?v}>}>)`, whose occurs-check must
+/// descend two nested `Rel` rows (`value`, then `inner`) to find `?v`. Uses
+/// a distinct `TyVar` (9101) from `occurs_check`'s (9100) so the two
+/// fixtures' facts never collide if ever exported together.
+pub fn occurs_check_row() -> TypeFixture {
+    let o = Origins::new("OccursRow");
+    let v = TyVar(9101);
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("OccursRow"),
+            params: vec![(Ident::new("x"), Ty::Var(v))],
+            body: Pattern::default(),
+            yields: o.var("x"),
+            result: Ty::rel(Row::closed(vec![RowField {
+                name: Ident::new("value"),
+                ty: Ty::rel(Row::closed(vec![RowField {
+                    name: Ident::new("inner"),
+                    ty: Ty::Var(v),
+                }])),
+            }])),
+        }],
+    };
+    TypeFixture {
+        label: "occurs_check_row",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver: TableResolver::new(),
+        expected_categories: BTreeSet::from([Category::Occurs]),
+    }
+}
+
 /// Fixture 7 (row symmetry, conflicting side): `query.result` declares a
 /// *closed* `{a}` row but the yielded record is `{a, b}` — an extra field
 /// on the *found* side of a closed row. Catching this requires the

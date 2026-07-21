@@ -32,10 +32,11 @@ use brixc::pipeline::PhaseAssign;
 use brixc::{emit, lower_file, AstPhase};
 
 use brix_conformance::typecorpus::{
-    field_failure, NATIVE_GUARD_NON_BOOL_FIXTURE, NATIVE_OPERATOR_APPLIES_FIXTURE,
-    NATIVE_ROLE_BINDINGS_FIXTURE, NATIVE_ROLE_LIT_MISMATCH_FIXTURE,
-    NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE, NATIVE_VAR_THREE_ROLES_FIXTURE,
-    NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE, NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
+    field_failure, occurs_check, occurs_check_row, NATIVE_GUARD_NON_BOOL_FIXTURE,
+    NATIVE_OPERATOR_APPLIES_FIXTURE, NATIVE_ROLE_BINDINGS_FIXTURE,
+    NATIVE_ROLE_LIT_MISMATCH_FIXTURE, NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE,
+    NATIVE_VAR_THREE_ROLES_FIXTURE, NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
+    NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
 };
 use brix_conformance::typefacts;
 
@@ -812,5 +813,143 @@ fn unknown_field_access_derives_one_unknown_field_conflict() {
         conflict_byte_set(reflect_conflicts.iter().copied()),
         "the native-derived UnknownField conflict set must canonical-byte-equal reflect.rs's own \
          (same subject, same field name, same scope)"
+    );
+}
+
+/// #15 native slice 7 (Occurs, `Option` unary-family form): `occurs_check`'s
+/// query forces `bind_ty` to attempt `?v := Rel<{value: Option<?v>}>` —
+/// `reflect.rs`'s `solve::occurs` rejects it via the `Option` descent arm.
+/// The native `OccursDetected` rule must independently reach the same
+/// verdict via `TyChild`/`TyReaches` — pure positive recursion, no
+/// negation, over the `typefacts::decompose_ty` structure edges the
+/// `BindAttempt` export emits for the (already resolved) bind target.
+#[test]
+fn occurs_check_derives_one_occurs_conflict() {
+    let fixture = occurs_check();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts: Vec<&TypeConflict> = report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::Occurs { .. }))
+        .collect();
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one Occurs conflict for the occurs_check fixture; \
+         got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-occurs".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let occurs_extent = settled
+        .extents
+        .get("OccursConflict")
+        .expect("brix.type package must declare an OccursConflict relation");
+    assert_eq!(
+        occurs_extent.len(),
+        1,
+        "native package must derive exactly one OccursConflict row"
+    );
+
+    let native_conflicts: Vec<TypeConflict> = occurs_extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_occurs(&export.tokens, &record.row).expect(
+                "every derived OccursConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::Occurs {
+                    var: resolved.var,
+                    into: resolved.into,
+                },
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect();
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived Occurs conflict set must canonical-byte-equal reflect.rs's own \
+         (same subject, same var, same into type, same scope)"
+    );
+}
+
+/// #15 native slice 7 (Occurs, `Rel` row-descent form): `occurs_check_row`'s
+/// query forces `bind_ty` to attempt `?v := Rel<{value: Rel<{inner: ?v}>}>` —
+/// a soundness case the `Option`-only `occurs_check` fixture above can't
+/// reach, since it never exercises `TyRowChild`/row descent at all. Proves
+/// the native `OccursDetected` rule's `TyReaches` closure walks `TyRowChild`
+/// edges (via `TyEdgeRow`) exactly as faithfully as it walks `TyChild`
+/// (via `TyEdgeApp`).
+#[test]
+fn occurs_check_row_descent_derives_one_occurs_conflict() {
+    let fixture = occurs_check_row();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts: Vec<&TypeConflict> = report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::Occurs { .. }))
+        .collect();
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one Occurs conflict for the occurs_check_row fixture; \
+         got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-occurs-row".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let occurs_extent = settled
+        .extents
+        .get("OccursConflict")
+        .expect("brix.type package must declare an OccursConflict relation");
+    assert_eq!(
+        occurs_extent.len(),
+        1,
+        "native package must derive exactly one OccursConflict row"
+    );
+
+    let native_conflicts: Vec<TypeConflict> = occurs_extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_occurs(&export.tokens, &record.row).expect(
+                "every derived OccursConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::Occurs {
+                    var: resolved.var,
+                    into: resolved.into,
+                },
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect();
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived Occurs conflict set must canonical-byte-equal reflect.rs's own \
+         (same subject, same var, same into type, same scope)"
     );
 }

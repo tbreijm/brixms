@@ -25,12 +25,12 @@
 //! interpret one — that discipline lives entirely on this side of the
 //! bridge.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use brix_canon::{CanonWriter, Canonical, Domain};
 use brix_ir::ident::{Ident, QualIdent};
 use brix_ir::reflect::{Fact, ReflectiveReport, ScopeId, Subject};
-use brix_ir::types::Ty;
+use brix_ir::types::{Ty, TyVar};
 use brix_rt::engine::{Row, TransactionOp, Value};
 
 /// What one opaque token decodes back to (#15 slice-1 R2: "exporter records
@@ -116,6 +116,103 @@ fn role_token(role: &Ident) -> Value {
     opaque_token(role)
 }
 
+/// Build one `Assert` op from a relation name and its fields, without
+/// spelling out `Row(BTreeMap::from([...]))` at every call site.
+fn assert_op(
+    relation: &str,
+    fields: impl IntoIterator<Item = (&'static str, Value)>,
+) -> TransactionOp {
+    TransactionOp::Assert {
+        relation: relation.to_string(),
+        row: Row(fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect::<BTreeMap<_, _>>()),
+    }
+}
+
+/// #15 native slice 7 (Occurs): recursively emit `TyChild`/`TyRowChild`
+/// structure edges for a `Ty`, memoized (`seen`) so each distinct sub-`Ty` is
+/// decomposed — and its token recorded — exactly once per `export` run. The
+/// descent set mirrors `solve::occurs` exactly (unary family
+/// Option/List/Vector/Set/Bag/Estimate/Missing; binary Result/Map;
+/// Record/Rel rows) — this function IS that same descent, just re-expressed
+/// as edges a Datalog transitive closure can walk instead of a Rust
+/// recursion a Rust function can walk. Scalars and `Ty::Var` leaves record
+/// only their own token (via `tokens.record`, at the top) and emit no edges.
+fn decompose_ty(
+    ty: &Ty,
+    tokens: &mut TokenTable,
+    ops: &mut Vec<TransactionOp>,
+    seen: &mut BTreeSet<String>,
+) -> Value {
+    let self_tok = tokens.record(TokenValue::Ty(ty.clone()));
+    let Value::Str(hex) = self_tok.clone() else {
+        unreachable!("TokenTable::record always returns Value::Str")
+    };
+    if !seen.insert(hex) {
+        return self_tok;
+    }
+    match ty {
+        Ty::Option(t)
+        | Ty::List(t)
+        | Ty::Vector(t)
+        | Ty::Set(t)
+        | Ty::Bag(t)
+        | Ty::Estimate(t)
+        | Ty::Missing(t) => {
+            let child = decompose_ty(t, tokens, ops, seen);
+            ops.push(assert_op(
+                "TyChild",
+                [
+                    ("parent", self_tok.clone()),
+                    ("ordinal", Value::Int(0)),
+                    ("child", child),
+                ],
+            ));
+        }
+        Ty::Result(a, b) | Ty::Map(a, b) => {
+            let ca = decompose_ty(a, tokens, ops, seen);
+            ops.push(assert_op(
+                "TyChild",
+                [
+                    ("parent", self_tok.clone()),
+                    ("ordinal", Value::Int(0)),
+                    ("child", ca),
+                ],
+            ));
+            let cb = decompose_ty(b, tokens, ops, seen);
+            ops.push(assert_op(
+                "TyChild",
+                [
+                    ("parent", self_tok.clone()),
+                    ("ordinal", Value::Int(1)),
+                    ("child", cb),
+                ],
+            ));
+        }
+        Ty::Record(row) | Ty::Rel(row) => {
+            for field in &row.fields {
+                let c = decompose_ty(&field.ty, tokens, ops, seen);
+                ops.push(assert_op(
+                    "TyRowChild",
+                    [
+                        ("parent", self_tok.clone()),
+                        (
+                            "field",
+                            tokens.record(TokenValue::Ident(field.name.clone())),
+                        ),
+                        ("child", c),
+                    ],
+                ));
+            }
+        }
+        // scalar / Var leaf — records its own token (above), no edges
+        _ => {}
+    }
+    self_tok
+}
+
 /// The exported transaction ops (Ground `Assert`s for `RoleVar`/`RoleLit`/
 /// `SchemaRole`/`RootScope`) plus the token table needed to map derived rows
 /// back to `Subject`/`Ty`/`ScopeId`.
@@ -150,12 +247,26 @@ pub struct Export {
 /// by the *absence* of a matching `RowField` on the base (a `without` join) —
 /// the package's first negation.
 ///
+/// `Fact::BindAttempt` is exported as `BindAttempt` plus, via [`decompose_ty`],
+/// the `TyChild`/`TyRowChild` structural decomposition of its (already
+/// resolved) `target` — and of `Ty::Var(var)` itself, so the bound
+/// variable's own leaf token lines up byte-for-byte with any occurrence of
+/// that variable found while decomposing `target` (#15 native slice 7,
+/// Occurs). The package's `TyReaches` transitive closure over those edges,
+/// joined back against `BindAttempt.var`, is the structural occurs-check —
+/// positive recursion, no substitution model needed, because `bind_ty`
+/// always resolves `target` before recording the attempt.
+///
 /// Facts outside these slices' rules (`ExprKindIs`, `ExprChild`, `FnSig`,
 /// `RowTail`, `DimTerm`) are not exported — the native package doesn't consume
 /// them yet.
 pub fn export(report: &ReflectiveReport) -> Export {
     let mut tokens = TokenTable::default();
     let mut ops = Vec::new();
+    // #15 native slice 7: memoizes `decompose_ty`'s recursion across every
+    // `BindAttempt` in one `export` run — a sub-`Ty` reachable from two
+    // different bind attempts is decomposed (and its edges emitted) once.
+    let mut seen: BTreeSet<String> = BTreeSet::new();
 
     for derivation in &report.facts {
         match &derivation.fact {
@@ -317,6 +428,34 @@ pub fn export(report: &ReflectiveReport) -> Export {
                     row,
                 });
             }
+            // #15 native slice 7 (Occurs): the variable-binding attempt
+            // itself, plus its structural decomposition. `var_tok` is a pure
+            // leaf lookup (`Ty::Var(*var)` never has edges) but MUST go
+            // through `decompose_ty` rather than a bare `opaque_token`/
+            // `tokens.record` call — it has to be the exact same token
+            // `decompose_ty(target, ...)` would produce if it ever reached
+            // that same `Ty::Var(*var)` node while descending `target`, and
+            // `decompose_ty` is the one place that mapping is defined.
+            Fact::BindAttempt {
+                subject,
+                var,
+                target,
+            } => {
+                let var_tok = decompose_ty(&Ty::Var(*var), &mut tokens, &mut ops, &mut seen);
+                let target_tok = decompose_ty(target, &mut tokens, &mut ops, &mut seen);
+                let row = Row(BTreeMap::from([
+                    (
+                        "subject".to_string(),
+                        tokens.record(TokenValue::Subject(subject.clone())),
+                    ),
+                    ("var".to_string(), var_tok),
+                    ("target".to_string(), target_tok),
+                ]));
+                ops.push(TransactionOp::Assert {
+                    relation: "BindAttempt".to_string(),
+                    row,
+                });
+            }
             _ => {}
         }
     }
@@ -446,6 +585,36 @@ pub fn resolve_unknown_field(tokens: &TokenTable, row: &Row) -> Option<ResolvedU
     Some(ResolvedUnknownField {
         subject,
         field,
+        scope,
+    })
+}
+
+/// The resolved shape of one derived `OccursConflict` row (#15 native slice
+/// 7) — like [`ResolvedMismatch`], not a `Fact`/`TypeConflict` by itself; the
+/// harness builds a comparable `ConflictKind::Occurs` `TypeConflict` from it.
+/// `var` decodes through the token table's `Ty` mapping and is then
+/// unwrapped from its `Ty::Var(_)` wrapper back to a bare `TyVar` — the
+/// wrapper is only there so `var`'s token matches `into`'s decomposition
+/// leaf-for-leaf (see [`decompose_ty`]).
+pub struct ResolvedOccurs {
+    pub subject: Subject,
+    pub var: TyVar,
+    pub into: Ty,
+    pub scope: ScopeId,
+}
+
+pub fn resolve_occurs(tokens: &TokenTable, row: &Row) -> Option<ResolvedOccurs> {
+    let subject = tokens.subject(token_str(row, "subject")?)?.clone();
+    let var = match tokens.ty(token_str(row, "var")?)? {
+        Ty::Var(v) => *v,
+        _ => return None,
+    };
+    let into = tokens.ty(token_str(row, "into")?)?.clone();
+    let scope = tokens.scope(token_str(row, "scope")?)?;
+    Some(ResolvedOccurs {
+        subject,
+        var,
+        into,
         scope,
     })
 }
