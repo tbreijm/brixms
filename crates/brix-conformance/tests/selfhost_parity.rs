@@ -34,7 +34,7 @@ use brixc::{emit, lower_file, AstPhase};
 use brix_conformance::typecorpus::{
     NATIVE_ROLE_BINDINGS_FIXTURE, NATIVE_ROLE_LIT_MISMATCH_FIXTURE,
     NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE, NATIVE_VAR_THREE_ROLES_FIXTURE,
-    NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
+    NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE, NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
 };
 use brix_conformance::typefacts;
 
@@ -546,5 +546,66 @@ fn var_three_roles_yields_two_oriented_mismatches_never_later_vs_later() {
         conflict_byte_set(reflect_conflicts.iter().copied()),
         "the native-derived MismatchConflict set must canonical-byte-equal reflect.rs's own, \
          and by this equality never contain the (Str, Bool) later-vs-later pair"
+    );
+}
+
+/// #15 native slice 3 (RequiresBool): a single `when` clause with a
+/// well-typed `Bool` condition. `reflect.rs`'s `Clause::When` handling
+/// records `Fact::RequiresBool { subject: Subject::Expr{origin}, scope:
+/// ScopeId::root() }` unconditionally for every `when` clause, before it
+/// even checks whether the condition's type is `Bool` — a direct
+/// restatement, not a join. The native package reproduces this via the
+/// `WhenCond` structural input the exporter now emits for
+/// `Fact::RequiresBool`, re-derived through a `RootScope` join
+/// (`RequiresBoolInRoot`).
+#[test]
+fn when_clause_derives_requires_bool_fact_id_for_fact_id() {
+    let report = analyze_source(NATIVE_WHEN_REQUIRES_BOOL_FIXTURE);
+
+    let expected: BTreeSet<FactId> = report
+        .facts
+        .iter()
+        .filter(|derivation| matches!(&derivation.fact, Fact::RequiresBool { .. }))
+        .map(|derivation| derivation.id)
+        .collect();
+    assert_eq!(
+        expected.len(),
+        1,
+        "reflect.rs must record exactly one RequiresBool fact for the single-when-clause \
+         fixture; got {expected:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-when-requires-bool".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let requires_bool_extent = settled
+        .extents
+        .get("RequiresBool")
+        .expect("brix.type package must declare a RequiresBool relation");
+    assert_eq!(
+        requires_bool_extent.len(),
+        1,
+        "native package must derive exactly one RequiresBool row"
+    );
+
+    let native: BTreeSet<FactId> = requires_bool_extent
+        .values()
+        .map(|record| {
+            let fact = typefacts::resolve_requires_bool(&export.tokens, &record.row).expect(
+                "every derived RequiresBool row's tokens must resolve through the token table",
+            );
+            FactId::derive(&fact)
+        })
+        .collect();
+
+    assert_eq!(
+        native, expected,
+        "native-derived RequiresBool FactIds must equal reflect.rs's, FactId-for-FactId"
     );
 }

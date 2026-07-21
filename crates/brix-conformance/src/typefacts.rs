@@ -115,14 +115,20 @@ pub struct Export {
 }
 
 /// Flatten a [`ReflectiveReport`]'s relevant structural facts
-/// (`Fact::RoleVar`/`Fact::RoleLit`/`Fact::SchemaRole`) into Ground `Assert`
-/// ops for `packages/brix.type/brix.type.brix`, plus the `RootScope`
-/// singleton (R3: every derived judgment joins the root scope from day one).
+/// (`Fact::RoleVar`/`Fact::RoleLit`/`Fact::SchemaRole`/`Fact::RequiresBool`)
+/// into Ground `Assert` ops for `packages/brix.type/brix.type.brix`, plus the
+/// `RootScope` singleton (R3: every derived judgment joins the root scope
+/// from day one).
 ///
-/// Facts outside this slice's two rules (`ExprKindIs`, `ExprChild`, `FnSig`,
-/// `RowField`, `RowTail`, `DimTerm`, and the derived `HasType`/
-/// `RequiresBool`/`Applies` `reflect.rs` itself already produced) are not
-/// exported — the native package doesn't consume them yet.
+/// `Fact::RequiresBool` is exported as `WhenCond` (#15 native slice 3): the
+/// native package re-derives `RequiresBool` from it via a `RootScope` join
+/// rather than importing `reflect.rs`'s own derived fact directly, matching
+/// how `RoleVar`/`RoleLit` feed `HasType`/`MismatchConflict`.
+///
+/// Facts outside this slice's rules (`ExprKindIs`, `ExprChild`, `FnSig`,
+/// `RowField`, `RowTail`, `DimTerm`, and the derived `Applies` `reflect.rs`
+/// itself already produced) are not exported — the native package doesn't
+/// consume them yet.
 pub fn export(report: &ReflectiveReport) -> Export {
     let mut tokens = TokenTable::default();
     let mut ops = Vec::new();
@@ -185,6 +191,18 @@ pub fn export(report: &ReflectiveReport) -> Export {
                     row,
                 });
             }
+            Fact::RequiresBool { subject, scope: _ } => {
+                // `scope` is always root — already seeded below by the
+                // `RootScope` singleton, so only `subject` needs a row here.
+                let row = Row(BTreeMap::from([(
+                    "subject".to_string(),
+                    tokens.record(TokenValue::Subject(subject.clone())),
+                )]));
+                ops.push(TransactionOp::Assert {
+                    relation: "WhenCond".to_string(),
+                    row,
+                });
+            }
             _ => {}
         }
     }
@@ -216,6 +234,16 @@ pub fn resolve_has_type(tokens: &TokenTable, row: &Row) -> Option<Fact> {
     let ty = tokens.ty(token_str(row, "ty")?)?.clone();
     let scope = tokens.scope(token_str(row, "scope")?)?;
     Some(Fact::HasType { subject, ty, scope })
+}
+
+/// Map one derived `RequiresBool` row (`subject`/`scope` tokens) back to the
+/// `Fact::RequiresBool` it represents, via `tokens` (#15 native slice 3) —
+/// the `RequiresBool` counterpart of [`resolve_has_type`]. `None` if a token
+/// is missing from the row or doesn't decode against the table.
+pub fn resolve_requires_bool(tokens: &TokenTable, row: &Row) -> Option<Fact> {
+    let subject = tokens.subject(token_str(row, "subject")?)?.clone();
+    let scope = tokens.scope(token_str(row, "scope")?)?;
+    Some(Fact::RequiresBool { subject, scope })
 }
 
 /// The resolved shape of one derived `MismatchConflict` row — deliberately
