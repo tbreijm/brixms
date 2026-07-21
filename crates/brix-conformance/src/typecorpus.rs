@@ -1078,6 +1078,27 @@ derive Compute: Output(y: y) from {
 }
 "#;
 
+/// The non-Bool-guard native-slice fixture (#15 native slice 5, NonBool): a
+/// `when n` guard whose bound variable `n` has the concrete type `Int` (from
+/// the `Input` role binding), not `Bool` and not a type variable. `reflect.rs`
+/// records `Fact::HasType { Subject::Expr(n), Int }` for the guard expr and
+/// then, since `Int != Bool && !is_var(Int)`, a `ConflictKind::NonBool { found:
+/// Int }`. The native `GuardNonBool` rule mirrors that conflict from the
+/// imported `ExprType` + the `BoolType` singleton. Exactly one `when` guard, so
+/// this produces exactly one NonBool conflict; the test computes the expected
+/// set from `reflect.rs` rather than hard-coding it.
+pub const NATIVE_GUARD_NON_BOOL_FIXTURE: &str = r#"
+package t @ 1.0.0
+
+rel Input { n: Int } key(n)
+rel Output { n: Int } key(n)
+
+derive Copy: Output(n: n) from {
+    Input(n: n)
+    when n
+}
+"#;
+
 /// All 15 type-inference-axis fixtures, in corpus order. Convenience for
 /// consumers that want to iterate the whole axis rather than naming each
 /// fixture function individually.

@@ -63,6 +63,21 @@ rel WhenCond { subject: String } key(subject)
 // only copies it into `Applies`, never constructs or interprets it.
 rel OpApply { subject: String; operator: String } key(subject, operator)
 
+// structural input: the resolved type of an *expression* subject (#15 native
+// slice 5). Imported from `reflect.rs`'s `HasType{Subject::Expr, ty}` (which
+// `expr()` records for every typed expression) — the first slice to consume
+// reflect's post-inference expression types rather than re-deriving them.
+// The exporter drops rows whose `ty` is a `Ty::Var`, faithfully reproducing
+// reflect's `!matches!(ty, Ty::Var(_))` guard on the bridge so this rule set
+// needs no native type-variable detection (a later inference slice moves that
+// judgment into the package). R1 holds: rules only join on / copy `ty`.
+rel ExprType { subject: String; ty: String } key(subject, ty)
+
+// The well-known `Ty::Bool` constant, tokenized once by the exporter and
+// asserted as a singleton (like `RootScope`) so a rule can test `ty != Bool`
+// against a known token rather than constructing one (#15 native slice 5).
+rel BoolType { ty: String } key(ty)
+
 // --- derived judgments ---
 
 // Mirrors Fact::HasType { subject, ty, scope }.
@@ -77,6 +92,10 @@ rel Applies { subject: String; operator: String; scope: String } key(subject, op
 // A derived conflict row (never a `constraint`): a literal in a role whose
 // class disagrees with the role's declared type.
 rel MismatchConflict { subject: String; expect: String; found: String; scope: String } key(subject, expect, found, scope)
+
+// A derived conflict row: a `when` guard whose resolved type is not `Bool`
+// (mirrors reflect.rs's `ConflictKind::NonBool { found }`).
+rel NonBoolConflict { subject: String; found: String; scope: String } key(subject, found, scope)
 
 // TypeOfRoleBinding: RoleVar ⋈ SchemaRole ⋈ RootScope → HasType. Only the
 // FIRST role-binding of a variable types it (env-order first-wins, #15
@@ -138,4 +157,19 @@ derive RequiresBoolInRoot: RequiresBool(subject: subject, scope: scope) from {
 derive AppliesInRoot: Applies(subject: subject, operator: operator, scope: scope) from {
     OpApply(subject: subject, operator: operator)
     RootScope(scope: scope)
+}
+
+// GuardNonBool: RequiresBool ⋈ ExprType ⋈ BoolType, when found != Bool →
+// NonBoolConflict. `reflect.rs`'s `Clause::When` raises `NonBool { found: ty }`
+// when the guard's resolved type is neither `Bool` nor a type variable (see
+// reflect.rs); the `!Ty::Var` half of that guard is honored on the export
+// bridge (ExprType carries no `Ty::Var` rows), so this rule only has to test
+// `found != Bool`. Monotone — a `when`-inequality against the ground
+// `BoolType` singleton, the same shape as `LitRoleMismatch`, so it stays
+// Appendix-F stratified (#15 native slice 5 (NonBool)).
+derive GuardNonBool: NonBoolConflict(subject: subject, found: found, scope: scope) from {
+    RequiresBool(subject: subject, scope: scope)
+    ExprType(subject: subject, ty: found)
+    BoolType(ty: bool)
+    when found != bool
 }
