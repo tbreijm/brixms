@@ -1,6 +1,0 @@
-[package]
-name = "brix.core"
-version = "0.1.0"
-authors = []
-
-[dependencies]
