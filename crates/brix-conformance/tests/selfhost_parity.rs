@@ -32,7 +32,7 @@ use brixc::pipeline::PhaseAssign;
 use brixc::{emit, lower_file, AstPhase};
 
 use brix_conformance::typecorpus::{
-    NATIVE_OPERATOR_APPLIES_FIXTURE, NATIVE_ROLE_BINDINGS_FIXTURE,
+    NATIVE_GUARD_NON_BOOL_FIXTURE, NATIVE_OPERATOR_APPLIES_FIXTURE, NATIVE_ROLE_BINDINGS_FIXTURE,
     NATIVE_ROLE_LIT_MISMATCH_FIXTURE, NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE,
     NATIVE_VAR_THREE_ROLES_FIXTURE, NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
     NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
@@ -668,5 +668,73 @@ fn operator_application_derives_applies_fact_id_for_fact_id() {
         native, expected,
         "native-derived Applies FactIds must equal reflect.rs's, FactId-for-FactId \
          (including the verbatim operator string)"
+    );
+}
+
+/// #15 native slice 5 (NonBool): a `when n` guard whose bound variable `n` is
+/// `Int`. `reflect.rs` records `HasType{Subject::Expr(n), Int}` for the guard
+/// and, since `Int != Bool && !is_var(Int)`, a `ConflictKind::NonBool{found:
+/// Int}`. The native package reproduces the conflict from the imported
+/// `ExprType` (reflect's post-inference expr type, with `Ty::Var` rows dropped
+/// on the bridge to honor reflect's `!is_var` guard) joined against the
+/// `BoolType` singleton by `GuardNonBool` — the first slice to consume
+/// reflect's inferred types rather than re-derive them.
+#[test]
+fn non_bool_guard_derives_one_non_bool_conflict() {
+    let report = analyze_source(NATIVE_GUARD_NON_BOOL_FIXTURE);
+
+    let reflect_conflicts: Vec<&TypeConflict> = report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::NonBool { .. }))
+        .collect();
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one NonBool conflict for the `when n` \
+         (n: Int) fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-non-bool".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let non_bool_extent = settled
+        .extents
+        .get("NonBoolConflict")
+        .expect("brix.type package must declare a NonBoolConflict relation");
+    assert_eq!(
+        non_bool_extent.len(),
+        1,
+        "native package must derive exactly one NonBoolConflict row"
+    );
+
+    let native_conflicts: Vec<TypeConflict> = non_bool_extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_non_bool(&export.tokens, &record.row).expect(
+                "every derived NonBoolConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::NonBool {
+                    found: resolved.found,
+                },
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect();
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived NonBool conflict set must canonical-byte-equal reflect.rs's own \
+         (same subject, same `found` type, same scope)"
     );
 }

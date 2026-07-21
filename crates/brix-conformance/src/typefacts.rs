@@ -115,10 +115,10 @@ pub struct Export {
 }
 
 /// Flatten a [`ReflectiveReport`]'s relevant structural facts (`Fact::RoleVar`/
-/// `Fact::RoleLit`/`Fact::SchemaRole`/`Fact::RequiresBool`/`Fact::Applies`)
-/// into Ground `Assert` ops for `packages/brix.type/brix.type.brix`, plus the
-/// `RootScope` singleton (R3: every derived judgment joins the root scope
-/// from day one).
+/// `Fact::RoleLit`/`Fact::SchemaRole`/`Fact::RequiresBool`/`Fact::Applies`/
+/// `Fact::HasType`-on-`Expr`) into Ground `Assert` ops for
+/// `packages/brix.type/brix.type.brix`, plus the `RootScope` and `BoolType`
+/// singletons (R3: every derived judgment joins the root scope from day one).
 ///
 /// `Fact::RequiresBool`/`Fact::Applies` are exported as `WhenCond`/`OpApply`
 /// (#15 native slices 3–4): the native package re-derives them via a
@@ -127,6 +127,12 @@ pub struct Export {
 /// `Applies`'s `operator` is a plain `func.to_string()`, not a
 /// `Subject`/`Ty`/`ScopeId`, so it is asserted verbatim (`Value::Str`) rather
 /// than tokenized — the rule only copies it, never interprets it (R1).
+///
+/// `Fact::HasType` on a `Subject::Expr` is exported as `ExprType` (#15 native
+/// slice 5) — the first import of reflect's *post-inference* types, feeding the
+/// `GuardNonBool` rule. `Ty::Var` rows are dropped on this bridge to reproduce
+/// reflect's `!is_var` NonBool guard; `BoolType` seeds the `Ty::Bool` constant
+/// the rule tests against.
 ///
 /// Facts outside these slices' rules (`ExprKindIs`, `ExprChild`, `FnSig`,
 /// `RowField`, `RowTail`, `DimTerm`) are not exported — the native package
@@ -225,6 +231,31 @@ pub fn export(report: &ReflectiveReport) -> Export {
                     row,
                 });
             }
+            // #15 native slice 5: import `reflect.rs`'s post-inference type of
+            // an *expression* subject (`expr()` records `HasType{Expr, ty}` for
+            // every typed expr) as the `ExprType` input the `GuardNonBool` rule
+            // joins. `Ty::Var` rows are dropped here, faithfully reproducing
+            // reflect's `!matches!(ty, Ty::Var(_))` NonBool guard on the bridge
+            // so the package needs no native type-variable detection. Only
+            // `Subject::Expr` HasTypes are relevant (a `when` guard is one);
+            // `Binding`/`Head` HasTypes are re-derived natively elsewhere.
+            Fact::HasType {
+                subject: subject @ Subject::Expr { .. },
+                ty,
+                scope: _,
+            } if !matches!(ty, Ty::Var(_)) => {
+                let row = Row(BTreeMap::from([
+                    (
+                        "subject".to_string(),
+                        tokens.record(TokenValue::Subject(subject.clone())),
+                    ),
+                    ("ty".to_string(), tokens.record(TokenValue::Ty(ty.clone()))),
+                ]));
+                ops.push(TransactionOp::Assert {
+                    relation: "ExprType".to_string(),
+                    row,
+                });
+            }
             _ => {}
         }
     }
@@ -233,6 +264,14 @@ pub fn export(report: &ReflectiveReport) -> Export {
     ops.push(TransactionOp::Assert {
         relation: "RootScope".to_string(),
         row: Row(BTreeMap::from([("scope".to_string(), scope_token)])),
+    });
+
+    // The `Ty::Bool` constant `GuardNonBool` tests `found != Bool` against,
+    // seeded as a singleton exactly like `RootScope` (#15 native slice 5).
+    let bool_token = tokens.record(TokenValue::Ty(Ty::Bool));
+    ops.push(TransactionOp::Assert {
+        relation: "BoolType".to_string(),
+        row: Row(BTreeMap::from([("ty".to_string(), bool_token)])),
     });
 
     Export { ops, tokens }
@@ -303,6 +342,26 @@ pub fn resolve_mismatch(tokens: &TokenTable, row: &Row) -> Option<ResolvedMismat
     Some(ResolvedMismatch {
         subject,
         expect,
+        found,
+        scope,
+    })
+}
+
+/// The resolved shape of one derived `NonBoolConflict` row (#15 native slice
+/// 5) — like [`ResolvedMismatch`], not a `Fact`/`TypeConflict` by itself; the
+/// harness builds a comparable `ConflictKind::NonBool` `TypeConflict` from it.
+pub struct ResolvedNonBool {
+    pub subject: Subject,
+    pub found: Ty,
+    pub scope: ScopeId,
+}
+
+pub fn resolve_non_bool(tokens: &TokenTable, row: &Row) -> Option<ResolvedNonBool> {
+    let subject = tokens.subject(token_str(row, "subject")?)?.clone();
+    let found = tokens.ty(token_str(row, "found")?)?.clone();
+    let scope = tokens.scope(token_str(row, "scope")?)?;
+    Some(ResolvedNonBool {
+        subject,
         found,
         scope,
     })
