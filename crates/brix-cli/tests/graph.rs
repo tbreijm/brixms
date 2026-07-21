@@ -454,3 +454,63 @@ fn function_overload_across_files_is_not_a_duplicate() {
         dups
     );
 }
+
+// --- Issue #42 Slice 5: richer / attributed diagnostics ---------------
+
+#[test]
+fn function_type_error_carries_a_real_span() {
+    // `f` takes one argument; calling it with two is a function-named type
+    // error. render_type_error maps the function back to its decl span, so the
+    // diagnostic no longer degrades to 0:0.
+    let src = "package t @ 0.1.0\n\
+rel In { id: Int; n: Int } key(id)\n\
+rel Out { id: Int; v: Int } key(id)\n\
+fn f(x: Int) -> Int = x\n\
+derive R: Out(id: i, v: y) from { In(id: i, n: x); let y = f(x, x) }\n";
+    let (file, diags) = parse_file(src);
+    assert!(!diags.has_errors(), "fixture parses: {:#?}", diags);
+    let lowered = lower_file(&file, &diags);
+    let type_err = lowered
+        .diags
+        .iter()
+        .find(|d| d.code == "BRX-IR-0005")
+        .expect("an arity/overload type error is expected");
+    assert!(
+        !(type_err.span.start == 0 && type_err.span.end == 0),
+        "a function-named type error must carry a real span, got {:?}",
+        type_err.span
+    );
+}
+
+#[test]
+fn dependency_diagnostics_are_attributed_to_their_package() {
+    // A dependency whose role names an unresolved type errors during its own
+    // lowering; in the graph that error is attributed to `lib` (and its
+    // cross-source span dropped) instead of pointing at an unrelated root line.
+    let (lib_file, lib_diags) =
+        parse_file("package lib @ 1.0.0\nrel Bad { x: Nonexistent } key(x)\n");
+    assert!(
+        !lib_diags.has_errors(),
+        "dep parses cleanly (error is semantic)"
+    );
+    let (app_file, app_diags) = parse_file("package app @ 0.1.0\nrel Out { id: Int } key(id)\n");
+    assert!(!app_diags.has_errors());
+
+    let lowered = lower_graph(
+        &app_file,
+        &app_diags,
+        &[DepPackage {
+            name_segments: vec!["lib".to_string()],
+            file: &lib_file,
+            parse_diags: &lib_diags,
+        }],
+    );
+    assert!(
+        lowered
+            .diags
+            .iter()
+            .any(|d| d.message.starts_with("dependency `lib`:")),
+        "a dependency's own diagnostics must be attributed to it, got: {:#?}",
+        lowered.diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}

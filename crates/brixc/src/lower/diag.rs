@@ -146,6 +146,22 @@ fn decl_span(meta: &LowerMeta, name: &IrIdent) -> Span {
     meta.decl_span(name).unwrap_or(Span::empty(0))
 }
 
-pub fn render_type_error(error: &TypeError) -> Diagnostic {
-    Diagnostic::error(TYPE_ERROR, Span::empty(0), error.to_string())
+/// Render an inference [`TypeError`]. Core IR expression nodes carry no spans,
+/// so most type errors still resolve only to an empty span (locating them needs
+/// expression-span threading through `infer_source` — a brix-ir change). The
+/// exception is the *function-named* errors (arity / overload resolution),
+/// whose `QualIdent` we can map back to its declaration span via `meta` — a
+/// real source location instead of `0:0` (issue #42 Slice 5).
+pub fn render_type_error(error: &TypeError, meta: &LowerMeta) -> Diagnostic {
+    let span = match error {
+        TypeError::Arity { function, .. }
+        | TypeError::NoMatchingOverload { function, .. }
+        | TypeError::AmbiguousOverload { function, .. } => function
+            .segments()
+            .last()
+            .and_then(|seg| meta.decl_span(&IrIdent::new(seg.as_str())))
+            .unwrap_or(Span::empty(0)),
+        _ => Span::empty(0),
+    };
+    Diagnostic::error(TYPE_ERROR, span, error.to_string())
 }
