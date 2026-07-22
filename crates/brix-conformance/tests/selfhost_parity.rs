@@ -32,9 +32,11 @@ use brixc::pipeline::PhaseAssign;
 use brixc::{emit, lower_file, AstPhase};
 
 use brix_conformance::typecorpus::{
-    estimate_to_plain_erasure, field_failure, missing_to_plain_implicit_coercion, occurs_check,
-    occurs_check_row, plain_scalar_mismatch, probability_f64_bridge_is_not_a_conflict,
-    probability_to_bool_erasure, subst_chain_composite_root, subst_chain_scalar_root,
+    container_vs_container_mismatch, container_vs_plain_mismatch, cross_epistemic_wrapper_mismatch,
+    estimate_same_ctor_mismatch, estimate_to_plain_erasure, estimate_vs_container_erasure,
+    field_failure, missing_to_plain_implicit_coercion, occurs_check, occurs_check_row,
+    plain_scalar_mismatch, probability_f64_bridge_is_not_a_conflict, probability_to_bool_erasure,
+    same_container_leaf_no_double_count, subst_chain_composite_root, subst_chain_scalar_root,
     NATIVE_GUARD_NON_BOOL_FIXTURE, NATIVE_OPERATOR_APPLIES_FIXTURE, NATIVE_ROLE_BINDINGS_FIXTURE,
     NATIVE_ROLE_LIT_MISMATCH_FIXTURE, NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE,
     NATIVE_VAR_THREE_ROLES_FIXTURE, NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
@@ -1356,5 +1358,312 @@ fn subst_chain_composite_root_resolves_to_the_composite() {
         "native Resolved(var, root) must equal reflect's own fully-chased BindAttempt.target \
          for every accepted var — proving the native fixpoint reproduces solve::resolve's chase \
          even when the chain terminates in a composite (non-leaf) root"
+    );
+}
+
+/// #15 gap-closure (slice 8 B+C, Gap B — container vs a DIFFERENT ctor):
+/// `Result<Bool, Str>` vs `Option<Int>`, reached through the `value`-field row
+/// descent (both top-level `Rel` wrappers agree, so `step` `Rows`-descends into
+/// the field, where the two DIFFERENT container ctors flatten straight to
+/// `Mismatch`). Only `UnifyMismatchCrossCtor` reproduces this.
+#[test]
+fn container_vs_container_derives_exactly_one_mismatch_conflict() {
+    let fixture = container_vs_container_mismatch();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts = reflect_mismatches(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one Mismatch conflict for the \
+         container_vs_container_mismatch fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-container-vs-container".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let mismatch_extent = settled
+        .extents
+        .get("MismatchConflict")
+        .expect("brix.type package must declare a MismatchConflict relation");
+    assert_eq!(
+        mismatch_extent.len(),
+        1,
+        "native package must derive exactly one MismatchConflict row"
+    );
+
+    let native_conflicts = native_mismatches(&export.tokens, mismatch_extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived MismatchConflict set must be canonical-byte-identical \
+         to reflect.rs's own conflict set"
+    );
+}
+
+/// #15 gap-closure (slice 8 B+C, Gap B — container vs plain): `Option<Int>`
+/// vs a bare `Int` — different ctors, `step` flattens to `Mismatch`.
+/// `UnifyMismatch` doesn't reach this (`Option` isn't `TyCtorOrdinary`); only
+/// `UnifyMismatchCrossCtor` does.
+#[test]
+fn container_vs_plain_derives_exactly_one_mismatch_conflict() {
+    let fixture = container_vs_plain_mismatch();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts = reflect_mismatches(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one Mismatch conflict for the \
+         container_vs_plain_mismatch fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-container-vs-plain".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let mismatch_extent = settled
+        .extents
+        .get("MismatchConflict")
+        .expect("brix.type package must declare a MismatchConflict relation");
+    assert_eq!(
+        mismatch_extent.len(),
+        1,
+        "native package must derive exactly one MismatchConflict row"
+    );
+
+    let native_conflicts = native_mismatches(&export.tokens, mismatch_extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived MismatchConflict set must be canonical-byte-identical \
+         to reflect.rs's own conflict set"
+    );
+}
+
+/// #15 gap-closure (slice 8 B+C, Gap B — epistemic vs container erasure):
+/// `Estimate<Int>` vs `Option<Int>` — `is_plain` (solve.rs:263) is TRUE for
+/// containers, so this is a genuine `Erasure`. Only the amended
+/// `EstimateErasureFwd`/`Bwd` (joining the broadened `TyCtorPlain` set)
+/// reproduce it.
+#[test]
+fn estimate_vs_container_derives_exactly_one_erasure_conflict() {
+    let fixture = estimate_vs_container_erasure();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts = reflect_erasures(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one EpistemicErasure conflict for the \
+         estimate_vs_container_erasure fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-estimate-vs-container".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let erasure_extent = settled
+        .extents
+        .get("EpistemicErasureConflict")
+        .expect("brix.type package must declare an EpistemicErasureConflict relation");
+    assert_eq!(
+        erasure_extent.len(),
+        1,
+        "native package must derive exactly one EpistemicErasureConflict row"
+    );
+
+    let native_conflicts = native_erasures(&export.tokens, erasure_extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived EpistemicErasureConflict set must canonical-byte-equal \
+         reflect.rs's own (same subject, same from/to types, same scope)"
+    );
+}
+
+/// #15 gap-closure (slice 8 B+C, Gap C — cross-epistemic-wrapper mismatch):
+/// `Estimate<Int>` vs `Missing<Int>` — two DIFFERENT epistemic wrappers;
+/// `solve::epistemic_erasure` requires one side `is_plain`, and neither is,
+/// so `step` flattens to an ordinary `Mismatch`, never an erasure. Only
+/// `UnifyMismatchCrossCtor` reproduces this.
+#[test]
+fn cross_epistemic_wrapper_derives_exactly_one_mismatch_conflict() {
+    let fixture = cross_epistemic_wrapper_mismatch();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts = reflect_mismatches(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one Mismatch conflict for the \
+         cross_epistemic_wrapper_mismatch fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-cross-epistemic-wrapper".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let mismatch_extent = settled
+        .extents
+        .get("MismatchConflict")
+        .expect("brix.type package must declare a MismatchConflict relation");
+    assert_eq!(
+        mismatch_extent.len(),
+        1,
+        "native package must derive exactly one MismatchConflict row"
+    );
+
+    let native_conflicts = native_mismatches(&export.tokens, mismatch_extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived MismatchConflict set must be canonical-byte-identical \
+         to reflect.rs's own conflict set"
+    );
+}
+
+/// #15 gap-closure (slice 8 B+C, third cell — Estimate vs Estimate): `step`
+/// has NO `(Estimate, Estimate)` Descend arm, so `Estimate<Bool>` vs
+/// `Estimate<Int>` falls to the catch-all, where `epistemic_erasure` returns
+/// `None` — an ordinary `Mismatch` at the container level, no leaf descent.
+/// Only the dedicated `EstimateSameCtorMismatch` rule reproduces this.
+#[test]
+fn estimate_same_ctor_derives_exactly_one_mismatch_conflict() {
+    let fixture = estimate_same_ctor_mismatch();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts = reflect_mismatches(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one Mismatch conflict for the \
+         estimate_same_ctor_mismatch fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-estimate-same-ctor".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let mismatch_extent = settled
+        .extents
+        .get("MismatchConflict")
+        .expect("brix.type package must declare a MismatchConflict relation");
+    assert_eq!(
+        mismatch_extent.len(),
+        1,
+        "native package must derive exactly one MismatchConflict row"
+    );
+
+    let native_conflicts = native_mismatches(&export.tokens, mismatch_extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived MismatchConflict set must be canonical-byte-identical \
+         to reflect.rs's own conflict set"
+    );
+}
+
+/// #15 gap-closure (slice 8 B+C, REGRESSION GUARD — the load-bearing `lc !=
+/// rc` guard): `Option<Bool>` vs `Option<Int>` — SAME ctor at the container
+/// level, which `step`'s `Option`/`Option` arm `Descend`s into the leaf
+/// `Bool` vs `Int` pair, the actual `Mismatch`. This test proves
+/// `UnifyMismatchCrossCtor` does NOT also fire at the container level (which
+/// would double-count the conflict): exactly ONE `MismatchConflict` results,
+/// and — beyond the count/byte-set check every other fixture in this file
+/// makes — its resolved `(expect, found)` is asserted to be the LEAF pair
+/// `(Bool, Int)`, never the container pair `(Option<Bool>, Option<Int>)`.
+#[test]
+fn same_container_leaf_derives_exactly_one_mismatch_at_the_leaf_not_the_container() {
+    let fixture = same_container_leaf_no_double_count();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts = reflect_mismatches(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one Mismatch conflict for the \
+         same_container_leaf_no_double_count fixture (the leaf Bool-vs-Int pair, \
+         not the container-level Option-vs-Option pair, which step Descends \
+         rather than flags as a Mismatch); got {reflect_conflicts:?}"
+    );
+    assert_eq!(
+        reflect_conflicts[0].kind,
+        ConflictKind::Mismatch {
+            left: Ty::Bool,
+            right: Ty::Int(IntWidth::Int),
+        },
+        "reflect's own single Mismatch conflict must be the leaf (Bool, Int) pair"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-same-container-leaf".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let mismatch_extent = settled
+        .extents
+        .get("MismatchConflict")
+        .expect("brix.type package must declare a MismatchConflict relation");
+    assert_eq!(
+        mismatch_extent.len(),
+        1,
+        "native package must derive exactly one MismatchConflict row — NOT two \
+         (which would mean UnifyMismatchCrossCtor double-counted the same-ctor \
+         container pair alongside the leaf pair)"
+    );
+
+    let record = mismatch_extent.values().next().unwrap();
+    let resolved = typefacts::resolve_mismatch(&export.tokens, &record.row)
+        .expect("the derived MismatchConflict row's tokens must resolve through the token table");
+    assert_eq!(
+        (resolved.expect, resolved.found),
+        (Ty::Bool, Ty::Int(IntWidth::Int)),
+        "the single native-derived MismatchConflict must resolve to the LEAF pair \
+         (Bool, Int), never the container pair (Option<Bool>, Option<Int>) — the \
+         exact case the `lc != rc` guard on UnifyMismatchCrossCtor exists to prevent"
+    );
+
+    let native_conflicts = native_mismatches(&export.tokens, mismatch_extent);
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived MismatchConflict set must be canonical-byte-identical \
+         to reflect.rs's own conflict set"
     );
 }
