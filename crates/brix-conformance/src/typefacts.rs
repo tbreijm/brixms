@@ -318,6 +318,14 @@ pub struct Export {
 /// also seeded here (alongside `RootScope`/`BoolType`) with the three ctors
 /// eligible as ordinary-`Mismatch` operands.
 ///
+/// `Fact::SubstEdge` is exported as `SubstEdge` (#15 native slice 9, binding
+/// fixpoint) plus, reusing slice 8's `ctor_seen`/`ty_ctor` machinery, a
+/// `TyCtorIs` row per distinct operand token — `var`'s own `Ty::Var(var)`
+/// leaf and the raw, un-chased `target`, which (unlike `BindAttempt`'s) `zonk`
+/// deliberately leaves alone. The package's `Bound`/`Resolved` chase over
+/// those edges, stopping the instant a target's ctor isn't `Var` (ctor 1),
+/// reproduces `solve::resolve`'s own transitive chase at read time.
+///
 /// Facts outside these slices' rules (`ExprKindIs`, `ExprChild`, `FnSig`,
 /// `RowTail`, `DimTerm`) are not exported — the native package doesn't consume
 /// them yet.
@@ -559,6 +567,42 @@ pub fn export(report: &ReflectiveReport) -> Export {
                     row,
                 });
             }
+            // #15 native slice 9 (binding fixpoint): the raw, un-chased
+            // `subst.insert` edge, plus a `TyCtorIs` row per distinct operand
+            // token (reusing the same `ctor_seen`/`ty_ctor` machinery slice 8
+            // set up) — `TyCtorIs` ctor 1 (`Var`) is the terminator tag the
+            // package's `Resolved` fixpoint chases against.
+            Fact::SubstEdge {
+                subject,
+                var,
+                target,
+            } => {
+                let var_tok = tokens.record(TokenValue::Ty(Ty::Var(*var)));
+                let target_tok = tokens.record(TokenValue::Ty(target.clone()));
+                for (tok, ty) in [(&var_tok, &Ty::Var(*var)), (&target_tok, target)] {
+                    let Value::Str(hex) = tok else {
+                        unreachable!("TokenTable::record always returns Value::Str")
+                    };
+                    if ctor_seen.insert(hex.clone()) {
+                        ops.push(assert_op(
+                            "TyCtorIs",
+                            [("ty", tok.clone()), ("ctor", Value::Int(ty_ctor(ty)))],
+                        ));
+                    }
+                }
+                let row = Row(BTreeMap::from([
+                    (
+                        "subject".to_string(),
+                        tokens.record(TokenValue::Subject(subject.clone())),
+                    ),
+                    ("var".to_string(), var_tok),
+                    ("target".to_string(), target_tok),
+                ]));
+                ops.push(TransactionOp::Assert {
+                    relation: "SubstEdge".to_string(),
+                    row,
+                });
+            }
             _ => {}
         }
     }
@@ -754,4 +798,21 @@ pub fn resolve_epistemic_erasure(tokens: &TokenTable, row: &Row) -> Option<Resol
         to,
         scope,
     })
+}
+
+/// The resolved shape of one derived `Resolved` row (#15 native slice 9): a
+/// var mapped to its union-find root type. `var` unwraps its `Ty::Var`
+/// wrapper like `resolve_occurs`; `root` is the chased terminal type.
+pub struct ResolvedBinding {
+    pub var: TyVar,
+    pub root: Ty,
+}
+
+pub fn resolve_resolved(tokens: &TokenTable, row: &Row) -> Option<ResolvedBinding> {
+    let var = match tokens.ty(token_str(row, "var")?)? {
+        Ty::Var(v) => *v,
+        _ => return None,
+    };
+    let root = tokens.ty(token_str(row, "root")?)?.clone();
+    Some(ResolvedBinding { var, root })
 }

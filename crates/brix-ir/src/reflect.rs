@@ -353,6 +353,21 @@ pub enum Fact {
         expect: Ty,
         found: Ty,
     },
+    /// #15 native slice 9 (binding fixpoint): the raw, un-chased edge `bind_ty`
+    /// inserts into `subst` — captured at the accepted-branch `subst.insert`
+    /// itself (NOT alongside `BindAttempt`, which fires earlier, before the
+    /// occurs-check, on both accepted AND rejected attempts). `target` is `ty`
+    /// as accepted — it may be a bare `Ty::Var` if the other operand was still
+    /// unbound at bind time (a var-to-var edge). Unlike `BindAttempt`, `zonk`
+    /// must NOT resolve it further: the point is to expose the one-hop state
+    /// `subst` holds at THIS insert, before any later insert extends the chain.
+    /// Recording only on the accepted path gives this fact "exactly one row per
+    /// var, ever" (write-once), matching `self.subst.insert`'s own guarantee.
+    SubstEdge {
+        subject: Subject,
+        var: TyVar,
+        target: Ty,
+    },
 }
 
 /// The one canonical encoder `FactId::derive` uses. Never a second fact
@@ -475,6 +490,15 @@ pub fn write_fact(fact: &Fact, w: &mut CanonWriter) {
             subject.canon_write(w);
             expect.canon_write(w);
             found.canon_write(w);
+        }),
+        Fact::SubstEdge {
+            subject,
+            var,
+            target,
+        } => w.write_enum(15, |w| {
+            subject.canon_write(w);
+            var.canon_write(w);
+            target.canon_write(w);
         }),
     }
 }
@@ -757,6 +781,12 @@ impl Reflect {
                     *expect = solve::resolve(&subst, expect.clone());
                     *found = solve::resolve(&subst, found.clone());
                 }
+                // #15 native slice 9: deliberately UNCHANGED by zonk. BindAttempt.target is
+                // fully re-chased above; SubstEdge.target must instead survive that collapse
+                // and read exactly as subst.insert recorded it (the raw one-hop edge the
+                // package's own Resolved fixpoint chases). Zonking it would make slice 9
+                // vacuous (identical to consuming zonked BindAttempt).
+                Fact::SubstEdge { .. } => {}
             }
         }
         for conflict in &mut self.draft_conflicts {
@@ -985,6 +1015,18 @@ impl Reflect {
                 because,
             );
         } else {
+            // #15 native slice 9: record the accepted subst.insert itself as
+            // its own fact, at this insert — NOT paired with BindAttempt (which
+            // also fires on rejected attempts). This placement is what gives
+            // SubstEdge "exactly one row per var, ever" (write-once).
+            self.fact(
+                Fact::SubstEdge {
+                    subject: subject.clone(),
+                    var: variable,
+                    target: ty.clone(),
+                },
+                because.clone(),
+            );
             self.subst.insert(variable, ty);
         }
     }

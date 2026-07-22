@@ -34,10 +34,11 @@ use brixc::{emit, lower_file, AstPhase};
 use brix_conformance::typecorpus::{
     estimate_to_plain_erasure, field_failure, missing_to_plain_implicit_coercion, occurs_check,
     occurs_check_row, plain_scalar_mismatch, probability_f64_bridge_is_not_a_conflict,
-    probability_to_bool_erasure, NATIVE_GUARD_NON_BOOL_FIXTURE, NATIVE_OPERATOR_APPLIES_FIXTURE,
-    NATIVE_ROLE_BINDINGS_FIXTURE, NATIVE_ROLE_LIT_MISMATCH_FIXTURE,
-    NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE, NATIVE_VAR_THREE_ROLES_FIXTURE,
-    NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE, NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
+    probability_to_bool_erasure, subst_chain_composite_root, subst_chain_scalar_root,
+    NATIVE_GUARD_NON_BOOL_FIXTURE, NATIVE_OPERATOR_APPLIES_FIXTURE, NATIVE_ROLE_BINDINGS_FIXTURE,
+    NATIVE_ROLE_LIT_MISMATCH_FIXTURE, NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE,
+    NATIVE_VAR_THREE_ROLES_FIXTURE, NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
+    NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
 };
 use brix_conformance::typefacts;
 
@@ -1229,5 +1230,131 @@ fn missing_to_plain_implicit_coercion_derives_exactly_one_erasure_conflict() {
         conflict_byte_set(reflect_conflicts.iter().copied()),
         "the native-derived EpistemicErasureConflict set must canonical-byte-equal \
          reflect.rs's own (same subject, same from/to types, same scope)"
+    );
+}
+
+/// #15 native slice 9 (binding fixpoint): reflect's own fully-chased ground
+/// truth for one fixture, restricted to vars that were actually inserted into
+/// `subst` (accepted binds only — via `Fact::SubstEdge`). A rejected bind (an
+/// occurs-check failure) has a `BindAttempt` but no `SubstEdge`, and produces
+/// no native `Resolved` row either, so filtering keeps this helper correct
+/// even for fixtures that mix accepted and rejected binds.
+fn reflect_resolved(report: &ReflectiveReport) -> BTreeSet<(brix_ir::types::TyVar, Ty)> {
+    // vars that were actually inserted into subst (accepted binds)
+    let accepted: BTreeSet<brix_ir::types::TyVar> = report
+        .facts
+        .iter()
+        .filter_map(|d| match &d.fact {
+            Fact::SubstEdge { var, .. } => Some(*var),
+            _ => None,
+        })
+        .collect();
+    report
+        .facts
+        .iter()
+        .filter_map(|d| match &d.fact {
+            Fact::BindAttempt { var, target, .. } if accepted.contains(var) => {
+                Some((*var, target.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// #15 native slice 9 (binding fixpoint, scalar root): proves the native
+/// `Bound`/`Resolved` fixpoint reproduces `solve::resolve`'s own transitive
+/// chase over the RAW, un-chased `SubstEdge` edges — `?a := ?b` then
+/// `?b := Int` (subst `{a: Var(b), b: Int}`), chased to `a -> Int`, `b -> Int`.
+#[test]
+fn subst_chain_scalar_root_resolves_two_hops_to_the_same_final_type() {
+    let fixture = subst_chain_scalar_root();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let expected = reflect_resolved(&report);
+    assert_eq!(
+        expected.len(),
+        2,
+        "reflect must accept both binds (A and B) in this fixture; got {expected:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-subst-chain-scalar".to_vec());
+    txn.ops = export.ops;
+    let mut store = Store::new(compiled_package());
+    let settled = store.commit(&txn).expect("shadow mode never rejects");
+
+    let resolved_extent = settled
+        .extents
+        .get("Resolved")
+        .expect("brix.type package must declare a Resolved relation");
+    assert_eq!(
+        resolved_extent.len(),
+        2,
+        "native must derive exactly two Resolved rows"
+    );
+
+    let native: BTreeSet<(brix_ir::types::TyVar, Ty)> = resolved_extent
+        .values()
+        .map(|record| {
+            let r = typefacts::resolve_resolved(&export.tokens, &record.row)
+                .expect("every derived Resolved row's tokens must resolve through the token table");
+            (r.var, r.root)
+        })
+        .collect();
+
+    assert_eq!(
+        native, expected,
+        "native Resolved(var, root) must equal reflect's own fully-chased BindAttempt.target \
+         for every accepted var — proving the native fixpoint reproduces solve::resolve's chase"
+    );
+}
+
+/// #15 native slice 9 (binding fixpoint, composite root): [`subst_chain_scalar_root`]'s
+/// counterpart chasing to a pre-tokenized ground composite root (`Option<Int>`)
+/// instead of a bare scalar, proving the fixpoint doesn't special-case the
+/// terminal shape — it only ever inspects `TyCtorIs`, which the composite
+/// root's own token gets exactly once, same as any other operand.
+#[test]
+fn subst_chain_composite_root_resolves_to_the_composite() {
+    let fixture = subst_chain_composite_root();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let expected = reflect_resolved(&report);
+    assert_eq!(
+        expected.len(),
+        2,
+        "reflect must accept both binds (A and B) in this fixture; got {expected:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-subst-chain-composite".to_vec());
+    txn.ops = export.ops;
+    let mut store = Store::new(compiled_package());
+    let settled = store.commit(&txn).expect("shadow mode never rejects");
+
+    let resolved_extent = settled
+        .extents
+        .get("Resolved")
+        .expect("brix.type package must declare a Resolved relation");
+    assert_eq!(
+        resolved_extent.len(),
+        2,
+        "native must derive exactly two Resolved rows"
+    );
+
+    let native: BTreeSet<(brix_ir::types::TyVar, Ty)> = resolved_extent
+        .values()
+        .map(|record| {
+            let r = typefacts::resolve_resolved(&export.tokens, &record.row)
+                .expect("every derived Resolved row's tokens must resolve through the token table");
+            (r.var, r.root)
+        })
+        .collect();
+
+    assert_eq!(
+        native, expected,
+        "native Resolved(var, root) must equal reflect's own fully-chased BindAttempt.target \
+         for every accepted var — proving the native fixpoint reproduces solve::resolve's chase \
+         even when the chain terminates in a composite (non-leaf) root"
     );
 }
