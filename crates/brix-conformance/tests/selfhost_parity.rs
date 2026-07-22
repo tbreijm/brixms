@@ -32,11 +32,12 @@ use brixc::pipeline::PhaseAssign;
 use brixc::{emit, lower_file, AstPhase};
 
 use brix_conformance::typecorpus::{
-    field_failure, occurs_check, occurs_check_row, NATIVE_GUARD_NON_BOOL_FIXTURE,
-    NATIVE_OPERATOR_APPLIES_FIXTURE, NATIVE_ROLE_BINDINGS_FIXTURE,
-    NATIVE_ROLE_LIT_MISMATCH_FIXTURE, NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE,
-    NATIVE_VAR_THREE_ROLES_FIXTURE, NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
-    NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
+    estimate_to_plain_erasure, field_failure, missing_to_plain_implicit_coercion, occurs_check,
+    occurs_check_row, plain_scalar_mismatch, probability_f64_bridge_is_not_a_conflict,
+    probability_to_bool_erasure, NATIVE_GUARD_NON_BOOL_FIXTURE, NATIVE_OPERATOR_APPLIES_FIXTURE,
+    NATIVE_ROLE_BINDINGS_FIXTURE, NATIVE_ROLE_LIT_MISMATCH_FIXTURE,
+    NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE, NATIVE_VAR_THREE_ROLES_FIXTURE,
+    NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE, NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
 };
 use brix_conformance::typefacts;
 
@@ -119,6 +120,39 @@ fn native_mismatches(tokens: &typefacts::TokenTable, extent: &Extent) -> Vec<Typ
                 kind: ConflictKind::Mismatch {
                     left: resolved.expect,
                     right: resolved.found,
+                },
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect()
+}
+
+/// Every `EpistemicErasure`-kind conflict `reflect::analyze` recorded (#15
+/// native slice 8) — the erasure counterpart of [`reflect_mismatches`].
+fn reflect_erasures(report: &ReflectiveReport) -> Vec<&TypeConflict> {
+    report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::EpistemicErasure { .. }))
+        .collect()
+}
+
+/// Resolve every row of a settled `EpistemicErasureConflict` extent back to a
+/// comparable [`TypeConflict`] via the exporter's token table (#15 native
+/// slice 8) — the erasure counterpart of [`native_mismatches`].
+fn native_erasures(tokens: &typefacts::TokenTable, extent: &Extent) -> Vec<TypeConflict> {
+    extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_epistemic_erasure(tokens, &record.row).expect(
+                "every derived EpistemicErasureConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::EpistemicErasure {
+                    from: resolved.from,
+                    to: resolved.to,
                 },
                 because: BTreeSet::new(),
                 scope: resolved.scope,
@@ -951,5 +985,249 @@ fn occurs_check_row_descent_derives_one_occurs_conflict() {
         conflict_byte_set(reflect_conflicts.iter().copied()),
         "the native-derived Occurs conflict set must canonical-byte-equal reflect.rs's own \
          (same subject, same var, same into type, same scope)"
+    );
+}
+
+/// #15 native slice 8 (`step` classification, flat Mismatch): `reflect.rs`'s
+/// own `unify` recursion reaches the `Bool`-vs-`Int` leaf through Query
+/// result-vs-yields *row descent* (`unify_rows` → leaf `unify`), never
+/// through `role_arg`'s direct literal compare — so this is the first
+/// selfhost fixture only `UnifyMismatch` reproduces; neither
+/// `LitRoleMismatch` nor `VarRoleMismatch` fires on it.
+#[test]
+fn plain_scalar_mismatch_derives_exactly_one_mismatch_conflict() {
+    let fixture = plain_scalar_mismatch();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts = reflect_mismatches(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one Mismatch conflict for the plain_scalar_mismatch \
+         fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-plain-scalar-mismatch".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let mismatch_extent = settled
+        .extents
+        .get("MismatchConflict")
+        .expect("brix.type package must declare a MismatchConflict relation");
+    assert_eq!(
+        mismatch_extent.len(),
+        1,
+        "native package must derive exactly one MismatchConflict row"
+    );
+
+    let native_conflicts = native_mismatches(&export.tokens, mismatch_extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived MismatchConflict set must be canonical-byte-identical \
+         to reflect.rs's own conflict set"
+    );
+}
+
+/// #15 native slice 8 (`step` classification, `Probability`/`F64` bridge):
+/// the deliberately-kept v1 bridge (solve.rs:163) is `Step::Done` — proves it
+/// is a non-event both in `reflect.rs` and, end-to-end, in the native
+/// package: zero `MismatchConflict` rows and zero `EpistemicErasureConflict`
+/// rows, matching reflect's own zero Mismatch and zero EpistemicErasure
+/// conflicts. Distinct from `probability_to_bool_erasure`, the OTHER "plain"
+/// partner, which IS a named erasure.
+#[test]
+fn probability_f64_bridge_is_a_non_event_end_to_end() {
+    let fixture = probability_f64_bridge_is_not_a_conflict();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_mismatch_conflicts = reflect_mismatches(&report);
+    assert!(
+        reflect_mismatch_conflicts.is_empty(),
+        "reflect.rs must record zero Mismatch conflicts for the Probability/F64 bridge \
+         fixture; got {reflect_mismatch_conflicts:?}"
+    );
+    let reflect_erasure_conflicts = reflect_erasures(&report);
+    assert!(
+        reflect_erasure_conflicts.is_empty(),
+        "reflect.rs must record zero EpistemicErasure conflicts for the Probability/F64 \
+         bridge fixture; got {reflect_erasure_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-probability-f64-bridge".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    // An empty extent may be absent from `settled.extents` entirely or
+    // present with length 0 — handle both, since the bridge fixture never
+    // asserts a single `MismatchConflict`/`EpistemicErasureConflict` row.
+    let mismatch_len = settled
+        .extents
+        .get("MismatchConflict")
+        .map_or(0, |extent| extent.len());
+    assert_eq!(
+        mismatch_len, 0,
+        "native package must derive zero MismatchConflict rows for the Probability/F64 bridge"
+    );
+    let erasure_len = settled
+        .extents
+        .get("EpistemicErasureConflict")
+        .map_or(0, |extent| extent.len());
+    assert_eq!(
+        erasure_len, 0,
+        "native package must derive zero EpistemicErasureConflict rows for the \
+         Probability/F64 bridge"
+    );
+}
+
+/// #15 native slice 8 (`step` classification, epistemic Erasure —
+/// `Estimate<T>`): mirrors `estimate_to_plain_erasure`'s reference conflict
+/// (`Estimate<Int>` unified against `Int`) against the native
+/// `EstimateErasureFwd`/`EstimateErasureBwd` rules.
+#[test]
+fn estimate_to_plain_erasure_derives_exactly_one_erasure_conflict() {
+    let fixture = estimate_to_plain_erasure();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts = reflect_erasures(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one EpistemicErasure conflict for the \
+         estimate_to_plain_erasure fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-estimate-erasure".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let erasure_extent = settled
+        .extents
+        .get("EpistemicErasureConflict")
+        .expect("brix.type package must declare an EpistemicErasureConflict relation");
+    assert_eq!(
+        erasure_extent.len(),
+        1,
+        "native package must derive exactly one EpistemicErasureConflict row"
+    );
+
+    let native_conflicts = native_erasures(&export.tokens, erasure_extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived EpistemicErasureConflict set must canonical-byte-equal \
+         reflect.rs's own (same subject, same from/to types, same scope)"
+    );
+}
+
+/// #15 native slice 8 (`step` classification, epistemic Erasure —
+/// `Probability`/`Bool`): mirrors `probability_to_bool_erasure`'s reference
+/// conflict against the native `ProbabilityBoolErasureFwd`/
+/// `ProbabilityBoolErasureBwd` rules — distinct from the `Probability`/`F64`
+/// bridge (see `probability_f64_bridge_is_a_non_event_end_to_end`), which
+/// must NOT derive an erasure.
+#[test]
+fn probability_to_bool_erasure_derives_exactly_one_erasure_conflict() {
+    let fixture = probability_to_bool_erasure();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts = reflect_erasures(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one EpistemicErasure conflict for the \
+         probability_to_bool_erasure fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-probability-bool-erasure".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let erasure_extent = settled
+        .extents
+        .get("EpistemicErasureConflict")
+        .expect("brix.type package must declare an EpistemicErasureConflict relation");
+    assert_eq!(
+        erasure_extent.len(),
+        1,
+        "native package must derive exactly one EpistemicErasureConflict row"
+    );
+
+    let native_conflicts = native_erasures(&export.tokens, erasure_extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived EpistemicErasureConflict set must canonical-byte-equal \
+         reflect.rs's own (same subject, same from/to types, same scope)"
+    );
+}
+
+/// #15 native slice 8 (`step` classification, epistemic Erasure —
+/// `Missing<T>`): mirrors `missing_to_plain_implicit_coercion`'s reference
+/// conflict against the native `MissingErasureFwd`/`MissingErasureBwd`
+/// rules.
+#[test]
+fn missing_to_plain_implicit_coercion_derives_exactly_one_erasure_conflict() {
+    let fixture = missing_to_plain_implicit_coercion();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts = reflect_erasures(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one EpistemicErasure conflict for the \
+         missing_to_plain_implicit_coercion fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-missing-erasure".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let erasure_extent = settled
+        .extents
+        .get("EpistemicErasureConflict")
+        .expect("brix.type package must declare an EpistemicErasureConflict relation");
+    assert_eq!(
+        erasure_extent.len(),
+        1,
+        "native package must derive exactly one EpistemicErasureConflict row"
+    );
+
+    let native_conflicts = native_erasures(&export.tokens, erasure_extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived EpistemicErasureConflict set must canonical-byte-equal \
+         reflect.rs's own (same subject, same from/to types, same scope)"
     );
 }

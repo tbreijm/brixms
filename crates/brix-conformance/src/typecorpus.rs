@@ -971,6 +971,73 @@ pub fn missing_well_typed_flow() -> TypeFixture {
     }
 }
 
+/// Fixture (#15 native slice 8): `Probability` unified against `F64` is the
+/// deliberately-kept v1 bridge (solve.rs:163) — Step::Done, NOT a conflict of
+/// any kind. Proves the bridge is a non-event natively (zero MismatchConflict,
+/// zero EpistemicErasureConflict). Distinct from probability_to_bool_erasure
+/// (the OTHER "plain" partner, which IS an erasure). Selfhost-only (like
+/// `occurs_check_row`), not added to [`all_type_fixtures`], to keep
+/// `type_parity` unchanged.
+pub fn probability_f64_bridge_is_not_a_conflict() -> TypeFixture {
+    let o = Origins::new("Bridge");
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("Bridge"),
+            params: vec![(Ident::new("p"), Ty::Probability)],
+            body: Pattern::default(),
+            yields: o.var("p"),
+            result: Ty::rel(Row::closed(vec![RowField {
+                name: Ident::new("value"),
+                ty: Ty::F64,
+            }])),
+        }],
+    };
+    TypeFixture {
+        label: "probability_f64_bridge_is_not_a_conflict",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver: TableResolver::new(),
+        expected_categories: BTreeSet::new(),
+    }
+}
+
+/// Fixture (#15 native slice 8): a genuine solve::step-driven flat Mismatch
+/// reached through Query result-vs-yields row descent (unify_rows → leaf
+/// unify(Bool, Int)), NOT role_arg's direct literal compare. query() wraps the
+/// scalar `yields` as Rel<{value: Int}> (reflect.rs:1058) and unifies it
+/// against `result` = Rel<{value: Bool}>, descending Rows into the leaf. This
+/// is the path only UnifyMismatch reproduces (Lit/VarRoleMismatch never do).
+/// Selfhost-only (like `occurs_check_row`), not added to
+/// [`all_type_fixtures`], to keep `type_parity` unchanged.
+pub fn plain_scalar_mismatch() -> TypeFixture {
+    let o = Origins::new("PlainMismatch");
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("PlainMismatch"),
+            params: vec![],
+            body: Pattern::default(),
+            yields: o.lit(Ty::Int(IntWidth::Int), Lit::Int(1)),
+            result: Ty::rel(Row::closed(vec![RowField {
+                name: Ident::new("value"),
+                ty: Ty::Bool,
+            }])),
+        }],
+    };
+    TypeFixture {
+        label: "plain_scalar_mismatch",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver: TableResolver::new(),
+        expected_categories: BTreeSet::from([Category::Mismatch]),
+    }
+}
+
 /// The smallest native-slice fixture (#15 slice-1 ruling): a two-role body
 /// clause with both roles bound to variables. `reflect.rs` records exactly
 /// two `Fact::HasType(Subject::Binding)` facts for it (`count`, `label`) —
