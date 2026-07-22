@@ -213,6 +213,56 @@ fn decompose_ty(
     self_tok
 }
 
+/// #15 native slice 8 (`step` classification): the top-level constructor tag
+/// of a `Ty`, exporter-side only — not `Canonical`, not a reflect `Fact`, the
+/// same category as [`decompose_ty`]: a pure function of a token's shape. The
+/// package joins on this `Int` (via `TyCtorIs`) rather than reproducing any
+/// `Ty` shape matching of its own.
+///
+/// The set is exactly what `solve::step` distinguishes: `Var`/`Error`
+/// recognize-and-exclude the `Bind`/absorb arms (a `step` pair with either
+/// side a bare variable or `Error` never reaches `Mismatch`/`Erasure`);
+/// `Probability`/`F64`/`Bool` participate in named pairings (the
+/// `Probability`/`F64` bridge, the `Probability`/`Bool` erasure);
+/// `Estimate`/`Missing` are the epistemic wrappers `step`'s `Erasure` arm
+/// singles out; `Option`/`Result`/`Record`/`Rel` exist ONLY so the ordinary-
+/// `Mismatch` rule (`UnifyMismatch`) can exclude them via `TyCtorOrdinary`
+/// (see the deferred-gap note in `brix.type.brix`); everything else is
+/// honestly `Plain` because `step` never singles it out.
+#[repr(i64)]
+#[derive(Clone, Copy)]
+enum TyCtor {
+    Plain = 0,
+    Var = 1,
+    Error = 2,
+    Probability = 3,
+    F64 = 4,
+    Bool = 5,
+    Estimate = 6,
+    Missing = 7,
+    Option = 8,
+    Result = 9,
+    Record = 10,
+    Rel = 11,
+}
+
+fn ty_ctor(ty: &Ty) -> i64 {
+    (match ty {
+        Ty::Var(_) => TyCtor::Var,
+        Ty::Error => TyCtor::Error,
+        Ty::Probability => TyCtor::Probability,
+        Ty::F64 => TyCtor::F64,
+        Ty::Bool => TyCtor::Bool,
+        Ty::Estimate(_) => TyCtor::Estimate,
+        Ty::Missing(_) => TyCtor::Missing,
+        Ty::Option(_) => TyCtor::Option,
+        Ty::Result(_, _) => TyCtor::Result,
+        Ty::Record(_) => TyCtor::Record,
+        Ty::Rel(_) => TyCtor::Rel,
+        _ => TyCtor::Plain,
+    }) as i64
+}
+
 /// The exported transaction ops (Ground `Assert`s for `RoleVar`/`RoleLit`/
 /// `SchemaRole`/`RootScope`) plus the token table needed to map derived rows
 /// back to `Subject`/`Ty`/`ScopeId`.
@@ -257,6 +307,17 @@ pub struct Export {
 /// positive recursion, no substitution model needed, because `bind_ty`
 /// always resolves `target` before recording the attempt.
 ///
+/// `Fact::UnifyAttempt` is exported as `UnifyAttempt` (#15 native slice 8,
+/// native `solve::step` classification) plus a per-token `TyCtorIs` row for
+/// each of its two (already zonked) operands — the top-level constructor tag
+/// [`ty_ctor`] computes, deduped through a *separate* `ctor_seen` set (NOT
+/// the `seen` set `decompose_ty` uses: `UnifyAttempt` facts precede
+/// `BindAttempt` facts in `report.facts`, so sharing `seen` would
+/// pre-populate a bind-target's hex and make `decompose_ty` short-circuit
+/// before emitting its `TyChild`/`TyRowChild` edges). `TyCtorOrdinary` is
+/// also seeded here (alongside `RootScope`/`BoolType`) with the three ctors
+/// eligible as ordinary-`Mismatch` operands.
+///
 /// Facts outside these slices' rules (`ExprKindIs`, `ExprChild`, `FnSig`,
 /// `RowTail`, `DimTerm`) are not exported — the native package doesn't consume
 /// them yet.
@@ -267,6 +328,11 @@ pub fn export(report: &ReflectiveReport) -> Export {
     // `BindAttempt` in one `export` run — a sub-`Ty` reachable from two
     // different bind attempts is decomposed (and its edges emitted) once.
     let mut seen: BTreeSet<String> = BTreeSet::new();
+    // #15 native slice 8: memoizes `TyCtorIs` emission across every
+    // `UnifyAttempt` operand in one `export` run. Deliberately separate from
+    // `seen` above — see the `export` doc comment for why sharing it would
+    // corrupt `decompose_ty`'s occurs-check edges.
+    let mut ctor_seen: BTreeSet<String> = BTreeSet::new();
 
     for derivation in &report.facts {
         match &derivation.fact {
@@ -456,6 +522,43 @@ pub fn export(report: &ReflectiveReport) -> Export {
                     row,
                 });
             }
+            // #15 native slice 8 (`step` classification): the unification
+            // attempt itself, plus a `TyCtorIs` row per distinct operand
+            // token — the native package's only handle on a `Ty`'s
+            // top-level shape (it never descends the `Ty` directly; reflect's
+            // own `unify` recursion already reaches every leaf, see
+            // `brix.type.brix`'s slice-8 block comment).
+            Fact::UnifyAttempt {
+                subject,
+                expect,
+                found,
+            } => {
+                let expect_tok = tokens.record(TokenValue::Ty(expect.clone()));
+                let found_tok = tokens.record(TokenValue::Ty(found.clone()));
+                for (tok, ty) in [(&expect_tok, expect), (&found_tok, found)] {
+                    let Value::Str(hex) = tok else {
+                        unreachable!("TokenTable::record always returns Value::Str")
+                    };
+                    if ctor_seen.insert(hex.clone()) {
+                        ops.push(assert_op(
+                            "TyCtorIs",
+                            [("ty", tok.clone()), ("ctor", Value::Int(ty_ctor(ty)))],
+                        ));
+                    }
+                }
+                let row = Row(BTreeMap::from([
+                    (
+                        "subject".to_string(),
+                        tokens.record(TokenValue::Subject(subject.clone())),
+                    ),
+                    ("expect".to_string(), expect_tok),
+                    ("found".to_string(), found_tok),
+                ]));
+                ops.push(TransactionOp::Assert {
+                    relation: "UnifyAttempt".to_string(),
+                    row,
+                });
+            }
             _ => {}
         }
     }
@@ -473,6 +576,16 @@ pub fn export(report: &ReflectiveReport) -> Export {
         relation: "BoolType".to_string(),
         row: Row(BTreeMap::from([("ty".to_string(), bool_token)])),
     });
+
+    // The three ctors eligible as ordinary-`Mismatch` operands / erasure
+    // targets, seeded as singletons exactly like `RootScope`/`BoolType`
+    // (#15 native slice 8).
+    for ctor in [TyCtor::Plain, TyCtor::F64, TyCtor::Bool] {
+        ops.push(assert_op(
+            "TyCtorOrdinary",
+            [("ctor", Value::Int(ctor as i64))],
+        ));
+    }
 
     Export { ops, tokens }
 }
@@ -615,6 +728,30 @@ pub fn resolve_occurs(tokens: &TokenTable, row: &Row) -> Option<ResolvedOccurs> 
         subject,
         var,
         into,
+        scope,
+    })
+}
+
+/// The resolved shape of one derived `EpistemicErasureConflict` row (#15
+/// native slice 8) — like [`ResolvedMismatch`], not a `Fact`/`TypeConflict`
+/// by itself; the harness builds a comparable `ConflictKind::EpistemicErasure`
+/// `TypeConflict` from it.
+pub struct ResolvedErasure {
+    pub subject: Subject,
+    pub from: Ty,
+    pub to: Ty,
+    pub scope: ScopeId,
+}
+
+pub fn resolve_epistemic_erasure(tokens: &TokenTable, row: &Row) -> Option<ResolvedErasure> {
+    let subject = tokens.subject(token_str(row, "subject")?)?.clone();
+    let from = tokens.ty(token_str(row, "from")?)?.clone();
+    let to = tokens.ty(token_str(row, "to")?)?.clone();
+    let scope = tokens.scope(token_str(row, "scope")?)?;
+    Some(ResolvedErasure {
+        subject,
+        from,
+        to,
         scope,
     })
 }

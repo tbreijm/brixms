@@ -1,6 +1,8 @@
 // Native `brix.type` — vertical slice 1 (#15), amended by slice 2
 // (var-at-two-roles, Fable ruling comment 5012408628) and slice 3
-// (#15 native slice 3 (RequiresBool)).
+// (#15 native slice 3 (RequiresBool)). Slice 8 adds native `solve::step`
+// classification (flat Mismatch + epistemic Erasure) over every unification
+// attempt reflect's own `unify` recursion records.
 //
 // Shadow-mode differential companion to `brix_ir::reflect::analyze`. This
 // package never runs against a real user transaction: `brix-conformance`'s
@@ -293,5 +295,137 @@ derive TyReachesStep: TyReaches(root: p, node: c) from { TyEdge(parent: p, child
 derive OccursDetected: OccursConflict(subject: subject, var: var, into: target, scope: scope) from {
     BindAttempt(subject: subject, var: var, target: target)
     TyReaches(root: target, node: var)
+    RootScope(scope: scope)
+}
+
+// --- #15 native slice 8: native `solve::step` classification ---
+//
+// `crate::solve::step` (solve.rs:129) is `reflect::unify`'s entire policy for
+// what to do with two already-resolved operands: `Step::Done` (nothing),
+// `Step::Bind`/`Step::Rows`/`Step::Descend` (already reproduced by the
+// occurs-check and row/field-access slices), or the two outcomes this slice
+// adds — a flat `Step::Mismatch` and the three-member epistemic
+// `Step::Erasure` family (`Estimate<T>`→T, `Missing<T>`→T,
+// `Probability`↔`Bool`) — plus proving the deliberately-kept v1
+// `Probability`/`F64` bridge (solve.rs:163) is a non-event: `Step::Done`,
+// never a conflict of any kind.
+//
+// LOAD-BEARING INSIGHT (do not re-derive row/field descent here):
+// `Reflect::unify` (reflect.rs:904) recurses through itself (`Step::Descend`)
+// and through `unify_rows`, over operands `solve::resolve` has already
+// deeply resolved. A `Fact::UnifyAttempt` recorded at EVERY entry to
+// `unify` therefore captures every leaf classification `step` ever makes,
+// at every recursion depth — this package only has to classify LEAF pairs
+// by their top-level constructor tag (`TyCtorIs`, computed exporter-side by
+// `typefacts::ty_ctor`). It never needs to reproduce `Option`/`Result`/
+// `Record`/`Rel` descent of its own; reflect's own recursion already walked
+// there before recording the leaf `UnifyAttempt` this package classifies.
+//
+// DOCUMENTED DEFERRED GAP (audit before any shadow→authoritative flip):
+// `Option`/`Result`/`Record`/`Rel` are given `TyCtor` tags purely so
+// `TyCtorOrdinary` can exclude them from `UnifyMismatch` — this slice does
+// NOT attempt to classify a flat Mismatch or an erasure `to` when either
+// operand is one of those four container ctors, nor does it distinguish a
+// matching-shape container pair (which `step` would `Descend`/`Rows` into,
+// never reaching a leaf Mismatch at THIS ctor) from a mismatched-shape
+// container pair (which `step` DOES flatten straight to `Mismatch` at this
+// level, e.g. `Option<T>` vs `Record<...>`). Cross-epistemic-wrapper
+// mismatches (`Estimate<T>` vs `Missing<T>`, or `Probability` vs
+// `Estimate<Bool>` — solve.rs:256-257 calls these out explicitly as ordinary
+// Mismatch, not erasure) are likewise under-reported this slice. No current
+// fixture exercises either gap, so it is silently incomplete rather than
+// wrong on any fixture in the corpus; closing it exactly needs a
+// matching-vs-mismatched-container disambiguation this slice defers,
+// mirroring how slice 6 documented its own `unify_rows`-UnknownField gap.
+
+// structural input: the pair of already-resolved operands about to be
+// classified by `solve::step`, recorded at EVERY entry to `Reflect::unify`
+// (reflect.rs:904) — mirrors `BindAttempt`'s placement, an event inside the
+// algorithm recorded before the algorithm's own decision. Imported from
+// reflect.rs's `Fact::UnifyAttempt`.
+rel UnifyAttempt { subject: String; expect: String; found: String } key(subject, expect, found)
+
+// structural input: the top-level constructor tag of a `Ty` token, computed
+// exporter-side (`typefacts::ty_ctor`) — the package's only handle on a
+// `Ty`'s shape; it never inspects a `Ty` token's structure itself. See
+// `typefacts::TyCtor` for the tag values and the rationale for exactly this
+// set.
+rel TyCtorIs { ty: String; ctor: Int } key(ty)
+
+// structural input: the singleton set of ctors eligible as an ordinary
+// (non-epistemic) Mismatch operand — `Plain`, `F64`, `Bool` — seeded by the
+// exporter alongside `RootScope`/`BoolType`.
+rel TyCtorOrdinary { ctor: Int } key(ctor)
+
+// derived: a genuine epistemic-erasure conflict (mirrors reflect.rs's
+// `ConflictKind::EpistemicErasure { from, to }`).
+rel EpistemicErasureConflict { subject: String; from: String; to: String; scope: String } key(subject, from, to, scope)
+
+// UnifyMismatch: UnifyAttempt ⋈ TyCtorIs(expect) ⋈ TyCtorIs(found) ⋈
+// TyCtorOrdinary(both) ⋈ RootScope, when expect != found →
+// MismatchConflict. Feeds the EXISTING MismatchConflict relation — this
+// slice's 3rd producer alongside LitRoleMismatch/VarRoleMismatch, converging
+// under set semantics (a mismatch that both a role rule and this rule would
+// derive collapses to one row). Both operands are restricted to the ordinary
+// ctor set so this rule never fires where an erasure rule below should
+// instead — the exact partition `solve::step`'s own match arms encode.
+// Monotone: pure positive joins over ground inputs plus one `!=` guard, so
+// it stays Appendix-F stratified.
+derive UnifyMismatch: MismatchConflict(subject: subject, expect: expect, found: found, scope: scope) from {
+    UnifyAttempt(subject: subject, expect: expect, found: found)
+    TyCtorIs(ty: expect, ctor: lc)
+    TyCtorIs(ty: found, ctor: rc)
+    TyCtorOrdinary(ctor: lc)
+    TyCtorOrdinary(ctor: rc)
+    RootScope(scope: scope)
+    when expect != found
+}
+
+// Six erasure rules, Fwd/Bwd per epistemic side (Estimate, Missing,
+// Probability/Bool) — `step`'s `Erasure` outcome is order-insensitive (it
+// tries both `(a, b)` and `(b, a)` via `epistemic_erasure`), so each pair
+// needs both orientations of `UnifyAttempt`'s `(expect, found)` columns.
+// Orientation of the OUTPUT `(from, to)` matches `solve::epistemic_erasure`
+// (solve.rs:262): `from` is always the epistemic side, `to` the plain side,
+// regardless of which operand played `expect` vs `found`.
+
+derive EstimateErasureFwd: EpistemicErasureConflict(subject: subject, from: expect, to: found, scope: scope) from {
+    UnifyAttempt(subject: subject, expect: expect, found: found)
+    TyCtorIs(ty: expect, ctor: 6)
+    TyCtorIs(ty: found, ctor: rc)
+    TyCtorOrdinary(ctor: rc)
+    RootScope(scope: scope)
+}
+derive EstimateErasureBwd: EpistemicErasureConflict(subject: subject, from: found, to: expect, scope: scope) from {
+    UnifyAttempt(subject: subject, expect: expect, found: found)
+    TyCtorIs(ty: found, ctor: 6)
+    TyCtorIs(ty: expect, ctor: lc)
+    TyCtorOrdinary(ctor: lc)
+    RootScope(scope: scope)
+}
+derive MissingErasureFwd: EpistemicErasureConflict(subject: subject, from: expect, to: found, scope: scope) from {
+    UnifyAttempt(subject: subject, expect: expect, found: found)
+    TyCtorIs(ty: expect, ctor: 7)
+    TyCtorIs(ty: found, ctor: rc)
+    TyCtorOrdinary(ctor: rc)
+    RootScope(scope: scope)
+}
+derive MissingErasureBwd: EpistemicErasureConflict(subject: subject, from: found, to: expect, scope: scope) from {
+    UnifyAttempt(subject: subject, expect: expect, found: found)
+    TyCtorIs(ty: found, ctor: 7)
+    TyCtorIs(ty: expect, ctor: lc)
+    TyCtorOrdinary(ctor: lc)
+    RootScope(scope: scope)
+}
+derive ProbabilityBoolErasureFwd: EpistemicErasureConflict(subject: subject, from: expect, to: found, scope: scope) from {
+    UnifyAttempt(subject: subject, expect: expect, found: found)
+    TyCtorIs(ty: expect, ctor: 3)
+    TyCtorIs(ty: found, ctor: 5)
+    RootScope(scope: scope)
+}
+derive ProbabilityBoolErasureBwd: EpistemicErasureConflict(subject: subject, from: found, to: expect, scope: scope) from {
+    UnifyAttempt(subject: subject, expect: expect, found: found)
+    TyCtorIs(ty: found, ctor: 3)
+    TyCtorIs(ty: expect, ctor: 5)
     RootScope(scope: scope)
 }

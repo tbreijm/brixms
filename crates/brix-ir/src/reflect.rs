@@ -341,6 +341,18 @@ pub enum Fact {
         var: TyVar,
         target: Ty,
     },
+    /// #15 native slice 8 (`step` classification): the pair of already-resolved
+    /// operands about to be classified by [`crate::solve::step`], recorded at
+    /// every entry to [`Reflect::unify`] — mirroring [`Fact::BindAttempt`]'s
+    /// placement, an event inside the algorithm recorded BEFORE `solve::step`
+    /// classifies it, at every recursion depth (including every `Step::Descend`
+    /// leaf `unify` reaches, since this fires on entry rather than only at the
+    /// top of a traversal).
+    UnifyAttempt {
+        subject: Subject,
+        expect: Ty,
+        found: Ty,
+    },
 }
 
 /// The one canonical encoder `FactId::derive` uses. Never a second fact
@@ -454,6 +466,15 @@ pub fn write_fact(fact: &Fact, w: &mut CanonWriter) {
             subject.canon_write(w);
             var.canon_write(w);
             target.canon_write(w);
+        }),
+        Fact::UnifyAttempt {
+            subject,
+            expect,
+            found,
+        } => w.write_enum(14, |w| {
+            subject.canon_write(w);
+            expect.canon_write(w);
+            found.canon_write(w);
         }),
     }
 }
@@ -732,6 +753,10 @@ impl Reflect {
                 Fact::BindAttempt { target, .. } => {
                     *target = solve::resolve(&subst, target.clone());
                 }
+                Fact::UnifyAttempt { expect, found, .. } => {
+                    *expect = solve::resolve(&subst, expect.clone());
+                    *found = solve::resolve(&subst, found.clone());
+                }
             }
         }
         for conflict in &mut self.draft_conflicts {
@@ -904,6 +929,14 @@ impl Reflect {
     fn unify(&mut self, subject: Subject, expected: Ty, found: Ty, because: Vec<usize>) {
         let expected = self.resolve(expected);
         let found = self.resolve(found);
+        self.fact(
+            Fact::UnifyAttempt {
+                subject: subject.clone(),
+                expect: expected.clone(),
+                found: found.clone(),
+            },
+            because.clone(),
+        );
         match solve::step(expected, found) {
             Step::Done => {}
             Step::Bind(variable, ty) => self.bind_ty(subject, variable, ty, because),
