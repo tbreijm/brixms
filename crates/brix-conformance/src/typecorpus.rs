@@ -553,6 +553,121 @@ pub fn occurs_check_row() -> TypeFixture {
     }
 }
 
+/// Fixture (#15 native slice 9, scalar root): a var bound at three roles of one
+/// relation typed Var(A), Var(B), Int — driving unify(Var(A),Var(B)) then
+/// unify(resolve(Var(A))=Var(B), Int), i.e. subst {A:Var(B), B:Int}, a genuine
+/// 2-hop chain. solve::resolve chases A→Var(B)→Int; the native Bound/Resolved
+/// closure must reproduce it. A Constraint (not Query) keeps Reflect::constraint
+/// to just pattern() — no yields/result unify noise. Selfhost-only.
+pub fn subst_chain_scalar_root() -> TypeFixture {
+    let a = TyVar(9200);
+    let b = TyVar(9201);
+    let relation = QualIdent::from("Chain");
+    let resolver = TableResolver::new().with_relation(RelationSchema {
+        name: relation.clone(),
+        roles: vec![
+            (Ident::new("a"), Ty::Var(a)),
+            (Ident::new("b"), Ty::Var(b)),
+            (Ident::new("c"), Ty::Int(IntWidth::Int)),
+        ],
+        key: vec![],
+        model_closed: true,
+        derived: false,
+    });
+    let source = FrontendSource {
+        functions: vec![],
+        rules: vec![],
+        constraints: vec![Constraint {
+            name: Ident::new("Chain"),
+            severity: Severity::Strict,
+            body: Pattern::new(vec![Clause::Edge {
+                bind: None,
+                relation: relation.clone(),
+                args: vec![
+                    RoleArg {
+                        role: Ident::new("a"),
+                        arg: Arg::Var(Ident::new("x")),
+                    },
+                    RoleArg {
+                        role: Ident::new("b"),
+                        arg: Arg::Var(Ident::new("x")),
+                    },
+                    RoleArg {
+                        role: Ident::new("c"),
+                        arg: Arg::Var(Ident::new("x")),
+                    },
+                ],
+            }]),
+        }],
+        queries: vec![],
+    };
+    TypeFixture {
+        label: "subst_chain_scalar_root",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver,
+        expected_categories: BTreeSet::new(),
+    }
+}
+
+/// Fixture (#15 native slice 9, composite root): [`subst_chain_scalar_root`]'s
+/// counterpart with a pre-tokenized ground composite root — role `c`'s type is
+/// `Option<Int>` rather than plain `Int`, so the chase lands on A→Var(B)→
+/// `Option<Int>` instead of a bare scalar, exercising a root that isn't itself
+/// a leaf token. Distinct `TyVar`s (9210/9211) from the scalar fixture's
+/// (9200/9201) so the two fixtures' facts never collide if ever exported
+/// together. Selfhost-only.
+pub fn subst_chain_composite_root() -> TypeFixture {
+    let a = TyVar(9210);
+    let b = TyVar(9211);
+    let relation = QualIdent::from("Chain");
+    let resolver = TableResolver::new().with_relation(RelationSchema {
+        name: relation.clone(),
+        roles: vec![
+            (Ident::new("a"), Ty::Var(a)),
+            (Ident::new("b"), Ty::Var(b)),
+            (Ident::new("c"), Ty::option(Ty::Int(IntWidth::Int))),
+        ],
+        key: vec![],
+        model_closed: true,
+        derived: false,
+    });
+    let source = FrontendSource {
+        functions: vec![],
+        rules: vec![],
+        constraints: vec![Constraint {
+            name: Ident::new("Chain"),
+            severity: Severity::Strict,
+            body: Pattern::new(vec![Clause::Edge {
+                bind: None,
+                relation: relation.clone(),
+                args: vec![
+                    RoleArg {
+                        role: Ident::new("a"),
+                        arg: Arg::Var(Ident::new("x")),
+                    },
+                    RoleArg {
+                        role: Ident::new("b"),
+                        arg: Arg::Var(Ident::new("x")),
+                    },
+                    RoleArg {
+                        role: Ident::new("c"),
+                        arg: Arg::Var(Ident::new("x")),
+                    },
+                ],
+            }]),
+        }],
+        queries: vec![],
+    };
+    TypeFixture {
+        label: "subst_chain_composite_root",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver,
+        expected_categories: BTreeSet::new(),
+    }
+}
+
 /// Fixture 7 (row symmetry, conflicting side): `query.result` declares a
 /// *closed* `{a}` row but the yielded record is `{a, b}` — an extra field
 /// on the *found* side of a closed row. Catching this requires the

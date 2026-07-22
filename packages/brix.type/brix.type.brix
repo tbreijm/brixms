@@ -2,7 +2,10 @@
 // (var-at-two-roles, Fable ruling comment 5012408628) and slice 3
 // (#15 native slice 3 (RequiresBool)). Slice 8 adds native `solve::step`
 // classification (flat Mismatch + epistemic Erasure) over every unification
-// attempt reflect's own `unify` recursion records.
+// attempt reflect's own `unify` recursion records. Slice 9 adds the binding
+// fixpoint: chasing the raw, un-chased var-to-var `subst.insert` edges
+// `bind_ty` records to their union-find root, reproducing `solve::resolve`'s
+// own transitive chase natively.
 //
 // Shadow-mode differential companion to `brix_ir::reflect::analyze`. This
 // package never runs against a real user transaction: `brix-conformance`'s
@@ -428,4 +431,49 @@ derive ProbabilityBoolErasureBwd: EpistemicErasureConflict(subject: subject, fro
     TyCtorIs(ty: found, ctor: 3)
     TyCtorIs(ty: expect, ctor: 5)
     RootScope(scope: scope)
+}
+
+// --- #15 native slice 9 (binding fixpoint): the accepted subst.insert chain,
+// chased to its union-find root ---
+//
+// bind_ty resolves ty against the CURRENT subst before recording, but a
+// still-unbound operand var stays a bare Ty::Var, so a multi-hop chain
+// (?a~?b then ?b~Int) leaves subst[a]==Var(b) forever — write-once: subst.insert
+// fires at most once per var, exactly where Fact::SubstEdge is recorded.
+// solve::resolve chases this transitively at read time; this package reproduces
+// that chase over the RAW edge SubstEdge exposes, deliberately un-zonked unlike
+// BindAttempt — which IS the fully-chased result Resolved is checked against.
+//
+// DOCUMENTED DEFERRED GAP (audit before shadow→authoritative flip): function
+// overload resolution (reflect.rs, solve::try_unify_args → self.subst = next)
+// mutates subst WITHOUT going through bind_ty, so vars bound via calling an
+// overloaded fn get no BindAttempt or SubstEdge at all — a pre-existing gap
+// (already under-covers slice 7's occurs-check) that slice 9 inherits; the
+// fixtures here sidestep it (they bind via Clause::Edge/role_arg, never Call).
+
+rel SubstEdge { subject: String; var: String; target: String } key(subject, var, target)
+
+// derived: SubstEdge restated as a plain var -> target edge, dropping subject
+// (attribution only) — same simplification TyEdge makes over TyChild (slice 7).
+rel Bound { var: String; target: String } key(var, target)
+
+derive BoundFrom: Bound(var: var, target: target) from { SubstEdge(subject: subject, var: var, target: target) }
+
+// derived: var's union-find root — chase Bound while the current target's ctor
+// IS Var (TyCtorIs ctor 1), stop the instant it is anything else. ResolvedBase/
+// ResolvedStep co-produce Resolved, condensing into one phase via errata 0002
+// (like TyReachesBase/Step, slice 7). Pure positive, zero negation. Termination:
+// write-once (Bound is a partial function of var) + occurs-guaranteed acyclic
+// chains → finite chase.
+rel Resolved { var: String; root: String } key(var, root)
+
+derive ResolvedBase: Resolved(var: var, root: target) from {
+    Bound(var: var, target: target)
+    TyCtorIs(ty: target, ctor: ctor)
+    when ctor != 1
+}
+derive ResolvedStep: Resolved(var: var, root: root) from {
+    Bound(var: var, target: mid)
+    TyCtorIs(ty: mid, ctor: 1)
+    Resolved(var: mid, root: root)
 }
