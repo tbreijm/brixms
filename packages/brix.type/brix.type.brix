@@ -620,3 +620,34 @@ derive TryNonResultCheck: TryNonResultConflict(subject: subject, found: found, s
     RootScope(scope: scope)
     when ctor != 9
 }
+
+// --- native Arity ---
+
+// structural input: a call site's own argument count (Arity slice).
+rel CallArity { subject: String; argc: Int } key(subject)
+// structural input: one candidate overload's param count at its ordinal
+// position among same-named overloads (0 = first-declared — the candidate
+// reflect orients `expected` against). `function` is the plain name string,
+// same verbatim Value::Str OpApply.operator carries — joins directly.
+rel FnArity { function: String; ordinal: Int; paramc: Int } key(function, ordinal)
+
+rel ArityConflict { subject: String; expected: Int; found: Int; scope: String } key(subject, expected, found, scope)
+
+// CallArityMismatch: OpApply ⋈ CallArity ⋈ FnArity(ordinal 0) ⋈ RootScope,
+// when NO candidate's paramc equals this call's argc → ArityConflict. Mirrors
+// reflect's arity_ok.is_empty() branch: `expected` = candidates[0].paramc
+// (pinned via ordinal: 0), `found` = argc. CRITICAL: the without-block's
+// ordinal column MUST be a FRESH variable (`any_ord`), existentially ranging
+// over EVERY candidate — reusing the ordinal-0 literal here would only check
+// candidate 0 and wrongly fire when a LATER overload matches (see the
+// discriminator fixture). Monotone; without over Ground FnArity, Appendix-F
+// stratified like FieldNotInRow.
+derive CallArityMismatch: ArityConflict(subject: subject, expected: expected, found: found, scope: scope) from {
+    OpApply(subject: subject, operator: fname)
+    CallArity(subject: subject, argc: found)
+    FnArity(function: fname, ordinal: 0, paramc: expected)
+    RootScope(scope: scope)
+    without {
+        FnArity(function: fname, ordinal: any_ord, paramc: found)
+    }
+}

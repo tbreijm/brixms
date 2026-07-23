@@ -407,6 +407,63 @@ pub fn arity_mismatch() -> TypeFixture {
     }
 }
 
+/// Discriminator fixture (native Arity slice): two overloads of `g` —
+/// `g(Int) -> Int` (ordinal 0, one param) and `g(Int, Int) -> Int` (ordinal
+/// 1, two params) — called with two `Int` args, matching ONLY the ordinal-1
+/// candidate. reflect's `arity_ok` filter keeps the 2-param candidate, so
+/// `arity_ok` is non-empty and reflect records ZERO Arity conflicts. This is
+/// the test a wrong native `CallArityMismatch` `without` block — one that
+/// reused the ordinal-0 literal instead of a FRESH existential var — would
+/// fail: such a bug would only check candidate 0's paramc (1) against found
+/// (2), see no match, and wrongly derive `ArityConflict{expected: 1, found:
+/// 2}`. Selfhost-only, like `plain_scalar_mismatch`; not added to
+/// [`all_type_fixtures`].
+pub fn arity_non_first_candidate_match_is_not_a_conflict() -> TypeFixture {
+    let o = Origins::new("Arity2");
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("Arity2"),
+            params: vec![],
+            body: Pattern::default(),
+            yields: o.call(
+                "g",
+                vec![
+                    o.lit(Ty::Int(IntWidth::Int), Lit::Int(1)),
+                    o.lit(Ty::Int(IntWidth::Int), Lit::Int(2)),
+                ],
+            ),
+            result: o.ty_var(),
+        }],
+    };
+    let resolver = TableResolver::new()
+        .with_function(FnSignature {
+            name: QualIdent::from("g"),
+            params: vec![Ty::Int(IntWidth::Int)],
+            ret: Ty::Int(IntWidth::Int),
+            effects: EffectRow::empty(),
+            is_aggregate: false,
+            may_diverge: false,
+        })
+        .with_function(FnSignature {
+            name: QualIdent::from("g"),
+            params: vec![Ty::Int(IntWidth::Int), Ty::Int(IntWidth::Int)],
+            ret: Ty::Int(IntWidth::Int),
+            effects: EffectRow::empty(),
+            is_aggregate: false,
+            may_diverge: false,
+        });
+    TypeFixture {
+        label: "arity_non_first_candidate_match_is_not_a_conflict",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver,
+        expected_categories: BTreeSet::new(),
+    }
+}
+
 /// Fixture 4: an edge clause's literal role argument does not match the
 /// relation schema's declared role type. Uses a `Rule`, not a `Constraint`,
 /// purely for fixture variety — `constraint_role_mismatch` below exercises

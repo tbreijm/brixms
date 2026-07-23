@@ -368,6 +368,22 @@ pub enum Fact {
         var: TyVar,
         target: Ty,
     },
+    /// #15 native Arity: a call site's own argument count, recorded
+    /// unconditionally for every call. No scope (pure program structure, like
+    /// FieldAccess).
+    CallArity {
+        subject: Subject,
+        argc: u32,
+    },
+    /// #15 native Arity: one candidate overload's declared param count at its
+    /// `ordinal` position in resolver.functions(func). `function` is the plain
+    /// func.to_string() string (NOT a digest), so it round-trips byte-identical
+    /// to Fact::Applies::operator and the native rule joins them directly.
+    FnArity {
+        function: String,
+        ordinal: u32,
+        paramc: u32,
+    },
 }
 
 /// The one canonical encoder `FactId::derive` uses. Never a second fact
@@ -499,6 +515,19 @@ pub fn write_fact(fact: &Fact, w: &mut CanonWriter) {
             subject.canon_write(w);
             var.canon_write(w);
             target.canon_write(w);
+        }),
+        Fact::CallArity { subject, argc } => w.write_enum(17, |w| {
+            subject.canon_write(w);
+            w.write_uint(*argc as u64);
+        }),
+        Fact::FnArity {
+            function,
+            ordinal,
+            paramc,
+        } => w.write_enum(18, |w| {
+            w.write_str(function);
+            w.write_uint(*ordinal as u64);
+            w.write_uint(*paramc as u64);
         }),
     }
 }
@@ -769,7 +798,9 @@ impl Reflect {
                 | Fact::RequiresBool { .. }
                 | Fact::Applies { .. }
                 | Fact::FieldAccess { .. }
-                | Fact::RoleVar { .. } => {}
+                | Fact::RoleVar { .. }
+                | Fact::CallArity { .. }
+                | Fact::FnArity { .. } => {}
                 // `ty` here is always `lit_ty(lit)` — a concrete literal
                 // class (`Unit`/`Bool`/`Int`/`Str`/`F64`/`Enum`) that never
                 // contains a `TyVar`, so there is nothing to resolve.
@@ -1652,10 +1683,27 @@ impl Reflect {
             },
             deps.clone(),
         );
+        self.fact(
+            Fact::CallArity {
+                subject: subject.clone(),
+                argc: arg_types.len() as u32,
+            },
+            vec![],
+        );
         if let Some(op) = func.to_string().strip_prefix("brix.ops.") {
             return (self.operator(subject, op, &arg_types, &deps), op_fact);
         }
         let candidates = resolver.functions(func);
+        for (ordinal, sig) in candidates.iter().enumerate() {
+            self.fact(
+                Fact::FnArity {
+                    function: func.to_string(),
+                    ordinal: ordinal as u32,
+                    paramc: sig.params.len() as u32,
+                },
+                vec![],
+            );
+        }
         if candidates.is_empty() {
             return (Ty::Error, op_fact);
         }
