@@ -109,6 +109,26 @@ pub enum TypeArg {
 // Declarations
 // ---------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Visibility {
+    Public(Option<RelVis>),
+    #[default]
+    Private,
+}
+
+impl Visibility {
+    pub fn is_public(&self) -> bool {
+        matches!(self, Visibility::Public(_))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelVis {
+    Read,
+    Write,
+    Derive,
+}
+
 #[derive(Debug, Clone)]
 pub enum Decl {
     Entity(EntityDecl),
@@ -188,11 +208,149 @@ impl Decl {
             Decl::Error(s, _) => *s,
         }
     }
+
+    pub fn vis(&self) -> Visibility {
+        match self {
+            Decl::Entity(d) => d.vis,
+            Decl::Rel(d) => d.vis,
+            Decl::Derive(d) => d.vis,
+            Decl::Constraint(d) => d.vis,
+            Decl::Query(d) => d.vis,
+            Decl::Protocol(d) => d.vis,
+            Decl::Driver(d) => d.vis,
+            Decl::Scenario(d) => d.vis,
+            Decl::Fn(d) => d.vis,
+            Decl::Type(d) => d.vis,
+            Decl::Measure(d) => d.vis,
+            Decl::Unit(d) => d.vis,
+            Decl::Enum(d) => d.vis,
+            Decl::Record(d) => d.vis,
+            Decl::DataRecipe(d) => d.vis,
+            Decl::Feature(d) => d.vis,
+            Decl::FeatureSet(d) => d.vis,
+            Decl::Dataset(d) => d.vis,
+            Decl::StatModel(d) => d.vis,
+            Decl::MlWorkflow(d) => d.vis,
+            Decl::Experiment(d) => d.vis,
+            Decl::Visualization(d) => d.vis,
+            Decl::Let(d) => d.vis,
+            Decl::Extension(d) => d.vis,
+            Decl::Error(_, _) => Visibility::Private,
+        }
+    }
+
+    pub fn set_vis(&mut self, vis: Visibility, vis_span: Option<Span>) {
+        let set_span = |span: &mut Span| {
+            if let Some(vs) = vis_span {
+                *span = vs.to(*span);
+            }
+        };
+        match self {
+            Decl::Entity(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Rel(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Derive(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Constraint(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Query(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Protocol(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Driver(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Scenario(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Fn(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Type(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Measure(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Unit(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Enum(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Record(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::DataRecipe(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Feature(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::FeatureSet(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Dataset(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::StatModel(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::MlWorkflow(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Experiment(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Visualization(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Let(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Extension(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Error(_, _) => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct EntityDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub fields: Vec<FieldDecl>,
 }
@@ -216,6 +374,7 @@ pub enum RelKind {
 #[derive(Debug, Clone)]
 pub struct RelDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub kind: RelKind,
     pub name: Ident,
     pub roles: Vec<FieldDecl>,
@@ -234,6 +393,7 @@ pub enum RelMod {
 #[derive(Debug, Clone)]
 pub struct DeriveDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub head: Head,
     pub body: Block,
@@ -349,6 +509,7 @@ pub enum ConstraintKind {
 #[derive(Debug, Clone)]
 pub struct ConstraintDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub kind: ConstraintKind,
     pub body: Block,
@@ -357,6 +518,7 @@ pub struct ConstraintDecl {
 #[derive(Debug, Clone)]
 pub struct QueryDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub params: Vec<Param>,
     pub ret: Type,
@@ -382,6 +544,7 @@ pub struct OrderClause {
 #[derive(Debug, Clone)]
 pub struct ProtocolDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
     pub request: RequestDecl,
@@ -418,6 +581,7 @@ pub struct FnSig {
 #[derive(Debug, Clone)]
 pub struct DriverDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub for_protocol: Ident,
     pub needs: Vec<CapRef>,
@@ -436,6 +600,7 @@ pub struct CapRef {
 #[derive(Debug, Clone)]
 pub struct ScenarioDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub seed: SeedDecl,
     pub binds: Vec<BindDecl>,
@@ -587,6 +752,7 @@ pub struct GenericParam {
 #[derive(Debug, Clone)]
 pub struct FnDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub partial: bool,
     pub aggregate: bool,
     pub name: Ident,
@@ -606,6 +772,7 @@ pub enum FnBody {
 #[derive(Debug, Clone)]
 pub struct TypeDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
     pub value: Type,
@@ -614,12 +781,14 @@ pub struct TypeDecl {
 #[derive(Debug, Clone)]
 pub struct MeasureDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
 }
 
 #[derive(Debug, Clone)]
 pub struct UnitDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub measure: Ident,
     pub value: Expr,
@@ -628,6 +797,7 @@ pub struct UnitDecl {
 #[derive(Debug, Clone)]
 pub struct EnumDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
     pub variants: Vec<EnumVariant>,
@@ -650,6 +820,7 @@ pub enum VariantPayload {
 #[derive(Debug, Clone)]
 pub struct RecordDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
     pub fields: Vec<FieldDecl>,
@@ -658,6 +829,7 @@ pub struct RecordDecl {
 #[derive(Debug, Clone)]
 pub struct DataRecipeDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub items: Vec<RecipeItem>,
 }
@@ -673,6 +845,7 @@ pub enum RecipeItem {
 #[derive(Debug, Clone)]
 pub struct FeatureDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub params: Vec<Param>,
     pub ret: Type,
@@ -697,6 +870,7 @@ pub enum FeatureItem {
 #[derive(Debug, Clone)]
 pub struct FeatureSetDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub version: Option<Expr>,
     pub items: LooseBlock,
@@ -705,6 +879,7 @@ pub struct FeatureSetDecl {
 #[derive(Debug, Clone)]
 pub struct DatasetDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub items: LooseBlock,
 }
@@ -712,6 +887,7 @@ pub struct DatasetDecl {
 #[derive(Debug, Clone)]
 pub struct StatModelDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub items: LooseBlock,
 }
@@ -719,6 +895,7 @@ pub struct StatModelDecl {
 #[derive(Debug, Clone)]
 pub struct MlWorkflowDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub items: LooseBlock,
 }
@@ -732,6 +909,7 @@ pub enum ExperimentKind {
 #[derive(Debug, Clone)]
 pub struct ExperimentDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub kind: ExperimentKind,
     pub name: Ident,
     pub items: LooseBlock,
@@ -740,6 +918,7 @@ pub struct ExperimentDecl {
 #[derive(Debug, Clone)]
 pub struct VisualizationDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub items: LooseBlock,
 }
@@ -747,6 +926,7 @@ pub struct VisualizationDecl {
 #[derive(Debug, Clone)]
 pub struct LetBindingDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub name: Ident,
     pub ty: Option<Type>,
     pub value: Expr,
@@ -757,6 +937,7 @@ pub struct LetBindingDecl {
 #[derive(Debug, Clone)]
 pub struct ExtensionDecl {
     pub span: Span,
+    pub vis: Visibility,
     pub keywords: Vec<Ident>,
     pub name: Option<Ident>,
     pub version: Option<Expr>,

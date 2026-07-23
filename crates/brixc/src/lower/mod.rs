@@ -320,6 +320,70 @@ pub fn lower_graph(
         // for the graph; never re-export it under `pkg.brix.*`.
         let is_prelude = |name: &QualIdent| name.segments()[0].as_str().starts_with("brix");
 
+        let is_pub = |name: &QualIdent| -> bool {
+            use brix_ast::ast::Decl;
+            let decl_name = name.segments().first().map(|s| s.as_str()).unwrap_or("");
+            for d in &dep.file.decls {
+                let d_name = match d {
+                    Decl::Entity(e) => Some(e.name.text.as_str()),
+                    Decl::Rel(r) => Some(r.name.text.as_str()),
+                    Decl::Enum(e) => Some(e.name.text.as_str()),
+                    Decl::Type(t) => Some(t.name.text.as_str()),
+                    Decl::Record(r) => Some(r.name.text.as_str()),
+                    Decl::Protocol(p) => Some(p.name.text.as_str()),
+                    Decl::Fn(f) => Some(f.name.text.as_str()),
+                    Decl::Unit(u) => Some(u.name.text.as_str()),
+                    Decl::Measure(m) => Some(m.name.text.as_str()),
+                    Decl::DataRecipe(r) => Some(r.name.text.as_str()),
+                    Decl::Feature(f) => Some(f.name.text.as_str()),
+                    Decl::FeatureSet(f) => Some(f.name.text.as_str()),
+                    Decl::Dataset(d) => Some(d.name.text.as_str()),
+                    Decl::StatModel(s) => Some(s.name.text.as_str()),
+                    Decl::MlWorkflow(m) => Some(m.name.text.as_str()),
+                    Decl::Experiment(e) => Some(e.name.text.as_str()),
+                    Decl::Visualization(v) => Some(v.name.text.as_str()),
+                    _ => None,
+                };
+                if let Some(dn) = d_name {
+                    if dn == decl_name {
+                        return d.vis().is_public();
+                    }
+                }
+            }
+            false
+        };
+
+        // Register all package-private symbols into `private_symbols` for diagnostic checks
+        for d in &dep.file.decls {
+            if !d.vis().is_public() {
+                use brix_ast::ast::Decl;
+                let d_name = match d {
+                    Decl::Entity(e) => Some(e.name.text.as_str()),
+                    Decl::Rel(r) => Some(r.name.text.as_str()),
+                    Decl::Enum(e) => Some(e.name.text.as_str()),
+                    Decl::Type(t) => Some(t.name.text.as_str()),
+                    Decl::Record(r) => Some(r.name.text.as_str()),
+                    Decl::Protocol(p) => Some(p.name.text.as_str()),
+                    Decl::Fn(f) => Some(f.name.text.as_str()),
+                    Decl::Unit(u) => Some(u.name.text.as_str()),
+                    Decl::Measure(m) => Some(m.name.text.as_str()),
+                    Decl::DataRecipe(r) => Some(r.name.text.as_str()),
+                    Decl::Feature(f) => Some(f.name.text.as_str()),
+                    Decl::FeatureSet(f) => Some(f.name.text.as_str()),
+                    Decl::Dataset(d) => Some(d.name.text.as_str()),
+                    Decl::StatModel(s) => Some(s.name.text.as_str()),
+                    Decl::MlWorkflow(m) => Some(m.name.text.as_str()),
+                    Decl::Experiment(e) => Some(e.name.text.as_str()),
+                    Decl::Visualization(v) => Some(v.name.text.as_str()),
+                    _ => None,
+                };
+                if let Some(dn) = d_name {
+                    let qname = qualify(dn);
+                    resolver = resolver.with_private_symbol(qname, dep_name.clone());
+                }
+            }
+        }
+
         // Map each of the dependency's local enum names to its qualified name,
         // so relation-role and function-signature types that mention them are
         // rewritten to match the qualified enum we register below (issue #42
@@ -327,7 +391,7 @@ pub fn lower_graph(
         let mut enum_rename: std::collections::BTreeMap<QualIdent, QualIdent> =
             std::collections::BTreeMap::new();
         for (name, _variants) in dep_lowered.resolver.enums() {
-            if is_prelude(name) {
+            if is_prelude(name) || !is_pub(name) {
                 continue;
             }
             enum_rename.insert(name.clone(), qualify_path(name.segments()));
@@ -338,7 +402,7 @@ pub fn lower_graph(
         // Slice 3: dotted names are now qualified, not skipped). Role types are
         // requalified so an enum role points at the qualified enum.
         for schema in dep_lowered.resolver.relations() {
-            if is_prelude(&schema.name) {
+            if is_prelude(&schema.name) || !is_pub(&schema.name) {
                 continue;
             }
             let qname = qualify_path(schema.name.segments());
@@ -361,19 +425,19 @@ pub fn lower_graph(
         // came across as relations above; this adds the `type_ns`/entity-set
         // membership those loops don't touch.
         for ent in dep_lowered.resolver.entities() {
-            if is_prelude(ent) {
+            if is_prelude(ent) || !is_pub(ent) {
                 continue;
             }
             resolver = resolver.with_entity(qualify_path(ent.segments()));
         }
         for (name, variants) in dep_lowered.resolver.enums() {
-            if is_prelude(name) {
+            if is_prelude(name) || !is_pub(name) {
                 continue;
             }
             resolver = resolver.with_enum(qualify_path(name.segments()), variants.to_vec());
         }
         for (name, ty) in dep_lowered.resolver.aliases() {
-            if is_prelude(name) {
+            if is_prelude(name) || !is_pub(name) {
                 continue;
             }
             resolver = resolver.with_alias(qualify_path(name.segments()), ty.clone());
@@ -385,6 +449,10 @@ pub fn lower_graph(
         // enum). Bodies encode enum *values* by ordinal, not name, so they need
         // no rewrite.
         for f in &dep_lowered.source.functions {
+            let local_qname = QualIdent::simple(f.name.to_string());
+            if !is_pub(&local_qname) {
+                continue;
+            }
             let qname = qualify(&f.name.to_string());
             resolver = resolver.with_function(FnSignature {
                 name: qname.clone(),

@@ -79,6 +79,9 @@ pub const AMBIGUOUS_IMPORT: &str = "BRX-LOW-0014";
 /// export, caught deterministically rather than silently last-wins). Function
 /// declarations are exempt — same name, different signature is an overload.
 pub const DUPLICATE_DECL: &str = "BRX-LOW-0015";
+/// `BRX-LOW-0016` — a `use` item or reference names a declaration from a
+/// dependency package that is package-private (not marked `pub`).
+pub const PRIVATE_IMPORT: &str = "BRX-LOW-0016";
 /// `BRX-IR-0005` — an expression failed HM/ground-dimension type checking.
 pub const TYPE_ERROR: &str = "BRX-IR-0005";
 /// `BRX-IR-0006` — Appendix E `pure(B, H)` violated: an impure effect atom
