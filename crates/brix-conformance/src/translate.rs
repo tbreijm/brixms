@@ -20,10 +20,10 @@
 //!   engine-specific `Value` types, so a capturing/converting wrapper isn't
 //!   possible. A fixture that needs a custom function must register the
 //!   native-side equivalent directly under the same name in `brix-rt`'s own
-//!   `builtin_total`/`builtin_partial` (mirroring how the flagship's
-//!   `surcharge`/`riskModel` already work) — none of the current fixtures
-//!   call a registered function at all, so this is a documented limit, not
-//!   a gap exercised today.
+//!   `builtin_total` — none of the current fixtures call a registered function
+//!   at all, so this is a documented limit, not a gap exercised today. (The
+//!   flagship's `surcharge`/`riskModel` no longer need this: both compile from
+//!   source and run via `Program::fn_defs` — issue #47.)
 
 use std::collections::BTreeMap;
 

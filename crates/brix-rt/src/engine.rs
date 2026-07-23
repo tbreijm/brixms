@@ -733,6 +733,9 @@ pub struct Settled {
     all_extents: BTreeMap<String, Extent>,
     pub masked: Vec<MaskRecord>,
     pub violations: Vec<Violation>,
+    /// `RuleError` edges from partial-fn `?` failures in rule bodies (issue #47
+    /// Part 3). Empty when no partial failed (the common case).
+    pub rule_errors: Vec<RuleError>,
 }
 
 /// One masked row: `Masked(target, by, atPhase, atRevision)` (Appendix A,
@@ -762,14 +765,27 @@ pub struct Violation {
     pub match_digest: Digest,
 }
 
-/// Canonical settled dump compatible with the oracle's basic relation,
-/// support, claim, mask, and violation layout. Key conflicts and rule
-/// errors are still emitted as empty canonical lists: the native engine
-/// currently hard-rejects transactions on key conflicts and panics on
-/// partial-fn failure instead of producing these families (see this crate's
-/// `OWNER.md` / the issue #10 PR body for the tracked follow-up). Retaining
-/// their positions makes this an ABI extension rather than a second
-/// generated-binary format.
+/// A `RuleError(rule, site, partialMatch, error, atRevision)` edge (Part III §9,
+/// issue #47 Part 3): a partial function bound with `?` in a rule body failed at
+/// clause `site` (`"{rule}#{clauseIndex}"`) for the partially-built match
+/// `partial_match`, carrying the `Err` payload. Mirrors the oracle's
+/// `RuleErrorEdge` field-for-field so the settled dumps compare byte-for-byte.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuleError {
+    pub rule: String,
+    pub site: String,
+    pub partial_match: Digest,
+    pub error: Value,
+    pub at_revision: u64,
+}
+
+/// Canonical settled dump compatible with the oracle's relation, support,
+/// claim, mask, rule-error, and violation layout. Rule errors are now emitted
+/// from real partial-fn `?` failures (issue #47 Part 3). Key conflicts are still
+/// an empty list: the native engine hard-rejects transactions on entity key
+/// conflicts at transaction time rather than settling them into a `KeyConflict`
+/// family (a separate follow-up). Retaining every family position makes this an
+/// ABI extension, never a second generated-binary format.
 pub fn dump_bytes(settled: &Settled, program: &Program) -> Vec<u8> {
     let mut writer = CanonWriter::new();
     writer.write_uint(settled.at_revision);
@@ -834,9 +850,22 @@ pub fn dump_bytes(settled: &Settled, program: &Program) -> Vec<u8> {
         writer.write_uint(mask.at_phase as u64);
         writer.write_uint(settled.at_revision);
     }
-    // key conflicts, rule errors
+    // key conflicts (still empty — brix-rt hard-rejects entity key conflicts at
+    // transaction time; the KeyConflict family is a separate follow-up).
     writer.write_uint(0);
-    writer.write_uint(0);
+    // rule errors (issue #47 Part 3): matches the oracle's `dump.rs` layout —
+    // per edge `tag(rule) · tag(site) · bytes(partialMatch) · error(canon) ·
+    // uint(atRevision)`, in sorted order.
+    let mut errors = settled.rule_errors.clone();
+    errors.sort();
+    writer.write_uint(errors.len() as u64);
+    for e in &errors {
+        writer.write_tag(&e.rule);
+        writer.write_tag(&e.site);
+        writer.write_bytes(e.partial_match.as_bytes());
+        e.error.canon_write(&mut writer);
+        writer.write_uint(e.at_revision);
+    }
     writer.write_uint(settled.violations.len() as u64);
     for violation in &settled.violations {
         writer.write_tag(&violation.constraint);
@@ -1090,18 +1119,26 @@ pub fn settle(program: &Program, ground: &GroundState, at_revision: u64) -> Sett
         })
         .collect();
     let mut masked: Vec<MaskRecord> = Vec::new();
+    // RuleError provenance (issue #47 Part 3): accumulated across every phase and
+    // fixpoint iteration, deduped on `(rule, site, partialMatch)` so a site that
+    // fails on every naive re-derivation yields exactly one edge.
+    let mut rule_errors: Vec<RuleError> = Vec::new();
+    let mut rule_error_seen: BTreeSet<(String, String, Digest)> = BTreeSet::new();
     let phases: BTreeSet<u32> = program.rules.values().map(|rule| rule.phase).collect();
     for phase in phases {
         loop {
             let snapshot = visible_extents(&candidates, &masked);
             let mut changed = false;
             for rule in program.rules.values().filter(|rule| rule.phase == phase) {
-                let envs = eval_body(
+                let envs = eval_rule_body(
                     program,
                     &snapshot,
                     &ground.history,
                     &rule.body,
-                    vec![Env::new()],
+                    &rule.id,
+                    at_revision,
+                    &mut rule_errors,
+                    &mut rule_error_seen,
                 );
                 match &rule.head {
                     Head::Tuple { relation, args } => {
@@ -1190,6 +1227,7 @@ pub fn settle(program: &Program, ground: &GroundState, at_revision: u64) -> Sett
         all_extents: candidates,
         masked,
         violations,
+        rule_errors,
     }
 }
 
@@ -1289,6 +1327,63 @@ fn eval_body(
     envs
 }
 
+/// Evaluate a rule body, recording a [`RuleError`] for each partial-fn `?`
+/// failure (issue #47 Part 3). A `Clause::Let(v, Try(..))` runs the partial
+/// through [`call_partial`]: `Ok` binds `v`; `Err` drops the match and derives a
+/// `RuleError` at this clause site, deduped on `(rule, site, partialMatch)` so
+/// the naive fixpoint's re-derivation yields exactly one edge per failing site.
+/// Every other clause delegates to [`eval_body`] unchanged.
+#[allow(clippy::too_many_arguments)]
+fn eval_rule_body(
+    program: &Program,
+    live: &BTreeMap<String, Extent>,
+    history: &BTreeMap<String, Extent>,
+    clauses: &[Clause],
+    rule_id: &str,
+    at_revision: u64,
+    rule_errors: &mut Vec<RuleError>,
+    seen: &mut BTreeSet<(String, String, Digest)>,
+) -> Vec<Env> {
+    let mut envs = vec![Env::new()];
+    for (site_idx, clause) in clauses.iter().enumerate() {
+        if envs.is_empty() {
+            break;
+        }
+        envs = match clause {
+            Clause::Let(binding, Expr::Try(name, args)) => {
+                let mut out = Vec::new();
+                for env in envs {
+                    let vals: Vec<Value> =
+                        args.iter().map(|a| eval_expr(program, &env, a)).collect();
+                    match call_partial(program, name, &vals) {
+                        Ok(value) => {
+                            let mut next = env;
+                            next.insert(binding.clone(), value);
+                            out.push(next);
+                        }
+                        Err(error) => {
+                            let site = format!("{rule_id}#{site_idx}");
+                            let partial_match = env_digest(&env);
+                            if seen.insert((rule_id.to_string(), site.clone(), partial_match)) {
+                                rule_errors.push(RuleError {
+                                    rule: rule_id.to_string(),
+                                    site,
+                                    partial_match,
+                                    error,
+                                    at_revision,
+                                });
+                            }
+                        }
+                    }
+                }
+                out
+            }
+            other => eval_body(program, live, history, std::slice::from_ref(other), envs),
+        };
+    }
+    envs
+}
+
 fn unify(env: &Env, args: &[(String, Term)], row: &Row) -> Option<Env> {
     let mut next = env.clone();
     for (role, term) in args {
@@ -1368,16 +1463,109 @@ fn eval_expr(program: &Program, env: &Env, expr: &Expr) -> Value {
                 .iter()
                 .map(|arg| eval_expr(program, env, arg))
                 .collect::<Vec<_>>();
-            match program
-                .partial_fns
-                .get(name)
-                .copied()
-                .or_else(|| builtin_partial(name))
-            {
-                Some(function) => function(&args).expect("unhandled partial function failure"),
-                None => panic!("unregistered partial function `{name}`"),
+            // A `?` on a partial call in expression position (nested, not the
+            // rule-clause form handled in `eval_body`). Resolve the compiled
+            // body first (issue #47 Part 3); a failure here has no clause to
+            // attribute a `RuleError` to, so it propagates as a panic until
+            // nested-`?` provenance lands.
+            match call_partial(program, name, &args) {
+                Ok(value) => value,
+                Err(_) => panic!("unhandled partial function failure in `{name}`"),
             }
         }
+    }
+}
+
+/// Evaluate a **partial** function body to a `Result<Value, Value>` (issue #47
+/// Part 3). Total sub-expressions evaluate normally and wrap `Ok`; the fallible
+/// leaves are validated constructors (`Type.try(x)`) and nested `?` calls. `if`
+/// and `let` recurse so a `.try` inside a branch stays in fallible position.
+fn eval_fallible(program: &Program, env: &Env, expr: &Expr) -> Result<Value, Value> {
+    match expr {
+        Expr::If { cond, then, els } => match eval_expr(program, env, cond) {
+            Value::Bool(true) => eval_fallible(program, env, then),
+            Value::Bool(false) => eval_fallible(program, env, els),
+            other => panic!("`if` condition must be Bool, got {other:?}"),
+        },
+        Expr::Let { name, value, body } => {
+            let mut inner = env.clone();
+            inner.insert(name.clone(), eval_expr(program, env, value));
+            eval_fallible(program, &inner, body)
+        }
+        Expr::Call(name, args) if is_validated_ctor(name) => {
+            let args = args
+                .iter()
+                .map(|arg| eval_expr(program, env, arg))
+                .collect::<Vec<_>>();
+            validated_ctor(name, &args)
+        }
+        Expr::Try(name, args) => {
+            let args = args
+                .iter()
+                .map(|arg| eval_expr(program, env, arg))
+                .collect::<Vec<_>>();
+            // A nested `?`: unwrap-or-propagate. As a tail this equals the
+            // callee's own `Result`.
+            call_partial(program, name, &args)
+        }
+        // Any other body form is total: evaluate and wrap `Ok`.
+        other => Ok(eval_expr(program, env, other)),
+    }
+}
+
+/// Call a partial function by name, returning its `Result`. A function compiled
+/// from source (issue #47) resolves first — its body runs through
+/// [`eval_fallible`]; otherwise a hand-registered/builtin `PartialFn` answers.
+fn call_partial(program: &Program, name: &str, args: &[Value]) -> Result<Value, Value> {
+    if let Some(def) = program.fn_defs.get(name) {
+        let call_env: Env = def
+            .params
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect();
+        return eval_fallible(program, &call_env, &def.body);
+    }
+    match program.partial_fns.get(name).copied() {
+        Some(function) => function(args),
+        None => panic!("unregistered partial function `{name}`"),
+    }
+}
+
+/// Whether `name` is a builtin validated fallible constructor `Type.try(x)`
+/// (issue #47 Part 3). Scoped to the refinement types the flagship exercises.
+fn is_validated_ctor(name: &str) -> bool {
+    name == "Probability.try"
+}
+
+/// Admit a value into a refinement type, or fail with a `ValidationError`. All
+/// arithmetic is integer basis points (Part 2 ruling): a `Probability` is
+/// `0..=10_000`.
+fn validated_ctor(name: &str, args: &[Value]) -> Result<Value, Value> {
+    match name {
+        "Probability.try" => {
+            let bp = args
+                .first()
+                .and_then(Value::as_i128)
+                .expect("Probability.try expects a numeric (basis-point) argument");
+            if (0..=10_000).contains(&bp) {
+                Ok(Value::Int(bp as i64))
+            } else {
+                Err(validation_error())
+            }
+        }
+        _ => panic!("unknown validated constructor `{name}`"),
+    }
+}
+
+/// The canonical `ValidationError` failure value (issue #47 Part 3). Both
+/// engines construct it identically so a `RuleError`'s `error` payload compares
+/// byte-for-byte.
+fn validation_error() -> Value {
+    Value::Enum {
+        ty: "ValidationError".to_string(),
+        ordinal: 0,
+        name: "OutOfRange".to_string(),
     }
 }
 
@@ -1394,33 +1582,6 @@ fn builtin_total(name: &str) -> Option<TotalFn> {
         let lo = args[1].as_i128().expect("clamp: non-numeric lo");
         let hi = args[2].as_i128().expect("clamp: non-numeric hi");
         Value::Int(x.max(lo).min(hi).try_into().unwrap_or(i64::MAX))
-    })
-}
-
-fn builtin_partial(name: &str) -> Option<PartialFn> {
-    (name == "riskModel").then_some(|args| {
-        let due = args
-            .first()
-            .and_then(Value::as_i128)
-            .expect("riskModel expects numeric due time");
-        let now = args
-            .get(1)
-            .and_then(Value::as_i128)
-            .expect("riskModel expects numeric current time");
-        let remaining = due - now;
-        // Probability is represented as basis points in the runtime's
-        // integer-only semantic path. This is the ground truth for the
-        // issue #47 Part 2 fixed-point ruling (integer-floor, no float
-        // `Value`) — the oracle's `risk_model` test hand-regs
-        // (`crates/brix-oracle/tests/flagship.rs`,
-        // `crates/brix-cli/tests/build_run_smoke.rs`) were reconciled to
-        // this exact form.
-        let risk = if remaining <= 0 {
-            10_000
-        } else {
-            ((24 - remaining).clamp(0, 24) * 10_000 / 24) as i64
-        };
-        Ok(Value::Int(risk))
     })
 }
 

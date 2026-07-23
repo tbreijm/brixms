@@ -406,32 +406,15 @@ fn node_hex(program: &Program, rel: &str, key_row: brix_oracle::row::Row) -> Str
     program.relations[rel].node_id(&key_row).digest().to_hex()
 }
 
-// `surcharge` is compiled from BrixMS source (issue #47 Slice 1.5) and runs via
-// `Program::fn_defs`, so it is no longer hand-registered. `riskModel` remains
-// hand-transcribed (still deferred) — same function, and same integer-floor
-// fixed-point ruling (issue #47 Part 2), as
-// `crates/brix-oracle/tests/flagship.rs` (issue #24).
-fn risk_model(args: &[Value]) -> Result<Value, Value> {
-    let due = args[0].as_i128().expect("riskModel: non-numeric due");
-    let now = args[1].as_i128().expect("riskModel: non-numeric now");
-    let remaining = due - now;
-    let risk = if remaining <= 0 {
-        10_000i64
-    } else {
-        (((24 - remaining).clamp(0, 24) * 10_000) / 24) as i64
-    };
-    Ok(Value::Int(risk))
-}
-
-fn fn_library() -> FnLibrary {
-    FnLibrary::new().with_partial_fn("riskModel", risk_model)
-}
+// `surcharge` (Slice 1.5) and `riskModel` (Part 3) both compile from BrixMS
+// source and run via `Program::fn_defs`, so the flagship needs no hand-registered
+// `FnLibrary` on either engine.
 
 fn flagship_oracle_dump_and_stream(source: &str) -> (Vec<u8>, String) {
     let (file, diagnostics) = parse_file(source);
     let lowered = brixc::lower_file(&file, &diagnostics);
     let kinds = flagship_kinds(&lowered);
-    let program = program_from_source(&lowered.source, &lowered.resolver, &kinds, fn_library())
+    let program = program_from_source(&lowered.source, &lowered.resolver, &kinds, FnLibrary::new())
         .expect("flagship must adapt to the oracle");
 
     let node = |rel: &str, key_row: brix_oracle::row::Row| {
@@ -616,7 +599,7 @@ fn flagship_capacity_violation_stream() -> String {
     let (file, diagnostics) = parse_file(FLAGSHIP);
     let lowered = brixc::lower_file(&file, &diagnostics);
     let kinds = flagship_kinds(&lowered);
-    let program = program_from_source(&lowered.source, &lowered.resolver, &kinds, fn_library())
+    let program = program_from_source(&lowered.source, &lowered.resolver, &kinds, FnLibrary::new())
         .expect("flagship must adapt to the oracle");
 
     let ams = node_hex(

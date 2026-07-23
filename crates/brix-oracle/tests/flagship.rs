@@ -53,35 +53,10 @@ fn kinds() -> KindTable {
     k
 }
 
-// `surcharge` is no longer hand-transcribed here: it is compiled from its
-// BrixMS source and executes via `Program::fn_defs` (issue #47 Slice 1.5), so
-// the `FnLibrary` only needs to supply `riskModel` (still deferred).
-
-/// `riskModel(due, now) -> Result<Probability, ValidationError>`:
-/// `let remaining = due - now; if remaining <= 0 hours { 1.0 } else {
-/// clamp(1.0 - remaining / 24 hours, 0.0, 1.0) }` — hand-transcribed from
-/// the flagship source, same reasoning as `surcharge`. `Instant` values
-/// are whole hours here; `Probability` is basis points (×10000).
-///
-/// Integer-floor fixed-point (issue #47 Part 2 ruling): truncating `i128`
-/// division, no float arithmetic — matches `brix-rt::engine::builtin_partial`
-/// bit-for-bit (previously this hand-reg used f64 round-half, disagreeing
-/// with the runtime by 1 bp at `remaining = 8`: 6667 vs 6666).
-fn risk_model(args: &[Value]) -> Result<Value, Value> {
-    let due = args[0].as_i128().expect("riskModel: non-numeric due");
-    let now = args[1].as_i128().expect("riskModel: non-numeric now");
-    let remaining = due - now;
-    let risk = if remaining <= 0 {
-        10_000i64
-    } else {
-        (((24 - remaining).clamp(0, 24) * 10_000) / 24) as i64
-    };
-    Ok(Value::Int(risk))
-}
-
-fn fn_library() -> FnLibrary {
-    FnLibrary::new().with_partial_fn("riskModel", risk_model)
-}
+// Neither `surcharge` nor `riskModel` is hand-transcribed here any more: both
+// compile from their BrixMS source and execute via `Program::fn_defs` (issue
+// #47 — `surcharge` in Slice 1.5, `riskModel` in Part 3), so the flagship runs
+// with an empty `FnLibrary`.
 
 fn node_ref(program: &brix_oracle::program::Program, rel: &str, key_row: Row) -> Value {
     Value::Node(program.relations[rel].node_id(&key_row))
@@ -121,8 +96,13 @@ fn flagship_settles_end_to_end_and_answers_why() {
         lowered.diags
     );
 
-    let program = program_from_source(&lowered.source, &lowered.resolver, &kinds(), fn_library())
-        .expect("flagship must adapt cleanly onto the oracle's Program");
+    let program = program_from_source(
+        &lowered.source,
+        &lowered.resolver,
+        &kinds(),
+        FnLibrary::new(),
+    )
+    .expect("flagship must adapt cleanly onto the oracle's Program");
     program
         .validate()
         .expect("adapted flagship program must validate");
