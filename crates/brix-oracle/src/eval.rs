@@ -338,6 +338,90 @@ fn eval_body_inner(clauses: &[Clause], mut envs: Vec<Env>, ctx: &Ctx) -> Vec<Env
 /// Same clause-body evaluator as `eval_body_inner`, but for `Clause::Let`
 /// over an `Expr::Try` that fails, records a `RuleError` (Part III §9)
 /// instead of silently dropping the match.
+/// Evaluate a **partial** function body to a `Result<Value, Value>` (issue #47
+/// Part 3): total sub-expressions wrap `Ok`; the fallible leaves are validated
+/// constructors (`Type.try(x)`) and nested `?` calls; `if`/`let` recurse so a
+/// `.try` inside a branch stays in fallible position.
+fn eval_fallible(env: &Env, expr: &Expr, ctx: &Ctx) -> Result<Value, Value> {
+    match expr {
+        Expr::If { cond, then, els } => match eval_expr(env, cond, ctx) {
+            Value::Bool(true) => eval_fallible(env, then, ctx),
+            Value::Bool(false) => eval_fallible(env, els, ctx),
+            other => panic!("`if` condition must be Bool, got {other:?}"),
+        },
+        Expr::Let { name, value, body } => {
+            let mut inner = env.clone();
+            inner.insert(name.clone(), eval_expr(env, value, ctx));
+            eval_fallible(&inner, body, ctx)
+        }
+        Expr::Call(name, args) if is_validated_ctor(name) => {
+            let vals: Vec<Value> = args.iter().map(|a| eval_expr(env, a, ctx)).collect();
+            validated_ctor(name, &vals)
+        }
+        Expr::Try(name, args) => {
+            let vals: Vec<Value> = args.iter().map(|a| eval_expr(env, a, ctx)).collect();
+            call_partial(name, &vals, ctx)
+        }
+        other => Ok(eval_expr(env, other, ctx)),
+    }
+}
+
+/// Call a partial function by name, returning its `Result`. A function compiled
+/// from source (issue #47) resolves first — its body runs through
+/// [`eval_fallible`]; otherwise a hand-registered `PartialFn` answers.
+fn call_partial(name: &str, args: &[Value], ctx: &Ctx) -> Result<Value, Value> {
+    if let Some(def) = ctx.program.fn_defs.get(name) {
+        let call_env: Env = def
+            .params
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect();
+        return eval_fallible(&call_env, &def.body, ctx);
+    }
+    let f = *ctx
+        .program
+        .partial_fns
+        .get(name)
+        .unwrap_or_else(|| panic!("unregistered partial fn `{name}`"));
+    f(args)
+}
+
+/// Whether `name` is a builtin validated fallible constructor `Type.try(x)`
+/// (issue #47 Part 3), scoped to the refinement types the flagship exercises.
+fn is_validated_ctor(name: &str) -> bool {
+    name == "Probability.try"
+}
+
+/// Admit a value into a refinement type, or fail with a `ValidationError`.
+/// Integer basis points (Part 2 ruling): a `Probability` is `0..=10_000`.
+fn validated_ctor(name: &str, args: &[Value]) -> Result<Value, Value> {
+    match name {
+        "Probability.try" => {
+            let bp = args
+                .first()
+                .and_then(Value::as_i128)
+                .expect("Probability.try expects a numeric (basis-point) argument");
+            if (0..=10_000).contains(&bp) {
+                Ok(Value::Int(bp as i64))
+            } else {
+                Err(validation_error())
+            }
+        }
+        _ => panic!("unknown validated constructor `{name}`"),
+    }
+}
+
+/// The canonical `ValidationError` failure value — constructed identically to
+/// brix-rt's so a `RuleError`'s `error` payload compares byte-for-byte.
+fn validation_error() -> Value {
+    Value::Enum {
+        ty: std::sync::Arc::from("ValidationError"),
+        ordinal: 0,
+        name: std::sync::Arc::from("OutOfRange"),
+    }
+}
+
 fn eval_rule_body(
     clauses: &[Clause],
     ctx: &Ctx,
@@ -351,16 +435,14 @@ fn eval_rule_body(
             break;
         }
         envs = match clause {
+            // A partial-fn call bound with `?`: resolve the compiled body first
+            // (issue #47 Part 3), else a hand-registered `PartialFn`. `Ok` binds;
+            // `Err` derives a `RuleError` at this clause site.
             Clause::Let(v, Expr::Try(name, args)) => {
-                let f = *ctx
-                    .program
-                    .partial_fns
-                    .get(name)
-                    .unwrap_or_else(|| panic!("unregistered partial fn `{name}`"));
                 let mut out = Vec::new();
                 for env in envs {
                     let vals: Vec<Value> = args.iter().map(|a| eval_expr(&env, a, ctx)).collect();
-                    match f(&vals) {
+                    match call_partial(name, &vals, ctx) {
                         Ok(val) => {
                             let mut ne = env;
                             ne.insert(v.clone(), val);

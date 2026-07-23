@@ -1275,10 +1275,25 @@ fn eval_body(
                 .collect(),
             Clause::Let(binding, expr) => envs
                 .into_iter()
-                .map(|mut env| {
+                .filter_map(|mut env| {
+                    // A partial-fn call bound with `?` (issue #47 Part 3): run
+                    // the compiled body fallibly. `Ok` binds; a failure drops
+                    // this binding (its `RuleError` provenance is a follow-up
+                    // slice — the flagship's `riskModel` never fails).
+                    if let Expr::Try(name, args) = expr {
+                        let vals: Vec<Value> =
+                            args.iter().map(|a| eval_expr(program, &env, a)).collect();
+                        return match call_partial(program, name, &vals) {
+                            Ok(value) => {
+                                env.insert(binding.clone(), value);
+                                Some(env)
+                            }
+                            Err(_) => None,
+                        };
+                    }
                     let value = eval_expr(program, &env, expr);
                     env.insert(binding.clone(), value);
-                    env
+                    Some(env)
                 })
                 .collect(),
         };
@@ -1368,16 +1383,114 @@ fn eval_expr(program: &Program, env: &Env, expr: &Expr) -> Value {
                 .iter()
                 .map(|arg| eval_expr(program, env, arg))
                 .collect::<Vec<_>>();
-            match program
-                .partial_fns
-                .get(name)
-                .copied()
-                .or_else(|| builtin_partial(name))
-            {
-                Some(function) => function(&args).expect("unhandled partial function failure"),
-                None => panic!("unregistered partial function `{name}`"),
+            // A `?` on a partial call in expression position (nested, not the
+            // rule-clause form handled in `eval_body`). Resolve the compiled
+            // body first (issue #47 Part 3); a failure here has no clause to
+            // attribute a `RuleError` to, so it propagates as a panic until
+            // nested-`?` provenance lands.
+            match call_partial(program, name, &args) {
+                Ok(value) => value,
+                Err(_) => panic!("unhandled partial function failure in `{name}`"),
             }
         }
+    }
+}
+
+/// Evaluate a **partial** function body to a `Result<Value, Value>` (issue #47
+/// Part 3). Total sub-expressions evaluate normally and wrap `Ok`; the fallible
+/// leaves are validated constructors (`Type.try(x)`) and nested `?` calls. `if`
+/// and `let` recurse so a `.try` inside a branch stays in fallible position.
+fn eval_fallible(program: &Program, env: &Env, expr: &Expr) -> Result<Value, Value> {
+    match expr {
+        Expr::If { cond, then, els } => match eval_expr(program, env, cond) {
+            Value::Bool(true) => eval_fallible(program, env, then),
+            Value::Bool(false) => eval_fallible(program, env, els),
+            other => panic!("`if` condition must be Bool, got {other:?}"),
+        },
+        Expr::Let { name, value, body } => {
+            let mut inner = env.clone();
+            inner.insert(name.clone(), eval_expr(program, env, value));
+            eval_fallible(program, &inner, body)
+        }
+        Expr::Call(name, args) if is_validated_ctor(name) => {
+            let args = args
+                .iter()
+                .map(|arg| eval_expr(program, env, arg))
+                .collect::<Vec<_>>();
+            validated_ctor(name, &args)
+        }
+        Expr::Try(name, args) => {
+            let args = args
+                .iter()
+                .map(|arg| eval_expr(program, env, arg))
+                .collect::<Vec<_>>();
+            // A nested `?`: unwrap-or-propagate. As a tail this equals the
+            // callee's own `Result`.
+            call_partial(program, name, &args)
+        }
+        // Any other body form is total: evaluate and wrap `Ok`.
+        other => Ok(eval_expr(program, env, other)),
+    }
+}
+
+/// Call a partial function by name, returning its `Result`. A function compiled
+/// from source (issue #47) resolves first — its body runs through
+/// [`eval_fallible`]; otherwise a hand-registered/builtin `PartialFn` answers.
+fn call_partial(program: &Program, name: &str, args: &[Value]) -> Result<Value, Value> {
+    if let Some(def) = program.fn_defs.get(name) {
+        let call_env: Env = def
+            .params
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect();
+        return eval_fallible(program, &call_env, &def.body);
+    }
+    match program
+        .partial_fns
+        .get(name)
+        .copied()
+        .or_else(|| builtin_partial(name))
+    {
+        Some(function) => function(args),
+        None => panic!("unregistered partial function `{name}`"),
+    }
+}
+
+/// Whether `name` is a builtin validated fallible constructor `Type.try(x)`
+/// (issue #47 Part 3). Scoped to the refinement types the flagship exercises.
+fn is_validated_ctor(name: &str) -> bool {
+    name == "Probability.try"
+}
+
+/// Admit a value into a refinement type, or fail with a `ValidationError`. All
+/// arithmetic is integer basis points (Part 2 ruling): a `Probability` is
+/// `0..=10_000`.
+fn validated_ctor(name: &str, args: &[Value]) -> Result<Value, Value> {
+    match name {
+        "Probability.try" => {
+            let bp = args
+                .first()
+                .and_then(Value::as_i128)
+                .expect("Probability.try expects a numeric (basis-point) argument");
+            if (0..=10_000).contains(&bp) {
+                Ok(Value::Int(bp as i64))
+            } else {
+                Err(validation_error())
+            }
+        }
+        _ => panic!("unknown validated constructor `{name}`"),
+    }
+}
+
+/// The canonical `ValidationError` failure value (issue #47 Part 3). Both
+/// engines construct it identically so a `RuleError`'s `error` payload compares
+/// byte-for-byte.
+fn validation_error() -> Value {
+    Value::Enum {
+        ty: "ValidationError".to_string(),
+        ordinal: 0,
+        name: "OutOfRange".to_string(),
     }
 }
 

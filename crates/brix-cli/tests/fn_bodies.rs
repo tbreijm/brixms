@@ -535,3 +535,58 @@ partial fn clampProb(x: Float) -> Result<Probability, ValidationError> = Probabi
         .expect("clampProb must lower into source.functions, not be deferred");
     assert!(f.is_partial, "clampProb must be marked partial");
 }
+
+// --- Issue #47 Part 3 (Slice 3b): partial-fn execution (Ok path) -------
+
+/// A `partial fn` whose body is a validated constructor executes from source on
+/// BOTH engines with an **empty FnLibrary** — the rule's `?` routes through the
+/// compiled `fn_def`, `Probability.try` admits the value, and the two engines
+/// settle byte-for-byte. No hand-registered `PartialFn` anywhere.
+#[test]
+fn partial_fn_executes_from_source_ok_path() {
+    let src = "package t @ 0.1.0\n\
+rel In { id: Int } key(id)\n\
+rel Out { id: Int; risk: Probability } key(id)\n\
+partial fn always(x: Float) -> Result<Probability, ValidationError> = Probability.try(x)\n\
+derive R: Out(id: i, risk) from { In(id: i); let risk = always(1.0)? }\n";
+    let (file, diags) = parse_file(src);
+    assert!(!diags.has_errors(), "must parse cleanly: {diags:?}");
+    let lowered = lower_file(&file, &diags);
+    assert!(
+        !lowered.has_errors(),
+        "must lower + check cleanly: {:#?}",
+        lowered.diags
+    );
+    let phased = AstPhase
+        .assign_phases(lowered)
+        .expect("fixture must be well-stratified");
+
+    let oracle_program = program_from_source(
+        &phased.lowered.source,
+        &phased.lowered.resolver,
+        &kinds(&phased.lowered),
+        FnLibrary::new(),
+    )
+    .expect("adapts to the oracle");
+    let mut store = OracleStore::new(oracle_program).expect("program is stratified");
+    let settled = store
+        .commit(
+            &OracleTxn::new(b"brix-stdin-0".to_vec()).assert("In", row(&[("id", Value::Int(1))])),
+        )
+        .expect("transaction commits");
+    let oracle_hex = hex(&dump_bytes(settled));
+
+    let rt_program = brixc::emit::project_program(&phased);
+    let out = brix_rt::engine::run_text(rt_program, "assert In id=int:1\n")
+        .expect("generated runtime runs the transaction");
+    let rt_hex = out
+        .lines()
+        .next()
+        .and_then(|line| line.split_ascii_whitespace().nth(2))
+        .expect("run_text emits a canonical dump line");
+
+    assert_eq!(
+        rt_hex, oracle_hex,
+        "a partial fn compiled from source must settle identically on both engines"
+    );
+}
