@@ -1690,7 +1690,7 @@ impl Reflect {
                 matches.push((*sig, next, score));
             }
         }
-        let Some((sig, next, _)) = ({
+        let Some((sig, _, _)) = ({
             match matches.len() {
                 0 => None,
                 1 => matches.pop(),
@@ -1716,7 +1716,22 @@ impl Reflect {
             );
             return (Ty::Error, op_fact);
         };
-        self.subst = next;
+        // #15 gap D fix: re-run the winner's arg unifications through the one
+        // canonical `self.unify` entry point instead of wholesale-assigning the
+        // trial substitution `next`. This reaches the identical subst as `next`
+        // (same base self.subst — trials clone; same solve::step dispatch; same
+        // left-to-right arg order) and can never emit a conflict the trial didn't
+        // already rule out (a candidate only reaches this point if try_unify_args
+        // returned Some — every arg unified with no occurs/mismatch/missing-field
+        // failure). Unlike `self.subst = next`, this routes each bind through
+        // `bind_ty`, so the vars the overload binds now emit BindAttempt (slice-7
+        // occurs) and SubstEdge (slice-9 binding fixpoint) — the facts the old
+        // wholesale assignment silently swallowed. MAINTENANCE: nothing may be
+        // inserted between candidate selection above and this loop that reads
+        // self.subst expecting it already post-call — the loop is what makes it so.
+        for ((arg, param), dep) in arg_types.iter().zip(sig.params.iter()).zip(deps.iter()) {
+            self.unify(subject.clone(), arg.clone(), param.clone(), vec![*dep]);
+        }
         self.fact(
             Fact::FnSig {
                 function: Ident::new(func.to_string()),
