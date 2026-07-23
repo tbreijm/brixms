@@ -148,31 +148,48 @@ impl Formatter {
                     .as_ref()
                     .map(|e| format!(" @ {}", expr_str(e)))
                     .unwrap_or_default();
-                self.header_loose(&format!("{}feature set {}{}", vis_prefix(f.vis), f.name.text, v), &f.items);
+                self.header_loose(
+                    &format!("{}feature set {}{}", vis_prefix(f.vis), f.name.text, v),
+                    &f.items,
+                );
             }
-            Decl::Dataset(d) => self.header_loose(&format!("{}dataset {}", vis_prefix(d.vis), d.name.text), &d.items),
-            Decl::StatModel(s) => {
-                self.header_loose(&format!("{}statistical model {}", vis_prefix(s.vis), s.name.text), &s.items)
-            }
-            Decl::MlWorkflow(m) => {
-                self.header_loose(&format!("{}ml workflow {}", vis_prefix(m.vis), m.name.text), &m.items)
-            }
+            Decl::Dataset(d) => self.header_loose(
+                &format!("{}dataset {}", vis_prefix(d.vis), d.name.text),
+                &d.items,
+            ),
+            Decl::StatModel(s) => self.header_loose(
+                &format!("{}statistical model {}", vis_prefix(s.vis), s.name.text),
+                &s.items,
+            ),
+            Decl::MlWorkflow(m) => self.header_loose(
+                &format!("{}ml workflow {}", vis_prefix(m.vis), m.name.text),
+                &m.items,
+            ),
             Decl::Experiment(e) => {
                 let kw = match e.kind {
                     ExperimentKind::Experiment => "experiment",
                     ExperimentKind::Tuning => "tuning",
                 };
-                self.header_loose(&format!("{}{kw} {}", vis_prefix(e.vis), e.name.text), &e.items);
+                self.header_loose(
+                    &format!("{}{kw} {}", vis_prefix(e.vis), e.name.text),
+                    &e.items,
+                );
             }
-            Decl::Visualization(v) => {
-                self.header_loose(&format!("{}visualization {}", vis_prefix(v.vis), v.name.text), &v.items)
-            }
+            Decl::Visualization(v) => self.header_loose(
+                &format!("{}visualization {}", vis_prefix(v.vis), v.name.text),
+                &v.items,
+            ),
             Decl::Let(l) => {
                 let ty =
                     l.ty.as_ref()
                         .map(|t| format!(": {}", type_str(t)))
                         .unwrap_or_default();
-                self.line(&format!("{}let {}{ty} = {}", vis_prefix(l.vis), l.name.text, expr_str(&l.value)));
+                self.line(&format!(
+                    "{}let {}{ty} = {}",
+                    vis_prefix(l.vis),
+                    l.name.text,
+                    expr_str(&l.value)
+                ));
             }
             Decl::Extension(x) => self.extension(x),
             Decl::Error(_, raw) => self.verbatim_lines(raw),
@@ -296,7 +313,12 @@ impl Formatter {
             ConstraintKind::Strict => "strict",
             ConstraintKind::Audit => "audit",
         };
-        self.line(&format!("{}constraint {} {} {{", vis_prefix(c.vis), c.name.text, kind));
+        self.line(&format!(
+            "{}constraint {} {} {{",
+            vis_prefix(c.vis),
+            c.name.text,
+            kind
+        ));
         self.indent += 1;
         self.clauses(&c.body.clauses);
         self.indent -= 1;
@@ -407,7 +429,10 @@ impl Formatter {
         };
         self.line(&format!(
             "{}driver {} for {}{} {{",
-            vis_prefix(d.vis), d.name.text, d.for_protocol.text, needs
+            vis_prefix(d.vis),
+            d.name.text,
+            d.for_protocol.text,
+            needs
         ));
         self.indent += 1;
         self.line(&format!(
@@ -586,7 +611,11 @@ impl Formatter {
     }
 
     fn data_recipe(&mut self, r: &DataRecipeDecl) {
-        self.line(&format!("{}data recipe {} {{", vis_prefix(r.vis), r.name.text));
+        self.line(&format!(
+            "{}data recipe {} {{",
+            vis_prefix(r.vis),
+            r.name.text
+        ));
         self.indent += 1;
         for item in &r.items {
             match item {

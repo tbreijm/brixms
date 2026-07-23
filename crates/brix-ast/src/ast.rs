@@ -246,30 +246,102 @@ impl Decl {
             }
         };
         match self {
-            Decl::Entity(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Rel(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Derive(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Constraint(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Query(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Protocol(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Driver(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Scenario(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Fn(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Type(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Measure(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Unit(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Enum(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Record(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::DataRecipe(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Feature(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::FeatureSet(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Dataset(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::StatModel(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::MlWorkflow(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Experiment(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Visualization(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Let(d) => { d.vis = vis; set_span(&mut d.span); }
-            Decl::Extension(d) => { d.vis = vis; set_span(&mut d.span); }
+            Decl::Entity(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Rel(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Derive(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Constraint(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Query(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Protocol(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Driver(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Scenario(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Fn(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Type(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Measure(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Unit(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Enum(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Record(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::DataRecipe(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Feature(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::FeatureSet(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Dataset(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::StatModel(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::MlWorkflow(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Experiment(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Visualization(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Let(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Extension(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
             Decl::Error(_, _) => {}
         }
     }

@@ -557,4 +557,3 @@ pub derive rel D { id: Int } key(id)\n";
     assert!(!diags2.has_errors());
     assert_eq!(format_file(&file2), formatted);
 }
-
