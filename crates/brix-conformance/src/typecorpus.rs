@@ -668,6 +668,50 @@ pub fn subst_chain_composite_root() -> TypeFixture {
     }
 }
 
+/// Fixture (#15 gap D): a 2-hop var chain whose FIRST hop is bound by resolving
+/// a user-defined overloaded call — the exact `self.subst = next` commit site
+/// (reflect.rs:1719) gap D patches. `pick`'s only candidate is identity
+/// `[Var(B)] -> Var(B)`; `pick(x)` with `x: Var(A)` unifies `Var(A) ~ Var(B)`,
+/// binding `A := Var(B)` — a var-to-var edge pre-fix swallowed entirely (no
+/// BindAttempt/SubstEdge for A). The query `result: Int` then forces the
+/// ordinary second hop `B := Int` via the normal query-result unify (already
+/// observed either way). Distinct TyVars (9400/9401) from every other fixture.
+pub fn overload_bind_chain() -> TypeFixture {
+    let o = Origins::new("OverloadChain");
+    let a = TyVar(9400);
+    let b = TyVar(9401);
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("OverloadChain"),
+            params: vec![(Ident::new("x"), Ty::Var(a))],
+            body: Pattern::default(),
+            yields: o.call("pick", vec![o.var("x")]),
+            result: Ty::rel(Row::closed(vec![RowField {
+                name: Ident::new("value"),
+                ty: Ty::Int(IntWidth::Int),
+            }])),
+        }],
+    };
+    let resolver = TableResolver::new().with_function(FnSignature {
+        name: QualIdent::from("pick"),
+        params: vec![Ty::Var(b)],
+        ret: Ty::Var(b),
+        effects: EffectRow::empty(),
+        is_aggregate: false,
+        may_diverge: false,
+    });
+    TypeFixture {
+        label: "overload_bind_chain",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver,
+        expected_categories: BTreeSet::new(),
+    }
+}
+
 /// Fixture 7 (row symmetry, conflicting side): `query.result` declares a
 /// *closed* `{a}` row but the yielded record is `{a, b}` — an extra field
 /// on the *found* side of a closed row. Catching this requires the

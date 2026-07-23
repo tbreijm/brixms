@@ -35,12 +35,12 @@ use brix_conformance::typecorpus::{
     container_vs_container_mismatch, container_vs_plain_mismatch, cross_epistemic_wrapper_mismatch,
     estimate_same_ctor_mismatch, estimate_to_plain_erasure, estimate_vs_container_erasure,
     field_failure, missing_to_plain_implicit_coercion, occurs_check, occurs_check_row,
-    plain_scalar_mismatch, probability_f64_bridge_is_not_a_conflict, probability_to_bool_erasure,
-    same_container_leaf_no_double_count, subst_chain_composite_root, subst_chain_scalar_root,
-    NATIVE_GUARD_NON_BOOL_FIXTURE, NATIVE_OPERATOR_APPLIES_FIXTURE, NATIVE_ROLE_BINDINGS_FIXTURE,
-    NATIVE_ROLE_LIT_MISMATCH_FIXTURE, NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE,
-    NATIVE_VAR_THREE_ROLES_FIXTURE, NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
-    NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
+    overload_bind_chain, plain_scalar_mismatch, probability_f64_bridge_is_not_a_conflict,
+    probability_to_bool_erasure, same_container_leaf_no_double_count, subst_chain_composite_root,
+    subst_chain_scalar_root, NATIVE_GUARD_NON_BOOL_FIXTURE, NATIVE_OPERATOR_APPLIES_FIXTURE,
+    NATIVE_ROLE_BINDINGS_FIXTURE, NATIVE_ROLE_LIT_MISMATCH_FIXTURE,
+    NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE, NATIVE_VAR_THREE_ROLES_FIXTURE,
+    NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE, NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
 };
 use brix_conformance::typefacts;
 
@@ -1358,6 +1358,68 @@ fn subst_chain_composite_root_resolves_to_the_composite() {
         "native Resolved(var, root) must equal reflect's own fully-chased BindAttempt.target \
          for every accepted var — proving the native fixpoint reproduces solve::resolve's chase \
          even when the chain terminates in a composite (non-leaf) root"
+    );
+}
+
+/// #15 gap D: proves the overloaded-call commit site (reflect.rs:1719, formerly
+/// a wholesale `self.subst = next`) now emits BindAttempt/SubstEdge for the var
+/// it binds, closing the one genuinely unsound gap. Layer 1 asserts on
+/// report.facts that the CALL's own bind (var 9400 = A) produced a SubstEdge —
+/// the pre-fix/post-fix discriminator (reflect_resolved reads the same fact
+/// stream the gap starves, so its equality alone would pass vacuously pre-fix).
+/// Layer 2 is the subst_chain_scalar_root native-parity shape.
+#[test]
+fn overload_bind_chain_resolves_two_hops_to_the_same_final_type() {
+    let fixture = overload_bind_chain();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let call_bind_present = report.facts.iter().any(|d| {
+        matches!(&d.fact, Fact::SubstEdge { var, target: Ty::Var(_), .. }
+            if *var == brix_ir::types::TyVar(9400))
+    });
+    assert!(
+        call_bind_present,
+        "reflect.rs must record a SubstEdge for the var the overloaded call itself \
+         binds (var 9400, `A := Var(B)`) — the fact reflect.rs previously swallowed \
+         at the `self.subst = next` commit"
+    );
+
+    let expected = reflect_resolved(&report);
+    assert_eq!(
+        expected.len(),
+        2,
+        "reflect must accept both binds (call-bound A and query-result-bound B); got {expected:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-overload-bind-chain".to_vec());
+    txn.ops = export.ops;
+    let mut store = Store::new(compiled_package());
+    let settled = store.commit(&txn).expect("shadow mode never rejects");
+
+    let resolved_extent = settled
+        .extents
+        .get("Resolved")
+        .expect("brix.type package must declare a Resolved relation");
+    assert_eq!(
+        resolved_extent.len(),
+        2,
+        "native must derive exactly two Resolved rows"
+    );
+
+    let native: BTreeSet<(brix_ir::types::TyVar, Ty)> = resolved_extent
+        .values()
+        .map(|record| {
+            let r = typefacts::resolve_resolved(&export.tokens, &record.row)
+                .expect("every derived Resolved row's tokens must resolve through the token table");
+            (r.var, r.root)
+        })
+        .collect();
+
+    assert_eq!(
+        native, expected,
+        "native Resolved(var, root) must equal reflect's own fully-chased BindAttempt.target \
+         for every accepted var, including the var bound by the overloaded-call commit path"
     );
 }
 
