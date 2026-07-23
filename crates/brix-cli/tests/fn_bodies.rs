@@ -507,3 +507,31 @@ fn total_fn_using_try_fails_closed() {
         codes(src)
     );
 }
+
+// --- Issue #47 Part 3 (Slice 3a): partial-fn body lowering -------------
+
+/// A `partial fn` now lowers its body into a Core IR `FnDef` (was deferred /
+/// hand-registered). `Probability.try(x)` is the builtin validated constructor,
+/// typed `Result<Probability, ValidationError>`; the fn is marked `is_partial`.
+/// This proves the body lowers cleanly and enters the program (execution is a
+/// later slice).
+#[test]
+fn partial_fn_lowers_into_source_functions() {
+    let src = "package t @ 0.1.0\n\
+partial fn clampProb(x: Float) -> Result<Probability, ValidationError> = Probability.try(x)\n";
+    let (file, diags) = parse_file(src);
+    assert!(!diags.has_errors(), "fixture parses: {diags:#?}");
+    let lowered = lower_file(&file, &diags);
+    assert!(
+        !lowered.has_errors(),
+        "a partial fn body must lower cleanly: {:#?}",
+        lowered.diags
+    );
+    let f = lowered
+        .source
+        .functions
+        .iter()
+        .find(|f| f.name.to_string() == "clampProb")
+        .expect("clampProb must lower into source.functions, not be deferred");
+    assert!(f.is_partial, "clampProb must be marked partial");
+}

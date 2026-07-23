@@ -1,9 +1,13 @@
 /target
+**/target/
 **/*.rs.bk
 Cargo.lock.orig
 .DS_Store
 *.pending-snap
 /registry-local
+# Per-package build cache written by `brix build`/`brix run`.
+.brix-cache/
+**/.brix-cache/
 
 # Claude Code local worktrees / session state
 .claude/

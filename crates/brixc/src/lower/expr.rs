@@ -121,6 +121,18 @@ fn poison(meta: &mut LowerMeta) -> IrExpr {
     )
 }
 
+/// The success type of a builtin validated constructor `Type.try(arg)` (issue
+/// #47 Part 3), or `None` if `Type` has no such constructor. Scoped to the
+/// refinement types the flagship exercises; the runtime/oracle admission check
+/// (`0 ≤ x ≤ 10000` basis points for `Probability`) is a builtin in both
+/// engines.
+fn refinement_try_ok_ty(type_name: &str) -> Option<Ty> {
+    match type_name {
+        "Probability" => Some(Ty::Probability),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------
 // Pattern-argument resolution (shared by Head/Edge/Entity/History/
 // StructLit-field lowering in decl.rs).
@@ -434,6 +446,50 @@ fn lower_call(
                             args: vec![comp],
                         },
                     );
+                }
+            }
+        }
+    }
+
+    // Validated fallible constructor `Type.try(arg)` (issue #47 Part 3): a
+    // refinement newtype's checked constructor, typed `Result<Type,
+    // ValidationError>`. Scoped to the builtin refinement types the flagship
+    // exercises (`Probability`); the actual admission check lives in both
+    // engines as a builtin (beside Part 2's `clamp`/`div`). The error arm is a
+    // fresh var — inference unifies it with the enclosing fn's declared `E`.
+    if prefix.is_none() {
+        if let ast::ExprKind::Field { base, name } = &*callee.kind {
+            if name.text == "try" {
+                if let ast::ExprKind::Ident(p) = &*base.kind {
+                    if p.segments.len() == 1 {
+                        if let Some(ok_ty) = refinement_try_ok_ty(&p.segments[0].text) {
+                            let arg = if args.len() == 1 && args[0].name.is_none() {
+                                lower_expr(ctx, &args[0].value)
+                            } else {
+                                ctx.diags.push(diag::error(
+                                    diag::UNSUPPORTED_V0,
+                                    span,
+                                    format!(
+                                        "`{}.try` takes exactly one positional argument",
+                                        p.segments[0].text
+                                    ),
+                                ));
+                                poison(ctx.meta)
+                            };
+                            let func = QualIdent::from_segments([
+                                IrIdent::new(p.segments[0].text.clone()),
+                                IrIdent::new("try"),
+                            ]);
+                            let err_ty = Ty::Var(ctx.meta.fresh_tyvar());
+                            return IrExpr::new(
+                                Ty::Result(Box::new(ok_ty), Box::new(err_ty)),
+                                ExprKind::Call {
+                                    func,
+                                    args: vec![arg],
+                                },
+                            );
+                        }
+                    }
                 }
             }
         }

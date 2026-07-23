@@ -178,13 +178,27 @@ impl Infer {
     /// Infer/check a user function body (issue #47). Seeds the env from the
     /// declared parameters (mirroring [`Infer::query`]'s param seeding), infers
     /// the body expression, and unifies its type against the declared return
-    /// type — so a body that computes the wrong type is a `Mismatch`. Only
-    /// total, expression-bodied functions reach here in Slice 1 (partial /
-    /// block bodies are rejected at lowering).
+    /// type — so a body that computes the wrong type is a `Mismatch`.
+    ///
+    /// For a **partial** fn (declared `-> Result<T, E>`, issue #47 Part 3) the
+    /// body may evaluate to either the full `Result` (a `.try`/`Ok`/`Err`-tailed
+    /// body, e.g. `riskModel`) or a bare success value `T` (a body whose tail is
+    /// `g(x)?`). So when the body's type is not itself a `Result`, unify it
+    /// against the `Ok` arm of the declared `Result` return type rather than the
+    /// whole `Result`.
     fn function(&mut self, def: &mut FnDef, resolver: &impl SchemaResolver) {
         let mut env: Env = def.params.iter().cloned().collect();
         let body_ty = self.expr(&mut def.body, &mut env, resolver);
-        self.unify(def.ret.clone(), body_ty);
+        let target = if def.is_partial {
+            match (self.resolve(def.ret.clone()), self.resolve(body_ty.clone())) {
+                // Bare success value against `Result<T, E>` -> unify with `T`.
+                (Ty::Result(ok, _), body) if !matches!(body, Ty::Result(_, _)) => (*ok).clone(),
+                _ => def.ret.clone(),
+            }
+        } else {
+            def.ret.clone()
+        };
+        self.unify(target, body_ty);
         self.zonk_expr(&mut def.body);
         def.ret = self.resolve(def.ret.clone());
     }
