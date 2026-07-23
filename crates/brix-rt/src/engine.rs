@@ -36,6 +36,15 @@ pub enum Value {
         name: String,
     },
     Unit,
+    /// Raw canonical byte string carrying another value's already-serialized
+    /// canon bytes (not a digest) — the value-construction primitive #15's
+    /// native `brix.type` checker mints new type tokens with: a composite
+    /// `Ty`'s token is `Digest::of(Domain::Value, uint(ctor) ++ child_raw_bytes)`
+    /// (see `brix_ir::types::Ty::canon_write`), so minting a parent token
+    /// needs the child's raw bytes, not its digest. `brix.ty.mint_unary`/
+    /// `brix.ty.mint_binary`/`brix.canon.digest` (this module's
+    /// `builtin_total`) are the only producers/consumers a rule body reaches.
+    Bytes(Vec<u8>),
 }
 
 /// The identity-relevant projection of a [`Value`] — everything
@@ -53,6 +62,7 @@ enum ValueKey<'a> {
     Claim(ClaimId),
     Enum { ty: &'a str, ordinal: u32 },
     Unit,
+    Bytes(&'a [u8]),
 }
 
 impl Value {
@@ -70,6 +80,7 @@ impl Value {
                 ordinal: *ordinal,
             },
             Value::Unit => ValueKey::Unit,
+            Value::Bytes(b) => ValueKey::Bytes(b),
         }
     }
 
@@ -150,6 +161,10 @@ impl Canonical for Value {
                 writer.write_uint(*ordinal as u64);
             }
             Self::Unit => writer.write_uint(8),
+            Self::Bytes(value) => {
+                writer.write_uint(9);
+                writer.write_bytes(value);
+            }
         }
     }
 }
@@ -1572,17 +1587,70 @@ fn validation_error() -> Value {
 /// Native total-function fallback. `surcharge` used to live here as a
 /// hand-transcription of its BrixMS source; it is now compiled from source
 /// (issue #47 Slice 1.5) and resolves via `Program::fn_defs`. What remains
-/// is `brix.math.clamp(x, lo, hi)` — a prelude-seeded signature
-/// (`brixc::lower::resolve::seed_prelude`) with no source body to compile,
-/// so it stays a builtin: integer clamp on basis-point `Value::Int`s, per
-/// the issue #47 Part 2 fixed-point ruling (no float arithmetic).
-fn builtin_total(name: &str) -> Option<TotalFn> {
-    (name == "brix.math.clamp").then_some(|args: &[Value]| {
-        let x = args[0].as_i128().expect("clamp: non-numeric value");
-        let lo = args[1].as_i128().expect("clamp: non-numeric lo");
-        let hi = args[2].as_i128().expect("clamp: non-numeric hi");
-        Value::Int(x.max(lo).min(hi).try_into().unwrap_or(i64::MAX))
-    })
+/// are builtins with no source body to compile: `brix.math.clamp(x, lo, hi)`
+/// — a prelude-seeded signature (`brixc::lower::resolve::seed_prelude`),
+/// integer clamp on basis-point `Value::Int`s per the issue #47 Part 2
+/// fixed-point ruling (no float arithmetic) — and #15's value-construction
+/// primitives (`brix.ty.mint_unary`/`brix.ty.mint_binary`/
+/// `brix.canon.digest`), which reproduce `Ty::canon_write`'s inline framing
+/// (`write_enum(ctor, |w| child.canon_write(w))` = `uint(ctor) ++
+/// child_raw_bytes`, one buffer, hashed once) byte-for-byte so a rule body
+/// can mint the same token `crates/brix-conformance/src/typefacts.rs`'s
+/// exporter would compute for a composite `Ty` — see
+/// `crates/brix-conformance/tests/engine_mint.rs` for the proof.
+///
+/// `pub` (rather than crate-private, `Expr::Call`'s normal dispatch path)
+/// solely so that byte-identity proof can call the exact same function
+/// pointers the engine dispatches through, from `brix-conformance`'s test
+/// crate, without re-implementing the builtin bodies as a surrogate.
+pub fn builtin_total(name: &str) -> Option<TotalFn> {
+    match name {
+        "brix.math.clamp" => Some(|args: &[Value]| {
+            let x = args[0].as_i128().expect("clamp: non-numeric value");
+            let lo = args[1].as_i128().expect("clamp: non-numeric lo");
+            let hi = args[2].as_i128().expect("clamp: non-numeric hi");
+            Value::Int(x.max(lo).min(hi).try_into().unwrap_or(i64::MAX))
+        }),
+        "brix.ty.mint_unary" => Some(|args: &[Value]| {
+            let Value::Int(ctor) = args[0] else {
+                panic!("mint_unary: ctor not Int")
+            };
+            let Value::Bytes(child) = &args[1] else {
+                panic!("mint_unary: child not Bytes")
+            };
+            // Reproduces `write_enum(ctor, |w| child.canon_write(w))`:
+            // uint(ctor) ++ child's raw canonical bytes.
+            let mut w = CanonWriter::new();
+            w.write_uint(ctor as u64);
+            let mut out = w.finish();
+            out.extend_from_slice(child);
+            Value::Bytes(out)
+        }),
+        "brix.ty.mint_binary" => Some(|args: &[Value]| {
+            let Value::Int(ctor) = args[0] else {
+                panic!("mint_binary: ctor not Int")
+            };
+            let Value::Bytes(a) = &args[1] else {
+                panic!("mint_binary: a not Bytes")
+            };
+            let Value::Bytes(b) = &args[2] else {
+                panic!("mint_binary: b not Bytes")
+            };
+            let mut w = CanonWriter::new();
+            w.write_uint(ctor as u64);
+            let mut out = w.finish();
+            out.extend_from_slice(a);
+            out.extend_from_slice(b);
+            Value::Bytes(out)
+        }),
+        "brix.canon.digest" => Some(|args: &[Value]| {
+            let Value::Bytes(bytes) = &args[0] else {
+                panic!("digest: not Bytes")
+            };
+            Value::Str(Digest::of(Domain::Value, bytes).to_hex())
+        }),
+        _ => None,
+    }
 }
 
 fn eval_binop(operator: BinOp, left: &Value, right: &Value) -> Value {
