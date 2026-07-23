@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use brix_canon::{CanonWriter, Canonical, Domain};
 use brix_ir::ident::{Ident, QualIdent};
-use brix_ir::reflect::{Fact, ReflectiveReport, ScopeId, Subject};
+use brix_ir::reflect::{ExprKindTag, Fact, ReflectiveReport, ScopeId, Subject};
 use brix_ir::types::{RowTail, Ty, TyVar};
 use brix_rt::engine::{Row, TransactionOp, Value};
 
@@ -338,9 +338,22 @@ pub struct Export {
 /// those edges, stopping the instant a target's ctor isn't `Var` (ctor 1),
 /// reproduces `solve::resolve`'s own transitive chase at read time.
 ///
-/// Facts outside these slices' rules (`ExprKindIs`, `ExprChild`, `FnSig`,
-/// `RowTail`, `DimTerm`) are not exported — the native package doesn't consume
-/// them yet.
+/// #15 native slice-11 (TryNonResult) adds two more structural imports:
+/// `Fact::ExprKindIs` is now *filtered* re-projected as `TryExpr`, Try-tag
+/// only (mirroring the `WhenCond`/`OpApply` filtered re-projections of
+/// `RequiresBool`/`Applies`) — every other `ExprKindIs` tag still falls
+/// through the wildcard and stays unexported. `Fact::ExprChild` is now
+/// imported verbatim as `ExprChild` (previously unexported). Together with
+/// the `ExprType`-arm widening below, these let `TryInnerOf`/
+/// `TryNonResultCheck` reproduce `ExprKind::Try`'s `TryNonResult` conflict
+/// natively. The `ExprType` arm above ALSO now seeds a `TyCtorIs` row per
+/// distinct expr-type token (reusing slice 8's `ctor_seen`/`ty_ctor`
+/// machinery) — without it, a `try`-inner expr's resolved type would never
+/// otherwise appear as a `UnifyAttempt`/`SubstEdge` operand, leaving
+/// `TryNonResultCheck` with no `TyCtorIs` row to join against.
+///
+/// Facts outside these slices' rules (`FnSig`, `RowTail`, `DimTerm`) are not
+/// exported — the native package doesn't consume them yet.
 pub fn export(report: &ReflectiveReport) -> Export {
     let mut tokens = TokenTable::default();
     let mut ops = Vec::new();
@@ -457,15 +470,71 @@ pub fn export(report: &ReflectiveReport) -> Export {
                 ty,
                 scope: _,
             } if !matches!(ty, Ty::Var(_)) => {
+                let ty_tok = tokens.record(TokenValue::Ty(ty.clone()));
                 let row = Row(BTreeMap::from([
                     (
                         "subject".to_string(),
                         tokens.record(TokenValue::Subject(subject.clone())),
                     ),
-                    ("ty".to_string(), tokens.record(TokenValue::Ty(ty.clone()))),
+                    ("ty".to_string(), ty_tok.clone()),
                 ]));
                 ops.push(TransactionOp::Assert {
                     relation: "ExprType".to_string(),
+                    row,
+                });
+                // #15 native slice-11 (TryNonResult): also seed `TyCtorIs`
+                // for this (already resolved) expr type, reusing slice 8's
+                // `ctor_seen`/`ty_ctor` machinery — without this, a `try`
+                // inner expr's type never otherwise appears as a
+                // `UnifyAttempt`/`SubstEdge` operand, so `TryNonResultCheck`
+                // would have zero `TyCtorIs` rows to join against.
+                let Value::Str(hex) = &ty_tok else {
+                    unreachable!("TokenTable::record always returns Value::Str")
+                };
+                if ctor_seen.insert(hex.clone()) {
+                    ops.push(assert_op(
+                        "TyCtorIs",
+                        [("ty", ty_tok.clone()), ("ctor", Value::Int(ty_ctor(ty)))],
+                    ));
+                }
+            }
+            // #15 native slice-11 (TryNonResult): filtered re-projection of
+            // `Fact::ExprKindIs`, Try-only — mirrors the `WhenCond`/`OpApply`
+            // filtered re-projections of `RequiresBool`/`Applies`. Other
+            // `ExprKindIs` kinds still fall through the wildcard arm below.
+            Fact::ExprKindIs {
+                subject,
+                kind: ExprKindTag::Try,
+            } => {
+                let row = Row(BTreeMap::from([(
+                    "subject".to_string(),
+                    tokens.record(TokenValue::Subject(subject.clone())),
+                )]));
+                ops.push(TransactionOp::Assert {
+                    relation: "TryExpr".to_string(),
+                    row,
+                });
+            }
+            // #15 native slice-11 (TryNonResult): verbatim 1:1 import of
+            // reflect's own parent -> child expression-tree edge.
+            Fact::ExprChild {
+                parent,
+                ordinal,
+                child,
+            } => {
+                let row = Row(BTreeMap::from([
+                    (
+                        "parent".to_string(),
+                        tokens.record(TokenValue::Subject(parent.clone())),
+                    ),
+                    ("ordinal".to_string(), Value::Int(*ordinal as i64)),
+                    (
+                        "child".to_string(),
+                        tokens.record(TokenValue::Subject(child.clone())),
+                    ),
+                ]));
+                ops.push(TransactionOp::Assert {
+                    relation: "ExprChild".to_string(),
                     row,
                 });
             }
@@ -905,4 +974,25 @@ pub fn resolve_resolved(tokens: &TokenTable, row: &Row) -> Option<ResolvedBindin
     };
     let root = tokens.ty(token_str(row, "root")?)?.clone();
     Some(ResolvedBinding { var, root })
+}
+
+/// The resolved shape of one derived `TryNonResultConflict` row (#15 native
+/// slice-11) — like [`ResolvedNonBool`], not a `Fact`/`TypeConflict` by
+/// itself; the harness builds a comparable `ConflictKind::TryNonResult`
+/// `TypeConflict` from it.
+pub struct ResolvedTryNonResult {
+    pub subject: Subject,
+    pub found: Ty,
+    pub scope: ScopeId,
+}
+
+pub fn resolve_try_non_result(tokens: &TokenTable, row: &Row) -> Option<ResolvedTryNonResult> {
+    let subject = tokens.subject(token_str(row, "subject")?)?.clone();
+    let found = tokens.ty(token_str(row, "found")?)?.clone();
+    let scope = tokens.scope(token_str(row, "scope")?)?;
+    Some(ResolvedTryNonResult {
+        subject,
+        found,
+        scope,
+    })
 }
