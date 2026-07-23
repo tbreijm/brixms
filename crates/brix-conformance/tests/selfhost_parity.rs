@@ -32,14 +32,15 @@ use brixc::pipeline::PhaseAssign;
 use brixc::{emit, lower_file, AstPhase};
 
 use brix_conformance::typecorpus::{
-    closed_row_extra_field, closed_row_missing_field, container_vs_container_mismatch,
-    container_vs_plain_mismatch, cross_epistemic_wrapper_mismatch, estimate_same_ctor_mismatch,
-    estimate_to_plain_erasure, estimate_vs_container_erasure, field_failure,
-    missing_to_plain_implicit_coercion, occurs_check, occurs_check_row, open_row_extra_field,
-    overload_bind_chain, plain_scalar_mismatch, probability_f64_bridge_is_not_a_conflict,
-    probability_to_bool_erasure, same_container_leaf_no_double_count, subst_chain_composite_root,
-    subst_chain_scalar_root, try_non_result, try_over_result_is_not_a_conflict,
-    NATIVE_GUARD_NON_BOOL_FIXTURE, NATIVE_OPERATOR_APPLIES_FIXTURE, NATIVE_ROLE_BINDINGS_FIXTURE,
+    arity_mismatch, arity_non_first_candidate_match_is_not_a_conflict, closed_row_extra_field,
+    closed_row_missing_field, container_vs_container_mismatch, container_vs_plain_mismatch,
+    cross_epistemic_wrapper_mismatch, estimate_same_ctor_mismatch, estimate_to_plain_erasure,
+    estimate_vs_container_erasure, field_failure, missing_to_plain_implicit_coercion, occurs_check,
+    occurs_check_row, open_row_extra_field, overload_bind_chain, plain_scalar_mismatch,
+    probability_f64_bridge_is_not_a_conflict, probability_to_bool_erasure,
+    same_container_leaf_no_double_count, subst_chain_composite_root, subst_chain_scalar_root,
+    try_non_result, try_over_result_is_not_a_conflict, NATIVE_GUARD_NON_BOOL_FIXTURE,
+    NATIVE_OPERATOR_APPLIES_FIXTURE, NATIVE_ROLE_BINDINGS_FIXTURE,
     NATIVE_ROLE_LIT_MISMATCH_FIXTURE, NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE,
     NATIVE_VAR_THREE_ROLES_FIXTURE, NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
     NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
@@ -130,6 +131,16 @@ fn native_mismatches(tokens: &typefacts::TokenTable, extent: &Extent) -> Vec<Typ
                 scope: resolved.scope,
             }
         })
+        .collect()
+}
+
+/// Every `Arity`-kind conflict `reflect::analyze` recorded (native Arity
+/// slice) — the arity counterpart of [`reflect_mismatches`].
+fn reflect_arity_conflicts(report: &ReflectiveReport) -> Vec<&TypeConflict> {
+    report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::Arity { .. }))
         .collect()
 }
 
@@ -2019,5 +2030,119 @@ fn try_over_result_derives_no_conflict() {
     assert_eq!(
         try_non_result_len, 0,
         "native package must derive zero TryNonResultConflict rows for a try over a genuine Result"
+    );
+}
+
+/// Native Arity slice: `arity_mismatch`'s single-candidate call — `f(Int) ->
+/// Int` called with zero args — where `reflect.rs`'s `arity_ok.is_empty()`
+/// branch fires, recording `ConflictKind::Arity{expected: 1, found: 0}`. The
+/// native `CallArityMismatch` rule must reproduce the identical conflict via
+/// `OpApply` ⋈ `CallArity` ⋈ `FnArity(ordinal 0)` ⋈ `RootScope`, gated by the
+/// absence of ANY candidate (fresh `any_ord`) whose `paramc` equals `found`.
+#[test]
+fn arity_mismatch_derives_one_arity_conflict() {
+    let fixture = arity_mismatch();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts = reflect_arity_conflicts(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one Arity conflict for the arity_mismatch \
+         fixture; got {reflect_conflicts:?}"
+    );
+    assert_eq!(
+        reflect_conflicts[0].kind,
+        ConflictKind::Arity {
+            expected: 1,
+            found: 0,
+        },
+        "reflect's Arity conflict must be expected:1 (f's declared arity), found:0 \
+         (the call's actual arg count)"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-arity-mismatch".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let arity_extent = settled
+        .extents
+        .get("ArityConflict")
+        .expect("brix.type package must declare an ArityConflict relation");
+    assert_eq!(
+        arity_extent.len(),
+        1,
+        "native package must derive exactly one ArityConflict row"
+    );
+
+    let native_conflicts: Vec<TypeConflict> = arity_extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_arity(&export.tokens, &record.row).expect(
+                "every derived ArityConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::Arity {
+                    expected: resolved.expected,
+                    found: resolved.found,
+                },
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect();
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived ArityConflict set must canonical-byte-equal reflect.rs's own \
+         (same subject, same expected/found counts, same scope)"
+    );
+}
+
+/// Native Arity slice discriminator: two overloads of `g` (`g(Int)`, ordinal
+/// 0; `g(Int, Int)`, ordinal 1), called with two `Int` args — matching ONLY
+/// the ordinal-1 candidate. `reflect.rs`'s `arity_ok` filter keeps that
+/// candidate, so reflect records ZERO Arity conflicts. This is the fresh-
+/// `any_ord`-correctness proof: a native `CallArityMismatch` `without` block
+/// that wrongly reused the ordinal-0 literal (instead of ranging over every
+/// candidate) would only check candidate 0's paramc (1) against found (2),
+/// see no match, and wrongly derive `ArityConflict{expected:1, found:2}`.
+#[test]
+fn arity_non_first_candidate_match_derives_zero_arity_conflicts() {
+    let fixture = arity_non_first_candidate_match_is_not_a_conflict();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts = reflect_arity_conflicts(&report);
+    assert!(
+        reflect_conflicts.is_empty(),
+        "reflect.rs must record zero Arity conflicts when a later overload's \
+         arity matches the call; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-arity-non-first-candidate".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let arity_len = settled
+        .extents
+        .get("ArityConflict")
+        .map_or(0, |extent| extent.len());
+    assert_eq!(
+        arity_len, 0,
+        "native package must derive zero ArityConflict rows — a `without` block that \
+         reused the ordinal-0 literal instead of a fresh existential var would wrongly \
+         fire here"
     );
 }

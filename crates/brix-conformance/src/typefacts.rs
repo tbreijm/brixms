@@ -352,6 +352,13 @@ pub struct Export {
 /// otherwise appear as a `UnifyAttempt`/`SubstEdge` operand, leaving
 /// `TryNonResultCheck` with no `TyCtorIs` row to join against.
 ///
+/// `Fact::CallArity` and `Fact::FnArity` are exported as `CallArity`/`FnArity`
+/// (native Arity slice) — a call site's own argument count, and each
+/// candidate overload's declared param count at its ordinal position.
+/// `FnArity.function` is asserted verbatim (`Value::Str`, not a token), so it
+/// byte-matches `Applies.operator`'s own verbatim string for the native
+/// `CallArityMismatch` rule's join.
+///
 /// Facts outside these slices' rules (`FnSig`, `RowTail`, `DimTerm`) are not
 /// exported — the native package doesn't consume them yet.
 pub fn export(report: &ReflectiveReport) -> Export {
@@ -695,6 +702,36 @@ pub fn export(report: &ReflectiveReport) -> Export {
                     row,
                 });
             }
+            Fact::CallArity { subject, argc } => {
+                let row = Row(BTreeMap::from([
+                    (
+                        "subject".to_string(),
+                        tokens.record(TokenValue::Subject(subject.clone())),
+                    ),
+                    ("argc".to_string(), Value::Int(*argc as i64)),
+                ]));
+                ops.push(TransactionOp::Assert {
+                    relation: "CallArity".to_string(),
+                    row,
+                });
+            }
+            Fact::FnArity {
+                function,
+                ordinal,
+                paramc,
+            } => {
+                // `function` asserted VERBATIM (Value::Str, not a digest) so it byte-matches
+                // OpApply.operator's own verbatim string for the native join.
+                let row = Row(BTreeMap::from([
+                    ("function".to_string(), Value::Str(function.clone())),
+                    ("ordinal".to_string(), Value::Int(*ordinal as i64)),
+                    ("paramc".to_string(), Value::Int(*paramc as i64)),
+                ]));
+                ops.push(TransactionOp::Assert {
+                    relation: "FnArity".to_string(),
+                    row,
+                });
+            }
             _ => {}
         }
     }
@@ -801,6 +838,17 @@ fn token_str<'a>(row: &'a Row, role: &str) -> Option<&'a str> {
     }
 }
 
+/// Read a `Value::Int` out of a derived row's role, if present (mirrors
+/// [`token_str`] for the plain-integer roles `CallArity`/`FnArity`/
+/// `ArityConflict` carry — `argc`/`ordinal`/`paramc`/`expected`/`found` were
+/// never tokens, just asserted `Value::Int` verbatim).
+fn token_int(row: &Row, role: &str) -> Option<i64> {
+    match row.get(role) {
+        Some(Value::Int(n)) => Some(*n),
+        _ => None,
+    }
+}
+
 /// Map one derived `HasType` row (`subject`/`ty`/`scope` tokens) back to the
 /// `Fact::HasType` it represents, via `tokens`. `None` if a token is missing
 /// from the row or doesn't decode against the table — a fixture bug (the
@@ -901,6 +949,31 @@ pub fn resolve_unknown_field(tokens: &TokenTable, row: &Row) -> Option<ResolvedU
     Some(ResolvedUnknownField {
         subject,
         field,
+        scope,
+    })
+}
+
+/// The resolved shape of one derived `ArityConflict` row (native Arity slice)
+/// — like [`ResolvedMismatch`], not a `Fact`/`TypeConflict` by itself; the
+/// harness builds a comparable `ConflictKind::Arity` `TypeConflict` from it.
+/// `expected`/`found` were never tokens — asserted as plain `Value::Int` by
+/// the package rule, read back via [`token_int`].
+pub struct ResolvedArity {
+    pub subject: Subject,
+    pub expected: u32,
+    pub found: u32,
+    pub scope: ScopeId,
+}
+
+pub fn resolve_arity(tokens: &TokenTable, row: &Row) -> Option<ResolvedArity> {
+    let subject = tokens.subject(token_str(row, "subject")?)?.clone();
+    let expected = token_int(row, "expected")? as u32;
+    let found = token_int(row, "found")? as u32;
+    let scope = tokens.scope(token_str(row, "scope")?)?;
+    Some(ResolvedArity {
+        subject,
+        expected,
+        found,
         scope,
     })
 }
