@@ -32,9 +32,10 @@ use brixc::pipeline::PhaseAssign;
 use brixc::{emit, lower_file, AstPhase};
 
 use brix_conformance::typecorpus::{
-    container_vs_container_mismatch, container_vs_plain_mismatch, cross_epistemic_wrapper_mismatch,
-    estimate_same_ctor_mismatch, estimate_to_plain_erasure, estimate_vs_container_erasure,
-    field_failure, missing_to_plain_implicit_coercion, occurs_check, occurs_check_row,
+    closed_row_extra_field, closed_row_missing_field, container_vs_container_mismatch,
+    container_vs_plain_mismatch, cross_epistemic_wrapper_mismatch, estimate_same_ctor_mismatch,
+    estimate_to_plain_erasure, estimate_vs_container_erasure, field_failure,
+    missing_to_plain_implicit_coercion, occurs_check, occurs_check_row, open_row_extra_field,
     overload_bind_chain, plain_scalar_mismatch, probability_f64_bridge_is_not_a_conflict,
     probability_to_bool_erasure, same_container_leaf_no_double_count, subst_chain_composite_root,
     subst_chain_scalar_root, NATIVE_GUARD_NON_BOOL_FIXTURE, NATIVE_OPERATOR_APPLIES_FIXTURE,
@@ -1727,5 +1728,187 @@ fn same_container_leaf_derives_exactly_one_mismatch_at_the_leaf_not_the_containe
         conflict_byte_set(reflect_conflicts.iter().copied()),
         "the native-derived MismatchConflict set must be canonical-byte-identical \
          to reflect.rs's own conflict set"
+    );
+}
+
+/// #15 gap-closure A (row-unification UnknownField, `missing_in_left`
+/// direction): `query.result` (expect/left) declares a CLOSED `{a}` row but
+/// the yielded record (found/right) is `{a, b}` — `solve::match_rows`'s
+/// `missing_in_left` set (solve.rs:308-312) fires for field `b`, since `left`
+/// is Closed and lacks a counterpart for `right`'s `b`. Proves
+/// `UnifyRowsMissingInLeft` end-to-end, gated on `RowClosed(ty: expect)`.
+#[test]
+fn closed_row_extra_field_derives_one_unknown_field_conflict() {
+    let fixture = closed_row_extra_field();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts: Vec<&TypeConflict> = report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::UnknownField { .. }))
+        .collect();
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one UnknownField conflict for the \
+         closed_row_extra_field fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-closed-row-extra-field".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let unknown_field_extent = settled
+        .extents
+        .get("UnknownFieldConflict")
+        .expect("brix.type package must declare an UnknownFieldConflict relation");
+    assert_eq!(
+        unknown_field_extent.len(),
+        1,
+        "native package must derive exactly one UnknownFieldConflict row (the \
+         UnifyRowsMissingInLeft direction, field `b`)"
+    );
+
+    let native_conflicts: Vec<TypeConflict> = unknown_field_extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_unknown_field(&export.tokens, &record.row).expect(
+                "every derived UnknownFieldConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::UnknownField {
+                    field: resolved.field,
+                },
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect();
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived UnknownField conflict set must canonical-byte-equal reflect.rs's own \
+         (same subject, same field name, same scope)"
+    );
+}
+
+/// #15 gap-closure A (row-unification UnknownField, `missing_in_right`
+/// direction): `closed_row_missing_field`'s mirror of the fixture above —
+/// `query.result` (expect/left) declares a CLOSED `{a, b}` row while the
+/// yielded record (found/right) only has `{a}` — `solve::match_rows`'s
+/// `missing_in_right` set (solve.rs:302-304) fires for field `b`, since
+/// `right` is Closed and lacks a counterpart for `left`'s `b`. Proves
+/// `UnifyRowsMissingInRight` end-to-end, gated on `RowClosed(ty: found)`.
+#[test]
+fn closed_row_missing_field_derives_one_unknown_field_conflict() {
+    let fixture = closed_row_missing_field();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts: Vec<&TypeConflict> = report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::UnknownField { .. }))
+        .collect();
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one UnknownField conflict for the \
+         closed_row_missing_field fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-closed-row-missing-field".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let unknown_field_extent = settled
+        .extents
+        .get("UnknownFieldConflict")
+        .expect("brix.type package must declare an UnknownFieldConflict relation");
+    assert_eq!(
+        unknown_field_extent.len(),
+        1,
+        "native package must derive exactly one UnknownFieldConflict row (the \
+         UnifyRowsMissingInRight direction, field `b`)"
+    );
+
+    let native_conflicts: Vec<TypeConflict> = unknown_field_extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_unknown_field(&export.tokens, &record.row).expect(
+                "every derived UnknownFieldConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::UnknownField {
+                    field: resolved.field,
+                },
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect();
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived UnknownField conflict set must canonical-byte-equal reflect.rs's own \
+         (same subject, same field name, same scope)"
+    );
+}
+
+/// #15 gap-closure A discriminator: `open_row_extra_field` is the closed/open
+/// control — the same extra-field shape as `closed_row_extra_field`, but
+/// `query.result` declares an OPEN row, so row polymorphism admits the extra
+/// field and NEITHER `UnifyRowsMissingInLeft` nor `UnifyRowsMissingInRight`
+/// may fire. An inverted `RowClosed` gate would wrongly fire here — this test
+/// is what catches that.
+#[test]
+fn open_row_extra_field_derives_no_unknown_field_conflict() {
+    let fixture = open_row_extra_field();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts: Vec<&TypeConflict> = report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::UnknownField { .. }))
+        .collect();
+    assert!(
+        reflect_conflicts.is_empty(),
+        "reflect.rs must record zero UnknownField conflicts for the open_row_extra_field \
+         fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-open-row-extra-field".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    // An empty extent may be absent from `settled.extents` entirely or
+    // present with length 0 — handle both, matching the Probability/F64
+    // bridge test's pattern.
+    let unknown_field_len = settled
+        .extents
+        .get("UnknownFieldConflict")
+        .map_or(0, |extent| extent.len());
+    assert_eq!(
+        unknown_field_len, 0,
+        "native package must derive zero UnknownFieldConflict rows for the open row — \
+         an inverted RowClosed gate would wrongly fire here"
     );
 }

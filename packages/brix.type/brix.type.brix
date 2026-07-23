@@ -203,7 +203,8 @@ derive GuardNonBool: NonBoolConflict(subject: subject, found: found, scope: scop
 // is of the ground `RowField` input (an earlier phase than this derivation) —
 // Appendix-F admits negation across a phase boundary (#15 native slice 6
 // (UnknownField, field-access form)). reflect ALSO raises UnknownField during
-// row unification; that form awaits the later unification machinery.
+// row unification; that form is CLOSED by UnifyRowsMissingInRight/
+// UnifyRowsMissingInLeft below (#15 gap-closure A).
 derive FieldNotInRow: UnknownFieldConflict(subject: subject, field: field, scope: scope) from {
     FieldAccess(subject: subject, base: base, field: field)
     RootScope(scope: scope)
@@ -524,4 +525,53 @@ derive ResolvedStep: Resolved(var: var, root: root) from {
     Bound(var: var, target: mid)
     TyCtorIs(ty: mid, ctor: 1)
     Resolved(var: mid, root: root)
+}
+
+// --- #15 gap-closure A: row-unification UnknownField ---
+//
+// `Reflect::unify_rows` (reflect.rs:1040-1059) raises one
+// `ConflictKind::UnknownField{field}` per field `solve::match_rows`
+// (solve.rs:297-315) reports missing on either side, gated by closed tails:
+// `missing_in_right` (a field on `left`'s row absent from a CLOSED `right`)
+// and `missing_in_left` (the mirror). Orientation (verified against
+// reflect.rs's `unify`/`step`): `unify` records `Fact::UnifyAttempt{subject,
+// expect, found}` at entry, then `step`'s `(Record,Record)|(Rel,Rel) =>
+// Step::Rows(*a,*b)` carries `expect`'s row as `left`, `found`'s row as
+// `right` — so `expect` = left, `found` = right. This is FieldNotInRow's
+// row-unification sibling — the field-access form's deferred-gap note above
+// pointed here.
+
+// structural input: exporter-computed closedness of a Record/Rel operand's
+// row tail (#15 gap-closure A). decompose_ty's TyRowChild gives field
+// membership but never inspects row.tail — this is the one extra bit
+// match_rows's Closed gate (solve.rs:302,309) needs. Ground/structural,
+// never derived.
+rel RowClosed { ty: String } key(ty)
+
+// UnifyRowsMissingInRight: match_rows's `missing_in_right` (solve.rs:302-304)
+// — a field on `expect`'s row (left) with no counterpart on a CLOSED `found`
+// row (right) → UnknownFieldConflict. `child`/`oty` are free (existential
+// name-membership test, mirroring match_rows). Monotone; the `without` is
+// over the Ground TyRowChild relation — same phase-boundary shape as
+// FieldNotInRow, Appendix-F stratified.
+derive UnifyRowsMissingInRight: UnknownFieldConflict(subject: subject, field: field, scope: scope) from {
+    UnifyAttempt(subject: subject, expect: expect, found: found)
+    TyRowChild(parent: expect, field: field, child: fty)
+    RowClosed(ty: found)
+    RootScope(scope: scope)
+    without {
+        TyRowChild(parent: found, field: field, child: oty)
+    }
+}
+// UnifyRowsMissingInLeft: match_rows's `missing_in_left` (solve.rs:308-312) —
+// the mirror: a field on `found`'s row (right) with no counterpart on a
+// CLOSED `expect` row (left).
+derive UnifyRowsMissingInLeft: UnknownFieldConflict(subject: subject, field: field, scope: scope) from {
+    UnifyAttempt(subject: subject, expect: expect, found: found)
+    TyRowChild(parent: found, field: field, child: fty)
+    RowClosed(ty: expect)
+    RootScope(scope: scope)
+    without {
+        TyRowChild(parent: expect, field: field, child: oty)
+    }
 }

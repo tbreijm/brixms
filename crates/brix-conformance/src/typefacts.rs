@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use brix_canon::{CanonWriter, Canonical, Domain};
 use brix_ir::ident::{Ident, QualIdent};
 use brix_ir::reflect::{Fact, ReflectiveReport, ScopeId, Subject};
-use brix_ir::types::{Ty, TyVar};
+use brix_ir::types::{RowTail, Ty, TyVar};
 use brix_rt::engine::{Row, TransactionOp, Value};
 
 /// What one opaque token decodes back to (#15 slice-1 R2: "exporter records
@@ -324,7 +324,11 @@ pub struct Export {
 /// cross-ctor flat-Mismatch operand), and `TyCtorNonMismatch` (the ordered
 /// ctor-pair exclusion table for pairs `step` routes to Done/Erasure instead
 /// of Mismatch) — see `brix.type.brix`'s slice-8 block comment for the rules
-/// these feed.
+/// these feed. The #15 gap-closure A (row-unification `UnknownField`) further amends this
+/// arm: `expect`/`found` are now run through [`decompose_ty`] (reusing `BindAttempt`'s `seen`
+/// set, strictly additive over the bare-token form) rather than tokenized directly, so their
+/// `TyRowChild` field membership is available; and each closed Record/Rel operand seeds a
+/// `RowClosed` Ground fact, ungated by `ctor_seen`.
 ///
 /// `Fact::SubstEdge` is exported as `SubstEdge` (#15 native slice 9, binding
 /// fixpoint) plus, reusing slice 8's `ctor_seen`/`ty_ctor` machinery, a
@@ -549,8 +553,8 @@ pub fn export(report: &ReflectiveReport) -> Export {
                 expect,
                 found,
             } => {
-                let expect_tok = tokens.record(TokenValue::Ty(expect.clone()));
-                let found_tok = tokens.record(TokenValue::Ty(found.clone()));
+                let expect_tok = decompose_ty(expect, &mut tokens, &mut ops, &mut seen);
+                let found_tok = decompose_ty(found, &mut tokens, &mut ops, &mut seen);
                 for (tok, ty) in [(&expect_tok, expect), (&found_tok, found)] {
                     let Value::Str(hex) = tok else {
                         unreachable!("TokenTable::record always returns Value::Str")
@@ -560,6 +564,17 @@ pub fn export(report: &ReflectiveReport) -> Export {
                             "TyCtorIs",
                             [("ty", tok.clone()), ("ctor", Value::Int(ty_ctor(ty)))],
                         ));
+                    }
+                    // #15 gap-closure A: closedness of a Record/Rel row
+                    // operand, ungated (NOT inside the ctor_seen guard above
+                    // — RowClosed is keyed by `ty`, so a duplicate assert is
+                    // a harmless no-op, but sharing ctor_seen's dedup slot
+                    // with SubstEdge's TyCtorIs emission could otherwise
+                    // cause a genuine closed operand to be skipped).
+                    if let Ty::Record(row) | Ty::Rel(row) = ty {
+                        if matches!(row.tail, RowTail::Closed) {
+                            ops.push(assert_op("RowClosed", [("ty", tok.clone())]));
+                        }
                     }
                 }
                 let row = Row(BTreeMap::from([
