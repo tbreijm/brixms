@@ -341,10 +341,11 @@ impl fmt::Display for Query {
 ///
 /// Core IR historically carried only a function *signature* (see
 /// [`crate::frontend::FnSignature`]); a `fn` body was never lowered, so the
-/// flagship's `surcharge`/`riskModel` had to be hand-registered natively. This
-/// node carries the body so it can be type/effect/totality-checked here and
-/// executed from source (issue #47). `params` keeps parameter *names* (the
-/// signature has only types) so a body checker/interpreter can bind them.
+/// flagship's `surcharge`/`riskModel` had to be hand-registered natively. Both
+/// now compile from source and execute via `Program::fn_defs` (issue #47): this
+/// node carries the body so it can be type/effect/totality-checked here and run
+/// on both engines. `params` keeps parameter *names* (the signature has only
+/// types) so a body checker/interpreter can bind them.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FnDef {
     pub name: QualIdent,

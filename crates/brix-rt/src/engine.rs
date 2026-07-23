@@ -1526,12 +1526,7 @@ fn call_partial(program: &Program, name: &str, args: &[Value]) -> Result<Value, 
             .collect();
         return eval_fallible(program, &call_env, &def.body);
     }
-    match program
-        .partial_fns
-        .get(name)
-        .copied()
-        .or_else(|| builtin_partial(name))
-    {
+    match program.partial_fns.get(name).copied() {
         Some(function) => function(args),
         None => panic!("unregistered partial function `{name}`"),
     }
@@ -1587,33 +1582,6 @@ fn builtin_total(name: &str) -> Option<TotalFn> {
         let lo = args[1].as_i128().expect("clamp: non-numeric lo");
         let hi = args[2].as_i128().expect("clamp: non-numeric hi");
         Value::Int(x.max(lo).min(hi).try_into().unwrap_or(i64::MAX))
-    })
-}
-
-fn builtin_partial(name: &str) -> Option<PartialFn> {
-    (name == "riskModel").then_some(|args| {
-        let due = args
-            .first()
-            .and_then(Value::as_i128)
-            .expect("riskModel expects numeric due time");
-        let now = args
-            .get(1)
-            .and_then(Value::as_i128)
-            .expect("riskModel expects numeric current time");
-        let remaining = due - now;
-        // Probability is represented as basis points in the runtime's
-        // integer-only semantic path. This is the ground truth for the
-        // issue #47 Part 2 fixed-point ruling (integer-floor, no float
-        // `Value`) — the oracle's `risk_model` test hand-regs
-        // (`crates/brix-oracle/tests/flagship.rs`,
-        // `crates/brix-cli/tests/build_run_smoke.rs`) were reconciled to
-        // this exact form.
-        let risk = if remaining <= 0 {
-            10_000
-        } else {
-            ((24 - remaining).clamp(0, 24) * 10_000 / 24) as i64
-        };
-        Ok(Value::Int(risk))
     })
 }
 
