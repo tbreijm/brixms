@@ -316,7 +316,15 @@ pub struct Export {
 /// pre-populate a bind-target's hex and make `decompose_ty` short-circuit
 /// before emitting its `TyChild`/`TyRowChild` edges). `TyCtorOrdinary` is
 /// also seeded here (alongside `RootScope`/`BoolType`) with the three ctors
-/// eligible as ordinary-`Mismatch` operands.
+/// eligible as ordinary-`Mismatch` operands. The #15 gap-closure (slice 8
+/// B+C: container vs different-ctor, cross-epistemic-wrapper, and
+/// same-epistemic-ctor Mismatch) adds three more static ctor-set seeds here
+/// — `TyCtorPlain` (the broadened is_plain erasure-recipient set, containers
+/// included), `TyCtorMismatchable` (every ctor but Var/Error, eligible as a
+/// cross-ctor flat-Mismatch operand), and `TyCtorNonMismatch` (the ordered
+/// ctor-pair exclusion table for pairs `step` routes to Done/Erasure instead
+/// of Mismatch) — see `brix.type.brix`'s slice-8 block comment for the rules
+/// these feed.
 ///
 /// `Fact::SubstEdge` is exported as `SubstEdge` (#15 native slice 9, binding
 /// fixpoint) plus, reusing slice 8's `ctor_seen`/`ty_ctor` machinery, a
@@ -628,6 +636,73 @@ pub fn export(report: &ReflectiveReport) -> Export {
         ops.push(assert_op(
             "TyCtorOrdinary",
             [("ctor", Value::Int(ctor as i64))],
+        ));
+    }
+
+    // #15 gap-closure (slice 8 B+C): is_plain (solve.rs:263) — the ctors
+    // eligible as an epistemic-erasure recipient (`to`), broadened beyond
+    // `TyCtorOrdinary` to include containers.
+    for ctor in [
+        TyCtor::Plain,
+        TyCtor::F64,
+        TyCtor::Bool,
+        TyCtor::Option,
+        TyCtor::Result,
+        TyCtor::Record,
+        TyCtor::Rel,
+    ] {
+        ops.push(assert_op(
+            "TyCtorPlain",
+            [("ctor", Value::Int(ctor as i64))],
+        ));
+    }
+    // operands eligible for the cross-ctor flat-Mismatch rule — everything
+    // but Var/Error.
+    for ctor in [
+        TyCtor::Plain,
+        TyCtor::Probability,
+        TyCtor::F64,
+        TyCtor::Bool,
+        TyCtor::Estimate,
+        TyCtor::Missing,
+        TyCtor::Option,
+        TyCtor::Result,
+        TyCtor::Record,
+        TyCtor::Rel,
+    ] {
+        ops.push(assert_op(
+            "TyCtorMismatchable",
+            [("ctor", Value::Int(ctor as i64))],
+        ));
+    }
+    // ordered ctor pairs the cross-ctor rule must NOT fire on because step
+    // routes them to Done (Prob/F64 bridge) or Erasure (Prob/Bool, and
+    // Estimate/Missing vs any is_plain ctor) instead of Mismatch.
+    let plain = [
+        TyCtor::Plain,
+        TyCtor::F64,
+        TyCtor::Bool,
+        TyCtor::Option,
+        TyCtor::Result,
+        TyCtor::Record,
+        TyCtor::Rel,
+    ];
+    let mut non_mismatch: Vec<(i64, i64)> = vec![
+        (3, 4),
+        (4, 3), // Probability/F64 bridge → Done
+        (3, 5),
+        (5, 3), // Probability/Bool → Erasure
+    ];
+    for epi in [TyCtor::Estimate, TyCtor::Missing] {
+        for p in plain {
+            non_mismatch.push((epi as i64, p as i64));
+            non_mismatch.push((p as i64, epi as i64));
+        }
+    }
+    for (a, b) in non_mismatch {
+        ops.push(assert_op(
+            "TyCtorNonMismatch",
+            [("a", Value::Int(a)), ("b", Value::Int(b))],
         ));
     }
 

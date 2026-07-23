@@ -1153,6 +1153,215 @@ pub fn plain_scalar_mismatch() -> TypeFixture {
     }
 }
 
+/// #15 gap-closure (slice 8 B+C, Gap B — container vs a DIFFERENT ctor): the
+/// outer `Rel<{value: ..}>` wrapping (both sides) is the same ctor (Rel),
+/// descending via `Step::Rows` into the `value` field, where `Result<Bool,
+/// Str>` (ctor 9) meets `Option<Int>` (ctor 8) — two different container
+/// ctors, neither of which `step` gives a Descend/Rows arm against the
+/// other, so it flattens straight to `Mismatch`. Only `UnifyMismatchCrossCtor`
+/// reproduces this (`UnifyMismatch` excludes both ctors via `TyCtorOrdinary`).
+/// Selfhost-only (like `plain_scalar_mismatch`), not added to
+/// [`all_type_fixtures`], to keep `type_parity` unchanged.
+pub fn container_vs_container_mismatch() -> TypeFixture {
+    let o = Origins::new("ContainerVsContainer");
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("ContainerVsContainer"),
+            params: vec![(Ident::new("x"), Ty::option(Ty::Int(IntWidth::Int)))],
+            body: Pattern::default(),
+            yields: o.var("x"),
+            result: Ty::rel(Row::closed(vec![RowField {
+                name: Ident::new("value"),
+                ty: Ty::Result(Box::new(Ty::Bool), Box::new(Ty::Str)),
+            }])),
+        }],
+    };
+    TypeFixture {
+        label: "container_vs_container_mismatch",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver: TableResolver::new(),
+        expected_categories: BTreeSet::from([Category::Mismatch]),
+    }
+}
+
+/// #15 gap-closure (slice 8 B+C, Gap B — container vs plain): `Option<Int>`
+/// (ctor 8) meets a bare `Int` (ctor 0, Plain) — different ctors, `step`
+/// flattens to `Mismatch`. `UnifyMismatch` doesn't reach this either (`Option`
+/// isn't in `TyCtorOrdinary`); only `UnifyMismatchCrossCtor` does. Selfhost-only,
+/// not added to [`all_type_fixtures`].
+pub fn container_vs_plain_mismatch() -> TypeFixture {
+    let o = Origins::new("ContainerVsPlain");
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("ContainerVsPlain"),
+            params: vec![(Ident::new("x"), Ty::Int(IntWidth::Int))],
+            body: Pattern::default(),
+            yields: o.var("x"),
+            result: Ty::rel(Row::closed(vec![RowField {
+                name: Ident::new("value"),
+                ty: Ty::option(Ty::Int(IntWidth::Int)),
+            }])),
+        }],
+    };
+    TypeFixture {
+        label: "container_vs_plain_mismatch",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver: TableResolver::new(),
+        expected_categories: BTreeSet::from([Category::Mismatch]),
+    }
+}
+
+/// #15 gap-closure (slice 8 B+C, Gap B — epistemic vs container erasure):
+/// `Estimate<Int>` (ctor 6) meets `Option<Int>` (ctor 8) — `is_plain`
+/// (solve.rs:263) is TRUE for containers, so this is a genuine `Erasure`,
+/// not a `Mismatch`. Only the amended `EstimateErasureFwd`/`Bwd` (now joining
+/// the broadened `TyCtorPlain` set) reproduce this — the pre-gap-closure
+/// rules, restricted to `TyCtorOrdinary`, silently missed it. Selfhost-only,
+/// not added to [`all_type_fixtures`].
+pub fn estimate_vs_container_erasure() -> TypeFixture {
+    let o = Origins::new("EstimateVsContainer");
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("EstimateVsContainer"),
+            params: vec![(
+                Ident::new("x"),
+                Ty::Estimate(Box::new(Ty::Int(IntWidth::Int))),
+            )],
+            body: Pattern::default(),
+            yields: o.var("x"),
+            result: Ty::rel(Row::closed(vec![RowField {
+                name: Ident::new("value"),
+                ty: Ty::option(Ty::Int(IntWidth::Int)),
+            }])),
+        }],
+    };
+    TypeFixture {
+        label: "estimate_vs_container_erasure",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver: TableResolver::new(),
+        expected_categories: BTreeSet::from([Category::EpistemicErasure]),
+    }
+}
+
+/// #15 gap-closure (slice 8 B+C, Gap C — cross-epistemic-wrapper mismatch):
+/// `Estimate<Int>` (ctor 6) meets `Missing<Int>` (ctor 7) — two DIFFERENT
+/// epistemic wrappers; `solve::epistemic_erasure` requires one side to be
+/// `is_plain`, and neither is, so `step` flattens to an ordinary `Mismatch`,
+/// never an erasure. Only `UnifyMismatchCrossCtor` reproduces this. Selfhost-only,
+/// not added to [`all_type_fixtures`].
+pub fn cross_epistemic_wrapper_mismatch() -> TypeFixture {
+    let o = Origins::new("CrossEpistemic");
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("CrossEpistemic"),
+            params: vec![(
+                Ident::new("x"),
+                Ty::Estimate(Box::new(Ty::Int(IntWidth::Int))),
+            )],
+            body: Pattern::default(),
+            yields: o.var("x"),
+            result: Ty::rel(Row::closed(vec![RowField {
+                name: Ident::new("value"),
+                ty: Ty::Missing(Box::new(Ty::Int(IntWidth::Int))),
+            }])),
+        }],
+    };
+    TypeFixture {
+        label: "cross_epistemic_wrapper_mismatch",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver: TableResolver::new(),
+        expected_categories: BTreeSet::from([Category::Mismatch]),
+    }
+}
+
+/// #15 gap-closure (slice 8 B+C, third cell — Estimate vs Estimate): `step`
+/// has NO `(Estimate, Estimate)` Descend arm (unlike `Option`/`Result`/
+/// `Missing`), so `Estimate<Bool>` vs `Estimate<Int>` falls to the catch-all,
+/// where `epistemic_erasure` returns `None` (neither side `is_plain`) —
+/// an ordinary `Mismatch` at the container level, with no leaf descent at
+/// all. Only the dedicated `EstimateSameCtorMismatch` rule reproduces this
+/// (`UnifyMismatchCrossCtor`'s `lc != rc` guard structurally cannot fire on
+/// a same-ctor pair). Selfhost-only, not added to [`all_type_fixtures`].
+pub fn estimate_same_ctor_mismatch() -> TypeFixture {
+    let o = Origins::new("EstimateSameCtor");
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("EstimateSameCtor"),
+            params: vec![(
+                Ident::new("x"),
+                Ty::Estimate(Box::new(Ty::Int(IntWidth::Int))),
+            )],
+            body: Pattern::default(),
+            yields: o.var("x"),
+            result: Ty::rel(Row::closed(vec![RowField {
+                name: Ident::new("value"),
+                ty: Ty::Estimate(Box::new(Ty::Bool)),
+            }])),
+        }],
+    };
+    TypeFixture {
+        label: "estimate_same_ctor_mismatch",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver: TableResolver::new(),
+        expected_categories: BTreeSet::from([Category::Mismatch]),
+    }
+}
+
+/// #15 gap-closure (slice 8 B+C, REGRESSION GUARD — the load-bearing `lc !=
+/// rc` guard): `Option<Bool>` vs `Option<Int>` — SAME ctor (8) at the
+/// container level, which `step`'s `Option`/`Option` arm `Descend`s into the
+/// leaf `Bool` vs `Int` pair, the actual `Mismatch`. Proves
+/// `UnifyMismatchCrossCtor` does NOT also fire at the container level (which
+/// would double-count the conflict): the outer `Rel<{value:..}>` wrapping is
+/// likewise same-ctor (Rel), excluded the same way. Exactly ONE
+/// `MismatchConflict` must result, at the leaf pair, never the container
+/// pair. Selfhost-only, not added to [`all_type_fixtures`].
+pub fn same_container_leaf_no_double_count() -> TypeFixture {
+    let o = Origins::new("SameContainerLeaf");
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("SameContainerLeaf"),
+            params: vec![(Ident::new("x"), Ty::option(Ty::Int(IntWidth::Int)))],
+            body: Pattern::default(),
+            yields: o.var("x"),
+            result: Ty::rel(Row::closed(vec![RowField {
+                name: Ident::new("value"),
+                ty: Ty::option(Ty::Bool),
+            }])),
+        }],
+    };
+    TypeFixture {
+        label: "same_container_leaf_no_double_count",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver: TableResolver::new(),
+        expected_categories: BTreeSet::from([Category::Mismatch]),
+    }
+}
+
 /// The smallest native-slice fixture (#15 slice-1 ruling): a two-role body
 /// clause with both roles bound to variables. `reflect.rs` records exactly
 /// two `Fact::HasType(Subject::Binding)` facts for it (`count`, `label`) —
