@@ -38,10 +38,11 @@ use brix_conformance::typecorpus::{
     missing_to_plain_implicit_coercion, occurs_check, occurs_check_row, open_row_extra_field,
     overload_bind_chain, plain_scalar_mismatch, probability_f64_bridge_is_not_a_conflict,
     probability_to_bool_erasure, same_container_leaf_no_double_count, subst_chain_composite_root,
-    subst_chain_scalar_root, NATIVE_GUARD_NON_BOOL_FIXTURE, NATIVE_OPERATOR_APPLIES_FIXTURE,
-    NATIVE_ROLE_BINDINGS_FIXTURE, NATIVE_ROLE_LIT_MISMATCH_FIXTURE,
-    NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE, NATIVE_VAR_THREE_ROLES_FIXTURE,
-    NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE, NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
+    subst_chain_scalar_root, try_non_result, try_over_result_is_not_a_conflict,
+    NATIVE_GUARD_NON_BOOL_FIXTURE, NATIVE_OPERATOR_APPLIES_FIXTURE, NATIVE_ROLE_BINDINGS_FIXTURE,
+    NATIVE_ROLE_LIT_MISMATCH_FIXTURE, NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE,
+    NATIVE_VAR_THREE_ROLES_FIXTURE, NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
+    NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
 };
 use brix_conformance::typefacts;
 
@@ -1910,5 +1911,113 @@ fn open_row_extra_field_derives_no_unknown_field_conflict() {
         unknown_field_len, 0,
         "native package must derive zero UnknownFieldConflict rows for the open row — \
          an inverted RowClosed gate would wrongly fire here"
+    );
+}
+
+/// #15 native slice-11 (TryNonResult): a `?` postfix applied to a non-`Result`
+/// (`Int`) value. `reflect.rs`'s `ExprKind::Try` arm raises
+/// `ConflictKind::TryNonResult{found: Int}`. The native package reproduces
+/// this from the imported `TryExpr`/`ExprChild` structural facts joined
+/// against the (now `TyCtorIs`-seeded) `ExprType` of the inner subject, via
+/// `TryInnerOf`/`TryNonResultCheck`.
+#[test]
+fn try_non_result_derives_one_conflict() {
+    let fixture = try_non_result();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts: Vec<&TypeConflict> = report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::TryNonResult { .. }))
+        .collect();
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one TryNonResult conflict for the try_non_result \
+         fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-try-non-result".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let try_non_result_extent = settled
+        .extents
+        .get("TryNonResultConflict")
+        .expect("brix.type package must declare a TryNonResultConflict relation");
+    assert_eq!(
+        try_non_result_extent.len(),
+        1,
+        "native package must derive exactly one TryNonResultConflict row"
+    );
+
+    let native_conflicts: Vec<TypeConflict> = try_non_result_extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_try_non_result(&export.tokens, &record.row).expect(
+                "every derived TryNonResultConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::TryNonResult {
+                    found: resolved.found,
+                },
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect();
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived TryNonResult conflict set must canonical-byte-equal reflect.rs's own \
+         (same subject, same `found` type, same scope)"
+    );
+}
+
+/// #15 native slice-11 discriminator: a `?` postfix applied to a genuine
+/// `Result` value — the control for `try_non_result_derives_one_conflict`,
+/// proving `TryNonResultCheck`'s `when ctor != 9` guard doesn't over-fire.
+#[test]
+fn try_over_result_derives_no_conflict() {
+    let fixture = try_over_result_is_not_a_conflict();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts: Vec<&TypeConflict> = report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::TryNonResult { .. }))
+        .collect();
+    assert!(
+        reflect_conflicts.is_empty(),
+        "reflect.rs must record zero TryNonResult conflicts for the try_over_result_is_not_a_conflict \
+         fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-try-over-result".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    // An empty extent may be absent from `settled.extents` entirely or
+    // present with length 0 — handle both, matching the Probability/F64
+    // bridge test's pattern.
+    let try_non_result_len = settled
+        .extents
+        .get("TryNonResultConflict")
+        .map_or(0, |extent| extent.len());
+    assert_eq!(
+        try_non_result_len, 0,
+        "native package must derive zero TryNonResultConflict rows for a try over a genuine Result"
     );
 }
