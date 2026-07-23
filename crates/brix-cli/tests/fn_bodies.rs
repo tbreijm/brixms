@@ -590,3 +590,60 @@ derive R: Out(id: i, risk) from { In(id: i); let risk = always(1.0)? }\n";
         "a partial fn compiled from source must settle identically on both engines"
     );
 }
+
+// --- Issue #47 Part 3 (Slice 3c): partial-fn failure -> RuleError ------
+
+/// A partial fn whose validated constructor REJECTS its input fails the rule's
+/// `?`, deriving a `RuleError` edge. Both engines record it identically (same
+/// site `R#1`, partial-match digest, and `ValidationError` payload) and settle
+/// byte-for-byte — proving brix-rt's new RuleError provenance matches the
+/// oracle's. Empty FnLibrary; no hand-registration.
+#[test]
+fn partial_fn_failure_derives_matching_rule_error() {
+    // `bad(2.0)` -> Probability.try(20000 bp) is out of `0..=10_000` -> Err.
+    let src = "package t @ 0.1.0\n\
+rel In { id: Int } key(id)\n\
+rel Out { id: Int; risk: Probability } key(id)\n\
+partial fn bad(x: Float) -> Result<Probability, ValidationError> = Probability.try(x)\n\
+derive R: Out(id: i, risk) from { In(id: i); let risk = bad(2.0)? }\n";
+    let (file, diags) = parse_file(src);
+    assert!(!diags.has_errors(), "must parse cleanly: {diags:?}");
+    let lowered = lower_file(&file, &diags);
+    assert!(
+        !lowered.has_errors(),
+        "must lower cleanly: {:#?}",
+        lowered.diags
+    );
+    let phased = AstPhase
+        .assign_phases(lowered)
+        .expect("fixture must be well-stratified");
+
+    let oracle_program = program_from_source(
+        &phased.lowered.source,
+        &phased.lowered.resolver,
+        &kinds(&phased.lowered),
+        FnLibrary::new(),
+    )
+    .expect("adapts to the oracle");
+    let mut store = OracleStore::new(oracle_program).expect("program is stratified");
+    let settled = store
+        .commit(
+            &OracleTxn::new(b"brix-stdin-0".to_vec()).assert("In", row(&[("id", Value::Int(1))])),
+        )
+        .expect("transaction commits");
+    let oracle_hex = hex(&dump_bytes(settled));
+
+    let rt_program = brixc::emit::project_program(&phased);
+    let out = brix_rt::engine::run_text(rt_program, "assert In id=int:1\n")
+        .expect("generated runtime runs the transaction");
+    let rt_hex = out
+        .lines()
+        .next()
+        .and_then(|line| line.split_ascii_whitespace().nth(2))
+        .expect("run_text emits a canonical dump line");
+
+    assert_eq!(
+        rt_hex, oracle_hex,
+        "a partial-fn failure must derive a byte-identical RuleError on both engines"
+    );
+}

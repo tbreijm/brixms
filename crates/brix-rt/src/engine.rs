@@ -733,6 +733,9 @@ pub struct Settled {
     all_extents: BTreeMap<String, Extent>,
     pub masked: Vec<MaskRecord>,
     pub violations: Vec<Violation>,
+    /// `RuleError` edges from partial-fn `?` failures in rule bodies (issue #47
+    /// Part 3). Empty when no partial failed (the common case).
+    pub rule_errors: Vec<RuleError>,
 }
 
 /// One masked row: `Masked(target, by, atPhase, atRevision)` (Appendix A,
@@ -762,14 +765,27 @@ pub struct Violation {
     pub match_digest: Digest,
 }
 
-/// Canonical settled dump compatible with the oracle's basic relation,
-/// support, claim, mask, and violation layout. Key conflicts and rule
-/// errors are still emitted as empty canonical lists: the native engine
-/// currently hard-rejects transactions on key conflicts and panics on
-/// partial-fn failure instead of producing these families (see this crate's
-/// `OWNER.md` / the issue #10 PR body for the tracked follow-up). Retaining
-/// their positions makes this an ABI extension rather than a second
-/// generated-binary format.
+/// A `RuleError(rule, site, partialMatch, error, atRevision)` edge (Part III §9,
+/// issue #47 Part 3): a partial function bound with `?` in a rule body failed at
+/// clause `site` (`"{rule}#{clauseIndex}"`) for the partially-built match
+/// `partial_match`, carrying the `Err` payload. Mirrors the oracle's
+/// `RuleErrorEdge` field-for-field so the settled dumps compare byte-for-byte.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuleError {
+    pub rule: String,
+    pub site: String,
+    pub partial_match: Digest,
+    pub error: Value,
+    pub at_revision: u64,
+}
+
+/// Canonical settled dump compatible with the oracle's relation, support,
+/// claim, mask, rule-error, and violation layout. Rule errors are now emitted
+/// from real partial-fn `?` failures (issue #47 Part 3). Key conflicts are still
+/// an empty list: the native engine hard-rejects transactions on entity key
+/// conflicts at transaction time rather than settling them into a `KeyConflict`
+/// family (a separate follow-up). Retaining every family position makes this an
+/// ABI extension, never a second generated-binary format.
 pub fn dump_bytes(settled: &Settled, program: &Program) -> Vec<u8> {
     let mut writer = CanonWriter::new();
     writer.write_uint(settled.at_revision);
@@ -834,9 +850,22 @@ pub fn dump_bytes(settled: &Settled, program: &Program) -> Vec<u8> {
         writer.write_uint(mask.at_phase as u64);
         writer.write_uint(settled.at_revision);
     }
-    // key conflicts, rule errors
+    // key conflicts (still empty — brix-rt hard-rejects entity key conflicts at
+    // transaction time; the KeyConflict family is a separate follow-up).
     writer.write_uint(0);
-    writer.write_uint(0);
+    // rule errors (issue #47 Part 3): matches the oracle's `dump.rs` layout —
+    // per edge `tag(rule) · tag(site) · bytes(partialMatch) · error(canon) ·
+    // uint(atRevision)`, in sorted order.
+    let mut errors = settled.rule_errors.clone();
+    errors.sort();
+    writer.write_uint(errors.len() as u64);
+    for e in &errors {
+        writer.write_tag(&e.rule);
+        writer.write_tag(&e.site);
+        writer.write_bytes(e.partial_match.as_bytes());
+        e.error.canon_write(&mut writer);
+        writer.write_uint(e.at_revision);
+    }
     writer.write_uint(settled.violations.len() as u64);
     for violation in &settled.violations {
         writer.write_tag(&violation.constraint);
@@ -1090,18 +1119,26 @@ pub fn settle(program: &Program, ground: &GroundState, at_revision: u64) -> Sett
         })
         .collect();
     let mut masked: Vec<MaskRecord> = Vec::new();
+    // RuleError provenance (issue #47 Part 3): accumulated across every phase and
+    // fixpoint iteration, deduped on `(rule, site, partialMatch)` so a site that
+    // fails on every naive re-derivation yields exactly one edge.
+    let mut rule_errors: Vec<RuleError> = Vec::new();
+    let mut rule_error_seen: BTreeSet<(String, String, Digest)> = BTreeSet::new();
     let phases: BTreeSet<u32> = program.rules.values().map(|rule| rule.phase).collect();
     for phase in phases {
         loop {
             let snapshot = visible_extents(&candidates, &masked);
             let mut changed = false;
             for rule in program.rules.values().filter(|rule| rule.phase == phase) {
-                let envs = eval_body(
+                let envs = eval_rule_body(
                     program,
                     &snapshot,
                     &ground.history,
                     &rule.body,
-                    vec![Env::new()],
+                    &rule.id,
+                    at_revision,
+                    &mut rule_errors,
+                    &mut rule_error_seen,
                 );
                 match &rule.head {
                     Head::Tuple { relation, args } => {
@@ -1190,6 +1227,7 @@ pub fn settle(program: &Program, ground: &GroundState, at_revision: u64) -> Sett
         all_extents: candidates,
         masked,
         violations,
+        rule_errors,
     }
 }
 
@@ -1275,31 +1313,73 @@ fn eval_body(
                 .collect(),
             Clause::Let(binding, expr) => envs
                 .into_iter()
-                .filter_map(|mut env| {
-                    // A partial-fn call bound with `?` (issue #47 Part 3): run
-                    // the compiled body fallibly. `Ok` binds; a failure drops
-                    // this binding (its `RuleError` provenance is a follow-up
-                    // slice — the flagship's `riskModel` never fails).
-                    if let Expr::Try(name, args) = expr {
-                        let vals: Vec<Value> =
-                            args.iter().map(|a| eval_expr(program, &env, a)).collect();
-                        return match call_partial(program, name, &vals) {
-                            Ok(value) => {
-                                env.insert(binding.clone(), value);
-                                Some(env)
-                            }
-                            Err(_) => None,
-                        };
-                    }
+                .map(|mut env| {
                     let value = eval_expr(program, &env, expr);
                     env.insert(binding.clone(), value);
-                    Some(env)
+                    env
                 })
                 .collect(),
         };
         if envs.is_empty() {
             break;
         }
+    }
+    envs
+}
+
+/// Evaluate a rule body, recording a [`RuleError`] for each partial-fn `?`
+/// failure (issue #47 Part 3). A `Clause::Let(v, Try(..))` runs the partial
+/// through [`call_partial`]: `Ok` binds `v`; `Err` drops the match and derives a
+/// `RuleError` at this clause site, deduped on `(rule, site, partialMatch)` so
+/// the naive fixpoint's re-derivation yields exactly one edge per failing site.
+/// Every other clause delegates to [`eval_body`] unchanged.
+#[allow(clippy::too_many_arguments)]
+fn eval_rule_body(
+    program: &Program,
+    live: &BTreeMap<String, Extent>,
+    history: &BTreeMap<String, Extent>,
+    clauses: &[Clause],
+    rule_id: &str,
+    at_revision: u64,
+    rule_errors: &mut Vec<RuleError>,
+    seen: &mut BTreeSet<(String, String, Digest)>,
+) -> Vec<Env> {
+    let mut envs = vec![Env::new()];
+    for (site_idx, clause) in clauses.iter().enumerate() {
+        if envs.is_empty() {
+            break;
+        }
+        envs = match clause {
+            Clause::Let(binding, Expr::Try(name, args)) => {
+                let mut out = Vec::new();
+                for env in envs {
+                    let vals: Vec<Value> =
+                        args.iter().map(|a| eval_expr(program, &env, a)).collect();
+                    match call_partial(program, name, &vals) {
+                        Ok(value) => {
+                            let mut next = env;
+                            next.insert(binding.clone(), value);
+                            out.push(next);
+                        }
+                        Err(error) => {
+                            let site = format!("{rule_id}#{site_idx}");
+                            let partial_match = env_digest(&env);
+                            if seen.insert((rule_id.to_string(), site.clone(), partial_match)) {
+                                rule_errors.push(RuleError {
+                                    rule: rule_id.to_string(),
+                                    site,
+                                    partial_match,
+                                    error,
+                                    at_revision,
+                                });
+                            }
+                        }
+                    }
+                }
+                out
+            }
+            other => eval_body(program, live, history, std::slice::from_ref(other), envs),
+        };
     }
     envs
 }
