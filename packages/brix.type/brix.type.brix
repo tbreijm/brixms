@@ -575,3 +575,48 @@ derive UnifyRowsMissingInLeft: UnknownFieldConflict(subject: subject, field: fie
         TyRowChild(parent: expect, field: field, child: oty)
     }
 }
+
+// --- #15 native slice-11: native `TryNonResult` ---
+//
+// `Reflect::expr`'s `ExprKind::Try` arm (reflect.rs:1521-1541) resolves the
+// `?` expression's inner type and raises `ConflictKind::TryNonResult{found}`
+// when that resolved inner type is neither `Result` nor a type var. reflect
+// ALREADY emits, unconditionally, `Fact::ExprKindIs` (Try tag) for the outer
+// node and `Fact::ExprChild{parent, ordinal:0, child}` pointing at the inner
+// subject — this slice imports both, plus reuses slice 8's `TyCtorIs` (now
+// also seeded off every `ExprType` row, see typefacts.rs) to join the
+// inner's resolved type against its top-level ctor and fire the conflict
+// when that ctor isn't Result (9), mirroring `GuardNonBool` (slice 5).
+
+// structural input: an Expr subject whose ExprKindIs is Try (#15 TryNonResult),
+// filtered exporter-side to kind == Try.
+rel TryExpr { subject: String } key(subject)
+
+// structural input: a direct parent -> child edge in an expression tree,
+// imported verbatim from reflect.rs's Fact::ExprChild.
+rel ExprChild { parent: String; ordinal: Int; child: String } key(parent, ordinal, child)
+
+// derived: the inner expr subject of a `try` node — TryExpr ⋈ ExprChild at
+// ordinal 0 (a Try node's only child). Monotone restatement.
+rel TryInner { subject: String; inner: String } key(subject, inner)
+derive TryInnerOf: TryInner(subject: p, inner: c) from {
+    TryExpr(subject: p)
+    ExprChild(parent: p, ordinal: 0, child: c)
+}
+
+// derived conflict: a `try` applied to a non-Result value (mirrors reflect.rs's
+// ConflictKind::TryNonResult { found }).
+rel TryNonResultConflict { subject: String; found: String; scope: String } key(subject, found, scope)
+
+// TryNonResultCheck: TryInner ⋈ ExprType(inner) ⋈ TyCtorIs(found), when
+// ctor != Result(9) → TryNonResultConflict. Mirrors reflect.rs's ExprKind::Try
+// arm: `found` is neither Result nor Var. The !Var half is honored on the
+// bridge exactly like GuardNonBool (ExprType drops every Ty::Var row), so only
+// `ctor != 9` needs testing. Monotone, Appendix-F stratified.
+derive TryNonResultCheck: TryNonResultConflict(subject: subject, found: found, scope: scope) from {
+    TryInner(subject: subject, inner: inner)
+    ExprType(subject: inner, ty: found)
+    TyCtorIs(ty: found, ctor: ctor)
+    RootScope(scope: scope)
+    when ctor != 9
+}

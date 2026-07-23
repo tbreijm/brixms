@@ -918,6 +918,54 @@ pub fn try_non_result() -> TypeFixture {
     }
 }
 
+/// #15 native slice-11 discriminator: a `?` postfix applied to a genuine
+/// `Result` value — `try_non_result`'s control. The inner expr is an
+/// unbound `Var` (never entered into `env`, since the query body is empty)
+/// with an explicit `Ty::Result(Int, Str)` — `Reflect::expr`'s
+/// `ExprKind::Var` arm falls back to `expr.ty` for a name absent from `env`
+/// (reflect.rs:1397), so this inner expr resolves to `Result<Int, Str>`
+/// without needing any binding machinery. `Reflect::expr`'s `ExprKind::Try`
+/// arm therefore takes its `Ty::Result(ok, _) => (*ok, id)` branch — zero
+/// conflicts. Proves `TryNonResultCheck`'s `when ctor != 9` guard doesn't
+/// over-fire on a genuine Result. Selfhost-only (like
+/// `container_vs_container_mismatch`), not added to [`all_type_fixtures`],
+/// to keep `type_parity` unchanged.
+pub fn try_over_result_is_not_a_conflict() -> TypeFixture {
+    let o = Origins::new("TryOverResult");
+    let inner = Expr::new(
+        Ty::Result(Box::new(Ty::Int(IntWidth::Int)), Box::new(Ty::Str)),
+        ExprKind::Var(Ident::new("x")),
+    )
+    .with_origin(o.next_origin());
+    let try_expr = Expr::new(
+        o.ty_var(),
+        ExprKind::Try {
+            inner,
+            site: SiteId::derive(&Ident::new("TryOverResult"), 0),
+        },
+    )
+    .with_origin(o.next_origin());
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("TryOverResult"),
+            params: vec![],
+            body: Pattern::default(),
+            yields: try_expr,
+            result: o.ty_var(),
+        }],
+    };
+    TypeFixture {
+        label: "try_over_result_is_not_a_conflict",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver: TableResolver::new(),
+        expected_categories: BTreeSet::new(),
+    }
+}
+
 /// Fixture 12 (#15 PR4): Appendix E `pure(B, H)` violated — the rule's
 /// effect row carries an impure atom (`console`, which is neither `panic`
 /// nor `diverge`, so `det`/`nondiverge` stay satisfied and only `pure`
