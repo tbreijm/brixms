@@ -19,8 +19,8 @@ use brixc::pipeline::PhaseAssign;
 use brixc::{lower_file, lower_graph, merge_files, AstPhase, DepPackage};
 
 const LIB: &str = "package lib @ 1.0.0\n\
-rel Widget { id: Int; n: Int } key(id)\n\
-fn scale(x: Int) -> Int = x + x\n";
+pub rel Widget { id: Int; n: Int } key(id)\n\
+pub fn scale(x: Int) -> Int = x + x\n";
 
 const APP: &str = "package app @ 0.1.0\n\
 use lib.{Widget, scale}\n\
@@ -149,8 +149,8 @@ fn cross_package_fn_executes_matching_oracle() {
 
 // --- Issue #42 Slice 2: ambiguous / colliding imports -----------------
 
-const LIB_A: &str = "package a @ 1.0.0\nrel Widget { id: Int } key(id)\n";
-const LIB_B: &str = "package b @ 1.0.0\nrel Widget { id: Int } key(id)\n";
+const LIB_A: &str = "package a @ 1.0.0\npub rel Widget { id: Int } key(id)\n";
+const LIB_B: &str = "package b @ 1.0.0\npub rel Widget { id: Int } key(id)\n";
 
 fn dep(name: &str, src: &'static str) -> (brix_ast::File, brix_ast::Diagnostics) {
     let (file, diags) = parse_file(src);
@@ -254,11 +254,11 @@ fn non_colliding_import_still_resolves_cleanly() {
 // protocol.
 
 const LIB_BROAD: &str = "package lib @ 1.0.0\n\
-enum Colour { Red; Green }\n\
-type Meters = Int\n\
-rel Widget { id: Int; c: Colour; len: Meters } key(id)\n\
-protocol Assign { request { id: Int } key(id) outcome Chosen { who: Int } }\n\
-fn scale(x: Meters) -> Meters = x + x\n";
+pub enum Colour { Red; Green }\n\
+pub type Meters = Int\n\
+pub rel Widget { id: Int; c: Colour; len: Meters } key(id)\n\
+pub protocol Assign { request { id: Int } key(id) outcome Chosen { who: Int } }\n\
+pub fn scale(x: Meters) -> Meters = x + x\n";
 
 const APP_BROAD: &str = "package app @ 0.1.0\n\
 use lib.{Widget, Colour, Meters, Assign, scale}\n\
@@ -331,11 +331,11 @@ fn dependency_enum_alias_and_protocol_are_exported_qualified() {
 #[test]
 fn broader_exports_are_order_independent() {
     let reordered = "package lib @ 1.0.0\n\
-fn scale(x: Meters) -> Meters = x + x\n\
-protocol Assign { request { id: Int } key(id) outcome Chosen { who: Int } }\n\
-type Meters = Int\n\
-rel Widget { id: Int; c: Colour; len: Meters } key(id)\n\
-enum Colour { Red; Green }\n";
+pub fn scale(x: Meters) -> Meters = x + x\n\
+pub protocol Assign { request { id: Int } key(id) outcome Chosen { who: Int } }\n\
+pub type Meters = Int\n\
+pub rel Widget { id: Int; c: Colour; len: Meters } key(id)\n\
+pub enum Colour { Red; Green }\n";
 
     let names = |lowered: &brixc::Lowered| -> Vec<String> {
         let mut out: Vec<String> = lowered
@@ -514,3 +514,47 @@ fn dependency_diagnostics_are_attributed_to_their_package() {
         lowered.diags.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
 }
+
+// --- Issue #108: pub/visibility tests ----------------------------------
+
+#[test]
+fn private_declarations_in_dependency_are_not_exported_and_cause_brx_low_0016() {
+    let lib_src = "package lib @ 1.0.0\n\
+rel Secret { id: Int } key(id)\n\
+pub rel PublicWidget { id: Int } key(id)\n";
+    let app_src = "package app @ 0.1.0\nuse lib.{Secret}\n";
+    let (lib_file, lib_diags) = parse_file(lib_src);
+    let (app_file, app_diags) = parse_file(app_src);
+    assert!(!lib_diags.has_errors() && !app_diags.has_errors());
+
+    let lowered = lower_graph(
+        &app_file,
+        &app_diags,
+        &[DepPackage {
+            name_segments: vec!["lib".to_string()],
+            file: &lib_file,
+            parse_diags: &lib_diags,
+        }],
+    );
+    assert!(
+        has_code(&lowered, "BRX-LOW-0016"),
+        "importing private declaration `Secret` must trigger BRX-LOW-0016, got: {:#?}",
+        lowered.diags
+    );
+}
+
+#[test]
+fn relation_visibility_qualifiers_parse_and_format() {
+    use brix_ast::format_file;
+    let src = "package p @ 1.0.0\n\
+pub read rel R { id: Int } key(id)\n\
+pub write rel W { id: Int } key(id)\n\
+pub derive rel D { id: Int } key(id)\n";
+    let (file, diags) = parse_file(src);
+    assert!(!diags.has_errors());
+    let formatted = format_file(&file);
+    let (file2, diags2) = parse_file(&formatted);
+    assert!(!diags2.has_errors());
+    assert_eq!(format_file(&file2), formatted);
+}
+

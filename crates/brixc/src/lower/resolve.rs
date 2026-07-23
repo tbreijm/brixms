@@ -102,11 +102,23 @@ pub struct ProgramResolver {
     /// qualified prefix (design: "`use brix.sim` -> prefix sim.X ->
     /// brix.sim.X").
     prefix_map: BTreeMap<String, QualIdent>,
+    /// Dependency symbols that are package-private (not marked `pub`),
+    /// mapped to their package name. Used by `process_uses` to issue `BRX-LOW-0016`.
+    private_symbols: BTreeMap<QualIdent, String>,
 }
 
 impl ProgramResolver {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_private_symbol(mut self, target: QualIdent, package: String) -> Self {
+        self.private_symbols.insert(target, package);
+        self
+    }
+
+    pub fn is_private_symbol(&self, target: &QualIdent) -> Option<&str> {
+        self.private_symbols.get(target).map(|s| s.as_str())
     }
 
     pub fn with_relation(mut self, schema: RelationSchema) -> Self {

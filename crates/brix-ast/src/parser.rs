@@ -63,6 +63,7 @@ struct Parser<'s> {
 /// Keywords that can begin a top-level declaration. Used as the resync set
 /// for declaration-level error recovery.
 const DECL_STARTS: &[&str] = &[
+    "pub",
     "entity",
     "rel",
     "state",
@@ -478,9 +479,34 @@ impl<'s> Parser<'s> {
 
     // ---- declarations -------------------------------------------------
 
+    fn parse_vis(&mut self) -> (Visibility, Option<Span>) {
+        if !self.at_kw("pub") {
+            return (Visibility::Private, None);
+        }
+        let pub_tok = self.bump();
+        let mut end_span = pub_tok.span;
+        let rel_vis = if self.at_kw("read") {
+            let t = self.bump();
+            end_span = end_span.to(t.span);
+            Some(RelVis::Read)
+        } else if self.at_kw("write") {
+            let t = self.bump();
+            end_span = end_span.to(t.span);
+            Some(RelVis::Write)
+        } else if self.at_kw("derive") {
+            let t = self.bump();
+            end_span = end_span.to(t.span);
+            Some(RelVis::Derive)
+        } else {
+            None
+        };
+        (Visibility::Public(rel_vis), Some(pub_tok.span.to(end_span)))
+    }
+
     fn decl(&mut self) -> Option<Decl> {
+        let (vis, vis_span) = self.parse_vis();
         let kw = self.cur_text().to_string();
-        match kw.as_str() {
+        let mut decl = match kw.as_str() {
             "entity" => Some(Decl::Entity(self.entity_decl())),
             "rel" | "state" | "event" | "open" => Some(self.rel_decl()),
             "derive" => Some(Decl::Derive(self.derive_decl())),
@@ -514,7 +540,11 @@ impl<'s> Parser<'s> {
             "let" => Some(Decl::Let(self.let_binding_decl())),
             "" => None,
             _ => Some(Decl::Extension(self.extension_decl())),
+        };
+        if let Some(ref mut d) = decl {
+            d.set_vis(vis, vis_span);
         }
+        decl
     }
 
     fn cur_text_at(&self, n: usize) -> &'s str {
@@ -541,6 +571,7 @@ impl<'s> Parser<'s> {
         let (fields, end) = self.field_block();
         EntityDecl {
             span: kw.span.to(end),
+            vis: Visibility::Private,
             name,
             fields,
         }
@@ -649,6 +680,7 @@ impl<'s> Parser<'s> {
         }
         Decl::Rel(RelDecl {
             span: start.to(end),
+            vis: Visibility::Private,
             kind,
             name,
             roles,
@@ -696,6 +728,7 @@ impl<'s> Parser<'s> {
         let body = self.block();
         DeriveDecl {
             span: kw.span.to(body.span),
+            vis: Visibility::Private,
             name,
             head,
             body,
@@ -1078,6 +1111,7 @@ impl<'s> Parser<'s> {
         let body = self.block();
         ConstraintDecl {
             span: kw.span.to(body.span),
+            vis: Visibility::Private,
             name,
             kind,
             body,
@@ -1107,6 +1141,7 @@ impl<'s> Parser<'s> {
         let end = order.as_ref().map(|o| o.span).unwrap_or(yield_.span);
         QueryDecl {
             span: kw.span.to(end),
+            vis: Visibility::Private,
             name,
             params,
             ret,
@@ -1244,6 +1279,7 @@ impl<'s> Parser<'s> {
             .unwrap_or(name.span);
         ProtocolDecl {
             span: kw.span.to(end),
+            vis: Visibility::Private,
             name,
             generics,
             request,
@@ -1302,6 +1338,7 @@ impl<'s> Parser<'s> {
             .unwrap_or(body.span);
         DriverDecl {
             span: kw.span.to(end),
+            vis: Visibility::Private,
             name,
             for_protocol,
             needs,
@@ -1389,6 +1426,7 @@ impl<'s> Parser<'s> {
         };
         ScenarioDecl {
             span: kw.span.to(end),
+            vis: Visibility::Private,
             name,
             seed,
             binds,
@@ -1666,6 +1704,7 @@ impl<'s> Parser<'s> {
         };
         FnDecl {
             span: start.to(end),
+            vis: Visibility::Private,
             partial,
             aggregate,
             name,
@@ -1751,6 +1790,7 @@ impl<'s> Parser<'s> {
         let value = self.type_();
         TypeDecl {
             span: kw.span.to(value.span),
+            vis: Visibility::Private,
             name,
             generics,
             value,
@@ -1762,6 +1802,7 @@ impl<'s> Parser<'s> {
         let name = self.ident("measure name");
         MeasureDecl {
             span: kw.span.to(name.span),
+            vis: Visibility::Private,
             name,
         }
     }
@@ -1775,6 +1816,7 @@ impl<'s> Parser<'s> {
         let value = self.expr();
         UnitDecl {
             span: kw.span.to(value.span),
+            vis: Visibility::Private,
             name,
             measure,
             value,
@@ -1829,6 +1871,7 @@ impl<'s> Parser<'s> {
             .unwrap_or(name.span);
         EnumDecl {
             span: kw.span.to(end),
+            vis: Visibility::Private,
             name,
             generics,
             variants,
@@ -1842,6 +1885,7 @@ impl<'s> Parser<'s> {
         let (fields, end) = self.field_block();
         RecordDecl {
             span: kw.span.to(end),
+            vis: Visibility::Private,
             name,
             generics,
             fields,
@@ -1898,6 +1942,7 @@ impl<'s> Parser<'s> {
             .unwrap_or(name.span);
         DataRecipeDecl {
             span: kw.span.to(end),
+            vis: Visibility::Private,
             name,
             items,
         }
@@ -1920,6 +1965,7 @@ impl<'s> Parser<'s> {
         };
         FeatureDecl {
             span: kw.span.to(end),
+            vis: Visibility::Private,
             name,
             params,
             ret,
@@ -1980,6 +2026,7 @@ impl<'s> Parser<'s> {
         let items = self.loose_block();
         FeatureSetDecl {
             span: kw.span.to(items.span),
+            vis: Visibility::Private,
             name,
             version,
             items,
@@ -1992,6 +2039,7 @@ impl<'s> Parser<'s> {
         let items = self.loose_block();
         DatasetDecl {
             span: kw.span.to(items.span),
+            vis: Visibility::Private,
             name,
             items,
         }
@@ -2004,6 +2052,7 @@ impl<'s> Parser<'s> {
         let items = self.loose_block();
         StatModelDecl {
             span: kw.span.to(items.span),
+            vis: Visibility::Private,
             name,
             items,
         }
@@ -2016,6 +2065,7 @@ impl<'s> Parser<'s> {
         let items = self.loose_block();
         MlWorkflowDecl {
             span: kw.span.to(items.span),
+            vis: Visibility::Private,
             name,
             items,
         }
@@ -2032,6 +2082,7 @@ impl<'s> Parser<'s> {
         let items = self.loose_block();
         ExperimentDecl {
             span: kw.span.to(items.span),
+            vis: Visibility::Private,
             kind,
             name,
             items,
@@ -2044,6 +2095,7 @@ impl<'s> Parser<'s> {
         let items = self.loose_block();
         VisualizationDecl {
             span: kw.span.to(items.span),
+            vis: Visibility::Private,
             name,
             items,
         }
@@ -2066,6 +2118,7 @@ impl<'s> Parser<'s> {
         let value = self.expr();
         LetBindingDecl {
             span: kw.span.to(value.span),
+            vis: Visibility::Private,
             name,
             ty,
             value,
@@ -2138,6 +2191,7 @@ impl<'s> Parser<'s> {
         let end = body.as_ref().map(|b| b.span).unwrap_or(start);
         ExtensionDecl {
             span: start.to(end),
+            vis: Visibility::Private,
             keywords,
             name,
             version,

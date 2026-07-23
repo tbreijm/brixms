@@ -10,8 +10,8 @@ use brixpkg::{Manifest, Registry};
 use camino::Utf8PathBuf;
 
 const LIB_SRC: &str = "package lib @ 1.0.0\n\
-rel Widget { id: Int; n: Int } key(id)\n\
-fn scale(x: Int) -> Int = x + x\n";
+pub rel Widget { id: Int; n: Int } key(id)\n\
+pub fn scale(x: Int) -> Int = x + x\n";
 
 const APP_SRC: &str = "package app @ 0.1.0\n\
 use lib.{Widget, scale}\n\

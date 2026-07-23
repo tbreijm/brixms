@@ -136,6 +136,17 @@ fn process_uses(
                         ),
                     ));
                 }
+
+                if let Some(dep_name) = resolver.is_private_symbol(&target).map(|s| s.to_string()) {
+                    diags.push(diag::error(
+                        diag::PRIVATE_IMPORT,
+                        item.span,
+                        format!(
+                            "cannot import package-private declaration `{}` from dependency `{dep_name}`",
+                            item.text
+                        ),
+                    ));
+                }
             }
         }
     }

@@ -13,6 +13,16 @@
 
 use crate::ast::*;
 
+fn vis_prefix(vis: Visibility) -> &'static str {
+    match vis {
+        Visibility::Private => "",
+        Visibility::Public(None) => "pub ",
+        Visibility::Public(Some(RelVis::Read)) => "pub read ",
+        Visibility::Public(Some(RelVis::Write)) => "pub write ",
+        Visibility::Public(Some(RelVis::Derive)) => "pub derive ",
+    }
+}
+
 /// Format a parsed file to canonical text.
 pub fn format_file(file: &File) -> String {
     let mut f = Formatter::default();
@@ -114,14 +124,16 @@ impl Formatter {
             Decl::Scenario(s) => self.scenario(s),
             Decl::Fn(f) => self.fn_decl(f),
             Decl::Type(t) => self.line(&format!(
-                "type {}{} = {}",
+                "{}type {}{} = {}",
+                vis_prefix(t.vis),
                 t.name.text,
                 generics_str(&t.generics),
                 type_str(&t.value)
             )),
-            Decl::Measure(m) => self.line(&format!("measure {}", m.name.text)),
+            Decl::Measure(m) => self.line(&format!("{}measure {}", vis_prefix(m.vis), m.name.text)),
             Decl::Unit(u) => self.line(&format!(
-                "unit {}: {} = {}",
+                "{}unit {}: {} = {}",
+                vis_prefix(u.vis),
                 u.name.text,
                 u.measure.text,
                 expr_str(&u.value)
@@ -136,31 +148,31 @@ impl Formatter {
                     .as_ref()
                     .map(|e| format!(" @ {}", expr_str(e)))
                     .unwrap_or_default();
-                self.header_loose(&format!("feature set {}{}", f.name.text, v), &f.items);
+                self.header_loose(&format!("{}feature set {}{}", vis_prefix(f.vis), f.name.text, v), &f.items);
             }
-            Decl::Dataset(d) => self.header_loose(&format!("dataset {}", d.name.text), &d.items),
+            Decl::Dataset(d) => self.header_loose(&format!("{}dataset {}", vis_prefix(d.vis), d.name.text), &d.items),
             Decl::StatModel(s) => {
-                self.header_loose(&format!("statistical model {}", s.name.text), &s.items)
+                self.header_loose(&format!("{}statistical model {}", vis_prefix(s.vis), s.name.text), &s.items)
             }
             Decl::MlWorkflow(m) => {
-                self.header_loose(&format!("ml workflow {}", m.name.text), &m.items)
+                self.header_loose(&format!("{}ml workflow {}", vis_prefix(m.vis), m.name.text), &m.items)
             }
             Decl::Experiment(e) => {
                 let kw = match e.kind {
                     ExperimentKind::Experiment => "experiment",
                     ExperimentKind::Tuning => "tuning",
                 };
-                self.header_loose(&format!("{} {}", kw, e.name.text), &e.items);
+                self.header_loose(&format!("{}{kw} {}", vis_prefix(e.vis), e.name.text), &e.items);
             }
             Decl::Visualization(v) => {
-                self.header_loose(&format!("visualization {}", v.name.text), &v.items)
+                self.header_loose(&format!("{}visualization {}", vis_prefix(v.vis), v.name.text), &v.items)
             }
             Decl::Let(l) => {
                 let ty =
                     l.ty.as_ref()
                         .map(|t| format!(": {}", type_str(t)))
                         .unwrap_or_default();
-                self.line(&format!("let {}{ty} = {}", l.name.text, expr_str(&l.value)));
+                self.line(&format!("{}let {}{ty} = {}", vis_prefix(l.vis), l.name.text, expr_str(&l.value)));
             }
             Decl::Extension(x) => self.extension(x),
             Decl::Error(_, raw) => self.verbatim_lines(raw),
@@ -168,11 +180,12 @@ impl Formatter {
     }
 
     fn entity(&mut self, e: &EntityDecl) {
+        let vis = vis_prefix(e.vis);
         if e.fields.is_empty() {
-            self.line(&format!("entity {} {{}}", e.name.text));
+            self.line(&format!("{vis}entity {} {{}}", e.name.text));
             return;
         }
-        self.line(&format!("entity {} {{", e.name.text));
+        self.line(&format!("{vis}entity {} {{", e.name.text));
         self.indent += 1;
         for field in &e.fields {
             self.line(&field_str(field));
@@ -182,6 +195,7 @@ impl Formatter {
     }
 
     fn rel(&mut self, r: &RelDecl) {
+        let vis = vis_prefix(r.vis);
         let kw = match r.kind {
             RelKind::Ground => "rel".to_string(),
             RelKind::State => "state rel".to_string(),
@@ -195,10 +209,10 @@ impl Formatter {
             format!(" {m}")
         };
         if r.roles.is_empty() {
-            self.line(&format!("{kw} {} {{}}{mods}", r.name.text));
+            self.line(&format!("{vis}{kw} {} {{}}{mods}", r.name.text));
             return;
         }
-        self.line(&format!("{kw} {} {{", r.name.text));
+        self.line(&format!("{vis}{kw} {} {{", r.name.text));
         self.indent += 1;
         for role in &r.roles {
             self.line(&field_str(role));
@@ -209,7 +223,8 @@ impl Formatter {
 
     fn derive(&mut self, d: &DeriveDecl) {
         self.line(&format!(
-            "derive {}: {} from {{",
+            "{}derive {}: {} from {{",
+            vis_prefix(d.vis),
             d.name.text,
             head_str(&d.head)
         ));
@@ -281,7 +296,7 @@ impl Formatter {
             ConstraintKind::Strict => "strict",
             ConstraintKind::Audit => "audit",
         };
-        self.line(&format!("constraint {} {} {{", c.name.text, kind));
+        self.line(&format!("{}constraint {} {} {{", vis_prefix(c.vis), c.name.text, kind));
         self.indent += 1;
         self.clauses(&c.body.clauses);
         self.indent -= 1;
@@ -290,7 +305,8 @@ impl Formatter {
 
     fn query(&mut self, q: &QueryDecl) {
         self.line(&format!(
-            "query {}({}) -> {} =",
+            "{}query {}({}) -> {} =",
+            vis_prefix(q.vis),
             q.name.text,
             params_str(&q.params),
             type_str(&q.ret)
@@ -316,7 +332,8 @@ impl Formatter {
 
     fn protocol(&mut self, p: &ProtocolDecl) {
         self.line(&format!(
-            "protocol {}{} {{",
+            "{}protocol {}{} {{",
+            vis_prefix(p.vis),
             p.name.text,
             generics_str(&p.generics)
         ));
@@ -389,8 +406,8 @@ impl Formatter {
             format!(" needs {n}")
         };
         self.line(&format!(
-            "driver {} for {}{} {{",
-            d.name.text, d.for_protocol.text, needs
+            "{}driver {} for {}{} {{",
+            vis_prefix(d.vis), d.name.text, d.for_protocol.text, needs
         ));
         self.indent += 1;
         self.line(&format!(
@@ -406,7 +423,7 @@ impl Formatter {
     }
 
     fn scenario(&mut self, s: &ScenarioDecl) {
-        self.line(&format!("scenario {} {{", s.name.text));
+        self.line(&format!("{}scenario {} {{", vis_prefix(s.vis), s.name.text));
         self.indent += 1;
         match &s.seed {
             SeedDecl::Nat(n, _) => self.line(&format!("seed {n}")),
@@ -502,7 +519,7 @@ impl Formatter {
     }
 
     fn fn_decl(&mut self, f: &FnDecl) {
-        let mut head = String::new();
+        let mut head = String::from(vis_prefix(f.vis));
         if f.partial {
             head.push_str("partial ");
         }
@@ -540,7 +557,8 @@ impl Formatter {
 
     fn enum_decl(&mut self, e: &EnumDecl) {
         self.line(&format!(
-            "enum {}{} {{",
+            "{}enum {}{} {{",
+            vis_prefix(e.vis),
             e.name.text,
             generics_str(&e.generics)
         ));
@@ -554,7 +572,8 @@ impl Formatter {
 
     fn record(&mut self, r: &RecordDecl) {
         self.line(&format!(
-            "record {}{} {{",
+            "{}record {}{} {{",
+            vis_prefix(r.vis),
             r.name.text,
             generics_str(&r.generics)
         ));
@@ -567,7 +586,7 @@ impl Formatter {
     }
 
     fn data_recipe(&mut self, r: &DataRecipeDecl) {
-        self.line(&format!("data recipe {} {{", r.name.text));
+        self.line(&format!("{}data recipe {} {{", vis_prefix(r.vis), r.name.text));
         self.indent += 1;
         for item in &r.items {
             match item {
@@ -590,7 +609,8 @@ impl Formatter {
 
     fn feature(&mut self, f: &FeatureDecl) {
         let head = format!(
-            "feature {}({}) -> {}",
+            "{}feature {}({}) -> {}",
+            vis_prefix(f.vis),
             f.name.text,
             params_str(&f.params),
             type_str(&f.ret)
