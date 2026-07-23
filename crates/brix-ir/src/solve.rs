@@ -366,6 +366,20 @@ pub enum DimStep {
 }
 
 pub fn same_dimension_step(a: &Ty, b: &Ty) -> DimStep {
+    // Temporal arithmetic (issue #47): `Instant`/`Duration` are not
+    // ground-`Dimensions` types, but `add`/`sub` over them has fixed algebra —
+    // `Instant - Instant = Duration`, `Instant ± Duration = Instant`,
+    // `Duration ± Duration = Duration`. Comparisons (`le`/`eq`/...) discard this
+    // result Ty and only need the pair to be non-conflicting, so the same arms
+    // serve both.
+    match (a, b) {
+        (Ty::Instant, Ty::Instant) => return DimStep::Ok(Ty::Duration),
+        (Ty::Duration, Ty::Duration) => return DimStep::Ok(Ty::Duration),
+        (Ty::Instant, Ty::Duration) | (Ty::Duration, Ty::Instant) => {
+            return DimStep::Ok(Ty::Instant)
+        }
+        _ => {}
+    }
     match (dims(a), dims(b)) {
         (Some(x), Some(y)) if x == y => DimStep::Ok(a.clone()),
         (Some(_), Some(_)) => DimStep::Conflict,
@@ -384,6 +398,13 @@ pub enum DimBinaryStep {
 }
 
 pub fn dimension_binary_step(a: &Ty, b: &Ty, mul: bool) -> DimBinaryStep {
+    // Temporal ratio (issue #47): `Duration / Duration` is a dimensionless
+    // scalar — typed `F64` so it composes with float literals (`1.0 - r/24h`).
+    if !mul {
+        if let (Ty::Duration, Ty::Duration) = (a, b) {
+            return DimBinaryStep::Ok(Ty::F64);
+        }
+    }
     match (dims(a), dims(b)) {
         (Some(x), Some(y)) => {
             if has_distinct_currencies(&x, &y) || (mul && has_money(&x) && has_money(&y)) {

@@ -26,6 +26,21 @@ fn lower_flagship() -> brixc::Lowered {
 }
 
 #[test]
+fn flagship_risk_model_lowers_from_source() {
+    // riskModel is a `partial fn`; issue #47 Part 3 lowers its body from source
+    // instead of hand-registering it. It must now appear in the lowered program
+    // marked partial (execution/hand-reg removal come in later slices).
+    let lowered = lower_flagship();
+    let risk = lowered
+        .source
+        .functions
+        .iter()
+        .find(|f| f.name.to_string() == "riskModel")
+        .expect("riskModel must lower into source.functions");
+    assert!(risk.is_partial, "riskModel must be marked partial");
+}
+
+#[test]
 fn flagship_lowers_with_zero_errors() {
     let lowered = lower_flagship();
     let errors: Vec<&brix_ast::Diagnostic> = lowered
@@ -71,10 +86,10 @@ fn flagship_produces_exactly_the_expected_warnings() {
         .collect();
     warnings.sort();
 
-    // 2 drivers + 1 scenario, skip-with-warning (BRX-LOW-0002); plus
-    // riskModel's undeclared
-    // `ValidationError` return-type component (BRX-LOW-0012, warning
-    // severity because it's fn-sig position, not role position).
+    // 2 drivers + 1 scenario, skip-with-warning (BRX-LOW-0002). riskModel now
+    // compiles from source (issue #47 Part 3) and `ValidationError` +
+    // `Probability.try` are builtin-resolved, so its former BRX-LOW-0012
+    // unresolved-type warning no longer fires.
     let decl_skips = warnings
         .iter()
         .filter(|(c, _)| *c == "BRX-LOW-0002")
@@ -89,12 +104,12 @@ fn flagship_produces_exactly_the_expected_warnings() {
         "2 driver decls + 1 scenario decl: {warnings:#?}"
     );
     assert_eq!(
-        unresolved_ty, 1,
-        "riskModel's ValidationError: {warnings:#?}"
+        unresolved_ty, 0,
+        "riskModel's ValidationError now resolves as a builtin: {warnings:#?}"
     );
     assert_eq!(
         warnings.len(),
-        4,
+        3,
         "no other warning should appear: {warnings:#?}"
     );
 }

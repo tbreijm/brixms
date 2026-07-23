@@ -387,39 +387,49 @@ fn lower_query(
 
 /// Lower a user `fn` body into a checked Core IR [`core::FnDef`] (issue #47).
 ///
-/// Handles **total** functions, expression- or block-bodied (issue #47 Slices
-/// 1–2): a `fn f(..) -> T = <expr>` or `fn f(..) -> T { let .. ; <expr> }`.
-/// Both reuse the rule-body expression-lowering engine ([`expr::lower_expr`] /
+/// Handles **total and partial** functions, expression- or block-bodied (issue
+/// #47 Slices 1–2 + Part 3): `fn f(..) -> T = <expr>`, `fn f(..) -> T { let .. ;
+/// <expr> }`, and `partial fn f(..) -> Result<T, E> { .. }`. All reuse the
+/// rule-body expression-lowering engine ([`expr::lower_expr`] /
 /// [`expr::lower_fn_block`]), with parameters seeded into scope exactly as
-/// [`lower_query`] seeds query params. `partial` fns and bodyless fns return
-/// `None` — *not* an error (that would break the flagship's `riskModel`); they
-/// stay unlowered and hand-registered until Slice 2 grows partial-result /
-/// runtime provenance.
+/// [`lower_query`] seeds query params; `is_partial` is recorded on the `FnDef`
+/// so the checker exempts it from the total-fn fallibility error and the engines
+/// evaluate its body to a `Result`. Only a **bodyless** fn (declared-only /
+/// `extern`) returns `None` — *not* an error; it stays hand-registered.
 fn lower_fn(
     f: &ast::FnDecl,
     resolver: &ProgramResolver,
     meta: &mut LowerMeta,
     diags: &mut Vec<Diagnostic>,
 ) -> Option<core::FnDef> {
-    if f.partial || f.body.is_none() {
-        return None;
-    }
+    // A `partial fn` now lowers its body too (issue #47 Part 3): `is_partial` is
+    // recorded on the `FnDef`, the `?` sites become `ExprKind::Try`, and the
+    // checker exempts partials from the total-fn fallibility error. Only a
+    // bodyless (`extern`/declared-only) fn stays unlowered — `?` below returns
+    // `None` for it.
     let ast_body = f.body.as_ref()?;
     let qi = QualIdent::simple(f.name.text.clone());
     // Lower *this* declaration's param/ret types from the AST. Looking up by
     // name alone is wrong once typed overloads exist — pass 1 stores every
     // overload, and the first match is not necessarily this body.
+    //
+    // Type-resolution diagnostics for the signature are owned by pass 1
+    // (`schema::build_schemas`), which already lowered these same types; re-
+    // lowering here only recovers the `Ty` values, so its diagnostics go to a
+    // throwaway sink to avoid double-reporting (e.g. a `partial fn`'s unresolved
+    // `ValidationError` return-type component — issue #47 Part 3).
+    let sig_diags = &mut Vec::new();
     let params: Vec<(IrIdent, Ty)> = f
         .params
         .iter()
         .map(|p| {
             (
                 IrIdent::new(p.name.text.clone()),
-                tymap::lower_type(&p.ty, TyPos::FnSig, resolver, meta, diags),
+                tymap::lower_type(&p.ty, TyPos::FnSig, resolver, meta, sig_diags),
             )
         })
         .collect();
-    let ret = tymap::lower_type(&f.ret, TyPos::FnSig, resolver, meta, diags);
+    let ret = tymap::lower_type(&f.ret, TyPos::FnSig, resolver, meta, sig_diags);
     let effects = resolver
         .functions(&qi)
         .iter()

@@ -476,6 +476,25 @@ pub fn seed_prelude(resolver: ProgramResolver) -> ProgramResolver {
         derived: false,
     });
 
+    // `ValidationError` — the failure payload of a validated constructor (Part V
+    // refinement newtypes) — as a builtin nominal type, plus `Probability.try`,
+    // the fallible constructor the flagship's `riskModel` uses (issue #47 Part
+    // 3). The admission check (`0 ≤ x ≤ 1`) is a builtin evaluator in both
+    // engines, resolved from source with no hand-registration.
+    let validation_error = QualIdent::simple("ValidationError");
+    r = r.with_enum(validation_error.clone(), Vec::new());
+    r = r.with_function(FnSignature {
+        name: QualIdent::from("Probability.try"),
+        params: vec![Ty::F64],
+        ret: Ty::Result(
+            Box::new(Ty::Probability),
+            Box::new(Ty::Enum(validation_error)),
+        ),
+        effects: EffectRow::empty(),
+        is_aggregate: false,
+        may_diverge: false,
+    });
+
     for (name, arity) in [
         ("or", 2),
         ("and", 2),
