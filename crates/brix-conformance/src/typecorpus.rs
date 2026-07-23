@@ -784,6 +784,42 @@ pub fn open_row_extra_field() -> TypeFixture {
     }
 }
 
+/// Fixture (#15 gap-closure A, `missing_in_right` direction): closed_row_extra_field's
+/// mirror. `query.result` (expect) declares a CLOSED {a, b} row while the yielded
+/// record (found) only has {a} — forces match_rows's `missing_in_right` set
+/// (solve.rs:302-304) → one UnknownField{b}.
+pub fn closed_row_missing_field() -> TypeFixture {
+    let o = Origins::new("ClosedRowMissing");
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("ClosedRowMissing"),
+            params: vec![],
+            body: Pattern::default(),
+            yields: o.record(vec![("a", o.lit(Ty::Int(IntWidth::Int), Lit::Int(1)))]),
+            result: Ty::rel(Row::closed(vec![
+                RowField {
+                    name: Ident::new("a"),
+                    ty: Ty::Int(IntWidth::Int),
+                },
+                RowField {
+                    name: Ident::new("b"),
+                    ty: Ty::Bool,
+                },
+            ])),
+        }],
+    };
+    TypeFixture {
+        label: "closed_row_missing_field",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver: TableResolver::new(),
+        expected_categories: BTreeSet::from([Category::UnknownField]),
+    }
+}
+
 /// Fixture 9 (#33): a `when` guard whose expression is not `Bool`, this time
 /// inside a `Constraint` body rather than a `Rule` body — the exact shape
 /// `infer_source` used to silently skip entirely (it never visited
