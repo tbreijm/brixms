@@ -102,7 +102,7 @@ fn unresolved(reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brix_ir::ident::{Ident, QualIdent};
+    use brix_ir::ident::QualIdent;
     use brix_ir::types::{Row, RowTail};
 
     #[test]
