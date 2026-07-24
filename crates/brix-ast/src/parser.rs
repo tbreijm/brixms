@@ -1680,7 +1680,20 @@ impl<'s> Parser<'s> {
         let partial = self.eat_kw("partial");
         let aggregate = self.eat_kw("aggregate");
         self.eat_kw("fn");
-        let name = self.ident("function name");
+        let name = if self.at(TokKind::Ident) && self.nth(1) == Some(TokKind::Dot) {
+            let path = self.qual_ident();
+            Ident {
+                span: path.span,
+                text: path
+                    .segments
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("."),
+            }
+        } else {
+            self.ident("function name")
+        };
         let generics = self.generics_opt();
         let params = self.param_list();
         self.expect(TokKind::Arrow, "`->`");
