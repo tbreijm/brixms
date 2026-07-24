@@ -1,0 +1,17 @@
+package brix.ops @ 0.1.0
+
+pub fn or(a: Var, b: Var) -> Var
+pub fn and(a: Var, b: Var) -> Var
+pub fn not(a: Var) -> Var
+pub fn eq(a: Var, b: Var) -> Var
+pub fn ne(a: Var, b: Var) -> Var
+pub fn lt(a: Var, b: Var) -> Var
+pub fn le(a: Var, b: Var) -> Var
+pub fn gt(a: Var, b: Var) -> Var
+pub fn ge(a: Var, b: Var) -> Var
+pub fn in(a: Var, b: Var) -> Var
+pub fn add(a: Var, b: Var) -> Var
+pub fn sub(a: Var, b: Var) -> Var
+pub fn mul(a: Var, b: Var) -> Var
+pub fn div(a: Var, b: Var) -> Var
+pub fn neg(a: Var) -> Var

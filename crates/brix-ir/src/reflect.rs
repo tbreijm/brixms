@@ -1363,22 +1363,22 @@ impl Reflect {
                     entity,
                     fields,
                 } => {
-                    self.bind(declaration, var, Ty::NodeRef(entity.clone()), env, vec![]);
-                    let relation = QualIdent::simple(entity.as_str());
-                    if let Some(schema) = resolver.relation(&relation) {
+                    let qname = QualIdent::from(entity.as_str());
+                    self.bind(declaration, var, Ty::NodeRef(qname.clone()), env, vec![]);
+                    if let Some(schema) = resolver.relation(&qname) {
                         for arg in fields {
                             if let Some((_, ty)) =
                                 schema.roles.iter().find(|(name, _)| name == &arg.role)
                             {
                                 self.fact(
                                     Fact::SchemaRole {
-                                        relation: relation.clone(),
+                                        relation: qname.clone(),
                                         role: arg.role.clone(),
                                         ty: ty.clone(),
                                     },
                                     vec![],
                                 );
-                                self.role_arg(declaration, &relation, arg, ty.clone(), env);
+                                self.role_arg(declaration, &qname, arg, ty.clone(), env);
                             }
                         }
                     }
