@@ -35,7 +35,7 @@ use brixc::{emit, lower_file, AstPhase};
 use brix_conformance::typecorpus::{
     NATIVE_ROLE_BINDINGS_FIXTURE, NATIVE_ROLE_LIT_MISMATCH_FIXTURE,
 };
-use brix_conformance::typefacts;
+use brixc::selfhost::typefacts;
 
 const PACKAGE_SRC: &str = include_str!("../../../packages/brix.type/brix.type.brix");
 

@@ -52,6 +52,7 @@ pub mod lower;
 pub mod phase;
 pub mod pipeline;
 pub mod plan;
+pub mod selfhost;
 
 pub use cache::{CacheInputs, CacheKey, Profile, ToolchainId};
 pub use incremental::{IncrementalCompiler, IncrementalProgress, IncrementalUnit};
