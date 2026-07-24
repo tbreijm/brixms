@@ -136,6 +136,37 @@ pub struct Label {
     pub message: String,
 }
 
+/// A map from source path/identifier to source code content for multi-source diagnostic rendering.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SourceMap {
+    sources: BTreeMap<String, String>,
+}
+
+impl SourceMap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn single(path: impl Into<String>, source: impl Into<String>) -> Self {
+        let mut map = Self::new();
+        map.insert(path, source);
+        map
+    }
+
+    pub fn insert(&mut self, path: impl Into<String>, source: impl Into<String>) -> &mut Self {
+        self.sources.insert(path.into(), source.into());
+        self
+    }
+
+    pub fn get(&self, path: &str) -> Option<&str> {
+        self.sources.get(path).map(|s| s.as_str())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sources.is_empty()
+    }
+}
+
 /// The shared diagnostic data model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Diagnostic {
@@ -145,6 +176,7 @@ pub struct Diagnostic {
     pub message: String,
     pub structure: CanonValue,
     pub labels: Vec<Label>,
+    pub source_id: Option<String>,
 }
 
 impl Diagnostic {
@@ -168,7 +200,13 @@ impl Diagnostic {
             message: message.into(),
             structure: CanonValue::Null,
             labels: Vec::new(),
+            source_id: None,
         }
+    }
+
+    pub fn with_source_id(mut self, source_id: impl Into<String>) -> Self {
+        self.source_id = Some(source_id.into());
+        self
     }
 
     pub fn with_label(mut self, span: Span, message: impl Into<String>) -> Self {
@@ -244,18 +282,30 @@ impl Diagnostics {
     }
 
     pub fn render_compact(&self, source: &str, path: &str) -> String {
+        let mut map = SourceMap::new();
+        map.insert(path, source);
+        self.render_compact_map(&map, path)
+    }
+
+    pub fn render_compact_map(&self, sources: &SourceMap, default_path: &str) -> String {
+        let default_source = sources.get(default_path).unwrap_or("");
         let mut output = String::new();
         for diagnostic in &self.items {
+            let file_path = diagnostic.source_id.as_deref().unwrap_or(default_path);
+            let source = sources.get(file_path).unwrap_or(default_source);
             let (line, column) = line_col(source, diagnostic.span.start);
             output.push_str(&format!(
-                "{path}:{line}:{column}: {severity}[{code}]: {message}\n",
+                "{file_path}:{line}:{column}: {severity}[{code}]: {message}\n",
                 severity = severity_name(diagnostic.severity),
                 code = diagnostic.code,
                 message = diagnostic.message,
             ));
             for label in &diagnostic.labels {
                 let (line, column) = line_col(source, label.span.start);
-                output.push_str(&format!("    {path}:{line}:{column}: {}\n", label.message));
+                output.push_str(&format!(
+                    "    {file_path}:{line}:{column}: {}\n",
+                    label.message
+                ));
             }
         }
         output
@@ -265,20 +315,47 @@ impl Diagnostics {
     /// separate opt-in renderer because CLI modes use compact, JSON, or SARIF
     /// output depending on their consumer.
     pub fn render_miette(&self, source: &str, path: &str) -> Result<String, fmt::Error> {
+        let mut map = SourceMap::new();
+        map.insert(path, source);
+        self.render_miette_map(&map, path)
+    }
+
+    pub fn render_miette_map(
+        &self,
+        sources: &SourceMap,
+        default_path: &str,
+    ) -> Result<String, fmt::Error> {
         let handler = GraphicalReportHandler::new();
         let mut output = String::new();
+        let default_source = sources.get(default_path).unwrap_or("");
         for diagnostic in &self.items {
-            handler.render_report(&mut output, &MietteReport::new(diagnostic, source, path))?;
+            let file_path = diagnostic.source_id.as_deref().unwrap_or(default_path);
+            let source = sources.get(file_path).unwrap_or(default_source);
+            handler.render_report(
+                &mut output,
+                &MietteReport::new(diagnostic, source, file_path),
+            )?;
         }
         Ok(output)
     }
 
     /// Canonical compact JSON for editor, agent, and test consumers.
     pub fn render_json(&self, source: &str, path: &str) -> String {
+        let mut map = SourceMap::new();
+        map.insert(path, source);
+        self.render_json_map(&map, path)
+    }
+
+    pub fn render_json_map(&self, sources: &SourceMap, default_path: &str) -> String {
+        let default_source = sources.get(default_path).unwrap_or("");
         let diagnostics = self
             .items
             .iter()
-            .map(|diagnostic| JsonDiagnostic::from_diagnostic(diagnostic, source, path))
+            .map(|diagnostic| {
+                let file_path = diagnostic.source_id.as_deref().unwrap_or(default_path);
+                let source = sources.get(file_path).unwrap_or(default_source);
+                JsonDiagnostic::from_diagnostic(diagnostic, source, file_path)
+            })
             .collect::<Vec<_>>();
         serde_json::to_string(&JsonOutput { diagnostics }).expect("diagnostics are serializable")
     }
@@ -287,6 +364,13 @@ impl Diagnostics {
     /// deterministic run and emits a result for every diagnostic, including
     /// warnings and notes.
     pub fn render_sarif(&self, source: &str, path: &str) -> String {
+        let mut map = SourceMap::new();
+        map.insert(path, source);
+        self.render_sarif_map(&map, path)
+    }
+
+    pub fn render_sarif_map(&self, sources: &SourceMap, default_path: &str) -> String {
+        let default_source = sources.get(default_path).unwrap_or("");
         let rules = self
             .items
             .iter()
@@ -301,6 +385,8 @@ impl Diagnostics {
             .items
             .iter()
             .map(|diagnostic| {
+                let file_path = diagnostic.source_id.as_deref().unwrap_or(default_path);
+                let source = sources.get(file_path).unwrap_or(default_source);
                 let (start_line, start_column) = line_col(source, diagnostic.span.start);
                 let (end_line, end_column) = line_col(source, diagnostic.span.end);
                 serde_json::json!({
@@ -309,7 +395,7 @@ impl Diagnostics {
                     "message": { "text": diagnostic.message },
                     "locations": [{
                         "physicalLocation": {
-                            "artifactLocation": { "uri": path },
+                            "artifactLocation": { "uri": file_path },
                             "region": {
                                 "startLine": start_line,
                                 "startColumn": start_column,
@@ -334,16 +420,30 @@ impl Diagnostics {
     }
 
     pub fn render_format(&self, format: DiagnosticFormat, source: &str, path: &str) -> String {
+        let mut map = SourceMap::new();
+        map.insert(path, source);
+        self.render_format_map(format, &map, path)
+    }
+
+    pub fn render_format_map(
+        &self,
+        format: DiagnosticFormat,
+        sources: &SourceMap,
+        default_path: &str,
+    ) -> String {
         match format {
-            DiagnosticFormat::Human => self.render_compact(source, path),
-            DiagnosticFormat::Json => self.render_json(source, path),
-            DiagnosticFormat::Sarif => self.render_sarif(source, path),
+            DiagnosticFormat::Human => self.render_compact_map(sources, default_path),
+            DiagnosticFormat::Json => self.render_json_map(sources, default_path),
+            DiagnosticFormat::Sarif => self.render_sarif_map(sources, default_path),
         }
     }
 }
 
-fn diagnostic_key(diagnostic: &Diagnostic) -> (Span, BrxCode, Severity, &str, &CanonValue) {
+fn diagnostic_key(
+    diagnostic: &Diagnostic,
+) -> (Option<&str>, Span, BrxCode, Severity, &str, &CanonValue) {
     (
+        diagnostic.source_id.as_deref(),
         diagnostic.span,
         diagnostic.code,
         diagnostic.severity,

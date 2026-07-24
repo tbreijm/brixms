@@ -90,6 +90,9 @@ fn lower_named(
 ) -> Ty {
     if path.segments.len() == 1 {
         let name = path.segments[0].text.as_str();
+        if name == "Var" {
+            return Ty::Var(meta.fresh_tyvar());
+        }
         if args.is_empty() {
             if let Some(t) = builtin_ty(name) {
                 return t;
@@ -111,12 +114,7 @@ fn lower_named(
         }
     }
     if resolver.is_entity(&qi) {
-        let last = qi
-            .segments()
-            .last()
-            .cloned()
-            .unwrap_or_else(|| IrIdent::new(""));
-        return Ty::NodeRef(last);
+        return Ty::NodeRef(qi);
     }
     if resolver.is_enum(&qi) {
         // Mismatch (A): the whole reason `Ty::Enum` exists.

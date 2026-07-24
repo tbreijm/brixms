@@ -181,7 +181,9 @@ impl TraitEnv {
 /// The head constructor name of a type, for exact-match impl selection.
 fn head_of(ty: &Ty) -> Option<ImplHead> {
     let name = match ty {
-        Ty::NodeRef(e) | Ty::EdgeRef(e) | Ty::ClaimRef(e) => e.as_str(),
+        Ty::NodeRef(e) | Ty::EdgeRef(e) | Ty::ClaimRef(e) => {
+            e.segments().last().map(|s| s.as_str()).unwrap_or("")
+        }
         Ty::Quantity(m) => m.as_str(),
         Ty::Money(c) => c.as_str(),
         Ty::List(_) => "List",

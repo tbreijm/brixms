@@ -109,7 +109,7 @@ impl FrontendSource {
 /// Uses sorted `Vec`s (no `HashMap` — semantic path discipline) so lookups are
 /// deterministic. The real frontend will supply its own implementation over
 /// the schema graph; this one lets brix-ir's checks be exercised today.
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct TableResolver {
     relations: Vec<RelationSchema>,
     functions: Vec<FnSignature>,
@@ -189,7 +189,7 @@ mod tests {
         let schema = RelationSchema {
             name: QualIdent::from("ComputedPrice"),
             roles: vec![
-                (Ident::new("order"), Ty::NodeRef(Ident::new("Order"))),
+                (Ident::new("order"), Ty::NodeRef(QualIdent::simple("Order"))),
                 (Ident::new("amount"), Ty::F64),
             ],
             key: vec![Ident::new("order")],

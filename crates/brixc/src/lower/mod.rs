@@ -21,6 +21,7 @@ mod diag;
 mod expr;
 mod resolve;
 mod schema;
+pub mod stdlib;
 mod tymap;
 
 pub use resolve::{
@@ -192,6 +193,11 @@ fn qualify_ty(
     use brix_ir::types::Ty;
     match ty {
         Ty::Enum(name) => Ty::Enum(rename.get(name).cloned().unwrap_or_else(|| name.clone())),
+        Ty::NodeRef(name) => Ty::NodeRef(rename.get(name).cloned().unwrap_or_else(|| name.clone())),
+        Ty::EdgeRef(name) => Ty::EdgeRef(rename.get(name).cloned().unwrap_or_else(|| name.clone())),
+        Ty::ClaimRef(name) => {
+            Ty::ClaimRef(rename.get(name).cloned().unwrap_or_else(|| name.clone()))
+        }
         Ty::Option(t) => Ty::Option(Box::new(qualify_ty(t, rename))),
         Ty::Result(a, b) => Ty::Result(
             Box::new(qualify_ty(a, rename)),
@@ -274,24 +280,21 @@ pub fn lower_graph(
     let mut ordered: Vec<&DepPackage> = deps.iter().collect();
     ordered.sort_by(|a, b| a.name_segments.cmp(&b.name_segments));
 
-    let mut resolver = resolve::seed_prelude(ProgramResolver::new());
+    let mut resolver = stdlib::stdlib_resolver().clone();
     let mut dep_fndefs: Vec<FnDef> = Vec::new();
 
     for dep in &ordered {
         // Lower and check the dependency in isolation (bare names, own
         // prelude); its errors surface tagged into the graph's channel.
         let dep_lowered = lower_file(dep.file, dep.parse_diags);
-        // A dependency's diagnostics carry spans into ITS OWN source, which the
-        // build renders against the ROOT source — a wrong caret. Until the
-        // diagnostic renderer is source-aware (a diag-lane follow-up), attribute
-        // each to its package in the message and drop the cross-source span, so
-        // a dependency error reads honestly ("dependency `lib`: ...") rather
-        // than pointing at an unrelated root line (issue #42 Slice 5).
         let dep_name = dep.name_segments.join(".");
+        // A dependency's diagnostics carry spans into ITS OWN source; set source_id
+        // to its package name so multi-source diagnostic renderers format carets against it (issue #112).
         diags.extend(dep_lowered.diags.iter().map(|d| {
             let mut d = d.clone();
-            d.message = format!("dependency `{dep_name}`: {}", d.message);
-            d.span = brix_diag::Span::empty(0);
+            if d.source_id.is_none() {
+                d.source_id = Some(dep_name.clone());
+            }
             d
         }));
 
@@ -316,6 +319,8 @@ pub fn lower_graph(
             segs.extend(segments.iter().cloned());
             QualIdent::from_segments(segs)
         };
+
+        meta.merge_dep(&dep_lowered.meta, qualify_path);
         // A dependency's own prelude (`brix.*`) is seeded per-dep and re-seeded
         // for the graph; never re-export it under `pkg.brix.*`.
         let is_prelude = |name: &QualIdent| name.segments()[0].as_str().starts_with("brix");
@@ -384,23 +389,29 @@ pub fn lower_graph(
             }
         }
 
-        // Map each of the dependency's local enum names to its qualified name,
+        // Map each of the dependency's local enum and entity names to its qualified name,
         // so relation-role and function-signature types that mention them are
-        // rewritten to match the qualified enum we register below (issue #42
-        // Slice 3 — see `qualify_ty`).
-        let mut enum_rename: std::collections::BTreeMap<QualIdent, QualIdent> =
+        // rewritten to match the qualified enum/entity we register below (issues #42
+        // Slice 3 and #110 — see `qualify_ty`).
+        let mut nominal_rename: std::collections::BTreeMap<QualIdent, QualIdent> =
             std::collections::BTreeMap::new();
         for (name, _variants) in dep_lowered.resolver.enums() {
             if is_prelude(name) || !is_pub(name) {
                 continue;
             }
-            enum_rename.insert(name.clone(), qualify_path(name.segments()));
+            nominal_rename.insert(name.clone(), qualify_path(name.segments()));
+        }
+        for ent in dep_lowered.resolver.entities() {
+            if is_prelude(ent) || !is_pub(ent) {
+                continue;
+            }
+            nominal_rename.insert(ent.clone(), qualify_path(ent.segments()));
         }
 
         // Dependency's own declared relations -> `pkg.Rel`, and protocol-synth
         // relations -> `pkg.Proto.request` / `pkg.Proto.<outcome>` (issue #42
         // Slice 3: dotted names are now qualified, not skipped). Role types are
-        // requalified so an enum role points at the qualified enum.
+        // requalified so an enum/entity role points at the qualified nominal type.
         for schema in dep_lowered.resolver.relations() {
             if is_prelude(&schema.name) || !is_pub(&schema.name) {
                 continue;
@@ -412,7 +423,7 @@ pub fn lower_graph(
             qschema.roles = qschema
                 .roles
                 .iter()
-                .map(|(n, t)| (n.clone(), qualify_ty(t, &enum_rename)))
+                .map(|(n, t)| (n.clone(), qualify_ty(t, &nominal_rename)))
                 .collect();
             resolver = resolver
                 .with_relation(qschema)
@@ -459,9 +470,9 @@ pub fn lower_graph(
                 params: f
                     .params
                     .iter()
-                    .map(|(_, t)| qualify_ty(t, &enum_rename))
+                    .map(|(_, t)| qualify_ty(t, &nominal_rename))
                     .collect(),
-                ret: qualify_ty(&f.ret, &enum_rename),
+                ret: qualify_ty(&f.ret, &nominal_rename),
                 is_aggregate: false,
                 may_diverge: f.effects.may_diverge(),
                 effects: f.effects.clone(),
@@ -471,9 +482,9 @@ pub fn lower_graph(
             qf.params = qf
                 .params
                 .iter()
-                .map(|(n, t)| (n.clone(), qualify_ty(t, &enum_rename)))
+                .map(|(n, t)| (n.clone(), qualify_ty(t, &nominal_rename)))
                 .collect();
-            qf.ret = qualify_ty(&qf.ret, &enum_rename);
+            qf.ret = qualify_ty(&qf.ret, &nominal_rename);
             dep_fndefs.push(qf);
         }
     }
