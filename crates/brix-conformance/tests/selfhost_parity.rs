@@ -35,11 +35,13 @@ use brix_conformance::typecorpus::{
     arity_mismatch, arity_non_first_candidate_match_is_not_a_conflict, closed_row_extra_field,
     closed_row_missing_field, container_vs_container_mismatch, container_vs_plain_mismatch,
     cross_epistemic_wrapper_mismatch, estimate_same_ctor_mismatch, estimate_to_plain_erasure,
-    estimate_vs_container_erasure, field_failure, missing_to_plain_implicit_coercion, occurs_check,
-    occurs_check_row, open_row_extra_field, overload_bind_chain, plain_scalar_mismatch,
-    probability_f64_bridge_is_not_a_conflict, probability_to_bool_erasure,
-    same_container_leaf_no_double_count, subst_chain_composite_root, subst_chain_scalar_root,
-    try_non_result, try_over_result_is_not_a_conflict, NATIVE_GUARD_NON_BOOL_FIXTURE,
+    estimate_vs_container_erasure, field_failure, flagship_pricing_mutation,
+    missing_to_plain_implicit_coercion, occurs_check, occurs_check_row, open_row_extra_field,
+    overload_bind_chain, plain_scalar_mismatch, probability_f64_bridge_is_not_a_conflict,
+    probability_to_bool_erasure, quantity_add_dimension_mismatch,
+    quantity_add_same_dimension_is_not_a_conflict, same_container_leaf_no_double_count,
+    subst_chain_composite_root, subst_chain_scalar_root, try_non_result,
+    try_over_result_is_not_a_conflict, NATIVE_GUARD_NON_BOOL_FIXTURE,
     NATIVE_OPERATOR_APPLIES_FIXTURE, NATIVE_ROLE_BINDINGS_FIXTURE,
     NATIVE_ROLE_LIT_MISMATCH_FIXTURE, NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE,
     NATIVE_VAR_THREE_ROLES_FIXTURE, NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
@@ -169,6 +171,42 @@ fn native_erasures(tokens: &typefacts::TokenTable, extent: &Extent) -> Vec<TypeC
                 kind: ConflictKind::EpistemicErasure {
                     from: resolved.from,
                     to: resolved.to,
+                },
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect()
+}
+
+/// Every `Dimension`-kind conflict `reflect::analyze` recorded (native
+/// Dimension slice, add/sub same-dimension) — the Dimension counterpart of
+/// [`reflect_mismatches`]/[`reflect_arity_conflicts`].
+fn reflect_dimension_conflicts(report: &ReflectiveReport) -> Vec<&TypeConflict> {
+    report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::Dimension { .. }))
+        .collect()
+}
+
+/// Resolve every row of a settled `DimensionConflict` extent back to a
+/// comparable [`TypeConflict`] via the exporter's token table (native
+/// Dimension slice) — the Dimension counterpart of
+/// [`native_mismatches`]/[`native_erasures`].
+fn native_dimensions(tokens: &typefacts::TokenTable, extent: &Extent) -> Vec<TypeConflict> {
+    extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_dimension(tokens, &record.row).expect(
+                "every derived DimensionConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::Dimension {
+                    op: resolved.op,
+                    left: resolved.left,
+                    right: resolved.right,
                 },
                 because: BTreeSet::new(),
                 scope: resolved.scope,
@@ -2144,5 +2182,171 @@ fn arity_non_first_candidate_match_derives_zero_arity_conflicts() {
         "native package must derive zero ArityConflict rows — a `without` block that \
          reused the ordinal-0 literal instead of a fresh existential var would wrongly \
          fire here"
+    );
+}
+
+/// Native Dimension slice (add/sub same-dimension): `quantity_add_dimension_mismatch`'s
+/// minimal `add(a, b)` over two GROUND, UNEQUAL dimensioned operands
+/// (`Quantity(Mass)`, `Quantity(Kilometre)`) — `reflect.rs`'s `same_dimension`
+/// records `ConflictKind::Dimension{op:"add", left, right}` directly (no
+/// mul/div dimension arithmetic in the way). The native `DimSameMismatch`
+/// rule must independently reach the same verdict, deciding the conflict
+/// itself from the `TyDims` digest inequality rather than restating
+/// reflect's own conclusion — proven by the discriminator immediately below.
+#[test]
+fn quantity_add_dimension_mismatch_derives_one_dimension_conflict() {
+    let fixture = quantity_add_dimension_mismatch();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts = reflect_dimension_conflicts(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one Dimension conflict for the \
+         quantity_add_dimension_mismatch fixture; got {reflect_conflicts:?}"
+    );
+    assert_eq!(
+        reflect_conflicts[0].kind,
+        ConflictKind::Dimension {
+            op: "add".to_string(),
+            left: Ty::Quantity(Ident::new("Mass")),
+            right: Ty::Quantity(Ident::new("Kilometre")),
+        },
+        "reflect's Dimension conflict must be op:\"add\", left: Quantity(Mass), \
+         right: Quantity(Kilometre) — the verbatim operands, ground and unequal"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-quantity-add-dimension-mismatch".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let dimension_extent = settled
+        .extents
+        .get("DimensionConflict")
+        .expect("brix.type package must declare a DimensionConflict relation");
+    assert_eq!(
+        dimension_extent.len(),
+        1,
+        "native package must derive exactly one DimensionConflict row"
+    );
+
+    let native_conflicts = native_dimensions(&export.tokens, dimension_extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived DimensionConflict set must be canonical-byte-identical \
+         to reflect.rs's own conflict set (same subject, same op, same left/right, same scope)"
+    );
+}
+
+/// Native Dimension slice discriminator: `quantity_add_same_dimension_is_not_a_conflict`'s
+/// `add(a, b)` over two operands sharing the SAME ground dimension
+/// (`Quantity(Kilometre)` + `Quantity(Kilometre)`) — `same_dimension_step`'s
+/// `x == y` arm returns `Ok`, so reflect raises ZERO Dimension conflicts.
+/// The native package must independently reach zero `DimensionConflict` rows
+/// too — not because it saw nothing (`DimOp`/`TyDims` rows DO exist for this
+/// query), but because `DimSameMismatch`'s own `ldims != rdims` guard
+/// correctly declines to fire, in contrast with the fixture above where the
+/// same guard correctly does fire. This is what proves the package decides
+/// the conflict rather than merely restating reflect's silence.
+#[test]
+fn quantity_add_same_dimension_is_not_a_conflict_end_to_end() {
+    let fixture = quantity_add_same_dimension_is_not_a_conflict();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts = reflect_dimension_conflicts(&report);
+    assert!(
+        reflect_conflicts.is_empty(),
+        "reflect.rs must record zero Dimension conflicts when both operands share \
+         the same ground dimension; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn =
+        Transaction::new(b"selfhost-parity-quantity-add-same-dimension-is-not-a-conflict".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    // An empty extent may be absent from `settled.extents` entirely or
+    // present with length 0 — handle both, matching the Probability/F64
+    // bridge test's pattern.
+    let dimension_len = settled
+        .extents
+        .get("DimensionConflict")
+        .map_or(0, |extent| extent.len());
+    assert_eq!(
+        dimension_len, 0,
+        "native package must derive zero DimensionConflict rows when both operands \
+         share the same ground dimension — DimOp/TyDims rows exist for this query, \
+         but DimSameMismatch's own ldims != rdims guard correctly declines to fire"
+    );
+}
+
+/// Native Dimension slice, flagship cross-spelling bonus: `flagship_pricing_mutation`'s
+/// one-character `rate * length` -> `rate / length` mutation breaks the
+/// flagship pricing computation's dimensions. The div itself is a mul/div
+/// dimension-vector combination (`solve::dimension_binary_step`, deferred —
+/// no `DimSameOp` is emitted for it), but its GROUND result
+/// (`Dimensioned(Money<EUR>/Kilometre^2)`) is then added to `surcharge`
+/// (`Money<EUR>`) — a same-dimension `add` over two ground, unequal operands,
+/// which IS this slice's scope. Proves the slice reproduces reflect's
+/// Dimension conflict even when the conflicting operand's own type was
+/// itself computed by the (deferred) mul/div machinery, not written directly
+/// in source.
+#[test]
+fn flagship_pricing_mutation_derives_one_dimension_conflict() {
+    let fixture = flagship_pricing_mutation();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts = reflect_dimension_conflicts(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one Dimension conflict for the \
+         flagship_pricing_mutation fixture; got {reflect_conflicts:?}"
+    );
+    assert!(
+        matches!(&reflect_conflicts[0].kind, ConflictKind::Dimension { op, .. } if op == "add"),
+        "the flagship mutation's Dimension conflict must be on the outer \"add\" \
+         (rate/length + surcharge), not the deferred div; got {:?}",
+        reflect_conflicts[0].kind
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-flagship-pricing-mutation".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let dimension_extent = settled
+        .extents
+        .get("DimensionConflict")
+        .expect("brix.type package must declare a DimensionConflict relation");
+    assert_eq!(
+        dimension_extent.len(),
+        1,
+        "native package must derive exactly one DimensionConflict row"
+    );
+
+    let native_conflicts = native_dimensions(&export.tokens, dimension_extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived DimensionConflict set must be canonical-byte-identical \
+         to reflect.rs's own conflict set, even for the div-computed operand type"
     );
 }

@@ -30,6 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use brix_canon::{CanonWriter, Canonical, Domain};
 use brix_ir::ident::{Ident, QualIdent};
 use brix_ir::reflect::{ExprKindTag, Fact, ReflectiveReport, ScopeId, Subject};
+use brix_ir::solve;
 use brix_ir::types::{RowTail, Ty, TyVar};
 use brix_rt::engine::{Row, TransactionOp, Value};
 
@@ -390,6 +391,14 @@ pub struct Export {
 /// `FnArity.function` is asserted verbatim (`Value::Str`, not a token), so it
 /// byte-matches `Applies.operator`'s own verbatim string for the native
 /// `CallArityMismatch` rule's join.
+///
+/// `Fact::DimSameOp` is exported as `DimOp` plus, per operand, a `TyDims` row
+/// carrying the canon digest of `solve::dims(ty)` (native Dimension slice,
+/// add/sub same-dimension only — mul/div deferred). `TyDims` is
+/// comparison-only: inequality of its `dims` column between the two operands
+/// of a `DimOp` IS the native dimension-conflict decision, reproducing
+/// `solve::same_dimension_step`'s ground/ground `x != y` arm without
+/// restating reflect's own verdict.
 ///
 /// Facts outside these slices' rules (`FnSig`, `RowTail`, `DimTerm`) are not
 /// exported — the native package doesn't consume them yet.
@@ -764,6 +773,41 @@ pub fn export(report: &ReflectiveReport) -> Export {
                     row,
                 });
             }
+            // #15 native slice (Dimension, add/sub same-dimension): the
+            // same-dimension operator application itself, plus a `TyDims`
+            // row per operand carrying the canon digest of its
+            // `solve::dims` — the package's own comparison-only handle on
+            // dimension equality (inequality of this column IS the native
+            // dimension conflict decision).
+            Fact::DimSameOp {
+                subject,
+                op,
+                left,
+                right,
+            } => {
+                let left_tok = tokens.record(TokenValue::Ty(left.clone()));
+                let right_tok = tokens.record(TokenValue::Ty(right.clone()));
+                for (tok, ty) in [(&left_tok, left), (&right_tok, right)] {
+                    if let Some(d) = solve::dims(ty) {
+                        ops.push(assert_op(
+                            "TyDims",
+                            [("ty", tok.clone()), ("dims", Value::Str(digest_hex(&d)))],
+                        ));
+                    }
+                }
+                ops.push(assert_op(
+                    "DimOp",
+                    [
+                        (
+                            "subject",
+                            tokens.record(TokenValue::Subject(subject.clone())),
+                        ),
+                        ("op", Value::Str(op.clone())),
+                        ("left", left_tok),
+                        ("right", right_tok),
+                    ],
+                ));
+            }
             _ => {}
         }
     }
@@ -1098,6 +1142,33 @@ pub fn resolve_try_non_result(tokens: &TokenTable, row: &Row) -> Option<Resolved
     Some(ResolvedTryNonResult {
         subject,
         found,
+        scope,
+    })
+}
+
+/// The resolved shape of one derived `DimensionConflict` row (#15 native
+/// Dimension slice, add/sub same-dimension) — like [`ResolvedMismatch`], not
+/// a `Fact`/`TypeConflict` by itself; the harness builds a comparable
+/// `ConflictKind::Dimension` `TypeConflict` from it.
+pub struct ResolvedDimension {
+    pub subject: Subject,
+    pub op: String,
+    pub left: Ty,
+    pub right: Ty,
+    pub scope: ScopeId,
+}
+
+pub fn resolve_dimension(tokens: &TokenTable, row: &Row) -> Option<ResolvedDimension> {
+    let subject = tokens.subject(token_str(row, "subject")?)?.clone();
+    let op = token_str(row, "op")?.to_string();
+    let left = tokens.ty(token_str(row, "left")?)?.clone();
+    let right = tokens.ty(token_str(row, "right")?)?.clone();
+    let scope = tokens.scope(token_str(row, "scope")?)?;
+    Some(ResolvedDimension {
+        subject,
+        op,
+        left,
+        right,
         scope,
     })
 }
