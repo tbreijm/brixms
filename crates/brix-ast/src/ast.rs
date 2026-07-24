@@ -153,6 +153,13 @@ pub enum Decl {
     MlWorkflow(MlWorkflowDecl),
     Experiment(ExperimentDecl),
     Visualization(VisualizationDecl),
+    /// `trait Name<...> { type Assoc; fn method(...) -> T }` (Part V §3:
+    /// "Traits provide constrained polymorphism with associated types;
+    /// coherence per package graph; no inheritance"). Issue #111.
+    Trait(TraitDecl),
+    /// `impl Trait<...>? for Type { type Assoc = T; fn method(...) -> T { ... } }`
+    /// (Part V §3 / §28.3 orphan rule). Issue #111.
+    Impl(ImplDecl),
     /// Top-level `let name (: Type)? = expr` (Appendix D §4/§27.2 examples:
     /// `let n = count(from { ... })`, `let orders: Frame<{ ... }> = frame
     /// from { ... }`) — a local-binding form the spec's own body text uses
@@ -164,7 +171,7 @@ pub enum Decl {
     Let(LetBindingDecl),
     /// Any top-level construct whose keyword Appendix D's `Decl`
     /// alternation doesn't list (see module docs) — parsed structurally
-    /// but not semantically: `trait`, `impl`, `currency`, `phase`, `logic`,
+    /// but not semantically: `currency`, `phase`, `logic`,
     /// `system dynamics`, `hybrid simulation`, `decision`, `workflow`,
     /// `brick`, `export api`, `model contract`, `correction policy`,
     /// `interchange`, `consistency`, `factor`/`ordered factor`,
@@ -203,6 +210,8 @@ impl Decl {
             Decl::MlWorkflow(d) => d.span,
             Decl::Experiment(d) => d.span,
             Decl::Visualization(d) => d.span,
+            Decl::Trait(d) => d.span,
+            Decl::Impl(d) => d.span,
             Decl::Let(d) => d.span,
             Decl::Extension(d) => d.span,
             Decl::Error(s, _) => *s,
@@ -233,6 +242,8 @@ impl Decl {
             Decl::MlWorkflow(d) => d.vis,
             Decl::Experiment(d) => d.vis,
             Decl::Visualization(d) => d.vis,
+            Decl::Trait(d) => d.vis,
+            Decl::Impl(d) => d.vis,
             Decl::Let(d) => d.vis,
             Decl::Extension(d) => d.vis,
             Decl::Error(_, _) => Visibility::Private,
@@ -331,6 +342,14 @@ impl Decl {
                 set_span(&mut d.span);
             }
             Decl::Visualization(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Trait(d) => {
+                d.vis = vis;
+                set_span(&mut d.span);
+            }
+            Decl::Impl(d) => {
                 d.vis = vis;
                 set_span(&mut d.span);
             }
@@ -775,6 +794,48 @@ pub struct TypeDecl {
     pub vis: Visibility,
     pub name: Ident,
     pub generics: Vec<GenericParam>,
+    pub value: Type,
+}
+
+/// `trait Name<Generics> { type Assoc; fn method(params) -> Ret }` — Part V §3.
+/// Method entries reuse [`FnDecl`]; a signature-only method has `body: None`,
+/// a default method carries a body. Issue #111.
+#[derive(Debug, Clone)]
+pub struct TraitDecl {
+    pub span: Span,
+    pub vis: Visibility,
+    pub name: Ident,
+    pub generics: Vec<GenericParam>,
+    pub assoc_types: Vec<AssocTypeDecl>,
+    pub methods: Vec<FnDecl>,
+}
+
+/// An associated-type *declaration* inside a trait: `type Item`.
+#[derive(Debug, Clone)]
+pub struct AssocTypeDecl {
+    pub span: Span,
+    pub name: Ident,
+}
+
+/// `impl Trait<Args>? for Type { type Assoc = T; fn method(params) -> Ret { .. } }`
+/// — Part V §3 / §28.3 orphan rule. Issue #111.
+#[derive(Debug, Clone)]
+pub struct ImplDecl {
+    pub span: Span,
+    pub vis: Visibility,
+    pub trait_name: Ident,
+    pub trait_args: Vec<TypeArg>,
+    /// The head type the trait is implemented for (`for Type`).
+    pub target: Type,
+    pub assoc_bindings: Vec<AssocTypeBinding>,
+    pub methods: Vec<FnDecl>,
+}
+
+/// An associated-type *binding* inside an impl: `type Item = String`.
+#[derive(Debug, Clone)]
+pub struct AssocTypeBinding {
+    pub span: Span,
+    pub name: Ident,
     pub value: Type,
 }
 

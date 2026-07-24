@@ -70,6 +70,10 @@ pub fn lower_decls(
             Decl::Experiment(x) => skip(diags, x.span, "experiment"),
             Decl::Visualization(x) => skip(diags, x.span, "visualization"),
             Decl::Let(x) => skip(diags, x.span, "let"),
+            // Trait/impl now parse to real AST nodes (#111 slice 1); lowering
+            // into TraitEnv + coherence is slice 2, so they still defer here.
+            Decl::Trait(x) => skip(diags, x.span, "trait"),
+            Decl::Impl(x) => skip(diags, x.span, "impl"),
             Decl::Extension(x) => skip(diags, x.span, "extension"),
 
             // Silent: the parser already reported this.
