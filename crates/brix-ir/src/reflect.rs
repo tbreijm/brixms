@@ -398,6 +398,25 @@ pub enum Fact {
         left: Ty,
         right: Ty,
     },
+    /// #15 native rule-side-conditions (restatement): reflect's Appendix-E
+    /// findings, emitted alongside the conflict so the package re-derives it via
+    /// a RootScope join (completeness, not inference — the effect/binding analysis
+    /// stays in crate::check). Subject is always Subject::Rule.
+    RuleImpure {
+        subject: Subject,
+    },
+    RuleUnboundHeadKey {
+        subject: Subject,
+        key: Ident,
+    },
+    RuleMaskRefNotEdgeBound {
+        subject: Subject,
+        var: Ident,
+    },
+    RuleOrdinaryFnOnDerivedRel {
+        subject: Subject,
+        relation: QualIdent,
+    },
 }
 
 /// The one canonical encoder `FactId::derive` uses. Never a second fact
@@ -554,6 +573,21 @@ pub fn write_fact(fact: &Fact, w: &mut CanonWriter) {
             w.write_str(op);
             left.canon_write(w);
             right.canon_write(w);
+        }),
+        Fact::RuleImpure { subject } => w.write_enum(20, |w| {
+            subject.canon_write(w);
+        }),
+        Fact::RuleUnboundHeadKey { subject, key } => w.write_enum(21, |w| {
+            subject.canon_write(w);
+            key.canon_write(w);
+        }),
+        Fact::RuleMaskRefNotEdgeBound { subject, var } => w.write_enum(22, |w| {
+            subject.canon_write(w);
+            var.canon_write(w);
+        }),
+        Fact::RuleOrdinaryFnOnDerivedRel { subject, relation } => w.write_enum(23, |w| {
+            subject.canon_write(w);
+            relation.canon_write(w);
         }),
     }
 }
@@ -826,7 +860,11 @@ impl Reflect {
                 | Fact::FieldAccess { .. }
                 | Fact::RoleVar { .. }
                 | Fact::CallArity { .. }
-                | Fact::FnArity { .. } => {}
+                | Fact::FnArity { .. }
+                | Fact::RuleImpure { .. }
+                | Fact::RuleUnboundHeadKey { .. }
+                | Fact::RuleMaskRefNotEdgeBound { .. }
+                | Fact::RuleOrdinaryFnOnDerivedRel { .. } => {}
                 Fact::DimSameOp { left, right, .. } => {
                     *left = solve::resolve(&subst, left.clone());
                     *right = solve::resolve(&subst, right.clone());
@@ -1142,6 +1180,12 @@ impl Reflect {
         let calls = crate::check::scan_rule_calls(rule, resolver);
         if !flags.pure {
             self.conflict(subject.clone(), ConflictKind::ImpureRule, vec![]);
+            self.fact(
+                Fact::RuleImpure {
+                    subject: subject.clone(),
+                },
+                vec![],
+            );
         }
         if !flags.det {
             self.conflict(subject.clone(), ConflictKind::NondeterministicRule, vec![]);
@@ -1152,21 +1196,44 @@ impl Reflect {
         for key in crate::check::unbound_head_keys(rule) {
             self.conflict(
                 subject.clone(),
-                ConflictKind::UnboundHeadKey { key },
+                ConflictKind::UnboundHeadKey { key: key.clone() },
+                vec![],
+            );
+            self.fact(
+                Fact::RuleUnboundHeadKey {
+                    subject: subject.clone(),
+                    key,
+                },
                 vec![],
             );
         }
         for var in crate::check::unbound_mask_refs(rule) {
             self.conflict(
                 subject.clone(),
-                ConflictKind::MaskRefNotEdgeBound { var },
+                ConflictKind::MaskRefNotEdgeBound { var: var.clone() },
+                vec![],
+            );
+            self.fact(
+                Fact::RuleMaskRefNotEdgeBound {
+                    subject: subject.clone(),
+                    var,
+                },
                 vec![],
             );
         }
         for relation in calls.ordinary_on_derived {
             self.conflict(
                 subject.clone(),
-                ConflictKind::OrdinaryFnOnDerivedRel { relation },
+                ConflictKind::OrdinaryFnOnDerivedRel {
+                    relation: relation.clone(),
+                },
+                vec![],
+            );
+            self.fact(
+                Fact::RuleOrdinaryFnOnDerivedRel {
+                    subject: subject.clone(),
+                    relation,
+                },
                 vec![],
             );
         }

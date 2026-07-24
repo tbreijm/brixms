@@ -54,6 +54,19 @@ pub const NAT_TRY_NON_RESULT: &str = "BRX-NAT-0007";
 /// `BRX-NAT-0008` — native counterpart of `ConflictKind::Dimension`'s
 /// add/sub same-dimension case: `DimensionConflict` (mul/div deferred).
 pub const NAT_DIMENSION: &str = "BRX-NAT-0008";
+/// `BRX-NAT-0009` — native counterpart of `ConflictKind::ImpureRule`
+/// (Appendix E `pure(B, H)`): `ImpureRuleConflict`. Restatement, not
+/// re-analysis — see `typefacts.rs`'s `Fact::RuleImpure` export doc.
+pub const NAT_RULE_IMPURE: &str = "BRX-NAT-0009";
+/// `BRX-NAT-0010` — native counterpart of `ConflictKind::UnboundHeadKey`
+/// (Appendix E `keys(H) ⊆ Bindings`): `UnboundHeadKeyConflict`.
+pub const NAT_UNBOUND_HEAD_KEY: &str = "BRX-NAT-0010";
+/// `BRX-NAT-0011` — native counterpart of `ConflictKind::MaskRefNotEdgeBound`
+/// (Appendix E mask-head side condition): `MaskRefNotEdgeBoundConflict`.
+pub const NAT_MASK_REF: &str = "BRX-NAT-0011";
+/// `BRX-NAT-0012` — native counterpart of `ConflictKind::OrdinaryFnOnDerivedRel`
+/// (Appendix E `Ordinary fn`): `OrdinaryFnOnDerivedRelConflict`.
+pub const NAT_ORDINARY_FN: &str = "BRX-NAT-0012";
 
 /// The compiled `packages/brix.type/src/world.brix` package, compiled once
 /// per process. The package is known-good (Track A slice B proved it
@@ -101,7 +114,7 @@ fn subject_span(subject: &Subject, meta: &LowerMeta) -> Span {
 }
 
 /// Run the self-hosted `brix.type` checker over `lowered` and map its
-/// derived conflicts to compiler diagnostics. Iterates the 8 `*Conflict`
+/// derived conflicts to compiler diagnostics. Iterates the 12 `*Conflict`
 /// extents in a fixed order, and rows within an extent in the extent's own
 /// (content-addressed, already deterministic) `BTreeMap` order, so the
 /// returned `Vec`'s order is stable across runs for the same input.
@@ -218,6 +231,50 @@ pub fn native_typecheck(lowered: &Lowered) -> Vec<Diagnostic> {
                         "dimension mismatch on `{}`: `{}` vs `{}`",
                         r.op, r.left, r.right
                     ),
+                ));
+            }
+        }
+    }
+    if let Some(extent) = settled.extents.get("ImpureRuleConflict") {
+        for record in extent.values() {
+            if let Some(r) = typefacts::resolve_rule_impure(tokens, &record.row) {
+                diags.push(Diagnostic::error(
+                    NAT_RULE_IMPURE,
+                    subject_span(&r.subject, meta),
+                    "impure rule".to_string(),
+                ));
+            }
+        }
+    }
+    if let Some(extent) = settled.extents.get("UnboundHeadKeyConflict") {
+        for record in extent.values() {
+            if let Some(r) = typefacts::resolve_unbound_head_key(tokens, &record.row) {
+                diags.push(Diagnostic::error(
+                    NAT_UNBOUND_HEAD_KEY,
+                    subject_span(&r.subject, meta),
+                    format!("unbound head key `{}`", r.key),
+                ));
+            }
+        }
+    }
+    if let Some(extent) = settled.extents.get("MaskRefNotEdgeBoundConflict") {
+        for record in extent.values() {
+            if let Some(r) = typefacts::resolve_mask_ref(tokens, &record.row) {
+                diags.push(Diagnostic::error(
+                    NAT_MASK_REF,
+                    subject_span(&r.subject, meta),
+                    format!("mask ref `{}` not edge-bound", r.var),
+                ));
+            }
+        }
+    }
+    if let Some(extent) = settled.extents.get("OrdinaryFnOnDerivedRelConflict") {
+        for record in extent.values() {
+            if let Some(r) = typefacts::resolve_ordinary_fn(tokens, &record.row) {
+                diags.push(Diagnostic::error(
+                    NAT_ORDINARY_FN,
+                    subject_span(&r.subject, meta),
+                    format!("ordinary fn on derived relation `{}`", r.relation),
                 ));
             }
         }
