@@ -338,3 +338,44 @@ fn multi_file_package_check_and_fmt_support() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+#[test]
+fn path_dependency_builds_and_checks_cleanly() {
+    let root = tmp_dir("pathdep_cli");
+    let app = root.join("app");
+    let sibling = root.join("sib");
+
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::create_dir_all(sibling.join("src")).unwrap();
+
+    std::fs::write(
+        sibling.join("brix.toml"),
+        "[package]\nname = \"sib\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sibling.join("src").join("world.brix"),
+        "package sib @ 0.1.0\npub rel SiblingRel { id: Int } key(id)\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        app.join("brix.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[dependencies]\nsib = { path = \"../sib\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("src").join("world.brix"),
+        "package app @ 0.1.0\nuse sib.{SiblingRel}\nrel Local { id: Int } key(id)\n",
+    )
+    .unwrap();
+
+    let check_out = brix(&["check", app.as_str()]);
+    assert!(
+        check_out.status.success(),
+        "brix check on package with path dependency must succeed, got: {}",
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
