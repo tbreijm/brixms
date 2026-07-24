@@ -40,9 +40,18 @@ pub fn rust_type_of(ty: &Ty) -> String {
         ),
         Ty::Bag(t) => format!("Vec<{}>", rust_type_of(t)),
         Ty::Rel(_) => unresolved("a Rel<_> value cannot be a relation column"),
-        Ty::NodeRef(e) => format!("{e}Id"),
-        Ty::EdgeRef(e) => format!("{e}EdgeId"),
-        Ty::ClaimRef(e) => format!("{e}ClaimId"),
+        Ty::NodeRef(e) => {
+            let s = e.segments().last().map(|s| s.as_str()).unwrap_or("");
+            format!("{s}Id")
+        }
+        Ty::EdgeRef(e) => {
+            let s = e.segments().last().map(|s| s.as_str()).unwrap_or("");
+            format!("{s}EdgeId")
+        }
+        Ty::ClaimRef(e) => {
+            let s = e.segments().last().map(|s| s.as_str()).unwrap_or("");
+            format!("{s}ClaimId")
+        }
         Ty::Enum(q) => q
             .segments()
             .last()
@@ -106,7 +115,10 @@ mod tests {
 
     #[test]
     fn node_ref_maps_to_a_per_entity_id_type() {
-        assert_eq!(rust_type_of(&Ty::NodeRef(Ident::new("Order"))), "OrderId");
+        assert_eq!(
+            rust_type_of(&Ty::NodeRef(QualIdent::simple("Order"))),
+            "OrderId"
+        );
     }
 
     #[test]

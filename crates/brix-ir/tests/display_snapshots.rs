@@ -69,7 +69,7 @@ fn expr_tree_with_try_site_display() {
         Ty::Instant,
         ExprKind::Field {
             base: Expr::new(
-                Ty::NodeRef(Ident::new("Order")),
+                Ty::NodeRef(QualIdent::simple("Order")),
                 ExprKind::Var(Ident::new("o")),
             ),
             field: Ident::new("due"),
@@ -131,7 +131,7 @@ fn type_display_forms() {
     let row = Row::closed(vec![
         RowField {
             name: Ident::new("vehicle"),
-            ty: Ty::NodeRef(Ident::new("Vehicle")),
+            ty: Ty::NodeRef(QualIdent::simple("Vehicle")),
         },
         RowField {
             name: Ident::new("score"),
@@ -166,12 +166,12 @@ fn constraint_and_query_display() {
         params: vec![],
         body: Pattern::new(vec![edge("Order", &[("id", "o")])]),
         yields: Expr::new(
-            Ty::NodeRef(Ident::new("Order")),
+            Ty::NodeRef(QualIdent::simple("Order")),
             ExprKind::Var(Ident::new("o")),
         ),
         result: Ty::rel(Row::closed(vec![RowField {
             name: Ident::new("order"),
-            ty: Ty::NodeRef(Ident::new("Order")),
+            ty: Ty::NodeRef(QualIdent::simple("Order")),
         }])),
     };
     insta::assert_snapshot!(format!("{c}\n{q}"), @r"

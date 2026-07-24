@@ -312,8 +312,11 @@ pub fn flagship_pricing_mutation() -> TypeFixture {
         .with_relation(RelationSchema {
             name: QualIdent::from("Move"),
             roles: vec![
-                (Ident::new("order"), Ty::NodeRef(Ident::new("Order"))),
-                (Ident::new("vehicle"), Ty::NodeRef(Ident::new("Vehicle"))),
+                (Ident::new("order"), Ty::NodeRef(QualIdent::simple("Order"))),
+                (
+                    Ident::new("vehicle"),
+                    Ty::NodeRef(QualIdent::simple("Vehicle")),
+                ),
             ],
             key: vec![Ident::new("order")],
             model_closed: true,
@@ -1198,7 +1201,7 @@ pub fn rule_ordinary_fn_on_derived_rel() -> RuleFixture {
     let resolver = TableResolver::new()
         .with_relation(RelationSchema {
             name: QualIdent::from("ComputedPrice"),
-            roles: vec![(Ident::new("order"), Ty::NodeRef(Ident::new("Order")))],
+            roles: vec![(Ident::new("order"), Ty::NodeRef(QualIdent::simple("Order")))],
             key: vec![],
             model_closed: true,
             derived: true,
