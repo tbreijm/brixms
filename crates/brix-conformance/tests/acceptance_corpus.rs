@@ -269,6 +269,18 @@ fn manifest() -> Vec<Entry> {
         expect: Expect::Fail,
         codes: &["BRX4001"],
     });
+    // Trait-coherence orphan rule (issue #111): a second `impl Trait for Head`
+    // must fail closed at Lower with BRX-LOW-0017.
+    m.push(Entry {
+        section: "negative-impl-coherence",
+        source: Source::Negative {
+            dir: "lower",
+            file: "impl_coherence.brix",
+        },
+        terminal: Stage::Lower,
+        expect: Expect::Fail,
+        codes: &["BRX-LOW-0017"],
+    });
 
     // --- 2 Build/Run fixtures (declarative here; driven by the ignored
     //     subprocess tests below). ----------------------------------------
@@ -683,6 +695,16 @@ fn negative_phase_cycle_snapshots() {
         "phase",
         "phase_cycle.brix",
         Stage::Phase,
+    );
+}
+
+#[test]
+fn negative_impl_coherence_snapshots() {
+    assert_negative_snapshots(
+        "negative_impl_coherence",
+        "lower",
+        "impl_coherence.brix",
+        Stage::Lower,
     );
 }
 
