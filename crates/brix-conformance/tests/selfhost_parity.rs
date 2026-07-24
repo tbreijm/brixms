@@ -37,13 +37,13 @@ use brix_conformance::typecorpus::{
     cross_epistemic_wrapper_mismatch, estimate_same_ctor_mismatch, estimate_to_plain_erasure,
     estimate_vs_container_erasure, field_failure, flagship_pricing_mutation,
     missing_to_plain_implicit_coercion, occurs_check, occurs_check_row, open_row_extra_field,
-    overload_bind_chain, plain_scalar_mismatch, probability_f64_bridge_is_not_a_conflict,
-    probability_to_bool_erasure, quantity_add_dimension_mismatch,
-    quantity_add_same_dimension_is_not_a_conflict, rule_divergent_call, rule_impure_effect_row,
-    rule_mask_ref_not_edge_bound, rule_nondeterministic_effect_row,
-    rule_ordinary_fn_on_derived_rel, rule_unbound_head_key, same_container_leaf_no_double_count,
-    subst_chain_composite_root, subst_chain_scalar_root, try_non_result,
-    try_over_result_is_not_a_conflict, RuleFixture, NATIVE_GUARD_NON_BOOL_FIXTURE,
+    overload_bind_chain, overload_no_winner_mismatch, plain_scalar_mismatch,
+    probability_f64_bridge_is_not_a_conflict, probability_to_bool_erasure,
+    quantity_add_dimension_mismatch, quantity_add_same_dimension_is_not_a_conflict,
+    rule_divergent_call, rule_impure_effect_row, rule_mask_ref_not_edge_bound,
+    rule_nondeterministic_effect_row, rule_ordinary_fn_on_derived_rel, rule_unbound_head_key,
+    same_container_leaf_no_double_count, subst_chain_composite_root, subst_chain_scalar_root,
+    try_non_result, try_over_result_is_not_a_conflict, RuleFixture, NATIVE_GUARD_NON_BOOL_FIXTURE,
     NATIVE_OPERATOR_APPLIES_FIXTURE, NATIVE_ROLE_BINDINGS_FIXTURE,
     NATIVE_ROLE_LIT_MISMATCH_FIXTURE, NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE,
     NATIVE_VAR_THREE_ROLES_FIXTURE, NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
@@ -1283,6 +1283,56 @@ fn plain_scalar_mismatch_derives_exactly_one_mismatch_conflict() {
 
     let export = typefacts::export(&report);
     let mut txn = Transaction::new(b"selfhost-parity-plain-scalar-mismatch".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let mismatch_extent = settled
+        .extents
+        .get("MismatchConflict")
+        .expect("brix.type package must declare a MismatchConflict relation");
+    assert_eq!(
+        mismatch_extent.len(),
+        1,
+        "native package must derive exactly one MismatchConflict row"
+    );
+
+    let native_conflicts = native_mismatches(&export.tokens, mismatch_extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived MismatchConflict set must be canonical-byte-identical \
+         to reflect.rs's own conflict set"
+    );
+}
+
+/// #15 native overload no-unique-winner: reflect's overload argmax
+/// (`resolve_call`) directly raises a `Mismatch` when no candidate is the
+/// unique top-scoring match. The `overload_no_winner_mismatch` fixture calls an
+/// overloaded `f` (`f(Int)`/`f(Bool)`) with a `Str` arg — both candidates pass
+/// the arity filter but neither unifies, so `matches` is empty and reflect
+/// raises `Mismatch{left: Str, right: Int}` whole (never via a `UnifyAttempt`).
+/// The native `OverloadNoWinner` restatement re-derives exactly that
+/// MismatchConflict — the last direct-raise Mismatch to reach native parity.
+#[test]
+fn overload_no_winner_derives_exactly_one_mismatch_conflict() {
+    let fixture = overload_no_winner_mismatch();
+    let report = analyze(&fixture.source, &fixture.resolver);
+
+    let reflect_conflicts = reflect_mismatches(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one Mismatch conflict for the \
+         overload_no_winner_mismatch fixture; got {reflect_conflicts:?}"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-overload-no-winner".to_vec());
     txn.ops = export.ops;
 
     let mut store = Store::new(compiled_package());

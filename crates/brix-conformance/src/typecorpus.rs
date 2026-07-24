@@ -538,6 +538,58 @@ pub fn arity_non_first_candidate_match_is_not_a_conflict() -> TypeFixture {
     }
 }
 
+/// Discriminator fixture (native overload no-unique-winner slice): two
+/// arity-matching overloads of `f` — `f(Int) -> Int` (ordinal 0) and
+/// `f(Bool) -> Bool` (ordinal 1) — called with a `Str` argument. Both survive
+/// the arity filter (each is 1-param), so `arity_ok` is non-empty (no Arity
+/// conflict), but neither candidate's single arg unifies (`Str` ~ `Int` and
+/// `Str` ~ `Bool` both fail), so `matches` is empty and reflect's overload
+/// argmax falls through to the direct-raise `Mismatch{left: Str, right: Int}`
+/// (`right` = `arity_ok[0].params[0]`, the FIRST arity-matching candidate's
+/// param). This is the one direct-raise Mismatch that never flows through a
+/// `UnifyAttempt` — the native `OverloadNoWinner` restatement reproduces it.
+/// Selfhost-only, like `arity_non_first_candidate_match_is_not_a_conflict`;
+/// not added to [`all_type_fixtures`].
+pub fn overload_no_winner_mismatch() -> TypeFixture {
+    let o = Origins::new("OverloadNoWinner");
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("OverloadNoWinner"),
+            params: vec![],
+            body: Pattern::default(),
+            yields: o.call("f", vec![o.lit(Ty::Str, Lit::Str("s".to_string()))]),
+            result: o.ty_var(),
+        }],
+    };
+    let resolver = TableResolver::new()
+        .with_function(FnSignature {
+            name: QualIdent::from("f"),
+            params: vec![Ty::Int(IntWidth::Int)],
+            ret: Ty::Int(IntWidth::Int),
+            effects: EffectRow::empty(),
+            is_aggregate: false,
+            may_diverge: false,
+        })
+        .with_function(FnSignature {
+            name: QualIdent::from("f"),
+            params: vec![Ty::Bool],
+            ret: Ty::Bool,
+            effects: EffectRow::empty(),
+            is_aggregate: false,
+            may_diverge: false,
+        });
+    TypeFixture {
+        label: "overload_no_winner_mismatch",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver,
+        expected_categories: BTreeSet::from([Category::Mismatch]),
+    }
+}
+
 /// Fixture 4: an edge clause's literal role argument does not match the
 /// relation schema's declared role type. Uses a `Rule`, not a `Constraint`,
 /// purely for fixture variety — `constraint_role_mismatch` below exercises
