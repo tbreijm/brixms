@@ -7,6 +7,10 @@
 // `bind_ty` records to their union-find root, reproducing `solve::resolve`'s
 // own transitive chase natively.
 //
+// The native Dimension slice adds add/sub same-dimension conflict detection
+// (mul/div deferred): the package independently compares two ground operands'
+// `solve::dims` digests rather than restating reflect's own verdict.
+//
 // Shadow-mode differential companion to `brix_ir::reflect::analyze`. This
 // package never runs against a real user transaction: `brix-conformance`'s
 // exporter (`crates/brix-conformance/src/typefacts.rs`) flattens a subset of
@@ -676,4 +680,38 @@ derive MintOptionOf: MintedType(orig: t, minted: m) from {
     TyBytes(ty: t, bytes: b)
     let raw = brix.ty.mint_unary(14, b)
     let m = brix.canon.digest(raw)
+}
+
+// --- #15 native Dimension (add/sub same-dimension) ---
+
+// structural input: a same-dimension operator application (add/sub/eq/ne/lt/
+// le/gt/ge) whose BOTH operands have ground dimensions — the Solve (var) and
+// temporal branches of solve::same_dimension_step never export a row. `op` is
+// the verbatim op string; `left`/`right` are Ty tokens, surfaced in the
+// conflict. Imported from reflect.rs's Fact::DimSameOp.
+rel DimOp { subject: String; op: String; left: String; right: String } key(subject, op, left, right)
+
+// structural input: the canon digest of `solve::dims(ty)` for a DimOp operand,
+// exporter-computed (a pure function of the token's shape, like TyCtorIs). Two
+// tokens share this digest iff their `Dimensions` vectors are equal (injective
+// canon encoding), which is exactly same_dimension_step's `x == y` — so
+// inequality of this column IS the native dimension comparison. Comparison-only.
+rel TyDims { ty: String; dims: String } key(ty)
+
+// derived conflict: a same-dimension operator over two ground operands whose
+// dimensions disagree (mirrors reflect.rs's ConflictKind::Dimension{op,left,
+// right}, add/sub form; mul/div deferred).
+rel DimensionConflict { subject: String; op: String; left: String; right: String; scope: String } key(subject, op, left, right, scope)
+
+// DimSameMismatch: DimOp ⋈ TyDims(left) ⋈ TyDims(right) ⋈ RootScope, when the
+// two operands' dims digests differ → DimensionConflict. reflect exports the
+// OPERANDS for every ground-ground same-dimension op (agreeing or not), never
+// the conflict — the `!=` here is the package's own decision. Monotone (the
+// LitRoleMismatch shape), Appendix-F stratified.
+derive DimSameMismatch: DimensionConflict(subject: subject, op: op, left: left, right: right, scope: scope) from {
+    DimOp(subject: subject, op: op, left: left, right: right)
+    TyDims(ty: left, dims: ldims)
+    TyDims(ty: right, dims: rdims)
+    RootScope(scope: scope)
+    when ldims != rdims
 }

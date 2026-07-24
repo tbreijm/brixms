@@ -384,6 +384,20 @@ pub enum Fact {
         ordinal: u32,
         paramc: u32,
     },
+    /// #15 native Dimension (add/sub same-dimension): one same-dimension operator
+    /// application over two GROUND-dimensioned operands, recorded regardless of
+    /// whether the dims agree — the package decides the conflict (dims-token
+    /// inequality). Emitted ONLY when `solve::dims` is `Some` for BOTH operands,
+    /// so the Solve (var) and temporal (`Instant`/`Duration`, whose `dims` is
+    /// `None`) branches never emit. `op` is the verbatim operation string (like
+    /// `Applies::operator`); `left`/`right` are the operand `Ty`s (var-free by the
+    /// guard). NOT emitted for mul/div (deferred).
+    DimSameOp {
+        subject: Subject,
+        op: String,
+        left: Ty,
+        right: Ty,
+    },
 }
 
 /// The one canonical encoder `FactId::derive` uses. Never a second fact
@@ -516,6 +530,7 @@ pub fn write_fact(fact: &Fact, w: &mut CanonWriter) {
             var.canon_write(w);
             target.canon_write(w);
         }),
+        // ordinal 16 is an intentionally-unused hole (skipped by #124); append-only continues at 19
         Fact::CallArity { subject, argc } => w.write_enum(17, |w| {
             subject.canon_write(w);
             w.write_uint(*argc as u64);
@@ -528,6 +543,17 @@ pub fn write_fact(fact: &Fact, w: &mut CanonWriter) {
             w.write_str(function);
             w.write_uint(*ordinal as u64);
             w.write_uint(*paramc as u64);
+        }),
+        Fact::DimSameOp {
+            subject,
+            op,
+            left,
+            right,
+        } => w.write_enum(19, |w| {
+            subject.canon_write(w);
+            w.write_str(op);
+            left.canon_write(w);
+            right.canon_write(w);
         }),
     }
 }
@@ -801,6 +827,10 @@ impl Reflect {
                 | Fact::RoleVar { .. }
                 | Fact::CallArity { .. }
                 | Fact::FnArity { .. } => {}
+                Fact::DimSameOp { left, right, .. } => {
+                    *left = solve::resolve(&subst, left.clone());
+                    *right = solve::resolve(&subst, right.clone());
+                }
                 // `ty` here is always `lit_ty(lit)` — a concrete literal
                 // class (`Unit`/`Bool`/`Int`/`Str`/`F64`/`Enum`) that never
                 // contains a `TyVar`, so there is nothing to resolve.
@@ -1809,6 +1839,17 @@ impl Reflect {
         b: &Ty,
         deps: &[usize],
     ) -> Ty {
+        if solve::dims(a).is_some() && solve::dims(b).is_some() {
+            self.fact(
+                Fact::DimSameOp {
+                    subject: subject.clone(),
+                    op: operation.to_owned(),
+                    left: a.clone(),
+                    right: b.clone(),
+                },
+                deps.to_vec(),
+            );
+        }
         match solve::same_dimension_step(a, b) {
             DimStep::Ok(t) => t,
             DimStep::Conflict => {

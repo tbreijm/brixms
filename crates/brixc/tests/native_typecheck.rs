@@ -160,3 +160,51 @@ fn call_arity_mismatch_yields_a_nat_arity_diagnostic() {
         arity_diags[0].message
     );
 }
+
+/// A dimension mismatch: `rate / length + surcharge` adds `Money<EUR>/Kilometre²`
+/// to `Money<EUR>` — two ground, unequal dimensions. Same shape as
+/// `lower_units.rs`'s `pricing_rate_divided_by_length_is_one_dimension_error`
+/// (and #15's `flagship_pricing_mutation` parity fixture). Covers the
+/// `DimensionConflict` → `BRX-NAT-0008` path of `native_typecheck`.
+const DIMENSION_MISMATCH_SRC: &str = r#"
+package t @ 1.0.0
+use brix.math.units.Kilometre
+rel Input { rate: Money<EUR> / Kilometre; length: Quantity<Kilometre>; surcharge: Money<EUR> } key(length)
+rel Output { amount: Money<EUR> } key(amount)
+derive R: Output(amount: amount) from {
+  Input(rate, length, surcharge)
+  let amount = rate / length + surcharge
+}
+"#;
+
+#[test]
+fn dimension_mismatch_yields_a_nat_dimension_diagnostic() {
+    let lowered = lower(DIMENSION_MISMATCH_SRC);
+
+    let report = analyze(&lowered.source, &lowered.resolver);
+    let reflect_dims: Vec<_> = report
+        .conflicts
+        .iter()
+        .filter(|c| matches!(c.kind, ConflictKind::Dimension { .. }))
+        .collect();
+    assert_eq!(
+        reflect_dims.len(),
+        1,
+        "reflect::analyze should report exactly one Dimension conflict: {:#?}",
+        report.conflicts
+    );
+
+    let diags = native_typecheck(&lowered);
+    let dim_diags: Vec<_> = diags.iter().filter(|d| d.code == "BRX-NAT-0008").collect();
+    assert_eq!(
+        dim_diags.len(),
+        1,
+        "expected exactly one BRX-NAT-0008 diagnostic: {:#?}",
+        diags
+    );
+    assert!(
+        dim_diags[0].message.contains("dimension mismatch"),
+        "unexpected message: {}",
+        dim_diags[0].message
+    );
+}

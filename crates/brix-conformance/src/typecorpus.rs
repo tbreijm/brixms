@@ -342,6 +342,77 @@ pub fn flagship_pricing_mutation() -> TypeFixture {
     }
 }
 
+/// #15 native Dimension slice (add/sub same-dimension): the minimal
+/// same-dimension conflict — two GROUND, UNEQUAL dimensioned operands
+/// (`Quantity(Mass)` vs `Quantity(Kilometre)`) added directly, no div/mul
+/// mutation in the way. Yields exactly one reflect
+/// `ConflictKind::Dimension{op:"add", left: Quantity(Mass), right:
+/// Quantity(Kilometre)}`. Selfhost-only, not added to [`all_type_fixtures`],
+/// to keep `type_parity` unchanged.
+pub fn quantity_add_dimension_mismatch() -> TypeFixture {
+    let o = Origins::new("QuantityAddDimensionMismatch");
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("QuantityAddDimensionMismatch"),
+            params: vec![
+                (Ident::new("a"), Ty::Quantity(Ident::new("Mass"))),
+                (Ident::new("b"), Ty::Quantity(Ident::new("Kilometre"))),
+            ],
+            body: Pattern::default(),
+            yields: o.op("add", vec![o.var("a"), o.var("b")]),
+            result: o.ty_var(),
+        }],
+    };
+    TypeFixture {
+        label: "quantity_add_dimension_mismatch",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver: TableResolver::new(),
+        expected_categories: BTreeSet::from([Category::Dimension]),
+    }
+}
+
+/// #15 native Dimension slice discriminator: both operands share the SAME
+/// ground dimension (`Quantity(Kilometre)` + `Quantity(Kilometre)`) — reflect
+/// raises ZERO `Dimension` conflicts (`same_dimension_step`'s `x == y` arm),
+/// and the native package must independently reach zero `DimensionConflict`
+/// rows too. The point isn't that native stays silent (a restatement
+/// implementation would trivially stay silent here as well, having nothing
+/// to restate) — it's that `DimOp`/`TyDims` rows DO exist for this query (the
+/// package sees the same-dimension op and both operands' digests), and
+/// `DimSameMismatch`'s own `ldims != rdims` guard is what correctly declines
+/// to fire, in contrast with [`quantity_add_dimension_mismatch`] where the
+/// same guard correctly fires. Selfhost-only, not added to
+/// [`all_type_fixtures`], to keep `type_parity` unchanged.
+pub fn quantity_add_same_dimension_is_not_a_conflict() -> TypeFixture {
+    let o = Origins::new("QuantityAddSameDimensionIsNotAConflict");
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("QuantityAddSameDimensionIsNotAConflict"),
+            params: vec![
+                (Ident::new("a"), Ty::Quantity(Ident::new("Kilometre"))),
+                (Ident::new("b"), Ty::Quantity(Ident::new("Kilometre"))),
+            ],
+            body: Pattern::default(),
+            yields: o.op("add", vec![o.var("a"), o.var("b")]),
+            result: o.ty_var(),
+        }],
+    };
+    TypeFixture {
+        label: "quantity_add_same_dimension_is_not_a_conflict",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver: TableResolver::new(),
+        expected_categories: BTreeSet::new(),
+    }
+}
+
 /// Fixture 2: a `when` guard whose expression is not `Bool`.
 pub fn non_bool_guard() -> TypeFixture {
     let o = Origins::new("R");

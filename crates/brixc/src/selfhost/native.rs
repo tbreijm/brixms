@@ -51,6 +51,9 @@ pub const NAT_EPISTEMIC_ERASURE: &str = "BRX-NAT-0006";
 /// `BRX-NAT-0007` — native counterpart of `TypeError::TryNonResult`:
 /// `TryNonResultConflict`.
 pub const NAT_TRY_NON_RESULT: &str = "BRX-NAT-0007";
+/// `BRX-NAT-0008` — native counterpart of `ConflictKind::Dimension`'s
+/// add/sub same-dimension case: `DimensionConflict` (mul/div deferred).
+pub const NAT_DIMENSION: &str = "BRX-NAT-0008";
 
 /// The compiled `packages/brix.type/src/world.brix` package, compiled once
 /// per process. The package is known-good (Track A slice B proved it
@@ -98,7 +101,7 @@ fn subject_span(subject: &Subject, meta: &LowerMeta) -> Span {
 }
 
 /// Run the self-hosted `brix.type` checker over `lowered` and map its
-/// derived conflicts to compiler diagnostics. Iterates the 7 `*Conflict`
+/// derived conflicts to compiler diagnostics. Iterates the 8 `*Conflict`
 /// extents in a fixed order, and rows within an extent in the extent's own
 /// (content-addressed, already deterministic) `BTreeMap` order, so the
 /// returned `Vec`'s order is stable across runs for the same input.
@@ -201,6 +204,20 @@ pub fn native_typecheck(lowered: &Lowered) -> Vec<Diagnostic> {
                     NAT_TRY_NON_RESULT,
                     subject_span(&r.subject, meta),
                     format!("`?` on non-`Result` value: `{}`", r.found),
+                ));
+            }
+        }
+    }
+    if let Some(extent) = settled.extents.get("DimensionConflict") {
+        for record in extent.values() {
+            if let Some(r) = typefacts::resolve_dimension(tokens, &record.row) {
+                diags.push(Diagnostic::error(
+                    NAT_DIMENSION,
+                    subject_span(&r.subject, meta),
+                    format!(
+                        "dimension mismatch on `{}`: `{}` vs `{}`",
+                        r.op, r.left, r.right
+                    ),
                 ));
             }
         }
