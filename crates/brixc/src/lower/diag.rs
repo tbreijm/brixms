@@ -140,13 +140,17 @@ pub fn render_finding(finding: &Finding, meta: &LowerMeta) -> Diagnostic {
             "BRX-IR-0001",
             pkg_id(relation),
         ),
-        Finding::AbsenceWithoutWitness { in_rule, .. } => (decl_span(meta, in_rule), "BRX-IR-0002", None),
+        Finding::AbsenceWithoutWitness { in_rule, .. } => {
+            (decl_span(meta, in_rule), "BRX-IR-0002", None)
+        }
         Finding::UnknownRelation { in_rule, .. } => (decl_span(meta, in_rule), "BRX-IR-0003", None),
         Finding::OrdinaryFnOnDerivedRel { in_rule, .. } => {
             (decl_span(meta, in_rule), "BRX-IR-0004", None)
         }
         Finding::ImpureRule { rule } => (decl_span(meta, rule), RULE_IMPURE, None),
-        Finding::NondeterministicRule { rule } => (decl_span(meta, rule), RULE_NONDETERMINISTIC, None),
+        Finding::NondeterministicRule { rule } => {
+            (decl_span(meta, rule), RULE_NONDETERMINISTIC, None)
+        }
         Finding::DivergentRule { rule } => (decl_span(meta, rule), RULE_DIVERGENT, None),
         Finding::UnboundHeadKey { rule, .. } => (decl_span(meta, rule), UNBOUND_HEAD_KEY, None),
         Finding::MaskRefNotEdgeBound { rule, .. } => {
@@ -155,7 +159,9 @@ pub fn render_finding(finding: &Finding, meta: &LowerMeta) -> Diagnostic {
         Finding::UndeclaredFnEffect { function, .. } => {
             (decl_span(meta, function), UNDECLARED_FN_EFFECT, None)
         }
-        Finding::TotalFnFallible { function } => (decl_span(meta, function), TOTAL_FN_FALLIBLE, None),
+        Finding::TotalFnFallible { function } => {
+            (decl_span(meta, function), TOTAL_FN_FALLIBLE, None)
+        }
     };
     let mut diag = Diagnostic::error(code, span, finding.to_string());
     if let Some(p) = pkg {

@@ -302,7 +302,10 @@ impl Diagnostics {
             ));
             for label in &diagnostic.labels {
                 let (line, column) = line_col(source, label.span.start);
-                output.push_str(&format!("    {file_path}:{line}:{column}: {}\n", label.message));
+                output.push_str(&format!(
+                    "    {file_path}:{line}:{column}: {}\n",
+                    label.message
+                ));
             }
         }
         output
@@ -317,14 +320,21 @@ impl Diagnostics {
         self.render_miette_map(&map, path)
     }
 
-    pub fn render_miette_map(&self, sources: &SourceMap, default_path: &str) -> Result<String, fmt::Error> {
+    pub fn render_miette_map(
+        &self,
+        sources: &SourceMap,
+        default_path: &str,
+    ) -> Result<String, fmt::Error> {
         let handler = GraphicalReportHandler::new();
         let mut output = String::new();
         let default_source = sources.get(default_path).unwrap_or("");
         for diagnostic in &self.items {
             let file_path = diagnostic.source_id.as_deref().unwrap_or(default_path);
             let source = sources.get(file_path).unwrap_or(default_source);
-            handler.render_report(&mut output, &MietteReport::new(diagnostic, source, file_path))?;
+            handler.render_report(
+                &mut output,
+                &MietteReport::new(diagnostic, source, file_path),
+            )?;
         }
         Ok(output)
     }

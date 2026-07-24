@@ -517,8 +517,8 @@ fn dependency_diagnostics_are_attributed_to_their_package() {
     sources.insert("app.brix", app_src);
     sources.insert("lib", lib_src);
 
-    let rendered = brix_diag::Diagnostics::from_items(lowered.diags)
-        .render_compact_map(&sources, "app.brix");
+    let rendered =
+        brix_diag::Diagnostics::from_items(lowered.diags).render_compact_map(&sources, "app.brix");
     assert!(
         rendered.contains("lib:2:14: error"),
         "multi-source rendering formats carets against dependency source line:col, got:\n{rendered}"

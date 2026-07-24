@@ -349,12 +349,8 @@ fn quality_diagnostic(
     BuildError::Diagnostics(DiagnosticReport::single(
         source.to_owned(),
         path.to_string(),
-        Diagnostics::from_items(vec![Diagnostic::error(
-            code,
-            Span::new(0, 0),
-            message,
-        )
-        .with_structure(quality_structure(profile, status, rules))]),
+        Diagnostics::from_items(vec![Diagnostic::error(code, Span::new(0, 0), message)
+            .with_structure(quality_structure(profile, status, rules))]),
     ))
 }
 
