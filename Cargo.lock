@@ -227,6 +227,7 @@ dependencies = [
  "brix-ir",
  "brix-oracle",
  "brix-rt",
+ "brix-semantic",
  "brixc",
  "insta",
 ]
@@ -287,6 +288,14 @@ dependencies = [
  "proptest",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "brix-semantic"
+version = "0.0.0"
+dependencies = [
+ "brix-canon",
+ "proptest",
 ]
 
 [[package]]
