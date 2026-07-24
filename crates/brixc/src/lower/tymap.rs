@@ -90,6 +90,9 @@ fn lower_named(
 ) -> Ty {
     if path.segments.len() == 1 {
         let name = path.segments[0].text.as_str();
+        if name == "Var" {
+            return Ty::Var(meta.fresh_tyvar());
+        }
         if args.is_empty() {
             if let Some(t) = builtin_ty(name) {
                 return t;

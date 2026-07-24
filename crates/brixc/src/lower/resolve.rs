@@ -16,10 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use brix_ast::ast;
 use brix_ast::Span;
-use brix_ir::effects::EffectRow;
 use brix_ir::frontend::{FnSignature, RelationSchema, SchemaResolver, TableResolver};
 use brix_ir::ident::{Ident as IrIdent, QualIdent};
-use brix_ir::types::{IntWidth, Ty, TyVar};
+use brix_ir::types::{Ty, TyVar};
 
 /// What a declared type-position name (from `Decl::Entity`/`Decl::Enum`/
 /// `Decl::Type`) means when `tymap` looks it up. Kept internal to the
@@ -70,7 +69,7 @@ pub enum VariantLookup {
 /// brix-ir's checker does not (entities, enums, aliases, units, imports).
 /// Built once by pass 1 ([`crate::lower::schema`]) then read-only through
 /// pass 2 and the final checks.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ProgramResolver {
     table: TableResolver,
     /// Every relation schema registered so far, keyed for dedup/replace-in-
@@ -450,135 +449,4 @@ impl LowerMeta {
             .get(name)
             .and_then(|infos| infos.iter().find(|info| info.param_names.len() == arity))
     }
-}
-
-/// PRELUDE-STUB (design §"Pass 1 — schema build"): a hand-seeded stand-in
-/// for real package resolution (brixpkg does not expose a symbol table to
-/// this lane yet). Seeds exactly the surface the spec corpus's `use
-/// brix.*` imports pull in: math/time units, `EUR` money, `brix.math.clamp`,
-/// `sim.Now`, `brix.ops.*` operator signatures, and `count` as an aggregate
-/// fn. Stopgap until real package resolution lands (see design ruling).
-pub fn seed_prelude(resolver: ProgramResolver) -> ProgramResolver {
-    let mut r = resolver
-        .with_unit("kg", UnitClass::Quantity(IrIdent::new("Mass")))
-        .with_unit("km", UnitClass::Quantity(IrIdent::new("Kilometre")))
-        .with_unit("hours", UnitClass::Duration)
-        .with_unit("s", UnitClass::Duration)
-        // Money's canonical minor unit is cents: `150 EUR` -> integer 15000.
-        // This ×100 is a convention (money-in-minor-units, matching the oracle
-        // `Value` docs and the transaction data), consolidated here as the one
-        // source of truth for `lower_measured`; a spec-level minor-unit
-        // declaration would ground it (issue #47 Slice 1.5).
-        .with_unit_scaled("EUR", UnitClass::Money(IrIdent::new("EUR")), 100);
-
-    r = r.with_function(FnSignature {
-        name: QualIdent::from("brix.math.clamp"),
-        params: vec![Ty::F64, Ty::F64, Ty::F64],
-        ret: Ty::F64,
-        effects: EffectRow::empty(),
-        is_aggregate: false,
-        may_diverge: false,
-    });
-
-    // #15 value-construction primitives (`brix-rt::engine::builtin_total`):
-    // mint a composite `Ty` token's raw bytes from its child(ren)'s raw
-    // bytes — `write_enum(ctor, |w| child.canon_write(w))` reproduced as
-    // `uint(ctor) ++ child_raw_bytes` — plus a digest to close it into the
-    // same opaque `String` token `typefacts.rs`'s exporter hands the
-    // package. Seeded here purely for name/arity/type resolution; the
-    // runtime dispatch is generic (`Expr::Call` falls back to
-    // `builtin_total` by name), no separate wiring needed.
-    r = r.with_function(FnSignature {
-        name: QualIdent::from("brix.ty.mint_unary"),
-        params: vec![Ty::Int(IntWidth::Int), Ty::Bytes],
-        ret: Ty::Bytes,
-        effects: EffectRow::empty(),
-        is_aggregate: false,
-        may_diverge: false,
-    });
-    r = r.with_function(FnSignature {
-        name: QualIdent::from("brix.ty.mint_binary"),
-        params: vec![Ty::Int(IntWidth::Int), Ty::Bytes, Ty::Bytes],
-        ret: Ty::Bytes,
-        effects: EffectRow::empty(),
-        is_aggregate: false,
-        may_diverge: false,
-    });
-    r = r.with_function(FnSignature {
-        name: QualIdent::from("brix.canon.digest"),
-        params: vec![Ty::Bytes],
-        ret: Ty::Str,
-        effects: EffectRow::empty(),
-        is_aggregate: false,
-        may_diverge: false,
-    });
-
-    r = r.with_relation(RelationSchema {
-        name: QualIdent::from("brix.sim.Now"),
-        roles: vec![(IrIdent::new("at"), Ty::Instant)],
-        key: vec![],
-        model_closed: false,
-        derived: false,
-    });
-
-    // `ValidationError` — the failure payload of a validated constructor (Part V
-    // refinement newtypes) — as a builtin nominal type, plus `Probability.try`,
-    // the fallible constructor the flagship's `riskModel` uses (issue #47 Part
-    // 3). The admission check (`0 ≤ x ≤ 1`) is a builtin evaluator in both
-    // engines, resolved from source with no hand-registration.
-    let validation_error = QualIdent::simple("ValidationError");
-    r = r.with_enum(validation_error.clone(), Vec::new());
-    r = r.with_function(FnSignature {
-        name: QualIdent::from("Probability.try"),
-        params: vec![Ty::F64],
-        ret: Ty::Result(
-            Box::new(Ty::Probability),
-            Box::new(Ty::Enum(validation_error)),
-        ),
-        effects: EffectRow::empty(),
-        is_aggregate: false,
-        may_diverge: false,
-    });
-
-    for (name, arity) in [
-        ("or", 2),
-        ("and", 2),
-        ("not", 1),
-        ("eq", 2),
-        ("ne", 2),
-        ("lt", 2),
-        ("le", 2),
-        ("gt", 2),
-        ("ge", 2),
-        ("in", 2),
-        ("add", 2),
-        ("sub", 2),
-        ("mul", 2),
-        ("div", 2),
-        ("neg", 1),
-    ] {
-        r = r.with_function(FnSignature {
-            name: QualIdent::from(format!("brix.ops.{name}").as_str()),
-            // The op signatures are ad hoc polymorphic (`+` closes over
-            // every numeric/quantity type); a real fn-sig table would carry
-            // a trait bound, not a monomorphic `Ty`. `Ty::Var(TyVar(0))` is
-            // a placeholder that is never actually unified against (v0 has
-            // no unifier) — only `effects`/`is_aggregate` are consulted by
-            // lowering (effect-row union) and brix-ir (nothing, today).
-            params: (0..arity).map(|_| Ty::Var(TyVar(0))).collect(),
-            ret: Ty::Var(TyVar(0)),
-            effects: EffectRow::empty(),
-            is_aggregate: false,
-            may_diverge: false,
-        });
-    }
-
-    r.with_function(FnSignature {
-        name: QualIdent::simple("count"),
-        params: vec![],
-        ret: Ty::Int(IntWidth::I64),
-        effects: EffectRow::empty(),
-        is_aggregate: true,
-        may_diverge: false,
-    })
 }

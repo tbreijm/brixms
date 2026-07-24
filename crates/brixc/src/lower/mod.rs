@@ -21,6 +21,7 @@ mod diag;
 mod expr;
 mod resolve;
 mod schema;
+pub mod stdlib;
 mod tymap;
 
 pub use resolve::{
@@ -274,7 +275,7 @@ pub fn lower_graph(
     let mut ordered: Vec<&DepPackage> = deps.iter().collect();
     ordered.sort_by(|a, b| a.name_segments.cmp(&b.name_segments));
 
-    let mut resolver = resolve::seed_prelude(ProgramResolver::new());
+    let mut resolver = stdlib::stdlib_resolver().clone();
     let mut dep_fndefs: Vec<FnDef> = Vec::new();
 
     for dep in &ordered {
