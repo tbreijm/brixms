@@ -9,6 +9,8 @@
 //! skip-with-warning; `Decl::Error` is a silent skip (the parser already
 //! reported it).
 
+use std::collections::BTreeMap;
+
 use brix_ast::ast::{self, Decl};
 use brix_diag::{Diagnostic, Span};
 use brix_ir::core::{self, Constraint, Query, Rule};
@@ -48,9 +50,27 @@ pub fn lower_decls(
                 }
             }
 
+            // Impl method bodies lower to checked Core IR FnDefs under a
+            // mangled name, with the impl's associated types substituted into
+            // the signature (`type Item = String` => `Item` resolves to
+            // `String`). Issue #111. Trait *default* method bodies stay
+            // deferred (their associated types are abstract, not yet bound).
+            Decl::Impl(im) => {
+                let subst = assoc_subst(im);
+                for m in &im.methods {
+                    if m.body.is_none() {
+                        continue;
+                    }
+                    let mangled = mangle_method(im, m);
+                    let concrete = substitute_method(m, mangled, &subst);
+                    if let Some(def) = lower_fn(&concrete, resolver, meta, diags) {
+                        source.functions.push(def);
+                    }
+                }
+            }
+
             // Schema-producing decls: fully handled by pass 1 already.
-            // Trait/impl register into the trait env (+ coherence) in pass 1
-            // (#111); method-body lowering is a follow-on slice.
+            // Trait registration (+ impl coherence) happened in pass 1 (#111).
             Decl::Entity(_)
             | Decl::Rel(_)
             | Decl::Protocol(_)
@@ -59,8 +79,7 @@ pub fn lower_decls(
             | Decl::Measure(_)
             | Decl::Unit(_)
             | Decl::Record(_)
-            | Decl::Trait(_)
-            | Decl::Impl(_) => {}
+            | Decl::Trait(_) => {}
 
             // v0 defer line: skip-with-warning (BRX-LOW-0002).
             Decl::Driver(x) => skip(diags, x.span, "driver"),
@@ -400,6 +419,87 @@ fn lower_query(
 /// so the checker exempts it from the total-fn fallibility error and the engines
 /// evaluate its body to a `Result`. Only a **bodyless** fn (declared-only /
 /// `extern`) returns `None` — *not* an error; it stays hand-registered.
+/// The impl's associated-type bindings as `name -> concrete AST type`
+/// (`type Item = String` => `{"Item": String}`), used to make a method's
+/// associated-type references concrete before lowering (issue #111).
+fn assoc_subst(im: &ast::ImplDecl) -> BTreeMap<String, ast::Type> {
+    im.assoc_bindings
+        .iter()
+        .map(|b| (b.name.text.clone(), b.value.clone()))
+        .collect()
+}
+
+/// A collision-free name for an impl method: the `(trait, head, method)`
+/// triple. Emitted as an engine string key (`emit::native`), never a raw Rust
+/// ident, so the dotted form is fine (issue #111).
+fn mangle_method(im: &ast::ImplDecl, m: &ast::FnDecl) -> String {
+    let head = match &im.target.kind {
+        ast::TypeKind::Named { path, .. } => {
+            path.segments.last().map(|s| s.text.as_str()).unwrap_or("?")
+        }
+        _ => "?",
+    };
+    format!("impl.{}.{head}.{}", im.trait_name.text, m.name.text)
+}
+
+/// Clone a method into a free-standing [`ast::FnDecl`] with the mangled name
+/// and its associated types substituted out of the signature, so `lower_fn`
+/// can lower it exactly like any other function (issue #111).
+fn substitute_method(
+    m: &ast::FnDecl,
+    name: String,
+    subst: &BTreeMap<String, ast::Type>,
+) -> ast::FnDecl {
+    let mut out = m.clone();
+    out.name = ast::Ident {
+        span: m.name.span,
+        text: name,
+    };
+    for p in &mut out.params {
+        p.ty = subst_ty(&p.ty, subst);
+    }
+    out.ret = subst_ty(&out.ret, subst);
+    out
+}
+
+/// Recursively replace a bare associated-type reference (`Item`) with its
+/// bound concrete type everywhere in `ty` (issue #111).
+fn subst_ty(ty: &ast::Type, subst: &BTreeMap<String, ast::Type>) -> ast::Type {
+    let kind = match &ty.kind {
+        ast::TypeKind::Named { path, args } => {
+            if args.is_empty() && path.segments.len() == 1 {
+                if let Some(bound) = subst.get(path.segments[0].text.as_str()) {
+                    return bound.clone();
+                }
+            }
+            ast::TypeKind::Named {
+                path: path.clone(),
+                args: args
+                    .iter()
+                    .map(|a| match a {
+                        ast::TypeArg::Type(t) => ast::TypeArg::Type(subst_ty(t, subst)),
+                        ast::TypeArg::Lit(e) => ast::TypeArg::Lit(e.clone()),
+                    })
+                    .collect(),
+            }
+        }
+        ast::TypeKind::Row { fields, rest } => ast::TypeKind::Row {
+            fields: fields
+                .iter()
+                .map(|(n, t)| (n.clone(), subst_ty(t, subst)))
+                .collect(),
+            rest: rest.as_ref().map(|r| Box::new(subst_ty(r, subst))),
+        },
+        ast::TypeKind::Div(a, b) => {
+            ast::TypeKind::Div(Box::new(subst_ty(a, subst)), Box::new(subst_ty(b, subst)))
+        }
+    };
+    ast::Type {
+        span: ty.span,
+        kind,
+    }
+}
+
 fn lower_fn(
     f: &ast::FnDecl,
     resolver: &ProgramResolver,

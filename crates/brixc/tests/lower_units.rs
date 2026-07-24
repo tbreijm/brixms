@@ -624,6 +624,63 @@ impl Canonical for Order { type Item = String }
 }
 
 // ---------------------------------------------------------------------
+// Impl method-body lowering (issue #111): a method body lowers to a checked
+// Core IR FnDef, with the impl's associated types made concrete.
+// ---------------------------------------------------------------------
+
+#[test]
+fn an_impl_method_body_lowers_to_a_checked_fn_def() {
+    let src = r#"
+package t @ 1.0.0
+entity Order { key ref: String }
+trait Canonical { type Item; fn encode(x: Item) -> Item }
+impl Canonical for Order {
+  type Item = String
+  fn encode(x: Item) -> Item = x
+}
+"#;
+    let lowered = lower(src);
+    // `Item` resolves to `String` via the impl binding, so the signature/body
+    // type-check — no unresolved-type (BRX-LOW-0012) or type errors.
+    assert!(
+        lowered.diags.iter().all(|d| d.severity != Severity::Error),
+        "impl method with a resolvable associated type must lower cleanly: {:#?}",
+        lowered.diags
+    );
+    let names: Vec<String> = lowered
+        .source
+        .functions
+        .iter()
+        .map(|f| f.name.to_string())
+        .collect();
+    assert!(
+        names.iter().any(|n| n.contains("encode")),
+        "the impl method body must lower to a FnDef; got {names:?}"
+    );
+}
+
+#[test]
+fn an_ill_typed_impl_method_body_is_actually_checked() {
+    // Proves the body is lowered AND checked (not silently dropped): `Item`
+    // resolves to `String`, so a body returning an integer is a type error.
+    let src = r#"
+package t @ 1.0.0
+entity Order { key ref: String }
+trait Canonical { type Item; fn encode(x: Item) -> Item }
+impl Canonical for Order {
+  type Item = String
+  fn encode(x: Item) -> Item = 1
+}
+"#;
+    let lowered = lower(src);
+    assert!(
+        lowered.diags.iter().any(|d| d.code == "BRX-IR-0005"),
+        "an ill-typed impl method body must be checked and flagged: {:#?}",
+        lowered.diags
+    );
+}
+
+// ---------------------------------------------------------------------
 // Totality: `Error`/`Ellipsis` AST nodes never panic lowering.
 // ---------------------------------------------------------------------
 
