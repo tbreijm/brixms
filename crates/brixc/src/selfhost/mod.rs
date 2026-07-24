@@ -10,6 +10,7 @@
 //! [`native`] is that later slice (Track A slice C): the entry point that
 //! actually runs the checker over a real lowered program and turns its
 //! derived conflicts into compiler diagnostics.
+pub mod extract;
 pub mod native;
 pub mod typefacts;
 
