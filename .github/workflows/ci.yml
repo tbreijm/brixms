@@ -34,6 +34,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # brix-cli's build_run_smoke tests each drive a nested `cargo build` of a
+      # generated program that pulls in the full wasmtime/cranelift tree; several
+      # of those overrun the stock runner's ~14GB free disk (os error 28). Reclaim
+      # the preinstalled toolchains (~20-30GB) we don't use before building.
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          large-packages: true
       - name: Toolchain (pinned via rust-toolchain.toml)
         run: rustup show
       - uses: Swatinem/rust-cache@v2
@@ -45,6 +54,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          large-packages: true
       - name: Toolchain (pinned via rust-toolchain.toml)
         run: rustup show
       - uses: Swatinem/rust-cache@v2
@@ -110,6 +124,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          large-packages: true
       - name: Toolchain (pinned via rust-toolchain.toml)
         run: rustup show
       - uses: Swatinem/rust-cache@v2
@@ -134,6 +153,11 @@ jobs:
     # not a required status check.
     steps:
       - uses: actions/checkout@v7
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          large-packages: true
       - name: Toolchain (pinned via rust-toolchain.toml)
         run: rustup show
       - uses: Swatinem/rust-cache@v2
