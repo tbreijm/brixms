@@ -15,8 +15,9 @@ use std::fmt;
 
 use brix_ast::{parse_file, File};
 use brixpkg::{
-    hydrate, resolve, version::parse_version, HydrateError, Lockfile, Manifest, ManifestError,
-    PackageName, Registry, RegistryError, ResolveError,
+    hydrate, manifest::DependencySpec, resolve, resolve::PathPackage, version::parse_version,
+    HydrateError, Lockfile, Manifest, ManifestError, PackageName, Registry, RegistryError,
+    ResolveError,
 };
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -248,9 +249,10 @@ fn load_graph(
 ) -> Result<(Vec<GraphDep>, Lockfile), LocateError> {
     let registry_root = pkg_root.join(".brix").join("registry");
     let registry = Registry::open(&registry_root).map_err(LocateError::Registry)?;
-    // Path dependencies (caller-located, pre-digested) are deferred; register
-    // deps resolve against the local registry with no network access.
-    let path_deps = BTreeMap::new();
+
+    let mut path_deps = BTreeMap::new();
+    collect_path_deps(manifest, pkg_root, &mut path_deps)?;
+
     let lockfile = resolve(manifest, &registry, &path_deps).map_err(LocateError::Resolve)?;
     let graph = hydrate(&lockfile, &registry, pkg_root).map_err(LocateError::Hydrate)?;
 
@@ -316,4 +318,88 @@ fn synthesize_manifest(file: &File, source_path: &Utf8Path) -> Result<Manifest, 
         authors: Vec::new(),
         dependencies: Default::default(),
     })
+}
+
+fn collect_path_deps(
+    manifest: &Manifest,
+    pkg_root: &Utf8Path,
+    path_deps: &mut BTreeMap<PackageName, PathPackage>,
+) -> Result<(), LocateError> {
+    for (dep_name, spec) in &manifest.dependencies {
+        if let DependencySpec::Path(rel_path) = spec {
+            let name = dep_name.clone();
+            if path_deps.contains_key(&name) {
+                continue;
+            }
+
+            let dep_pkg_dir = pkg_root.join(rel_path);
+            let manifest_path = dep_pkg_dir.join("brix.toml");
+            let dep_manifest = if manifest_path.exists() {
+                load_manifest(&manifest_path)?
+            } else {
+                let entry_path = dep_pkg_dir.join("src").join("world.brix");
+                let src = std::fs::read_to_string(&entry_path)?;
+                let (file, _) = parse_file(&src);
+                synthesize_manifest(&file, &entry_path)?
+            };
+
+            let files = read_package_files_for_locate(&dep_pkg_dir)?;
+            let content_digest = brixpkg::tree_digest(&files);
+
+            path_deps.insert(
+                name.clone(),
+                PathPackage {
+                    manifest: dep_manifest.clone(),
+                    path: rel_path.clone(),
+                    content_digest,
+                },
+            );
+
+            collect_path_deps(&dep_manifest, &dep_pkg_dir, path_deps)?;
+        }
+    }
+    Ok(())
+}
+
+fn read_package_files_for_locate(
+    dir: &Utf8Path,
+) -> Result<BTreeMap<Utf8PathBuf, Vec<u8>>, LocateError> {
+    let mut files = BTreeMap::new();
+
+    let manifest_path = dir.join("brix.toml");
+    if manifest_path.exists() {
+        let bytes = std::fs::read(&manifest_path)?;
+        files.insert(Utf8PathBuf::from("brix.toml"), bytes);
+    }
+
+    let src_dir = dir.join("src");
+    if src_dir.is_dir() {
+        collect_locate_dir_files(&src_dir, dir, &mut files)?;
+    }
+
+    Ok(files)
+}
+
+fn collect_locate_dir_files(
+    current_dir: &Utf8Path,
+    pkg_dir: &Utf8Path,
+    out: &mut BTreeMap<Utf8PathBuf, Vec<u8>>,
+) -> Result<(), LocateError> {
+    let entries = std::fs::read_dir(current_dir)?;
+    for entry in entries {
+        let entry = entry?;
+        let abs_path = Utf8PathBuf::from_path_buf(entry.path())
+            .map_err(|_| LocateError::Io(std::io::Error::other("non-UTF-8 path")))?;
+
+        if abs_path.is_dir() {
+            collect_locate_dir_files(&abs_path, pkg_dir, out)?;
+        } else if abs_path.is_file() {
+            let rel = abs_path
+                .strip_prefix(pkg_dir)
+                .map_err(|_| LocateError::Io(std::io::Error::other("strip_prefix failed")))?;
+            let bytes = std::fs::read(&abs_path)?;
+            out.insert(rel.to_path_buf(), bytes);
+        }
+    }
+    Ok(())
 }
