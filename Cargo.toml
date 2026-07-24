@@ -37,7 +37,7 @@ miette = { version = "7", features = ["fancy"] }
 quote = "1"
 proc-macro2 = "1"
 syn = { version = "2", features = ["full"] }
-prettyplease = "0.2"
+prettyplease = "0.3"
 indexmap = "2"
 camino = { version = "1", features = ["serde1"] }
 unicode-normalization = "0.1"
