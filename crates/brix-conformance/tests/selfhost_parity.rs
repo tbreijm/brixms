@@ -39,10 +39,11 @@ use brix_conformance::typecorpus::{
     missing_to_plain_implicit_coercion, occurs_check, occurs_check_row, open_row_extra_field,
     overload_bind_chain, plain_scalar_mismatch, probability_f64_bridge_is_not_a_conflict,
     probability_to_bool_erasure, quantity_add_dimension_mismatch,
-    quantity_add_same_dimension_is_not_a_conflict, rule_impure_effect_row,
-    rule_mask_ref_not_edge_bound, rule_ordinary_fn_on_derived_rel, rule_unbound_head_key,
-    same_container_leaf_no_double_count, subst_chain_composite_root, subst_chain_scalar_root,
-    try_non_result, try_over_result_is_not_a_conflict, RuleFixture, NATIVE_GUARD_NON_BOOL_FIXTURE,
+    quantity_add_same_dimension_is_not_a_conflict, rule_divergent_call, rule_impure_effect_row,
+    rule_mask_ref_not_edge_bound, rule_nondeterministic_effect_row,
+    rule_ordinary_fn_on_derived_rel, rule_unbound_head_key, same_container_leaf_no_double_count,
+    subst_chain_composite_root, subst_chain_scalar_root, try_non_result,
+    try_over_result_is_not_a_conflict, RuleFixture, NATIVE_GUARD_NON_BOOL_FIXTURE,
     NATIVE_OPERATOR_APPLIES_FIXTURE, NATIVE_ROLE_BINDINGS_FIXTURE,
     NATIVE_ROLE_LIT_MISMATCH_FIXTURE, NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE,
     NATIVE_VAR_THREE_ROLES_FIXTURE, NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
@@ -258,6 +259,74 @@ fn native_impure_rule_conflicts(
             TypeConflict {
                 subject: resolved.subject,
                 kind: ConflictKind::ImpureRule,
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect()
+}
+
+/// Every `NondeterministicRule`-kind conflict `reflect::analyze` recorded
+/// (#15 final native rule-side-conditions slice) — the NondeterministicRule
+/// counterpart of [`reflect_impure_rule_conflicts`].
+fn reflect_nondeterministic_rule_conflicts(report: &ReflectiveReport) -> Vec<&TypeConflict> {
+    report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::NondeterministicRule))
+        .collect()
+}
+
+/// Resolve every row of a settled `NondeterministicRuleConflict` extent back
+/// to a comparable [`TypeConflict`] via the exporter's token table — the
+/// native counterpart of [`reflect_nondeterministic_rule_conflicts`].
+fn native_nondeterministic_rule_conflicts(
+    tokens: &typefacts::TokenTable,
+    extent: &Extent,
+) -> Vec<TypeConflict> {
+    extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_rule_nondeterministic(tokens, &record.row).expect(
+                "every derived NondeterministicRuleConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::NondeterministicRule,
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect()
+}
+
+/// Every `DivergentRule`-kind conflict `reflect::analyze` recorded (#15
+/// final native rule-side-conditions slice) — the DivergentRule counterpart
+/// of [`reflect_impure_rule_conflicts`].
+fn reflect_divergent_rule_conflicts(report: &ReflectiveReport) -> Vec<&TypeConflict> {
+    report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::DivergentRule))
+        .collect()
+}
+
+/// Resolve every row of a settled `DivergentRuleConflict` extent back to a
+/// comparable [`TypeConflict`] via the exporter's token table — the native
+/// counterpart of [`reflect_divergent_rule_conflicts`].
+fn native_divergent_rule_conflicts(
+    tokens: &typefacts::TokenTable,
+    extent: &Extent,
+) -> Vec<TypeConflict> {
+    extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_rule_divergent(tokens, &record.row).expect(
+                "every derived DivergentRuleConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::DivergentRule,
                 because: BTreeSet::new(),
                 scope: resolved.scope,
             }
@@ -2550,6 +2619,119 @@ fn rule_impure_effect_row_derives_one_impure_rule_conflict() {
         conflict_byte_set(&native_conflicts),
         conflict_byte_set(reflect_conflicts.iter().copied()),
         "the native-derived ImpureRuleConflict set must be canonical-byte-identical \
+         to reflect.rs's own conflict set (same subject, same scope)"
+    );
+}
+
+/// #15 final native rule-side-conditions slice (reaching 14/14 `ConflictKind`
+/// parity): `rule_nondeterministic_effect_row`'s `Roll` rule's effect row
+/// carries a `random` atom — Appendix E `det(B, H)` is violated (jointly
+/// with `pure(B, H)`, since every non-determinism-flagging atom is also an
+/// impurity atom under the current `is_impure` stub; see the fixture's own
+/// doc comment). Reproduced by RESTATEMENT: reflect.rs emits
+/// `Fact::RuleNondeterministic` alongside its
+/// `ConflictKind::NondeterministicRule`, and the package re-derives the
+/// conflict via `NondeterministicRuleInRoot`'s
+/// `RuleNondeterministicFinding ⋈ RootScope` join.
+#[test]
+fn rule_nondeterministic_effect_row_derives_one_nondeterministic_rule_conflict() {
+    let fixture = rule_nondeterministic_effect_row();
+    let report = analyze_rule_fixture(&fixture);
+
+    let reflect_conflicts = reflect_nondeterministic_rule_conflicts(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one NondeterministicRule conflict for the \
+         rule_nondeterministic_effect_row fixture; got {reflect_conflicts:?}"
+    );
+    assert_eq!(
+        reflect_conflicts[0].kind,
+        ConflictKind::NondeterministicRule,
+        "reflect's conflict must be the unit NondeterministicRule variant"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-rule-nondeterministic-effect-row".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let extent = settled
+        .extents
+        .get("NondeterministicRuleConflict")
+        .expect("brix.type package must declare a NondeterministicRuleConflict relation");
+    assert_eq!(
+        extent.len(),
+        1,
+        "native package must derive exactly one NondeterministicRuleConflict row"
+    );
+
+    let native_conflicts = native_nondeterministic_rule_conflicts(&export.tokens, extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived NondeterministicRuleConflict set must be canonical-byte-identical \
+         to reflect.rs's own conflict set (same subject, same scope)"
+    );
+}
+
+/// #15 final native rule-side-conditions slice (reaching 14/14 `ConflictKind`
+/// parity): `rule_divergent_call`'s `Spins` rule calls `loopForever`, whose
+/// `FnSignature` declares `may_diverge: true` — Appendix E `nondiverge(B, H)`
+/// is violated, WITHOUT a `diverge` atom on the rule's own effect row
+/// (mirrors `check.rs`'s `diverging_called_fn_is_flagged_even_without_a_
+/// diverge_atom` unit test). Reproduced by RESTATEMENT: reflect.rs emits
+/// `Fact::RuleDivergent` alongside its `ConflictKind::DivergentRule`, and the
+/// package re-derives the conflict via `DivergentRuleInRoot`'s
+/// `RuleDivergentFinding ⋈ RootScope` join.
+#[test]
+fn rule_divergent_call_derives_one_divergent_rule_conflict() {
+    let fixture = rule_divergent_call();
+    let report = analyze_rule_fixture(&fixture);
+
+    let reflect_conflicts = reflect_divergent_rule_conflicts(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one DivergentRule conflict for the \
+         rule_divergent_call fixture; got {reflect_conflicts:?}"
+    );
+    assert_eq!(
+        reflect_conflicts[0].kind,
+        ConflictKind::DivergentRule,
+        "reflect's conflict must be the unit DivergentRule variant"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-rule-divergent-call".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let extent = settled
+        .extents
+        .get("DivergentRuleConflict")
+        .expect("brix.type package must declare a DivergentRuleConflict relation");
+    assert_eq!(
+        extent.len(),
+        1,
+        "native package must derive exactly one DivergentRuleConflict row"
+    );
+
+    let native_conflicts = native_divergent_rule_conflicts(&export.tokens, extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived DivergentRuleConflict set must be canonical-byte-identical \
          to reflect.rs's own conflict set (same subject, same scope)"
     );
 }

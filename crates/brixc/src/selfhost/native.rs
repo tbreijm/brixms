@@ -67,6 +67,14 @@ pub const NAT_MASK_REF: &str = "BRX-NAT-0011";
 /// `BRX-NAT-0012` — native counterpart of `ConflictKind::OrdinaryFnOnDerivedRel`
 /// (Appendix E `Ordinary fn`): `OrdinaryFnOnDerivedRelConflict`.
 pub const NAT_ORDINARY_FN: &str = "BRX-NAT-0012";
+/// `BRX-NAT-0013` — native counterpart of `ConflictKind::NondeterministicRule`
+/// (Appendix E `det(B, H)`): `NondeterministicRuleConflict`. Restatement, not
+/// re-analysis — see `typefacts.rs`'s `Fact::RuleNondeterministic` export doc.
+pub const NAT_RULE_NONDETERMINISTIC: &str = "BRX-NAT-0013";
+/// `BRX-NAT-0014` — native counterpart of `ConflictKind::DivergentRule`
+/// (Appendix E `nondiverge(B, H)`): `DivergentRuleConflict`. Restatement, not
+/// re-analysis — see `typefacts.rs`'s `Fact::RuleDivergent` export doc.
+pub const NAT_RULE_DIVERGENT: &str = "BRX-NAT-0014";
 
 /// The compiled `packages/brix.type/src/world.brix` package, compiled once
 /// per process. The package is known-good (Track A slice B proved it
@@ -114,7 +122,7 @@ fn subject_span(subject: &Subject, meta: &LowerMeta) -> Span {
 }
 
 /// Run the self-hosted `brix.type` checker over `lowered` and map its
-/// derived conflicts to compiler diagnostics. Iterates the 12 `*Conflict`
+/// derived conflicts to compiler diagnostics. Iterates the 14 `*Conflict`
 /// extents in a fixed order, and rows within an extent in the extent's own
 /// (content-addressed, already deterministic) `BTreeMap` order, so the
 /// returned `Vec`'s order is stable across runs for the same input.
@@ -242,6 +250,28 @@ pub fn native_typecheck(lowered: &Lowered) -> Vec<Diagnostic> {
                     NAT_RULE_IMPURE,
                     subject_span(&r.subject, meta),
                     "impure rule".to_string(),
+                ));
+            }
+        }
+    }
+    if let Some(extent) = settled.extents.get("NondeterministicRuleConflict") {
+        for record in extent.values() {
+            if let Some(r) = typefacts::resolve_rule_nondeterministic(tokens, &record.row) {
+                diags.push(Diagnostic::error(
+                    NAT_RULE_NONDETERMINISTIC,
+                    subject_span(&r.subject, meta),
+                    "nondeterministic rule".to_string(),
+                ));
+            }
+        }
+    }
+    if let Some(extent) = settled.extents.get("DivergentRuleConflict") {
+        for record in extent.values() {
+            if let Some(r) = typefacts::resolve_rule_divergent(tokens, &record.row) {
+                diags.push(Diagnostic::error(
+                    NAT_RULE_DIVERGENT,
+                    subject_span(&r.subject, meta),
+                    "divergent rule (`diverge` reachable from its body)".to_string(),
                 ));
             }
         }
