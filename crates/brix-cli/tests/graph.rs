@@ -484,16 +484,14 @@ derive R: Out(id: i, v: y) from { In(id: i, n: x); let y = f(x, x) }\n";
 
 #[test]
 fn dependency_diagnostics_are_attributed_to_their_package() {
-    // A dependency whose role names an unresolved type errors during its own
-    // lowering; in the graph that error is attributed to `lib` (and its
-    // cross-source span dropped) instead of pointing at an unrelated root line.
-    let (lib_file, lib_diags) =
-        parse_file("package lib @ 1.0.0\nrel Bad { x: Nonexistent } key(x)\n");
+    let lib_src = "package lib @ 1.0.0\nrel Bad { x: Nonexistent } key(x)\n";
+    let (lib_file, lib_diags) = parse_file(lib_src);
     assert!(
         !lib_diags.has_errors(),
         "dep parses cleanly (error is semantic)"
     );
-    let (app_file, app_diags) = parse_file("package app @ 0.1.0\nrel Out { id: Int } key(id)\n");
+    let app_src = "package app @ 0.1.0\nrel Out { id: Int } key(id)\n";
+    let (app_file, app_diags) = parse_file(app_src);
     assert!(!app_diags.has_errors());
 
     let lowered = lower_graph(
@@ -505,13 +503,25 @@ fn dependency_diagnostics_are_attributed_to_their_package() {
             parse_diags: &lib_diags,
         }],
     );
+    let dep_diag = lowered
+        .diags
+        .iter()
+        .find(|d| d.source_id.as_deref() == Some("lib"))
+        .expect("dependency diagnostic carried source_id `lib`");
     assert!(
-        lowered
-            .diags
-            .iter()
-            .any(|d| d.message.starts_with("dependency `lib`:")),
-        "a dependency's own diagnostics must be attributed to it, got: {:#?}",
-        lowered.diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        dep_diag.span.start > 0,
+        "dependency diagnostic retains its real span inside lib"
+    );
+
+    let mut sources = brix_diag::SourceMap::new();
+    sources.insert("app.brix", app_src);
+    sources.insert("lib", lib_src);
+
+    let rendered =
+        brix_diag::Diagnostics::from_items(lowered.diags).render_compact_map(&sources, "app.brix");
+    assert!(
+        rendered.contains("lib:2:14: error"),
+        "multi-source rendering formats carets against dependency source line:col, got:\n{rendered}"
     );
 }
 

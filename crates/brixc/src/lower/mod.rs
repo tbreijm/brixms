@@ -287,17 +287,14 @@ pub fn lower_graph(
         // Lower and check the dependency in isolation (bare names, own
         // prelude); its errors surface tagged into the graph's channel.
         let dep_lowered = lower_file(dep.file, dep.parse_diags);
-        // A dependency's diagnostics carry spans into ITS OWN source, which the
-        // build renders against the ROOT source — a wrong caret. Until the
-        // diagnostic renderer is source-aware (a diag-lane follow-up), attribute
-        // each to its package in the message and drop the cross-source span, so
-        // a dependency error reads honestly ("dependency `lib`: ...") rather
-        // than pointing at an unrelated root line (issue #42 Slice 5).
         let dep_name = dep.name_segments.join(".");
+        // A dependency's diagnostics carry spans into ITS OWN source; set source_id
+        // to its package name so multi-source diagnostic renderers format carets against it (issue #112).
         diags.extend(dep_lowered.diags.iter().map(|d| {
             let mut d = d.clone();
-            d.message = format!("dependency `{dep_name}`: {}", d.message);
-            d.span = brix_diag::Span::empty(0);
+            if d.source_id.is_none() {
+                d.source_id = Some(dep_name.clone());
+            }
             d
         }));
 
@@ -322,6 +319,8 @@ pub fn lower_graph(
             segs.extend(segments.iter().cloned());
             QualIdent::from_segments(segs)
         };
+
+        meta.merge_dep(&dep_lowered.meta, qualify_path);
         // A dependency's own prelude (`brix.*`) is seeded per-dep and re-seeded
         // for the graph; never re-export it under `pkg.brix.*`.
         let is_prelude = |name: &QualIdent| name.segments()[0].as_str().starts_with("brix");

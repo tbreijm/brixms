@@ -449,4 +449,27 @@ impl LowerMeta {
             .get(name)
             .and_then(|infos| infos.iter().find(|info| info.param_names.len() == arity))
     }
+
+    /// Merge a dependency's metadata into this root `LowerMeta` under qualified names.
+    pub fn merge_dep<F>(&mut self, dep_meta: &LowerMeta, qualify: F)
+    where
+        F: Fn(&[IrIdent]) -> QualIdent,
+    {
+        for (name, info) in &dep_meta.fn_info {
+            let qname = qualify(name.segments());
+            self.fn_info.entry(qname).or_default().extend(info.clone());
+        }
+        for (name, span) in &dep_meta.relation_decl_spans {
+            let qname = qualify(name.segments());
+            self.relation_decl_spans.insert(qname, *span);
+        }
+        for ((rel, role), span) in &dep_meta.role_spans {
+            let qrel = qualify(rel.segments());
+            self.role_spans.insert((qrel, role.clone()), *span);
+        }
+        for (ident, span) in &dep_meta.decl_spans {
+            let qname = qualify(std::slice::from_ref(ident));
+            self.relation_decl_spans.insert(qname, *span);
+        }
+    }
 }

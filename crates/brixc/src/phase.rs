@@ -28,7 +28,7 @@ impl PhaseAssign for AstPhase {
         let phases =
             brix_phase::infer_phases(&facts).map_err(|error| PipelineError::Diagnostic {
                 stage: Stage::Phase,
-                diagnostic: error.diagnostic(),
+                diagnostic: Box::new(error.diagnostic()),
             })?;
         Ok(Phased {
             lowered: ir,

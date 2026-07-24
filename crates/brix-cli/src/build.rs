@@ -46,17 +46,43 @@ impl fmt::Display for BuildError {
 }
 
 /// A source-labelled collection emitted by an attempted compiler stage.
+/// A source-labelled collection emitted by an attempted compiler stage.
 #[derive(Debug)]
 pub struct DiagnosticReport {
     pub source: String,
     pub path: String,
+    pub sources: brix_diag::SourceMap,
     pub diagnostics: Diagnostics,
 }
 
 impl DiagnosticReport {
+    pub fn single(source: String, path: String, diagnostics: Diagnostics) -> Self {
+        let sources = brix_diag::SourceMap::single(&path, &source);
+        Self {
+            source,
+            path,
+            sources,
+            diagnostics,
+        }
+    }
+
+    pub fn with_sources(
+        source: String,
+        path: String,
+        sources: brix_diag::SourceMap,
+        diagnostics: Diagnostics,
+    ) -> Self {
+        Self {
+            source,
+            path,
+            sources,
+            diagnostics,
+        }
+    }
+
     pub fn render(&self, format: DiagnosticFormat) -> String {
         self.diagnostics
-            .render_format(format, &self.source, &self.path)
+            .render_format_map(format, &self.sources, &self.path)
     }
 }
 
@@ -115,28 +141,30 @@ pub fn check(operand: &str, native_typecheck: bool) -> Result<CheckOutcome, Buil
     let source = std::fs::read_to_string(&located.source_path)?;
     let (file, parse_diags) = parse_file(&source);
     if parse_diags.has_errors() {
-        return Err(BuildError::Diagnostics(DiagnosticReport {
+        return Err(BuildError::Diagnostics(DiagnosticReport::single(
             source,
-            path: located.source_path.to_string(),
-            diagnostics: parse_diags,
-        }));
+            located.source_path.to_string(),
+            parse_diags,
+        )));
     }
 
     let lowered = brixc::lower_file(&file, &parse_diags);
     if lowered.has_errors() {
-        return Err(BuildError::Diagnostics(DiagnosticReport {
+        return Err(BuildError::Diagnostics(DiagnosticReport::single(
             source,
-            path: located.source_path.to_string(),
-            diagnostics: Diagnostics::from_items(lowered.diags),
-        }));
+            located.source_path.to_string(),
+            Diagnostics::from_items(lowered.diags),
+        )));
     }
 
     let native_report = if native_typecheck {
         let diagnostics = brixc::selfhost::native_typecheck(&lowered);
-        (!diagnostics.is_empty()).then(|| DiagnosticReport {
-            source: source.clone(),
-            path: located.source_path.to_string(),
-            diagnostics: Diagnostics::from_items(diagnostics),
+        (!diagnostics.is_empty()).then(|| {
+            DiagnosticReport::single(
+                source.clone(),
+                located.source_path.to_string(),
+                Diagnostics::from_items(diagnostics),
+            )
         })
     } else {
         None
@@ -148,11 +176,11 @@ pub fn check(operand: &str, native_typecheck: bool) -> Result<CheckOutcome, Buil
             native_report,
         }),
         Err(PipelineError::Diagnostic { diagnostic, .. }) => {
-            Err(BuildError::Diagnostics(DiagnosticReport {
+            Err(BuildError::Diagnostics(DiagnosticReport::single(
                 source,
-                path: located.source_path.to_string(),
-                diagnostics: Diagnostics::from_items(vec![diagnostic]),
-            }))
+                located.source_path.to_string(),
+                Diagnostics::from_items(vec![*diagnostic]),
+            )))
         }
         Err(error) => Err(BuildError::Phase(error)),
     }
@@ -171,11 +199,11 @@ pub fn format(operand: &str) -> Result<FormatOutcome, BuildError> {
     let source = std::fs::read_to_string(&located.source_path)?;
     let (file, parse_diags) = parse_file(&source);
     if parse_diags.has_errors() {
-        return Err(BuildError::Diagnostics(DiagnosticReport {
+        return Err(BuildError::Diagnostics(DiagnosticReport::single(
             source,
-            path: located.source_path.to_string(),
-            diagnostics: parse_diags,
-        }));
+            located.source_path.to_string(),
+            parse_diags,
+        )));
     }
     let formatted = brix_ast::format_file(&file);
     Ok(FormatOutcome {
@@ -198,11 +226,11 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
     // reported against that file's own source.
     let (entry_file, parse_diags) = parse_file(&source);
     if parse_diags.has_errors() {
-        return Err(BuildError::Diagnostics(DiagnosticReport {
+        return Err(BuildError::Diagnostics(DiagnosticReport::single(
             source,
-            path: located.source_path.to_string(),
-            diagnostics: parse_diags,
-        }));
+            located.source_path.to_string(),
+            parse_diags,
+        )));
     }
     let extra_parsed: Vec<(brix_ast::File, brix_ast::Diagnostics)> = located
         .extra_sources
@@ -211,11 +239,24 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
         .collect();
     for ((_, diags), src) in extra_parsed.iter().zip(located.extra_sources.iter()) {
         if diags.has_errors() {
-            return Err(BuildError::Diagnostics(DiagnosticReport {
-                source: src.clone(),
-                path: located.source_path.to_string(),
-                diagnostics: diags.clone(),
-            }));
+            return Err(BuildError::Diagnostics(DiagnosticReport::single(
+                src.clone(),
+                located.source_path.to_string(),
+                diags.clone(),
+            )));
+        }
+    }
+
+    let mut sources = brix_diag::SourceMap::new();
+    sources.insert(located.source_path.to_string(), source.clone());
+    for src in &located.extra_sources {
+        sources.insert(located.source_path.to_string(), src.clone());
+    }
+    for dep in &located.deps {
+        let dep_name = dep.name_segments.join(".");
+        sources.insert(dep_name.clone(), dep.source.clone());
+        for src in &dep.extra_sources {
+            sources.insert(dep_name.clone(), src.clone());
         }
     }
 
@@ -281,21 +322,23 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
         lowered.diags = merge_diags;
     }
     if lowered.has_errors() {
-        return Err(BuildError::Diagnostics(DiagnosticReport {
+        return Err(BuildError::Diagnostics(DiagnosticReport::with_sources(
             source,
-            path: located.source_path.to_string(),
-            diagnostics: Diagnostics::from_items(lowered.diags),
-        }));
+            located.source_path.to_string(),
+            sources,
+            Diagnostics::from_items(lowered.diags),
+        )));
     }
 
     let phased = match AstPhase.assign_phases(lowered) {
         Ok(phased) => phased,
         Err(PipelineError::Diagnostic { diagnostic, .. }) => {
-            return Err(BuildError::Diagnostics(DiagnosticReport {
+            return Err(BuildError::Diagnostics(DiagnosticReport::with_sources(
                 source,
-                path: located.source_path.to_string(),
-                diagnostics: Diagnostics::from_items(vec![diagnostic]),
-            }));
+                located.source_path.to_string(),
+                sources,
+                Diagnostics::from_items(vec![*diagnostic]),
+            )));
         }
         Err(error) => return Err(BuildError::Phase(error)),
     };
