@@ -47,7 +47,7 @@ use brix_conformance::typecorpus::{
 };
 use brixc::selfhost::typefacts;
 
-const PACKAGE_SRC: &str = include_str!("../../../packages/brix.type/brix.type.brix");
+const PACKAGE_SRC: &str = include_str!("../../../packages/brix.type/src/world.brix");
 
 fn analyze_source(src: &str) -> brix_ir::reflect::ReflectiveReport {
     let (file, parse_diags) = parse_file(src);
