@@ -269,9 +269,16 @@ Math      Ring 0: numeric tower types, Decimal contexts, strict-IEEE ops module,
                   with oracle-liable deterministic claims; solvers as Drivers
           HARD RULE: no BLAS/LAPACK in settlement — strict naive kernels only;
                   fast BLAS at boundaries returning Estimate, or in Drivers
-Logic     Ring 0: the kernel IS the engine; FOL grammar forms (backlog);
-                  proof objects = provenance subtrees, verified by oracle
-                  replay of the subtree (no second checker exists)
+Logic     Ring 0: TWO trusted kernels over one canonical artifact substrate
+                  (see spec/Proof_Substrate_ADR.md, supersedes the earlier
+                  single-kernel note). SETTLEMENT kernel: which consequences
+                  hold at a settled revision (world closure + replayable
+                  operational evidence) — settlement provenance proves an edge
+                  was DERIVED, not that it is a theorem. DEPENDENT PROOF kernel
+                  (brix-kernel, independent, tiny): checks a canonical explicit
+                  term against a proposition in an exact context. A settlement
+                  support becomes proof evidence ONLY across an elaboration
+                  boundary + kernel acceptance; FOL grammar forms (backlog)
           Ring 1: BPEF exporter, temporal/bounded model checking over
                   scenarios + history reads, ontology entailment as rules
 Sim       Ring 0: clock; event calendar SUPERDENSE-NATIVE in rt — keys are
