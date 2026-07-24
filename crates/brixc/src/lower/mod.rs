@@ -193,6 +193,11 @@ fn qualify_ty(
     use brix_ir::types::Ty;
     match ty {
         Ty::Enum(name) => Ty::Enum(rename.get(name).cloned().unwrap_or_else(|| name.clone())),
+        Ty::NodeRef(name) => Ty::NodeRef(rename.get(name).cloned().unwrap_or_else(|| name.clone())),
+        Ty::EdgeRef(name) => Ty::EdgeRef(rename.get(name).cloned().unwrap_or_else(|| name.clone())),
+        Ty::ClaimRef(name) => {
+            Ty::ClaimRef(rename.get(name).cloned().unwrap_or_else(|| name.clone()))
+        }
         Ty::Option(t) => Ty::Option(Box::new(qualify_ty(t, rename))),
         Ty::Result(a, b) => Ty::Result(
             Box::new(qualify_ty(a, rename)),
@@ -385,23 +390,29 @@ pub fn lower_graph(
             }
         }
 
-        // Map each of the dependency's local enum names to its qualified name,
+        // Map each of the dependency's local enum and entity names to its qualified name,
         // so relation-role and function-signature types that mention them are
-        // rewritten to match the qualified enum we register below (issue #42
-        // Slice 3 — see `qualify_ty`).
-        let mut enum_rename: std::collections::BTreeMap<QualIdent, QualIdent> =
+        // rewritten to match the qualified enum/entity we register below (issues #42
+        // Slice 3 and #110 — see `qualify_ty`).
+        let mut nominal_rename: std::collections::BTreeMap<QualIdent, QualIdent> =
             std::collections::BTreeMap::new();
         for (name, _variants) in dep_lowered.resolver.enums() {
             if is_prelude(name) || !is_pub(name) {
                 continue;
             }
-            enum_rename.insert(name.clone(), qualify_path(name.segments()));
+            nominal_rename.insert(name.clone(), qualify_path(name.segments()));
+        }
+        for ent in dep_lowered.resolver.entities() {
+            if is_prelude(ent) || !is_pub(ent) {
+                continue;
+            }
+            nominal_rename.insert(ent.clone(), qualify_path(ent.segments()));
         }
 
         // Dependency's own declared relations -> `pkg.Rel`, and protocol-synth
         // relations -> `pkg.Proto.request` / `pkg.Proto.<outcome>` (issue #42
         // Slice 3: dotted names are now qualified, not skipped). Role types are
-        // requalified so an enum role points at the qualified enum.
+        // requalified so an enum/entity role points at the qualified nominal type.
         for schema in dep_lowered.resolver.relations() {
             if is_prelude(&schema.name) || !is_pub(&schema.name) {
                 continue;
@@ -413,7 +424,7 @@ pub fn lower_graph(
             qschema.roles = qschema
                 .roles
                 .iter()
-                .map(|(n, t)| (n.clone(), qualify_ty(t, &enum_rename)))
+                .map(|(n, t)| (n.clone(), qualify_ty(t, &nominal_rename)))
                 .collect();
             resolver = resolver
                 .with_relation(qschema)
@@ -460,9 +471,9 @@ pub fn lower_graph(
                 params: f
                     .params
                     .iter()
-                    .map(|(_, t)| qualify_ty(t, &enum_rename))
+                    .map(|(_, t)| qualify_ty(t, &nominal_rename))
                     .collect(),
-                ret: qualify_ty(&f.ret, &enum_rename),
+                ret: qualify_ty(&f.ret, &nominal_rename),
                 is_aggregate: false,
                 may_diverge: f.effects.may_diverge(),
                 effects: f.effects.clone(),
@@ -472,9 +483,9 @@ pub fn lower_graph(
             qf.params = qf
                 .params
                 .iter()
-                .map(|(n, t)| (n.clone(), qualify_ty(t, &enum_rename)))
+                .map(|(n, t)| (n.clone(), qualify_ty(t, &nominal_rename)))
                 .collect();
-            qf.ret = qualify_ty(&qf.ret, &enum_rename);
+            qf.ret = qualify_ty(&qf.ret, &nominal_rename);
             dep_fndefs.push(qf);
         }
     }

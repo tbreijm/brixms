@@ -114,12 +114,7 @@ fn lower_named(
         }
     }
     if resolver.is_entity(&qi) {
-        let last = qi
-            .segments()
-            .last()
-            .cloned()
-            .unwrap_or_else(|| IrIdent::new(""));
-        return Ty::NodeRef(last);
+        return Ty::NodeRef(qi);
     }
     if resolver.is_enum(&qi) {
         // Mismatch (A): the whole reason `Ty::Enum` exists.

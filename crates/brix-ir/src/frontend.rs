@@ -189,7 +189,7 @@ mod tests {
         let schema = RelationSchema {
             name: QualIdent::from("ComputedPrice"),
             roles: vec![
-                (Ident::new("order"), Ty::NodeRef(Ident::new("Order"))),
+                (Ident::new("order"), Ty::NodeRef(QualIdent::simple("Order"))),
                 (Ident::new("amount"), Ty::F64),
             ],
             key: vec![Ident::new("order")],

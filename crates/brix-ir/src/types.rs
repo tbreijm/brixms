@@ -192,9 +192,9 @@ pub enum Ty {
     /// `Rel<S>`, a first-class finite relation value over schema row `S`
     /// (Part IV §5).
     Rel(Box<Row>),
-    NodeRef(Ident),
-    EdgeRef(Ident),
-    ClaimRef(Ident),
+    NodeRef(QualIdent),
+    EdgeRef(QualIdent),
+    ClaimRef(QualIdent),
     /// A nominal, closed-set enum type declared by `enum E { V1; V2; ... }`
     /// (Part V §2 addendum; Appendix G "enums encode by declaration-order
     /// ordinal"). The `QualIdent` names the declared enum; the *value*
@@ -738,7 +738,7 @@ mod tests {
             },
             RowField {
                 name: Ident::new("order"),
-                ty: Ty::NodeRef(Ident::new("Order")),
+                ty: Ty::NodeRef(QualIdent::simple("Order")),
             },
         ]);
         let err = check_key_canonical(&Ty::record(row)).unwrap_err();

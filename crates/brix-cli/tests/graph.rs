@@ -557,3 +557,34 @@ pub derive rel D { id: Int } key(id)\n";
     assert!(!diags2.has_errors());
     assert_eq!(format_file(&file2), formatted);
 }
+
+// --- Issue #110: cross-package entity-typed roles ----------------------
+
+#[test]
+fn cross_package_entity_typed_roles_resolve_and_check_cleanly() {
+    let lib_src = "package lib @ 1.0.0\n\
+pub entity Account { id: Int }\n\
+pub rel Balance { acc: Account; amount: Int } key(acc)\n";
+    let app_src = "package app @ 0.1.0\n\
+use lib.{Account, Balance}\n\
+rel HighBalance { acc: Account; amount: Int } key(acc)\n\
+derive R: HighBalance(acc: a, amount: v) from { Balance(acc: a, amount: v); when v > 100 }\n";
+    let (lib_file, lib_diags) = parse_file(lib_src);
+    let (app_file, app_diags) = parse_file(app_src);
+    assert!(!lib_diags.has_errors() && !app_diags.has_errors());
+
+    let lowered = lower_graph(
+        &app_file,
+        &app_diags,
+        &[DepPackage {
+            name_segments: vec!["lib".to_string()],
+            file: &lib_file,
+            parse_diags: &lib_diags,
+        }],
+    );
+    assert!(
+        !lowered.has_errors(),
+        "cross-package entity-typed role must lower cleanly: {:#?}",
+        lowered.diags
+    );
+}
