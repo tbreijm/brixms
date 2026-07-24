@@ -439,7 +439,7 @@ fn drive_to(src: &str, target: Stage) -> Reached {
         },
         Err(brixc::PipelineError::Diagnostic { diagnostic, .. }) => {
             let mut diagnostics = Diagnostics::new();
-            diagnostics.push(diagnostic);
+            diagnostics.push(*diagnostic);
             Reached {
                 phase: Stage::Phase,
                 clean: false,

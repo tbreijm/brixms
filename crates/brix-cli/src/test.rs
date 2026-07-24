@@ -36,11 +36,11 @@ pub fn run(operand: &str, selectors: &[String]) -> Result<TestOutcome, BuildErro
     let source = std::fs::read_to_string(&located.source_path)?;
     let (file, parse_diagnostics) = parse_file(&source);
     if parse_diagnostics.has_errors() {
-        return Err(BuildError::Diagnostics(DiagnosticReport {
+        return Err(BuildError::Diagnostics(DiagnosticReport::single(
             source,
-            path: located.source_path.to_string(),
-            diagnostics: parse_diagnostics,
-        }));
+            located.source_path.to_string(),
+            parse_diagnostics,
+        )));
     }
 
     let scenarios = scenarios_in_source_order(&file);
@@ -122,10 +122,10 @@ fn selector_diagnostic(
     code: &'static str,
     message: String,
 ) -> BuildError {
-    BuildError::Diagnostics(DiagnosticReport {
-        source: source.to_owned(),
-        path: path.to_string(),
-        diagnostics: Diagnostics::from_items(vec![Diagnostic::error(
+    BuildError::Diagnostics(DiagnosticReport::single(
+        source.to_owned(),
+        path.to_string(),
+        Diagnostics::from_items(vec![Diagnostic::error(
             code,
             file.package
                 .as_ref()
@@ -133,7 +133,7 @@ fn selector_diagnostic(
             message,
         )
         .with_structure(test_structure(selectors, "failed", &[]))]),
-    })
+    ))
 }
 
 fn test_diagnostic(
@@ -145,16 +145,16 @@ fn test_diagnostic(
     message: &str,
     runs: &[(String, ScenarioRun)],
 ) -> BuildError {
-    BuildError::Diagnostics(DiagnosticReport {
-        source: source.to_owned(),
-        path: path.to_string(),
-        diagnostics: Diagnostics::from_items(vec![Diagnostic::error(
+    BuildError::Diagnostics(DiagnosticReport::single(
+        source.to_owned(),
+        path.to_string(),
+        Diagnostics::from_items(vec![Diagnostic::error(
             code,
             Span::new(0, 0),
             message,
         )
         .with_structure(test_structure(selectors, status, runs))]),
-    })
+    ))
 }
 
 fn test_structure(
