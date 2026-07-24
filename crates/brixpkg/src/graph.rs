@@ -212,13 +212,8 @@ pub fn hydrate(
                 .fetch(&entry.content_digest)
                 .map_err(|e| HydrateError::Registry(name.clone(), e))?,
             LockSource::Path(rel) => {
-                // Path-dependency hydration (walking a sibling package's
-                // `src/` off disk) is deferred; registry deps cover the
-                // Slice-1 graph. Documented gap, not a silent skip.
-                return Err(HydrateError::PathUnsupported(
-                    name.clone(),
-                    base_dir.join(rel),
-                ));
+                let path_dir = base_dir.join(rel);
+                read_package_dir(&path_dir, name)?
             }
         };
         let actual = tree_digest(&files);
@@ -232,6 +227,75 @@ pub fn hydrate(
         out.insert(name.clone(), files);
     }
     Ok(out)
+}
+
+fn read_package_dir(
+    dir: &Utf8Path,
+    package: &PackageName,
+) -> Result<BTreeMap<Utf8PathBuf, Vec<u8>>, HydrateError> {
+    let mut files = BTreeMap::new();
+
+    let manifest_path = dir.join("brix.toml");
+    if manifest_path.exists() {
+        let bytes = std::fs::read(&manifest_path).map_err(|e| HydrateError::Io {
+            package: package.clone(),
+            path: manifest_path.clone(),
+            error: e,
+        })?;
+        files.insert(Utf8PathBuf::from("brix.toml"), bytes);
+    }
+
+    let src_dir = dir.join("src");
+    if src_dir.is_dir() {
+        collect_dir_files(&src_dir, dir, package, &mut files)?;
+    }
+
+    Ok(files)
+}
+
+fn collect_dir_files(
+    current_dir: &Utf8Path,
+    pkg_dir: &Utf8Path,
+    package: &PackageName,
+    out: &mut BTreeMap<Utf8PathBuf, Vec<u8>>,
+) -> Result<(), HydrateError> {
+    let entries = std::fs::read_dir(current_dir).map_err(|e| HydrateError::Io {
+        package: package.clone(),
+        path: current_dir.to_path_buf(),
+        error: e,
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| HydrateError::Io {
+            package: package.clone(),
+            path: current_dir.to_path_buf(),
+            error: e,
+        })?;
+        let abs_path = Utf8PathBuf::from_path_buf(entry.path()).map_err(|_| HydrateError::Io {
+            package: package.clone(),
+            path: current_dir.to_path_buf(),
+            error: std::io::Error::other("non-UTF-8 path"),
+        })?;
+
+        if abs_path.is_dir() {
+            collect_dir_files(&abs_path, pkg_dir, package, out)?;
+        } else if abs_path.is_file() {
+            let rel = abs_path
+                .strip_prefix(pkg_dir)
+                .map_err(|_| HydrateError::Io {
+                    package: package.clone(),
+                    path: abs_path.clone(),
+                    error: std::io::Error::other("strip_prefix failed"),
+                })?;
+            let bytes = std::fs::read(&abs_path).map_err(|e| HydrateError::Io {
+                package: package.clone(),
+                path: abs_path.clone(),
+                error: e,
+            })?;
+            out.insert(rel.to_path_buf(), bytes);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -447,6 +511,59 @@ mod tests {
             matches!(err, HydrateError::Cycle(_)),
             "expected Cycle, got {err:?}"
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn hydrate_round_trips_a_path_dependency() {
+        let root = tmp_dir("path_dep");
+        let reg_root = root.join("registry");
+        let registry = Registry::open(&reg_root).expect("open registry");
+
+        let sibling = root.join("sibling");
+        std::fs::create_dir_all(sibling.join("src")).unwrap();
+        std::fs::write(
+            sibling.join("brix.toml"),
+            "[package]\nname = \"sibling\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sibling.join("src").join("world.brix"),
+            "package sibling @ 1.0.0\npub rel S { id: Int } key(id)\n",
+        )
+        .unwrap();
+
+        let sibling_manifest = manifest("[package]\nname = \"sibling\"\nversion = \"1.0.0\"\n");
+        let mut sib_files = PackageFiles::new();
+        sib_files.insert(
+            Utf8PathBuf::from("brix.toml"),
+            b"[package]\nname = \"sibling\"\nversion = \"1.0.0\"\n".to_vec(),
+        );
+        sib_files.insert(
+            Utf8PathBuf::from("src/world.brix"),
+            b"package sibling @ 1.0.0\npub rel S { id: Int } key(id)\n".to_vec(),
+        );
+
+        let mut path_deps = BTreeMap::new();
+        path_deps.insert(
+            PackageName::parse("sibling").unwrap(),
+            crate::resolve::PathPackage {
+                manifest: sibling_manifest,
+                path: Utf8PathBuf::from("sibling"),
+                content_digest: tree_digest(&sib_files),
+            },
+        );
+
+        let app = manifest(
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[dependencies]\nsibling = { path = \"sibling\" }\n",
+        );
+        let lockfile = resolve(&app, &registry, &path_deps).expect("resolve path dep");
+
+        let graph = hydrate(&lockfile, &registry, &root).expect("hydrate path dep");
+        assert!(graph.contains_key(&PackageName::parse("sibling").unwrap()));
+        let hydrated_files = &graph[&PackageName::parse("sibling").unwrap()];
+        assert!(hydrated_files.contains_key(&Utf8PathBuf::from("src/world.brix")));
+
         std::fs::remove_dir_all(&root).ok();
     }
 
