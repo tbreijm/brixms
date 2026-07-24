@@ -821,3 +821,23 @@ derive OrdinaryFnOnDerivedRelInRoot: OrdinaryFnOnDerivedRelConflict(subject: sub
     OrdinaryFnOnDerivedRelFinding(subject: subject, relation: relation)
     RootScope(scope: scope)
 }
+
+// #15 native overload no-unique-winner: reflect's overload resolution
+// (`resolve_call`) directly raises a `Mismatch` when no candidate is the
+// unique top-scoring match — either zero args-unifying candidates or a score
+// tie. Unlike UnifyMismatch (which reproduces `solve::step`'s per-leaf
+// classification), this conflict never routes through a `UnifyAttempt` — it is
+// raised whole from the overload argmax, so it has no fact to reconstruct it
+// from. The exporter restates it as `OverloadNoWinner` (carrying the same
+// zonked `expect`/`found` the conflict does), and this rule re-derives the
+// EXISTING MismatchConflict via a plain RootScope join — completeness, not
+// inference (the argmax stays in reflect.rs). A 4th producer of
+// MismatchConflict, converging under set semantics like UnifyMismatch.
+rel OverloadNoWinner { subject: String; expect: String; found: String } key(subject, expect, found)
+
+// OverloadNoWinnerMismatch: OverloadNoWinner ⋈ RootScope → MismatchConflict.
+// Monotone (ground ⋈ ground), Appendix-F stratified.
+derive OverloadNoWinnerMismatch: MismatchConflict(subject: subject, expect: expect, found: found, scope: scope) from {
+    OverloadNoWinner(subject: subject, expect: expect, found: found)
+    RootScope(scope: scope)
+}

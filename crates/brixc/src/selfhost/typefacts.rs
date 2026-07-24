@@ -905,6 +905,29 @@ pub fn export(report: &ReflectiveReport) -> Export {
                     ],
                 ));
             }
+            // #15 native overload no-unique-winner (restatement): reflect's
+            // direct-raise `Mismatch` from failed overload resolution, imported
+            // verbatim so the package re-derives it via a `RootScope` join
+            // (like the rule-side-condition findings above). `expect`/`found`
+            // are the (already zonked) `Ty` operands, tokenized so they match
+            // the `Mismatch` conflict payload byte-for-byte.
+            Fact::OverloadNoWinner {
+                subject,
+                expect,
+                found,
+            } => {
+                ops.push(assert_op(
+                    "OverloadNoWinner",
+                    [
+                        (
+                            "subject",
+                            tokens.record(TokenValue::Subject(subject.clone())),
+                        ),
+                        ("expect", tokens.record(TokenValue::Ty(expect.clone()))),
+                        ("found", tokens.record(TokenValue::Ty(found.clone()))),
+                    ],
+                ));
+            }
             _ => {}
         }
     }

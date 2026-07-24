@@ -426,6 +426,21 @@ pub enum Fact {
     RuleDivergent {
         subject: Subject,
     },
+    /// #15 native overload no-unique-winner (restatement): reflect's
+    /// overload-resolution direct-raise `Mismatch` (`resolve_call`, the
+    /// `else` branch when `matches` yields no unique top-scoring candidate —
+    /// either zero args-unifying candidates or a score tie). Emitted alongside
+    /// that `self.conflict(..)` carrying the identical `expect`/`found` the
+    /// conflict does (`arg_types[0]` / `arity_ok[0].params[0]`, or `Ty::Error`
+    /// when either is absent), so the package re-derives the Mismatch via a
+    /// plain `RootScope` join — completeness, not inference (the overload
+    /// argmax stays in `reflect.rs`). Zonked like `UnifyAttempt`, so its two
+    /// `Ty` payloads token-match the zonked `Mismatch` conflict byte-for-byte.
+    OverloadNoWinner {
+        subject: Subject,
+        expect: Ty,
+        found: Ty,
+    },
 }
 
 /// The one canonical encoder `FactId::derive` uses. Never a second fact
@@ -603,6 +618,15 @@ pub fn write_fact(fact: &Fact, w: &mut CanonWriter) {
         }),
         Fact::RuleDivergent { subject } => w.write_enum(25, |w| {
             subject.canon_write(w);
+        }),
+        Fact::OverloadNoWinner {
+            subject,
+            expect,
+            found,
+        } => w.write_enum(26, |w| {
+            subject.canon_write(w);
+            expect.canon_write(w);
+            found.canon_write(w);
         }),
     }
 }
@@ -893,7 +917,8 @@ impl Reflect {
                 Fact::BindAttempt { target, .. } => {
                     *target = solve::resolve(&subst, target.clone());
                 }
-                Fact::UnifyAttempt { expect, found, .. } => {
+                Fact::UnifyAttempt { expect, found, .. }
+                | Fact::OverloadNoWinner { expect, found, .. } => {
                     *expect = solve::resolve(&subst, expect.clone());
                     *found = solve::resolve(&subst, found.clone());
                 }
@@ -1880,11 +1905,24 @@ impl Reflect {
                 }
             }
         }) else {
+            let expect = arg_types.first().cloned().unwrap_or(Ty::Error);
+            let found = arity_ok[0].params.first().cloned().unwrap_or(Ty::Error);
+            // #15 native overload no-unique-winner: restate the direct-raise
+            // Mismatch as a Fact so the native package re-derives it (the same
+            // `expect`/`found`, both zonked identically to the conflict below).
+            self.fact(
+                Fact::OverloadNoWinner {
+                    subject: subject.clone(),
+                    expect: expect.clone(),
+                    found: found.clone(),
+                },
+                deps.clone(),
+            );
             self.conflict(
                 subject,
                 ConflictKind::Mismatch {
-                    left: arg_types.first().cloned().unwrap_or(Ty::Error),
-                    right: arity_ok[0].params.first().cloned().unwrap_or(Ty::Error),
+                    left: expect,
+                    right: found,
                 },
                 deps,
             );
