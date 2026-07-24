@@ -65,8 +65,17 @@ jobs:
       - name: Run the suite twice; frozen artifacts must not drift
         run: |
           set -euo pipefail
-          cargo test --workspace
-          cargo test --workspace
+          # This gate only inspects the working tree (git status below). The only
+          # crates that emit tracked frozen artifacts are the snapshot/vector
+          # producers (brix-conformance/-oracle/-ir, brixc, brix-canon). brix-cli's
+          # integration tests instead drive nested `cargo build`s of the generated
+          # program (which pulls in the full wasmtime/cranelift tree) into $TMPDIR,
+          # so they can't dirty the tree and add nothing here — excluding them
+          # drops the dominant cost (~28min -> ~6-10min). The free-disk-space step
+          # above is kept as cheap insurance (the workspace still builds wasmtime
+          # once via brix-rt).
+          cargo test --workspace --exclude brix-cli
+          cargo test --workspace --exclude brix-cli
           # insta writes *.snap.new only on a snapshot mismatch, and the canon
           # golden-vector test fails outright on drift. Either way the working
           # tree must be byte-identical after repeated runs (proxy for the G3
