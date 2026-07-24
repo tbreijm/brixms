@@ -726,7 +726,7 @@ derive DimSameMismatch: DimensionConflict(subject: subject, op: op, left: left, 
 
 // --- #15 native rule-side-conditions (restatement) ---
 //
-// Four Appendix-E rule-validity conflicts, reproduced by RESTATEMENT rather
+// Six Appendix-E rule-validity conflicts, reproduced by RESTATEMENT rather
 // than native re-analysis: `crate::check`'s effect/binding judgments
 // (`Rule::effect_flags`, `unbound_head_keys`, `unbound_mask_refs`,
 // `scan_rule_calls`) are a large, purely-Rust-side analysis with no
@@ -735,7 +735,7 @@ derive DimSameMismatch: DimensionConflict(subject: subject, op: op, left: left, 
 // raises (`reflect.rs`'s `rule_side_conditions`), and this package
 // re-derives the matching `*Conflict` row via a plain `RootScope` join — the
 // same "completeness, not inference" pattern slices 3/4 established for
-// `RequiresBool`/`Applies`. All four findings are attributed to a
+// `RequiresBool`/`Applies`. All six findings are attributed to a
 // `Subject::Rule { declaration }` token.
 
 // structural input: Fact::RuleImpure { subject } — reflect's own `pure(B, H)`
@@ -747,6 +747,34 @@ rel ImpureRuleConflict { subject: String; scope: String } key(subject, scope)
 // Monotone (ground ⋈ ground), Appendix-F stratified.
 derive ImpureRuleInRoot: ImpureRuleConflict(subject: subject, scope: scope) from {
     RuleImpureFinding(subject: subject)
+    RootScope(scope: scope)
+}
+
+// structural input: Fact::RuleNondeterministic { subject } — reflect's own
+// `det(B, H)` violation finding (Appendix E). Unit payload beyond `subject`,
+// same shape as RuleImpureFinding.
+rel RuleNondeterministicFinding { subject: String } key(subject)
+rel NondeterministicRuleConflict { subject: String; scope: String } key(subject, scope)
+
+// NondeterministicRuleInRoot: RuleNondeterministicFinding ⋈ RootScope →
+// NondeterministicRuleConflict. Monotone (ground ⋈ ground), Appendix-F
+// stratified.
+derive NondeterministicRuleInRoot: NondeterministicRuleConflict(subject: subject, scope: scope) from {
+    RuleNondeterministicFinding(subject: subject)
+    RootScope(scope: scope)
+}
+
+// structural input: Fact::RuleDivergent { subject } — reflect's own
+// `nondiverge(B, H)` violation finding (Appendix E), including the
+// `diverge`-reachable-from-body case. Unit payload beyond `subject`, same
+// shape as RuleImpureFinding.
+rel RuleDivergentFinding { subject: String } key(subject)
+rel DivergentRuleConflict { subject: String; scope: String } key(subject, scope)
+
+// DivergentRuleInRoot: RuleDivergentFinding ⋈ RootScope →
+// DivergentRuleConflict. Monotone (ground ⋈ ground), Appendix-F stratified.
+derive DivergentRuleInRoot: DivergentRuleConflict(subject: subject, scope: scope) from {
+    RuleDivergentFinding(subject: subject)
     RootScope(scope: scope)
 }
 

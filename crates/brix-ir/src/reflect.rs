@@ -417,6 +417,15 @@ pub enum Fact {
         subject: Subject,
         relation: QualIdent,
     },
+    /// #15 native rule-side-conditions (restatement), continued: the last two
+    /// Appendix-E findings (both unit — no payload beyond `subject`), reaching
+    /// 14/14 `ConflictKind` parity. Same shape as `RuleImpure`.
+    RuleNondeterministic {
+        subject: Subject,
+    },
+    RuleDivergent {
+        subject: Subject,
+    },
 }
 
 /// The one canonical encoder `FactId::derive` uses. Never a second fact
@@ -588,6 +597,12 @@ pub fn write_fact(fact: &Fact, w: &mut CanonWriter) {
         Fact::RuleOrdinaryFnOnDerivedRel { subject, relation } => w.write_enum(23, |w| {
             subject.canon_write(w);
             relation.canon_write(w);
+        }),
+        Fact::RuleNondeterministic { subject } => w.write_enum(24, |w| {
+            subject.canon_write(w);
+        }),
+        Fact::RuleDivergent { subject } => w.write_enum(25, |w| {
+            subject.canon_write(w);
         }),
     }
 }
@@ -864,7 +879,9 @@ impl Reflect {
                 | Fact::RuleImpure { .. }
                 | Fact::RuleUnboundHeadKey { .. }
                 | Fact::RuleMaskRefNotEdgeBound { .. }
-                | Fact::RuleOrdinaryFnOnDerivedRel { .. } => {}
+                | Fact::RuleOrdinaryFnOnDerivedRel { .. }
+                | Fact::RuleNondeterministic { .. }
+                | Fact::RuleDivergent { .. } => {}
                 Fact::DimSameOp { left, right, .. } => {
                     *left = solve::resolve(&subst, left.clone());
                     *right = solve::resolve(&subst, right.clone());
@@ -1189,9 +1206,21 @@ impl Reflect {
         }
         if !flags.det {
             self.conflict(subject.clone(), ConflictKind::NondeterministicRule, vec![]);
+            self.fact(
+                Fact::RuleNondeterministic {
+                    subject: subject.clone(),
+                },
+                vec![],
+            );
         }
         if !flags.nondiverge || calls.diverges {
             self.conflict(subject.clone(), ConflictKind::DivergentRule, vec![]);
+            self.fact(
+                Fact::RuleDivergent {
+                    subject: subject.clone(),
+                },
+                vec![],
+            );
         }
         for key in crate::check::unbound_head_keys(rule) {
             self.conflict(

@@ -400,8 +400,10 @@ pub struct Export {
 /// `solve::same_dimension_step`'s ground/ground `x != y` arm without
 /// restating reflect's own verdict.
 ///
-/// `Fact::RuleImpure`/`Fact::RuleUnboundHeadKey`/`Fact::RuleMaskRefNotEdgeBound`/
+/// `Fact::RuleImpure`/`Fact::RuleNondeterministic`/`Fact::RuleDivergent`/
+/// `Fact::RuleUnboundHeadKey`/`Fact::RuleMaskRefNotEdgeBound`/
 /// `Fact::RuleOrdinaryFnOnDerivedRel` are exported as `RuleImpureFinding`/
+/// `RuleNondeterministicFinding`/`RuleDivergentFinding`/
 /// `UnboundHeadKeyFinding`/`MaskRefNotEdgeBoundFinding`/
 /// `OrdinaryFnOnDerivedRelFinding` (#15 native rule-side-conditions slice) —
 /// reflect's own Appendix-E structural findings, imported verbatim rather
@@ -838,6 +840,24 @@ pub fn export(report: &ReflectiveReport) -> Export {
                     )],
                 ));
             }
+            Fact::RuleNondeterministic { subject } => {
+                ops.push(assert_op(
+                    "RuleNondeterministicFinding",
+                    [(
+                        "subject",
+                        tokens.record(TokenValue::Subject(subject.clone())),
+                    )],
+                ));
+            }
+            Fact::RuleDivergent { subject } => {
+                ops.push(assert_op(
+                    "RuleDivergentFinding",
+                    [(
+                        "subject",
+                        tokens.record(TokenValue::Subject(subject.clone())),
+                    )],
+                ));
+            }
             Fact::RuleUnboundHeadKey { subject, key } => {
                 // Column is `hkey`, not `key` — `UnboundHeadKeyFinding`'s
                 // `.brix` declaration cannot name a field `key` (the parser's
@@ -1264,6 +1284,41 @@ pub fn resolve_rule_impure(tokens: &TokenTable, row: &Row) -> Option<ResolvedRul
     let subject = tokens.subject(token_str(row, "subject")?)?.clone();
     let scope = tokens.scope(token_str(row, "scope")?)?;
     Some(ResolvedRuleImpure { subject, scope })
+}
+
+/// The resolved shape of one derived `NondeterministicRuleConflict` row (#15
+/// native rule-side-conditions) — like [`ResolvedRuleImpure`], not a `Fact`/
+/// `TypeConflict` by itself; the harness builds a comparable
+/// `ConflictKind::NondeterministicRule` `TypeConflict` from it. No payload
+/// beyond `subject`/`scope` — `NondeterministicRule` is a unit variant.
+pub struct ResolvedRuleNondeterministic {
+    pub subject: Subject,
+    pub scope: ScopeId,
+}
+
+pub fn resolve_rule_nondeterministic(
+    tokens: &TokenTable,
+    row: &Row,
+) -> Option<ResolvedRuleNondeterministic> {
+    let subject = tokens.subject(token_str(row, "subject")?)?.clone();
+    let scope = tokens.scope(token_str(row, "scope")?)?;
+    Some(ResolvedRuleNondeterministic { subject, scope })
+}
+
+/// The resolved shape of one derived `DivergentRuleConflict` row (#15 native
+/// rule-side-conditions) — like [`ResolvedRuleImpure`], not a `Fact`/
+/// `TypeConflict` by itself; the harness builds a comparable
+/// `ConflictKind::DivergentRule` `TypeConflict` from it. No payload beyond
+/// `subject`/`scope` — `DivergentRule` is a unit variant.
+pub struct ResolvedRuleDivergent {
+    pub subject: Subject,
+    pub scope: ScopeId,
+}
+
+pub fn resolve_rule_divergent(tokens: &TokenTable, row: &Row) -> Option<ResolvedRuleDivergent> {
+    let subject = tokens.subject(token_str(row, "subject")?)?.clone();
+    let scope = tokens.scope(token_str(row, "scope")?)?;
+    Some(ResolvedRuleDivergent { subject, scope })
 }
 
 /// The resolved shape of one derived `UnboundHeadKeyConflict` row (#15 native
