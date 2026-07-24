@@ -136,6 +136,14 @@ fn emit_native_value(value: &NativeValue) -> String {
         NativeValue::Node(_) | NativeValue::Edge(_) | NativeValue::Claim(_) => {
             panic!("native program emission does not yet support reference literals")
         }
+        // `Value::Bytes` (#15 value-construction primitives) is a builtin
+        // output (`brix.ty.mint_unary`/`brix.ty.mint_binary`), never a
+        // source-level literal a `.brix` const expression can spell — same
+        // "no lowering path produces one" class as the reference literals
+        // above.
+        NativeValue::Bytes(_) => {
+            panic!("native program emission does not support Bytes literals")
+        }
         NativeValue::Enum { ty, ordinal, name } => format!(
             "brix_rt::engine::Value::Enum {{ ty: {ty:?}.into(), ordinal: {ordinal}, name: {name:?}.into() }}"
         ),

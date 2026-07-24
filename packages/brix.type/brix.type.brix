@@ -250,6 +250,15 @@ rel TyChild { parent: String; ordinal: Int; child: String } key(parent, ordinal,
 // `solve::occurs`'s descent set.
 rel TyRowChild { parent: String; field: String; child: String } key(parent, field, child)
 
+// #15 value-construction primitives: `ty`'s raw canonical bytes
+// (`Ty::canon_write`'s output, before hashing), carried as `Bytes` rather
+// than tokenized. Imported alongside `TyChild`/`TyRowChild` — one row per
+// distinct `Ty` `decompose_ty` decomposes — so a rule body can mint a new
+// composite token for a *parent* type from a *child*'s raw bytes via
+// `brix.ty.mint_unary`/`brix.ty.mint_binary` + `brix.canon.digest`, without
+// this package ever reconstructing a `Ty` itself.
+rel TyBytes { ty: String; bytes: Bytes } key(ty)
+
 // A derived conflict row: an occurs-check failure — `var` appears
 // (transitively) inside `into`, the type reflect's `bind_ty` was about to
 // bind it to (mirrors reflect.rs's `ConflictKind::Occurs { var, into }`).
@@ -650,4 +659,21 @@ derive CallArityMismatch: ArityConflict(subject: subject, expected: expected, fo
     without {
         FnArity(function: fname, ordinal: any_ord, paramc: found)
     }
+}
+
+// --- #15 value-construction primitives: minimal mint spike (ATTEMPT) ---
+//
+// De-risks the `.brix` invocation surface for `brix.ty.mint_unary`/
+// `brix.canon.digest` — NOT part of the shadow-mode parity surface above
+// (no `*Conflict` row depends on this), purely a proof that a rule body can
+// call the two-step mint-then-digest sequence via `let` and have the result
+// land in a derived relation's head column. `TyBytes` is imported by
+// `typefacts::decompose_ty` (see its declaration above); `14` is
+// `Ty::Option`'s canon ordinal (`Ty::canon_write`, `crates/brix-ir/src/types.rs:402`).
+rel MintedType { orig: String; minted: String } key(orig, minted)
+
+derive MintOptionOf: MintedType(orig: t, minted: m) from {
+    TyBytes(ty: t, bytes: b)
+    let raw = brix.ty.mint_unary(14, b)
+    let m = brix.canon.digest(raw)
 }

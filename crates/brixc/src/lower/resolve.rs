@@ -480,6 +480,39 @@ pub fn seed_prelude(resolver: ProgramResolver) -> ProgramResolver {
         may_diverge: false,
     });
 
+    // #15 value-construction primitives (`brix-rt::engine::builtin_total`):
+    // mint a composite `Ty` token's raw bytes from its child(ren)'s raw
+    // bytes — `write_enum(ctor, |w| child.canon_write(w))` reproduced as
+    // `uint(ctor) ++ child_raw_bytes` — plus a digest to close it into the
+    // same opaque `String` token `typefacts.rs`'s exporter hands the
+    // package. Seeded here purely for name/arity/type resolution; the
+    // runtime dispatch is generic (`Expr::Call` falls back to
+    // `builtin_total` by name), no separate wiring needed.
+    r = r.with_function(FnSignature {
+        name: QualIdent::from("brix.ty.mint_unary"),
+        params: vec![Ty::Int(IntWidth::Int), Ty::Bytes],
+        ret: Ty::Bytes,
+        effects: EffectRow::empty(),
+        is_aggregate: false,
+        may_diverge: false,
+    });
+    r = r.with_function(FnSignature {
+        name: QualIdent::from("brix.ty.mint_binary"),
+        params: vec![Ty::Int(IntWidth::Int), Ty::Bytes, Ty::Bytes],
+        ret: Ty::Bytes,
+        effects: EffectRow::empty(),
+        is_aggregate: false,
+        may_diverge: false,
+    });
+    r = r.with_function(FnSignature {
+        name: QualIdent::from("brix.canon.digest"),
+        params: vec![Ty::Bytes],
+        ret: Ty::Str,
+        effects: EffectRow::empty(),
+        is_aggregate: false,
+        may_diverge: false,
+    });
+
     r = r.with_relation(RelationSchema {
         name: QualIdent::from("brix.sim.Now"),
         roles: vec![(IrIdent::new("at"), Ty::Instant)],

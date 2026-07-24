@@ -108,6 +108,21 @@ fn digest_hex(value: &impl Canonical) -> String {
     writer.digest(Domain::Value).to_hex()
 }
 
+/// Like [`digest_hex`] but returns the raw canonical bytes instead of
+/// hashing and discarding them — #15's value-construction primitives
+/// (`brix.ty.mint_unary`/`brix.ty.mint_binary` in `brix-rt`'s
+/// `builtin_total`) need a `Ty`'s RAW bytes, not its digest, to splice into
+/// a parent's own `write_enum(ctor, |w| child.canon_write(w))` framing
+/// (`Ty::canon_write`, `crates/brix-ir/src/types.rs`). This is that framing's
+/// child-bytes half, exported so a rule body can mint a new token that is
+/// byte-identical to what this exporter would tokenize itself — see
+/// `crates/brix-conformance/tests/engine_mint.rs`.
+fn ty_canon_bytes(ty: &Ty) -> Vec<u8> {
+    let mut w = CanonWriter::new();
+    ty.canon_write(&mut w);
+    w.finish()
+}
+
 fn relation_token(relation: &QualIdent) -> Value {
     opaque_token(relation)
 }
@@ -133,7 +148,11 @@ fn assert_op(
 
 /// #15 native slice 7 (Occurs): recursively emit `TyChild`/`TyRowChild`
 /// structure edges for a `Ty`, memoized (`seen`) so each distinct sub-`Ty` is
-/// decomposed — and its token recorded — exactly once per `export` run. The
+/// decomposed — and its token recorded — exactly once per `export` run. Also
+/// emits a `TyBytes(ty, bytes)` Ground fact for each distinct sub-`Ty`
+/// (#15 value-construction primitives) carrying that `Ty`'s raw canonical
+/// bytes as a `Value::Bytes`, so a rule body can mint a new composite token
+/// from a child's bytes without this crate constructing it directly. The
 /// descent set mirrors `solve::occurs` exactly (unary family
 /// Option/List/Vector/Set/Bag/Estimate/Missing; binary Result/Map;
 /// Record/Rel rows) — this function IS that same descent, just re-expressed
@@ -153,6 +172,19 @@ fn decompose_ty(
     if !seen.insert(hex) {
         return self_tok;
     }
+    // #15 value-construction primitives: emit this `Ty`'s raw canonical
+    // bytes as a `TyBytes` Ground fact so a `.brix` rule body can mint a new
+    // composite token (via `brix.ty.mint_unary`/`brix.ty.mint_binary` +
+    // `brix.canon.digest`) from a child it only has as a `TyBytes` row —
+    // additive alongside the `TyChild`/`TyRowChild` structure edges below,
+    // gated on the same `seen` dedup but not gating the recursion itself.
+    ops.push(assert_op(
+        "TyBytes",
+        [
+            ("ty", self_tok.clone()),
+            ("bytes", Value::Bytes(ty_canon_bytes(ty))),
+        ],
+    ));
     match ty {
         Ty::Option(t)
         | Ty::List(t)
