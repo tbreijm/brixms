@@ -45,7 +45,7 @@ use brix_conformance::typecorpus::{
     NATIVE_VAR_THREE_ROLES_FIXTURE, NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
     NATIVE_WHEN_REQUIRES_BOOL_FIXTURE,
 };
-use brix_conformance::typefacts;
+use brixc::selfhost::typefacts;
 
 const PACKAGE_SRC: &str = include_str!("../../../packages/brix.type/brix.type.brix");
 

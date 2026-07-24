@@ -18,7 +18,7 @@ use brixc::pipeline::PhaseAssign;
 use brixc::{emit, lower_file, AstPhase};
 
 use brix_conformance::typecorpus::plain_scalar_mismatch;
-use brix_conformance::typefacts;
+use brixc::selfhost::typefacts;
 
 const PACKAGE_SRC: &str = include_str!("../../../packages/brix.type/brix.type.brix");
 
