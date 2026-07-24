@@ -36,6 +36,8 @@ pub struct LocatedPackage {
     /// Sorted by path so filesystem enumeration order can't affect the build;
     /// empty for a single-file / bare-file package.
     pub extra_sources: Vec<String>,
+    /// The root package's *additional* source files with their on-disk paths.
+    pub extra_files: Vec<(Utf8PathBuf, String)>,
     /// Resolved dependency graph: each dependency's package-name segments and
     /// its entry source. Empty for a dependency-free package.
     pub deps: Vec<GraphDep>,
@@ -174,7 +176,7 @@ fn finish_located(
     source_path: Utf8PathBuf,
     pkg_root: Utf8PathBuf,
     explicit_manifest: bool,
-    extra_sources: Vec<String>,
+    extra_files: Vec<(Utf8PathBuf, String)>,
 ) -> Result<LocatedPackage, LocateError> {
     let (deps, lockfile) = if manifest.dependencies.is_empty() {
         (Vec::new(), None)
@@ -182,12 +184,14 @@ fn finish_located(
         let (deps, lockfile) = load_graph(&manifest, &pkg_root)?;
         (deps, Some(lockfile))
     };
+    let extra_sources = extra_files.iter().map(|(_, s)| s.clone()).collect();
     Ok(LocatedPackage {
         manifest,
         source_path,
         pkg_root,
         explicit_manifest,
         extra_sources,
+        extra_files,
         deps,
         lockfile,
     })
@@ -197,18 +201,22 @@ fn finish_located(
 /// by path — the additional modules of a multi-file package (issue #42 Slice
 /// 4). Sorting makes the source set independent of filesystem enumeration
 /// order (determinism); a package with only its entry file yields an empty vec.
-fn read_extra_src_files(src_dir: &Utf8Path, entry: &Utf8Path) -> Result<Vec<String>, LocateError> {
+fn read_extra_src_files(
+    src_dir: &Utf8Path,
+    entry: &Utf8Path,
+) -> Result<Vec<(Utf8PathBuf, String)>, LocateError> {
     let mut paths: Vec<Utf8PathBuf> = Vec::new();
     collect_brix_files(src_dir, &mut paths)?;
     paths.sort();
-    let mut sources = Vec::new();
+    let mut files = Vec::new();
     for p in paths {
         if p == entry {
             continue;
         }
-        sources.push(std::fs::read_to_string(&p)?);
+        let content = std::fs::read_to_string(&p)?;
+        files.push((p, content));
     }
-    Ok(sources)
+    Ok(files)
 }
 
 /// Recursively collect every `*.brix` file under `dir` into `out`.

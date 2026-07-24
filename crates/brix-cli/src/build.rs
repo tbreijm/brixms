@@ -139,7 +139,8 @@ pub struct CheckOutcome {
 pub fn check(operand: &str, native_typecheck: bool) -> Result<CheckOutcome, BuildError> {
     let located = package::locate(operand).map_err(BuildError::Locate)?;
     let source = std::fs::read_to_string(&located.source_path)?;
-    let (file, parse_diags) = parse_file(&source);
+
+    let (entry_file, parse_diags) = parse_file(&source);
     if parse_diags.has_errors() {
         return Err(BuildError::Diagnostics(DiagnosticReport::single(
             source,
@@ -148,11 +149,92 @@ pub fn check(operand: &str, native_typecheck: bool) -> Result<CheckOutcome, Buil
         )));
     }
 
-    let lowered = brixc::lower_file(&file, &parse_diags);
+    let mut extra_parsed: Vec<(brix_ast::File, brix_ast::Diagnostics)> = Vec::new();
+    for (path, src) in &located.extra_files {
+        let (file, diags) = parse_file(src);
+        if diags.has_errors() {
+            return Err(BuildError::Diagnostics(DiagnosticReport::single(
+                src.clone(),
+                path.to_string(),
+                diags,
+            )));
+        }
+        extra_parsed.push((file, diags));
+    }
+
+    let mut sources = brix_diag::SourceMap::new();
+    sources.insert(located.source_path.to_string(), source.clone());
+    for (path, src) in &located.extra_files {
+        sources.insert(path.to_string(), src.clone());
+    }
+    for dep in &located.deps {
+        let dep_name = dep.name_segments.join(".");
+        sources.insert(dep_name.clone(), dep.source.clone());
+        for src in &dep.extra_sources {
+            sources.insert(dep_name.clone(), src.clone());
+        }
+    }
+
+    let mut root_refs: Vec<&brix_ast::File> = vec![&entry_file];
+    root_refs.extend(extra_parsed.iter().map(|(f, _)| f));
+    let (file, mut merge_diags) = brixc::merge_files(&root_refs);
+
+    let dep_merged: Vec<(
+        Vec<String>,
+        brix_ast::File,
+        brix_ast::Diagnostics,
+        Vec<Diagnostic>,
+    )> = located
+        .deps
+        .iter()
+        .map(|d| {
+            let mut parsed: Vec<(brix_ast::File, brix_ast::Diagnostics)> =
+                vec![parse_file(&d.source)];
+            parsed.extend(d.extra_sources.iter().map(|s| parse_file(s)));
+            let refs: Vec<&brix_ast::File> = parsed.iter().map(|(f, _)| f).collect();
+            let (merged, dups) = brixc::merge_files(&refs);
+            let parse_items: Vec<Diagnostic> = parsed
+                .iter()
+                .flat_map(|(_, dg)| dg.iter().cloned())
+                .collect();
+            (
+                d.name_segments.clone(),
+                merged,
+                Diagnostics::from_items(parse_items),
+                dups,
+            )
+        })
+        .collect();
+    for (_, _, _, dups) in &dep_merged {
+        merge_diags.extend(dups.iter().cloned());
+    }
+
+    let mut lowered = if dep_merged.is_empty() {
+        brixc::lower_file(&file, &parse_diags)
+    } else {
+        let dep_packages: Vec<brixc::DepPackage> = dep_merged
+            .iter()
+            .map(
+                |(name_segments, dep_file, dep_diags, _)| brixc::DepPackage {
+                    name_segments: name_segments.clone(),
+                    file: dep_file,
+                    parse_diags: dep_diags,
+                },
+            )
+            .collect();
+        brixc::lower_graph(&file, &parse_diags, &dep_packages)
+    };
+
+    if !merge_diags.is_empty() {
+        merge_diags.extend(std::mem::take(&mut lowered.diags));
+        lowered.diags = merge_diags;
+    }
+
     if lowered.has_errors() {
-        return Err(BuildError::Diagnostics(DiagnosticReport::single(
+        return Err(BuildError::Diagnostics(DiagnosticReport::with_sources(
             source,
             located.source_path.to_string(),
+            sources,
             Diagnostics::from_items(lowered.diags),
         )));
     }
@@ -160,9 +242,10 @@ pub fn check(operand: &str, native_typecheck: bool) -> Result<CheckOutcome, Buil
     let native_report = if native_typecheck {
         let diagnostics = brixc::selfhost::native_typecheck(&lowered);
         (!diagnostics.is_empty()).then(|| {
-            DiagnosticReport::single(
+            DiagnosticReport::with_sources(
                 source.clone(),
                 located.source_path.to_string(),
+                sources.clone(),
                 Diagnostics::from_items(diagnostics),
             )
         })
@@ -176,9 +259,10 @@ pub fn check(operand: &str, native_typecheck: bool) -> Result<CheckOutcome, Buil
             native_report,
         }),
         Err(PipelineError::Diagnostic { diagnostic, .. }) => {
-            Err(BuildError::Diagnostics(DiagnosticReport::single(
+            Err(BuildError::Diagnostics(DiagnosticReport::with_sources(
                 source,
                 located.source_path.to_string(),
+                sources,
                 Diagnostics::from_items(vec![*diagnostic]),
             )))
         }
@@ -186,30 +270,76 @@ pub fn check(operand: &str, native_typecheck: bool) -> Result<CheckOutcome, Buil
     }
 }
 
-/// Canonical source produced by the real BrixMS parser/formatter.
-pub struct FormatOutcome {
-    pub source_path: Utf8PathBuf,
+/// Canonical source for one formatted file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FormatFile {
+    pub path: Utf8PathBuf,
     pub formatted: String,
     pub changed: bool,
 }
 
-/// Parse and canonically format a package entry source without writing it.
+/// Canonical source produced by the real BrixMS parser/formatter across all package files.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FormatOutcome {
+    pub files: Vec<FormatFile>,
+}
+
+impl FormatOutcome {
+    pub fn changed(&self) -> bool {
+        self.files.iter().any(|f| f.changed)
+    }
+
+    /// Single-file compatibility helper: returns entry source_path.
+    pub fn source_path(&self) -> &Utf8Path {
+        &self.files[0].path
+    }
+
+    /// Single-file compatibility helper: returns entry formatted text.
+    pub fn formatted(&self) -> &str {
+        &self.files[0].formatted
+    }
+}
+
+/// Parse and canonically format every `.brix` source file in a package.
 pub fn format(operand: &str) -> Result<FormatOutcome, BuildError> {
     let located = package::locate(operand).map_err(BuildError::Locate)?;
-    let source = std::fs::read_to_string(&located.source_path)?;
-    let (file, parse_diags) = parse_file(&source);
+    let entry_source = std::fs::read_to_string(&located.source_path)?;
+    let (entry_file, parse_diags) = parse_file(&entry_source);
     if parse_diags.has_errors() {
         return Err(BuildError::Diagnostics(DiagnosticReport::single(
-            source,
+            entry_source,
             located.source_path.to_string(),
             parse_diags,
         )));
     }
-    let formatted = brix_ast::format_file(&file);
+
+    let mut format_files = Vec::new();
+    let entry_formatted = brix_ast::format_file(&entry_file);
+    format_files.push(FormatFile {
+        path: located.source_path.clone(),
+        changed: entry_formatted != entry_source,
+        formatted: entry_formatted,
+    });
+
+    for (path, src) in &located.extra_files {
+        let (file, diags) = parse_file(src);
+        if diags.has_errors() {
+            return Err(BuildError::Diagnostics(DiagnosticReport::single(
+                src.clone(),
+                path.to_string(),
+                diags,
+            )));
+        }
+        let formatted = brix_ast::format_file(&file);
+        format_files.push(FormatFile {
+            path: path.clone(),
+            changed: formatted != *src,
+            formatted,
+        });
+    }
+
     Ok(FormatOutcome {
-        source_path: located.source_path,
-        changed: formatted != source,
-        formatted,
+        files: format_files,
     })
 }
 
