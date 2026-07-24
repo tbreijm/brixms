@@ -82,7 +82,7 @@ struct RuleResult {
 
 /// Check the package with the compiler and evaluate the selected quality gate.
 pub fn evaluate(operand: &str, profile: QualityProfile) -> Result<QualityOutcome, BuildError> {
-    let checked = build::check(operand)?;
+    let checked = build::check(operand, false)?;
     let located = package::locate(operand).map_err(BuildError::Locate)?;
     let source = std::fs::read_to_string(&checked.source_path)?;
     let (file, parse_diagnostics) = parse_file(&source);

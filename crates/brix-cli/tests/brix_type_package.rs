@@ -68,7 +68,7 @@ fn brix_type_locates_via_standard_package_layout() {
 #[test]
 fn brix_type_checks_cleanly_through_the_real_locate_and_check_path() {
     let root = pkg_root();
-    let outcome = brix_cli::build::check(root.to_str().expect("pkg root must be UTF-8"));
+    let outcome = brix_cli::build::check(root.to_str().expect("pkg root must be UTF-8"), false);
     match outcome {
         Ok(checked) => assert!(checked.source_path.as_str().ends_with("src/world.brix")),
         Err(e) => panic!("brix check packages/brix.type failed end to end: {e}"),

@@ -91,7 +91,7 @@ pub fn publish(
     registry_override: Option<&str>,
 ) -> Result<PublishOutcome, PublishError> {
     // Gate 1 — parse/check. A package that does not compile is never published.
-    crate::build::check(operand).map_err(PublishError::Check)?;
+    crate::build::check(operand, false).map_err(PublishError::Check)?;
 
     let located = package::locate(operand).map_err(PublishError::Locate)?;
     let pkg_root = located.pkg_root.clone();

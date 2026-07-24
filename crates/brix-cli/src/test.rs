@@ -30,7 +30,7 @@ pub struct TestOutcome {
 
 /// Check a package with the real compiler, then execute selected scenarios.
 pub fn run(operand: &str, selectors: &[String]) -> Result<TestOutcome, BuildError> {
-    build::check(operand)?;
+    build::check(operand, false)?;
 
     let located = package::locate(operand).map_err(BuildError::Locate)?;
     let source = std::fs::read_to_string(&located.source_path)?;
