@@ -18,6 +18,7 @@ use brix_ast::ast;
 use brix_ast::Span;
 use brix_ir::frontend::{FnSignature, RelationSchema, SchemaResolver, TableResolver};
 use brix_ir::ident::{Ident as IrIdent, QualIdent};
+use brix_ir::traits::{CoherenceError, ImplDef, TraitDef, TraitEnv};
 use brix_ir::types::{Ty, TyVar};
 
 /// What a declared type-position name (from `Decl::Entity`/`Decl::Enum`/
@@ -104,6 +105,10 @@ pub struct ProgramResolver {
     /// Dependency symbols that are package-private (not marked `pub`),
     /// mapped to their package name. Used by `process_uses` to issue `BRX-LOW-0016`.
     private_symbols: BTreeMap<QualIdent, String>,
+    /// The trait environment Γ (trait part): registered traits + coherent impls.
+    /// Populated by pass 1 (`schema.rs`); [`Self::add_impl`] enforces the
+    /// §28.3 orphan rule as impls are registered (issue #111).
+    trait_env: TraitEnv,
 }
 
 impl ProgramResolver {
@@ -118,6 +123,28 @@ impl ProgramResolver {
 
     pub fn is_private_symbol(&self, target: &QualIdent) -> Option<&str> {
         self.private_symbols.get(target).map(|s| s.as_str())
+    }
+
+    /// Register a `trait` declaration (issue #111). Infallible — trait names
+    /// dedup/replace-in-place, same discipline as the other `with_*` builders.
+    pub fn with_trait(mut self, def: TraitDef) -> Self {
+        self.trait_env.insert_trait(def);
+        self
+    }
+
+    /// Register an `impl`, enforcing §28.3 non-overlap coherence: a second impl
+    /// for the same `(trait, head)` is a [`CoherenceError`] (issue #111). Unlike
+    /// the builder `with_*` methods this is fallible, so it borrows `&mut self`
+    /// and the caller surfaces the error as `BRX-LOW-0017`.
+    pub fn add_impl(&mut self, def: ImplDef) -> Result<(), CoherenceError> {
+        self.trait_env.insert_impl(def)
+    }
+
+    /// The trait environment — traits + coherent impls (issue #111). The
+    /// enumerable surface cross-package re-export / whole-graph coherence
+    /// (`lower_graph`) will fold over.
+    pub fn trait_env(&self) -> &TraitEnv {
+        &self.trait_env
     }
 
     pub fn with_relation(mut self, schema: RelationSchema) -> Self {

@@ -537,6 +537,8 @@ impl<'s> Parser<'s> {
             }
             "experiment" | "tuning" => Some(Decl::Experiment(self.experiment_decl())),
             "visualization" => Some(Decl::Visualization(self.visualization_decl())),
+            "trait" => Some(Decl::Trait(self.trait_decl())),
+            "impl" => Some(Decl::Impl(self.impl_decl())),
             "let" => Some(Decl::Let(self.let_binding_decl())),
             "" => None,
             _ => Some(Decl::Extension(self.extension_decl())),
@@ -1807,6 +1809,114 @@ impl<'s> Parser<'s> {
             name,
             generics,
             value,
+        }
+    }
+
+    /// `trait Name<Generics>? { (type Ident | FnDecl)* }` (Part V §3, issue #111).
+    /// A method with a body is a default method; a method with no body is a
+    /// required signature. Associated types are declared bare (`type Item`).
+    fn trait_decl(&mut self) -> TraitDecl {
+        let kw = self.bump();
+        let name = self.ident("trait name");
+        let generics = self.generics_opt();
+        let mut assoc_types = Vec::new();
+        let mut methods = Vec::new();
+        let mut end = name.span;
+        if self.expect(TokKind::LBrace, "`{`").is_some() {
+            loop {
+                self.skip_separators();
+                if self.at(TokKind::RBrace) || self.at_eof() {
+                    break;
+                }
+                let before = self.pos;
+                if self.at_kw("type") {
+                    let tkw = self.bump();
+                    let aname = self.ident("associated type name");
+                    assoc_types.push(AssocTypeDecl {
+                        span: tkw.span.to(aname.span),
+                        name: aname,
+                    });
+                } else if self.at_kw("fn") || self.at_kw("partial") || self.at_kw("aggregate") {
+                    methods.push(self.fn_decl());
+                } else {
+                    self.error_here("expected `type` or `fn` in trait body");
+                }
+                if self.pos == before {
+                    self.recover_in_braces();
+                    break;
+                }
+            }
+            if let Some(rb) = self.expect(TokKind::RBrace, "`}`") {
+                end = rb.span;
+            }
+        }
+        TraitDecl {
+            span: kw.span.to(end),
+            vis: Visibility::Private,
+            name,
+            generics,
+            assoc_types,
+            methods,
+        }
+    }
+
+    /// `impl Trait<Args>? for Type { (type Ident = Type | FnDecl)* }`
+    /// (Part V §3 / §28.3 orphan rule, issue #111). Associated types are bound
+    /// (`type Item = String`); methods carry bodies.
+    fn impl_decl(&mut self) -> ImplDecl {
+        let kw = self.bump();
+        let trait_name = self.ident("trait name");
+        let mut trait_args = Vec::new();
+        if self.at(TokKind::Lt) {
+            let (args, _) = self.type_args();
+            trait_args = args;
+        }
+        if !self.eat_kw("for") {
+            self.error_here("expected `for` in impl");
+        }
+        let target = self.type_();
+        let mut assoc_bindings = Vec::new();
+        let mut methods = Vec::new();
+        let mut end = target.span;
+        if self.expect(TokKind::LBrace, "`{`").is_some() {
+            loop {
+                self.skip_separators();
+                if self.at(TokKind::RBrace) || self.at_eof() {
+                    break;
+                }
+                let before = self.pos;
+                if self.at_kw("type") {
+                    let tkw = self.bump();
+                    let aname = self.ident("associated type name");
+                    self.expect(TokKind::Eq, "`=`");
+                    let value = self.type_();
+                    assoc_bindings.push(AssocTypeBinding {
+                        span: tkw.span.to(value.span),
+                        name: aname,
+                        value,
+                    });
+                } else if self.at_kw("fn") || self.at_kw("partial") || self.at_kw("aggregate") {
+                    methods.push(self.fn_decl());
+                } else {
+                    self.error_here("expected `type` or `fn` in impl body");
+                }
+                if self.pos == before {
+                    self.recover_in_braces();
+                    break;
+                }
+            }
+            if let Some(rb) = self.expect(TokKind::RBrace, "`}`") {
+                end = rb.span;
+            }
+        }
+        ImplDecl {
+            span: kw.span.to(end),
+            vis: Visibility::Private,
+            trait_name,
+            trait_args,
+            target,
+            assoc_bindings,
+            methods,
         }
     }
 
@@ -3565,5 +3675,68 @@ derive D: Output(value: value) from { Input(value: (((((1))))) }\n";
                 .all(|diagnostic| diagnostic.code != "BRX-AST-0003"),
             "{diagnostics:?}"
         );
+    }
+
+    const TRAIT_IMPL_SRC: &str = "package t @ 1.0.0\n\
+trait Canonical {\n\
+    type Item\n\
+    fn encode(x: Item) -> String\n\
+}\n\
+impl Canonical for Money<EUR> {\n\
+    type Item = String\n\
+    fn encode(x: String) -> String = x\n\
+}\n";
+
+    #[test]
+    fn trait_and_impl_parse_to_real_decls_not_extension() {
+        let (file, diagnostics) = parse_file(TRAIT_IMPL_SRC);
+        assert_eq!(diagnostics.iter().count(), 0, "{diagnostics:?}");
+        let mut saw_trait = false;
+        let mut saw_impl = false;
+        for d in &file.decls {
+            match d {
+                Decl::Trait(t) => {
+                    saw_trait = true;
+                    assert_eq!(t.name.text, "Canonical");
+                    assert_eq!(t.assoc_types.len(), 1);
+                    assert_eq!(t.assoc_types[0].name.text, "Item");
+                    assert_eq!(t.methods.len(), 1);
+                    assert_eq!(t.methods[0].name.text, "encode");
+                    // required signature: no body
+                    assert!(t.methods[0].body.is_none());
+                }
+                Decl::Impl(i) => {
+                    saw_impl = true;
+                    assert_eq!(i.trait_name.text, "Canonical");
+                    assert_eq!(i.assoc_bindings.len(), 1);
+                    assert_eq!(i.assoc_bindings[0].name.text, "Item");
+                    assert_eq!(i.methods.len(), 1);
+                    // method carries a body
+                    assert!(i.methods[0].body.is_some());
+                }
+                Decl::Extension(_) => {
+                    panic!("trait/impl must not fall through to Decl::Extension")
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_trait && saw_impl, "expected both trait and impl decls");
+    }
+
+    #[test]
+    fn trait_impl_fmt_is_idempotent_and_parse_stable() {
+        let (file1, _) = parse_file(TRAIT_IMPL_SRC);
+        let once = crate::fmt::format_file(&file1);
+        let (file2, diagnostics) = parse_file(&once);
+        assert_eq!(
+            diagnostics.iter().count(),
+            0,
+            "formatted output must parse cleanly: {diagnostics:?}\n{once}"
+        );
+        let twice = crate::fmt::format_file(&file2);
+        assert_eq!(once, twice, "fmt must be a fixed point");
+        // trait/impl survive the round-trip as real decls.
+        assert!(file2.decls.iter().any(|d| matches!(d, Decl::Trait(_))));
+        assert!(file2.decls.iter().any(|d| matches!(d, Decl::Impl(_))));
     }
 }

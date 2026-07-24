@@ -556,6 +556,169 @@ scenario S {
 }
 
 // ---------------------------------------------------------------------
+// Trait/impl coherence (issue #111): the §28.3 orphan rule enforced at
+// pass-1 registration. trait/impl are no longer BRX-LOW-0002 skips.
+// ---------------------------------------------------------------------
+
+#[test]
+fn two_overlapping_impls_for_the_same_head_are_one_coherence_error() {
+    let src = r#"
+package t @ 1.0.0
+entity Order { key ref: String }
+trait Canonical { type Item }
+impl Canonical for Order { type Item = String }
+impl Canonical for Order { type Item = String }
+"#;
+    let lowered = lower(src);
+    let coherence: Vec<_> = lowered
+        .diags
+        .iter()
+        .filter(|d| d.code == "BRX-LOW-0017")
+        .collect();
+    assert_eq!(coherence.len(), 1, "{:#?}", lowered.diags);
+    assert_eq!(coherence[0].severity, Severity::Error);
+}
+
+#[test]
+fn distinct_heads_and_a_lone_impl_are_coherent_no_error() {
+    let src = r#"
+package t @ 1.0.0
+entity Order { key ref: String }
+entity Invoice { key ref: String }
+trait Canonical { type Item }
+impl Canonical for Order { type Item = String }
+impl Canonical for Invoice { type Item = String }
+"#;
+    let lowered = lower(src);
+    assert!(
+        lowered.diags.iter().all(|d| d.code != "BRX-LOW-0017"),
+        "distinct heads must not collide: {:#?}",
+        lowered.diags
+    );
+    assert!(
+        lowered.diags.iter().all(|d| d.severity != Severity::Error),
+        "{:#?}",
+        lowered.diags
+    );
+}
+
+#[test]
+fn trait_and_impl_are_no_longer_brx_low_0002_skips() {
+    let src = r#"
+package t @ 1.0.0
+entity Order { key ref: String }
+trait Canonical { type Item }
+impl Canonical for Order { type Item = String }
+"#;
+    let lowered = lower(src);
+    assert!(
+        lowered.diags.iter().all(|d| d.code != "BRX-LOW-0002"),
+        "trait/impl are handled in pass 1, not deferred: {:#?}",
+        lowered.diags
+    );
+    assert!(
+        lowered.diags.iter().all(|d| d.severity != Severity::Error),
+        "a coherent trait+impl lowers cleanly: {:#?}",
+        lowered.diags
+    );
+}
+
+#[test]
+fn an_impl_missing_a_trait_associated_type_is_a_conformance_error() {
+    let src = r#"
+package t @ 1.0.0
+entity Order { key ref: String }
+trait Canonical { type Item }
+impl Canonical for Order { }
+"#;
+    let lowered = lower(src);
+    assert!(
+        lowered.diags.iter().any(|d| d.code == "BRX-LOW-0018"),
+        "an impl missing a declared associated type must be flagged: {:#?}",
+        lowered.diags
+    );
+}
+
+#[test]
+fn an_impl_binding_an_undeclared_associated_type_is_a_conformance_error() {
+    let src = r#"
+package t @ 1.0.0
+entity Order { key ref: String }
+trait Canonical { type Item }
+impl Canonical for Order { type Item = String; type Extra = String }
+"#;
+    let lowered = lower(src);
+    let conformance: Vec<_> = lowered
+        .diags
+        .iter()
+        .filter(|d| d.code == "BRX-LOW-0018")
+        .collect();
+    assert_eq!(
+        conformance.len(),
+        1,
+        "binding an undeclared associated type must be one BRX-LOW-0018: {:#?}",
+        lowered.diags
+    );
+}
+
+// ---------------------------------------------------------------------
+// Impl method-body lowering (issue #111): a method body lowers to a checked
+// Core IR FnDef, with the impl's associated types made concrete.
+// ---------------------------------------------------------------------
+
+#[test]
+fn an_impl_method_body_lowers_to_a_checked_fn_def() {
+    let src = r#"
+package t @ 1.0.0
+entity Order { key ref: String }
+trait Canonical { type Item; fn encode(x: Item) -> Item }
+impl Canonical for Order {
+  type Item = String
+  fn encode(x: Item) -> Item = x
+}
+"#;
+    let lowered = lower(src);
+    // `Item` resolves to `String` via the impl binding, so the signature/body
+    // type-check — no unresolved-type (BRX-LOW-0012) or type errors.
+    assert!(
+        lowered.diags.iter().all(|d| d.severity != Severity::Error),
+        "impl method with a resolvable associated type must lower cleanly: {:#?}",
+        lowered.diags
+    );
+    let names: Vec<String> = lowered
+        .source
+        .functions
+        .iter()
+        .map(|f| f.name.to_string())
+        .collect();
+    assert!(
+        names.iter().any(|n| n.contains("encode")),
+        "the impl method body must lower to a FnDef; got {names:?}"
+    );
+}
+
+#[test]
+fn an_ill_typed_impl_method_body_is_actually_checked() {
+    // Proves the body is lowered AND checked (not silently dropped): `Item`
+    // resolves to `String`, so a body returning an integer is a type error.
+    let src = r#"
+package t @ 1.0.0
+entity Order { key ref: String }
+trait Canonical { type Item; fn encode(x: Item) -> Item }
+impl Canonical for Order {
+  type Item = String
+  fn encode(x: Item) -> Item = 1
+}
+"#;
+    let lowered = lower(src);
+    assert!(
+        lowered.diags.iter().any(|d| d.code == "BRX-IR-0005"),
+        "an ill-typed impl method body must be checked and flagged: {:#?}",
+        lowered.diags
+    );
+}
+
+// ---------------------------------------------------------------------
 // Totality: `Error`/`Ellipsis` AST nodes never panic lowering.
 // ---------------------------------------------------------------------
 

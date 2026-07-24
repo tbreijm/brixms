@@ -191,6 +191,8 @@ impl Formatter {
                     expr_str(&l.value)
                 ));
             }
+            Decl::Trait(t) => self.trait_decl(t),
+            Decl::Impl(i) => self.impl_decl(i),
             Decl::Extension(x) => self.extension(x),
             Decl::Error(_, raw) => self.verbatim_lines(raw),
         }
@@ -578,6 +580,48 @@ impl Formatter {
                 self.line("}");
             }
         }
+    }
+
+    fn trait_decl(&mut self, t: &TraitDecl) {
+        self.line(&format!(
+            "{}trait {}{} {{",
+            vis_prefix(t.vis),
+            t.name.text,
+            generics_str(&t.generics)
+        ));
+        self.indent += 1;
+        for a in &t.assoc_types {
+            self.line(&format!("type {}", a.name.text));
+        }
+        for m in &t.methods {
+            self.fn_decl(m);
+        }
+        self.indent -= 1;
+        self.line("}");
+    }
+
+    fn impl_decl(&mut self, i: &ImplDecl) {
+        let args = if i.trait_args.is_empty() {
+            String::new()
+        } else {
+            format!("<{}>", type_args_str(&i.trait_args))
+        };
+        self.line(&format!(
+            "{}impl {}{} for {} {{",
+            vis_prefix(i.vis),
+            i.trait_name.text,
+            args,
+            type_str(&i.target)
+        ));
+        self.indent += 1;
+        for b in &i.assoc_bindings {
+            self.line(&format!("type {} = {}", b.name.text, type_str(&b.value)));
+        }
+        for m in &i.methods {
+            self.fn_decl(m);
+        }
+        self.indent -= 1;
+        self.line("}");
     }
 
     fn enum_decl(&mut self, e: &EnumDecl) {

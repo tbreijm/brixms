@@ -487,6 +487,30 @@ pub fn lower_graph(
             qf.ret = qualify_ty(&qf.ret, &nominal_rename);
             dep_fndefs.push(qf);
         }
+
+        // Dependency trait impls fold into the graph-wide coherence check. The
+        // §28.3 orphan rule is package-graph-global (issue #111): a root or
+        // sibling `impl Trait for Head` overlapping a dependency's impl for the
+        // same (trait, head) is a cross-package BRX-LOW-0017. Folding happens
+        // before `build_onto(root)` below, so a root overlap is caught there
+        // against the root impl's own span; a dep-vs-dep overlap is caught here
+        // and tagged to the offending dependency. (Bare-name keys for now;
+        // cross-package qualification of trait/head names is a later refinement
+        // that lands with the visibility surface.)
+        for tr in dep_lowered.resolver.trait_env().traits() {
+            resolver = resolver.with_trait(tr.clone());
+        }
+        for im in dep_lowered.resolver.trait_env().impls() {
+            if let Err(e) = resolver.add_impl(im.clone()) {
+                let mut d = diag::error(
+                    diag::IMPL_COHERENCE,
+                    brix_diag::Span::empty(0),
+                    e.to_string(),
+                );
+                d.source_id = Some(dep_name.clone());
+                diags.push(d);
+            }
+        }
     }
 
     // Root package (bare names) on top of the prelude + dependency exports.

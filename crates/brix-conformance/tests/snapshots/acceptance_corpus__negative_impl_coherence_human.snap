@@ -1,0 +1,5 @@
+---
+source: crates/brix-conformance/tests/acceptance_corpus.rs
+expression: "reached.diagnostics.render_format(brix_diag::DiagnosticFormat::Human, &src,\n&label)"
+---
+lower/impl_coherence.brix:12:1: error[BRX-LOW-0017]: overlapping impl: Canonical for Order already exists (no specialization, no overlap)
