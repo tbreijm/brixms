@@ -430,3 +430,122 @@ fn ordinary_fn_on_derived_rel_yields_a_nat_ordinary_fn_diagnostic() {
         ordinary_diags[0].message
     );
 }
+
+/// A nondeterministic rule: `noisyRandom`'s declared effect row carries
+/// `random`, and rule `R`'s body calls it — Appendix E `det(B, H)` is
+/// violated. `random` is ALSO one of `EffectRow::is_impure`'s impurity
+/// atoms (every atom but `panic`/`diverge` is impure; see `effects.rs`), so
+/// this program ALSO raises an incidental `BRX-NAT-0009` ImpureRule
+/// diagnostic — irrelevant to what this test covers, so the assertions
+/// filter specifically for `BRX-NAT-0013` rather than requiring a clean
+/// diagnostic set (mirrors `ordinary_fn_on_derived_rel_yields_a_nat_
+/// ordinary_fn_diagnostic`'s filter-by-code pattern; same shape as #15's
+/// `rule_nondeterministic_effect_row` parity fixture, translated to real
+/// `.brix` surface syntax). Covers the `NondeterministicRuleConflict` ->
+/// `BRX-NAT-0013` path.
+const RULE_NONDETERMINISTIC_SRC: &str = r#"
+package t @ 1.0.0
+
+fn noisyRandom(x: Int) -> Int ! { random } = x
+
+rel Input { value: Int } key(value)
+rel Output { value: Int } key(value)
+
+derive R: Output(value: y) from {
+  Input(value: v)
+  let y = noisyRandom(v)
+}
+"#;
+
+#[test]
+fn nondeterministic_rule_yields_a_nat_rule_nondeterministic_diagnostic() {
+    let lowered = lower(RULE_NONDETERMINISTIC_SRC);
+
+    let report = analyze(&lowered.source, &lowered.resolver);
+    let reflect_nondeterministic: Vec<_> = report
+        .conflicts
+        .iter()
+        .filter(|c| matches!(c.kind, ConflictKind::NondeterministicRule))
+        .collect();
+    assert_eq!(
+        reflect_nondeterministic.len(),
+        1,
+        "reflect::analyze should report exactly one NondeterministicRule conflict: {:#?}",
+        report.conflicts
+    );
+
+    let diags = native_typecheck(&lowered);
+    let nondeterministic_diags: Vec<_> =
+        diags.iter().filter(|d| d.code == "BRX-NAT-0013").collect();
+    assert_eq!(
+        nondeterministic_diags.len(),
+        1,
+        "expected exactly one BRX-NAT-0013 diagnostic: {:#?}",
+        diags
+    );
+    assert!(
+        nondeterministic_diags[0]
+            .message
+            .contains("nondeterministic rule"),
+        "unexpected message: {}",
+        nondeterministic_diags[0].message
+    );
+}
+
+/// A divergent rule: `loopForever`'s declared effect row carries `diverge`,
+/// and rule `R`'s body calls it — Appendix E `nondiverge(B, H)` is
+/// violated. Unlike the nondeterministic fixture above, `diverge` is
+/// excluded from `EffectRow::is_impure` (Appendix E lists purity and
+/// non-divergence as orthogonal judgments), so this program raises ONLY the
+/// `BRX-NAT-0014` diagnostic. Same shape as #15's `rule_divergent_call`
+/// parity fixture, translated to real `.brix` surface syntax — here the
+/// `diverge` atom sits directly on the rule's own (call-propagated) effect
+/// row rather than surfacing only via the called fn's `may_diverge` flag,
+/// but both paths feed the same `!flags.nondiverge || calls.diverges`
+/// disjunction in `reflect.rs`'s `rule_side_conditions`. Covers the
+/// `DivergentRuleConflict` -> `BRX-NAT-0014` path.
+const RULE_DIVERGENT_SRC: &str = r#"
+package t @ 1.0.0
+
+fn loopForever(x: Int) -> Int ! { diverge } = x
+
+rel Input { value: Int } key(value)
+rel Output { value: Int } key(value)
+
+derive R: Output(value: y) from {
+  Input(value: v)
+  let y = loopForever(v)
+}
+"#;
+
+#[test]
+fn divergent_rule_yields_a_nat_rule_divergent_diagnostic() {
+    let lowered = lower(RULE_DIVERGENT_SRC);
+
+    let report = analyze(&lowered.source, &lowered.resolver);
+    let reflect_divergent: Vec<_> = report
+        .conflicts
+        .iter()
+        .filter(|c| matches!(c.kind, ConflictKind::DivergentRule))
+        .collect();
+    assert_eq!(
+        reflect_divergent.len(),
+        1,
+        "reflect::analyze should report exactly one DivergentRule conflict: {:#?}",
+        report.conflicts
+    );
+
+    let diags = native_typecheck(&lowered);
+    let divergent_diags: Vec<_> = diags.iter().filter(|d| d.code == "BRX-NAT-0014").collect();
+    assert_eq!(
+        divergent_diags.len(),
+        1,
+        "expected exactly one BRX-NAT-0014 diagnostic: {:#?}",
+        diags
+    );
+    assert!(
+        divergent_diags[0].message.contains("divergent rule"),
+        "unexpected message: {}",
+        divergent_diags[0].message
+    );
+}

@@ -1117,6 +1117,81 @@ pub fn rule_impure_effect_row() -> RuleFixture {
     }
 }
 
+/// Fixture 12b (#15 final rule-side-condition slice, reaching 14/14
+/// `ConflictKind` parity): Appendix E `det(B, H)` violated — the rule's
+/// effect row carries a `random` atom, one of `EffectRow::rule_flags`'s
+/// non-determinism-flagging atoms (`random`/`clock`/`net`/`fs`/`solver`).
+///
+/// `expected_categories` names BOTH `Impure` and `Nondeterministic`, not
+/// `Nondeterministic` alone: under brix-ir's current `is_impure` stub
+/// (`effects.rs`, "every [atom] other [than panic/diverge] is an
+/// impurity"), every atom that flags non-determinism is *also* an impurity
+/// atom (the same is true of an open effect-row tail — `rule_flags` fails
+/// `pure` for the same reason it fails `det`). So `pure(B, H)` and
+/// `det(B, H)` cannot currently be pulled apart by an effect-row fixture:
+/// this is a real structural fact about the trusted checker's stub, not an
+/// artifact of how this fixture is built, and `check_rule`/`reflect::
+/// analyze` must agree on that joint verdict same as any other fixture.
+pub fn rule_nondeterministic_effect_row() -> RuleFixture {
+    let rule = Rule {
+        name: Ident::new("Roll"),
+        head: Head::Tuple {
+            relation: QualIdent::from("Out"),
+            args: vec![],
+        },
+        body: Pattern::default(),
+        effects: EffectRow::from_atoms([Effect::Random]),
+    };
+    RuleFixture {
+        label: "rule_nondeterministic_effect_row",
+        category: ConformanceCategory::RuleSideCondition,
+        rule,
+        resolver: TableResolver::new(),
+        expected_categories: BTreeSet::from([RuleCategory::Impure, RuleCategory::Nondeterministic]),
+    }
+}
+
+/// Fixture 12c (#15 final rule-side-condition slice, reaching 14/14
+/// `ConflictKind` parity): Appendix E `nondiverge(B, H)` violated via a
+/// called fn's [`FnSignature::may_diverge`] — deliberately WITHOUT a
+/// `diverge` atom on the rule's own effect row, proving (mirroring
+/// `check.rs`'s own `diverging_called_fn_is_flagged_even_without_a_diverge_
+/// atom` unit test) that the side-condition does not rely solely on the
+/// rule's local effect row. Unlike `Nondeterministic` above, this one *is*
+/// pullable apart from `Impure`: `may_diverge` is a call-graph property, not
+/// an effect-row atom, so `pure(B, H)` stays satisfied and only `nondiverge`
+/// fails.
+pub fn rule_divergent_call() -> RuleFixture {
+    let o = Origins::new("Spins");
+    let rule = Rule {
+        name: Ident::new("Spins"),
+        head: Head::Tuple {
+            relation: QualIdent::from("Out"),
+            args: vec![],
+        },
+        body: Pattern::new(vec![Clause::Let {
+            binds: Ident::new("x"),
+            expr: o.call("loopForever", vec![]),
+        }]),
+        effects: EffectRow::empty(),
+    };
+    let resolver = TableResolver::new().with_function(FnSignature {
+        name: QualIdent::from("loopForever"),
+        params: vec![],
+        ret: Ty::Int(IntWidth::Int),
+        effects: EffectRow::empty(),
+        is_aggregate: false,
+        may_diverge: true,
+    });
+    RuleFixture {
+        label: "rule_divergent_call",
+        category: ConformanceCategory::RuleSideCondition,
+        rule,
+        resolver,
+        expected_categories: BTreeSet::from([RuleCategory::Divergent]),
+    }
+}
+
 /// Fixture 13 (#15 PR4): Appendix E `keys(H) ⊆ Bindings` violated — a
 /// derived-node head's `keyed by (...)` ident is not among the body's
 /// bound values.
@@ -1812,10 +1887,12 @@ pub fn all_type_fixtures() -> Vec<TypeFixture> {
     ]
 }
 
-/// All 4 rule-side-condition-axis fixtures, in corpus order.
+/// All 6 rule-side-condition-axis fixtures, in corpus order.
 pub fn all_rule_fixtures() -> Vec<RuleFixture> {
     vec![
         rule_impure_effect_row(),
+        rule_nondeterministic_effect_row(),
+        rule_divergent_call(),
         rule_unbound_head_key(),
         rule_mask_ref_not_edge_bound(),
         rule_ordinary_fn_on_derived_rel(),
