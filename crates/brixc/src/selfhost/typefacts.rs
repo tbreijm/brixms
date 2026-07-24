@@ -83,7 +83,7 @@ impl TokenTable {
         }
     }
 
-    fn record(&mut self, value: TokenValue) -> Value {
+    pub(crate) fn record(&mut self, value: TokenValue) -> Value {
         let hex = match &value {
             TokenValue::Subject(subject) => digest_hex(subject),
             TokenValue::Ty(ty) => digest_hex(ty),
@@ -124,17 +124,17 @@ fn ty_canon_bytes(ty: &Ty) -> Vec<u8> {
     w.finish()
 }
 
-fn relation_token(relation: &QualIdent) -> Value {
+pub(crate) fn relation_token(relation: &QualIdent) -> Value {
     opaque_token(relation)
 }
 
-fn role_token(role: &Ident) -> Value {
+pub(crate) fn role_token(role: &Ident) -> Value {
     opaque_token(role)
 }
 
 /// Build one `Assert` op from a relation name and its fields, without
 /// spelling out `Row(BTreeMap::from([...]))` at every call site.
-fn assert_op(
+pub(crate) fn assert_op(
     relation: &str,
     fields: impl IntoIterator<Item = (&'static str, Value)>,
 ) -> TransactionOp {
@@ -909,6 +909,19 @@ pub fn export(report: &ReflectiveReport) -> Export {
         }
     }
 
+    seed_singletons(&mut tokens, &mut ops);
+
+    Export { ops, tokens }
+}
+
+/// The report-independent singleton seeds every native-fact transaction needs:
+/// the `RootScope`/`BoolType` constants plus the slice-8 ctor-classification
+/// tables (`TyCtorOrdinary`/`TyCtorPlain`/`TyCtorMismatchable`/
+/// `TyCtorNonMismatch`). Shared by [`export`] (the reflect-fed bridge) and
+/// [`super::extract`] (the reflect-free syntactic extractor) so both feed the
+/// package the identical seed rows — the seeds are pure constants, so which
+/// path produced the *facts* never changes the seeds.
+pub(crate) fn seed_singletons(tokens: &mut TokenTable, ops: &mut Vec<TransactionOp>) {
     let scope_token = tokens.record(TokenValue::Scope(ScopeId::root()));
     ops.push(TransactionOp::Assert {
         relation: "RootScope".to_string(),
@@ -999,8 +1012,6 @@ pub fn export(report: &ReflectiveReport) -> Export {
             [("a", Value::Int(a)), ("b", Value::Int(b))],
         ));
     }
-
-    Export { ops, tokens }
 }
 
 /// Read a `Value::Str` token out of a derived row's role, if present.

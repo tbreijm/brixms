@@ -2040,7 +2040,12 @@ fn ty_dimensions(ty: &Ty) -> Option<Dimensions> {
     }
 }
 
-fn lit_ty(lit: &Lit) -> Ty {
+/// The structural type class of a literal — the same mapping `reflect`'s
+/// `role_arg` records as [`Fact::RoleLit`]'s `ty`. Public so the reflect-free
+/// syntactic fact extractor (`brixc::selfhost::extract`, the north-star's
+/// independence path) reproduces `RoleLit`/literal types from the identical
+/// source of truth rather than a drifting copy.
+pub fn lit_ty(lit: &Lit) -> Ty {
     match lit {
         Lit::Unit => Ty::Unit,
         Lit::Bool(_) => Ty::Bool,
