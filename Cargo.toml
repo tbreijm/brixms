@@ -56,7 +56,7 @@ wasmtime = { version = "46.0.1", features = ["component-model"] }
 wasmtime-wasi = "46.0.1"
 # wit-bindgen: guest-side (sdk/brix-driver-rs, wasm32 target only) mirror of
 # `wasmtime::component::bindgen!` above — see DEPS.md.
-wit-bindgen = "0.36"
+wit-bindgen = "0.57"
 # toml: brixpkg manifest/lockfile parsing only — see DEPS.md.
 toml = "1.1"
 
