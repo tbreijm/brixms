@@ -37,7 +37,7 @@ use brix_conformance::typecorpus::{
 };
 use brixc::selfhost::typefacts;
 
-const PACKAGE_SRC: &str = include_str!("../../../packages/brix.type/brix.type.brix");
+const PACKAGE_SRC: &str = include_str!("../../../packages/brix.type/src/world.brix");
 
 /// The one thing this spike adds to the shadow-mode package: a strict
 /// constraint that fires whenever the native rules derive ANY

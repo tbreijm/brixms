@@ -20,7 +20,7 @@ use brixc::{emit, lower_file, AstPhase};
 use brix_conformance::typecorpus::plain_scalar_mismatch;
 use brixc::selfhost::typefacts;
 
-const PACKAGE_SRC: &str = include_str!("../../../packages/brix.type/brix.type.brix");
+const PACKAGE_SRC: &str = include_str!("../../../packages/brix.type/src/world.brix");
 
 /// Compile `packages/brix.type/brix.type.brix` through the real native
 /// pipeline — same anchor `selfhost_parity.rs`'s `compiled_package` uses.
