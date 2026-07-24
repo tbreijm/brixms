@@ -15,9 +15,8 @@ use brix_ir::ident::{Ident as IrIdent, QualIdent};
 use brix_ir::types::Ty;
 
 use super::diag;
-use super::resolve::{
-    seed_prelude, FnInfo, LowerMeta, ProgramResolver, RuntimeRelationKind, UnitClass,
-};
+use super::resolve::{FnInfo, LowerMeta, ProgramResolver, RuntimeRelationKind, UnitClass};
+use super::stdlib;
 use super::tymap::{lower_type, TyPos};
 
 pub fn build(
@@ -25,7 +24,7 @@ pub fn build(
     meta: &mut LowerMeta,
     diags: &mut Vec<Diagnostic>,
 ) -> ProgramResolver {
-    build_onto(file, seed_prelude(ProgramResolver::new()), meta, diags)
+    build_onto(file, stdlib::stdlib_resolver().clone(), meta, diags)
 }
 
 /// Run pass 1 over `file`, registering its decls into an **already-seeded**
@@ -235,10 +234,16 @@ fn is_self_referential(ty: &ast::Type, name: &str) -> bool {
 fn register_units(file: &ast::File, mut resolver: ProgramResolver) -> ProgramResolver {
     for d in &file.decls {
         if let Decl::Unit(u) = d {
-            resolver = resolver.with_unit(
-                u.name.text.clone(),
-                UnitClass::Quantity(IrIdent::new(u.measure.text.clone())),
-            );
+            let class = match u.measure.text.as_str() {
+                "Duration" => UnitClass::Duration,
+                "Money" => UnitClass::Money(IrIdent::new(u.name.text.clone())),
+                _ => UnitClass::Quantity(IrIdent::new(u.measure.text.clone())),
+            };
+            let scale = match &*u.value.kind {
+                ast::ExprKind::Int(n) => *n as i64,
+                _ => 1,
+            };
+            resolver = resolver.with_unit_scaled(u.name.text.clone(), class, scale);
         }
     }
     resolver

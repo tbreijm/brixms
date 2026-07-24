@@ -166,7 +166,7 @@ fn publish_rejects_dirty_lockfile() {
     .unwrap();
 
     let registry = Registry::open(app.join(".brix").join("registry")).unwrap();
-    let lib_src = "package lib @ VER\nrel Widget { id: Int; n: Int } key(id)\n";
+    let lib_src = "package lib @ VER\npub rel Widget { id: Int; n: Int } key(id)\n";
     let publish_lib = |ver: &str| {
         let m =
             Manifest::parse(&format!("[package]\nname = \"lib\"\nversion = \"{ver}\"\n")).unwrap();

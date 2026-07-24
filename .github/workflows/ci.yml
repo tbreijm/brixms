@@ -34,6 +34,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # brix-cli's build_run_smoke tests each drive a nested `cargo build` of a
+      # generated program that pulls in the full wasmtime/cranelift tree; several
+      # of those overrun the stock runner's ~14GB free disk (os error 28). Reclaim
+      # the preinstalled toolchains (~20-30GB) we don't use before building.
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          large-packages: true
       - name: Toolchain (pinned via rust-toolchain.toml)
         run: rustup show
       - uses: Swatinem/rust-cache@v2
@@ -45,14 +54,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          large-packages: true
       - name: Toolchain (pinned via rust-toolchain.toml)
         run: rustup show
       - uses: Swatinem/rust-cache@v2
       - name: Run the suite twice; frozen artifacts must not drift
         run: |
           set -euo pipefail
-          cargo test --workspace
-          cargo test --workspace
+          # This gate only inspects the working tree (git status below). The only
+          # crates that emit tracked frozen artifacts are the snapshot/vector
+          # producers (brix-conformance/-oracle/-ir, brixc, brix-canon). brix-cli's
+          # integration tests instead drive nested `cargo build`s of the generated
+          # program (which pulls in the full wasmtime/cranelift tree) into $TMPDIR,
+          # so they can't dirty the tree and add nothing here — excluding them
+          # drops the dominant cost (~28min -> ~6-10min). The free-disk-space step
+          # above is kept as cheap insurance (the workspace still builds wasmtime
+          # once via brix-rt).
+          cargo test --workspace --exclude brix-cli
+          cargo test --workspace --exclude brix-cli
           # insta writes *.snap.new only on a snapshot mismatch, and the canon
           # golden-vector test fails outright on drift. Either way the working
           # tree must be byte-identical after repeated runs (proxy for the G3
@@ -110,6 +133,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          large-packages: true
       - name: Toolchain (pinned via rust-toolchain.toml)
         run: rustup show
       - uses: Swatinem/rust-cache@v2
@@ -134,6 +162,11 @@ jobs:
     # not a required status check.
     steps:
       - uses: actions/checkout@v7
+      - name: Free up disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          large-packages: true
       - name: Toolchain (pinned via rust-toolchain.toml)
         run: rustup show
       - uses: Swatinem/rust-cache@v2
