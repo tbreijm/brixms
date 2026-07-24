@@ -623,6 +623,44 @@ impl Canonical for Order { type Item = String }
     );
 }
 
+#[test]
+fn an_impl_missing_a_trait_associated_type_is_a_conformance_error() {
+    let src = r#"
+package t @ 1.0.0
+entity Order { key ref: String }
+trait Canonical { type Item }
+impl Canonical for Order { }
+"#;
+    let lowered = lower(src);
+    assert!(
+        lowered.diags.iter().any(|d| d.code == "BRX-LOW-0018"),
+        "an impl missing a declared associated type must be flagged: {:#?}",
+        lowered.diags
+    );
+}
+
+#[test]
+fn an_impl_binding_an_undeclared_associated_type_is_a_conformance_error() {
+    let src = r#"
+package t @ 1.0.0
+entity Order { key ref: String }
+trait Canonical { type Item }
+impl Canonical for Order { type Item = String; type Extra = String }
+"#;
+    let lowered = lower(src);
+    let conformance: Vec<_> = lowered
+        .diags
+        .iter()
+        .filter(|d| d.code == "BRX-LOW-0018")
+        .collect();
+    assert_eq!(
+        conformance.len(),
+        1,
+        "binding an undeclared associated type must be one BRX-LOW-0018: {:#?}",
+        lowered.diags
+    );
+}
+
 // ---------------------------------------------------------------------
 // Impl method-body lowering (issue #111): a method body lowers to a checked
 // Core IR FnDef, with the impl's associated types made concrete.

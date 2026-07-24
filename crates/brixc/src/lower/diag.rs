@@ -87,6 +87,11 @@ pub const PRIVATE_IMPORT: &str = "BRX-LOW-0016";
 /// The minimal-coherent rule is non-overlap — no specialization — so the
 /// duplicate is an error, not a "more specific" winner (issue #111).
 pub const IMPL_COHERENCE: &str = "BRX-LOW-0017";
+/// `BRX-LOW-0018` — an `impl` does not satisfy its trait's associated-type
+/// obligations (Part V §3: "plain associated types" — an impl provides exactly
+/// one type per associated-type name): a `type` the trait declares is missing,
+/// or the impl binds a `type` the trait does not declare (issue #111).
+pub const IMPL_CONFORMANCE: &str = "BRX-LOW-0018";
 /// `BRX-IR-0005` — an expression failed HM/ground-dimension type checking.
 pub const TYPE_ERROR: &str = "BRX-IR-0005";
 /// `BRX-IR-0006` — Appendix E `pure(B, H)` violated: an impure effect atom

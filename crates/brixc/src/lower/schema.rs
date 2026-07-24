@@ -44,7 +44,53 @@ pub fn build_onto(
     resolver = register_aliases(file, resolver, meta, diags);
     resolver = register_units(file, resolver);
     resolver = build_schemas(file, resolver, meta, diags);
+    check_impl_conformance(file, &resolver, diags);
     recompute_derived(file, resolver, meta)
+}
+
+/// Impl-conformance (issue #111, Part V §3: "plain associated types — an impl
+/// provides exactly one type per associated-type name"): each `impl` must bind
+/// exactly the associated types its trait declares — none missing, none extra.
+/// Runs after [`build_schemas`] so every trait (local, or folded from a
+/// dependency in `lower_graph`) is in the resolver's trait env, independent of
+/// declaration order. A trait the resolver does not know is skipped (nothing to
+/// check against); the impl still registered for coherence.
+fn check_impl_conformance(
+    file: &ast::File,
+    resolver: &ProgramResolver,
+    diags: &mut Vec<Diagnostic>,
+) {
+    let env = resolver.trait_env();
+    for d in &file.decls {
+        let Decl::Impl(im) = d else { continue };
+        let trait_name = im.trait_name.text.as_str();
+        let Some(tr) = env.traits().iter().find(|t| t.name.as_str() == trait_name) else {
+            continue;
+        };
+        let declared: BTreeSet<&str> = tr.assoc_types.iter().map(|a| a.as_str()).collect();
+        let bound: BTreeSet<&str> = im
+            .assoc_bindings
+            .iter()
+            .map(|b| b.name.text.as_str())
+            .collect();
+        for missing in declared.difference(&bound) {
+            diags.push(diag::error(
+                diag::IMPL_CONFORMANCE,
+                im.span,
+                format!("impl of trait `{trait_name}` is missing associated type `{missing}`"),
+            ));
+        }
+        for extra in bound.difference(&declared) {
+            diags.push(diag::error(
+                diag::IMPL_CONFORMANCE,
+                im.span,
+                format!(
+                    "impl of trait `{trait_name}` binds associated type `{extra}`, \
+                     which the trait does not declare"
+                ),
+            ));
+        }
+    }
 }
 
 /// The bare names this file declares itself (entity/rel/enum/fn/type/record),
