@@ -121,4 +121,26 @@ mod tests {
             "segment split must be observable in the encoding, not just concatenation"
         );
     }
+
+    #[test]
+    fn qual_ident_round_trips_through_display_and_from_str() {
+        // #15 native rule-side-conditions: typefacts.rs's OrdinaryFnOnDerivedRel
+        // bridge relies on `QualIdent::from(qi.to_string())` canon-writing
+        // identically to the original `qi` (verbatim `Value::Str` round-trip,
+        // no dedicated `TokenValue::QualIdent`). Verify for both single- and
+        // multi-segment names.
+        for original in [
+            QualIdent::simple("Order"),
+            QualIdent::from("AssignVehicle.Decision"),
+            QualIdent::from_segments([Ident::new("a"), Ident::new("b"), Ident::new("c")]),
+        ] {
+            let round_tripped = QualIdent::from(original.to_string().as_str());
+            assert_eq!(
+                original.canon_bytes(),
+                round_tripped.canon_bytes(),
+                "QualIdent::from(qi.to_string()) must canon-write identically to qi"
+            );
+            assert_eq!(original, round_tripped);
+        }
+    }
 }

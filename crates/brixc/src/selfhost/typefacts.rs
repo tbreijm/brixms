@@ -400,6 +400,22 @@ pub struct Export {
 /// `solve::same_dimension_step`'s ground/ground `x != y` arm without
 /// restating reflect's own verdict.
 ///
+/// `Fact::RuleImpure`/`Fact::RuleUnboundHeadKey`/`Fact::RuleMaskRefNotEdgeBound`/
+/// `Fact::RuleOrdinaryFnOnDerivedRel` are exported as `RuleImpureFinding`/
+/// `UnboundHeadKeyFinding`/`MaskRefNotEdgeBoundFinding`/
+/// `OrdinaryFnOnDerivedRelFinding` (#15 native rule-side-conditions slice) —
+/// reflect's own Appendix-E structural findings, imported verbatim rather
+/// than re-derived, since the effect/binding analysis they summarize
+/// (`Rule::effect_flags`, `crate::check::unbound_head_keys`/
+/// `unbound_mask_refs`/`scan_rule_calls`) stays exclusively in
+/// `crate::check` — restatement, not inference, mirroring the
+/// `RequiresBool`/`Applies` bridge. `key`/`var` decode through the token
+/// table's `Ident` mapping; `relation` (a `QualIdent`) is asserted verbatim
+/// (`Value::Str`) rather than tokenized, since `QualIdent::from(qi.to_string())`
+/// canon-writes byte-identical to the original `qi` (verified by
+/// `crates/brix-ir/src/ident.rs`'s round-trip test) — no dedicated
+/// `TokenValue::QualIdent` needed.
+///
 /// Facts outside these slices' rules (`FnSig`, `RowTail`, `DimTerm`) are not
 /// exported — the native package doesn't consume them yet.
 pub fn export(report: &ReflectiveReport) -> Export {
@@ -808,6 +824,67 @@ pub fn export(report: &ReflectiveReport) -> Export {
                     ],
                 ));
             }
+            // #15 native rule-side-conditions (restatement): reflect's own
+            // Appendix-E structural findings, imported verbatim alongside its
+            // `TypeConflict`s so the package re-derives each conflict via a
+            // `RootScope` join — completeness, not inference. `subject` is
+            // always a `Subject::Rule` token.
+            Fact::RuleImpure { subject } => {
+                ops.push(assert_op(
+                    "RuleImpureFinding",
+                    [(
+                        "subject",
+                        tokens.record(TokenValue::Subject(subject.clone())),
+                    )],
+                ));
+            }
+            Fact::RuleUnboundHeadKey { subject, key } => {
+                // Column is `hkey`, not `key` — `UnboundHeadKeyFinding`'s
+                // `.brix` declaration cannot name a field `key` (the parser's
+                // `rel` field block reserves a bare leading `key` for the
+                // inline key-column marker); see world.brix's comment there.
+                ops.push(assert_op(
+                    "UnboundHeadKeyFinding",
+                    [
+                        (
+                            "subject",
+                            tokens.record(TokenValue::Subject(subject.clone())),
+                        ),
+                        ("hkey", tokens.record(TokenValue::Ident(key.clone()))),
+                    ],
+                ));
+            }
+            Fact::RuleMaskRefNotEdgeBound { subject, var } => {
+                ops.push(assert_op(
+                    "MaskRefNotEdgeBoundFinding",
+                    [
+                        (
+                            "subject",
+                            tokens.record(TokenValue::Subject(subject.clone())),
+                        ),
+                        ("var", tokens.record(TokenValue::Ident(var.clone()))),
+                    ],
+                ));
+            }
+            // `relation` is asserted VERBATIM (`Value::Str`, not a token) — a
+            // `QualIdent` round-trips byte-identical through
+            // `QualIdent::from(qi.to_string())` (see
+            // `crates/brix-ir/src/ident.rs`'s
+            // `qual_ident_round_trips_through_display_and_from_str` test), so
+            // the harness reconstructs it on the read side rather than this
+            // module growing a dedicated `TokenValue::QualIdent` variant.
+            Fact::RuleOrdinaryFnOnDerivedRel { subject, relation } => {
+                ops.push(assert_op(
+                    "OrdinaryFnOnDerivedRelFinding",
+                    [
+                        (
+                            "subject",
+                            tokens.record(TokenValue::Subject(subject.clone())),
+                        ),
+                        ("relation", Value::Str(relation.to_string())),
+                    ],
+                ));
+            }
             _ => {}
         }
     }
@@ -1169,6 +1246,92 @@ pub fn resolve_dimension(tokens: &TokenTable, row: &Row) -> Option<ResolvedDimen
         op,
         left,
         right,
+        scope,
+    })
+}
+
+/// The resolved shape of one derived `ImpureRuleConflict` row (#15 native
+/// rule-side-conditions) — like [`ResolvedMismatch`], not a `Fact`/
+/// `TypeConflict` by itself; the harness builds a comparable
+/// `ConflictKind::ImpureRule` `TypeConflict` from it. No payload beyond
+/// `subject`/`scope` — `ImpureRule` is a unit variant.
+pub struct ResolvedRuleImpure {
+    pub subject: Subject,
+    pub scope: ScopeId,
+}
+
+pub fn resolve_rule_impure(tokens: &TokenTable, row: &Row) -> Option<ResolvedRuleImpure> {
+    let subject = tokens.subject(token_str(row, "subject")?)?.clone();
+    let scope = tokens.scope(token_str(row, "scope")?)?;
+    Some(ResolvedRuleImpure { subject, scope })
+}
+
+/// The resolved shape of one derived `UnboundHeadKeyConflict` row (#15 native
+/// rule-side-conditions) — like [`ResolvedUnknownField`], not a `Fact`/
+/// `TypeConflict` by itself; the harness builds a comparable
+/// `ConflictKind::UnboundHeadKey` `TypeConflict` from it. `key` decodes
+/// through the token table's `Ident` mapping, from the row's `hkey` column
+/// (not `key` — see the `export` match arm's comment on the field-name
+/// collision with the `rel` grammar's inline key-column marker).
+pub struct ResolvedUnboundHeadKey {
+    pub subject: Subject,
+    pub key: Ident,
+    pub scope: ScopeId,
+}
+
+pub fn resolve_unbound_head_key(tokens: &TokenTable, row: &Row) -> Option<ResolvedUnboundHeadKey> {
+    let subject = tokens.subject(token_str(row, "subject")?)?.clone();
+    let key = tokens.ident(token_str(row, "hkey")?)?.clone();
+    let scope = tokens.scope(token_str(row, "scope")?)?;
+    Some(ResolvedUnboundHeadKey {
+        subject,
+        key,
+        scope,
+    })
+}
+
+/// The resolved shape of one derived `MaskRefNotEdgeBoundConflict` row (#15
+/// native rule-side-conditions) — like [`ResolvedUnknownField`], not a
+/// `Fact`/`TypeConflict` by itself; the harness builds a comparable
+/// `ConflictKind::MaskRefNotEdgeBound` `TypeConflict` from it. `var` decodes
+/// through the token table's `Ident` mapping.
+pub struct ResolvedMaskRef {
+    pub subject: Subject,
+    pub var: Ident,
+    pub scope: ScopeId,
+}
+
+pub fn resolve_mask_ref(tokens: &TokenTable, row: &Row) -> Option<ResolvedMaskRef> {
+    let subject = tokens.subject(token_str(row, "subject")?)?.clone();
+    let var = tokens.ident(token_str(row, "var")?)?.clone();
+    let scope = tokens.scope(token_str(row, "scope")?)?;
+    Some(ResolvedMaskRef {
+        subject,
+        var,
+        scope,
+    })
+}
+
+/// The resolved shape of one derived `OrdinaryFnOnDerivedRelConflict` row
+/// (#15 native rule-side-conditions) — like [`ResolvedMismatch`], not a
+/// `Fact`/`TypeConflict` by itself; the harness builds a comparable
+/// `ConflictKind::OrdinaryFnOnDerivedRel` `TypeConflict` from it. `relation`
+/// was never a token — asserted verbatim by the exporter (see the `export`
+/// match arm's doc comment on the `QualIdent` round-trip) — and is
+/// reconstructed here via `QualIdent::from`.
+pub struct ResolvedOrdinaryFn {
+    pub subject: Subject,
+    pub relation: QualIdent,
+    pub scope: ScopeId,
+}
+
+pub fn resolve_ordinary_fn(tokens: &TokenTable, row: &Row) -> Option<ResolvedOrdinaryFn> {
+    let subject = tokens.subject(token_str(row, "subject")?)?.clone();
+    let relation = QualIdent::from(token_str(row, "relation")?);
+    let scope = tokens.scope(token_str(row, "scope")?)?;
+    Some(ResolvedOrdinaryFn {
+        subject,
+        relation,
         scope,
     })
 }

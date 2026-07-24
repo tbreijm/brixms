@@ -208,3 +208,225 @@ fn dimension_mismatch_yields_a_nat_dimension_diagnostic() {
         dim_diags[0].message
     );
 }
+
+/// An impure rule: `noisy`'s declared effect row carries `console`, and
+/// rule `R`'s body calls it — Appendix E `pure(B, H)` is violated. Same
+/// shape as `crates/brix-conformance/tests/fixtures/negative/check/
+/// effect_violation.brix` (issue #45) and #15's `rule_impure_effect_row`
+/// parity fixture. Note lowering ALSO raises its own `BRX-IR-0006` for this
+/// program (`check_rule` runs during lowering too) — `native_typecheck`
+/// still runs over `lowered.source`/`lowered.resolver` regardless, since
+/// `lower()` here only asserts clean *parsing*, not clean lowering. Covers
+/// the `ImpureRuleConflict` -> `BRX-NAT-0009` path.
+const RULE_IMPURE_SRC: &str = r#"
+package t @ 1.0.0
+
+fn noisy(x: Int) -> Int ! { console } = x
+
+rel Input { value: Int } key(value)
+rel Output { value: Int } key(value)
+
+derive R: Output(value: y) from {
+  Input(value: v)
+  let y = noisy(v)
+}
+"#;
+
+#[test]
+fn impure_rule_yields_a_nat_rule_impure_diagnostic() {
+    let lowered = lower(RULE_IMPURE_SRC);
+
+    let report = analyze(&lowered.source, &lowered.resolver);
+    let reflect_impure: Vec<_> = report
+        .conflicts
+        .iter()
+        .filter(|c| matches!(c.kind, ConflictKind::ImpureRule))
+        .collect();
+    assert_eq!(
+        reflect_impure.len(),
+        1,
+        "reflect::analyze should report exactly one ImpureRule conflict: {:#?}",
+        report.conflicts
+    );
+
+    let diags = native_typecheck(&lowered);
+    let impure_diags: Vec<_> = diags.iter().filter(|d| d.code == "BRX-NAT-0009").collect();
+    assert_eq!(
+        impure_diags.len(),
+        1,
+        "expected exactly one BRX-NAT-0009 diagnostic: {:#?}",
+        diags
+    );
+    assert!(
+        impure_diags[0].message.contains("impure rule"),
+        "unexpected message: {}",
+        impure_diags[0].message
+    );
+}
+
+/// An unbound head key: `Mint`'s `keyed by (missing)` names an ident never
+/// bound in the body — Appendix E `keys(H) ⊆ Bindings` is violated. Same
+/// shape as #15's `rule_unbound_head_key` parity fixture, translated to
+/// real `.brix` surface syntax (`entity ... keyed by (...)` — grammar at
+/// `crates/brix-ast/src/parser.rs`'s `head_decl`). Covers the
+/// `UnboundHeadKeyConflict` -> `BRX-NAT-0010` path.
+const UNBOUND_HEAD_KEY_SRC: &str = r#"
+package t @ 1.0.0
+
+entity Widget { key id: String }
+
+rel Input { value: Int } key(value)
+
+derive Mint: n: Widget keyed by (missing) from {
+  Input(value: v)
+}
+"#;
+
+#[test]
+fn unbound_head_key_yields_a_nat_unbound_head_key_diagnostic() {
+    let lowered = lower(UNBOUND_HEAD_KEY_SRC);
+
+    let report = analyze(&lowered.source, &lowered.resolver);
+    let reflect_unbound: Vec<_> = report
+        .conflicts
+        .iter()
+        .filter(|c| matches!(c.kind, ConflictKind::UnboundHeadKey { .. }))
+        .collect();
+    assert_eq!(
+        reflect_unbound.len(),
+        1,
+        "reflect::analyze should report exactly one UnboundHeadKey conflict: {:#?}",
+        report.conflicts
+    );
+
+    let diags = native_typecheck(&lowered);
+    let unbound_diags: Vec<_> = diags.iter().filter(|d| d.code == "BRX-NAT-0010").collect();
+    assert_eq!(
+        unbound_diags.len(),
+        1,
+        "expected exactly one BRX-NAT-0010 diagnostic: {:#?}",
+        diags
+    );
+    assert!(
+        unbound_diags[0]
+            .message
+            .contains("unbound head key `missing`"),
+        "unexpected message: {}",
+        unbound_diags[0].message
+    );
+}
+
+/// A mask head whose `target`/`reason` are both plain reads, not `@`
+/// edge-bound aliases — Appendix E's mask-head side condition is violated
+/// for BOTH idents. Same shape as `crates/brix-ast/tests/fixtures/spec/
+/// 0002-6-the-mask-primitive.brix`'s WELL-formed mask (which uses
+/// `price @ ComputedPrice(...)` edge aliases), with the `@` bindings
+/// deliberately dropped so neither `price` nor `manual` is edge-bound.
+/// Covers the `MaskRefNotEdgeBoundConflict` -> `BRX-NAT-0011` path.
+const MASK_REF_SRC: &str = r#"
+package t @ 1.0.0
+
+rel ComputedPrice { order: Int; amount: Int } key(order)
+rel ManualPrice { order: Int; amount: Int } key(order)
+
+derive Override: mask(price) by manual from {
+  ComputedPrice(order: o, amount: a1)
+  ManualPrice(order: o, amount: a2)
+}
+"#;
+
+#[test]
+fn mask_ref_not_edge_bound_yields_two_nat_mask_ref_diagnostics() {
+    let lowered = lower(MASK_REF_SRC);
+
+    let report = analyze(&lowered.source, &lowered.resolver);
+    let reflect_mask_refs: Vec<_> = report
+        .conflicts
+        .iter()
+        .filter(|c| matches!(c.kind, ConflictKind::MaskRefNotEdgeBound { .. }))
+        .collect();
+    assert_eq!(
+        reflect_mask_refs.len(),
+        2,
+        "reflect::analyze should report exactly two MaskRefNotEdgeBound conflicts \
+         (target `price` and reason `manual`): {:#?}",
+        report.conflicts
+    );
+
+    let diags = native_typecheck(&lowered);
+    let mask_diags: Vec<_> = diags.iter().filter(|d| d.code == "BRX-NAT-0011").collect();
+    assert_eq!(
+        mask_diags.len(),
+        2,
+        "expected exactly two BRX-NAT-0011 diagnostics: {:#?}",
+        diags
+    );
+    assert!(
+        mask_diags
+            .iter()
+            .all(|d| d.message.contains("not edge-bound")),
+        "unexpected messages: {mask_diags:#?}"
+    );
+}
+
+/// An ordinary (non-`aggregate`) fn call consuming a `Comprehension` over
+/// `ComputedPrice`, a relation that is `derived: true` because it is itself
+/// a `derive` head in this same file (`derived` is never a `.brix` keyword —
+/// `recompute_derived` infers it) — Appendix E `Ordinary fn` is violated.
+/// Same shape as #15's `rule_ordinary_fn_on_derived_rel` parity fixture.
+/// `sumUp`'s declared param row doesn't match the comprehension's actual
+/// (empty) row, so this fixture ALSO raises an incidental `BRX-NAT-0001`
+/// Mismatch — irrelevant to what this test covers, so the assertions filter
+/// specifically for `BRX-NAT-0012` rather than requiring a clean diagnostic
+/// set (mirrors `call_arity_mismatch_yields_a_nat_arity_diagnostic`'s
+/// filter-by-code pattern). Covers the `OrdinaryFnOnDerivedRelConflict` ->
+/// `BRX-NAT-0012` path.
+const ORDINARY_FN_ON_DERIVED_REL_SRC: &str = r#"
+package t @ 1.0.0
+
+rel Order { id: Int } key(id)
+rel ComputedPrice { order: Int } key(order)
+rel PriceSummary { order: Int; total: Int } key(order)
+
+fn sumUp(r: Rel<{order: Int}>) -> Int = 0
+
+derive PriceOrder: ComputedPrice(order: o) from { Order(id: o) }
+derive Summary: PriceSummary(order: o, total: t) from {
+  Order(id: o)
+  let t = sumUp(from { ComputedPrice(order: o) })
+}
+"#;
+
+#[test]
+fn ordinary_fn_on_derived_rel_yields_a_nat_ordinary_fn_diagnostic() {
+    let lowered = lower(ORDINARY_FN_ON_DERIVED_REL_SRC);
+
+    let report = analyze(&lowered.source, &lowered.resolver);
+    let reflect_ordinary: Vec<_> = report
+        .conflicts
+        .iter()
+        .filter(|c| matches!(c.kind, ConflictKind::OrdinaryFnOnDerivedRel { .. }))
+        .collect();
+    assert_eq!(
+        reflect_ordinary.len(),
+        1,
+        "reflect::analyze should report exactly one OrdinaryFnOnDerivedRel conflict: {:#?}",
+        report.conflicts
+    );
+
+    let diags = native_typecheck(&lowered);
+    let ordinary_diags: Vec<_> = diags.iter().filter(|d| d.code == "BRX-NAT-0012").collect();
+    assert_eq!(
+        ordinary_diags.len(),
+        1,
+        "expected exactly one BRX-NAT-0012 diagnostic: {:#?}",
+        diags
+    );
+    assert!(
+        ordinary_diags[0]
+            .message
+            .contains("ordinary fn on derived relation `ComputedPrice`"),
+        "unexpected message: {}",
+        ordinary_diags[0].message
+    );
+}

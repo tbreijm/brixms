@@ -22,7 +22,7 @@ use std::collections::BTreeSet;
 
 use brix_ast::parse_file;
 use brix_canon::CanonWriter;
-use brix_ir::ident::Ident;
+use brix_ir::ident::{Ident, QualIdent};
 use brix_ir::reflect::{
     analyze, write_conflict, ConflictKind, Fact, FactId, ReflectiveReport, Subject, TypeConflict,
 };
@@ -39,9 +39,10 @@ use brix_conformance::typecorpus::{
     missing_to_plain_implicit_coercion, occurs_check, occurs_check_row, open_row_extra_field,
     overload_bind_chain, plain_scalar_mismatch, probability_f64_bridge_is_not_a_conflict,
     probability_to_bool_erasure, quantity_add_dimension_mismatch,
-    quantity_add_same_dimension_is_not_a_conflict, same_container_leaf_no_double_count,
-    subst_chain_composite_root, subst_chain_scalar_root, try_non_result,
-    try_over_result_is_not_a_conflict, NATIVE_GUARD_NON_BOOL_FIXTURE,
+    quantity_add_same_dimension_is_not_a_conflict, rule_impure_effect_row,
+    rule_mask_ref_not_edge_bound, rule_ordinary_fn_on_derived_rel, rule_unbound_head_key,
+    same_container_leaf_no_double_count, subst_chain_composite_root, subst_chain_scalar_root,
+    try_non_result, try_over_result_is_not_a_conflict, RuleFixture, NATIVE_GUARD_NON_BOOL_FIXTURE,
     NATIVE_OPERATOR_APPLIES_FIXTURE, NATIVE_ROLE_BINDINGS_FIXTURE,
     NATIVE_ROLE_LIT_MISMATCH_FIXTURE, NATIVE_VAR_SAME_ROLE_TWICE_FIXTURE,
     NATIVE_VAR_THREE_ROLES_FIXTURE, NATIVE_VAR_TWO_ROLES_MISMATCH_FIXTURE,
@@ -60,6 +61,21 @@ fn analyze_source(src: &str) -> brix_ir::reflect::ReflectiveReport {
     );
     let lowered = lower_file(&file, &parse_diags);
     analyze(&lowered.source, &lowered.resolver)
+}
+
+/// Wrap a [`RuleFixture`]'s bare `Rule` in a single-rule [`FrontendSource`]
+/// and run `reflect::analyze` — the `RuleFixture` counterpart of
+/// [`analyze_source`] (a `RuleFixture` carries `rule`/`resolver` directly,
+/// not a full `FrontendSource`; mirrors `type_parity.rs`'s
+/// `assert_rule_side_condition_parity`).
+fn analyze_rule_fixture(fixture: &RuleFixture) -> ReflectiveReport {
+    let source = brix_ir::frontend::FrontendSource {
+        functions: Vec::new(),
+        rules: vec![fixture.rule.clone()],
+        constraints: vec![],
+        queries: vec![],
+    };
+    analyze(&source, &fixture.resolver)
 }
 
 /// Compile `packages/brix.type/brix.type.brix` through the real native
@@ -207,6 +223,141 @@ fn native_dimensions(tokens: &typefacts::TokenTable, extent: &Extent) -> Vec<Typ
                     op: resolved.op,
                     left: resolved.left,
                     right: resolved.right,
+                },
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect()
+}
+
+/// Every `ImpureRule`-kind conflict `reflect::analyze` recorded (#15 native
+/// rule-side-conditions slice) — the ImpureRule counterpart of
+/// [`reflect_mismatches`]/[`reflect_arity_conflicts`].
+fn reflect_impure_rule_conflicts(report: &ReflectiveReport) -> Vec<&TypeConflict> {
+    report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::ImpureRule))
+        .collect()
+}
+
+/// Resolve every row of a settled `ImpureRuleConflict` extent back to a
+/// comparable [`TypeConflict`] via the exporter's token table — the native
+/// counterpart of [`reflect_impure_rule_conflicts`].
+fn native_impure_rule_conflicts(
+    tokens: &typefacts::TokenTable,
+    extent: &Extent,
+) -> Vec<TypeConflict> {
+    extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_rule_impure(tokens, &record.row).expect(
+                "every derived ImpureRuleConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::ImpureRule,
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect()
+}
+
+/// Every `UnboundHeadKey`-kind conflict `reflect::analyze` recorded (#15
+/// native rule-side-conditions slice) — the UnboundHeadKey counterpart of
+/// [`reflect_mismatches`]/[`reflect_arity_conflicts`].
+fn reflect_unbound_head_key_conflicts(report: &ReflectiveReport) -> Vec<&TypeConflict> {
+    report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::UnboundHeadKey { .. }))
+        .collect()
+}
+
+/// Resolve every row of a settled `UnboundHeadKeyConflict` extent back to a
+/// comparable [`TypeConflict`] via the exporter's token table — the native
+/// counterpart of [`reflect_unbound_head_key_conflicts`].
+fn native_unbound_head_key_conflicts(
+    tokens: &typefacts::TokenTable,
+    extent: &Extent,
+) -> Vec<TypeConflict> {
+    extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_unbound_head_key(tokens, &record.row).expect(
+                "every derived UnboundHeadKeyConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::UnboundHeadKey { key: resolved.key },
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect()
+}
+
+/// Every `MaskRefNotEdgeBound`-kind conflict `reflect::analyze` recorded
+/// (#15 native rule-side-conditions slice) — the MaskRefNotEdgeBound
+/// counterpart of [`reflect_mismatches`]/[`reflect_arity_conflicts`].
+fn reflect_mask_ref_conflicts(report: &ReflectiveReport) -> Vec<&TypeConflict> {
+    report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::MaskRefNotEdgeBound { .. }))
+        .collect()
+}
+
+/// Resolve every row of a settled `MaskRefNotEdgeBoundConflict` extent back
+/// to a comparable [`TypeConflict`] via the exporter's token table — the
+/// native counterpart of [`reflect_mask_ref_conflicts`].
+fn native_mask_ref_conflicts(tokens: &typefacts::TokenTable, extent: &Extent) -> Vec<TypeConflict> {
+    extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_mask_ref(tokens, &record.row).expect(
+                "every derived MaskRefNotEdgeBoundConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::MaskRefNotEdgeBound { var: resolved.var },
+                because: BTreeSet::new(),
+                scope: resolved.scope,
+            }
+        })
+        .collect()
+}
+
+/// Every `OrdinaryFnOnDerivedRel`-kind conflict `reflect::analyze` recorded
+/// (#15 native rule-side-conditions slice) — the OrdinaryFnOnDerivedRel
+/// counterpart of [`reflect_mismatches`]/[`reflect_arity_conflicts`].
+fn reflect_ordinary_fn_conflicts(report: &ReflectiveReport) -> Vec<&TypeConflict> {
+    report
+        .conflicts
+        .iter()
+        .filter(|conflict| matches!(conflict.kind, ConflictKind::OrdinaryFnOnDerivedRel { .. }))
+        .collect()
+}
+
+/// Resolve every row of a settled `OrdinaryFnOnDerivedRelConflict` extent
+/// back to a comparable [`TypeConflict`] via the exporter's token table —
+/// the native counterpart of [`reflect_ordinary_fn_conflicts`].
+fn native_ordinary_fn_conflicts(
+    tokens: &typefacts::TokenTable,
+    extent: &Extent,
+) -> Vec<TypeConflict> {
+    extent
+        .values()
+        .map(|record| {
+            let resolved = typefacts::resolve_ordinary_fn(tokens, &record.row).expect(
+                "every derived OrdinaryFnOnDerivedRelConflict row's tokens must resolve through the token table",
+            );
+            TypeConflict {
+                subject: resolved.subject,
+                kind: ConflictKind::OrdinaryFnOnDerivedRel {
+                    relation: resolved.relation,
                 },
                 because: BTreeSet::new(),
                 scope: resolved.scope,
@@ -2348,5 +2499,226 @@ fn flagship_pricing_mutation_derives_one_dimension_conflict() {
         conflict_byte_set(reflect_conflicts.iter().copied()),
         "the native-derived DimensionConflict set must be canonical-byte-identical \
          to reflect.rs's own conflict set, even for the div-computed operand type"
+    );
+}
+
+/// #15 native rule-side-conditions slice: `rule_impure_effect_row`'s `Loud`
+/// rule calls a `console`-effect fn — Appendix E `pure(B, H)` is violated.
+/// Reproduced by RESTATEMENT: reflect.rs emits `Fact::RuleImpure` alongside
+/// its `ConflictKind::ImpureRule`, and the package re-derives the conflict
+/// via `ImpureRuleInRoot`'s `RuleImpureFinding ⋈ RootScope` join.
+#[test]
+fn rule_impure_effect_row_derives_one_impure_rule_conflict() {
+    let fixture = rule_impure_effect_row();
+    let report = analyze_rule_fixture(&fixture);
+
+    let reflect_conflicts = reflect_impure_rule_conflicts(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one ImpureRule conflict for the \
+         rule_impure_effect_row fixture; got {reflect_conflicts:?}"
+    );
+    assert_eq!(
+        reflect_conflicts[0].kind,
+        ConflictKind::ImpureRule,
+        "reflect's conflict must be the unit ImpureRule variant"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-rule-impure-effect-row".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let extent = settled
+        .extents
+        .get("ImpureRuleConflict")
+        .expect("brix.type package must declare an ImpureRuleConflict relation");
+    assert_eq!(
+        extent.len(),
+        1,
+        "native package must derive exactly one ImpureRuleConflict row"
+    );
+
+    let native_conflicts = native_impure_rule_conflicts(&export.tokens, extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived ImpureRuleConflict set must be canonical-byte-identical \
+         to reflect.rs's own conflict set (same subject, same scope)"
+    );
+}
+
+/// #15 native rule-side-conditions slice: `rule_unbound_head_key`'s `Mint`
+/// rule's `keyed by (missing)` head names an ident never bound in the
+/// (empty) body — Appendix E `keys(H) ⊆ Bindings` is violated. Reproduced by
+/// RESTATEMENT via `UnboundHeadKeyInRoot`.
+#[test]
+fn rule_unbound_head_key_derives_one_unbound_head_key_conflict() {
+    let fixture = rule_unbound_head_key();
+    let report = analyze_rule_fixture(&fixture);
+
+    let reflect_conflicts = reflect_unbound_head_key_conflicts(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one UnboundHeadKey conflict for the \
+         rule_unbound_head_key fixture; got {reflect_conflicts:?}"
+    );
+    assert_eq!(
+        reflect_conflicts[0].kind,
+        ConflictKind::UnboundHeadKey {
+            key: Ident::new("missing"),
+        },
+        "reflect's conflict must name the unbound head key `missing`"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-rule-unbound-head-key".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let extent = settled
+        .extents
+        .get("UnboundHeadKeyConflict")
+        .expect("brix.type package must declare an UnboundHeadKeyConflict relation");
+    assert_eq!(
+        extent.len(),
+        1,
+        "native package must derive exactly one UnboundHeadKeyConflict row"
+    );
+
+    let native_conflicts = native_unbound_head_key_conflicts(&export.tokens, extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived UnboundHeadKeyConflict set must be canonical-byte-identical \
+         to reflect.rs's own conflict set (same subject, same key, same scope)"
+    );
+}
+
+/// #15 native rule-side-conditions slice: `rule_mask_ref_not_edge_bound`'s
+/// `Override` rule's `mask(price) by manual` head refers to `price`/`manual`,
+/// neither of which is an edge-bound alias in the (empty) body — Appendix
+/// E's mask-head side condition is violated for BOTH idents. Reproduced by
+/// RESTATEMENT via `MaskRefNotEdgeBoundInRoot`.
+#[test]
+fn rule_mask_ref_not_edge_bound_derives_two_mask_ref_conflicts() {
+    let fixture = rule_mask_ref_not_edge_bound();
+    let report = analyze_rule_fixture(&fixture);
+
+    let reflect_conflicts = reflect_mask_ref_conflicts(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        2,
+        "reflect.rs must record exactly two MaskRefNotEdgeBound conflicts \
+         (target `price` and reason `manual`) for the \
+         rule_mask_ref_not_edge_bound fixture; got {reflect_conflicts:?}"
+    );
+    let reflect_vars: BTreeSet<Ident> = reflect_conflicts
+        .iter()
+        .filter_map(|c| match &c.kind {
+            ConflictKind::MaskRefNotEdgeBound { var } => Some(var.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reflect_vars,
+        BTreeSet::from([Ident::new("price"), Ident::new("manual")]),
+        "reflect's conflicts must name both unbound mask refs, `price` and `manual`"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-rule-mask-ref-not-edge-bound".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let extent = settled
+        .extents
+        .get("MaskRefNotEdgeBoundConflict")
+        .expect("brix.type package must declare a MaskRefNotEdgeBoundConflict relation");
+    assert_eq!(
+        extent.len(),
+        2,
+        "native package must derive exactly two MaskRefNotEdgeBoundConflict rows"
+    );
+
+    let native_conflicts = native_mask_ref_conflicts(&export.tokens, extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived MaskRefNotEdgeBoundConflict set must be canonical-byte-identical \
+         to reflect.rs's own conflict set (same subject, same var, same scope)"
+    );
+}
+
+/// #15 native rule-side-conditions slice: `rule_ordinary_fn_on_derived_rel`'s
+/// `Summary` rule calls the non-`aggregate` `sumUp` fn on a `Comprehension`
+/// over `ComputedPrice`, a `derived: true` relation — Appendix E `Ordinary
+/// fn` is violated. Reproduced by RESTATEMENT via
+/// `OrdinaryFnOnDerivedRelInRoot`, proving the `QualIdent` verbatim
+/// round-trip (`relation` surfaces in the conflict) holds end-to-end.
+#[test]
+fn rule_ordinary_fn_on_derived_rel_derives_one_ordinary_fn_conflict() {
+    let fixture = rule_ordinary_fn_on_derived_rel();
+    let report = analyze_rule_fixture(&fixture);
+
+    let reflect_conflicts = reflect_ordinary_fn_conflicts(&report);
+    assert_eq!(
+        reflect_conflicts.len(),
+        1,
+        "reflect.rs must record exactly one OrdinaryFnOnDerivedRel conflict for the \
+         rule_ordinary_fn_on_derived_rel fixture; got {reflect_conflicts:?}"
+    );
+    assert_eq!(
+        reflect_conflicts[0].kind,
+        ConflictKind::OrdinaryFnOnDerivedRel {
+            relation: QualIdent::from("ComputedPrice"),
+        },
+        "reflect's conflict must name the derived relation `ComputedPrice`"
+    );
+
+    let export = typefacts::export(&report);
+    let mut txn = Transaction::new(b"selfhost-parity-rule-ordinary-fn-on-derived-rel".to_vec());
+    txn.ops = export.ops;
+
+    let mut store = Store::new(compiled_package());
+    let settled = store
+        .commit(&txn)
+        .expect("exported facts must commit cleanly (shadow mode never rejects)");
+
+    let extent = settled
+        .extents
+        .get("OrdinaryFnOnDerivedRelConflict")
+        .expect("brix.type package must declare an OrdinaryFnOnDerivedRelConflict relation");
+    assert_eq!(
+        extent.len(),
+        1,
+        "native package must derive exactly one OrdinaryFnOnDerivedRelConflict row"
+    );
+
+    let native_conflicts = native_ordinary_fn_conflicts(&export.tokens, extent);
+
+    assert_eq!(
+        conflict_byte_set(&native_conflicts),
+        conflict_byte_set(reflect_conflicts.iter().copied()),
+        "the native-derived OrdinaryFnOnDerivedRelConflict set must be canonical-byte-identical \
+         to reflect.rs's own conflict set (same subject, same relation, same scope) — \
+         proving the verbatim QualIdent round-trip holds end-to-end"
     );
 }

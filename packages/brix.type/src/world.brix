@@ -11,6 +11,14 @@
 // (mul/div deferred): the package independently compares two ground operands'
 // `solve::dims` digests rather than restating reflect's own verdict.
 //
+// The native rule-side-conditions slice adds four Appendix-E rule-validity
+// conflicts (ImpureRule, UnboundHeadKey, MaskRefNotEdgeBound,
+// OrdinaryFnOnDerivedRel) by RESTATEMENT rather than re-analysis: reflect.rs
+// emits a structural finding fact alongside each conflict it raises (the
+// effect/binding judgments stay exclusively in `crate::check`), and this
+// package re-derives the matching conflict via a plain RootScope join.
+//
+
 // Shadow-mode differential companion to `brix_ir::reflect::analyze`. This
 // package never runs against a real user transaction: `brix-conformance`'s
 // exporter (`crates/brix-conformance/src/typefacts.rs`) flattens a subset of
@@ -714,4 +722,74 @@ derive DimSameMismatch: DimensionConflict(subject: subject, op: op, left: left, 
     TyDims(ty: right, dims: rdims)
     RootScope(scope: scope)
     when ldims != rdims
+}
+
+// --- #15 native rule-side-conditions (restatement) ---
+//
+// Four Appendix-E rule-validity conflicts, reproduced by RESTATEMENT rather
+// than native re-analysis: `crate::check`'s effect/binding judgments
+// (`Rule::effect_flags`, `unbound_head_keys`, `unbound_mask_refs`,
+// `scan_rule_calls`) are a large, purely-Rust-side analysis with no
+// independent value in being re-derived here. Instead, `reflect.rs` emits a
+// structural FINDING fact alongside each `self.conflict(...)` it already
+// raises (`reflect.rs`'s `rule_side_conditions`), and this package
+// re-derives the matching `*Conflict` row via a plain `RootScope` join — the
+// same "completeness, not inference" pattern slices 3/4 established for
+// `RequiresBool`/`Applies`. All four findings are attributed to a
+// `Subject::Rule { declaration }` token.
+
+// structural input: Fact::RuleImpure { subject } — reflect's own `pure(B, H)`
+// violation finding (Appendix E). Unit payload beyond `subject`.
+rel RuleImpureFinding { subject: String } key(subject)
+rel ImpureRuleConflict { subject: String; scope: String } key(subject, scope)
+
+// ImpureRuleInRoot: RuleImpureFinding ⋈ RootScope → ImpureRuleConflict.
+// Monotone (ground ⋈ ground), Appendix-F stratified.
+derive ImpureRuleInRoot: ImpureRuleConflict(subject: subject, scope: scope) from {
+    RuleImpureFinding(subject: subject)
+    RootScope(scope: scope)
+}
+
+// structural input: Fact::RuleUnboundHeadKey { subject, key } — reflect's own
+// `keys(H) ⊆ Bindings` violation finding, `hkey` decoded through the
+// exporter's Ident token mapping. Field is named `hkey`, not `key` — the
+// parser's `rel` field block treats a bare leading `key` as the inline
+// key-column marker (`key? Ident : Type`), so a field literally named `key`
+// can never be declared.
+rel UnboundHeadKeyFinding { subject: String; hkey: String } key(subject, hkey)
+rel UnboundHeadKeyConflict { subject: String; hkey: String; scope: String } key(subject, hkey, scope)
+
+// UnboundHeadKeyInRoot: UnboundHeadKeyFinding ⋈ RootScope →
+// UnboundHeadKeyConflict. Monotone, Appendix-F stratified.
+derive UnboundHeadKeyInRoot: UnboundHeadKeyConflict(subject: subject, hkey: hkey, scope: scope) from {
+    UnboundHeadKeyFinding(subject: subject, hkey: hkey)
+    RootScope(scope: scope)
+}
+
+// structural input: Fact::RuleMaskRefNotEdgeBound { subject, var } —
+// reflect's own mask-head side-condition violation finding, `var` decoded
+// through the exporter's Ident token mapping.
+rel MaskRefNotEdgeBoundFinding { subject: String; var: String } key(subject, var)
+rel MaskRefNotEdgeBoundConflict { subject: String; var: String; scope: String } key(subject, var, scope)
+
+// MaskRefNotEdgeBoundInRoot: MaskRefNotEdgeBoundFinding ⋈ RootScope →
+// MaskRefNotEdgeBoundConflict. Monotone, Appendix-F stratified.
+derive MaskRefNotEdgeBoundInRoot: MaskRefNotEdgeBoundConflict(subject: subject, var: var, scope: scope) from {
+    MaskRefNotEdgeBoundFinding(subject: subject, var: var)
+    RootScope(scope: scope)
+}
+
+// structural input: Fact::RuleOrdinaryFnOnDerivedRel { subject, relation } —
+// reflect's own `Ordinary fn` violation finding. `relation` is asserted
+// verbatim (Value::Str, not a token) — QualIdent::from(qi.to_string())
+// canon-writes byte-identical to the original qi, so no dedicated token type
+// is needed for the harness's read-side reconstruction.
+rel OrdinaryFnOnDerivedRelFinding { subject: String; relation: String } key(subject, relation)
+rel OrdinaryFnOnDerivedRelConflict { subject: String; relation: String; scope: String } key(subject, relation, scope)
+
+// OrdinaryFnOnDerivedRelInRoot: OrdinaryFnOnDerivedRelFinding ⋈ RootScope →
+// OrdinaryFnOnDerivedRelConflict. Monotone, Appendix-F stratified.
+derive OrdinaryFnOnDerivedRelInRoot: OrdinaryFnOnDerivedRelConflict(subject: subject, relation: relation, scope: scope) from {
+    OrdinaryFnOnDerivedRelFinding(subject: subject, relation: relation)
+    RootScope(scope: scope)
 }
