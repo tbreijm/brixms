@@ -56,8 +56,11 @@ pub enum Outcome {
 /// outcome itself.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Authority {
-    /// The dependent proof kernel (`brix-kernel`). Sole publisher of
-    /// `Proven`/`Refuted`.
+    /// A dependent proof **kernel** — the role, not a specific crate:
+    /// `brix-kernel`, or an external kernel (e.g. Lean) reached across an
+    /// `elaboration-boundary`. Sole publisher of `Proven`/`Refuted`; the
+    /// certificate names *which* kernel certified it (a resolver may construct
+    /// the candidate term, but never publish the outcome).
     ProofKernel,
     /// The settlement kernel (`brix-rt`/`brix-oracle`). Sole publisher of
     /// `Derived`.
