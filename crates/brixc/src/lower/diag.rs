@@ -82,6 +82,11 @@ pub const DUPLICATE_DECL: &str = "BRX-LOW-0015";
 /// `BRX-LOW-0016` — a `use` item or reference names a declaration from a
 /// dependency package that is package-private (not marked `pub`).
 pub const PRIVATE_IMPORT: &str = "BRX-LOW-0016";
+/// `BRX-LOW-0017` — trait-coherence violation (§28.3 orphan rule / Part V §3):
+/// a second `impl Trait for Head` for a `(trait, head)` already implemented.
+/// The minimal-coherent rule is non-overlap — no specialization — so the
+/// duplicate is an error, not a "more specific" winner (issue #111).
+pub const IMPL_COHERENCE: &str = "BRX-LOW-0017";
 /// `BRX-IR-0005` — an expression failed HM/ground-dimension type checking.
 pub const TYPE_ERROR: &str = "BRX-IR-0005";
 /// `BRX-IR-0006` — Appendix E `pure(B, H)` violated: an impure effect atom

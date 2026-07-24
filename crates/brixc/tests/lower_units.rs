@@ -556,6 +556,74 @@ scenario S {
 }
 
 // ---------------------------------------------------------------------
+// Trait/impl coherence (issue #111): the §28.3 orphan rule enforced at
+// pass-1 registration. trait/impl are no longer BRX-LOW-0002 skips.
+// ---------------------------------------------------------------------
+
+#[test]
+fn two_overlapping_impls_for_the_same_head_are_one_coherence_error() {
+    let src = r#"
+package t @ 1.0.0
+entity Order { key ref: String }
+trait Canonical { type Item }
+impl Canonical for Order { type Item = String }
+impl Canonical for Order { type Item = String }
+"#;
+    let lowered = lower(src);
+    let coherence: Vec<_> = lowered
+        .diags
+        .iter()
+        .filter(|d| d.code == "BRX-LOW-0017")
+        .collect();
+    assert_eq!(coherence.len(), 1, "{:#?}", lowered.diags);
+    assert_eq!(coherence[0].severity, Severity::Error);
+}
+
+#[test]
+fn distinct_heads_and_a_lone_impl_are_coherent_no_error() {
+    let src = r#"
+package t @ 1.0.0
+entity Order { key ref: String }
+entity Invoice { key ref: String }
+trait Canonical { type Item }
+impl Canonical for Order { type Item = String }
+impl Canonical for Invoice { type Item = String }
+"#;
+    let lowered = lower(src);
+    assert!(
+        lowered.diags.iter().all(|d| d.code != "BRX-LOW-0017"),
+        "distinct heads must not collide: {:#?}",
+        lowered.diags
+    );
+    assert!(
+        lowered.diags.iter().all(|d| d.severity != Severity::Error),
+        "{:#?}",
+        lowered.diags
+    );
+}
+
+#[test]
+fn trait_and_impl_are_no_longer_brx_low_0002_skips() {
+    let src = r#"
+package t @ 1.0.0
+entity Order { key ref: String }
+trait Canonical { type Item }
+impl Canonical for Order { type Item = String }
+"#;
+    let lowered = lower(src);
+    assert!(
+        lowered.diags.iter().all(|d| d.code != "BRX-LOW-0002"),
+        "trait/impl are handled in pass 1, not deferred: {:#?}",
+        lowered.diags
+    );
+    assert!(
+        lowered.diags.iter().all(|d| d.severity != Severity::Error),
+        "a coherent trait+impl lowers cleanly: {:#?}",
+        lowered.diags
+    );
+}
+
+// ---------------------------------------------------------------------
 // Totality: `Error`/`Ellipsis` AST nodes never panic lowering.
 // ---------------------------------------------------------------------
 

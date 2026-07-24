@@ -12,6 +12,7 @@ use brix_diag::Diagnostic;
 use brix_ir::effects::{Effect, EffectRow};
 use brix_ir::frontend::{FnSignature, RelationSchema, SchemaResolver};
 use brix_ir::ident::{Ident as IrIdent, QualIdent};
+use brix_ir::traits::{AssocBinding, ImplDef, ImplHead, TraitDef};
 use brix_ir::types::Ty;
 
 use super::diag;
@@ -410,10 +411,64 @@ fn build_schemas(
                     is_aggregate: f.aggregate,
                 });
             }
+            // Trait/impl registration (issue #111). Traits go into Γ; impls are
+            // keyed by (trait, head) and `add_impl` enforces the §28.3 orphan
+            // rule right here as they register (BRX-LOW-0017 on overlap). Method
+            // bodies are not lowered yet (a follow-on slice).
+            Decl::Trait(t) => {
+                let name = IrIdent::new(t.name.text.clone());
+                let assoc_types = t
+                    .assoc_types
+                    .iter()
+                    .map(|a| IrIdent::new(a.name.text.clone()))
+                    .collect();
+                meta.set_decl_span(name.clone(), t.span);
+                resolver = resolver.with_trait(TraitDef { name, assoc_types });
+            }
+            Decl::Impl(im) => {
+                let assoc = im
+                    .assoc_bindings
+                    .iter()
+                    .map(|b| AssocBinding {
+                        name: IrIdent::new(b.name.text.clone()),
+                        ty: lower_type(&b.value, TyPos::FnSig, &resolver, meta, diags),
+                    })
+                    .collect();
+                match impl_head(&im.target) {
+                    Some(head) => {
+                        let def = ImplDef {
+                            trait_name: IrIdent::new(im.trait_name.text.clone()),
+                            head: ImplHead(head),
+                            assoc,
+                        };
+                        if let Err(e) = resolver.add_impl(def) {
+                            diags.push(diag::error(diag::IMPL_COHERENCE, im.span, e.to_string()));
+                        }
+                    }
+                    None => diags.push(diag::error(
+                        diag::UNSUPPORTED_V0,
+                        im.target.span,
+                        "impl target must be a named type \
+                         (row/compound targets are not supported in v0)",
+                    )),
+                }
+            }
             _ => {}
         }
     }
     resolver
+}
+
+/// The head-constructor name of an `impl ... for Target` — the last path
+/// segment of a Named type (`Money<EUR>` -> `Money`). Per the trait design,
+/// "generic-parameterized heads reduce to the head constructor name for the
+/// coherence key" (`brix_ir::traits`). Row/compound targets have no single head
+/// and return `None` (issue #111).
+fn impl_head(target: &ast::Type) -> Option<IrIdent> {
+    match &target.kind {
+        TypeKind::Named { path, .. } => path.segments.last().map(|s| IrIdent::new(s.text.clone())),
+        _ => None,
+    }
 }
 
 fn build_effect_row(effects: &Option<Vec<ast::Ident>>, diags: &mut Vec<Diagnostic>) -> EffectRow {

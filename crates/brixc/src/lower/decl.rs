@@ -49,6 +49,8 @@ pub fn lower_decls(
             }
 
             // Schema-producing decls: fully handled by pass 1 already.
+            // Trait/impl register into the trait env (+ coherence) in pass 1
+            // (#111); method-body lowering is a follow-on slice.
             Decl::Entity(_)
             | Decl::Rel(_)
             | Decl::Protocol(_)
@@ -56,7 +58,9 @@ pub fn lower_decls(
             | Decl::Type(_)
             | Decl::Measure(_)
             | Decl::Unit(_)
-            | Decl::Record(_) => {}
+            | Decl::Record(_)
+            | Decl::Trait(_)
+            | Decl::Impl(_) => {}
 
             // v0 defer line: skip-with-warning (BRX-LOW-0002).
             Decl::Driver(x) => skip(diags, x.span, "driver"),
@@ -70,10 +74,6 @@ pub fn lower_decls(
             Decl::Experiment(x) => skip(diags, x.span, "experiment"),
             Decl::Visualization(x) => skip(diags, x.span, "visualization"),
             Decl::Let(x) => skip(diags, x.span, "let"),
-            // Trait/impl now parse to real AST nodes (#111 slice 1); lowering
-            // into TraitEnv + coherence is slice 2, so they still defer here.
-            Decl::Trait(x) => skip(diags, x.span, "trait"),
-            Decl::Impl(x) => skip(diags, x.span, "impl"),
             Decl::Extension(x) => skip(diags, x.span, "extension"),
 
             // Silent: the parser already reported this.

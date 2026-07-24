@@ -114,7 +114,7 @@ impl fmt::Display for CoherenceError {
 /// The trait environment Γ (trait part). Impls are keyed by `(trait, head)`;
 /// the key set *is* the coherence invariant. Stored in sorted `Vec`s (no
 /// `HashMap` — semantic path) so iteration order is canonical.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct TraitEnv {
     traits: Vec<TraitDef>,
     impls: Vec<ImplDef>,
