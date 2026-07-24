@@ -53,7 +53,7 @@ wasmtime = { version = "46.0.1", features = ["component-model"] }
 # its own stdlib runtime support, independent of the delta-ABI's own
 # `capabilities` interface. The Driver host must satisfy those or components
 # fail to instantiate — see DEPS.md.
-wasmtime-wasi = "46.0.1"
+wasmtime-wasi = "47.0.2"
 # wit-bindgen: guest-side (sdk/brix-driver-rs, wasm32 target only) mirror of
 # `wasmtime::component::bindgen!` above — see DEPS.md.
 wit-bindgen = "0.36"
