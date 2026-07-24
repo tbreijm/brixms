@@ -92,11 +92,25 @@ pub struct BuildOutcome {
 /// is the narrow compiler oracle used by editors and local package agents.
 pub struct CheckOutcome {
     pub source_path: Utf8PathBuf,
+    /// Advisory findings from the self-hosted `brix.type` checker (Track A
+    /// slice D), populated only when `native_typecheck` was requested AND it
+    /// found at least one `BRX-NAT-*` conflict. These never affect whether
+    /// `check` returns `Ok` — `infer`/`assign_phases` remain the sole error
+    /// floor (see module docs on `check`'s advisory contract below).
+    pub native_report: Option<DiagnosticReport>,
 }
 
 /// Parse, lower, type/effect-check, and phase-check a package without emitting
 /// or executing anything.
-pub fn check(operand: &str) -> Result<CheckOutcome, BuildError> {
+///
+/// `native_typecheck`, when set, additionally runs the self-hosted
+/// `brix.type` checker (`brixc::selfhost::native_typecheck`) over the
+/// lowered program and surfaces any `BRX-NAT-*` findings via
+/// [`CheckOutcome::native_report`]. This is strictly advisory: it never turns
+/// an otherwise-clean check into an `Err` and never suppresses one — `infer`
+/// and phase-assignment stay the sole error floor, so no build can regress
+/// because of a native-checker finding (or its absence).
+pub fn check(operand: &str, native_typecheck: bool) -> Result<CheckOutcome, BuildError> {
     let located = package::locate(operand).map_err(BuildError::Locate)?;
     let source = std::fs::read_to_string(&located.source_path)?;
     let (file, parse_diags) = parse_file(&source);
@@ -117,9 +131,21 @@ pub fn check(operand: &str) -> Result<CheckOutcome, BuildError> {
         }));
     }
 
+    let native_report = if native_typecheck {
+        let diagnostics = brixc::selfhost::native_typecheck(&lowered);
+        (!diagnostics.is_empty()).then(|| DiagnosticReport {
+            source: source.clone(),
+            path: located.source_path.to_string(),
+            diagnostics: Diagnostics::from_items(diagnostics),
+        })
+    } else {
+        None
+    };
+
     match AstPhase.assign_phases(lowered) {
         Ok(_) => Ok(CheckOutcome {
             source_path: located.source_path,
+            native_report,
         }),
         Err(PipelineError::Diagnostic { diagnostic, .. }) => {
             Err(BuildError::Diagnostics(DiagnosticReport {

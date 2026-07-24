@@ -90,8 +90,16 @@ fn run_check(p: &ParsedArgs) -> i32 {
         eprintln!("brix check: expected a source file or package path");
         return EXIT_USAGE;
     };
-    match brix_cli::build::check(operand) {
+    let native = p.flag("native-typecheck");
+    match brix_cli::build::check(operand, native) {
         Ok(outcome) => {
+            // Advisory only (Track A slice D): native findings are printed
+            // but never affect the exit code — `infer`/phase-assignment
+            // (already Ok by this point) remain the sole error floor.
+            if let Some(report) = &outcome.native_report {
+                eprintln!("brix check: native type-checker (advisory) reported finding(s):");
+                eprint!("{}", report.render(format));
+            }
             println!("brix: checked {}", outcome.source_path);
             EXIT_SUCCESS
         }
