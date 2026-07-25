@@ -33,8 +33,17 @@
 //! shrinks `cand(e)`/`Succ(e)` pointwise over every reachable `e`
 //! (ADR-0002 §5 point 5, §5.5) — lives in
 //! `tests/governance_conservation.rs`.
+//!
+//! **Also E5-scaffolded here** ([`cost`], [`oracle::cand_instrumented`]): the
+//! O(Δ) benchmark gate (ADR-0002 §9.1/§9.3, `Build_Plan_v3_SOC.md` Step 6) —
+//! per-step [`cost::CostRecord`]s (ADR-0001 stage-4a) wired against the
+//! naive oracle *before* the fast incremental engine (E3/E4) exists, so the
+//! invariant is measurable from the first delta-driven candidate. The naive
+//! oracle is *expected* to fail this gate by design; the armed, currently
+//! `#[ignore]`d future gate lives in `tests/o_delta_gate.rs`.
 
 pub mod adm;
+pub mod cost;
 pub mod exec;
 pub mod history;
 pub mod intern;
@@ -43,9 +52,10 @@ pub mod regime;
 pub mod store;
 
 pub use adm::{Adm, AdmAll, AdmNone, AdmRegimeAllowlist, AdmSuccessorFilter, AndAdm};
+pub use cost::CostRecord;
 pub use exec::{intern_context, ExecConfig};
 pub use history::History;
 pub use intern::{Handle, Interner};
-pub use oracle::{cand, succ};
+pub use oracle::{cand, cand_instrumented, succ};
 pub use regime::{Candidate, Regime};
 pub use store::{ArcMap, PersistentMap};

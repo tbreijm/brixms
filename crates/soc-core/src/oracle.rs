@@ -15,6 +15,7 @@
 //! faster engine belongs beside it, not instead of it.
 
 use crate::adm::Adm;
+use crate::cost::CostRecord;
 use crate::exec::ExecConfig;
 use crate::history::History;
 use crate::intern::Handle;
@@ -36,6 +37,50 @@ pub fn cand(regimes: &[&dyn Regime], adm: &dyn Adm, e: &ExecConfig) -> BTreeSet<
         }
     }
     out
+}
+
+/// An instrumented variant of [`cand`] that additionally emits a
+/// [`CostRecord`] measuring the work this call actually did (ADR-0001 §4
+/// stage-4a; ADR-0002 §9.1, the O(Δ) gate — `tests/o_delta_gate.rs`). Does
+/// **not** change `cand`'s behavior: same filtering, same resulting
+/// candidate set, byte-for-byte. This is a pure, non-invasive addition
+/// beside the reference oracle, per ADR-0002 §9.2 "Reference oracle"
+/// discipline (never optimize or alter the naive oracle's semantics; add
+/// instrumentation beside it, not instead of it).
+///
+/// **Why this is exactly the naive oracle's real cost.** `cand` asks
+/// *every* regime in `regimes` for its candidates on *every* call,
+/// unconditionally — whether that regime is active (produces a candidate
+/// for this `e`) or inert (produces nothing). That unconditional scan is
+/// the O(|world|) "recompute-the-world" cost ADR-0002 §9.1's O(Δ) gate
+/// exists to catch. Work units here: one per regime scanned
+/// (`regimes.len()` scans, paid regardless of relevance) plus one per raw
+/// candidate a regime returns, scanned for admissibility before any
+/// admissible ones are inserted into the output set. Doubling the number of
+/// *inert* regimes in `regimes` therefore directly doubles the work-unit
+/// count measured here — that is what makes the naive oracle's
+/// world-proportional cost observable at all (see `tests/o_delta_gate.rs`).
+pub fn cand_instrumented(
+    regimes: &[&dyn Regime],
+    adm: &dyn Adm,
+    e: &ExecConfig,
+) -> (BTreeSet<Candidate>, CostRecord) {
+    let mut out = BTreeSet::new();
+    let mut work: u64 = 0;
+    for regime in regimes {
+        // One work unit per regime scanned, paid unconditionally — this is
+        // the naive oracle's O(|world|) shape, made measurable.
+        work += 1;
+        for c in regime.candidates(e) {
+            // One work unit per raw candidate scanned for admissibility,
+            // whether or not it ends up admitted.
+            work += 1;
+            if adm.admits(e, &c) {
+                out.insert(c);
+            }
+        }
+    }
+    (out, CostRecord::Steps(work))
 }
 
 /// `Succ(e)` — the observed successor-config set: every [`ExecConfig`]
@@ -169,5 +214,42 @@ mod tests {
         let (_i, regime, e) = setup();
         let regimes: Vec<&dyn Regime> = vec![&regime];
         assert_eq!(succ(&regimes, &AdmAll, &e), succ(&regimes, &AdmAll, &e));
+    }
+
+    #[test]
+    fn cand_instrumented_matches_cand_s_candidate_set() {
+        let (_i, regime, e) = setup();
+        let regimes: Vec<&dyn Regime> = vec![&regime];
+        let (instrumented, _cost) = cand_instrumented(&regimes, &AdmAll, &e);
+        assert_eq!(
+            instrumented,
+            cand(&regimes, &AdmAll, &e),
+            "cand_instrumented must not change cand's candidate set"
+        );
+    }
+
+    #[test]
+    fn cand_instrumented_never_emits_unknown_cost() {
+        let (_i, regime, e) = setup();
+        let regimes: Vec<&dyn Regime> = vec![&regime];
+        let (_c, cost) = cand_instrumented(&regimes, &AdmAll, &e);
+        assert!(
+            cost.work_units().is_some(),
+            "the instrumented oracle path always measures — never UnknownCost"
+        );
+    }
+
+    #[test]
+    fn cand_instrumented_cost_scales_with_the_number_of_regimes_scanned() {
+        let (_i, regime, e) = setup();
+        let regimes_one: Vec<&dyn Regime> = vec![&regime];
+        let regimes_two: Vec<&dyn Regime> = vec![&regime, &regime];
+        let (_c1, cost1) = cand_instrumented(&regimes_one, &AdmAll, &e);
+        let (_c2, cost2) = cand_instrumented(&regimes_two, &AdmAll, &e);
+        assert!(
+            cost2.work_units().unwrap() > cost1.work_units().unwrap(),
+            "scanning more regimes must cost strictly more work units \
+             (the O(|world|) shape the O(Δ) gate is built to catch)"
+        );
     }
 }
