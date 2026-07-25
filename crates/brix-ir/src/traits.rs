@@ -114,7 +114,7 @@ impl fmt::Display for CoherenceError {
 /// The trait environment Γ (trait part). Impls are keyed by `(trait, head)`;
 /// the key set *is* the coherence invariant. Stored in sorted `Vec`s (no
 /// `HashMap` — semantic path) so iteration order is canonical.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct TraitEnv {
     traits: Vec<TraitDef>,
     impls: Vec<ImplDef>,
@@ -181,7 +181,9 @@ impl TraitEnv {
 /// The head constructor name of a type, for exact-match impl selection.
 fn head_of(ty: &Ty) -> Option<ImplHead> {
     let name = match ty {
-        Ty::NodeRef(e) | Ty::EdgeRef(e) | Ty::ClaimRef(e) => e.as_str(),
+        Ty::NodeRef(e) | Ty::EdgeRef(e) | Ty::ClaimRef(e) => {
+            e.segments().last().map(|s| s.as_str()).unwrap_or("")
+        }
         Ty::Quantity(m) => m.as_str(),
         Ty::Money(c) => c.as_str(),
         Ty::List(_) => "List",

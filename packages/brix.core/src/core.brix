@@ -1,0 +1,17 @@
+pub measure Mass
+pub unit kg: Mass = 1
+
+pub measure Kilometre
+pub unit km: Kilometre = 1
+
+pub measure Duration
+pub unit hours: Duration = 1
+pub unit s: Duration = 1
+
+pub measure Money
+pub unit EUR: Money = 100
+
+pub enum ValidationError {}
+pub fn Probability.try(x: F64) -> Result<Probability, ValidationError>
+
+pub aggregate fn count() -> I64

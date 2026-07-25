@@ -170,10 +170,12 @@ derive Copy: Output(count: count) from {
 
     // Exactly the `(!diagnostics.is_empty()).then(...)` construction
     // `build::check` uses.
-    let native_report = (!diagnostics.is_empty()).then(|| brix_cli::build::DiagnosticReport {
-        source: ROLE_LIT_MISMATCH_SRC.to_string(),
-        path: "t".to_string(),
-        diagnostics: Diagnostics::from_items(diagnostics),
+    let native_report = (!diagnostics.is_empty()).then(|| {
+        brix_cli::build::DiagnosticReport::single(
+            ROLE_LIT_MISMATCH_SRC.to_string(),
+            "t".to_string(),
+            Diagnostics::from_items(diagnostics),
+        )
     });
     assert!(native_report.is_some());
     let rendered = native_report

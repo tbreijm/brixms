@@ -286,3 +286,96 @@ fn duplicate_decl_across_root_files_fails_closed() {
     );
     std::fs::remove_dir_all(&root).ok();
 }
+
+#[test]
+fn multi_file_package_check_and_fmt_support() {
+    let root = tmp_dir("multifmt");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("brix.toml"),
+        "[package]\nname = \"mf\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("world.brix"),
+        "package mf @ 0.1.0\nrel   Alpha {  id : Int } key(id)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src").join("other.brix"),
+        "package mf @ 0.1.0\nrel   Beta {  id : Int } key(id)\n",
+    )
+    .unwrap();
+
+    let check_out = brix(&["check", root.as_str()]);
+    assert!(
+        check_out.status.success(),
+        "brix check on multi-file package must succeed"
+    );
+
+    let fmt_check_out = brix(&["fmt", "--check", root.as_str()]);
+    assert!(
+        !fmt_check_out.status.success(),
+        "brix fmt --check must fail on unformatted multi-file package"
+    );
+    let stderr = String::from_utf8_lossy(&fmt_check_out.stderr);
+    assert!(
+        stderr.contains("world.brix") || stderr.contains("other.brix"),
+        "expected stderr to flag unformatted files, got: {stderr}"
+    );
+
+    let fmt_write_out = brix(&["fmt", "--write", root.as_str()]);
+    assert!(
+        fmt_write_out.status.success(),
+        "brix fmt --write on multi-file package must succeed"
+    );
+
+    let fmt_check_post = brix(&["fmt", "--check", root.as_str()]);
+    assert!(
+        fmt_check_post.status.success(),
+        "brix fmt --check after write must pass cleanly"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn path_dependency_builds_and_checks_cleanly() {
+    let root = tmp_dir("pathdep_cli");
+    let app = root.join("app");
+    let sibling = root.join("sib");
+
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::create_dir_all(sibling.join("src")).unwrap();
+
+    std::fs::write(
+        sibling.join("brix.toml"),
+        "[package]\nname = \"sib\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sibling.join("src").join("world.brix"),
+        "package sib @ 0.1.0\npub rel SiblingRel { id: Int } key(id)\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        app.join("brix.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n[dependencies]\nsib = { path = \"../sib\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("src").join("world.brix"),
+        "package app @ 0.1.0\nuse sib.{SiblingRel}\nrel Local { id: Int } key(id)\n",
+    )
+    .unwrap();
+
+    let check_out = brix(&["check", app.as_str()]);
+    assert!(
+        check_out.status.success(),
+        "brix check on package with path dependency must succeed, got: {}",
+        String::from_utf8_lossy(&check_out.stderr)
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}

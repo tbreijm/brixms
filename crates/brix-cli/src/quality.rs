@@ -87,11 +87,11 @@ pub fn evaluate(operand: &str, profile: QualityProfile) -> Result<QualityOutcome
     let source = std::fs::read_to_string(&checked.source_path)?;
     let (file, parse_diagnostics) = parse_file(&source);
     if parse_diagnostics.has_errors() {
-        return Err(BuildError::Diagnostics(DiagnosticReport {
+        return Err(BuildError::Diagnostics(DiagnosticReport::single(
             source,
-            path: checked.source_path.to_string(),
-            diagnostics: parse_diagnostics,
-        }));
+            checked.source_path.to_string(),
+            parse_diagnostics,
+        )));
     }
 
     let formatted = brix_ast::format_file(&file);
@@ -346,16 +346,12 @@ fn quality_diagnostic(
     message: &str,
     rules: &[RuleResult],
 ) -> BuildError {
-    BuildError::Diagnostics(DiagnosticReport {
-        source: source.to_owned(),
-        path: path.to_string(),
-        diagnostics: Diagnostics::from_items(vec![Diagnostic::error(
-            code,
-            Span::new(0, 0),
-            message,
-        )
-        .with_structure(quality_structure(profile, status, rules))]),
-    })
+    BuildError::Diagnostics(DiagnosticReport::single(
+        source.to_owned(),
+        path.to_string(),
+        Diagnostics::from_items(vec![Diagnostic::error(code, Span::new(0, 0), message)
+            .with_structure(quality_structure(profile, status, rules))]),
+    ))
 }
 
 fn quality_structure(profile: QualityProfile, status: &str, rules: &[RuleResult]) -> CanonValue {

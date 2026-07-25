@@ -1,0 +1,4 @@
+package brix.ty @ 0.1.0
+
+pub fn mint_unary(ctor: Int, child: Bytes) -> Bytes
+pub fn mint_binary(ctor: Int, child1: Bytes, child2: Bytes) -> Bytes

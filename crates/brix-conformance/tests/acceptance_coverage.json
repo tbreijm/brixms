@@ -127,6 +127,9 @@
   "negative-effect-violation": {
     "check": { "pass": 0, "fail": 1 }
   },
+  "negative-impl-coherence": {
+    "lower": { "pass": 0, "fail": 1 }
+  },
   "negative-name-resolution": {
     "lower": { "pass": 0, "fail": 1 }
   },

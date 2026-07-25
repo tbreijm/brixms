@@ -62,6 +62,7 @@ impl fmt::Display for Stage {
 /// A pipeline error. Real diagnostics flow through `brix-diag` once that crate's
 /// API is on this branch; until then a stage reports either a not-yet-wired seam
 /// or a stage-local failure message.
+#[allow(clippy::result_large_err)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PipelineError {
     /// A `todo` seam that depends on a sibling lane not yet merged.
@@ -71,7 +72,7 @@ pub enum PipelineError {
     /// A stage failed with a structured, source-map-ready diagnostic.
     Diagnostic {
         stage: Stage,
-        diagnostic: Diagnostic,
+        diagnostic: Box<Diagnostic>,
     },
 }
 

@@ -120,27 +120,36 @@ fn run_fmt(p: &ParsedArgs) -> i32 {
         return EXIT_USAGE;
     };
     match brix_cli::build::format(operand) {
-        Ok(outcome) if p.flag("check") && outcome.changed => {
-            eprintln!(
-                "brix fmt: {} is not canonically formatted",
-                outcome.source_path
-            );
+        Ok(outcome) if p.flag("check") && outcome.changed() => {
+            for file in outcome.files.iter().filter(|f| f.changed) {
+                eprintln!("brix fmt: {} is not canonically formatted", file.path);
+            }
             EXIT_FAILURE
         }
+        Ok(_outcome) if p.flag("check") => EXIT_SUCCESS,
         Ok(outcome) if p.flag("write") => {
-            match std::fs::write(&outcome.source_path, outcome.formatted) {
-                Ok(()) => {
-                    println!("brix: formatted {}", outcome.source_path);
-                    EXIT_SUCCESS
+            let mut failed = false;
+            for file in &outcome.files {
+                if file.changed {
+                    match std::fs::write(&file.path, &file.formatted) {
+                        Ok(()) => println!("brix: formatted {}", file.path),
+                        Err(error) => {
+                            eprintln!("brix fmt: I/O error writing {}: {error}", file.path);
+                            failed = true;
+                        }
+                    }
                 }
-                Err(error) => {
-                    eprintln!("brix fmt: I/O error: {error}");
-                    EXIT_FAILURE
-                }
+            }
+            if failed {
+                EXIT_FAILURE
+            } else {
+                EXIT_SUCCESS
             }
         }
         Ok(outcome) => {
-            print!("{}", outcome.formatted);
+            for file in &outcome.files {
+                print!("{}", file.formatted);
+            }
             EXIT_SUCCESS
         }
         Err(e) => {

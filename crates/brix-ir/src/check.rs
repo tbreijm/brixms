@@ -471,7 +471,7 @@ mod tests {
         let schema = rel(
             "ComputedPrice",
             vec![
-                ("order", Ty::NodeRef(Ident::new("Order"))),
+                ("order", Ty::NodeRef(QualIdent::simple("Order"))),
                 ("amount", Ty::F64),
             ],
             &["amount"],
@@ -499,7 +499,7 @@ mod tests {
             .with_relation(rel("Order", vec![("id", Ty::EventId)], &["id"], true))
             .with_relation(rel(
                 "Delivered",
-                vec![("order", Ty::NodeRef(Ident::new("Order")))],
+                vec![("order", Ty::NodeRef(QualIdent::simple("Order")))],
                 &["order"],
                 false, // open / not model-closed
             ));
@@ -527,7 +527,7 @@ mod tests {
             .with_relation(rel("Order", vec![("id", Ty::EventId)], &["id"], true))
             .with_relation(rel(
                 "Delivered",
-                vec![("order", Ty::NodeRef(Ident::new("Order")))],
+                vec![("order", Ty::NodeRef(QualIdent::simple("Order")))],
                 &["order"],
                 false,
             ))
@@ -553,7 +553,7 @@ mod tests {
             .with_relation(rel("Order", vec![("id", Ty::EventId)], &["id"], true))
             .with_relation(rel(
                 "Delivered",
-                vec![("order", Ty::NodeRef(Ident::new("Order")))],
+                vec![("order", Ty::NodeRef(QualIdent::simple("Order")))],
                 &["order"],
                 true, // model-closed: `without` is sound with no ceremony
             ));
@@ -758,7 +758,7 @@ mod tests {
         let resolver = TableResolver::new()
             .with_relation(rel(
                 "ComputedPrice",
-                vec![("order", Ty::NodeRef(Ident::new("Order")))],
+                vec![("order", Ty::NodeRef(QualIdent::simple("Order")))],
                 &[],
                 true,
             ))
@@ -777,7 +777,7 @@ mod tests {
                 derived: true,
                 ..rel(
                     "ComputedPrice",
-                    vec![("order", Ty::NodeRef(Ident::new("Order")))],
+                    vec![("order", Ty::NodeRef(QualIdent::simple("Order")))],
                     &[],
                     true,
                 )
@@ -833,7 +833,7 @@ mod tests {
                 derived: true,
                 ..rel(
                     "ComputedPrice",
-                    vec![("order", Ty::NodeRef(Ident::new("Order")))],
+                    vec![("order", Ty::NodeRef(QualIdent::simple("Order")))],
                     &[],
                     true,
                 )

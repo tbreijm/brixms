@@ -1,0 +1,12 @@
+// Negative fixture (issue #111): trait-coherence orphan rule (Part V §3 /
+// §28.3). At most one `impl Trait for Head` may exist across the package
+// graph — no specialization, no overlap. A second `impl Canonical for Order`
+// must fail closed with BRX-LOW-0017 rather than silently picking a winner.
+package neg.coherence @ 0.1.0
+
+entity Order { key ref: String }
+
+trait Canonical { type Item }
+
+impl Canonical for Order { type Item = String }
+impl Canonical for Order { type Item = String }

@@ -1,0 +1,5 @@
+---
+source: crates/brix-conformance/tests/acceptance_corpus.rs
+expression: "reached.diagnostics.render_format(brix_diag::DiagnosticFormat::Json, &src,\n&label)"
+---
+{"diagnostics":[{"code":"BRX-LOW-0017","severity":"error","message":"overlapping impl: Canonical for Order already exists (no specialization, no overlap)","path":"lower/impl_coherence.brix","span":{"start":452,"end":499},"startLine":12,"startColumn":1,"endLine":12,"endColumn":48,"structure":null,"labels":[]}]}

@@ -220,9 +220,10 @@ impl Infer {
                     entity,
                     fields,
                 } => {
+                    let qname = QualIdent::from(entity.as_str());
                     env.entry(var.clone())
-                        .or_insert_with(|| Ty::NodeRef(entity.clone()));
-                    if let Some(schema) = resolver.relation(&QualIdent::simple(entity.as_str())) {
+                        .or_insert_with(|| Ty::NodeRef(qname.clone()));
+                    if let Some(schema) = resolver.relation(&qname) {
                         for arg in fields {
                             if let Some((_, ty)) =
                                 schema.roles.iter().find(|(name, _)| name == &arg.role)
