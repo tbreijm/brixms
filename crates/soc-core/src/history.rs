@@ -8,7 +8,7 @@
 //! that a rescan could touch. This is the SOC `e = ⟨x, p, h⟩` history
 //! component `h`.
 
-use brix_canon::{Canonical, CanonWriter, Digest, Domain};
+use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 
 /// The running history digest chain: `h' = H(h_digest, step)`.
 ///

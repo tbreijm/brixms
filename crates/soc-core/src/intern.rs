@@ -103,7 +103,11 @@ mod tests {
         let h1 = i.intern(d);
         let h2 = i.intern(d);
         assert_eq!(h1, h2);
-        assert_eq!(i.len(), 1, "re-interning the same digest must not grow the table");
+        assert_eq!(
+            i.len(),
+            1,
+            "re-interning the same digest must not grow the table"
+        );
     }
 
     #[test]
@@ -122,7 +126,10 @@ mod tests {
         let h = i.intern(d);
         assert_eq!(i.resolve(h), d, "resolve must invert intern");
         let h2 = i.intern(i.resolve(h));
-        assert_eq!(h, h2, "interning a resolved digest must return the same handle");
+        assert_eq!(
+            h, h2,
+            "interning a resolved digest must return the same handle"
+        );
     }
 
     #[test]

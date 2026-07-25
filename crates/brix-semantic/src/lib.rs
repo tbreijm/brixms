@@ -57,7 +57,7 @@ mod witness;
 
 pub use config::ConfigId;
 pub use context::ContextId;
-pub use decomposition::{Decomposition, DecompVerification, DecompositionError, DecompositionId};
+pub use decomposition::{DecompVerification, Decomposition, DecompositionError, DecompositionId};
 pub use dependency::{Dependency, DependencyId, EdgeKind};
 pub use evidence::{CertificateId, Durability, Evidence, EvidenceId, VerifierId};
 pub use generator::{GeneratorId, GeneratorRegistry, GeneratorRegistryId};

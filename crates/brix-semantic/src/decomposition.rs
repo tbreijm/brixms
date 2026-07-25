@@ -162,7 +162,9 @@ mod tests {
     use super::*;
 
     fn gens(n: usize) -> Vec<GeneratorId> {
-        (0..n).map(|i| GeneratorId::named(&format!("g{i}@1"))).collect()
+        (0..n)
+            .map(|i| GeneratorId::named(&format!("g{i}@1")))
+            .collect()
     }
 
     fn configs(n: usize) -> Vec<ConfigId> {

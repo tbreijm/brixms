@@ -20,7 +20,7 @@ use crate::exec::ExecConfig;
 use crate::history::History;
 use crate::intern::Handle;
 use crate::regime::{Candidate, Regime};
-use brix_canon::{Canonical, CanonWriter, Digest};
+use brix_canon::{CanonWriter, Canonical, Digest};
 use std::collections::BTreeSet;
 
 /// `cand(e)` = the union over `regimes` of `regime.candidates(e)`, filtered
