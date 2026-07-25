@@ -1,3 +1,5 @@
+> **ARCHIVED — superseded by [`spec/Build_Plan_v3_SOC.md`](../Build_Plan_v3_SOC.md).** Retained for historical reference and as the source of the `brix-oracle` reference-implementation design (now reborn as the SOC reference coalgebra) and the determinism discipline. Its single-kernel Logic/Ring-0 language was already superseded by ADR-0001; ADR-0002 supersedes the hypergraph-as-ontology thesis.
+
 # BrixMS Ring 0 — Toolchain Build Plan
 
 **The concrete engineering plan for the core: crates, decisions, order, gates.**

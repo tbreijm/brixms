@@ -1,10 +1,29 @@
 # ADR-0001 — The Shared Proof Substrate and the Two-Kernel Constitution
 
-Status: **Proposed** (constitution freeze — governs #52, #53, #55, #56, #57,
-#58, #59, #63 and supersedes the single-kernel language in
-`spec/Ring0_Build_Plan.md`).
+Status: **Superseded-in-part by [ADR-0002](./ADR-0002_SOC_Constitution.md)** (2026-07-25).
+Originally: Proposed (constitution freeze).
 
-Date: 2026-07-24.
+> **What survives (verbatim, load-bearing):** the epistemic outcome lattice (§4)
+> — its five outcomes, canonical ordinals, and `Unknown`-as-bottom; the
+> verifier-authority table (§4.1); the canonical artifact identities (§5) incl.
+> the **`ContextId` root-digest invariant (§5.1)** and the durability axis; the
+> two-kernel constitution shape (§3, D1); retraction closure (§7); cost folded
+> into propositions (§5.7). These are carried into ADR-0002 unchanged and must
+> not be re-decided.
+>
+> **What is reframed:** D1's two kernels are re-typed as SOC's *committed
+> settlement coalgebra* (settlement kernel) and *dependent proof kernel*; the
+> shared substrate is re-typed as SOC configurations and witnesses; resolvers
+> become *realization regimes*.
+>
+> **What is superseded:** §1's thesis — "universal formalism for modelling …
+> in a **hypergraph**" with the Curry–Howard type system at the semantic
+> center. Under ADR-0002 the hypergraph is **one configuration family / client**,
+> and the `Ty` system + `brixc` compiler stack become a **finite
+> $F_O$-presentation frontend**, not the ontology. Read ADR-0002 first; this
+> document is retained for its frozen §§4–5–7 content and its rationale.
+
+Date: 2026-07-24. Superseded-in-part: 2026-07-25.
 
 ---
 

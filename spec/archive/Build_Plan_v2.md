@@ -1,3 +1,5 @@
+> **ARCHIVED — superseded by [`spec/Build_Plan_v3_SOC.md`](../Build_Plan_v3_SOC.md).** Retained for the ring-model orchestration doctrine and gate vocabulary, which carry forward. The toolchain-first sequence is demoted: the toolchain becomes the finite-presentation frontend, not the semantic center (ADR-0002).
+
 # BrixMS Build Plan v2 — Toolchain First, Agents as Developers
 
 **Supersedes v1. Gates, not dates. Blitz, then swarm.**
