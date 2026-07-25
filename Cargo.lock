@@ -1908,6 +1908,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "soc-core"
+version = "0.0.0"
+dependencies = [
+ "brix-canon",
+ "brix-semantic",
+ "proptest",
+]
+
+[[package]]
 name = "socket2"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
