@@ -1,3 +1,5 @@
+> **ARCHIVED — superseded by [`spec/Build_Plan_v3_SOC.md`](../Build_Plan_v3_SOC.md).** Byte-identical duplicate of the former `spec/Ring0_Build_Plan.md` (now also archived). Kept only so links from `docs/` do not dangle.
+
 # BrixMS Ring 0 — Toolchain Build Plan
 
 **The concrete engineering plan for the core: crates, decisions, order, gates.**
