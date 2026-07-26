@@ -66,7 +66,10 @@ fn check_impl_conformance(
     for d in &file.decls {
         let Decl::Impl(im) = d else { continue };
         let trait_name = im.trait_name.text.as_str();
-        let Some(tr) = env.traits().iter().find(|t| t.name.as_str() == trait_name) else {
+        // Match on the *resolved* trait name, so a `use`-imported trait finds
+        // the dependency's `TraitDef` rather than missing it (issue #111).
+        let trait_qual = resolve_trait_name(&im.trait_name, resolver);
+        let Some(tr) = env.traits().iter().find(|t| t.name == trait_qual) else {
             continue;
         };
         let declared: BTreeSet<&str> = tr.assoc_types.iter().map(|a| a.as_str()).collect();
@@ -613,14 +616,22 @@ fn build_schemas(
             // keyed by (trait, head) and `add_impl` enforces the §28.3 orphan
             // rule right here as they register (BRX-LOW-0017 on overlap). Method
             // bodies are not lowered yet (a follow-on slice).
+            //
+            // Both halves of the key are *resolved* names, not surface text: a
+            // bare name that a `use` imported resolves to the owning package's
+            // qualified name, and anything else stays package-local. Keying on
+            // surface text made two packages that each declare their own
+            // same-named trait and head collide on `(Canonical, Order)` even
+            // though neither can see the other (issue #111 follow-on).
             Decl::Trait(t) => {
-                let name = IrIdent::new(t.name.text.clone());
+                let name = QualIdent::simple(t.name.text.clone());
+                let span_key = IrIdent::new(t.name.text.clone());
                 let assoc_types = t
                     .assoc_types
                     .iter()
                     .map(|a| IrIdent::new(a.name.text.clone()))
                     .collect();
-                meta.set_decl_span(name.clone(), t.span);
+                meta.set_decl_span(span_key, t.span);
                 resolver = resolver.with_trait(TraitDef { name, assoc_types });
             }
             Decl::Impl(im) => {
@@ -632,10 +643,10 @@ fn build_schemas(
                         ty: lower_type(&b.value, TyPos::FnSig, &resolver, meta, diags),
                     })
                     .collect();
-                match impl_head(&im.target) {
+                match impl_head(&im.target, &resolver) {
                     Some(head) => {
                         let def = ImplDef {
-                            trait_name: IrIdent::new(im.trait_name.text.clone()),
+                            trait_name: resolve_trait_name(&im.trait_name, &resolver),
                             head: ImplHead(head),
                             assoc,
                         };
@@ -662,11 +673,25 @@ fn build_schemas(
 /// "generic-parameterized heads reduce to the head constructor name for the
 /// coherence key" (`brix_ir::traits`). Row/compound targets have no single head
 /// and return `None` (issue #111).
-fn impl_head(target: &ast::Type) -> Option<IrIdent> {
+/// The resolved head of an `impl` target. Resolution goes through the import
+/// map (the same `resolve_path` `check_impl_orphan` uses), so a `use`-imported
+/// head keys on the *owning* package's qualified name rather than the bare
+/// surface text it was written with.
+fn impl_head(target: &ast::Type, resolver: &ProgramResolver) -> Option<QualIdent> {
     match &target.kind {
-        TypeKind::Named { path, .. } => path.segments.last().map(|s| IrIdent::new(s.text.clone())),
+        TypeKind::Named { path, .. } => Some(resolver.resolve_path(path)),
         _ => None,
     }
+}
+
+/// Resolve a bare trait name the same way. `Path`-shaped references go through
+/// `resolve_path`; a trait name is a plain `Ident` in the grammar, so this is
+/// the single-segment case spelled out.
+fn resolve_trait_name(name: &ast::Ident, resolver: &ProgramResolver) -> QualIdent {
+    resolver
+        .imported_target(&name.text)
+        .cloned()
+        .unwrap_or_else(|| QualIdent::simple(name.text.clone()))
 }
 
 fn build_effect_row(effects: &Option<Vec<ast::Ident>>, diags: &mut Vec<Diagnostic>) -> EffectRow {

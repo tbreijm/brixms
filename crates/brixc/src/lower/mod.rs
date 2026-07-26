@@ -499,14 +499,25 @@ pub fn lower_graph(
         // same (trait, head) is a cross-package BRX-LOW-0017. Folding happens
         // before `build_onto(root)` below, so a root overlap is caught there
         // against the root impl's own span; a dep-vs-dep overlap is caught here
-        // and tagged to the offending dependency. (Bare-name keys for now;
-        // cross-package qualification of trait/head names is a later refinement
-        // that lands with the visibility surface.)
+        // and tagged to the offending dependency.
+        //
+        // A dependency is lowered standalone, so its trait/head keys are local
+        // (unqualified) names. Prefix them with the package here, matching the
+        // qualification every other dependency symbol gets above: that is what
+        // makes `dep.Canonical for dep.Order` a different key from a root-local
+        // `Canonical for Order`, while a root impl written against
+        // `use dep.{Canonical, Order}` still resolves onto the dependency's key
+        // and collides as it should (issue #111 follow-on).
         for tr in dep_lowered.resolver.trait_env().traits() {
-            resolver = resolver.with_trait(tr.clone());
+            let mut qt = tr.clone();
+            qt.name = qualify_path(tr.name.segments());
+            resolver = resolver.with_trait(qt);
         }
         for im in dep_lowered.resolver.trait_env().impls() {
-            if let Err(e) = resolver.add_impl(im.clone()) {
+            let mut qi = im.clone();
+            qi.trait_name = qualify_path(im.trait_name.segments());
+            qi.head = brix_ir::traits::ImplHead(qualify_path(im.head.0.segments()));
+            if let Err(e) = resolver.add_impl(qi) {
                 let mut d = diag::error(
                     diag::IMPL_COHERENCE,
                     brix_diag::Span::empty(0),
