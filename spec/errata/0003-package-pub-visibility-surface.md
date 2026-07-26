@@ -1,7 +1,7 @@
 # 0003 — The surface syntax and granularity of `pub`/visibility is underspecified
 
 **Lane:** compiler + ast (brixc, brix-ast)
-**Status:** drafted 2026-07-21 — **awaiting ruling** (Tony)
+**Status:** drafted 2026-07-21 — **ruled** 2026-07-25 (Tony); see "Ruling (adopted)" below
 **Affected sections:** Part XXVIII §28.3 (Runtime closure — "`pub read` / `pub
 write` / `pub derive` relation visibility"); §"modules, visibility, imports,
 exports, and editions" (the Rust-parity feature list); Appendix D (Normative
@@ -109,3 +109,42 @@ filter the dependency/module export loop in `crates/brixc/src/lower/mod.rs`
 (`lower_graph`) to skip non-`pub` symbols — threading the flag out of each
 dependency's lowering via the resolver. Until then, Slice 1's export-everything
 behavior stands, documented as the pre-visibility surface.
+
+## Ruling (adopted)
+
+Adopt the proposed EBNF (`Vis?` on `Decl`, `RelVis` before `RelDecl`). Rulings on
+the three open questions:
+
+### 1. Default visibility: **package-private (Rust parity).**
+Private-by-default, and take the migration now. It is the correct long-term
+design and the cheapest moment it will ever cost:
+- It aligns with the cohesion/weak-coupling thesis (#63) — export-everything is
+  maximal coupling.
+- It is the only default under which "detect duplicate exports" (#42 acceptance)
+  is meaningful — you can only collide on what is explicitly exported.
+- Public-by-default locks in the wrong default; reversing it later is a breaking
+  change across every package, whereas the private-by-default migration is
+  mechanical and the corpus is still small.
+
+The flagship and `brix.*` stdlib packages must annotate their public surfaces —
+honest API-declaration work that should happen regardless. Slice-1
+export-everything was always a placeholder.
+
+### 2. Bare `pub` on a relation = **`pub read` only.**
+Least privilege. `pub write` and `pub derive` are strictly stronger and must be
+explicit (each implies `read`, since you cannot assert into or extend a relation
+you cannot observe). The load-bearing reason is **`pub derive`**: it is the
+*coherence-affecting* capability (downstream extension under the orphan rule —
+exactly #111's cross-package coherence surface). It must never be granted
+implicitly by a bare `pub`.
+
+### 3. Field-level visibility (`FieldDecl`): **deferred to a later erratum.**
+Not needed to unblock #111/#42 (they need declaration-level export gating), and
+it has no clean home yet — records currently lower as non-nominal row aliases
+(`crates/brixc/src/lower/schema.rs`), so there is no nominal field surface to
+attach privacy to. Revisit when nominal records exist.
+
+Tracked to implementation in #151. The parse/AST/fmt/private-by-default surface
+already landed (#108); the remaining relation-granular capability enforcement
+(bare `pub` relation = `read`; `write`/`derive` strictly stronger; `pub derive`
+gates downstream extension under the orphan rule) is the follow-on.
