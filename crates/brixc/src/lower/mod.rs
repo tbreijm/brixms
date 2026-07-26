@@ -360,10 +360,11 @@ pub fn lower_graph(
 
         // Register each dependency decl's export status: package-private names
         // into `private_symbols` (for `BRX-LOW-0016`), and each *public* name's
-        // normalized relation capability into `export_caps` (issue #154), so the
+        // normalized relation capabilities into `export_caps` (issue #154), so the
         // `pub derive` orphan gate can later tell an extensible head from a
         // read-only one. A bare `pub` relation resolves to `read` here (errata
-        // 0003 Q2) via `Visibility::rel_cap`.
+        // 0003 Q2) via `Visibility::rel_caps`; `read` is implied by any `pub`
+        // (erratum 0004).
         for d in &dep.file.decls {
             use brix_ast::ast::Decl;
             let d_name = match d {
@@ -388,8 +389,8 @@ pub fn lower_graph(
             };
             let Some(dn) = d_name else { continue };
             let qname = qualify(dn);
-            match d.vis().rel_cap() {
-                Some(cap) => resolver = resolver.with_export_cap(qname, cap),
+            match d.vis().rel_caps() {
+                Some(caps) => resolver = resolver.with_export_caps(qname, caps),
                 None => resolver = resolver.with_private_symbol(qname, dep_name.clone()),
             }
         }

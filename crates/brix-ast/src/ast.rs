@@ -111,7 +111,10 @@ pub enum TypeArg {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Visibility {
-    Public(Option<RelVis>),
+    /// `pub` plus the capability qualifiers *as written* — empty for a bare
+    /// `pub`, so the formatter round-trips the two forms distinctly. Read the
+    /// effective grant through [`Visibility::rel_caps`], never off this field.
+    Public(RelCaps),
     #[default]
     Private,
 }
@@ -121,25 +124,94 @@ impl Visibility {
         matches!(self, Visibility::Public(_))
     }
 
-    /// The exported relation capability, applying errata 0003 ruling Q2: a bare
-    /// `pub` on a relation is `pub read` (least privilege). Returns `None` for a
-    /// private declaration; `write`/`derive` are preserved as declared. This is
-    /// a *reader* — the AST still stores `Public(None)` for a bare `pub`, so the
-    /// formatter round-trips it unchanged.
-    pub fn rel_cap(&self) -> Option<RelVis> {
+    /// The exported relation capabilities, applying the errata 0003 Q2 ruling (a
+    /// bare `pub` relation is `pub read`) and the erratum 0004 lattice (`read` is
+    /// implied by any `pub`; `write`/`derive` are additive grants on top).
+    /// `None` for a private declaration.
+    ///
+    /// This is a *reader* — the AST stores the qualifiers as written, so
+    /// `pub` and `pub read` stay distinguishable for the formatter even though
+    /// both grant exactly `read`.
+    pub fn rel_caps(&self) -> Option<RelCaps> {
         match self {
-            Visibility::Public(Some(v)) => Some(*v),
-            Visibility::Public(None) => Some(RelVis::Read),
+            Visibility::Public(written) => Some(written.with_implied_read()),
             Visibility::Private => None,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One relation capability qualifier (errata 0003 §"`pub read` / `pub write` /
+/// `pub derive`"): `read` = queryable/observable, `write` = assertable,
+/// `derive` = extensible by a downstream rule under the orphan rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum RelVis {
     Read,
     Write,
     Derive,
+}
+
+impl RelVis {
+    /// Canonical declaration order — the order [`RelCaps::iter`] yields and the
+    /// formatter emits, so `pub derive write` normalizes to `pub write derive`.
+    pub const ALL: [RelVis; 3] = [RelVis::Read, RelVis::Write, RelVis::Derive];
+
+    pub fn keyword(self) -> &'static str {
+        match self {
+            RelVis::Read => "read",
+            RelVis::Write => "write",
+            RelVis::Derive => "derive",
+        }
+    }
+
+    const fn bit(self) -> u8 {
+        match self {
+            RelVis::Read => 1,
+            RelVis::Write => 2,
+            RelVis::Derive => 4,
+        }
+    }
+}
+
+/// A *set* of relation capabilities (issue #172, erratum 0004). The qualifier
+/// was single-valued through errata 0003 (`read` xor `write` xor `derive`),
+/// which left a relation unable to grant a downstream package both direct
+/// assertion and rule-extension; this is that set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RelCaps(u8);
+
+impl RelCaps {
+    pub const fn empty() -> Self {
+        RelCaps(0)
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn contains(self, cap: RelVis) -> bool {
+        self.0 & cap.bit() != 0
+    }
+
+    /// Add `cap`; returns whether it was already present, so the parser can
+    /// diagnose a repeated qualifier rather than silently absorbing it.
+    pub fn insert(&mut self, cap: RelVis) -> bool {
+        let dup = self.contains(cap);
+        self.0 |= cap.bit();
+        dup
+    }
+
+    /// The effective grant: `read` is implied by any `pub` (erratum 0004). There
+    /// is no read gate in the compiler — every public relation is queryable — so
+    /// this makes the represented set match the enforced behavior rather than
+    /// describing a distinction nothing checks.
+    pub fn with_implied_read(self) -> Self {
+        RelCaps(self.0 | RelVis::Read.bit())
+    }
+
+    /// The capabilities in canonical order.
+    pub fn iter(self) -> impl Iterator<Item = RelVis> {
+        RelVis::ALL.into_iter().filter(move |c| self.contains(*c))
+    }
 }
 
 #[derive(Debug, Clone)]

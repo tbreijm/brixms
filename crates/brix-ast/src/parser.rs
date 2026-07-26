@@ -485,22 +485,26 @@ impl<'s> Parser<'s> {
         }
         let pub_tok = self.bump();
         let mut end_span = pub_tok.span;
-        let rel_vis = if self.at_kw("read") {
+        // Erratum 0004: the qualifier is a *set*, so consume every capability
+        // keyword that follows. `pub derive Foo: ..` is unchanged — the loop
+        // stops at the first token that is not a capability keyword, exactly
+        // where the single-valued form stopped.
+        let mut caps = RelCaps::empty();
+        while let Some(cap) = RelVis::ALL.into_iter().find(|c| self.at_kw(c.keyword())) {
             let t = self.bump();
             end_span = end_span.to(t.span);
-            Some(RelVis::Read)
-        } else if self.at_kw("write") {
-            let t = self.bump();
-            end_span = end_span.to(t.span);
-            Some(RelVis::Write)
-        } else if self.at_kw("derive") {
-            let t = self.bump();
-            end_span = end_span.to(t.span);
-            Some(RelVis::Derive)
-        } else {
-            None
-        };
-        (Visibility::Public(rel_vis), Some(pub_tok.span.to(end_span)))
+            if caps.insert(cap) {
+                self.diags.push(Diagnostic::error(
+                    "BRX-AST-0001",
+                    t.span,
+                    format!(
+                        "duplicate `{}` capability qualifier on `pub`",
+                        cap.keyword()
+                    ),
+                ));
+            }
+        }
+        (Visibility::Public(caps), Some(pub_tok.span.to(end_span)))
     }
 
     fn decl(&mut self) -> Option<Decl> {
@@ -3750,29 +3754,69 @@ rel Priv { x: I64 } key(x)\n\
 pub rel Bare { x: I64 } key(x)\n\
 pub read rel Reader { x: I64 } key(x)\n\
 pub write rel Writer { x: I64 } key(x)\n\
-pub derive rel Extendable { x: I64 } key(x)\n";
+pub derive rel Extendable { x: I64 } key(x)\n\
+pub write derive rel Both { x: I64 } key(x)\n";
         let (file, diagnostics) = parse_file(src);
         assert_eq!(diagnostics.iter().count(), 0, "{diagnostics:?}");
-        let cap = |name: &str| {
+        let caps = |name: &str| {
             file.decls
                 .iter()
                 .find_map(|d| match d {
-                    Decl::Rel(r) if r.name.text == name => Some(r.vis.rel_cap()),
+                    Decl::Rel(r) if r.name.text == name => Some(r.vis.rel_caps()),
                     _ => None,
                 })
                 .unwrap_or_else(|| panic!("no relation named {name}"))
         };
-        assert_eq!(cap("Priv"), None);
-        assert_eq!(cap("Bare"), Some(RelVis::Read));
-        assert_eq!(cap("Reader"), Some(RelVis::Read));
-        assert_eq!(cap("Writer"), Some(RelVis::Write));
-        assert_eq!(cap("Extendable"), Some(RelVis::Derive));
-        // The AST still stores a bare `pub` as `Public(None)` — `rel_cap` is a
-        // reader, so the formatter round-trips it unchanged.
+        let granted = |name: &str| caps(name).map(|c| c.iter().collect::<Vec<_>>());
+        assert_eq!(granted("Priv"), None);
+        // `read` is implied by any `pub` (erratum 0004), so every public
+        // relation grants it; `write`/`derive` are additive on top.
+        assert_eq!(granted("Bare"), Some(vec![RelVis::Read]));
+        assert_eq!(granted("Reader"), Some(vec![RelVis::Read]));
+        assert_eq!(granted("Writer"), Some(vec![RelVis::Read, RelVis::Write]));
+        assert_eq!(
+            granted("Extendable"),
+            Some(vec![RelVis::Read, RelVis::Derive])
+        );
+        assert_eq!(
+            granted("Both"),
+            Some(vec![RelVis::Read, RelVis::Write, RelVis::Derive]),
+            "`pub write derive` grants both direct assertion and rule-extension"
+        );
+        // The AST stores the qualifiers *as written* — a bare `pub` keeps an
+        // empty set, so the formatter round-trips it unchanged even though
+        // `rel_caps` reports `read`.
         let bare_vis = file.decls.iter().find_map(|d| match d {
             Decl::Rel(r) if r.name.text == "Bare" => Some(r.vis),
             _ => None,
         });
-        assert_eq!(bare_vis, Some(Visibility::Public(None)));
+        assert_eq!(bare_vis, Some(Visibility::Public(RelCaps::empty())));
+    }
+
+    #[test]
+    fn duplicate_capability_qualifier_is_a_parse_error() {
+        let (_, diagnostics) = parse_file(
+            "package t @ 1.0.0\n\
+pub write write rel R { x: I64 } key(x)\n",
+        );
+        assert_eq!(
+            diagnostics.iter().count(),
+            1,
+            "a repeated qualifier must be reported, not silently absorbed: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn capability_qualifiers_normalize_to_canonical_order() {
+        let (file, diagnostics) = parse_file(
+            "package t @ 1.0.0\n\
+pub derive write rel R { x: I64 } key(x)\n",
+        );
+        assert_eq!(diagnostics.iter().count(), 0, "{diagnostics:?}");
+        assert!(
+            crate::fmt::format_file(&file).contains("pub write derive rel R"),
+            "declaration order is normalized by the formatter: {}",
+            crate::fmt::format_file(&file)
+        );
     }
 }

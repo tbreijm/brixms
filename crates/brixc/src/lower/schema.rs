@@ -108,7 +108,7 @@ fn check_impl_conformance(
 /// sealed-extension error (`BRX-LOW-0019`).
 ///
 /// Runs after [`build_schemas`] (imports + schemas registered) with the
-/// graph-folded resolver, so [`ProgramResolver::export_cap`] answers `Some` iff
+/// graph-folded resolver, so [`ProgramResolver::exported_caps`] answers `Some` iff
 /// the head resolves to a foreign public dependency export — a local or
 /// package-private head returns `None` and never trips the gate. When a package
 /// is lowered standalone (no dependencies) there are no foreign caps, so this is
@@ -133,10 +133,10 @@ fn check_impl_orphan(file: &ast::File, resolver: &ProgramResolver, diags: &mut V
         let head_qual = resolver.resolve_path(path);
         // `Some` iff the head is a foreign public export; local and
         // package-private heads are `None` and out of scope for this gate.
-        let Some(cap) = resolver.export_cap(&head_qual) else {
+        let Some(caps) = resolver.exported_caps(&head_qual) else {
             continue;
         };
-        if cap == ast::RelVis::Derive {
+        if caps.contains(ast::RelVis::Derive) {
             continue; // owner opted the head into downstream extension
         }
         if local_traits.contains(im.trait_name.text.as_str()) {
@@ -286,8 +286,9 @@ fn head_write_target(tx: &ast::TxExpr, resolver: &ProgramResolver) -> Option<(Qu
 /// `ProgramResolver::resolve_path`, and deliberately **not** recursing into a
 /// `Call` callee. `export_caps` holds *every* public dependency symbol (`pub
 /// fn`, `pub enum`, entities — see the dependency walk in [`crate::lower`]), and
-/// a bare `pub fn` normalizes to [`ast::RelVis::Read`], so resolving arbitrary
-/// expression heads through it would report `retract helper(c)` as "asserts into
+/// a bare `pub fn` normalizes to a cap set containing [`ast::RelVis::Read`], so
+/// resolving arbitrary expression heads through it would report
+/// `retract helper(c)` as "asserts into
 /// `helper`". The binding map is the only sound handle on a `ClaimRef`'s
 /// relation short of resolving `ClaimRef<R>`'s type argument, which scenario
 /// bodies give no basis for (a v0 defer-line skip; they are never typed).
@@ -345,10 +346,10 @@ fn check_write_target(
     let mut reported = false;
     for (target, name) in targets {
         // `Some` iff the target is a foreign public export; local targets are `None`.
-        let Some(cap) = resolver.export_cap(&target) else {
+        let Some(caps) = resolver.exported_caps(&target) else {
             continue;
         };
-        if cap != ast::RelVis::Write {
+        if !caps.contains(ast::RelVis::Write) {
             diags.push(diag::error(
                 diag::SEALED_WRITE_TARGET,
                 tx.span(),

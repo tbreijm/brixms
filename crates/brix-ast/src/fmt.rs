@@ -13,13 +13,27 @@
 
 use crate::ast::*;
 
+/// The qualifiers are emitted in canonical order (`read`, `write`, `derive`),
+/// so `pub derive write` normalizes to `pub write derive`. A bare `pub` stays
+/// bare — the AST keeps the written set empty for exactly that reason, even
+/// though it grants `read`.
 fn vis_prefix(vis: Visibility) -> &'static str {
-    match vis {
-        Visibility::Private => "",
-        Visibility::Public(None) => "pub ",
-        Visibility::Public(Some(RelVis::Read)) => "pub read ",
-        Visibility::Public(Some(RelVis::Write)) => "pub write ",
-        Visibility::Public(Some(RelVis::Derive)) => "pub derive ",
+    let Visibility::Public(caps) = vis else {
+        return "";
+    };
+    match (
+        caps.contains(RelVis::Read),
+        caps.contains(RelVis::Write),
+        caps.contains(RelVis::Derive),
+    ) {
+        (false, false, false) => "pub ",
+        (true, false, false) => "pub read ",
+        (false, true, false) => "pub write ",
+        (false, false, true) => "pub derive ",
+        (true, true, false) => "pub read write ",
+        (true, false, true) => "pub read derive ",
+        (false, true, true) => "pub write derive ",
+        (true, true, true) => "pub read write derive ",
     }
 }
 

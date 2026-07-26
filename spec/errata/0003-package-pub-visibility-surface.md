@@ -229,6 +229,13 @@ The relation-granular capability enforcement landed in #154:
   (`write`) and rule-extension (`derive`). If a relation needs both, the surface
   must grow (e.g. `pub write derive`) — out of scope for this ruling.
 
+  > **Superseded in part by [erratum 0004](./0004-combined-relation-capability-qualifiers.md)**
+  > (**PROPOSED**, not ratified), which makes the qualifier set-valued and rules
+  > that `read` is implied by any `pub`. Until that erratum is ruled on, the EBNF
+  > above (`RelVis?`) remains the adopted grammar of record; 0004 carries the
+  > exact amendment to apply on ratification. Q2 (bare `pub` = `read`) and the
+  > least-privilege stance on `write`/`derive` are preserved either way.
+
 - **Test coverage.** `BRX-LOW-0019`/`BRX-LOW-0020`/`BRX-LOW-0021` are inherently
   cross-package,
   so they are covered by the `brixc` graph tests

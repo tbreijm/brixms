@@ -342,3 +342,76 @@ scenario S {\n\
         "a package retracting its own claim is never gated"
     );
 }
+
+// --- erratum 0004: `pub write derive` grants both capabilities ---------------
+//
+// Through errata 0003 the qualifier was single-valued (`read` xor `write` xor
+// `derive`), so a relation could not grant a downstream package both direct
+// assertion and rule-extension. The set form must grant exactly what is written
+// and no more — the control cases below are what make that claim testable.
+
+const ROOT_WRITES_AND_DERIVES: &str = "package root @ 1.0.0\n\
+use dep.{Ledger}\n\
+rel Local { x: I64 } key(x)\n\
+derive Extra: Ledger(x: x) from { Local(x: x) }\n\
+scenario S {\n\
+  seed 1\n\
+  setup {\n\
+    assert Ledger(x: 1)\n\
+  }\n\
+}\n";
+
+fn codes(dep: &str, root: &str) -> Vec<String> {
+    lower_with_dep(dep, root)
+        .iter()
+        .filter(|d| d.code == "BRX-LOW-0020" || d.code == "BRX-LOW-0021")
+        .map(|d| d.code.to_string())
+        .collect()
+}
+
+#[test]
+fn pub_write_derive_grants_both_assertion_and_rule_extension() {
+    let dep = "package dep @ 1.0.0\n\
+pub write derive rel Ledger { x: I64 } key(x)\n";
+    assert!(
+        codes(dep, ROOT_WRITES_AND_DERIVES).is_empty(),
+        "`pub write derive` must gate neither the assert nor the derive: {:#?}",
+        codes(dep, ROOT_WRITES_AND_DERIVES)
+    );
+}
+
+#[test]
+fn pub_write_alone_still_seals_rule_extension() {
+    // The control for the test above: writing is granted, deriving is not.
+    let dep = "package dep @ 1.0.0\n\
+pub write rel Ledger { x: I64 } key(x)\n";
+    assert_eq!(
+        codes(dep, ROOT_WRITES_AND_DERIVES),
+        vec!["BRX-LOW-0020"],
+        "`pub write` grants assertion only — the derive must still be sealed"
+    );
+}
+
+#[test]
+fn pub_derive_alone_still_seals_assertion() {
+    // The mirror control: deriving is granted, writing is not.
+    let dep = "package dep @ 1.0.0\n\
+pub derive rel Ledger { x: I64 } key(x)\n";
+    assert_eq!(
+        codes(dep, ROOT_WRITES_AND_DERIVES),
+        vec!["BRX-LOW-0021"],
+        "`pub derive` grants rule-extension only — the assert must still be sealed"
+    );
+}
+
+#[test]
+fn pub_read_write_does_not_leak_the_derive_capability() {
+    // An explicit `read` in the set must not widen anything beyond `write`.
+    let dep = "package dep @ 1.0.0\n\
+pub read write rel Ledger { x: I64 } key(x)\n";
+    assert_eq!(
+        codes(dep, ROOT_WRITES_AND_DERIVES),
+        vec!["BRX-LOW-0020"],
+        "`pub read write` must behave exactly as `pub write`"
+    );
+}
