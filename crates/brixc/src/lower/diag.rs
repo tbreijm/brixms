@@ -99,6 +99,14 @@ pub const IMPL_CONFORMANCE: &str = "BRX-LOW-0018";
 /// sealed against extension). Local-trait or local-head impls are unaffected
 /// (issue #154).
 pub const ORPHAN_SEALED: &str = "BRX-LOW-0019";
+/// `BRX-LOW-0020` — a downstream `derive` rule produces tuples into a relation
+/// owned by a dependency that did not export it `pub derive`. Errata 0003:
+/// `pub derive` is "extensible by a downstream package's rules under the derive
+/// orphan rule", so a foreign relation exported only `pub`/`pub read` is
+/// queryable but not derive-extensible from another package. The sibling
+/// [`ORPHAN_SEALED`] (`BRX-LOW-0019`) gates the same capability at the `impl`
+/// surface; this gates it at the rule-head surface (issue #154).
+pub const SEALED_DERIVE_TARGET: &str = "BRX-LOW-0020";
 /// `BRX-IR-0005` — an expression failed HM/ground-dimension type checking.
 pub const TYPE_ERROR: &str = "BRX-IR-0005";
 /// `BRX-IR-0006` — Appendix E `pure(B, H)` violated: an impure effect atom

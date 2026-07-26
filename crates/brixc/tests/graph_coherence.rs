@@ -127,3 +127,42 @@ impl Local for Order { type Item = String }\n";
         "a local trait may extend any foreign head: {diags:#?}"
     );
 }
+
+// --- issue #154: the `pub derive` rule-head gate (BRX-LOW-0020) --------------
+//
+// `pub derive` is "extensible by a downstream package's rules" (errata 0003), so
+// a downstream `derive` rule producing tuples into a foreign relation needs that
+// relation exported `pub derive`; a `pub read` relation is queryable but sealed
+// against downstream rules.
+
+#[test]
+fn deriving_into_a_pub_derive_dependency_relation_is_allowed() {
+    let dep = "package dep @ 1.0.0\n\
+pub read rel Reading { x: I64 } key(x)\n\
+pub derive rel Derived { x: I64 } key(x)\n";
+    let root = "package root @ 1.0.0\n\
+use dep.{Reading, Derived}\n\
+derive Fill: Derived(x: x) from { Reading(x: x) }\n";
+    let diags = lower_with_dep(dep, root);
+    assert!(
+        diags.iter().all(|d| d.code != "BRX-LOW-0020"),
+        "a `pub derive` relation must accept downstream rules: {diags:#?}"
+    );
+}
+
+#[test]
+fn deriving_into_a_read_only_dependency_relation_is_sealed() {
+    let dep = "package dep @ 1.0.0\n\
+pub read rel Reading { x: I64 } key(x)\n";
+    let root = "package root @ 1.0.0\n\
+use dep.{Reading}\n\
+rel Local { x: I64 } key(x)\n\
+derive Bad: Reading(x: x) from { Local(x: x) }\n";
+    let diags = lower_with_dep(dep, root);
+    let sealed: Vec<_> = diags.iter().filter(|d| d.code == "BRX-LOW-0020").collect();
+    assert_eq!(
+        sealed.len(),
+        1,
+        "deriving into a non-`pub derive` foreign relation must be one BRX-LOW-0020: {diags:#?}"
+    );
+}

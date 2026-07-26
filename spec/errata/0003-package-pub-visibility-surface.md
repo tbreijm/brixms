@@ -162,13 +162,21 @@ The relation-granular capability enforcement landed in #154:
   export in `lower_graph` — previously `RelVis` was parsed and formatted but
   dropped at the lowering boundary (the whole gap #154 named).
 
-- **`pub derive` orphan gate (`BRX-LOW-0019`)**: a downstream `impl Trait for
-  Head` may extend a head owned by a *dependency* only if the trait is local, or
-  the head is local, or the dependency exported the head `pub derive`. A bare
-  `pub`/`pub read` relation is re-exported for reference but sealed against
-  extension. Implemented as `check_impl_orphan` in
-  `crates/brixc/src/lower/schema.rs`, run once per package lowering (so every
-  cross-package impl is checked exactly once, in the package that declares it).
+- **`pub derive` gate, two surfaces.** `pub derive` is "extensible by a
+  downstream package's rules under the derive orphan rule" — which the compiler
+  now enforces at both surfaces a downstream package can extend a foreign
+  relation/head:
+  - **`impl` heads (`BRX-LOW-0019`)** — a downstream `impl Trait for Head` may
+    extend a dependency-owned head only if the trait is local, the head is local,
+    or the head was exported `pub derive`. `check_impl_orphan` in
+    `crates/brixc/src/lower/schema.rs`.
+  - **`derive` rule heads (`BRX-LOW-0020`)** — a downstream `derive` rule may
+    produce tuples into a dependency-owned relation only if it was exported `pub
+    derive`. Gated in `lower_head` (`crates/brixc/src/lower/decl.rs`); a package's
+    own relations are absent from `export_caps` and never gated.
+
+  Both run once per package lowering, so every cross-package extension is checked
+  exactly once, in the package that declares it.
 
 - **Interpretation (for the spec owner to ratify or correct).** §28.3 words
   `pub derive` as *relation* visibility, but the `impl` heads that the orphan
@@ -179,16 +187,21 @@ The relation-granular capability enforcement landed in #154:
   makes `pub derive` the load-bearing, coherence-affecting capability the ruling
   describes; it should be confirmed when nominal records / dispatch land.
 
-- **`pub write` cross-package enforcement remains deferred.** The compiler does
-  not yet model where a downstream package *asserts into* a foreign relation
-  (relations are re-exported for reference in rules, not for cross-package
-  writes), so there is no lowering site to gate. This waits on that design call,
-  tracked on #154; the `write` capability is carried (`export_caps`) but not yet
-  enforced.
+- **`pub write` cross-package enforcement remains deferred — no active lowering
+  site.** The surface for a direct cross-package *assertion* (as distinct from a
+  derive rule, which is the `derive` capability above) is `TxExpr::AssertTuple`
+  in a `scenario`'s transaction block (`crates/brix-ast/src/ast.rs`). But
+  `Decl::Scenario` is currently a defer-line skip (`BRX-LOW-0002` in
+  `crates/brixc/src/lower/decl.rs`) — scenario/tx bodies are not lowered at all
+  in v0 — so there is no site at which to gate a `pub write`. The `write`
+  capability is carried in `export_caps` and will gate `AssertTuple`/`Set` against
+  a foreign relation's `export_cap == Write` once scenario lowering lands. Tracked
+  on #154.
 
-- **Test coverage.** `BRX-LOW-0019` is inherently cross-package, so it is covered
-  by the `brixc` graph tests (`crates/brixc/tests/graph_coherence.rs`), not the
-  acceptance corpus — whose driver (`brixc::lower_file`) compiles a single file
-  and cannot express a foreign head, the same reason cross-package coherence
-  (`BRX-LOW-0017`) is corpus-tested only in its single-package overlap form.
-  Capability normalization is unit-tested in `crates/brix-ast/src/parser.rs`.
+- **Test coverage.** `BRX-LOW-0019`/`BRX-LOW-0020` are inherently cross-package,
+  so they are covered by the `brixc` graph tests
+  (`crates/brixc/tests/graph_coherence.rs`), not the acceptance corpus — whose
+  driver (`brixc::lower_file`) compiles a single file and cannot express a foreign
+  head, the same reason cross-package coherence (`BRX-LOW-0017`) is corpus-tested
+  only in its single-package overlap form. Capability normalization is unit-tested
+  in `crates/brix-ast/src/parser.rs`.
