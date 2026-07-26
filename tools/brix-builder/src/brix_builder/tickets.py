@@ -308,7 +308,9 @@ class TicketStore:
             reclaimed.append(state.spec.id)
         return reclaimed
 
-    def export(self, ticket_id: str, destination: Path) -> dict[str, Any]:
+    def export_payload(self, ticket_id: str) -> dict[str, Any]:
+        """Build the inert export bundle without writing it to disk."""
+
         state = self.load(ticket_id)
         candidate = CandidatePackage(
             self._package_path(state.spec), state.spec.write_allowlist
@@ -321,7 +323,7 @@ class TicketStore:
         )
         critics = [item for item in state.reports if item.get("role") == "critic"]
         host_evidence = [item for item in state.evidence if item.get("role") == "host"]
-        result = {
+        return {
             "ticket": state.spec.model_dump(),
             "status": state.status,
             "base_revision": state.base_revision.model_dump(),
@@ -330,6 +332,9 @@ class TicketStore:
             "critic_verdict": critics[-1] if critics else None,
             "unresolved_obligations": state.residual_obligations,
         }
+
+    def export(self, ticket_id: str, destination: Path) -> dict[str, Any]:
+        result = self.export_payload(ticket_id)
         target = destination.expanduser().resolve()
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(
