@@ -31,14 +31,24 @@
 //!   deterministic replay ([`journal::Journal::replay_chain`]). ADR-0002 §1,
 //!   §8 (⟨D-FO⟩ ratified), §9.2; `Build_Plan_v3_SOC.md` Step 4.
 //!
+//! - **Lane 2** ([`audit`]): the audit-factorization checker — the sole
+//!   authority for `Outcome::Audited` (ADR-0002 §4.1). Replays each committed
+//!   step's recorded [`brix_semantic::Decomposition`] against the log,
+//!   verifies the exact relational composition `ρ_k = ρ_gn ∘ … ∘ ρ_g1` over
+//!   the intermediate-configuration chain, and — iff it composes exactly —
+//!   publishes a new `Audited` judgement linked to the pre-existing `Derived`
+//!   one by a `Dependency` edge ([`audit::audit_step`],
+//!   [`audit::audit_journal`]). A replay that does not complete exactly
+//!   yields `Unknown(reason)`, never a pass (`Build_Plan_v3_SOC.md` Step 4
+//!   gate; PD-1's operational discharge).
+//!
 //! **What this crate deliberately does not do yet:** the incremental
 //! delta-driven regime form (`footprint`/`apply(delta)`, ADR-0002 §9.2,
-//! `Build_Plan_v3_SOC.md` Step 6) and the audit-factorization checker itself
-//! (Lane 2 — replaying a [`brix_semantic::Decomposition`] and publishing the
-//! upgraded `Audited` judgement). This crate's oracle is intentionally the
+//! `Build_Plan_v3_SOC.md` Step 6). This crate's oracle is intentionally the
 //! slow, obviously-correct baseline the fast engine gets
 //! differential-tested against; the committed loop here only *records*
-//! decompositions, never verifies them (ADR-0002 §5.1).
+//! decompositions, never verifies them (ADR-0002 §5.1) — verification is
+//! [`audit`]'s job, off the hot path.
 //!
 //! **Gate.** The executable governance-conservation law — tightening `Adm`
 //! shrinks `cand(e)`/`Succ(e)` pointwise over every reachable `e`
@@ -56,6 +66,7 @@
 //! `#[ignore]`d future gate lives in `tests/o_delta_gate.rs`.
 
 pub mod adm;
+pub mod audit;
 pub mod calendar;
 pub mod commit;
 pub mod cost;
@@ -68,6 +79,7 @@ pub mod regime;
 pub mod store;
 
 pub use adm::{Adm, AdmAll, AdmNone, AdmRegimeAllowlist, AdmSuccessorFilter, AndAdm};
+pub use audit::{audit_journal, audit_step, AuditResult, AuditedStep, GeneratorSemantics};
 pub use calendar::{Frontier, Key, KeyConflict};
 pub use commit::{commit_tick, run, Committed, Observation, SettlementRegime};
 pub use cost::CostRecord;
