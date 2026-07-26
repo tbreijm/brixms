@@ -1,0 +1,13 @@
+[package]
+name = "brix-kernel"
+description = "Dependent proof kernel for BrixMS (ADR-0003 Profile 1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+brix-semantic = { workspace = true }
+
+[lints]
+workspace = true
