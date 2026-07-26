@@ -1,3 +1,5 @@
+> **ARCHIVED — superseded by [`spec/Build_Plan_v3_SOC.md`](../Build_Plan_v3_SOC.md).** Byte-identical duplicate of the former `spec/Build_Plan_v2.md` (now also archived). Kept only so links from `docs/` do not dangle.
+
 # BrixMS Build Plan v2 — Toolchain First, Agents as Developers
 
 **Supersedes v1. Gates, not dates. Blitz, then swarm.**

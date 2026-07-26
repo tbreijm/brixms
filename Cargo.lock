@@ -227,6 +227,7 @@ dependencies = [
  "brix-ir",
  "brix-oracle",
  "brix-rt",
+ "brix-semantic",
  "brixc",
  "insta",
 ]
@@ -287,6 +288,14 @@ dependencies = [
  "proptest",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "brix-semantic"
+version = "0.0.0"
+dependencies = [
+ "brix-canon",
+ "proptest",
 ]
 
 [[package]]
@@ -1896,6 +1905,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "soc-core"
+version = "0.0.0"
+dependencies = [
+ "brix-canon",
+ "brix-semantic",
+ "proptest",
 ]
 
 [[package]]

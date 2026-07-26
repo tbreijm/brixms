@@ -16,6 +16,7 @@ brix-rt = { path = "../brix-rt" }
 brix-ast = { path = "../brix-ast" }
 brix-cli = { path = "../brix-cli" }
 brix-diag = { path = "../brix-diag" }
+brix-semantic = { path = "../brix-semantic" }
 brixc = { path = "../brixc" }
 insta = { workspace = true }
 
