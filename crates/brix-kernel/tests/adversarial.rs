@@ -288,3 +288,84 @@ fn test_tiny_budget_returns_resource_exhausted_mapping_to_unknown_never_refuted(
         "ResourceExhausted must NEVER map to Refuted"
     );
 }
+
+#[test]
+fn test_certificate_id_determinism() {
+    let ctx = sample_context_a();
+    let p = sample_prop_p();
+    let goal = Prop::Impl(Box::new(p.clone()), Box::new(p));
+
+    let term = ExplicitTerm::new(
+        ctx,
+        TermKind::Lam {
+            var_name: Some("x".into()),
+            body: Box::new(TermKind::Hyp(Var::Index(0))),
+        },
+    );
+
+    let budget1 = Budget::new(100, 100);
+    let budget2 = Budget::new(100, 100);
+
+    let verdict1 = acceptance(&ctx, &goal, &term, budget1);
+    let verdict2 = acceptance(&ctx, &goal, &term, budget2);
+
+    match (verdict1, verdict2) {
+        (Verdict::Accepted(cert1), Verdict::Accepted(cert2)) => {
+            assert_eq!(
+                cert1.certificate_id, cert2.certificate_id,
+                "Identical (context, proposition, term) must produce byte-identical CertificateId"
+            );
+            assert_eq!(cert1.verifier, cert2.verifier);
+        }
+        (v1, v2) => panic!("Expected both Accepted, got {v1:?} and {v2:?}"),
+    }
+}
+
+#[test]
+fn test_certificate_id_distinctness_for_different_terms() {
+    let ctx = sample_context_a();
+    let p = sample_prop_p();
+    // Goal: P -> P -> P
+    let goal = Prop::Impl(
+        Box::new(p.clone()),
+        Box::new(Prop::Impl(Box::new(p.clone()), Box::new(p))),
+    );
+
+    // Term 1: \x. \y. x (returns first parameter, Var::Index(1))
+    let term1 = ExplicitTerm::new(
+        ctx,
+        TermKind::Lam {
+            var_name: Some("x".into()),
+            body: Box::new(TermKind::Lam {
+                var_name: Some("y".into()),
+                body: Box::new(TermKind::Hyp(Var::Index(1))),
+            }),
+        },
+    );
+
+    // Term 2: \x. \y. y (returns second parameter, Var::Index(0))
+    let term2 = ExplicitTerm::new(
+        ctx,
+        TermKind::Lam {
+            var_name: Some("x".into()),
+            body: Box::new(TermKind::Lam {
+                var_name: Some("y".into()),
+                body: Box::new(TermKind::Hyp(Var::Index(0))),
+            }),
+        },
+    );
+
+    let budget = Budget::new(100, 100);
+    let verdict1 = acceptance(&ctx, &goal, &term1, budget);
+    let verdict2 = acceptance(&ctx, &goal, &term2, budget);
+
+    match (verdict1, verdict2) {
+        (Verdict::Accepted(cert1), Verdict::Accepted(cert2)) => {
+            assert_ne!(
+                cert1.certificate_id, cert2.certificate_id,
+                "Different proof terms must produce distinct CertificateIds"
+            );
+        }
+        (v1, v2) => panic!("Expected both Accepted, got {v1:?} and {v2:?}"),
+    }
+}

@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 brix-semantic = { workspace = true }
+brix-canon = { workspace = true }
 
 [lints]
 workspace = true

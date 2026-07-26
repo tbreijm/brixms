@@ -1,5 +1,6 @@
 //! Total, strictly-terminating bidirectional proof-term acceptance checker (ADR-0003 §4, §5).
 
+use brix_canon::{CanonWriter, Canonical};
 use brix_semantic::{CertificateId, ContextId, VerifierId};
 
 use crate::term::{ExplicitTerm, Prop, TermKind, Var};
@@ -89,8 +90,11 @@ pub fn acceptance(
     // 2. Bidirectional type check of term against proposition
     match check_type(&mut state, &mut gamma, &term.kind, proposition) {
         Ok(()) => {
-            let cert_payload = format!("{context:?}:{proposition:?}:{term:?}");
-            let certificate_id = CertificateId::from_canon(cert_payload.as_bytes());
+            let mut writer = CanonWriter::new();
+            context.canon_write(&mut writer);
+            proposition.canon_write(&mut writer);
+            term.canon_write(&mut writer);
+            let certificate_id = CertificateId::from_canon(&writer.finish());
             let verifier = VerifierId::named("brix.kernel@0.1");
 
             Verdict::Accepted(Certificate {
