@@ -42,13 +42,19 @@
 //!   yields `Unknown(reason)`, never a pass (`Build_Plan_v3_SOC.md` Step 4
 //!   gate; PD-1's operational discharge).
 //!
-//! **What this crate deliberately does not do yet:** the incremental
-//! delta-driven regime form (`footprint`/`apply(delta)`, ADR-0002 §9.2,
-//! `Build_Plan_v3_SOC.md` Step 6). This crate's oracle is intentionally the
-//! slow, obviously-correct baseline the fast engine gets
-//! differential-tested against; the committed loop here only *records*
-//! decompositions, never verifies them (ADR-0002 §5.1) — verification is
-//! [`audit`]'s job, off the hot path.
+//! - **E3⋈E5** ([`delta`], [`engine`]): the incremental delta-driven regime
+//!   form. [`delta::Delta`]/[`delta::CandidateDelta`]/[`delta::Footprint`] are
+//!   the delta protocol over content-addressed world-config handles;
+//!   [`engine::IncrementalRegime`] is the regime as a **dataflow operator**
+//!   (`footprint`/`apply(delta) → candidate delta`, ADR-0002 §9.2); and
+//!   [`engine::IncrementalEngine`] maintains the materialized candidate view
+//!   via a footprint index, so a committed step's cost is `∝ |Δ| × fanout`,
+//!   never `∝ |world|` (ADR-0002 §9.1). It lands **beside** the naive oracle,
+//!   which is retained verbatim as the reference oracle the fast engine is
+//!   differential-tested against ([`engine::naive_view_over`];
+//!   `Build_Plan_v3_SOC.md` Step 6). The committed loop still only *records*
+//!   decompositions, never verifies them (ADR-0002 §5.1) — verification is
+//!   [`audit`]'s job, off the hot path.
 //!
 //! **Gate.** The executable governance-conservation law — tightening `Adm`
 //! shrinks `cand(e)`/`Succ(e)` pointwise over every reachable `e`
@@ -70,6 +76,8 @@ pub mod audit;
 pub mod calendar;
 pub mod commit;
 pub mod cost;
+pub mod delta;
+pub mod engine;
 pub mod exec;
 pub mod history;
 pub mod intern;
@@ -81,8 +89,12 @@ pub mod store;
 pub use adm::{Adm, AdmAll, AdmNone, AdmRegimeAllowlist, AdmSuccessorFilter, AndAdm};
 pub use audit::{audit_journal, audit_step, AuditResult, AuditedStep, GeneratorSemantics};
 pub use calendar::{Frontier, Key, KeyConflict};
-pub use commit::{commit_tick, run, Committed, Observation, SettlementRegime};
+pub use commit::{commit_tick, run, step_world_delta, Committed, Observation, SettlementRegime};
 pub use cost::CostRecord;
+pub use delta::{CandidateDelta, Delta, Footprint};
+pub use engine::{
+    naive_view_over, naive_view_over_instrumented, IncrementalEngine, IncrementalRegime, StepReport,
+};
 pub use exec::{intern_context, ExecConfig};
 pub use history::History;
 pub use intern::{Handle, Interner};
