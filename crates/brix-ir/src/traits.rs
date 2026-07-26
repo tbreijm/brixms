@@ -20,7 +20,7 @@
 //! [`TraitEnv::select`] does the exact-head lookup a real solver would start
 //! from, but unification of generic impl heads is future work.
 
-use crate::ident::Ident;
+use crate::ident::{Ident, QualIdent};
 use crate::types::Ty;
 use core::fmt;
 
@@ -28,7 +28,7 @@ use core::fmt;
 /// but identity is by name set).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct TraitDef {
-    pub name: Ident,
+    pub name: QualIdent,
     pub assoc_types: Vec<Ident>,
 }
 
@@ -54,7 +54,7 @@ impl fmt::Display for TraitDef {
 /// constructor name for the coherence key — that is what makes "no overlapping
 /// impls" a simple exact-match rule.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct ImplHead(pub Ident);
+pub struct ImplHead(pub QualIdent);
 
 impl fmt::Display for ImplHead {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -72,7 +72,7 @@ pub struct AssocBinding {
 /// An `impl Trait for Head { type A = ...; ... }`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ImplDef {
-    pub trait_name: Ident,
+    pub trait_name: QualIdent,
     pub head: ImplHead,
     pub assoc: Vec<AssocBinding>,
 }
@@ -97,7 +97,7 @@ impl fmt::Display for ImplDef {
 /// A coherence violation: a second impl for a `(trait, head)` already covered.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CoherenceError {
-    pub trait_name: Ident,
+    pub trait_name: QualIdent,
     pub head: ImplHead,
 }
 
@@ -155,7 +155,7 @@ impl TraitEnv {
     /// head-constructor matching (the base case a real solver bottoms out on);
     /// generic-head unification is future work. Returns the single coherent
     /// impl or `None`.
-    pub fn select(&self, trait_name: &Ident, ty: &Ty) -> Option<&ImplDef> {
+    pub fn select(&self, trait_name: &QualIdent, ty: &Ty) -> Option<&ImplDef> {
         let head = head_of(ty)?;
         self.impls
             .iter()
@@ -164,7 +164,7 @@ impl TraitEnv {
 
     /// Resolve `<ty as Trait>::AssocName` via the selected impl. Stubbed on top
     /// of [`Self::select`].
-    pub fn project_assoc(&self, trait_name: &Ident, ty: &Ty, assoc: &Ident) -> Option<&Ty> {
+    pub fn project_assoc(&self, trait_name: &QualIdent, ty: &Ty, assoc: &Ident) -> Option<&Ty> {
         let imp = self.select(trait_name, ty)?;
         imp.assoc.iter().find(|b| &b.name == assoc).map(|b| &b.ty)
     }
@@ -196,7 +196,7 @@ fn head_of(ty: &Ty) -> Option<ImplHead> {
         Ty::Str => "String",
         _ => return None,
     };
-    Some(ImplHead(Ident::new(name)))
+    Some(ImplHead(QualIdent::simple(name)))
 }
 
 #[cfg(test)]
@@ -205,7 +205,7 @@ mod tests {
 
     fn ordish() -> TraitDef {
         TraitDef {
-            name: Ident::new("Ord"),
+            name: QualIdent::simple("Ord"),
             assoc_types: vec![],
         }
     }
@@ -215,35 +215,37 @@ mod tests {
         let mut env = TraitEnv::new();
         env.insert_trait(ordish());
         let imp = ImplDef {
-            trait_name: Ident::new("Ord"),
-            head: ImplHead(Ident::new("Money")),
+            trait_name: QualIdent::simple("Ord"),
+            head: ImplHead(QualIdent::simple("Money")),
             assoc: vec![],
         };
         assert!(env.insert_impl(imp.clone()).is_ok());
         let err = env.insert_impl(imp).unwrap_err();
-        assert_eq!(err.head.0.as_str(), "Money");
+        assert_eq!(err.head.0, QualIdent::simple("Money"));
     }
 
     #[test]
     fn select_finds_the_unique_impl_by_head() {
         let mut env = TraitEnv::new();
         env.insert_impl(ImplDef {
-            trait_name: Ident::new("Canonical"),
-            head: ImplHead(Ident::new("List")),
+            trait_name: QualIdent::simple("Canonical"),
+            head: ImplHead(QualIdent::simple("List")),
             assoc: vec![],
         })
         .unwrap();
         let ty = Ty::list(Ty::Bool);
-        assert!(env.select(&Ident::new("Canonical"), &ty).is_some());
-        assert!(env.select(&Ident::new("Canonical"), &Ty::Unit).is_none());
+        assert!(env.select(&QualIdent::simple("Canonical"), &ty).is_some());
+        assert!(env
+            .select(&QualIdent::simple("Canonical"), &Ty::Unit)
+            .is_none());
     }
 
     #[test]
     fn associated_type_projection_reads_the_impl_binding() {
         let mut env = TraitEnv::new();
         env.insert_impl(ImplDef {
-            trait_name: Ident::new("Collection"),
-            head: ImplHead(Ident::new("List")),
+            trait_name: QualIdent::simple("Collection"),
+            head: ImplHead(QualIdent::simple("List")),
             assoc: vec![AssocBinding {
                 name: Ident::new("Item"),
                 ty: Ty::Bool,
@@ -251,7 +253,7 @@ mod tests {
         })
         .unwrap();
         let got = env.project_assoc(
-            &Ident::new("Collection"),
+            &QualIdent::simple("Collection"),
             &Ty::list(Ty::Bool),
             &Ident::new("Item"),
         );

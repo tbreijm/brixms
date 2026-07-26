@@ -14,7 +14,16 @@ trait Canonical { type Item }\n\
 impl Canonical for Order { type Item = String }\n";
 
 #[test]
-fn a_root_impl_overlapping_a_dependency_impl_is_a_cross_package_coherence_error() {
+fn same_named_traits_and_heads_in_unrelated_packages_do_not_collide() {
+    // Root declares its *own* `Order` and `Canonical` and impls one for the
+    // other; `dep` independently does the same. Neither package can see the
+    // other's — there is no `use` — so these are two distinct local impls and
+    // the orphan rule has nothing to say about them.
+    //
+    // This asserted the opposite until coherence keys were qualified (issue
+    // #111 follow-on): keying on bare surface text made `(Canonical, Order)`
+    // one key across the whole graph, so two unrelated packages that happened
+    // to pick the same two names collided.
     let root_src = "package root @ 1.0.0\n\
 entity Order { key ref: String }\n\
 trait Canonical { type Item }\n\
@@ -27,16 +36,32 @@ impl Canonical for Order { type Item = String }\n";
         parse_diags: &dep_diags,
     }];
     let lowered = lower_graph(&root_file, &root_diags, &deps);
-    let coherence: Vec<_> = lowered
-        .diags
-        .iter()
-        .filter(|d| d.code == "BRX-LOW-0017")
-        .collect();
+    assert!(
+        lowered.diags.iter().all(|d| d.code != "BRX-LOW-0017"),
+        "same-named but unrelated impls in different packages must not collide: {:#?}",
+        lowered.diags
+    );
+}
+
+#[test]
+fn a_root_impl_overlapping_an_imported_dependency_impl_is_a_cross_package_coherence_error() {
+    // The genuine overlap the check exists for: root *imports* the dependency's
+    // trait and head, so both impls key on `(dep.Canonical, dep.Order)`. The
+    // head is `pub derive`, so the orphan gate (BRX-LOW-0019) permits the
+    // extension — what is left is a real non-overlap violation.
+    let dep = "package dep @ 1.0.0\n\
+pub derive entity Order { key ref: String }\n\
+pub trait Canonical { type Item }\n\
+impl Canonical for Order { type Item = String }\n";
+    let root = "package root @ 1.0.0\n\
+use dep.{Order, Canonical}\n\
+impl Canonical for Order { type Item = String }\n";
+    let diags = lower_with_dep(dep, root);
+    let coherence: Vec<_> = diags.iter().filter(|d| d.code == "BRX-LOW-0017").collect();
     assert_eq!(
         coherence.len(),
         1,
-        "root impl overlapping a dependency impl must be one BRX-LOW-0017: {:#?}",
-        lowered.diags
+        "an impl overlapping an imported dependency impl must be one BRX-LOW-0017: {diags:#?}"
     );
 }
 
