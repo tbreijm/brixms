@@ -39,6 +39,8 @@ use brix_semantic::{ConfigId, Decomposition, GeneratorId, RegimeId, Witness};
 
 use soc_core::audit::GeneratorSemantics;
 use soc_core::commit::SettlementRegime;
+use soc_core::delta::{CandidateDelta, Delta, Footprint};
+use soc_core::engine::IncrementalRegime;
 use soc_core::exec::ExecConfig;
 use soc_core::intern::{Handle, Interner};
 use soc_core::regime::{Candidate, Regime};
@@ -93,6 +95,21 @@ impl LiteralEqualityRegime {
         self.regime_id
     }
 
+    /// The reflexive candidate `config → config` this regime proposes for a
+    /// registered `config`, or `None` if `config` is not registered. The
+    /// single source of truth for the candidate identity shared by both the
+    /// naive [`Regime::candidates`] path and the incremental
+    /// [`IncrementalRegime::apply`] path, so the two produce byte-identical
+    /// candidates (the differential-identity anchor, ADR-0002 §9.2).
+    fn candidate_for(&self, config: Handle) -> Option<Candidate> {
+        self.known.get(&config).map(|known| Candidate {
+            regime: self.regime_handle,
+            witness: known.witness_handle,
+            // Reflexive: the successor IS the source, x → x.
+            successor: config,
+        })
+    }
+
     /// Register `config` (an interned configuration handle — typically an
     /// `ExecConfig::world`) as known to this regime: computes and interns its
     /// reflexive witness `Witness::new(x, x, regime_id)` once (idempotent —
@@ -127,15 +144,42 @@ impl Regime for LiteralEqualityRegime {
     /// scope. Unregistered worlds propose nothing: this regime never invents
     /// a witness for a configuration it was not told about (module docs).
     fn candidates(&self, e: &ExecConfig) -> Vec<Candidate> {
-        match self.known.get(&e.world) {
-            Some(known) => vec![Candidate {
-                regime: self.regime_handle,
-                witness: known.witness_handle,
-                // Reflexive: the successor IS the source, x → x.
-                successor: e.world,
-            }],
-            None => vec![],
+        self.candidate_for(e.world).into_iter().collect()
+    }
+}
+
+impl IncrementalRegime for LiteralEqualityRegime {
+    /// This regime is sensitive to exactly its registered configurations: a
+    /// delta touching only unregistered configs induces no candidate change,
+    /// so the engine skips it (ADR-0002 §9.1). Declaring the footprint as the
+    /// registered-config set — rather than [`Footprint::AllConfigs`] — is
+    /// what lets the O(Δ) gate scale unregistered (inert) configurations as
+    /// ballast without paying this regime on every delta.
+    fn footprint(&self) -> Footprint {
+        Footprint::configs(self.known.keys().copied())
+    }
+
+    /// The dataflow-operator form of [`Regime::candidates`] (ADR-0002 §9.2):
+    /// for each **registered** config that entered the world, the reflexive
+    /// candidate `x → x` enters the view; for each registered config that
+    /// left, it leaves. Reuses [`candidate_for`](Self::candidate_for), so an
+    /// incrementally-maintained view is byte-identical to the naive union.
+    /// No internal state mutates — the literal regime is memoryless — but the
+    /// `&mut self` receiver honours the trait's contract for regimes that do
+    /// carry incremental state.
+    fn apply(&mut self, delta: &Delta) -> CandidateDelta {
+        let mut cd = CandidateDelta::new();
+        for h in &delta.added {
+            if let Some(c) = self.candidate_for(*h) {
+                cd.added.insert(c);
+            }
         }
+        for h in &delta.removed {
+            if let Some(c) = self.candidate_for(*h) {
+                cd.removed.insert(c);
+            }
+        }
+        cd
     }
 }
 
@@ -263,6 +307,57 @@ mod tests {
         );
         assert_eq!(decomposition.configs.len(), 2);
         assert_eq!(decomposition.configs[0], decomposition.configs[1]);
+    }
+
+    #[test]
+    fn incremental_footprint_is_the_registered_config_set() {
+        let mut i = Interner::new();
+        let a = i.intern(Digest::of(Domain::Value, b"a"));
+        let b = i.intern(Digest::of(Domain::Value, b"b"));
+        let mut regime = LiteralEqualityRegime::new(&mut i);
+        regime.register(&mut i, a);
+        regime.register(&mut i, b);
+        match regime.footprint() {
+            Footprint::Configs(set) => {
+                assert!(set.contains(&a) && set.contains(&b));
+                assert_eq!(set.len(), 2);
+            }
+            Footprint::AllConfigs => panic!("literal regime declares an explicit config footprint"),
+        }
+    }
+
+    #[test]
+    fn incremental_apply_adds_and_removes_the_reflexive_candidate() {
+        let (mut i, world, mut regime) = setup();
+        let expected = regime.candidate_for(world).unwrap();
+
+        let add = regime.apply(&Delta::of_added([world]));
+        assert_eq!(add.added, std::collections::BTreeSet::from([expected]));
+        assert!(add.removed.is_empty());
+
+        let remove = regime.apply(&Delta::of_removed([world]));
+        assert_eq!(remove.removed, std::collections::BTreeSet::from([expected]));
+        assert!(remove.added.is_empty());
+
+        // An unregistered config induces no candidate change.
+        let other = i.intern(Digest::of(Domain::Value, b"unregistered"));
+        assert!(regime.apply(&Delta::of_added([other])).is_empty());
+    }
+
+    #[test]
+    fn incremental_apply_agrees_with_naive_candidates_for_the_same_config() {
+        let (mut i, world, mut regime) = setup();
+        let policy = i.intern(Digest::of(Domain::Value, b"policy"));
+        let e = ExecConfig::new(world, policy, Digest::of(Domain::Value, b"history"));
+
+        let naive = regime.candidates(&e);
+        let incremental = regime.apply(&Delta::of_added([world]));
+        assert_eq!(naive.len(), 1);
+        assert_eq!(
+            incremental.added,
+            naive.into_iter().collect::<std::collections::BTreeSet<_>>(),
+            "the incremental add-delta must reconstruct exactly the naive candidate"
+        );
     }
 
     #[test]

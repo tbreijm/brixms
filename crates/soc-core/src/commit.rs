@@ -33,6 +33,7 @@ use brix_semantic::{
 use crate::adm::Adm;
 use crate::calendar::{Frontier, Key};
 use crate::cost::CostRecord;
+use crate::delta::Delta;
 use crate::exec::ExecConfig;
 use crate::intern::Interner;
 use crate::journal::{CommittedStep, Journal};
@@ -272,11 +273,32 @@ where
     (journal, costs)
 }
 
+/// The world-configuration [`Delta`] a committed step induces (ADR-0002 §9.2;
+/// `Build_Plan_v3_SOC.md` Step 6, E3): at the commit boundary, exactly the
+/// step's predecessor world-config handle *left* and its successor world-config
+/// handle *entered*. This is the emitter that feeds the incremental engine
+/// ([`crate::engine::IncrementalEngine::step`]) — a committed step is the unit
+/// of world change, and this turns it into the delta the engine consumes.
+///
+/// - [`Committed::Quiescent`] induces the empty delta (nothing committed,
+///   nothing changed).
+/// - [`Committed::Step`] induces `{ removed: {before.world}, added:
+///   {successor.world} }` — collapsing to empty for a reflexive step whose
+///   successor world equals `before.world` (e.g. the literal-equality
+///   regime's `x → x`), via [`Delta::between_worlds`].
+pub fn step_world_delta(before: &ExecConfig, committed: &Committed) -> Delta {
+    match committed {
+        Committed::Quiescent => Delta::new(),
+        Committed::Step { successor, .. } => Delta::between_worlds(before.world, successor.world),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::adm::{AdmAll, AdmNone};
     use crate::history::History;
+    use crate::intern::Handle;
     use brix_canon::Domain;
     use brix_semantic::GeneratorId;
 
@@ -447,6 +469,48 @@ mod tests {
         for cost in &costs {
             assert!(cost.work_units().is_some(), "cost is never omitted");
         }
+    }
+
+    #[test]
+    fn step_world_delta_of_a_committed_step_removes_old_world_adds_successor() {
+        let (i, regime, e) = setup();
+        let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+        let (committed, _step, _cost) = commit_tick(
+            &regimes,
+            &AdmAll,
+            &i,
+            &e,
+            ContextId::root(),
+            0,
+            &mut |c, phase| Key::new(phase, 0, tiebreak_of(c)),
+        );
+        let Committed::Step { successor, .. } = committed else {
+            panic!("expected a committed step");
+        };
+        let delta = step_world_delta(&e, &committed);
+        let expected_removed: std::collections::BTreeSet<Handle> =
+            std::collections::BTreeSet::from([e.world]);
+        let expected_added: std::collections::BTreeSet<Handle> =
+            std::collections::BTreeSet::from([successor.world]);
+        assert_eq!(delta.removed, expected_removed);
+        assert_eq!(delta.added, expected_added);
+    }
+
+    #[test]
+    fn step_world_delta_of_quiescence_is_empty() {
+        let (i, regime, e) = setup();
+        let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+        let (committed, _step, _cost) = commit_tick(
+            &regimes,
+            &AdmNone,
+            &i,
+            &e,
+            ContextId::root(),
+            0,
+            &mut |c, phase| Key::new(phase, 0, tiebreak_of(c)),
+        );
+        assert_eq!(committed, Committed::Quiescent);
+        assert!(step_world_delta(&e, &committed).is_empty());
     }
 
     #[test]
