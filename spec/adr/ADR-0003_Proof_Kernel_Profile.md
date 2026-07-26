@@ -1,6 +1,6 @@
 # ADR-0003 — Proof Kernel Profile: Calculus Subset, Independent TCB, and Elaboration Gate
 
-Status: **Proposed** (refines [ADR-0002](./ADR-0002_SOC_Constitution.md) §3 D1, §5.2, §8, §10; governs `brix-kernel` and `crates/brix-kernel`).
+Status: **Accepted (2026-07-26, ratified by maintainer)** (refines [ADR-0002](./ADR-0002_SOC_Constitution.md) §3 D1, §5.2, §8, §10; governs `brix-kernel` and `crates/brix-kernel`).
 
 Date: 2026-07-26.
 
