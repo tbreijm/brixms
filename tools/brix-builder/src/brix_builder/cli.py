@@ -312,6 +312,15 @@ def main(argv: list[str] | None = None) -> int:
                         break
                 return 0 if processed else 1
 
+        if args.command == "serve":
+            coder_model, critic_model = backends_for_roles(args, config)
+            return serve(
+                config,
+                coder_model,
+                critic_model,
+                TicketStore(args.queue, config.root),
+                args.socket,
+            )
         model = backend_from(args, config)
         if args.command == "run":
             result = BrixBuilderTeam(config, model).run(" ".join(args.brief))
@@ -319,8 +328,6 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if result.status == "validated_candidate" else 1
         if args.command == "chat":
             return chat(config, model)
-        if args.command == "serve":
-            return serve(config, model, args.socket)
     except (KeyError, ValueError, ModelError, OSError, RuntimeError) as error:
         print(f"brix-builder: {error}", file=sys.stderr)
         return 2
@@ -397,7 +404,180 @@ def chat(config: BuilderConfig, model: ModelBackend) -> int:
         print_result(result, False)
 
 
-def serve(config: BuilderConfig, model: ModelBackend, socket_path: Path) -> int:
+def handle_sidecar_request(
+    request: dict[str, Any],
+    config: BuilderConfig,
+    coder: ModelBackend,
+    critic: ModelBackend,
+    store: TicketStore,
+) -> dict[str, Any]:
+    """Dispatch one NDJSON sidecar request.
+
+    Legacy one-shot form ``{"brief": "..."}`` remains supported. Ticket-loop
+    workflows use an explicit ``command`` field matching the CLI verbs from
+    issue #79: enqueue, inspect-ticket, run-ticket, loop, resume, cancel,
+    export-proposal, plus tickets/status/reclaim.
+    """
+
+    if not isinstance(request, dict):
+        raise ValueError("request must be a JSON object")
+
+    command = request.get("command")
+    if command is None and "brief" in request:
+        command = "run"
+    if not isinstance(command, str) or not command:
+        raise ValueError(
+            "request requires 'command' (or legacy one-shot 'brief'); "
+            "supported ticket commands: enqueue, tickets, status, reclaim, "
+            "inspect-ticket, resume, cancel, export-proposal, run-ticket, loop, run"
+        )
+
+    if command == "run":
+        brief = request.get("brief")
+        if not isinstance(brief, str) or not brief.strip():
+            raise ValueError("brief must be a non-empty string")
+        result = BrixBuilderTeam(config, coder).run(brief)
+        return {"ok": True, "command": command, "result": asdict(result)}
+
+    if command == "enqueue":
+        state = store.enqueue(**_sidecar_enqueue_kwargs(request, config))
+        return {"ok": True, "command": command, "ticket": state.model_dump()}
+
+    if command == "tickets":
+        return {
+            "ok": True,
+            "command": command,
+            "tickets": [state.model_dump() for state in store.list()],
+        }
+
+    if command == "status":
+        states = store.list()
+        counts: dict[str, int] = {}
+        for state in states:
+            counts[state.status] = counts.get(state.status, 0) + 1
+        next_ticket = store.next_queued()
+        return {
+            "ok": True,
+            "command": command,
+            "root": str(config.root),
+            "queue": str(store.queue_root),
+            "total": len(states),
+            "counts": counts,
+            "next_queued": next_ticket.spec.id if next_ticket else None,
+        }
+
+    if command == "reclaim":
+        return {
+            "ok": True,
+            "command": command,
+            "reclaimed": store.reclaim_stale_running(),
+        }
+
+    ticket_id = request.get("ticket_id")
+    if command in {
+        "inspect-ticket",
+        "resume",
+        "cancel",
+        "export-proposal",
+        "run-ticket",
+    }:
+        if not isinstance(ticket_id, str) or not ticket_id.strip():
+            raise ValueError(f"{command} requires a non-empty ticket_id")
+
+    if command == "inspect-ticket":
+        return {
+            "ok": True,
+            "command": command,
+            "ticket": store.load(ticket_id).model_dump(),
+        }
+
+    if command == "resume":
+        return {
+            "ok": True,
+            "command": command,
+            "ticket": store.resume(ticket_id).model_dump(),
+        }
+
+    if command == "cancel":
+        reason = request.get("reason", "cancelled via sidecar")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("cancel requires a non-empty reason")
+        return {
+            "ok": True,
+            "command": command,
+            "ticket": store.cancel(ticket_id, reason).model_dump(),
+        }
+
+    if command == "export-proposal":
+        payload = store.export_payload(ticket_id)
+        destination = request.get("destination")
+        if destination is not None:
+            if not isinstance(destination, str) or not destination.strip():
+                raise ValueError("destination must be a non-empty path string")
+            store.export(ticket_id, Path(destination))
+            payload = {**payload, "destination": str(Path(destination).expanduser().resolve())}
+        return {"ok": True, "command": command, "proposal": payload}
+
+    if command in {"run-ticket", "loop"}:
+        with WorkerLock(store.queue_root):
+            store.reclaim_stale_running()
+            worker = TicketWorker(store, config, coder, critic)
+            if command == "run-ticket":
+                one_iteration = bool(request.get("one_iteration", False))
+                state = (
+                    worker.run_iteration(ticket_id)
+                    if one_iteration
+                    else worker.run_to_terminal(ticket_id)
+                )
+                return {"ok": True, "command": command, "ticket": state.model_dump()}
+            once = bool(request.get("once", False))
+            processed: list[dict[str, Any]] = []
+            while True:
+                state = worker.run_next()
+                if state is None:
+                    break
+                processed.append(state.model_dump())
+                if once:
+                    break
+            return {
+                "ok": True,
+                "command": command,
+                "processed": processed,
+                "count": len(processed),
+            }
+
+    raise ValueError(f"unsupported sidecar command: {command}")
+
+
+def _sidecar_enqueue_kwargs(
+    request: dict[str, Any], config: BuilderConfig
+) -> dict[str, Any]:
+    brief = request.get("brief")
+    if not isinstance(brief, str) or not brief.strip():
+        raise ValueError("enqueue requires a non-empty brief")
+    kwargs: dict[str, Any] = {
+        "brief": brief,
+        "ticket_id": request.get("ticket_id"),
+        "package_path": request.get("package_path", "."),
+        "write_allowlist": request.get("write_allowlist"),
+        "acceptance_gates": request.get("acceptance_gates"),
+        "max_iterations": request.get("max_iterations", 3),
+        "max_actions_per_role": request.get(
+            "max_actions_per_role", config.max_actions
+        ),
+        "context_tokens": request.get("context_tokens", config.context_tokens),
+        "metadata": request.get("metadata"),
+    }
+    return kwargs
+
+
+def serve(
+    config: BuilderConfig,
+    coder: ModelBackend,
+    critic: ModelBackend,
+    store: TicketStore,
+    socket_path: Path,
+) -> int:
     path = socket_path.expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -417,12 +597,17 @@ def serve(config: BuilderConfig, model: ModelBackend, socket_path: Path) -> int:
                 line = stream.readline()
                 try:
                     request = json.loads(line)
-                    brief = request["brief"]
-                    if not isinstance(brief, str) or not brief.strip():
-                        raise ValueError("brief must be a non-empty string")
-                    result = BrixBuilderTeam(config, model).run(brief)
-                    response = {"ok": True, "result": asdict(result)}
-                except (json.JSONDecodeError, KeyError, ValueError, TypeError) as error:
+                    response = handle_sidecar_request(
+                        request, config, coder, critic, store
+                    )
+                except (
+                    json.JSONDecodeError,
+                    KeyError,
+                    ValueError,
+                    TypeError,
+                    RuntimeError,
+                    OSError,
+                ) as error:
                     response = {"ok": False, "error": str(error)}
                 stream.write(json.dumps(response, default=str).encode() + b"\n")
                 stream.flush()

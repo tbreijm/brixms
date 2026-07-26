@@ -100,14 +100,30 @@ sidecar's compiler evidence, not that loss value.
   --socket /tmp/brix-builder.sock
 ```
 
-The socket is mode `0600`. Send one newline-terminated object per connection:
+The socket is mode `0600`. Send one newline-terminated JSON object per
+connection. Legacy one-shot form still works:
 
 ```json
 {"brief":"Create a reusable approval workflow package"}
 ```
 
-The response contains the status, evidence, unresolved gates, and proposed diff.
-There is deliberately no apply, publish, production-boundary, or arbitrary-shell
+The durable ticket-loop workflows from the CLI are also available over the
+sidecar via an explicit `command` field (same verbs as `enqueue`,
+`inspect-ticket`, `run-ticket`, `loop`, `resume`, `cancel`, `export-proposal`,
+plus `tickets` / `status` / `reclaim`):
+
+```json
+{"command":"enqueue","ticket_id":"orders-1","brief":"Add OpenOrders query","acceptance_gates":["check"],"max_iterations":2}
+{"command":"run-ticket","ticket_id":"orders-1"}
+{"command":"export-proposal","ticket_id":"orders-1"}
+{"command":"loop","once":true}
+{"command":"cancel","ticket_id":"orders-1","reason":"operator stopped"}
+```
+
+Responses are `{"ok": true, ...}` on success or `{"ok": false, "error": "..."}`
+on failure. `export-proposal` returns the inert proposal bundle inline; pass
+`destination` only when you also want it written to disk on the host. There is
+deliberately no apply, publish, production-boundary, or arbitrary-shell
 operation in the protocol.
 
 ## Ticket loop
