@@ -3739,4 +3739,40 @@ impl Canonical for Money<EUR> {\n\
         assert!(file2.decls.iter().any(|d| matches!(d, Decl::Trait(_))));
         assert!(file2.decls.iter().any(|d| matches!(d, Decl::Impl(_))));
     }
+
+    #[test]
+    fn relation_visibility_resolves_capability_per_errata_0003() {
+        // A bare `pub` relation normalizes to `read` (least privilege, ruling
+        // Q2); `write`/`derive` are preserved as declared; a private relation
+        // has no exported capability.
+        let src = "package t @ 1.0.0\n\
+rel Priv { x: I64 } key(x)\n\
+pub rel Bare { x: I64 } key(x)\n\
+pub read rel Reader { x: I64 } key(x)\n\
+pub write rel Writer { x: I64 } key(x)\n\
+pub derive rel Extendable { x: I64 } key(x)\n";
+        let (file, diagnostics) = parse_file(src);
+        assert_eq!(diagnostics.iter().count(), 0, "{diagnostics:?}");
+        let cap = |name: &str| {
+            file.decls
+                .iter()
+                .find_map(|d| match d {
+                    Decl::Rel(r) if r.name.text == name => Some(r.vis.rel_cap()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no relation named {name}"))
+        };
+        assert_eq!(cap("Priv"), None);
+        assert_eq!(cap("Bare"), Some(RelVis::Read));
+        assert_eq!(cap("Reader"), Some(RelVis::Read));
+        assert_eq!(cap("Writer"), Some(RelVis::Write));
+        assert_eq!(cap("Extendable"), Some(RelVis::Derive));
+        // The AST still stores a bare `pub` as `Public(None)` — `rel_cap` is a
+        // reader, so the formatter round-trips it unchanged.
+        let bare_vis = file.decls.iter().find_map(|d| match d {
+            Decl::Rel(r) if r.name.text == "Bare" => Some(r.vis),
+            _ => None,
+        });
+        assert_eq!(bare_vis, Some(Visibility::Public(None)));
+    }
 }

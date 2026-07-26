@@ -61,3 +61,69 @@ impl Canonical for Invoice { type Item = String }\n";
         lowered.diags
     );
 }
+
+// --- issue #154: the `pub derive` orphan gate (BRX-LOW-0019) -----------------
+//
+// A downstream `impl Trait for Head` may extend a head owned by a dependency
+// only when that dependency exported the head `pub derive`. Bare `pub`/`pub
+// read` re-exports the head for *reference* but seals it against extension.
+
+fn lower_with_dep(dep_src: &str, root_src: &str) -> Vec<brix_diag::Diagnostic> {
+    let (dep_file, dep_diags) = parse_file(dep_src);
+    let (root_file, root_diags) = parse_file(root_src);
+    let deps = vec![DepPackage {
+        name_segments: vec!["dep".to_string()],
+        file: &dep_file,
+        parse_diags: &dep_diags,
+    }];
+    lower_graph(&root_file, &root_diags, &deps).diags
+}
+
+const ROOT_EXTENDS_FOREIGN: &str = "package root @ 1.0.0\n\
+use dep.{Order, Canonical}\n\
+impl Canonical for Order { type Item = String }\n";
+
+#[test]
+fn extending_a_pub_derive_dependency_head_is_allowed() {
+    let dep = "package dep @ 1.0.0\n\
+pub derive entity Order { key ref: String }\n\
+pub trait Canonical { type Item }\n";
+    let diags = lower_with_dep(dep, ROOT_EXTENDS_FOREIGN);
+    assert!(
+        diags.iter().all(|d| d.code != "BRX-LOW-0019"),
+        "a `pub derive` head must be downstream-extensible: {diags:#?}"
+    );
+}
+
+#[test]
+fn extending_a_bare_pub_dependency_head_is_sealed() {
+    // Bare `pub` on a relation is `pub read` (least privilege) — read-only, not
+    // extensible. The same foreign impl as above must now be rejected.
+    let dep = "package dep @ 1.0.0\n\
+pub entity Order { key ref: String }\n\
+pub trait Canonical { type Item }\n";
+    let diags = lower_with_dep(dep, ROOT_EXTENDS_FOREIGN);
+    let sealed: Vec<_> = diags.iter().filter(|d| d.code == "BRX-LOW-0019").collect();
+    assert_eq!(
+        sealed.len(),
+        1,
+        "extending a non-`pub derive` foreign head must be one BRX-LOW-0019: {diags:#?}"
+    );
+}
+
+#[test]
+fn a_local_trait_may_extend_a_read_only_foreign_head() {
+    // The orphan rule mirrors trait coherence: a *local* trait impl'd for a
+    // foreign head is always allowed, `pub derive` or not.
+    let dep = "package dep @ 1.0.0\n\
+pub entity Order { key ref: String }\n";
+    let root = "package root @ 1.0.0\n\
+use dep.{Order}\n\
+trait Local { type Item }\n\
+impl Local for Order { type Item = String }\n";
+    let diags = lower_with_dep(dep, root);
+    assert!(
+        diags.iter().all(|d| d.code != "BRX-LOW-0019"),
+        "a local trait may extend any foreign head: {diags:#?}"
+    );
+}

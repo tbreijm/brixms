@@ -92,6 +92,13 @@ pub const IMPL_COHERENCE: &str = "BRX-LOW-0017";
 /// one type per associated-type name): a `type` the trait declares is missing,
 /// or the impl binds a `type` the trait does not declare (issue #111).
 pub const IMPL_CONFORMANCE: &str = "BRX-LOW-0018";
+/// `BRX-LOW-0019` — a downstream package's `impl Trait for Head` extends a head
+/// owned by a dependency that did not export it `pub derive` (§28.3 orphan rule
+/// / errata 0003 ruling: `pub derive` is the only capability that lets a
+/// downstream package extend a foreign head; a bare `pub`/`pub read` relation is
+/// sealed against extension). Local-trait or local-head impls are unaffected
+/// (issue #154).
+pub const ORPHAN_SEALED: &str = "BRX-LOW-0019";
 /// `BRX-IR-0005` — an expression failed HM/ground-dimension type checking.
 pub const TYPE_ERROR: &str = "BRX-IR-0005";
 /// `BRX-IR-0006` — Appendix E `pure(B, H)` violated: an impure effect atom

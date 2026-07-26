@@ -105,6 +105,14 @@ pub struct ProgramResolver {
     /// Dependency symbols that are package-private (not marked `pub`),
     /// mapped to their package name. Used by `process_uses` to issue `BRX-LOW-0016`.
     private_symbols: BTreeMap<QualIdent, String>,
+    /// The exported relation capability of each *public* dependency symbol
+    /// (issue #154), qualified name -> normalized [`ast::RelVis`] (a bare `pub`
+    /// relation resolves to `Read` per errata 0003 Q2). This is the capability
+    /// channel `RelVis` was missing on its way into `brixc`: the binary
+    /// `is_public()` gate re-exports the symbol, and this map records *which*
+    /// capability was granted so the `pub derive` orphan gate (BRX-LOW-0019) can
+    /// tell an extensible head from a read-only one.
+    export_caps: BTreeMap<QualIdent, ast::RelVis>,
     /// The trait environment Γ (trait part): registered traits + coherent impls.
     /// Populated by pass 1 (`schema.rs`); [`Self::add_impl`] enforces the
     /// §28.3 orphan rule as impls are registered (issue #111).
@@ -123,6 +131,21 @@ impl ProgramResolver {
 
     pub fn is_private_symbol(&self, target: &QualIdent) -> Option<&str> {
         self.private_symbols.get(target).map(|s| s.as_str())
+    }
+
+    /// Record the exported relation capability of a public dependency symbol
+    /// (issue #154). `cap` is already normalized (bare `pub` relation -> `Read`).
+    pub fn with_export_cap(mut self, target: QualIdent, cap: ast::RelVis) -> Self {
+        self.export_caps.insert(target, cap);
+        self
+    }
+
+    /// The exported capability of a (qualified) symbol, or `None` if it is not a
+    /// known public dependency export. `None` therefore covers both
+    /// package-private and root-local heads — neither is a foreign export the
+    /// `pub derive` gate must consult.
+    pub fn export_cap(&self, target: &QualIdent) -> Option<ast::RelVis> {
+        self.export_caps.get(target).copied()
     }
 
     /// Register a `trait` declaration (issue #111). Infallible — trait names
