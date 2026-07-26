@@ -188,7 +188,8 @@ The relation-granular capability enforcement landed in #154:
   describes; it should be confirmed when nominal records / dispatch land.
 
 - **`pub write` gate (`BRX-LOW-0021`).** A `scenario` transaction that directly
-  *asserts into* a dependency-owned relation (`assert`/`set`/`ensure`) requires
+  *asserts into* a dependency-owned relation (`assert`/`set`/`ensure`/`fresh`)
+  requires
   that relation to be exported `pub write` (`write` = "assertable", distinct from
   the `derive` capability, which is a downstream *rule* extending the relation).
   Implemented as `check_scenario_writes` (`crates/brixc/src/lower/schema.rs`).
@@ -199,9 +200,28 @@ The relation-granular capability enforcement landed in #154:
   IR), but the parser already builds the full write-surface AST
   (`TxExpr::AssertTuple`/`Set`/`Ensure`/`Fresh`/`AssertStruct`), so the gate needs
   only the resolver's `export_caps` + import map — the same inputs the `impl`
-  gate uses. `retract`/`supersede` carry their target inside an expression rather
-  than a head path and are the one remaining write form the static gate does not
-  yet pin; revisit if a foreign-relation retract surface is needed.
+  gate uses.
+
+  `retract`/`supersede` carry their target inside an expression rather than a
+  head path, so they are pinned indirectly (issue #172): the gate carries a
+  scenario-wide map from each `let`-bound name to the relation the bound tx-form
+  wrote into, and the two expression forms resolve their operands through it. The
+  retraction site **suppresses** its diagnostic when the binding site already
+  reported, so one root cause is never counted twice. Note what this does and
+  does not buy: every target reachable through a binding was produced by an
+  `assert`/`set` the gate already checked, so the retraction path adds no
+  diagnostic under today's capability model — its value is that the gate no
+  longer skips a write form outright, and that the resolution machinery is in
+  place. A `ClaimRef` that reaches a `retract` from anywhere *other* than a local
+  write stays unpinned; catching that needs resolution of `ClaimRef<R>`'s type
+  argument over scenario tx-blocks, which scenario bodies give no basis for (a v0
+  defer-line skip — they are never typed or lowered). That is the prerequisite to
+  revisit, not the retract surface itself.
+
+  The binding map is deliberately the *only* handle used: `export_caps` carries
+  every public dependency symbol (`pub fn`, `pub enum`, entities), and a bare
+  `pub fn` normalizes to `read`, so resolving an arbitrary retract operand's head
+  through the resolver would report `retract helper(c)` as a sealed relation.
 
   One surface limitation to note for a future erratum: a relation's `pub`
   qualifier is single-valued (`read` **xor** `write` **xor** `derive`), so a

@@ -206,3 +206,139 @@ pub read rel Ledger { x: I64 } key(x)\n";
         "asserting into a non-`pub write` foreign relation must be one BRX-LOW-0021: {diags:#?}"
     );
 }
+
+// --- issue #172: `retract`/`supersede` under the same gate -------------------
+//
+// Those two forms carry their target in an *expression*, not a head path, so the
+// gate reaches them through the `let` binding the expression names. Every target
+// reachable that way was bound by an `assert`/`set` the gate already checked, so
+// the gate deliberately *suppresses* at the retraction site when the binding site
+// already reported — it must never double-report one root cause. A `ClaimRef`
+// arriving from anywhere other than a local write stays unpinned (that needs
+// `ClaimRef<R>` type resolution; scenario bodies are never typed).
+
+const READ_ONLY_LEDGER: &str = "package dep @ 1.0.0\n\
+pub read rel Ledger { x: I64 } key(x)\n";
+
+fn sealed_writes(dep: &str, root: &str) -> usize {
+    lower_with_dep(dep, root)
+        .iter()
+        .filter(|d| d.code == "BRX-LOW-0021")
+        .count()
+}
+
+#[test]
+fn retracting_a_read_only_dependency_claim_reports_once_not_twice() {
+    let root = "package root @ 1.0.0\n\
+use dep.{Ledger}\n\
+scenario S {\n\
+  seed 1\n\
+  setup {\n\
+    let c = assert Ledger(x: 1)\n\
+    retract c\n\
+  }\n\
+}\n";
+    assert_eq!(
+        sealed_writes(READ_ONLY_LEDGER, root),
+        1,
+        "the assert reports; the `retract` of the same binding must stay silent"
+    );
+}
+
+#[test]
+fn retracting_a_pub_write_dependency_claim_is_allowed() {
+    let dep = "package dep @ 1.0.0\n\
+pub write rel Ledger { x: I64 } key(x)\n";
+    let root = "package root @ 1.0.0\n\
+use dep.{Ledger}\n\
+scenario S {\n\
+  seed 1\n\
+  setup {\n\
+    let c = assert Ledger(x: 1)\n\
+    retract c\n\
+  }\n\
+}\n";
+    assert_eq!(
+        sealed_writes(dep, root),
+        0,
+        "`pub write` grants retraction of a claim the scenario itself asserted"
+    );
+}
+
+#[test]
+fn superseding_read_only_dependency_claims_reports_once_per_assert() {
+    let root = "package root @ 1.0.0\n\
+use dep.{Ledger}\n\
+scenario S {\n\
+  seed 1\n\
+  setup {\n\
+    let a = assert Ledger(x: 1)\n\
+    let b = assert Ledger(x: 2)\n\
+    supersede a over b\n\
+  }\n\
+}\n";
+    assert_eq!(
+        sealed_writes(READ_ONLY_LEDGER, root),
+        2,
+        "one per `assert`; the `supersede` adds nothing for either operand"
+    );
+}
+
+#[test]
+fn retracting_an_unbound_reference_is_skipped() {
+    let root = "package root @ 1.0.0\n\
+use dep.{Ledger}\n\
+scenario S {\n\
+  seed 1\n\
+  setup {\n\
+    retract someRef\n\
+  }\n\
+}\n";
+    assert_eq!(
+        sealed_writes(READ_ONLY_LEDGER, root),
+        0,
+        "a target the binding map cannot resolve is skipped, not guessed at"
+    );
+}
+
+#[test]
+fn a_pub_fn_in_retract_position_is_not_read_as_a_relation() {
+    // `export_caps` carries *every* public dependency symbol, and a bare `pub fn`
+    // normalizes to `read` — so resolving a retract operand's head through the
+    // resolver (rather than the binding map) would report `helper` as a sealed
+    // relation. It is a function; there is no write here at all.
+    let dep = "package dep @ 1.0.0\n\
+pub read rel Ledger { x: I64 } key(x)\n\
+pub fn helper(x: I64) -> I64 = x\n";
+    let root = "package root @ 1.0.0\n\
+use dep.{Ledger, helper}\n\
+scenario S {\n\
+  seed 1\n\
+  setup {\n\
+    retract helper(1)\n\
+  }\n\
+}\n";
+    assert_eq!(
+        sealed_writes(dep, root),
+        0,
+        "a `pub fn` in retract position is not a write target"
+    );
+}
+
+#[test]
+fn retracting_a_root_local_claim_is_unaffected() {
+    let root = "package root @ 1.0.0\n\
+rel Local { x: I64 } key(x)\n\
+scenario S {\n\
+  seed 1\n\
+  setup {\n\
+    let c = assert Local(x: 1)\n\
+    retract c\n\
+  }\n\
+}\n";
+    assert_eq!(
+        sealed_writes(READ_ONLY_LEDGER, root),
+        0,
+        "a package retracting its own claim is never gated"
+    );
+}

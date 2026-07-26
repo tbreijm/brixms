@@ -5,7 +5,7 @@
 //! `constraint`/`query` bodies, fn bodies) — that is pass 2's job
 //! ([`crate::lower::decl`]).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use brix_ast::ast::{self, Decl, RelKind, RelMod, TypeKind};
 use brix_diag::Diagnostic;
@@ -162,7 +162,8 @@ fn check_impl_orphan(file: &ast::File, resolver: &ProgramResolver, diags: &mut V
 
 /// The `pub write` gate (issue #154, errata 0003 ruling): a `scenario`
 /// transaction that directly *asserts into* a relation owned by a **dependency**
-/// (`assert`/`set`/`ensure`) requires that relation to be exported `pub write`.
+/// (`assert`/`set`/`ensure`/`fresh`) requires that relation to be exported
+/// `pub write`.
 /// `write` = "assertable" — distinct from the `derive` capability, which covers
 /// a downstream *rule* extending the relation (`check_impl_orphan` /
 /// `lower_head`).
@@ -174,6 +175,15 @@ fn check_impl_orphan(file: &ast::File, resolver: &ProgramResolver, diags: &mut V
 /// and import map — the same inputs `check_impl_orphan` uses. Local write
 /// targets are absent from `export_caps` and never gated, so a package writing
 /// into its own relations (the common case, incl. the flagship) is unaffected.
+///
+/// `retract`/`supersede` (issue #172) carry their target in an *expression*
+/// rather than a head path, so they are pinned indirectly: `bindings` maps each
+/// `let`-bound name to the relation the bound tx-form wrote to, and the
+/// expression forms resolve their operands through it. The map is
+/// **scenario-wide**, not per-block — scoping of a scenario `let` across
+/// `setup`/`step`/`at` is unspecified, and widening the environment can only
+/// resolve a name to the same target or mark it already-reported; it can never
+/// invent a diagnostic.
 fn check_scenario_writes(
     file: &ast::File,
     resolver: &ProgramResolver,
@@ -188,61 +198,170 @@ fn check_scenario_writes(
             .iter()
             .chain(s.steps.iter().map(|st| &st.body))
             .chain(s.ats.iter().map(|at| &at.body));
+        let mut bindings: BTreeMap<String, WriteBinding> = BTreeMap::new();
         for block in blocks {
             for stmt in &block.stmts {
-                let tx = match stmt {
-                    ast::TxStmt::Let { value, .. } => value,
-                    ast::TxStmt::Expr(e) => e,
+                let (tx, pattern) = match stmt {
+                    ast::TxStmt::Let { pattern, value } => (value, Some(pattern)),
+                    ast::TxStmt::Expr(e) => (e, None),
                     ast::TxStmt::Error(..) => continue,
                 };
-                check_write_target(tx, resolver, diags);
+                let reported = check_write_target(tx, resolver, &bindings, diags);
+                // Record what this `let` bound, so a later `retract`/`supersede`
+                // naming it can resolve back to the relation it wrote into.
+                if let Some(name) = pattern.and_then(binding_name) {
+                    if let Some((target, rel)) = head_write_target(tx, resolver) {
+                        bindings.insert(
+                            name,
+                            WriteBinding {
+                                target,
+                                name: rel,
+                                reported,
+                            },
+                        );
+                    }
+                }
             }
         }
     }
 }
 
-/// Gate one transaction expression's write target against `pub write`. Path-form
-/// writes (`set`/`assert R(..)`) resolve through the import map; type-form writes
-/// (`ensure`/`fresh`/`assert S {..}`) resolve their bare type name the same way a
-/// single-segment path would. `retract`/`supersede` carry their target inside an
-/// expression rather than a head path, so they are out of scope for the static
-/// gate (revisit if a foreign-relation retract surface is needed).
-fn check_write_target(tx: &ast::TxExpr, resolver: &ProgramResolver, diags: &mut Vec<Diagnostic>) {
-    let (target, span, name) = match tx {
-        ast::TxExpr::Set { path, span, .. } | ast::TxExpr::AssertTuple { path, span, .. } => {
+/// What a tx `let` bound, within one scenario (issue #172) — the handle a later
+/// `retract`/`supersede` of that name uses to reach a relation.
+struct WriteBinding {
+    /// The relation the bound tx-form wrote into, fully qualified.
+    target: QualIdent,
+    /// The bare relation name, quoted in the diagnostic.
+    name: String,
+    /// Whether gating the *binding site* already emitted
+    /// [`diag::SEALED_WRITE_TARGET`]. A later `retract` of this name then stays
+    /// silent rather than double-reporting one root cause.
+    reported: bool,
+}
+
+/// The single bare name a tx `let` binds, or `None` for a destructuring pattern
+/// (which leaves no one name a `retract` could later mention).
+fn binding_name(pattern: &ast::Expr) -> Option<String> {
+    let ast::ExprKind::Ident(path) = &*pattern.kind else {
+        return None;
+    };
+    match path.segments.as_slice() {
+        [seg] => Some(seg.text.clone()),
+        _ => None,
+    }
+}
+
+/// The relation a *head-path* write form targets, plus the bare name to quote in
+/// a diagnostic. Path-form writes (`set`/`assert R(..)`) resolve through the
+/// import map; type-form writes (`ensure`/`fresh`/`assert S {..}`) resolve their
+/// bare type name the same way a single-segment path would. `None` for the
+/// expression-target forms, which go through [`bound_write_target`] instead.
+fn head_write_target(tx: &ast::TxExpr, resolver: &ProgramResolver) -> Option<(QualIdent, String)> {
+    match tx {
+        ast::TxExpr::Set { path, .. } | ast::TxExpr::AssertTuple { path, .. } => {
             let name = path
                 .segments
                 .last()
                 .map(|s| s.text.clone())
                 .unwrap_or_default();
-            (resolver.resolve_path(path), *span, name)
+            Some((resolver.resolve_path(path), name))
         }
-        ast::TxExpr::Ensure { ty, span, .. }
-        | ast::TxExpr::Fresh { ty, span, .. }
-        | ast::TxExpr::AssertStruct { ty, span, .. } => {
+        ast::TxExpr::Ensure { ty, .. }
+        | ast::TxExpr::Fresh { ty, .. }
+        | ast::TxExpr::AssertStruct { ty, .. } => {
             let target = resolver
                 .imported_target(&ty.text)
                 .cloned()
                 .unwrap_or_else(|| QualIdent::simple(ty.text.clone()));
-            (target, *span, ty.text.clone())
+            Some((target, ty.text.clone()))
         }
-        ast::TxExpr::Retract { .. } | ast::TxExpr::Supersede { .. } => return,
-    };
-    // `Some` iff the target is a foreign public export; local targets are `None`.
-    let Some(cap) = resolver.export_cap(&target) else {
-        return;
-    };
-    if cap != ast::RelVis::Write {
-        diags.push(diag::error(
-            diag::SEALED_WRITE_TARGET,
-            span,
-            format!(
-                "scenario asserts into `{name}`, a relation owned by another package \
-                 that did not export it `pub write`; a downstream package may only \
-                 assert into a foreign relation marked `pub write`"
-            ),
-        ));
+        ast::TxExpr::Retract { .. } | ast::TxExpr::Supersede { .. } => None,
     }
+}
+
+/// The [`WriteBinding`] a `retract`/`supersede` operand names, if any.
+///
+/// Only a bare single-segment identifier (optionally parenthesized) resolves,
+/// and only against `bindings` — deliberately **not** through
+/// `ProgramResolver::resolve_path`, and deliberately **not** recursing into a
+/// `Call` callee. `export_caps` holds *every* public dependency symbol (`pub
+/// fn`, `pub enum`, entities — see the dependency walk in [`crate::lower`]), and
+/// a bare `pub fn` normalizes to [`ast::RelVis::Read`], so resolving arbitrary
+/// expression heads through it would report `retract helper(c)` as "asserts into
+/// `helper`". The binding map is the only sound handle on a `ClaimRef`'s
+/// relation short of resolving `ClaimRef<R>`'s type argument, which scenario
+/// bodies give no basis for (a v0 defer-line skip; they are never typed).
+fn bound_write_target<'a>(
+    expr: &ast::Expr,
+    bindings: &'a BTreeMap<String, WriteBinding>,
+) -> Option<&'a WriteBinding> {
+    match &*expr.kind {
+        ast::ExprKind::Ident(path) => match path.segments.as_slice() {
+            [seg] => bindings.get(&seg.text),
+            _ => None,
+        },
+        ast::ExprKind::Paren(inner) => bound_write_target(inner, bindings),
+        _ => None,
+    }
+}
+
+/// Gate one transaction expression's write target against `pub write`. Returns
+/// whether a [`diag::SEALED_WRITE_TARGET`] was emitted, so the caller can record
+/// that on the binding and keep a later `retract` of the same name silent.
+fn check_write_target(
+    tx: &ast::TxExpr,
+    resolver: &ProgramResolver,
+    bindings: &BTreeMap<String, WriteBinding>,
+    diags: &mut Vec<Diagnostic>,
+) -> bool {
+    // Expression-target forms resolve through the binding map and skip anything
+    // the binding site already reported; head-path forms resolve their own name.
+    let targets: Vec<(QualIdent, String)> = match tx {
+        ast::TxExpr::Retract { expr, .. } => bound_write_target(expr, bindings)
+            .filter(|b| !b.reported)
+            .map(|b| (b.target.clone(), b.name.clone()))
+            .into_iter()
+            .collect(),
+        ast::TxExpr::Supersede { new, old, .. } => {
+            let mut out: Vec<(QualIdent, String)> = Vec::new();
+            for operand in [new, old] {
+                let Some(b) = bound_write_target(operand, bindings) else {
+                    continue;
+                };
+                // Both operands may name the same relation — one diagnostic.
+                if !b.reported && !out.iter().any(|(t, _)| *t == b.target) {
+                    out.push((b.target.clone(), b.name.clone()));
+                }
+            }
+            out
+        }
+        _ => head_write_target(tx, resolver).into_iter().collect(),
+    };
+    let verb = match tx {
+        ast::TxExpr::Retract { .. } => "retracts a claim in",
+        ast::TxExpr::Supersede { .. } => "supersedes a claim in",
+        _ => "asserts into",
+    };
+    let mut reported = false;
+    for (target, name) in targets {
+        // `Some` iff the target is a foreign public export; local targets are `None`.
+        let Some(cap) = resolver.export_cap(&target) else {
+            continue;
+        };
+        if cap != ast::RelVis::Write {
+            diags.push(diag::error(
+                diag::SEALED_WRITE_TARGET,
+                tx.span(),
+                format!(
+                    "scenario {verb} `{name}`, a relation owned by another package \
+                     that did not export it `pub write`; a downstream package may only \
+                     write into a foreign relation marked `pub write`"
+                ),
+            ));
+            reported = true;
+        }
+    }
+    reported
 }
 
 /// The bare names this file declares itself (entity/rel/enum/fn/type/record),

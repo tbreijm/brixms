@@ -113,7 +113,8 @@ pub const SEALED_DERIVE_TARGET: &str = "BRX-LOW-0020";
 /// the `derive` capability, `BRX-LOW-0020`) this is a direct fact assertion, so
 /// it needs `pub write` on the target. Checked statically over scenario tx-blocks
 /// (the write surface is name resolution, not execution lowering — scenarios stay
-/// a defer-line skip for *running*) (issue #154).
+/// a defer-line skip for *running*) (issue #154). `retract`/`supersede` are
+/// covered too, via the `let`-binding their target expression names (issue #172).
 pub const SEALED_WRITE_TARGET: &str = "BRX-LOW-0021";
 /// `BRX-IR-0005` — an expression failed HM/ground-dimension type checking.
 pub const TYPE_ERROR: &str = "BRX-IR-0005";
