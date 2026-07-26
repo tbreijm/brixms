@@ -18,6 +18,8 @@ brix-cli = { path = "../brix-cli" }
 brix-diag = { path = "../brix-diag" }
 brix-semantic = { path = "../brix-semantic" }
 brixc = { path = "../brixc" }
+soc-core = { path = "../soc-core" }
+soc-regimes = { path = "../soc-regimes" }
 insta = { workspace = true }
 
 [lints]

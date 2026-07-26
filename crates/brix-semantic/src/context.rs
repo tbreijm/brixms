@@ -53,6 +53,34 @@ impl ContextId {
         ContextId::from_canon(&w.finish())
     }
 
+    /// **Additive (Build_Plan_v3_SOC.md Step 5(b)): content-addressed context
+    /// extension** — the first real assumption-scope machinery. Hashes this
+    /// context's own digest together with `assumption`'s canonical bytes
+    /// under a dedicated tag, producing a fresh child [`ContextId`]:
+    ///
+    /// - the same `(parent, assumption)` pair is stable across calls (same
+    ///   inputs, same digest, every time);
+    /// - two distinct assumptions extended from the same parent give distinct
+    ///   children (`assumption` is folded into the hash, not discarded);
+    /// - a child is never equal to its parent (root or otherwise) — the
+    ///   dedicated tag plus the folded-in parent digest guarantees this
+    ///   barring a hash collision.
+    ///
+    /// This is the **only** change this slice makes to [`ContextId`]:
+    /// [`ContextId::root`]'s digest and canonical encoding are completely
+    /// unchanged (this method only ever *adds* a new, distinct id reachable
+    /// from an existing one — see `crates/soc-regimes/src/structural.rs`'s
+    /// `ScopedWorldNonLeak` gate for the property this unlocks: a judgement
+    /// derived under an extended context does not leak into its parent's
+    /// projection, because the two contexts hash to different ids).
+    pub fn extend(&self, assumption: &[u8]) -> ContextId {
+        let mut w = CanonWriter::new();
+        w.write_tag("brix.semantic.ContextId.extend");
+        w.write_bytes(self.0.as_bytes());
+        w.write_bytes(assumption);
+        ContextId::from_canon(&w.finish())
+    }
+
     /// The underlying digest.
     pub fn digest(&self) -> Digest {
         self.0
@@ -99,5 +127,66 @@ mod tests {
         // …and neither collides with the root anchor.
         assert_ne!(a, ContextId::root());
         assert_ne!(b, ContextId::root());
+    }
+
+    // --- `ContextId::extend` (additive, Build_Plan_v3_SOC.md Step 5(b)) ---
+
+    #[test]
+    fn extend_is_stable_for_the_same_parent_and_assumption() {
+        let a = ContextId::root().extend(b"x > 0");
+        let b = ContextId::root().extend(b"x > 0");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn distinct_assumptions_from_the_same_parent_give_distinct_children() {
+        let a = ContextId::root().extend(b"x > 0");
+        let b = ContextId::root().extend(b"x < 0");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_child_is_never_equal_to_its_parent() {
+        let root = ContextId::root();
+        let child = root.extend(b"some assumption");
+        assert_ne!(child, root);
+
+        let other_parent = ContextId::from_canon(b"non-root-parent");
+        let other_child = other_parent.extend(b"some assumption");
+        assert_ne!(other_child, other_parent);
+    }
+
+    #[test]
+    fn distinct_parents_give_distinct_children_for_the_same_assumption() {
+        let root_child = ContextId::root().extend(b"a");
+        let other_parent = ContextId::from_canon(b"other-parent");
+        let other_child = other_parent.extend(b"a");
+        assert_ne!(root_child, other_child);
+    }
+
+    #[test]
+    fn extending_root_does_not_change_roots_own_digest() {
+        // The additive change must not perturb `ContextId::root()` itself —
+        // re-asserted here alongside the frozen golden vector test above.
+        let before = ContextId::root();
+        let _ = before.extend(b"anything");
+        assert_eq!(ContextId::root(), before);
+        assert_eq!(ContextId::root().to_hex(), ROOT_CONTEXT_DIGEST_HEX);
+    }
+
+    /// Golden vector, reproduced independently with a fresh `CanonWriter`
+    /// (not via `ContextId::extend`), so it cannot be vacuously satisfied by
+    /// the code it guards.
+    #[test]
+    fn golden_vector_root_extend_reproduced_independently() {
+        let child = ContextId::root().extend(b"x > 0");
+
+        let mut expected = CanonWriter::new();
+        expected.write_tag("brix.semantic.ContextId.extend");
+        expected.write_bytes(ContextId::root().digest().as_bytes());
+        expected.write_bytes(b"x > 0");
+        let expected_id = ContextId::from_canon(&expected.finish());
+
+        assert_eq!(child, expected_id);
     }
 }

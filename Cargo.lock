@@ -230,6 +230,8 @@ dependencies = [
  "brix-semantic",
  "brixc",
  "insta",
+ "soc-core",
+ "soc-regimes",
 ]
 
 [[package]]
@@ -1914,6 +1916,16 @@ dependencies = [
  "brix-canon",
  "brix-semantic",
  "proptest",
+]
+
+[[package]]
+name = "soc-regimes"
+version = "0.0.0"
+dependencies = [
+ "brix-canon",
+ "brix-ir",
+ "brix-semantic",
+ "soc-core",
 ]
 
 [[package]]
