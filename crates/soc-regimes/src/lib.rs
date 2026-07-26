@@ -26,11 +26,18 @@
 //!   audit-factorization checker's upgrade to `Audited` — exercising the
 //!   whole SOC loop end to end for the first time.
 //!
-//! Deliberately **not** here yet: the structural (`brix.type`) regime (Step
-//! 5(b)) and its `brix-ir` dependency. That is a later lane's job; this
-//! crate stays minimal at this slice (ADR-0002 §11: "not enlarging
-//! `brix.type` into a universal library").
+//! - [`structural`] — the **structural** (`brix.type`) regime (Step 5(b)):
+//!   consumes `brix_ir::reflect::analyze` (the retained differential oracle,
+//!   ADR-0002 §12) and re-projects `Fact`/`TypeConflict` into SOC artifacts —
+//!   `Realizes`/`Derived` judgements for `HasType`, `Unknown` judgements for
+//!   conflicts. See `crates/brix-conformance/tests/structural_regime.rs` for
+//!   the 14/14 differential parity, `FactId`-for-`FactId` shadow parity, and
+//!   `ScopedWorldNonLeak` gates.
 
 pub mod literal;
+pub mod structural;
 
 pub use literal::{LiteralEqualityRegime, LiteralEqualitySemantics};
+pub use structural::{
+    HasTypeProjection, ProjectedConflict, StructuralProjection, StructuralRegime,
+};
