@@ -92,6 +92,29 @@ pub const IMPL_COHERENCE: &str = "BRX-LOW-0017";
 /// one type per associated-type name): a `type` the trait declares is missing,
 /// or the impl binds a `type` the trait does not declare (issue #111).
 pub const IMPL_CONFORMANCE: &str = "BRX-LOW-0018";
+/// `BRX-LOW-0019` — a downstream package's `impl Trait for Head` extends a head
+/// owned by a dependency that did not export it `pub derive` (§28.3 orphan rule
+/// / errata 0003 ruling: `pub derive` is the only capability that lets a
+/// downstream package extend a foreign head; a bare `pub`/`pub read` relation is
+/// sealed against extension). Local-trait or local-head impls are unaffected
+/// (issue #154).
+pub const ORPHAN_SEALED: &str = "BRX-LOW-0019";
+/// `BRX-LOW-0020` — a downstream `derive` rule produces tuples into a relation
+/// owned by a dependency that did not export it `pub derive`. Errata 0003:
+/// `pub derive` is "extensible by a downstream package's rules under the derive
+/// orphan rule", so a foreign relation exported only `pub`/`pub read` is
+/// queryable but not derive-extensible from another package. The sibling
+/// [`ORPHAN_SEALED`] (`BRX-LOW-0019`) gates the same capability at the `impl`
+/// surface; this gates it at the rule-head surface (issue #154).
+pub const SEALED_DERIVE_TARGET: &str = "BRX-LOW-0020";
+/// `BRX-LOW-0021` — a `scenario` transaction directly *asserts into* (or `set`s /
+/// `ensure`s) a relation owned by a dependency that did not export it `pub
+/// write`. Errata 0003: `write` = "assertable"; unlike a `derive` rule (which is
+/// the `derive` capability, `BRX-LOW-0020`) this is a direct fact assertion, so
+/// it needs `pub write` on the target. Checked statically over scenario tx-blocks
+/// (the write surface is name resolution, not execution lowering — scenarios stay
+/// a defer-line skip for *running*) (issue #154).
+pub const SEALED_WRITE_TARGET: &str = "BRX-LOW-0021";
 /// `BRX-IR-0005` — an expression failed HM/ground-dimension type checking.
 pub const TYPE_ERROR: &str = "BRX-IR-0005";
 /// `BRX-IR-0006` — Appendix E `pure(B, H)` violated: an impure effect atom

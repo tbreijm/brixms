@@ -120,6 +120,19 @@ impl Visibility {
     pub fn is_public(&self) -> bool {
         matches!(self, Visibility::Public(_))
     }
+
+    /// The exported relation capability, applying errata 0003 ruling Q2: a bare
+    /// `pub` on a relation is `pub read` (least privilege). Returns `None` for a
+    /// private declaration; `write`/`derive` are preserved as declared. This is
+    /// a *reader* — the AST still stores `Public(None)` for a bare `pub`, so the
+    /// formatter round-trips it unchanged.
+    pub fn rel_cap(&self) -> Option<RelVis> {
+        match self {
+            Visibility::Public(Some(v)) => Some(*v),
+            Visibility::Public(None) => Some(RelVis::Read),
+            Visibility::Private => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

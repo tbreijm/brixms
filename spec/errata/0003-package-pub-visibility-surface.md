@@ -148,3 +148,72 @@ Tracked to implementation in #151. The parse/AST/fmt/private-by-default surface
 already landed (#108); the remaining relation-granular capability enforcement
 (bare `pub` relation = `read`; `write`/`derive` strictly stronger; `pub derive`
 gates downstream extension under the orphan rule) is the follow-on.
+
+## Implementation notes (#154)
+
+The relation-granular capability enforcement landed in #154:
+
+- **Bare `pub` relation → `read` (Q2)** is enforced in lowering. The AST still
+  stores a bare `pub` as `Visibility::Public(None)` (so `fmt` round-trips it
+  unchanged); the normalization is a *reader*, `Visibility::rel_cap()`
+  (`crates/brix-ast/src/ast.rs`), which maps `Public(None) → Read`. The
+  capability now crosses into `brixc` via `ProgramResolver::export_caps`
+  (`crates/brixc/src/lower/resolve.rs`), populated for every public dependency
+  export in `lower_graph` — previously `RelVis` was parsed and formatted but
+  dropped at the lowering boundary (the whole gap #154 named).
+
+- **`pub derive` gate, two surfaces.** `pub derive` is "extensible by a
+  downstream package's rules under the derive orphan rule" — which the compiler
+  now enforces at both surfaces a downstream package can extend a foreign
+  relation/head:
+  - **`impl` heads (`BRX-LOW-0019`)** — a downstream `impl Trait for Head` may
+    extend a dependency-owned head only if the trait is local, the head is local,
+    or the head was exported `pub derive`. `check_impl_orphan` in
+    `crates/brixc/src/lower/schema.rs`.
+  - **`derive` rule heads (`BRX-LOW-0020`)** — a downstream `derive` rule may
+    produce tuples into a dependency-owned relation only if it was exported `pub
+    derive`. Gated in `lower_head` (`crates/brixc/src/lower/decl.rs`); a package's
+    own relations are absent from `export_caps` and never gated.
+
+  Both run once per package lowering, so every cross-package extension is checked
+  exactly once, in the package that declares it.
+
+- **Interpretation (for the spec owner to ratify or correct).** §28.3 words
+  `pub derive` as *relation* visibility, but the `impl` heads that the orphan
+  rule ranges over are entities/types (`Order`, `Money`). Because entities lower
+  to relations in BrixMS, #154 attaches the `derive` capability to whatever
+  exported declaration is the impl **head** (entity or relation): extension of a
+  foreign head requires that head declared `pub derive`. This is the reading that
+  makes `pub derive` the load-bearing, coherence-affecting capability the ruling
+  describes; it should be confirmed when nominal records / dispatch land.
+
+- **`pub write` gate (`BRX-LOW-0021`).** A `scenario` transaction that directly
+  *asserts into* a dependency-owned relation (`assert`/`set`/`ensure`) requires
+  that relation to be exported `pub write` (`write` = "assertable", distinct from
+  the `derive` capability, which is a downstream *rule* extending the relation).
+  Implemented as `check_scenario_writes` (`crates/brixc/src/lower/schema.rs`).
+
+  The earlier "no lowering site" framing was a **misdiagnosis**: a *visibility*
+  gate is static name resolution, not execution lowering. `Decl::Scenario` stays
+  a v0 defer-line skip for *running* (its tx-bodies are never lowered to runtime
+  IR), but the parser already builds the full write-surface AST
+  (`TxExpr::AssertTuple`/`Set`/`Ensure`/`Fresh`/`AssertStruct`), so the gate needs
+  only the resolver's `export_caps` + import map — the same inputs the `impl`
+  gate uses. `retract`/`supersede` carry their target inside an expression rather
+  than a head path and are the one remaining write form the static gate does not
+  yet pin; revisit if a foreign-relation retract surface is needed.
+
+  One surface limitation to note for a future erratum: a relation's `pub`
+  qualifier is single-valued (`read` **xor** `write` **xor** `derive`), so a
+  relation cannot today grant a downstream package *both* direct assertion
+  (`write`) and rule-extension (`derive`). If a relation needs both, the surface
+  must grow (e.g. `pub write derive`) — out of scope for this ruling.
+
+- **Test coverage.** `BRX-LOW-0019`/`BRX-LOW-0020`/`BRX-LOW-0021` are inherently
+  cross-package,
+  so they are covered by the `brixc` graph tests
+  (`crates/brixc/tests/graph_coherence.rs`), not the acceptance corpus — whose
+  driver (`brixc::lower_file`) compiles a single file and cannot express a foreign
+  head, the same reason cross-package coherence (`BRX-LOW-0017`) is corpus-tested
+  only in its single-package overlap form. Capability normalization is unit-tested
+  in `crates/brix-ast/src/parser.rs`.
