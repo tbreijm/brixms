@@ -123,7 +123,7 @@ jobs:
         with:
           name: nextest-archive
       - name: Errata fixtures + oracle/compiled-engine differential
-        run: cargo nextest run --archive-file nextest-archive.tar.zst -p brix-conformance
+        run: cargo nextest run --archive-file nextest-archive.tar.zst -E 'package(brix-conformance)'
 
   acceptance:
     name: acceptance
@@ -143,7 +143,7 @@ jobs:
         with:
           name: nextest-archive
       - name: Spec-derived acceptance corpus (parse/lower/check/phase + negative fixtures + coverage report)
-        run: cargo nextest run --archive-file nextest-archive.tar.zst -p brix-conformance --test acceptance_corpus
+        run: cargo nextest run --archive-file nextest-archive.tar.zst -E 'package(brix-conformance) and test(=acceptance_corpus)'
 
   reproducibility:
     name: reproducibility
@@ -164,7 +164,7 @@ jobs:
         with:
           name: nextest-archive
       - name: Reproducible emit + cache-integrity + deterministic budgets
-        run: cargo nextest run --archive-file nextest-archive.tar.zst -p brix-cli --test reproducibility
+        run: cargo nextest run --archive-file nextest-archive.tar.zst -E 'package(brix-cli) and test(=reproducibility)'
 
   cargo-deny:
     name: cargo-deny

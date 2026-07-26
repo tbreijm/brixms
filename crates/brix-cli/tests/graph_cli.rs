@@ -62,7 +62,8 @@ fn scaffold_app(tag: &str, publish_lib: bool) -> (Utf8PathBuf, Utf8PathBuf) {
 }
 
 fn brix(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_brix"))
+    let brix_exe = std::env::var("CARGO_BIN_EXE_brix").unwrap_or_else(|_| env!("CARGO_BIN_EXE_brix").to_string());
+    Command::new(brix_exe)
         .args(args)
         .output()
         .expect("brix binary must be spawnable")
