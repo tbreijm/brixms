@@ -17,6 +17,7 @@ members = [
     "crates/brix-cli",
     "crates/brix-conformance",
     "crates/soc-core",
+    "crates/soc-regimes",
     "sdk/brix-driver-rs",
 ]
 

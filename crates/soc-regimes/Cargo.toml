@@ -1,0 +1,15 @@
+[package]
+name = "soc-regimes"
+description = "SOC client realization regimes over soc-core (ADR-0002 §7): the literal-equality regime (Build_Plan_v3_SOC.md Step 5(a))."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+soc-core = { path = "../soc-core" }
+brix-semantic = { workspace = true }
+brix-canon = { workspace = true }
+
+[lints]
+workspace = true
