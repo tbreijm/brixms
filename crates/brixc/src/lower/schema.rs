@@ -46,6 +46,7 @@ pub fn build_onto(
     resolver = build_schemas(file, resolver, meta, diags);
     check_impl_conformance(file, &resolver, diags);
     check_impl_orphan(file, &resolver, diags);
+    check_scenario_writes(file, &resolver, diags);
     recompute_derived(file, resolver, meta)
 }
 
@@ -154,6 +155,91 @@ fn check_impl_orphan(file: &ast::File, resolver: &ProgramResolver, diags: &mut V
                  that did not export it `pub derive`; a downstream package may only \
                  extend a foreign head marked `pub derive`",
                 im.trait_name.text
+            ),
+        ));
+    }
+}
+
+/// The `pub write` gate (issue #154, errata 0003 ruling): a `scenario`
+/// transaction that directly *asserts into* a relation owned by a **dependency**
+/// (`assert`/`set`/`ensure`) requires that relation to be exported `pub write`.
+/// `write` = "assertable" — distinct from the `derive` capability, which covers
+/// a downstream *rule* extending the relation (`check_impl_orphan` /
+/// `lower_head`).
+///
+/// This is deliberately a **static name-resolution** check, not execution
+/// lowering: `Decl::Scenario` is a v0 defer-line skip (its tx-bodies are never
+/// lowered to runtime IR), but the *write surface* is fully present in the
+/// parsed AST, so the visibility gate needs only the resolver's `export_caps`
+/// and import map — the same inputs `check_impl_orphan` uses. Local write
+/// targets are absent from `export_caps` and never gated, so a package writing
+/// into its own relations (the common case, incl. the flagship) is unaffected.
+fn check_scenario_writes(
+    file: &ast::File,
+    resolver: &ProgramResolver,
+    diags: &mut Vec<Diagnostic>,
+) {
+    for d in &file.decls {
+        let Decl::Scenario(s) = d else { continue };
+        // Only the *executable* tx-blocks assert; `seed`/`bind`/`assert`
+        // clauses observe, they do not write.
+        let blocks = s
+            .setup
+            .iter()
+            .chain(s.steps.iter().map(|st| &st.body))
+            .chain(s.ats.iter().map(|at| &at.body));
+        for block in blocks {
+            for stmt in &block.stmts {
+                let tx = match stmt {
+                    ast::TxStmt::Let { value, .. } => value,
+                    ast::TxStmt::Expr(e) => e,
+                    ast::TxStmt::Error(..) => continue,
+                };
+                check_write_target(tx, resolver, diags);
+            }
+        }
+    }
+}
+
+/// Gate one transaction expression's write target against `pub write`. Path-form
+/// writes (`set`/`assert R(..)`) resolve through the import map; type-form writes
+/// (`ensure`/`fresh`/`assert S {..}`) resolve their bare type name the same way a
+/// single-segment path would. `retract`/`supersede` carry their target inside an
+/// expression rather than a head path, so they are out of scope for the static
+/// gate (revisit if a foreign-relation retract surface is needed).
+fn check_write_target(tx: &ast::TxExpr, resolver: &ProgramResolver, diags: &mut Vec<Diagnostic>) {
+    let (target, span, name) = match tx {
+        ast::TxExpr::Set { path, span, .. } | ast::TxExpr::AssertTuple { path, span, .. } => {
+            let name = path
+                .segments
+                .last()
+                .map(|s| s.text.clone())
+                .unwrap_or_default();
+            (resolver.resolve_path(path), *span, name)
+        }
+        ast::TxExpr::Ensure { ty, span, .. }
+        | ast::TxExpr::Fresh { ty, span, .. }
+        | ast::TxExpr::AssertStruct { ty, span, .. } => {
+            let target = resolver
+                .imported_target(&ty.text)
+                .cloned()
+                .unwrap_or_else(|| QualIdent::simple(ty.text.clone()));
+            (target, *span, ty.text.clone())
+        }
+        ast::TxExpr::Retract { .. } | ast::TxExpr::Supersede { .. } => return,
+    };
+    // `Some` iff the target is a foreign public export; local targets are `None`.
+    let Some(cap) = resolver.export_cap(&target) else {
+        return;
+    };
+    if cap != ast::RelVis::Write {
+        diags.push(diag::error(
+            diag::SEALED_WRITE_TARGET,
+            span,
+            format!(
+                "scenario asserts into `{name}`, a relation owned by another package \
+                 that did not export it `pub write`; a downstream package may only \
+                 assert into a foreign relation marked `pub write`"
             ),
         ));
     }

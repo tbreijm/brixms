@@ -166,3 +166,43 @@ derive Bad: Reading(x: x) from { Local(x: x) }\n";
         "deriving into a non-`pub derive` foreign relation must be one BRX-LOW-0020: {diags:#?}"
     );
 }
+
+// --- issue #154: the `pub write` gate (BRX-LOW-0021) ------------------------
+//
+// `write` = "assertable" (errata 0003): a scenario transaction that directly
+// asserts into a foreign relation needs that relation exported `pub write`. This
+// is a static check over the scenario's write surface — scenarios remain a v0
+// defer-line skip for *execution*.
+
+const ROOT_ASSERTS_INTO: &str = "package root @ 1.0.0\n\
+use dep.{Ledger}\n\
+scenario S {\n\
+  seed 1\n\
+  setup {\n\
+    assert Ledger(x: 1)\n\
+  }\n\
+}\n";
+
+#[test]
+fn asserting_into_a_pub_write_dependency_relation_is_allowed() {
+    let dep = "package dep @ 1.0.0\n\
+pub write rel Ledger { x: I64 } key(x)\n";
+    let diags = lower_with_dep(dep, ROOT_ASSERTS_INTO);
+    assert!(
+        diags.iter().all(|d| d.code != "BRX-LOW-0021"),
+        "a `pub write` relation must accept downstream assertions: {diags:#?}"
+    );
+}
+
+#[test]
+fn asserting_into_a_read_only_dependency_relation_is_sealed() {
+    let dep = "package dep @ 1.0.0\n\
+pub read rel Ledger { x: I64 } key(x)\n";
+    let diags = lower_with_dep(dep, ROOT_ASSERTS_INTO);
+    let sealed: Vec<_> = diags.iter().filter(|d| d.code == "BRX-LOW-0021").collect();
+    assert_eq!(
+        sealed.len(),
+        1,
+        "asserting into a non-`pub write` foreign relation must be one BRX-LOW-0021: {diags:#?}"
+    );
+}

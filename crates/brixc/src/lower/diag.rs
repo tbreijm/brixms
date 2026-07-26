@@ -107,6 +107,14 @@ pub const ORPHAN_SEALED: &str = "BRX-LOW-0019";
 /// [`ORPHAN_SEALED`] (`BRX-LOW-0019`) gates the same capability at the `impl`
 /// surface; this gates it at the rule-head surface (issue #154).
 pub const SEALED_DERIVE_TARGET: &str = "BRX-LOW-0020";
+/// `BRX-LOW-0021` — a `scenario` transaction directly *asserts into* (or `set`s /
+/// `ensure`s) a relation owned by a dependency that did not export it `pub
+/// write`. Errata 0003: `write` = "assertable"; unlike a `derive` rule (which is
+/// the `derive` capability, `BRX-LOW-0020`) this is a direct fact assertion, so
+/// it needs `pub write` on the target. Checked statically over scenario tx-blocks
+/// (the write surface is name resolution, not execution lowering — scenarios stay
+/// a defer-line skip for *running*) (issue #154).
+pub const SEALED_WRITE_TARGET: &str = "BRX-LOW-0021";
 /// `BRX-IR-0005` — an expression failed HM/ground-dimension type checking.
 pub const TYPE_ERROR: &str = "BRX-IR-0005";
 /// `BRX-IR-0006` — Appendix E `pure(B, H)` violated: an impure effect atom

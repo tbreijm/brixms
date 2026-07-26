@@ -187,18 +187,30 @@ The relation-granular capability enforcement landed in #154:
   makes `pub derive` the load-bearing, coherence-affecting capability the ruling
   describes; it should be confirmed when nominal records / dispatch land.
 
-- **`pub write` cross-package enforcement remains deferred — no active lowering
-  site.** The surface for a direct cross-package *assertion* (as distinct from a
-  derive rule, which is the `derive` capability above) is `TxExpr::AssertTuple`
-  in a `scenario`'s transaction block (`crates/brix-ast/src/ast.rs`). But
-  `Decl::Scenario` is currently a defer-line skip (`BRX-LOW-0002` in
-  `crates/brixc/src/lower/decl.rs`) — scenario/tx bodies are not lowered at all
-  in v0 — so there is no site at which to gate a `pub write`. The `write`
-  capability is carried in `export_caps` and will gate `AssertTuple`/`Set` against
-  a foreign relation's `export_cap == Write` once scenario lowering lands. Tracked
-  on #154.
+- **`pub write` gate (`BRX-LOW-0021`).** A `scenario` transaction that directly
+  *asserts into* a dependency-owned relation (`assert`/`set`/`ensure`) requires
+  that relation to be exported `pub write` (`write` = "assertable", distinct from
+  the `derive` capability, which is a downstream *rule* extending the relation).
+  Implemented as `check_scenario_writes` (`crates/brixc/src/lower/schema.rs`).
 
-- **Test coverage.** `BRX-LOW-0019`/`BRX-LOW-0020` are inherently cross-package,
+  The earlier "no lowering site" framing was a **misdiagnosis**: a *visibility*
+  gate is static name resolution, not execution lowering. `Decl::Scenario` stays
+  a v0 defer-line skip for *running* (its tx-bodies are never lowered to runtime
+  IR), but the parser already builds the full write-surface AST
+  (`TxExpr::AssertTuple`/`Set`/`Ensure`/`Fresh`/`AssertStruct`), so the gate needs
+  only the resolver's `export_caps` + import map — the same inputs the `impl`
+  gate uses. `retract`/`supersede` carry their target inside an expression rather
+  than a head path and are the one remaining write form the static gate does not
+  yet pin; revisit if a foreign-relation retract surface is needed.
+
+  One surface limitation to note for a future erratum: a relation's `pub`
+  qualifier is single-valued (`read` **xor** `write` **xor** `derive`), so a
+  relation cannot today grant a downstream package *both* direct assertion
+  (`write`) and rule-extension (`derive`). If a relation needs both, the surface
+  must grow (e.g. `pub write derive`) — out of scope for this ruling.
+
+- **Test coverage.** `BRX-LOW-0019`/`BRX-LOW-0020`/`BRX-LOW-0021` are inherently
+  cross-package,
   so they are covered by the `brixc` graph tests
   (`crates/brixc/tests/graph_coherence.rs`), not the acceptance corpus — whose
   driver (`brixc::lower_file`) compiles a single file and cannot express a foreign
