@@ -107,7 +107,16 @@ pub fn succ(regimes: &[&dyn Regime], adm: &dyn Adm, e: &ExecConfig) -> BTreeSet<
 /// Apply one candidate to `e`, producing its successor `ExecConfig`. Policy
 /// carries over unchanged; the world becomes the candidate's successor
 /// handle; the history digest folds in the applied witness.
-fn apply(e: &ExecConfig, c: &Candidate) -> ExecConfig {
+///
+/// `pub(crate)` (not private): [`crate::commit`]'s committed loop reuses this
+/// verbatim to advance `e` after `select_K` commits a candidate, so the
+/// committed successor's history component folds exactly the same way the
+/// naive oracle's deliberation-frontier successors do (ADR-0002 §9.2 —
+/// "oracle and committed loop share candidate enumeration"; this extends
+/// that sharing to the successor-construction step). This is a visibility
+/// change only — `apply`'s behavior is untouched, per the "never optimize or
+/// alter the naive oracle" discipline (module docs).
+pub(crate) fn apply(e: &ExecConfig, c: &Candidate) -> ExecConfig {
     ExecConfig::new(c.successor, e.policy, next_history(e, c))
 }
 
