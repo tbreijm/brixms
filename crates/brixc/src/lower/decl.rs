@@ -254,6 +254,30 @@ fn lower_head(ctx: &mut BodyCtx, h: &ast::Head) -> core::Head {
     match h {
         ast::Head::Tuple { path, args } => {
             let relation = ctx.resolver.resolve_path(path);
+            // `pub derive` rule-head gate (issue #154): a downstream `derive`
+            // rule may produce tuples into a *dependency-owned* relation only if
+            // that relation was exported `pub derive` (errata 0003: "derive =
+            // extensible by a downstream package's rules"). `export_cap` is
+            // `Some` iff the head resolves to a foreign public export — a
+            // package's own relations are absent from the map and never gated.
+            if let Some(cap) = ctx.resolver.export_cap(&relation) {
+                if cap != ast::RelVis::Derive {
+                    let head = path
+                        .segments
+                        .last()
+                        .map(|s| s.text.as_str())
+                        .unwrap_or_default();
+                    ctx.diags.push(diag::error(
+                        diag::SEALED_DERIVE_TARGET,
+                        path.span,
+                        format!(
+                            "rule derives into `{head}`, a relation owned by another \
+                             package that did not export it `pub derive`; a downstream \
+                             package may only extend a foreign relation marked `pub derive`"
+                        ),
+                    ));
+                }
+            }
             let schema = ctx.resolver.relation(&relation);
             let mut ir_args = Vec::new();
             for a in args {

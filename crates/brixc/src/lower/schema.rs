@@ -45,6 +45,8 @@ pub fn build_onto(
     resolver = register_units(file, resolver);
     resolver = build_schemas(file, resolver, meta, diags);
     check_impl_conformance(file, &resolver, diags);
+    check_impl_orphan(file, &resolver, diags);
+    check_scenario_writes(file, &resolver, diags);
     recompute_derived(file, resolver, meta)
 }
 
@@ -90,6 +92,156 @@ fn check_impl_conformance(
                 ),
             ));
         }
+    }
+}
+
+/// The `pub derive` orphan gate (issue #154, errata 0003 ruling): a downstream
+/// `impl Trait for Head` may extend a head owned by a **dependency** only if
+/// that dependency exported the head `pub derive`. A bare `pub`/`pub read`
+/// relation is re-exported for *reference* but sealed against extension — the
+/// ruling makes `derive` the one capability that is coherence-affecting and
+/// must be granted explicitly, never implied by a bare `pub`.
+///
+/// The rule mirrors trait coherence (§28.3): the impl is allowed when the trait
+/// is local, or the head is local, or the foreign head is `pub derive`. Only an
+/// `impl ForeignTrait for ForeignHead` where the head is not `pub derive` is the
+/// sealed-extension error (`BRX-LOW-0019`).
+///
+/// Runs after [`build_schemas`] (imports + schemas registered) with the
+/// graph-folded resolver, so [`ProgramResolver::export_cap`] answers `Some` iff
+/// the head resolves to a foreign public dependency export — a local or
+/// package-private head returns `None` and never trips the gate. When a package
+/// is lowered standalone (no dependencies) there are no foreign caps, so this is
+/// inert; every cross-package impl is therefore checked exactly once, in the
+/// lowering of whichever package declares it.
+fn check_impl_orphan(file: &ast::File, resolver: &ProgramResolver, diags: &mut Vec<Diagnostic>) {
+    let local_traits: BTreeSet<&str> = file
+        .decls
+        .iter()
+        .filter_map(|d| match d {
+            Decl::Trait(t) => Some(t.name.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    for d in &file.decls {
+        let Decl::Impl(im) = d else { continue };
+        // The head must be a named type to have a coherence head at all; row/
+        // compound targets already error in `build_schemas` (UNSUPPORTED_V0).
+        let TypeKind::Named { path, .. } = &im.target.kind else {
+            continue;
+        };
+        let head_qual = resolver.resolve_path(path);
+        // `Some` iff the head is a foreign public export; local and
+        // package-private heads are `None` and out of scope for this gate.
+        let Some(cap) = resolver.export_cap(&head_qual) else {
+            continue;
+        };
+        if cap == ast::RelVis::Derive {
+            continue; // owner opted the head into downstream extension
+        }
+        if local_traits.contains(im.trait_name.text.as_str()) {
+            continue; // local trait: allowed under the orphan rule regardless
+        }
+        let head = path
+            .segments
+            .last()
+            .map(|s| s.text.as_str())
+            .unwrap_or_default();
+        diags.push(diag::error(
+            diag::ORPHAN_SEALED,
+            im.span,
+            format!(
+                "impl of `{}` for `{head}` extends a head owned by another package \
+                 that did not export it `pub derive`; a downstream package may only \
+                 extend a foreign head marked `pub derive`",
+                im.trait_name.text
+            ),
+        ));
+    }
+}
+
+/// The `pub write` gate (issue #154, errata 0003 ruling): a `scenario`
+/// transaction that directly *asserts into* a relation owned by a **dependency**
+/// (`assert`/`set`/`ensure`) requires that relation to be exported `pub write`.
+/// `write` = "assertable" — distinct from the `derive` capability, which covers
+/// a downstream *rule* extending the relation (`check_impl_orphan` /
+/// `lower_head`).
+///
+/// This is deliberately a **static name-resolution** check, not execution
+/// lowering: `Decl::Scenario` is a v0 defer-line skip (its tx-bodies are never
+/// lowered to runtime IR), but the *write surface* is fully present in the
+/// parsed AST, so the visibility gate needs only the resolver's `export_caps`
+/// and import map — the same inputs `check_impl_orphan` uses. Local write
+/// targets are absent from `export_caps` and never gated, so a package writing
+/// into its own relations (the common case, incl. the flagship) is unaffected.
+fn check_scenario_writes(
+    file: &ast::File,
+    resolver: &ProgramResolver,
+    diags: &mut Vec<Diagnostic>,
+) {
+    for d in &file.decls {
+        let Decl::Scenario(s) = d else { continue };
+        // Only the *executable* tx-blocks assert; `seed`/`bind`/`assert`
+        // clauses observe, they do not write.
+        let blocks = s
+            .setup
+            .iter()
+            .chain(s.steps.iter().map(|st| &st.body))
+            .chain(s.ats.iter().map(|at| &at.body));
+        for block in blocks {
+            for stmt in &block.stmts {
+                let tx = match stmt {
+                    ast::TxStmt::Let { value, .. } => value,
+                    ast::TxStmt::Expr(e) => e,
+                    ast::TxStmt::Error(..) => continue,
+                };
+                check_write_target(tx, resolver, diags);
+            }
+        }
+    }
+}
+
+/// Gate one transaction expression's write target against `pub write`. Path-form
+/// writes (`set`/`assert R(..)`) resolve through the import map; type-form writes
+/// (`ensure`/`fresh`/`assert S {..}`) resolve their bare type name the same way a
+/// single-segment path would. `retract`/`supersede` carry their target inside an
+/// expression rather than a head path, so they are out of scope for the static
+/// gate (revisit if a foreign-relation retract surface is needed).
+fn check_write_target(tx: &ast::TxExpr, resolver: &ProgramResolver, diags: &mut Vec<Diagnostic>) {
+    let (target, span, name) = match tx {
+        ast::TxExpr::Set { path, span, .. } | ast::TxExpr::AssertTuple { path, span, .. } => {
+            let name = path
+                .segments
+                .last()
+                .map(|s| s.text.clone())
+                .unwrap_or_default();
+            (resolver.resolve_path(path), *span, name)
+        }
+        ast::TxExpr::Ensure { ty, span, .. }
+        | ast::TxExpr::Fresh { ty, span, .. }
+        | ast::TxExpr::AssertStruct { ty, span, .. } => {
+            let target = resolver
+                .imported_target(&ty.text)
+                .cloned()
+                .unwrap_or_else(|| QualIdent::simple(ty.text.clone()));
+            (target, *span, ty.text.clone())
+        }
+        ast::TxExpr::Retract { .. } | ast::TxExpr::Supersede { .. } => return,
+    };
+    // `Some` iff the target is a foreign public export; local targets are `None`.
+    let Some(cap) = resolver.export_cap(&target) else {
+        return;
+    };
+    if cap != ast::RelVis::Write {
+        diags.push(diag::error(
+            diag::SEALED_WRITE_TARGET,
+            span,
+            format!(
+                "scenario asserts into `{name}`, a relation owned by another package \
+                 that did not export it `pub write`; a downstream package may only \
+                 assert into a foreign relation marked `pub write`"
+            ),
+        ));
     }
 }
 

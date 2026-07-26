@@ -358,34 +358,39 @@ pub fn lower_graph(
             false
         };
 
-        // Register all package-private symbols into `private_symbols` for diagnostic checks
+        // Register each dependency decl's export status: package-private names
+        // into `private_symbols` (for `BRX-LOW-0016`), and each *public* name's
+        // normalized relation capability into `export_caps` (issue #154), so the
+        // `pub derive` orphan gate can later tell an extensible head from a
+        // read-only one. A bare `pub` relation resolves to `read` here (errata
+        // 0003 Q2) via `Visibility::rel_cap`.
         for d in &dep.file.decls {
-            if !d.vis().is_public() {
-                use brix_ast::ast::Decl;
-                let d_name = match d {
-                    Decl::Entity(e) => Some(e.name.text.as_str()),
-                    Decl::Rel(r) => Some(r.name.text.as_str()),
-                    Decl::Enum(e) => Some(e.name.text.as_str()),
-                    Decl::Type(t) => Some(t.name.text.as_str()),
-                    Decl::Record(r) => Some(r.name.text.as_str()),
-                    Decl::Protocol(p) => Some(p.name.text.as_str()),
-                    Decl::Fn(f) => Some(f.name.text.as_str()),
-                    Decl::Unit(u) => Some(u.name.text.as_str()),
-                    Decl::Measure(m) => Some(m.name.text.as_str()),
-                    Decl::DataRecipe(r) => Some(r.name.text.as_str()),
-                    Decl::Feature(f) => Some(f.name.text.as_str()),
-                    Decl::FeatureSet(f) => Some(f.name.text.as_str()),
-                    Decl::Dataset(d) => Some(d.name.text.as_str()),
-                    Decl::StatModel(s) => Some(s.name.text.as_str()),
-                    Decl::MlWorkflow(m) => Some(m.name.text.as_str()),
-                    Decl::Experiment(e) => Some(e.name.text.as_str()),
-                    Decl::Visualization(v) => Some(v.name.text.as_str()),
-                    _ => None,
-                };
-                if let Some(dn) = d_name {
-                    let qname = qualify(dn);
-                    resolver = resolver.with_private_symbol(qname, dep_name.clone());
-                }
+            use brix_ast::ast::Decl;
+            let d_name = match d {
+                Decl::Entity(e) => Some(e.name.text.as_str()),
+                Decl::Rel(r) => Some(r.name.text.as_str()),
+                Decl::Enum(e) => Some(e.name.text.as_str()),
+                Decl::Type(t) => Some(t.name.text.as_str()),
+                Decl::Record(r) => Some(r.name.text.as_str()),
+                Decl::Protocol(p) => Some(p.name.text.as_str()),
+                Decl::Fn(f) => Some(f.name.text.as_str()),
+                Decl::Unit(u) => Some(u.name.text.as_str()),
+                Decl::Measure(m) => Some(m.name.text.as_str()),
+                Decl::DataRecipe(r) => Some(r.name.text.as_str()),
+                Decl::Feature(f) => Some(f.name.text.as_str()),
+                Decl::FeatureSet(f) => Some(f.name.text.as_str()),
+                Decl::Dataset(d) => Some(d.name.text.as_str()),
+                Decl::StatModel(s) => Some(s.name.text.as_str()),
+                Decl::MlWorkflow(m) => Some(m.name.text.as_str()),
+                Decl::Experiment(e) => Some(e.name.text.as_str()),
+                Decl::Visualization(v) => Some(v.name.text.as_str()),
+                _ => None,
+            };
+            let Some(dn) = d_name else { continue };
+            let qname = qualify(dn);
+            match d.vis().rel_cap() {
+                Some(cap) => resolver = resolver.with_export_cap(qname, cap),
+                None => resolver = resolver.with_private_symbol(qname, dep_name.clone()),
             }
         }
 
