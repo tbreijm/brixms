@@ -1901,3 +1901,24 @@ pub fn all_rule_fixtures() -> Vec<RuleFixture> {
         rule_ordinary_fn_on_derived_rel(),
     ]
 }
+
+/// `Build_Plan_v3_SOC.md` Step 5(b) / ADR-0002 §6.1: the first
+/// [`ConformanceCategory::ScopedWorldNonLeak`] fixture, activating the
+/// category the #15 PR6 Fable ruling reserved name-only ("name now, fixtures
+/// post-gate"). Reuses [`flagship_pricing_mutation`]'s query-param `HasType`
+/// shape (its three query params — `rate`/`length`/`surcharge` — guarantee at
+/// least one real `HasType` fact; `arity_mismatch`'s zero-param query would
+/// not) — the fixture's only job here is to hand `crates/soc-regimes`'s
+/// `StructuralRegime` a real `ReflectiveReport` to project once under
+/// `ContextId::root()` and once under a `ContextId::extend`-derived child
+/// (real assumption-scope machinery, ADR-0002 §6.1), proving the child's
+/// judgement never appears in the root projection's set — see
+/// `crates/brix-conformance/tests/structural_regime.rs`. Deliberately **not**
+/// added to [`all_type_fixtures`], mirroring every other selfhost-only
+/// fixture in this module, so `type_parity.rs` stays unchanged.
+pub fn scoped_world_non_leak_probe() -> TypeFixture {
+    let mut fixture = flagship_pricing_mutation();
+    fixture.label = "scoped_world_non_leak_probe";
+    fixture.category = ConformanceCategory::ScopedWorldNonLeak;
+    fixture
+}
