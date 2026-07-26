@@ -29,8 +29,8 @@ jobs:
       - name: Clippy (warnings are errors)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-  test:
-    name: test
+  build:
+    name: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -46,22 +46,42 @@ jobs:
       - name: Toolchain (pinned via rust-toolchain.toml)
         run: rustup show
       - uses: Swatinem/rust-cache@v2
-      - name: Test
-        run: cargo test --workspace
+      - uses: taiki-e/install-action@nextest
+      - name: Archive workspace tests
+        run: cargo nextest archive --workspace --archive-file nextest-archive.tar.zst
+      - name: Upload nextest archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-archive
+          path: nextest-archive.tar.zst
+      - name: Run doctests (nextest does not support doctests yet)
+        run: cargo test --doc --workspace
 
-  determinism:
-    name: determinism
+  test:
+    name: test
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Free up disk space
-        uses: jlumbroso/free-disk-space@main
+      - uses: taiki-e/install-action@nextest
+      - name: Download nextest archive
+        uses: actions/download-artifact@v4
         with:
-          tool-cache: true
-          large-packages: true
-      - name: Toolchain (pinned via rust-toolchain.toml)
-        run: rustup show
-      - uses: Swatinem/rust-cache@v2
+          name: nextest-archive
+      - name: Test
+        run: cargo nextest run --archive-file nextest-archive.tar.zst
+
+  determinism:
+    name: determinism
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@nextest
+      - name: Download nextest archive
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-archive
       - name: Run the suite twice; frozen artifacts must not drift
         run: |
           set -euo pipefail
@@ -71,11 +91,9 @@ jobs:
           # integration tests instead drive nested `cargo build`s of the generated
           # program (which pulls in the full wasmtime/cranelift tree) into $TMPDIR,
           # so they can't dirty the tree and add nothing here — excluding them
-          # drops the dominant cost (~28min -> ~6-10min). The free-disk-space step
-          # above is kept as cheap insurance (the workspace still builds wasmtime
-          # once via brix-rt).
-          cargo test --workspace --exclude brix-cli
-          cargo test --workspace --exclude brix-cli
+          # drops the dominant cost. The free-disk-space step is moved to build job.
+          cargo nextest run --archive-file nextest-archive.tar.zst -E 'not package(brix-cli)'
+          cargo nextest run --archive-file nextest-archive.tar.zst -E 'not package(brix-cli)'
           # insta writes *.snap.new only on a snapshot mismatch, and the canon
           # golden-vector test fails outright on drift. Either way the working
           # tree must be byte-identical after repeated runs (proxy for the G3
@@ -90,39 +108,47 @@ jobs:
 
   conformance:
     name: conformance
+    needs: build
+    runs-on: ubuntu-latest
     # Already covered by `cargo test --workspace` in the `test` job above;
     # broken out as its own named check (issue #11 / Ring0 §1.10's "starts
     # Day 1, never stops") so oracle == compiled-engine drift has a distinct,
     # always-visible signal as this suite grows (differential fuzz, more
     # fixtures) instead of being buried in the general test job.
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Toolchain (pinned via rust-toolchain.toml)
-        run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: Download nextest archive
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-archive
       - name: Errata fixtures + oracle/compiled-engine differential
-        run: cargo test -p brix-conformance
+        run: cargo nextest run --archive-file nextest-archive.tar.zst -p brix-conformance
 
   acceptance:
     name: acceptance
+    needs: build
+    runs-on: ubuntu-latest
     # Already covered by `cargo test --workspace` in the `test` job above;
     # broken out as its own named check (issue #45's "CI fails when spec
     # coverage, support status, or expected diagnostics drift without an
     # explicit fixture update") so the spec-derived acceptance corpus (52
     # spec fixtures + 6 negative fixtures + the committed coverage report)
     # has a distinct, always-visible signal, same rationale as `conformance`.
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Toolchain (pinned via rust-toolchain.toml)
-        run: rustup show
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: Download nextest archive
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-archive
       - name: Spec-derived acceptance corpus (parse/lower/check/phase + negative fixtures + coverage report)
-        run: cargo test -p brix-conformance --test acceptance_corpus
+        run: cargo nextest run --archive-file nextest-archive.tar.zst -p brix-conformance --test acceptance_corpus
 
   reproducibility:
     name: reproducibility
+    needs: build
+    runs-on: ubuntu-latest
     # Issue #41 (G3): the in-repo proxy for the two-machine reproducibility gate.
     # Deterministic emit (byte-identical generated workspace), cache-integrity
     # fail-closed (a corrupted/incomplete cache entry is rebuilt, never trusted),
@@ -130,19 +156,15 @@ jobs:
     # byte-identity check is `#[ignore]`d (two full `cargo build`s); the
     # two-machine comparison itself is a release-infra concern (#46), not this
     # job. Broken out as its own signal, same rationale as `conformance`.
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Free up disk space
-        uses: jlumbroso/free-disk-space@main
+      - uses: taiki-e/install-action@nextest
+      - name: Download nextest archive
+        uses: actions/download-artifact@v4
         with:
-          tool-cache: true
-          large-packages: true
-      - name: Toolchain (pinned via rust-toolchain.toml)
-        run: rustup show
-      - uses: Swatinem/rust-cache@v2
+          name: nextest-archive
       - name: Reproducible emit + cache-integrity + deterministic budgets
-        run: cargo test -p brix-cli --test reproducibility
+        run: cargo nextest run --archive-file nextest-archive.tar.zst -p brix-cli --test reproducibility
 
   cargo-deny:
     name: cargo-deny
