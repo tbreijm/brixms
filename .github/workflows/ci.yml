@@ -97,7 +97,10 @@ jobs:
           # so they can't dirty the tree and add nothing here — excluding them
           # drops the dominant cost. The free-disk-space step is moved to build job.
           cargo nextest run --archive-file nextest-archive.tar.zst -E 'not package(brix-cli)'
+          # Re-run from the exact same cached output without modifications
           cargo nextest run --archive-file nextest-archive.tar.zst -E 'not package(brix-cli)'
+          # Clean up the downloaded archive so it doesn't pollute the git workspace
+          rm nextest-archive.tar.zst
           # insta writes *.snap.new only on a snapshot mismatch, and the canon
           # golden-vector test fails outright on drift. Either way the working
           # tree must be byte-identical after repeated runs (proxy for the G3
@@ -151,7 +154,7 @@ jobs:
       - name: Fetch dependencies (for offline nested builds)
         run: cargo fetch
       - name: Spec-derived acceptance corpus (parse/lower/check/phase + negative fixtures + coverage report)
-        run: cargo nextest run --archive-file nextest-archive.tar.zst -E 'package(brix-conformance) and test(=acceptance_corpus)'
+        run: cargo nextest run --archive-file nextest-archive.tar.zst -E 'package(brix-conformance) and binary(acceptance_corpus)'
 
   reproducibility:
     name: reproducibility
@@ -174,7 +177,7 @@ jobs:
       - name: Fetch dependencies (for offline nested builds)
         run: cargo fetch
       - name: Reproducible emit + cache-integrity + deterministic budgets
-        run: cargo nextest run --archive-file nextest-archive.tar.zst -E 'package(brix-cli) and test(=reproducibility)'
+        run: cargo nextest run --archive-file nextest-archive.tar.zst -E 'package(brix-cli) and binary(reproducibility)'
 
   cargo-deny:
     name: cargo-deny
