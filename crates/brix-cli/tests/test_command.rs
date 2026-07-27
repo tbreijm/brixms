@@ -24,7 +24,8 @@ fn tmp_dir(tag: &str) -> Utf8PathBuf {
 }
 
 fn brix(args: &[&str]) -> Output {
-    let brix_exe = std::env::var("CARGO_BIN_EXE_brix").unwrap_or_else(|_| env!("CARGO_BIN_EXE_brix").to_string());
+    let brix_exe = std::env::var("CARGO_BIN_EXE_brix")
+        .unwrap_or_else(|_| env!("CARGO_BIN_EXE_brix").to_string());
     Command::new(brix_exe)
         .args(args)
         .output()
