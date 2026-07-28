@@ -516,8 +516,10 @@ pub fn build(operand: &str, profile: Profile) -> Result<BuildOutcome, BuildError
         Profile::Run => "debug",
         Profile::Serve => "release",
     };
-    let binary_path = cache_dir
-        .join("target")
+    let target_dir = std::env::var("BRIX_TEST_SHARED_TARGET_DIR")
+        .map(Utf8PathBuf::from)
+        .unwrap_or_else(|_| cache_dir.join("target"));
+    let binary_path = target_dir
         .join(profile_dir)
         .join(format!("{crate_name}{}", std::env::consts::EXE_SUFFIX));
 
@@ -643,7 +645,11 @@ fn run_cargo_build(cache_dir: &Utf8Path, profile: Profile) -> Result<(), BuildEr
         cmd.arg("--release");
     }
     cmd.arg("--manifest-path").arg(cache_dir.join("Cargo.toml"));
-    cmd.arg("--target-dir").arg(cache_dir.join("target"));
+    if let Ok(shared_target) = std::env::var("BRIX_TEST_SHARED_TARGET_DIR") {
+        cmd.arg("--target-dir").arg(shared_target);
+    } else {
+        cmd.arg("--target-dir").arg(cache_dir.join("target"));
+    }
     let status = cmd.status()?;
     if !status.success() {
         return Err(BuildError::CargoBuildFailed(status));
