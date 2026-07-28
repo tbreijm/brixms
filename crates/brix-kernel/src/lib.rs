@@ -8,7 +8,7 @@ mod term;
 mod verdict;
 
 pub use check::{acceptance, Budget};
-pub use term::{ExplicitTerm, Prop, TermKind, Var};
+pub use term::{instantiate, ExplicitTerm, ObjectTerm, Prop, TermKind, Var};
 pub use verdict::{
     Certificate, RejectionReason, ResourceBudgetReason, UnsupportedConstruct, Verdict,
 };
