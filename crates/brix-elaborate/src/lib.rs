@@ -100,8 +100,8 @@ pub fn elaborate_decomposition(
 
     // 2. Build composite witness k_term = compose(g_n, compose(g_{n-1}, ... compose(g_2, g_1)...))
     let mut k_term = ObjectTerm::Const(PropositionId(generators[0].digest()));
-    for i in 1..n {
-        let g_i_term = ObjectTerm::Const(PropositionId(generators[i].digest()));
+    for g in &generators[1..] {
+        let g_i_term = ObjectTerm::Const(PropositionId(g.digest()));
         k_term = ObjectTerm::Compose(Box::new(g_i_term), Box::new(k_term));
     }
 
