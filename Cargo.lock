@@ -266,6 +266,7 @@ dependencies = [
 name = "brix-kernel"
 version = "0.0.0"
 dependencies = [
+ "brix-canon",
  "brix-semantic",
 ]
 
