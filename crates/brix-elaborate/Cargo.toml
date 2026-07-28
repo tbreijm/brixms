@@ -1,0 +1,14 @@
+[package]
+name = "brix-elaborate"
+description = "Elaboration bridge for BrixMS proof kernel (Stage A)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+brix-semantic = { workspace = true }
+brix-kernel = { path = "../brix-kernel" }
+
+[lints]
+workspace = true

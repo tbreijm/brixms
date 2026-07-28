@@ -19,6 +19,7 @@ members = [
     "crates/soc-core",
     "crates/soc-regimes",
     "crates/brix-kernel",
+    "crates/brix-elaborate",
     "sdk/brix-driver-rs",
 ]
 
