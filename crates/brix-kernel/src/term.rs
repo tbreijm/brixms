@@ -10,6 +10,8 @@ pub enum ObjectTerm {
     Const(PropositionId),
     /// de Bruijn index over object binders.
     BoundVar(usize),
+    /// Generator composition compose(g2, g1) meaning outer g2, inner g1 (Profile 1.1).
+    Compose(Box<ObjectTerm>, Box<ObjectTerm>),
 }
 
 /// A proposition in intuitionistic propositional logic (Profile 1, extended in Slice 2b).
@@ -118,6 +120,11 @@ pub enum TermKind {
         motive: Box<Prop>,
         sub: Box<TermKind>,
     },
+    /// Realization composition (\(\text{RealizesComp}\)): \(\mathsf{realizes\_comp}(p, q)\) (Profile 1.1).
+    RealizesComp {
+        left: Box<TermKind>,
+        right: Box<TermKind>,
+    },
 }
 
 /// Fully explicit, canonical proof-term artifact carrying its embedded context digest.
@@ -151,6 +158,10 @@ fn shift_object_term(term: &ObjectTerm, amount: usize) -> ObjectTerm {
     match term {
         ObjectTerm::Const(c) => ObjectTerm::Const(*c),
         ObjectTerm::BoundVar(idx) => ObjectTerm::BoundVar(idx + amount),
+        ObjectTerm::Compose(g2, g1) => ObjectTerm::Compose(
+            Box::new(shift_object_term(g2, amount)),
+            Box::new(shift_object_term(g1, amount)),
+        ),
     }
 }
 
@@ -166,6 +177,10 @@ fn subst_obj(term: &ObjectTerm, replacement: &ObjectTerm, depth: usize) -> Objec
                 ObjectTerm::BoundVar(*idx)
             }
         }
+        ObjectTerm::Compose(g2, g1) => ObjectTerm::Compose(
+            Box::new(subst_obj(g2, replacement, depth)),
+            Box::new(subst_obj(g1, replacement, depth)),
+        ),
     }
 }
 
@@ -212,6 +227,10 @@ impl Canonical for ObjectTerm {
         match self {
             ObjectTerm::Const(id) => w.write_enum(0, |w| id.canon_write(w)),
             ObjectTerm::BoundVar(idx) => w.write_enum(1, |w| (*idx as u64).canon_write(w)),
+            ObjectTerm::Compose(g2, g1) => w.write_enum(2, |w| {
+                g2.canon_write(w);
+                g1.canon_write(w);
+            }),
         }
     }
 }
@@ -331,6 +350,10 @@ impl Canonical for TermKind {
                 preserves.canon_write(w);
                 motive.canon_write(w);
                 sub.canon_write(w);
+            }),
+            TermKind::RealizesComp { left, right } => w.write_enum(15, |w| {
+                left.canon_write(w);
+                right.canon_write(w);
             }),
         }
     }

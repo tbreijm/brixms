@@ -102,6 +102,16 @@ pub fn acceptance(
     }
 }
 
+fn obj_term_contains(term: &ObjectTerm, target: &ObjectTerm) -> bool {
+    if term == target {
+        return true;
+    }
+    if let ObjectTerm::Compose(g2, g1) = term {
+        return obj_term_contains(g2, target) || obj_term_contains(g1, target);
+    }
+    false
+}
+
 /// Helper to check if an object term `target` occurs free in `prop`.
 fn prop_contains_obj_term(prop: &Prop, target: &ObjectTerm) -> bool {
     match prop {
@@ -109,11 +119,17 @@ fn prop_contains_obj_term(prop: &Prop, target: &ObjectTerm) -> bool {
         Prop::Impl(p1, p2) | Prop::Prod(p1, p2) | Prop::Sum(p1, p2) => {
             prop_contains_obj_term(p1, target) || prop_contains_obj_term(p2, target)
         }
-        Prop::Eq(t1, t2) => t1 == target || t2 == target,
+        Prop::Eq(t1, t2) => obj_term_contains(t1, target) || obj_term_contains(t2, target),
         Prop::Exists(body) => prop_contains_obj_term(body, target),
-        Prop::Applied(_, args) => args.iter().any(|arg| arg == target),
-        Prop::Realizes(w, x, y) => w == target || x == target || y == target,
-        Prop::Preserves(w, motive) => w == target || prop_contains_obj_term(motive, target),
+        Prop::Applied(_, args) => args.iter().any(|arg| obj_term_contains(arg, target)),
+        Prop::Realizes(w, x, y) => {
+            obj_term_contains(w, target)
+                || obj_term_contains(x, target)
+                || obj_term_contains(y, target)
+        }
+        Prop::Preserves(w, motive) => {
+            obj_term_contains(w, target) || prop_contains_obj_term(motive, target)
+        }
     }
 }
 
@@ -268,6 +284,66 @@ fn check_type(
             let right_res = check_type(state, gamma, right_body, expected);
             gamma.pop();
             right_res
+        }
+
+        // (RealizesComp) Realization Composition (Profile 1.1)
+        (TermKind::RealizesComp { left, right }, Prop::Realizes(w, x, z)) => {
+            let left_type = infer_type(state, gamma, left)?;
+            let (g1, xl, y) = match left_type {
+                Prop::Realizes(g1, xl, y) => (g1, xl, y),
+                other => {
+                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                        expected: "Realizes(g1, x, y)".into(),
+                        found: format!("{other:?}"),
+                    }));
+                }
+            };
+
+            let right_type = infer_type(state, gamma, right)?;
+            let (g2, ys, z2) = match right_type {
+                Prop::Realizes(g2, ys, z2) => (g2, ys, z2),
+                other => {
+                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                        expected: "Realizes(g2, y, z)".into(),
+                        found: format!("{other:?}"),
+                    }));
+                }
+            };
+
+            // Side condition (iii): Outer source endpoint match
+            if xl != *x {
+                return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                    expected: format!("Source endpoint {x:?}"),
+                    found: format!("{xl:?}"),
+                }));
+            }
+
+            // Side condition (i): Middle endpoint match
+            if y != ys {
+                return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                    expected: format!("Middle endpoint matching {y:?}"),
+                    found: format!("{ys:?}"),
+                }));
+            }
+
+            // Side condition (iii): Outer target endpoint match
+            if z2 != *z {
+                return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                    expected: format!("Target endpoint {z:?}"),
+                    found: format!("{z2:?}"),
+                }));
+            }
+
+            // Side condition (ii): Witness match compose(outer g2, inner g1)
+            let expected_witness = ObjectTerm::Compose(Box::new(g2), Box::new(g1));
+            if *w != expected_witness {
+                return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                    expected: format!("Witness {expected_witness:?}"),
+                    found: format!("{w:?}"),
+                }));
+            }
+
+            Ok(())
         }
 
         // Out-of-slice unsupported construct placeholder
@@ -464,6 +540,44 @@ fn infer_type(
             let p1 = infer_type(state, gamma, fst)?;
             let p2 = infer_type(state, gamma, snd)?;
             Ok(Prop::Prod(Box::new(p1), Box::new(p2)))
+        }
+
+        // (RealizesComp) Realization Composition (Profile 1.1)
+        TermKind::RealizesComp { left, right } => {
+            let left_type = infer_type(state, gamma, left)?;
+            let (g1, xl, y) = match left_type {
+                Prop::Realizes(g1, xl, y) => (g1, xl, y),
+                other => {
+                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                        expected: "Realizes(g1, x, y)".into(),
+                        found: format!("{other:?}"),
+                    }));
+                }
+            };
+
+            let right_type = infer_type(state, gamma, right)?;
+            let (g2, ys, z2) = match right_type {
+                Prop::Realizes(g2, ys, z2) => (g2, ys, z2),
+                other => {
+                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                        expected: "Realizes(g2, y, z)".into(),
+                        found: format!("{other:?}"),
+                    }));
+                }
+            };
+
+            if y != ys {
+                return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                    expected: format!("Middle endpoint matching {y:?}"),
+                    found: format!("{ys:?}"),
+                }));
+            }
+
+            Ok(Prop::Realizes(
+                ObjectTerm::Compose(Box::new(g2), Box::new(g1)),
+                xl,
+                z2,
+            ))
         }
 
         // Out-of-slice unsupported construct placeholder
