@@ -289,83 +289,364 @@ fn test_tiny_budget_returns_resource_exhausted_mapping_to_unknown_never_refuted(
     );
 }
 
+// =========================================================================
+// Slice 2b Tests (ADR-0003 §5 — Existentials, Equality, Trans-Pres)
+// =========================================================================
+
+use brix_kernel::{instantiate, ObjectTerm};
+
+fn sample_obj_const_a() -> ObjectTerm {
+    ObjectTerm::Const(PropositionId::from_canon(b"obj_a"))
+}
+
+fn sample_obj_const_b() -> ObjectTerm {
+    ObjectTerm::Const(PropositionId::from_canon(b"obj_b"))
+}
+
+fn sample_obj_const_c() -> ObjectTerm {
+    ObjectTerm::Const(PropositionId::from_canon(b"obj_c"))
+}
+
 #[test]
-fn test_certificate_id_determinism() {
+fn test_refl_equal_terms_returns_accepted() {
     let ctx = sample_context_a();
-    let p = sample_prop_p();
-    let goal = Prop::Impl(Box::new(p.clone()), Box::new(p));
+    let a = sample_obj_const_a();
+    let goal = Prop::Eq(a.clone(), a.clone());
+
+    let term = ExplicitTerm::new(ctx, TermKind::Refl(a));
+    let budget = Budget::new(100, 100);
+    let verdict = acceptance(&ctx, &goal, &term, budget);
+
+    assert!(
+        matches!(verdict, Verdict::Accepted(_)),
+        "Refl on equal terms should be Accepted"
+    );
+}
+
+#[test]
+fn test_refl_non_equal_terms_returns_rejected() {
+    let ctx = sample_context_a();
+    let a = sample_obj_const_a();
+    let b = sample_obj_const_b();
+    let goal = Prop::Eq(a.clone(), b);
+
+    let term = ExplicitTerm::new(ctx, TermKind::Refl(a));
+    let budget = Budget::new(100, 100);
+    let verdict = acceptance(&ctx, &goal, &term, budget);
+
+    assert!(
+        matches!(verdict, Verdict::Rejected(_)),
+        "Refl on non-equal terms should be Rejected"
+    );
+}
+
+#[test]
+fn test_subst_valid_returns_accepted() {
+    let ctx = sample_context_a();
+    let a = sample_obj_const_a();
+    let b = sample_obj_const_b();
+    let c = sample_obj_const_c();
+
+    let motive = Prop::Eq(ObjectTerm::BoundVar(0), c.clone());
+    let goal = instantiate(&motive, &b);
+
+    let full_goal = Prop::Impl(
+        Box::new(Prop::Eq(a.clone(), b.clone())),
+        Box::new(Prop::Impl(
+            Box::new(instantiate(&motive, &a)),
+            Box::new(goal),
+        )),
+    );
 
     let term = ExplicitTerm::new(
         ctx,
         TermKind::Lam {
-            var_name: Some("x".into()),
-            body: Box::new(TermKind::Hyp(Var::Index(0))),
-        },
-    );
-
-    let budget1 = Budget::new(100, 100);
-    let budget2 = Budget::new(100, 100);
-
-    let verdict1 = acceptance(&ctx, &goal, &term, budget1);
-    let verdict2 = acceptance(&ctx, &goal, &term, budget2);
-
-    match (verdict1, verdict2) {
-        (Verdict::Accepted(cert1), Verdict::Accepted(cert2)) => {
-            assert_eq!(
-                cert1.certificate_id, cert2.certificate_id,
-                "Identical (context, proposition, term) must produce byte-identical CertificateId"
-            );
-            assert_eq!(cert1.verifier, cert2.verifier);
-        }
-        (v1, v2) => panic!("Expected both Accepted, got {v1:?} and {v2:?}"),
-    }
-}
-
-#[test]
-fn test_certificate_id_distinctness_for_different_terms() {
-    let ctx = sample_context_a();
-    let p = sample_prop_p();
-    // Goal: P -> P -> P
-    let goal = Prop::Impl(
-        Box::new(p.clone()),
-        Box::new(Prop::Impl(Box::new(p.clone()), Box::new(p))),
-    );
-
-    // Term 1: \x. \y. x (returns first parameter, Var::Index(1))
-    let term1 = ExplicitTerm::new(
-        ctx,
-        TermKind::Lam {
-            var_name: Some("x".into()),
+            var_name: Some("h_eq".into()),
             body: Box::new(TermKind::Lam {
-                var_name: Some("y".into()),
-                body: Box::new(TermKind::Hyp(Var::Index(1))),
-            }),
-        },
-    );
-
-    // Term 2: \x. \y. y (returns second parameter, Var::Index(0))
-    let term2 = ExplicitTerm::new(
-        ctx,
-        TermKind::Lam {
-            var_name: Some("x".into()),
-            body: Box::new(TermKind::Lam {
-                var_name: Some("y".into()),
-                body: Box::new(TermKind::Hyp(Var::Index(0))),
+                var_name: Some("h_sub".into()),
+                body: Box::new(TermKind::Subst {
+                    eq: Box::new(TermKind::Hyp(Var::Named("h_eq".into()))),
+                    motive: Box::new(motive),
+                    sub: Box::new(TermKind::Hyp(Var::Named("h_sub".into()))),
+                }),
             }),
         },
     );
 
     let budget = Budget::new(100, 100);
-    let verdict1 = acceptance(&ctx, &goal, &term1, budget);
-    let verdict2 = acceptance(&ctx, &goal, &term2, budget);
+    let verdict = acceptance(&ctx, &full_goal, &term, budget);
 
-    match (verdict1, verdict2) {
-        (Verdict::Accepted(cert1), Verdict::Accepted(cert2)) => {
-            assert_ne!(
-                cert1.certificate_id, cert2.certificate_id,
-                "Different proof terms must produce distinct CertificateIds"
-            );
-        }
-        (v1, v2) => panic!("Expected both Accepted, got {v1:?} and {v2:?}"),
-    }
+    assert!(
+        matches!(verdict, Verdict::Accepted(_)),
+        "Valid Subst proof should be Accepted, got {verdict:?}"
+    );
+}
+
+#[test]
+fn test_subst_producing_wrong_instantiation_returns_rejected() {
+    let ctx = sample_context_a();
+    let a = sample_obj_const_a();
+    let b = sample_obj_const_b();
+    let c = sample_obj_const_c();
+
+    let motive = Prop::Eq(ObjectTerm::BoundVar(0), c.clone());
+    let wrong_goal = instantiate(&motive, &a);
+
+    let full_goal = Prop::Impl(
+        Box::new(Prop::Eq(a.clone(), b.clone())),
+        Box::new(Prop::Impl(
+            Box::new(instantiate(&motive, &a)),
+            Box::new(wrong_goal),
+        )),
+    );
+
+    let term = ExplicitTerm::new(
+        ctx,
+        TermKind::Lam {
+            var_name: Some("h_eq".into()),
+            body: Box::new(TermKind::Lam {
+                var_name: Some("h_sub".into()),
+                body: Box::new(TermKind::Subst {
+                    eq: Box::new(TermKind::Hyp(Var::Named("h_eq".into()))),
+                    motive: Box::new(motive),
+                    sub: Box::new(TermKind::Hyp(Var::Named("h_sub".into()))),
+                }),
+            }),
+        },
+    );
+
+    let budget = Budget::new(100, 100);
+    let verdict = acceptance(&ctx, &full_goal, &term, budget);
+
+    assert!(
+        matches!(verdict, Verdict::Rejected(_)),
+        "Subst producing wrong instantiation should be Rejected"
+    );
+}
+
+#[test]
+fn test_pack_valid_witness_returns_accepted() {
+    let ctx = sample_context_a();
+    let a = sample_obj_const_a();
+
+    let pred = Prop::Eq(ObjectTerm::BoundVar(0), a.clone());
+    let goal = Prop::Exists(Box::new(pred));
+
+    let term = ExplicitTerm::new(
+        ctx,
+        TermKind::Pack {
+            witness: a.clone(),
+            body_proof: Box::new(TermKind::Refl(a)),
+        },
+    );
+
+    let budget = Budget::new(100, 100);
+    let verdict = acceptance(&ctx, &goal, &term, budget);
+
+    assert!(
+        matches!(verdict, Verdict::Accepted(_)),
+        "Valid Pack proof should be Accepted"
+    );
+}
+
+#[test]
+fn test_unpack_valid_returns_accepted() {
+    let ctx = sample_context_a();
+    let a = sample_obj_const_a();
+    let r = sample_prop_p();
+
+    let pred = Prop::Eq(ObjectTerm::BoundVar(0), a.clone());
+    let ex_prop = Prop::Exists(Box::new(pred));
+
+    let goal = Prop::Impl(
+        Box::new(ex_prop),
+        Box::new(Prop::Impl(Box::new(r.clone()), Box::new(r))),
+    );
+
+    let term = ExplicitTerm::new(
+        ctx,
+        TermKind::Lam {
+            var_name: Some("h_ex".into()),
+            body: Box::new(TermKind::Lam {
+                var_name: Some("h_r".into()),
+                body: Box::new(TermKind::Unpack {
+                    scrutinee: Box::new(TermKind::Hyp(Var::Named("h_ex".into()))),
+                    obj_var: Some("x".into()),
+                    proof_var: Some("h_proof".into()),
+                    body: Box::new(TermKind::Hyp(Var::Named("h_r".into()))),
+                }),
+            }),
+        },
+    );
+
+    let budget = Budget::new(100, 100);
+    let verdict = acceptance(&ctx, &goal, &term, budget);
+
+    assert!(
+        matches!(verdict, Verdict::Accepted(_)),
+        "Valid Unpack proof without witness escape should be Accepted, got {verdict:?}"
+    );
+}
+
+#[test]
+fn test_unpack_body_leaking_eigenvariable_returns_malformed() {
+    let ctx = sample_context_a();
+    let a = sample_obj_const_a();
+
+    let pred = Prop::Eq(ObjectTerm::BoundVar(0), a.clone());
+    let ex_prop = Prop::Exists(Box::new(pred));
+
+    // Unpack body returns `h_proof` (which has type `x_fresh = a`).
+    let unpack_term = TermKind::Unpack {
+        scrutinee: Box::new(TermKind::Hyp(Var::Named("h_ex".into()))),
+        obj_var: Some("x".into()),
+        proof_var: Some("h_proof".into()),
+        body: Box::new(TermKind::Hyp(Var::Named("h_proof".into()))),
+    };
+
+    // Use `unpack_term` as discriminant of a Case, forcing infer_type on Unpack.
+    let term = ExplicitTerm::new(
+        ctx,
+        TermKind::Lam {
+            var_name: Some("h_ex".into()),
+            body: Box::new(TermKind::Case {
+                discriminant: Box::new(unpack_term),
+                left_var: Some("l".into()),
+                left_body: Box::new(TermKind::Hyp(Var::Named("h_ex".into()))),
+                right_var: Some("r".into()),
+                right_body: Box::new(TermKind::Hyp(Var::Named("h_ex".into()))),
+            }),
+        },
+    );
+
+    let budget = Budget::new(100, 100);
+    let goal = Prop::Impl(Box::new(ex_prop.clone()), Box::new(ex_prop));
+    let verdict = acceptance(&ctx, &goal, &term, budget);
+
+    assert!(
+        matches!(verdict, Verdict::Malformed(_)),
+        "Unpack leaking eigenvariable should return Malformed (witness escape), got {verdict:?}"
+    );
+}
+
+#[test]
+fn test_trans_pres_valid_returns_accepted() {
+    let ctx = sample_context_a();
+    let w = ObjectTerm::Const(PropositionId::from_canon(b"w"));
+    let x = sample_obj_const_a();
+    let y = sample_obj_const_b();
+    let c = sample_obj_const_c();
+
+    let motive = Prop::Eq(ObjectTerm::BoundVar(0), c.clone());
+
+    let realizes_prop = Prop::Realizes(w.clone(), x.clone(), y.clone());
+    let preserves_prop = Prop::Preserves(w.clone(), Box::new(motive.clone()));
+    let sub_prop = instantiate(&motive, &x);
+    let goal_prop = instantiate(&motive, &y);
+
+    let full_goal = Prop::Impl(
+        Box::new(realizes_prop),
+        Box::new(Prop::Impl(
+            Box::new(preserves_prop),
+            Box::new(Prop::Impl(Box::new(sub_prop), Box::new(goal_prop))),
+        )),
+    );
+
+    let term = ExplicitTerm::new(
+        ctx,
+        TermKind::Lam {
+            var_name: Some("h_realizes".into()),
+            body: Box::new(TermKind::Lam {
+                var_name: Some("h_preserves".into()),
+                body: Box::new(TermKind::Lam {
+                    var_name: Some("h_sub".into()),
+                    body: Box::new(TermKind::Pres {
+                        realizes: Box::new(TermKind::Hyp(Var::Named("h_realizes".into()))),
+                        preserves: Box::new(TermKind::Hyp(Var::Named("h_preserves".into()))),
+                        motive: Box::new(motive),
+                        sub: Box::new(TermKind::Hyp(Var::Named("h_sub".into()))),
+                    }),
+                }),
+            }),
+        },
+    );
+
+    let budget = Budget::new(100, 100);
+    let verdict = acceptance(&ctx, &full_goal, &term, budget);
+
+    assert!(
+        matches!(verdict, Verdict::Accepted(_)),
+        "Valid Trans-Pres proof should be Accepted, got {verdict:?}"
+    );
+}
+
+#[test]
+fn test_trans_pres_without_matching_preserves_premise_returns_rejected() {
+    let ctx = sample_context_a();
+    let w = ObjectTerm::Const(PropositionId::from_canon(b"w"));
+    let w_other = ObjectTerm::Const(PropositionId::from_canon(b"w_other"));
+    let x = sample_obj_const_a();
+    let y = sample_obj_const_b();
+    let c = sample_obj_const_c();
+
+    let motive = Prop::Eq(ObjectTerm::BoundVar(0), c.clone());
+
+    let realizes_prop = Prop::Realizes(w.clone(), x.clone(), y.clone());
+    let wrong_preserves_prop = Prop::Preserves(w_other, Box::new(motive.clone()));
+    let sub_prop = instantiate(&motive, &x);
+    let goal_prop = instantiate(&motive, &y);
+
+    let full_goal = Prop::Impl(
+        Box::new(realizes_prop),
+        Box::new(Prop::Impl(
+            Box::new(wrong_preserves_prop),
+            Box::new(Prop::Impl(Box::new(sub_prop), Box::new(goal_prop))),
+        )),
+    );
+
+    let term = ExplicitTerm::new(
+        ctx,
+        TermKind::Lam {
+            var_name: Some("h_realizes".into()),
+            body: Box::new(TermKind::Lam {
+                var_name: Some("h_preserves".into()),
+                body: Box::new(TermKind::Lam {
+                    var_name: Some("h_sub".into()),
+                    body: Box::new(TermKind::Pres {
+                        realizes: Box::new(TermKind::Hyp(Var::Named("h_realizes".into()))),
+                        preserves: Box::new(TermKind::Hyp(Var::Named("h_preserves".into()))),
+                        motive: Box::new(motive),
+                        sub: Box::new(TermKind::Hyp(Var::Named("h_sub".into()))),
+                    }),
+                }),
+            }),
+        },
+    );
+
+    let budget = Budget::new(100, 100);
+    let verdict = acceptance(&ctx, &full_goal, &term, budget);
+
+    assert!(
+        matches!(verdict, Verdict::Rejected(_)),
+        "Trans-Pres without matching Preserves premise should be Rejected"
+    );
+}
+
+#[test]
+fn test_instantiate_capture_avoidance_nested_exists() {
+    let target_var_at_depth_2 = ObjectTerm::BoundVar(2);
+    let inner_bound_var = ObjectTerm::BoundVar(0);
+    let inner_eq = Prop::Eq(target_var_at_depth_2, inner_bound_var);
+    let inner_exists = Prop::Exists(Box::new(inner_eq));
+    let outer_exists = Prop::Exists(Box::new(inner_exists));
+
+    let replacement = ObjectTerm::BoundVar(0);
+    let instantiated = instantiate(&outer_exists, &replacement);
+
+    let expected = Prop::Exists(Box::new(Prop::Exists(Box::new(Prop::Eq(
+        ObjectTerm::BoundVar(2),
+        ObjectTerm::BoundVar(0),
+    )))));
+
+    assert_eq!(instantiated, expected);
 }

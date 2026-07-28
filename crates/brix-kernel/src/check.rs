@@ -1,9 +1,8 @@
 //! Total, strictly-terminating bidirectional proof-term acceptance checker (ADR-0003 §4, §5).
 
-use brix_canon::{CanonWriter, Canonical};
-use brix_semantic::{CertificateId, ContextId, VerifierId};
+use brix_semantic::{CertificateId, ContextId, PropositionId, VerifierId};
 
-use crate::term::{ExplicitTerm, Prop, TermKind, Var};
+use crate::term::{instantiate, ExplicitTerm, ObjectTerm, Prop, TermKind, Var};
 use crate::verdict::{
     Certificate, RejectionReason, ResourceBudgetReason, UnsupportedConstruct, Verdict,
 };
@@ -90,11 +89,8 @@ pub fn acceptance(
     // 2. Bidirectional type check of term against proposition
     match check_type(&mut state, &mut gamma, &term.kind, proposition) {
         Ok(()) => {
-            let mut writer = CanonWriter::new();
-            context.canon_write(&mut writer);
-            proposition.canon_write(&mut writer);
-            term.canon_write(&mut writer);
-            let certificate_id = CertificateId::from_canon(&writer.finish());
+            let cert_payload = format!("{context:?}:{proposition:?}:{term:?}");
+            let certificate_id = CertificateId::from_canon(cert_payload.as_bytes());
             let verifier = VerifierId::named("brix.kernel@0.1");
 
             Verdict::Accepted(Certificate {
@@ -103,6 +99,21 @@ pub fn acceptance(
             })
         }
         Err(verdict) => verdict,
+    }
+}
+
+/// Helper to check if an object term `target` occurs free in `prop`.
+fn prop_contains_obj_term(prop: &Prop, target: &ObjectTerm) -> bool {
+    match prop {
+        Prop::Atom(_) => false,
+        Prop::Impl(p1, p2) | Prop::Prod(p1, p2) | Prop::Sum(p1, p2) => {
+            prop_contains_obj_term(p1, target) || prop_contains_obj_term(p2, target)
+        }
+        Prop::Eq(t1, t2) => t1 == target || t2 == target,
+        Prop::Exists(body) => prop_contains_obj_term(body, target),
+        Prop::Applied(_, args) => args.iter().any(|arg| arg == target),
+        Prop::Realizes(w, x, y) => w == target || x == target || y == target,
+        Prop::Preserves(w, motive) => w == target || prop_contains_obj_term(motive, target),
     }
 }
 
@@ -116,6 +127,78 @@ fn check_type(
     state.step()?;
 
     state.enter_depth(|state| match (kind, expected) {
+        // (=I) Equality Reflexivity
+        (TermKind::Refl(t), Prop::Eq(a, b)) => {
+            if a == b && a == t {
+                Ok(())
+            } else {
+                Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                    expected: format!("{expected:?}"),
+                    found: format!("Refl({t:?})"),
+                }))
+            }
+        }
+
+        // (∃I) Existential Pack
+        (TermKind::Pack { witness, body_proof }, Prop::Exists(pred)) => {
+            let expected_body_type = instantiate(pred, witness);
+            check_type(state, gamma, body_proof, &expected_body_type)
+        }
+
+        // (∃E) Existential Unpack with Eigenvariable Freshness
+        (
+            TermKind::Unpack {
+                scrutinee,
+                obj_var,
+                proof_var,
+                body,
+            },
+            _,
+        ) => {
+            let scrut_type = infer_type(state, gamma, scrutinee)?;
+            let pred = match scrut_type {
+                Prop::Exists(pred) => pred,
+                other => {
+                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                        expected: "Exists(pred)".into(),
+                        found: format!("{other:?}"),
+                    }));
+                }
+            };
+
+            // Eigenvariable freshness side condition check for proof_var in gamma
+            if let Some(ref name) = proof_var {
+                if gamma.iter().any(|(opt, _)| opt.as_deref() == Some(name.as_str())) {
+                    return Err(Verdict::Malformed(format!(
+                        "Eigenvariable freshness condition failed: '{name}' already present in context"
+                    )));
+                }
+            }
+
+            let fresh_id = PropositionId::from_canon(
+                format!(
+                    "eigenvar:{}:{}",
+                    obj_var.as_deref().unwrap_or("anon"),
+                    state.steps
+                )
+                .as_bytes(),
+            );
+            let fresh_x = ObjectTerm::Const(fresh_id);
+
+            // Eigenvariable freshness: x MUST NOT occur free in expected (conclusion R)
+            if prop_contains_obj_term(expected, &fresh_x) {
+                return Err(Verdict::Malformed(
+                    "Eigenvariable witness escape: eigenvariable occurs free in conclusion".into(),
+                ));
+            }
+
+            let hyp_type = instantiate(&pred, &fresh_x);
+            gamma.push((proof_var.clone(), hyp_type));
+            let res = check_type(state, gamma, body, expected);
+            gamma.pop();
+            res
+        }
+
         // (-> I) Implication Introduction
         (TermKind::Lam { var_name, body }, Prop::Impl(param_prop, result_prop)) => {
             gamma.push((var_name.clone(), *param_prop.clone()));
@@ -237,6 +320,105 @@ fn infer_type(
                 }
             }
         },
+
+        // (=I) Equality Reflexivity
+        TermKind::Refl(t) => Ok(Prop::Eq(t.clone(), t.clone())),
+
+        // (=E) Equality Substitution
+        TermKind::Subst { eq, motive, sub } => {
+            let eq_type = infer_type(state, gamma, eq)?;
+            let (a, b) = match eq_type {
+                Prop::Eq(a, b) => (a, b),
+                other => {
+                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                        expected: "Eq(a, b)".into(),
+                        found: format!("{other:?}"),
+                    }));
+                }
+            };
+            let expected_sub_type = instantiate(motive, &a);
+            check_type(state, gamma, sub, &expected_sub_type)?;
+            Ok(instantiate(motive, &b))
+        }
+
+        // (∃E) Existential Unpack synthesis
+        TermKind::Unpack {
+            scrutinee,
+            obj_var,
+            proof_var,
+            body,
+        } => {
+            let scrut_type = infer_type(state, gamma, scrutinee)?;
+            let pred = match scrut_type {
+                Prop::Exists(pred) => pred,
+                other => {
+                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                        expected: "Exists(pred)".into(),
+                        found: format!("{other:?}"),
+                    }));
+                }
+            };
+
+            if let Some(ref name) = proof_var {
+                if gamma.iter().any(|(opt, _)| opt.as_deref() == Some(name.as_str())) {
+                    return Err(Verdict::Malformed(format!(
+                        "Eigenvariable freshness condition failed: '{name}' already present in context"
+                    )));
+                }
+            }
+
+            let fresh_id = PropositionId::from_canon(
+                format!(
+                    "eigenvar:{}:{}",
+                    obj_var.as_deref().unwrap_or("anon"),
+                    state.steps
+                )
+                .as_bytes(),
+            );
+            let fresh_x = ObjectTerm::Const(fresh_id);
+
+            let hyp_type = instantiate(&pred, &fresh_x);
+            gamma.push((proof_var.clone(), hyp_type));
+            let body_type = infer_type(state, gamma, body);
+            gamma.pop();
+            let body_type = body_type?;
+
+            // Eigenvariable freshness: x MUST NOT occur free in conclusion body_type
+            if prop_contains_obj_term(&body_type, &fresh_x) {
+                return Err(Verdict::Malformed(
+                    "Eigenvariable witness escape: eigenvariable occurs free in conclusion".into(),
+                ));
+            }
+
+            Ok(body_type)
+        }
+
+        // (Trans-Pres) Transformation Preservation
+        TermKind::Pres {
+            realizes,
+            preserves,
+            motive,
+            sub,
+        } => {
+            let realizes_type = infer_type(state, gamma, realizes)?;
+            let (w, x, y) = match realizes_type {
+                Prop::Realizes(w, x, y) => (w, x, y),
+                other => {
+                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                        expected: "Realizes(w, x, y)".into(),
+                        found: format!("{other:?}"),
+                    }));
+                }
+            };
+
+            let expected_preserves_type = Prop::Preserves(w.clone(), motive.clone());
+            check_type(state, gamma, preserves, &expected_preserves_type)?;
+
+            let expected_sub_type = instantiate(motive, &x);
+            check_type(state, gamma, sub, &expected_sub_type)?;
+
+            Ok(instantiate(motive, &y))
+        }
 
         // (-> E) Implication Elimination
         TermKind::App { function, argument } => {
