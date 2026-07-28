@@ -210,9 +210,11 @@ fn generated_binary_consumes_a_transaction_stream_and_emits_canon_dump() {
         .unwrap()
         .unwrap()
         .path();
-    let binary = Utf8PathBuf::from_path_buf(cache_entry)
-        .unwrap()
-        .join("target")
+    let cache_entry_utf8 = Utf8PathBuf::from_path_buf(cache_entry).unwrap();
+    let target_dir = std::env::var("BRIX_TEST_SHARED_TARGET_DIR")
+        .map(Utf8PathBuf::from)
+        .unwrap_or_else(|_| cache_entry_utf8.join("target"));
+    let binary = target_dir
         .join("debug")
         .join(format!("smoke_build{}", std::env::consts::EXE_SUFFIX));
 
@@ -317,9 +319,11 @@ fn compiled_flagship_transaction_dump_matches_the_oracle() {
         .unwrap()
         .unwrap()
         .path();
-    let binary = Utf8PathBuf::from_path_buf(cache_entry)
-        .unwrap()
-        .join("target")
+    let cache_entry_utf8 = Utf8PathBuf::from_path_buf(cache_entry).unwrap();
+    let target_dir = std::env::var("BRIX_TEST_SHARED_TARGET_DIR")
+        .map(Utf8PathBuf::from)
+        .unwrap_or_else(|_| cache_entry_utf8.join("target"));
+    let binary = target_dir
         .join("debug")
         .join(format!("demo_logistics{}", std::env::consts::EXE_SUFFIX));
 

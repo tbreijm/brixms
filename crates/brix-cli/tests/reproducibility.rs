@@ -298,8 +298,10 @@ fn two_clean_builds_are_byte_identical_on_disk() {
     // Backend parity: both binaries settle the same transaction to the same
     // canonical dump.
     let dump = |entry: &Utf8Path| -> String {
-        let binary = entry
-            .join("target")
+        let target_dir = std::env::var("BRIX_TEST_SHARED_TARGET_DIR")
+            .map(Utf8PathBuf::from)
+            .unwrap_or_else(|_| entry.join("target"));
+        let binary = target_dir
             .join("debug")
             .join(format!("smoke_repro{}", std::env::consts::EXE_SUFFIX));
         let mut child = Command::new(binary)
