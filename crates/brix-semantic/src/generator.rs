@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use brix_canon::{CanonWriter, Canonical};
 
 use crate::id::digest_id;
+use crate::WitnessId;
 
 digest_id!(
     /// Identity of a single primitive logged settlement witness — a member
@@ -27,6 +28,18 @@ impl GeneratorId {
         let mut w = CanonWriter::new();
         w.write_str(name);
         GeneratorId::from_canon(&w.finish())
+    }
+
+    /// The primitive witness identity of this generator (equal to its underlying digest).
+    pub fn witness_id(&self) -> WitnessId {
+        WitnessId(self.0)
+    }
+}
+
+impl From<GeneratorId> for WitnessId {
+    /// A generator is a primitive witness — its witness identity is its own underlying digest.
+    fn from(gid: GeneratorId) -> Self {
+        WitnessId(gid.digest())
     }
 }
 
