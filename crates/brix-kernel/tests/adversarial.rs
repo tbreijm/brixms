@@ -650,3 +650,196 @@ fn test_instantiate_capture_avoidance_nested_exists() {
 
     assert_eq!(instantiated, expected);
 }
+
+// =========================================================================
+// Profile 1.1 Tests (ADR-0004 — Realization Composition Rule)
+// =========================================================================
+
+#[test]
+fn test_realizes_comp_valid_returns_accepted() {
+    let ctx = sample_context_a();
+    let g1 = ObjectTerm::Const(PropositionId::from_canon(b"g1"));
+    let g2 = ObjectTerm::Const(PropositionId::from_canon(b"g2"));
+    let x = sample_obj_const_a();
+    let y = sample_obj_const_b();
+    let z = sample_obj_const_c();
+
+    let p1 = Prop::Realizes(g1.clone(), x.clone(), y.clone());
+    let p2 = Prop::Realizes(g2.clone(), y.clone(), z.clone());
+
+    let goal_witness = ObjectTerm::Compose(Box::new(g2), Box::new(g1));
+    let goal = Prop::Realizes(goal_witness, x, z);
+
+    let full_goal = Prop::Impl(
+        Box::new(p1),
+        Box::new(Prop::Impl(Box::new(p2), Box::new(goal))),
+    );
+
+    let term = ExplicitTerm::new(
+        ctx,
+        TermKind::Lam {
+            var_name: Some("h_p1".into()),
+            body: Box::new(TermKind::Lam {
+                var_name: Some("h_p2".into()),
+                body: Box::new(TermKind::RealizesComp {
+                    left: Box::new(TermKind::Hyp(Var::Named("h_p1".into()))),
+                    right: Box::new(TermKind::Hyp(Var::Named("h_p2".into()))),
+                }),
+            }),
+        },
+    );
+
+    let budget = Budget::new(100, 100);
+    let verdict = acceptance(&ctx, &full_goal, &term, budget);
+
+    assert!(
+        matches!(verdict, Verdict::Accepted(_)),
+        "Valid RealizesComp proof should be Accepted, got {verdict:?}"
+    );
+}
+
+#[test]
+fn test_realizes_comp_middle_mismatch_returns_rejected() {
+    let ctx = sample_context_a();
+    let g1 = ObjectTerm::Const(PropositionId::from_canon(b"g1"));
+    let g2 = ObjectTerm::Const(PropositionId::from_canon(b"g2"));
+    let x = sample_obj_const_a();
+    let y = sample_obj_const_b();
+    let y_prime = ObjectTerm::Const(PropositionId::from_canon(b"y_prime"));
+    let z = sample_obj_const_c();
+
+    let p1 = Prop::Realizes(g1.clone(), x.clone(), y);
+    let p2_mismatched = Prop::Realizes(g2.clone(), y_prime, z.clone());
+
+    let goal_witness = ObjectTerm::Compose(Box::new(g2), Box::new(g1));
+    let goal = Prop::Realizes(goal_witness, x, z);
+
+    let full_goal = Prop::Impl(
+        Box::new(p1),
+        Box::new(Prop::Impl(Box::new(p2_mismatched), Box::new(goal))),
+    );
+
+    let term = ExplicitTerm::new(
+        ctx,
+        TermKind::Lam {
+            var_name: Some("h_p1".into()),
+            body: Box::new(TermKind::Lam {
+                var_name: Some("h_p2".into()),
+                body: Box::new(TermKind::RealizesComp {
+                    left: Box::new(TermKind::Hyp(Var::Named("h_p1".into()))),
+                    right: Box::new(TermKind::Hyp(Var::Named("h_p2".into()))),
+                }),
+            }),
+        },
+    );
+
+    let budget = Budget::new(100, 100);
+    let verdict = acceptance(&ctx, &full_goal, &term, budget);
+
+    assert!(
+        matches!(verdict, Verdict::Rejected(_)),
+        "RealizesComp with middle endpoint mismatch should be Rejected, got {verdict:?}"
+    );
+}
+
+#[test]
+fn test_realizes_comp_witness_mismatch_returns_rejected() {
+    let ctx = sample_context_a();
+    let g1 = ObjectTerm::Const(PropositionId::from_canon(b"g1"));
+    let g2 = ObjectTerm::Const(PropositionId::from_canon(b"g2"));
+    let x = sample_obj_const_a();
+    let y = sample_obj_const_b();
+    let z = sample_obj_const_c();
+
+    let p1 = Prop::Realizes(g1, x.clone(), y.clone());
+    let p2 = Prop::Realizes(g2, y, z.clone());
+
+    // Goal has some atom witness instead of compose(g2, g1)
+    let wrong_witness = ObjectTerm::Const(PropositionId::from_canon(b"wrong_witness"));
+    let goal = Prop::Realizes(wrong_witness, x, z);
+
+    let full_goal = Prop::Impl(
+        Box::new(p1),
+        Box::new(Prop::Impl(Box::new(p2), Box::new(goal))),
+    );
+
+    let term = ExplicitTerm::new(
+        ctx,
+        TermKind::Lam {
+            var_name: Some("h_p1".into()),
+            body: Box::new(TermKind::Lam {
+                var_name: Some("h_p2".into()),
+                body: Box::new(TermKind::RealizesComp {
+                    left: Box::new(TermKind::Hyp(Var::Named("h_p1".into()))),
+                    right: Box::new(TermKind::Hyp(Var::Named("h_p2".into()))),
+                }),
+            }),
+        },
+    );
+
+    let budget = Budget::new(100, 100);
+    let verdict = acceptance(&ctx, &full_goal, &term, budget);
+
+    assert!(
+        matches!(verdict, Verdict::Rejected(_)),
+        "RealizesComp with witness mismatch should be Rejected, got {verdict:?}"
+    );
+}
+
+#[test]
+fn test_realizes_comp_3_generator_chain_returns_accepted() {
+    let ctx = sample_context_a();
+    let g1 = ObjectTerm::Const(PropositionId::from_canon(b"g1"));
+    let g2 = ObjectTerm::Const(PropositionId::from_canon(b"g2"));
+    let g3 = ObjectTerm::Const(PropositionId::from_canon(b"g3"));
+    let x = sample_obj_const_a();
+    let y = sample_obj_const_b();
+    let z = sample_obj_const_c();
+    let w_end = ObjectTerm::Const(PropositionId::from_canon(b"obj_w"));
+
+    let p1 = Prop::Realizes(g1.clone(), x.clone(), y.clone());
+    let p2 = Prop::Realizes(g2.clone(), y.clone(), z.clone());
+    let p3 = Prop::Realizes(g3.clone(), z.clone(), w_end.clone());
+
+    // Goal: Realizes(compose(g3, compose(g2, g1)), x, w_end)
+    let g12 = ObjectTerm::Compose(Box::new(g2), Box::new(g1));
+    let g123 = ObjectTerm::Compose(Box::new(g3), Box::new(g12));
+    let goal = Prop::Realizes(g123, x, w_end);
+
+    let full_goal = Prop::Impl(
+        Box::new(p1),
+        Box::new(Prop::Impl(
+            Box::new(p2),
+            Box::new(Prop::Impl(Box::new(p3), Box::new(goal))),
+        )),
+    );
+
+    // term: \h1 \h2 \h3. realizes_comp(realizes_comp(h1, h2), h3)
+    let term = ExplicitTerm::new(
+        ctx,
+        TermKind::Lam {
+            var_name: Some("h1".into()),
+            body: Box::new(TermKind::Lam {
+                var_name: Some("h2".into()),
+                body: Box::new(TermKind::Lam {
+                    var_name: Some("h3".into()),
+                    body: Box::new(TermKind::RealizesComp {
+                        left: Box::new(TermKind::RealizesComp {
+                            left: Box::new(TermKind::Hyp(Var::Named("h1".into()))),
+                            right: Box::new(TermKind::Hyp(Var::Named("h2".into()))),
+                        }),
+                        right: Box::new(TermKind::Hyp(Var::Named("h3".into()))),
+                    }),
+                }),
+            }),
+        },
+    );
+
+    let budget = Budget::new(100, 100);
+    let verdict = acceptance(&ctx, &full_goal, &term, budget);
+
+    assert!(
+        matches!(verdict, Verdict::Accepted(_)),
+        "3-generator chain RealizesComp proof should be Accepted, got {verdict:?}"
+    );
+}
