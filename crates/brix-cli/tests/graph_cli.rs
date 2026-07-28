@@ -62,7 +62,9 @@ fn scaffold_app(tag: &str, publish_lib: bool) -> (Utf8PathBuf, Utf8PathBuf) {
 }
 
 fn brix(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_brix"))
+    let brix_exe = std::env::var("CARGO_BIN_EXE_brix")
+        .unwrap_or_else(|_| env!("CARGO_BIN_EXE_brix").to_string());
+    Command::new(brix_exe)
         .args(args)
         .output()
         .expect("brix binary must be spawnable")
@@ -96,9 +98,11 @@ fn locked_multi_package_graph_builds_and_runs_through_the_cli() {
         .unwrap()
         .unwrap()
         .path();
-    let binary = Utf8PathBuf::from_path_buf(binary)
-        .unwrap()
-        .join("target")
+    let cache_entry_utf8 = Utf8PathBuf::from_path_buf(binary).unwrap();
+    let target_dir = std::env::var("BRIX_TEST_SHARED_TARGET_DIR")
+        .map(Utf8PathBuf::from)
+        .unwrap_or_else(|_| cache_entry_utf8.join("target"));
+    let binary = target_dir
         .join("debug")
         .join(format!("app{}", std::env::consts::EXE_SUFFIX));
     let mut child = Command::new(&binary)
