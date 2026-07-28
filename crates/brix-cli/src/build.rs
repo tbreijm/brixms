@@ -643,7 +643,11 @@ fn run_cargo_build(cache_dir: &Utf8Path, profile: Profile) -> Result<(), BuildEr
         cmd.arg("--release");
     }
     cmd.arg("--manifest-path").arg(cache_dir.join("Cargo.toml"));
-    cmd.arg("--target-dir").arg(cache_dir.join("target"));
+    if let Ok(shared_target) = std::env::var("BRIX_TEST_SHARED_TARGET_DIR") {
+        cmd.arg("--target-dir").arg(shared_target);
+    } else {
+        cmd.arg("--target-dir").arg(cache_dir.join("target"));
+    }
     let status = cmd.status()?;
     if !status.success() {
         return Err(BuildError::CargoBuildFailed(status));

@@ -14,6 +14,8 @@ on:
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
+env:
+  BRIX_TEST_SHARED_TARGET_DIR: ${{ github.workspace }}/target/nested
 
 jobs:
   lint:
