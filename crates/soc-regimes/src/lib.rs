@@ -35,6 +35,7 @@
 //!   `ScopedWorldNonLeak` gates.
 
 pub mod literal;
+pub mod native;
 pub mod structural;
 pub mod structural_incremental;
 pub mod type_realization;
