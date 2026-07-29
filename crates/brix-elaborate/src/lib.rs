@@ -30,7 +30,7 @@ pub enum ElaborationResult {
 /// Soundness-critical semantics:
 /// 1. Calls `brix_kernel::acceptance(&source.context, proposition, term, budget)`.
 /// 2. ONLY if it returns `Verdict::Accepted(certificate)`: construct a NEW Judgement with
-///    the SAME context and proposition as `source`, `Outcome::Proven`, and Evidence =
+///    the SAME context as `source`, the proved `proposition`, `Outcome::Proven`, and Evidence =
 ///    `Evidence::KernelCertificate` wrapping that certificate. Also construct a `Dependency`
 ///    with `EdgeKind::ElaborationBoundary` FROM the new Proven judgement's id TO the source
 ///    judgement's id.
@@ -49,7 +49,7 @@ pub fn elaborate_and_publish(
             };
             let judgement = Judgement::new(
                 source.context,
-                source.proposition,
+                proposition.proposition_id(),
                 Outcome::Proven,
                 evidence.id(),
             );

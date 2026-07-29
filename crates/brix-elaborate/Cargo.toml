@@ -10,5 +10,9 @@ repository.workspace = true
 brix-semantic = { workspace = true }
 brix-kernel = { path = "../brix-kernel" }
 
+[dev-dependencies]
+soc-core = { path = "../soc-core" }
+brix-canon = { workspace = true }
+
 [lints]
 workspace = true
