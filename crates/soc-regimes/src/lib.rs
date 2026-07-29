@@ -37,9 +37,11 @@
 pub mod literal;
 pub mod structural;
 pub mod structural_incremental;
+pub mod type_realization;
 
 pub use literal::{LiteralEqualityRegime, LiteralEqualitySemantics};
 pub use structural::{
     HasTypeProjection, ProjectedConflict, StructuralProjection, StructuralRegime,
 };
 pub use structural_incremental::StructuralIncremental;
+pub use type_realization::{g_lit, g_var, type_check, Expr, Ty, TyCtx, TypeError};
