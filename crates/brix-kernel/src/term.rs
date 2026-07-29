@@ -1,7 +1,7 @@
 //! Proof term representations (`ExplicitTerm`, `TermKind`, `Var`), object terms (`ObjectTerm`), and propositions (`Prop`).
 
 use brix_canon::{CanonWriter, Canonical};
-use brix_semantic::{compose, ContextId, PropositionId, WitnessId};
+use brix_semantic::{compose, tensor, ContextId, PropositionId, WitnessId};
 
 /// Object terms (ADR-0003 §5).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -12,6 +12,8 @@ pub enum ObjectTerm {
     BoundVar(usize),
     /// Generator composition compose(g2, g1) meaning outer g2, inner g1 (Profile 1.1).
     Compose(Box<ObjectTerm>, Box<ObjectTerm>),
+    /// Witness/object tensor (parallel composition) left ⊗ right (Profile 1.2).
+    Tensor(Box<ObjectTerm>, Box<ObjectTerm>),
 }
 
 impl ObjectTerm {
@@ -28,6 +30,9 @@ impl ObjectTerm {
             ObjectTerm::Const(id) => WitnessId(id.digest()),
             ObjectTerm::Compose(outer, inner) => {
                 compose(outer.witness_digest(), inner.witness_digest())
+            }
+            ObjectTerm::Tensor(left, right) => {
+                tensor(left.witness_digest(), right.witness_digest())
             }
             ObjectTerm::BoundVar(_) => {
                 WitnessId::from_canon(b"brix.kernel.witness_digest.bound_var")
@@ -154,6 +159,11 @@ pub enum TermKind {
         left: Box<TermKind>,
         right: Box<TermKind>,
     },
+    /// Realization tensor (\(\text{RealizesTensor}\)): \(\mathsf{realizes\_tensor}(p, q)\) (Profile 1.2).
+    RealizesTensor {
+        left: Box<TermKind>,
+        right: Box<TermKind>,
+    },
 }
 
 /// Fully explicit, canonical proof-term artifact carrying its embedded context digest.
@@ -191,6 +201,10 @@ fn shift_object_term(term: &ObjectTerm, amount: usize) -> ObjectTerm {
             Box::new(shift_object_term(g2, amount)),
             Box::new(shift_object_term(g1, amount)),
         ),
+        ObjectTerm::Tensor(left, right) => ObjectTerm::Tensor(
+            Box::new(shift_object_term(left, amount)),
+            Box::new(shift_object_term(right, amount)),
+        ),
     }
 }
 
@@ -209,6 +223,10 @@ fn subst_obj(term: &ObjectTerm, replacement: &ObjectTerm, depth: usize) -> Objec
         ObjectTerm::Compose(g2, g1) => ObjectTerm::Compose(
             Box::new(subst_obj(g2, replacement, depth)),
             Box::new(subst_obj(g1, replacement, depth)),
+        ),
+        ObjectTerm::Tensor(left, right) => ObjectTerm::Tensor(
+            Box::new(subst_obj(left, replacement, depth)),
+            Box::new(subst_obj(right, replacement, depth)),
         ),
     }
 }
@@ -259,6 +277,10 @@ impl Canonical for ObjectTerm {
             ObjectTerm::Compose(g2, g1) => w.write_enum(2, |w| {
                 g2.canon_write(w);
                 g1.canon_write(w);
+            }),
+            ObjectTerm::Tensor(left, right) => w.write_enum(3, |w| {
+                left.canon_write(w);
+                right.canon_write(w);
             }),
         }
     }
@@ -384,6 +406,10 @@ impl Canonical for TermKind {
                 left.canon_write(w);
                 right.canon_write(w);
             }),
+            TermKind::RealizesTensor { left, right } => w.write_enum(16, |w| {
+                left.canon_write(w);
+                right.canon_write(w);
+            }),
         }
     }
 }
@@ -436,5 +462,19 @@ mod tests {
         let bv = ObjectTerm::BoundVar(0);
         let sentinel = WitnessId::from_canon(b"brix.kernel.witness_digest.bound_var");
         assert_eq!(bv.witness_digest(), sentinel);
+    }
+
+    #[test]
+    fn test_witness_digest_alignment_with_brix_semantic_tensor() {
+        let g1_gen = GeneratorId::named("gen-step-1");
+        let g2_gen = GeneratorId::named("gen-step-2");
+
+        let g1_const = ObjectTerm::Const(PropositionId(g1_gen.digest()));
+        let g2_const = ObjectTerm::Const(PropositionId(g2_gen.digest()));
+
+        let term_tens = ObjectTerm::Tensor(Box::new(g1_const), Box::new(g2_const));
+
+        let expected = tensor(WitnessId::from(g1_gen), WitnessId::from(g2_gen));
+        assert_eq!(term_tens.witness_digest(), expected);
     }
 }

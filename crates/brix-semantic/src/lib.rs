@@ -66,4 +66,7 @@ pub use outcome::{Authority, Outcome};
 pub use proposition::PropositionId;
 pub use realizes::Realizes;
 pub use regime::RegimeId;
-pub use witness::{compose, compose_chain, Witness, WitnessId, WITNESS_COMPOSE_TAG};
+pub use witness::{
+    compose, compose_chain, tensor, tensor_chain, Witness, WitnessId, WITNESS_COMPOSE_TAG,
+    WITNESS_TENSOR_TAG,
+};

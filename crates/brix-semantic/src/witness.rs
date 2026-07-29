@@ -54,6 +54,16 @@ impl WitnessId {
     pub fn compose_chain(generators: &[GeneratorId]) -> Option<WitnessId> {
         compose_chain(generators)
     }
+
+    /// The canonical identity of the tensored witness `left ⊗ right`.
+    pub fn tensor(left: WitnessId, right: WitnessId) -> WitnessId {
+        tensor(left, right)
+    }
+
+    /// The committed-witness identity of a left-nested tensored chain `[w_1, w_2, ..., w_n]`.
+    pub fn tensor_chain(witnesses: &[WitnessId]) -> Option<WitnessId> {
+        tensor_chain(witnesses)
+    }
 }
 
 /// Dedicated composition tag for canonical witness identity hashing.
@@ -62,6 +72,13 @@ impl WitnessId {
 /// using `write_tag(WITNESS_COMPOSE_TAG)` followed by `outer`'s digest bytes and `inner`'s
 /// digest bytes.
 pub const WITNESS_COMPOSE_TAG: &str = "brix.semantic.WitnessId.compose";
+
+/// Dedicated tensor tag for canonical witness identity hashing.
+///
+/// **Frozen ABI tag.** Canonical witness tensor hashes under [`brix_canon::Domain::Value`]
+/// using `write_tag(WITNESS_TENSOR_TAG)` followed by `left`'s digest bytes and `right`'s
+/// digest bytes.
+pub const WITNESS_TENSOR_TAG: &str = "brix.semantic.WitnessId.tensor";
 
 /// The canonical identity of the composite witness `outer ∘ inner` (apply `inner` first, then `outer`).
 ///
@@ -81,6 +98,23 @@ pub fn compose(outer: WitnessId, inner: WitnessId) -> WitnessId {
     WitnessId::from_canon(&w.finish())
 }
 
+/// The canonical identity of the tensored witness `left ⊗ right`.
+///
+/// **Encoding (Frozen ABI):**
+/// - `write_tag("brix.semantic.WitnessId.tensor")`
+/// - `left` digest bytes (`write_bytes`)
+/// - `right` digest bytes (`write_bytes`)
+/// - Digest payload under [`brix_canon::Domain::Value`].
+///
+/// Tensor is non-commutative (`tensor(left, right) != tensor(right, left)`).
+pub fn tensor(left: WitnessId, right: WitnessId) -> WitnessId {
+    let mut w = CanonWriter::new();
+    w.write_tag(WITNESS_TENSOR_TAG);
+    w.write_bytes(left.digest().as_bytes());
+    w.write_bytes(right.digest().as_bytes());
+    WitnessId::from_canon(&w.finish())
+}
+
 /// The committed-witness identity of a generator decomposition `[g_1, g_2, ..., g_n]`.
 ///
 /// Converts each [`GeneratorId`] to its [`WitnessId`] identity (a generator is a primitive
@@ -95,6 +129,22 @@ pub fn compose_chain(generators: &[GeneratorId]) -> Option<WitnessId> {
     let mut acc = WitnessId::from(*first);
     for g in &generators[1..] {
         acc = compose(WitnessId::from(*g), acc);
+    }
+    Some(acc)
+}
+
+/// The committed-witness identity of a left-nested tensored chain `[w_1, w_2, ..., w_n]`.
+///
+/// Folds left-nested: `tensor(...tensor(tensor(w_1, w_2), w_3)..., w_n)`.
+///
+/// - For `n == 0`: returns `None`.
+/// - For `n == 1`: returns `Some(w_1)`.
+/// - For `n >= 2`: returns `Some(...)` folded left-nested as specified.
+pub fn tensor_chain(witnesses: &[WitnessId]) -> Option<WitnessId> {
+    let first = witnesses.first()?;
+    let mut acc = *first;
+    for w in &witnesses[1..] {
+        acc = tensor(acc, *w);
     }
     Some(acc)
 }
@@ -226,5 +276,39 @@ mod tests {
         let expected = compose(g3.witness_id(), compose(g2.witness_id(), g1.witness_id()));
         assert_eq!(chain_id, expected);
         assert_eq!(chain_id.to_hex(), GOLDEN_WITNESS_COMPOSE_CHAIN_HEX);
+    }
+
+    #[test]
+    fn tensor_is_non_commutative() {
+        let a = WitnessId::from_canon(b"witness-A");
+        let b = WitnessId::from_canon(b"witness-B");
+        assert_ne!(tensor(a, b), tensor(b, a));
+    }
+
+    #[test]
+    fn tensor_canon_encoding_matches_independent_reproduction() {
+        let a = WitnessId::from_canon(b"witness-A");
+        let b = WitnessId::from_canon(b"witness-B");
+        let got = tensor(a, b);
+
+        let mut expected = CanonWriter::new();
+        expected.write_tag(WITNESS_TENSOR_TAG);
+        expected.write_bytes(a.digest().as_bytes());
+        expected.write_bytes(b.digest().as_bytes());
+        let expected_id = WitnessId::from_canon(&expected.finish());
+
+        assert_eq!(got, expected_id);
+    }
+
+    /// Frozen golden vector for `tensor(a, b)` over fixed inputs
+    /// `a = WitnessId::from_canon(b"witness-A")` and `b = WitnessId::from_canon(b"witness-B")`.
+    #[test]
+    fn golden_vector_witness_tensor() {
+        const GOLDEN_WITNESS_TENSOR_HEX: &str =
+            "d60155eabf0dc374e711f1e2c946fc8199ae40b6867841bbd3518342247bdbd5";
+        let a = WitnessId::from_canon(b"witness-A");
+        let b = WitnessId::from_canon(b"witness-B");
+        let tens = tensor(a, b);
+        assert_eq!(tens.to_hex(), GOLDEN_WITNESS_TENSOR_HEX);
     }
 }
