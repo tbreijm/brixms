@@ -1487,6 +1487,43 @@ pub fn plain_scalar_mismatch() -> TypeFixture {
     }
 }
 
+/// Minimal scalar occurs-check fixture (N1 native type checker):
+/// Query params: x: ?v (TyVar)
+/// yields: x
+/// result: Rel<{value: ( ?v ) -> ?v}>
+/// This forces unify(?v, Fn(?v -> ?v)) which triggers Occurs check failure.
+pub fn scalar_occurs_check() -> TypeFixture {
+    let o = Origins::new("ScalarOccurs");
+    let v = TyVar(9105);
+    let fn_ty = Ty::Fn {
+        params: vec![Ty::Var(v)],
+        ret: Box::new(Ty::Var(v)),
+        effects: brix_ir::effects::EffectRow::empty(),
+    };
+    let source = FrontendSource {
+        functions: Vec::new(),
+        rules: vec![],
+        constraints: vec![],
+        queries: vec![Query {
+            name: Ident::new("ScalarOccurs"),
+            params: vec![(Ident::new("x"), Ty::Var(v))],
+            body: Pattern::default(),
+            yields: o.var("x"),
+            result: Ty::rel(Row::closed(vec![RowField {
+                name: Ident::new("value"),
+                ty: fn_ty,
+            }])),
+        }],
+    };
+    TypeFixture {
+        label: "scalar_occurs_check",
+        category: ConformanceCategory::TypeInference,
+        source,
+        resolver: TableResolver::new(),
+        expected_categories: BTreeSet::from([Category::Occurs]),
+    }
+}
+
 /// #15 gap-closure (slice 8 B+C, Gap B — container vs a DIFFERENT ctor): the
 /// outer `Rel<{value: ..}>` wrapping (both sides) is the same ctor (Rel),
 /// descending via `Step::Rows` into the `value` field, where `Result<Bool,
