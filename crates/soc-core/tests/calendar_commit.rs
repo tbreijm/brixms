@@ -18,7 +18,6 @@
 use brix_canon::{CanonWriter, Digest, Domain};
 use brix_semantic::{
     ConfigId, ContextId, Decomposition, Evidence, GeneratorId, Judgement, Outcome, Realizes,
-    WitnessId,
 };
 use soc_core::adm::{AdmAll, AdmNone};
 use soc_core::calendar::{Frontier, Key};
@@ -256,9 +255,9 @@ fn committed_observation_judgement_digest_matches_independent_reconstruction() {
     // internals.
     let src = ConfigId(i.resolve(e.world));
     let dst = ConfigId(i.resolve(regime.successor));
-    let witness = WitnessId(i.resolve(regime.witness));
-    let proposition = Realizes::new(witness, src, dst).proposition_id();
     let decomposition = fixture_decomposition();
+    let witness = brix_semantic::compose_chain(&decomposition.generators).unwrap();
+    let proposition = Realizes::new(witness, src, dst).proposition_id();
     let evidence = Evidence::SettlementReplay {
         body: decomposition.id().digest(),
     }
