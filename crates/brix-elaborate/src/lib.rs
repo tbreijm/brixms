@@ -139,3 +139,375 @@ pub fn elaborate_decomposition(
     // 5. Call existing elaborate_and_publish
     elaborate_and_publish(source, &implication_prop, &term, budget)
 }
+
+/// Content-addressed object structure for realization trees.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TreeObj {
+    Atom(brix_semantic::ConfigId),
+    Prod(Box<TreeObj>, Box<TreeObj>),
+}
+
+impl TreeObj {
+    pub fn to_object_term(&self) -> brix_kernel::ObjectTerm {
+        match self {
+            TreeObj::Atom(c) => ObjectTerm::Const(PropositionId(c.digest())),
+            TreeObj::Prod(a, b) => {
+                ObjectTerm::Tensor(Box::new(a.to_object_term()), Box::new(b.to_object_term()))
+            }
+        }
+    }
+}
+
+/// Tree-structured realization derivation (ADR-0007).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum RealizesTree {
+    Leaf {
+        generator: brix_semantic::GeneratorId,
+        src: TreeObj,
+        dst: TreeObj,
+    },
+    Seq {
+        left: Box<RealizesTree>,
+        right: Box<RealizesTree>,
+    },
+    Tensor {
+        left: Box<RealizesTree>,
+        right: Box<RealizesTree>,
+    },
+}
+
+impl RealizesTree {
+    pub fn src(&self) -> TreeObj {
+        match self {
+            RealizesTree::Leaf { src, .. } => src.clone(),
+            RealizesTree::Seq { left, .. } => left.src(),
+            RealizesTree::Tensor { left, right } => {
+                TreeObj::Prod(Box::new(left.src()), Box::new(right.src()))
+            }
+        }
+    }
+
+    pub fn dst(&self) -> TreeObj {
+        match self {
+            RealizesTree::Leaf { dst, .. } => dst.clone(),
+            RealizesTree::Seq { right, .. } => right.dst(),
+            RealizesTree::Tensor { left, right } => {
+                TreeObj::Prod(Box::new(left.dst()), Box::new(right.dst()))
+            }
+        }
+    }
+
+    pub fn witness_object(&self) -> brix_kernel::ObjectTerm {
+        match self {
+            RealizesTree::Leaf { generator, .. } => {
+                ObjectTerm::Const(PropositionId(generator.digest()))
+            }
+            RealizesTree::Seq { left, right } => ObjectTerm::Compose(
+                Box::new(right.witness_object()),
+                Box::new(left.witness_object()),
+            ),
+            RealizesTree::Tensor { left, right } => ObjectTerm::Tensor(
+                Box::new(left.witness_object()),
+                Box::new(right.witness_object()),
+            ),
+        }
+    }
+
+    fn collect_leaves<'a>(&'a self, out: &mut Vec<&'a RealizesTree>) {
+        match self {
+            RealizesTree::Leaf { .. } => out.push(self),
+            RealizesTree::Seq { left, right } | RealizesTree::Tensor { left, right } => {
+                left.collect_leaves(out);
+                right.collect_leaves(out);
+            }
+        }
+    }
+
+    pub fn leaves(&self) -> Vec<&RealizesTree> {
+        let mut out = Vec::new();
+        self.collect_leaves(&mut out);
+        out
+    }
+
+    pub fn well_formed(&self) -> bool {
+        match self {
+            RealizesTree::Leaf { .. } => true,
+            RealizesTree::Seq { left, right } => {
+                left.well_formed() && right.well_formed() && left.dst() == right.src()
+            }
+            RealizesTree::Tensor { left, right } => left.well_formed() && right.well_formed(),
+        }
+    }
+}
+
+/// Elaborate a tree-structured typing derivation into a kernel proof term (ADR-0007).
+pub fn elaborate_tree(
+    source: &Judgement,
+    tree: &RealizesTree,
+    budget: brix_kernel::Budget,
+) -> ElaborationResult {
+    if !tree.well_formed() {
+        return ElaborationResult::NotElaborated(brix_kernel::Verdict::Rejected(
+            brix_kernel::RejectionReason::Custom("malformed Seq middle".into()),
+        ));
+    }
+
+    let leaves = tree.leaves();
+    let m = leaves.len();
+    if m == 0 {
+        return ElaborationResult::NotElaborated(brix_kernel::Verdict::Rejected(
+            brix_kernel::RejectionReason::Custom("empty leaves".into()),
+        ));
+    }
+
+    let mut h_props = Vec::with_capacity(m);
+    for leaf_node in &leaves {
+        match leaf_node {
+            RealizesTree::Leaf {
+                generator,
+                src,
+                dst,
+            } => {
+                let g_term = ObjectTerm::Const(PropositionId(generator.digest()));
+                let src_term = src.to_object_term();
+                let dst_term = dst.to_object_term();
+                h_props.push(Prop::Realizes(g_term, src_term, dst_term));
+            }
+            _ => {
+                return ElaborationResult::NotElaborated(brix_kernel::Verdict::Rejected(
+                    brix_kernel::RejectionReason::Custom("non-leaf in leaves enumeration".into()),
+                ));
+            }
+        }
+    }
+
+    let goal_prop = Prop::Realizes(
+        tree.witness_object(),
+        tree.src().to_object_term(),
+        tree.dst().to_object_term(),
+    );
+
+    let mut implication_prop = goal_prop;
+    for h_i in h_props.into_iter().rev() {
+        implication_prop = Prop::Impl(Box::new(h_i), Box::new(implication_prop));
+    }
+
+    fn to_term(tree: &RealizesTree, m: usize, k: &mut usize) -> TermKind {
+        match tree {
+            RealizesTree::Leaf { .. } => {
+                let idx = m - 1 - *k;
+                *k += 1;
+                TermKind::Hyp(Var::Index(idx))
+            }
+            RealizesTree::Seq { left, right } => TermKind::RealizesComp {
+                left: Box::new(to_term(left, m, k)),
+                right: Box::new(to_term(right, m, k)),
+            },
+            RealizesTree::Tensor { left, right } => TermKind::RealizesTensor {
+                left: Box::new(to_term(left, m, k)),
+                right: Box::new(to_term(right, m, k)),
+            },
+        }
+    }
+
+    let mut k = 0;
+    let body_kind = to_term(tree, m, &mut k);
+
+    let mut kind = body_kind;
+    for i in (0..m).rev() {
+        kind = TermKind::Lam {
+            var_name: Some(format!("h{}", i + 1)),
+            body: Box::new(kind),
+        };
+    }
+
+    let term = ExplicitTerm::new(source.context, kind);
+    elaborate_and_publish(source, &implication_prop, &term, budget)
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+    use brix_kernel::{Budget, RejectionReason, Verdict};
+    use brix_semantic::{ConfigId, ContextId, GeneratorId, PropositionId};
+
+    #[test]
+    fn test_malformed_seq_rejected() {
+        let context = ContextId::root();
+        let source = Judgement::new(
+            context,
+            PropositionId::from_canon(b"src"),
+            Outcome::Audited,
+            brix_semantic::EvidenceId::from_canon(b"ev"),
+        );
+
+        let g1 = GeneratorId::named("g1");
+        let g2 = GeneratorId::named("g2");
+        let c1 = ConfigId::from_canon(b"c1");
+        let c2 = ConfigId::from_canon(b"c2");
+        let c3 = ConfigId::from_canon(b"c3");
+        let c4 = ConfigId::from_canon(b"c4");
+
+        // Leaf1: c1 -> c2
+        let leaf1 = RealizesTree::Leaf {
+            generator: g1,
+            src: TreeObj::Atom(c1),
+            dst: TreeObj::Atom(c2),
+        };
+
+        // Leaf2: c3 -> c4  (middle mismatch: c2 != c3)
+        let leaf2 = RealizesTree::Leaf {
+            generator: g2,
+            src: TreeObj::Atom(c3),
+            dst: TreeObj::Atom(c4),
+        };
+
+        let tree = RealizesTree::Seq {
+            left: Box::new(leaf1),
+            right: Box::new(leaf2),
+        };
+
+        assert!(!tree.well_formed());
+
+        let res = elaborate_tree(&source, &tree, Budget::new(1000, 1000));
+        match res {
+            ElaborationResult::NotElaborated(Verdict::Rejected(RejectionReason::Custom(msg))) => {
+                assert_eq!(msg, "malformed Seq middle");
+            }
+            other => panic!("Expected NotElaborated(Rejected(Custom)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_3_leaf_tree_well_formed_and_misbuilt() {
+        let context = ContextId::root();
+        let source = Judgement::new(
+            context,
+            PropositionId::from_canon(b"src"),
+            Outcome::Audited,
+            brix_semantic::EvidenceId::from_canon(b"ev"),
+        );
+
+        let ga = GeneratorId::named("ga");
+        let gb = GeneratorId::named("gb");
+        let gc = GeneratorId::named("gc");
+        let gd = GeneratorId::named("gd");
+
+        let c1 = ConfigId::from_canon(b"c1");
+        let c2 = ConfigId::from_canon(b"c2");
+        let c3 = ConfigId::from_canon(b"c3");
+        let c4 = ConfigId::from_canon(b"c4");
+        let c5 = ConfigId::from_canon(b"c5");
+        let c6 = ConfigId::from_canon(b"c6");
+
+        // Seq(Leaf a, Seq(Tensor(Leaf b, Leaf c), Leaf d))
+        let leaf_a = RealizesTree::Leaf {
+            generator: ga,
+            src: TreeObj::Atom(c1),
+            dst: TreeObj::Prod(Box::new(TreeObj::Atom(c2)), Box::new(TreeObj::Atom(c3))),
+        };
+        let leaf_b = RealizesTree::Leaf {
+            generator: gb,
+            src: TreeObj::Atom(c2),
+            dst: TreeObj::Atom(c4),
+        };
+        let leaf_c = RealizesTree::Leaf {
+            generator: gc,
+            src: TreeObj::Atom(c3),
+            dst: TreeObj::Atom(c5),
+        };
+        let leaf_d = RealizesTree::Leaf {
+            generator: gd,
+            src: TreeObj::Prod(Box::new(TreeObj::Atom(c4)), Box::new(TreeObj::Atom(c5))),
+            dst: TreeObj::Atom(c6),
+        };
+
+        let tensor_bc = RealizesTree::Tensor {
+            left: Box::new(leaf_b.clone()),
+            right: Box::new(leaf_c.clone()),
+        };
+
+        let seq_bc_d = RealizesTree::Seq {
+            left: Box::new(tensor_bc),
+            right: Box::new(leaf_d.clone()),
+        };
+
+        let well_formed_tree = RealizesTree::Seq {
+            left: Box::new(leaf_a.clone()),
+            right: Box::new(seq_bc_d),
+        };
+
+        assert!(well_formed_tree.well_formed());
+
+        let res = elaborate_tree(&source, &well_formed_tree, Budget::new(1000, 1000));
+        assert!(matches!(res, ElaborationResult::Proven { .. }));
+
+        // Mis-built tree (mismatched middle)
+        let misbuilt_leaf_b = RealizesTree::Leaf {
+            generator: gb,
+            src: TreeObj::Atom(c3), // Wrong src (c3 instead of c2)
+            dst: TreeObj::Atom(c4),
+        };
+        let misbuilt_tensor = RealizesTree::Tensor {
+            left: Box::new(misbuilt_leaf_b),
+            right: Box::new(leaf_c),
+        };
+        let misbuilt_tree = RealizesTree::Seq {
+            left: Box::new(leaf_a),
+            right: Box::new(RealizesTree::Seq {
+                left: Box::new(misbuilt_tensor),
+                right: Box::new(leaf_d),
+            }),
+        };
+
+        assert!(!misbuilt_tree.well_formed());
+        let res_misbuilt = elaborate_tree(&source, &misbuilt_tree, Budget::new(1000, 1000));
+        assert!(matches!(res_misbuilt, ElaborationResult::NotElaborated(_)));
+    }
+
+    #[test]
+    fn test_witness_object_digest() {
+        let ga = GeneratorId::named("ga");
+        let gb = GeneratorId::named("gb");
+        let gc = GeneratorId::named("gc");
+        let c1 = ConfigId::from_canon(b"c1");
+        let c2 = ConfigId::from_canon(b"c2");
+        let c3 = ConfigId::from_canon(b"c3");
+
+        let leaf_a = RealizesTree::Leaf {
+            generator: ga,
+            src: TreeObj::Atom(c1),
+            dst: TreeObj::Atom(c2),
+        };
+        let leaf_b = RealizesTree::Leaf {
+            generator: gb,
+            src: TreeObj::Atom(c2),
+            dst: TreeObj::Atom(c3),
+        };
+        let leaf_c = RealizesTree::Leaf {
+            generator: gc,
+            src: TreeObj::Atom(c2),
+            dst: TreeObj::Atom(c3),
+        };
+
+        let tree = RealizesTree::Seq {
+            left: Box::new(leaf_a),
+            right: Box::new(RealizesTree::Tensor {
+                left: Box::new(leaf_b),
+                right: Box::new(leaf_c),
+            }),
+        };
+
+        let w_a = ObjectTerm::Const(PropositionId(ga.digest()));
+        let w_b = ObjectTerm::Const(PropositionId(gb.digest()));
+        let w_c = ObjectTerm::Const(PropositionId(gc.digest()));
+        let w_bc = ObjectTerm::Tensor(Box::new(w_b), Box::new(w_c));
+        let expected_witness = ObjectTerm::Compose(Box::new(w_bc), Box::new(w_a));
+
+        assert_eq!(tree.witness_object(), expected_witness);
+        assert_eq!(
+            tree.witness_object().witness_digest(),
+            expected_witness.witness_digest()
+        );
+    }
+}

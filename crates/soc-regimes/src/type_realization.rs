@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use brix_canon::{CanonWriter, Canonical};
+use brix_elaborate::{RealizesTree, TreeObj};
 use brix_semantic::{
     compose_chain, ConfigId, ContextId, Decomposition, Evidence, GeneratorId, Judgement, Outcome,
     Realizes, WitnessId,
@@ -107,6 +108,16 @@ pub fn g_lam() -> GeneratorId {
     GeneratorId::named("type.rule.lam@1")
 }
 
+/// Typing-rule generator for application splitting (`"type.rule.app.split@1"`).
+pub fn g_split() -> GeneratorId {
+    GeneratorId::named("type.rule.app.split@1")
+}
+
+/// Typing-rule generator for binary application (`"type.rule.app@2"`).
+pub fn g_app2() -> GeneratorId {
+    GeneratorId::named("type.rule.app@2")
+}
+
 /// Typing-rule generator for unification steps (`"type.rule.unify@1"`).
 pub fn g_unify() -> GeneratorId {
     GeneratorId::named("type.rule.unify@1")
@@ -138,6 +149,11 @@ pub enum TypeError {
     Unbound(String),
     Mismatch,
     InfiniteType,
+    Unsupported,
+    /// The built derivation tree is not well-formed (a `Seq` middle does not match),
+    /// so it cannot be honestly labelled `Audited`. Arises when a leaf endpoint config
+    /// captured at sub-inference time is later refined by unification (ADR-0007 §7 limitation).
+    IllFormedDerivation,
 }
 
 /// Immutable inference state containing substitution map and fresh variable counter.
@@ -380,6 +396,119 @@ pub fn audited_type_check(
 
     let audited = Judgement::new(context, prop, Outcome::Audited, evidence);
     Ok((audited, verified_decomp))
+}
+
+/// Infer tree-structured realization derivation for {Lit, Var, App} (ADR-0007).
+pub fn infer_tree(
+    expr: &Expr,
+    ctx: &TyCtx,
+    st: Infer,
+) -> Result<(Ty, RealizesTree, Infer), TypeError> {
+    match expr {
+        Expr::Lit(n) => Ok((
+            Ty::Con("Int"),
+            RealizesTree::Leaf {
+                generator: g_lit(),
+                src: TreeObj::Atom(Expr::Lit(*n).config_id()),
+                dst: TreeObj::Atom(Ty::Con("Int").config_id()),
+            },
+            st,
+        )),
+        Expr::Var(name) => {
+            let t = ctx
+                .get(name)
+                .cloned()
+                .ok_or_else(|| TypeError::Unbound((*name).to_string()))?;
+            Ok((
+                t.clone(),
+                RealizesTree::Leaf {
+                    generator: g_var(),
+                    src: TreeObj::Atom(Expr::Var(name).config_id()),
+                    dst: TreeObj::Atom(t.config_id()),
+                },
+                st,
+            ))
+        }
+        Expr::Lam(_, _) => Err(TypeError::Unsupported),
+        Expr::App(f, x) => {
+            let (tf, df, s1) = infer_tree(f, ctx, st)?;
+            let (tx, dx, s2) = infer_tree(x, ctx, s1)?;
+            let (beta, s_beta) = s2.fresh_var();
+
+            let target = Ty::Fn(
+                Box::new(resolve(&tx, &s_beta.subst).clone()),
+                Box::new(Ty::Var(beta)),
+            );
+
+            let (s3, _) = unify(resolve(&tf, &s_beta.subst), &target, &s_beta.subst)?;
+
+            let a = zonk(&tx, &s3);
+            let b = zonk(&Ty::Var(beta), &s3);
+            let fn_ty = Ty::Fn(Box::new(a.clone()), Box::new(b.clone()));
+
+            let split = RealizesTree::Leaf {
+                generator: g_split(),
+                src: TreeObj::Atom(expr.config_id()),
+                dst: TreeObj::Prod(
+                    Box::new(TreeObj::Atom(f.config_id())),
+                    Box::new(TreeObj::Atom(x.config_id())),
+                ),
+            };
+
+            let tensor = RealizesTree::Tensor {
+                left: Box::new(df),
+                right: Box::new(dx),
+            };
+
+            let app = RealizesTree::Leaf {
+                generator: g_app2(),
+                src: TreeObj::Prod(
+                    Box::new(TreeObj::Atom(fn_ty.config_id())),
+                    Box::new(TreeObj::Atom(a.config_id())),
+                ),
+                dst: TreeObj::Atom(b.config_id()),
+            };
+
+            let tree = RealizesTree::Seq {
+                left: Box::new(split),
+                right: Box::new(RealizesTree::Seq {
+                    left: Box::new(tensor),
+                    right: Box::new(app),
+                }),
+            };
+
+            Ok((
+                b,
+                tree,
+                Infer {
+                    subst: s3,
+                    next_var: s_beta.next_var,
+                },
+            ))
+        }
+    }
+}
+
+/// Upgrades a native `infer_tree` derivation to an `Audited` `Judgement` and `RealizesTree` (ADR-0007).
+pub fn audited_type_check_tree(
+    expr: &Expr,
+    ctx: &TyCtx,
+    context: ContextId,
+) -> Result<(Judgement, RealizesTree), TypeError> {
+    let (ty, tree, _st) = infer_tree(expr, ctx, Infer::new())?;
+    // `Audited` must imply the derivation is a verified decomposition: refuse to label a
+    // malformed tree (a `Seq` middle that does not match) as `Audited`.
+    if !tree.well_formed() {
+        return Err(TypeError::IllFormedDerivation);
+    }
+    let witness_id = tree.witness_object().witness_digest();
+    let prop = Realizes::new(witness_id, expr.config_id(), ty.config_id()).proposition_id();
+    let evidence = Evidence::SettlementReplay {
+        body: brix_canon::Digest::of(brix_canon::Domain::Value, prop.digest().as_bytes()),
+    }
+    .id();
+    let audited = Judgement::new(context, prop, Outcome::Audited, evidence);
+    Ok((audited, tree))
 }
 
 #[cfg(test)]
@@ -692,5 +821,62 @@ mod tests {
             matches!(audit_res, soc_core::AuditResult::Unknown(_)),
             "Audit MUST fail for endpoints-padded configs under sound generator semantics"
         );
+    }
+
+    #[test]
+    fn test_tree_elaboration_end_to_end() {
+        let expr = Expr::App(Box::new(Expr::Var("f")), Box::new(Expr::Lit(1)));
+        let ctx = TyCtx::new().extend(
+            "f",
+            Ty::Fn(Box::new(Ty::Con("Int")), Box::new(Ty::Con("Bool"))),
+        );
+        let context = ContextId::root();
+
+        let (aud, tree) = audited_type_check_tree(&expr, &ctx, context).unwrap();
+        assert_eq!(aud.outcome, Outcome::Audited);
+
+        // Inspect tree: g_app2 leaf src config equals Prod(Atom(Fn(Int,Bool).config_id()), Atom(Int.config_id()))
+        if let RealizesTree::Seq { right, .. } = &tree {
+            if let RealizesTree::Seq {
+                right: app_leaf, ..
+            } = right.as_ref()
+            {
+                if let RealizesTree::Leaf { generator, src, .. } = app_leaf.as_ref() {
+                    assert_eq!(*generator, g_app2());
+                    let expected_src = TreeObj::Prod(
+                        Box::new(TreeObj::Atom(
+                            Ty::Fn(Box::new(Ty::Con("Int")), Box::new(Ty::Con("Bool"))).config_id(),
+                        )),
+                        Box::new(TreeObj::Atom(Ty::Con("Int").config_id())),
+                    );
+                    assert_eq!(*src, expected_src);
+                } else {
+                    panic!("Expected app leaf");
+                }
+            } else {
+                panic!("Expected inner Seq");
+            }
+        } else {
+            panic!("Expected outer Seq");
+        }
+
+        let res = brix_elaborate::elaborate_tree(&aud, &tree, Budget::new(1000, 1000));
+        match res {
+            ElaborationResult::Proven { judgement, edge } => {
+                assert_eq!(judgement.outcome, Outcome::Proven);
+                assert_eq!(
+                    judgement.outcome.authority(),
+                    brix_semantic::Authority::ProofKernel
+                );
+                assert_eq!(edge.kind, brix_semantic::EdgeKind::ElaborationBoundary);
+                assert_eq!(edge.target, aud.id().digest());
+            }
+            other => panic!("Expected Proven, got {:?}", other),
+        }
+
+        // Determinism check
+        let (aud2, tree2) = audited_type_check_tree(&expr, &ctx, context).unwrap();
+        assert_eq!(aud, aud2);
+        assert_eq!(tree, tree2);
     }
 }
