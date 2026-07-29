@@ -9,15 +9,11 @@ repository.workspace = true
 [dependencies]
 brix-canon = { path = "../brix-canon" }
 brix-ir = { path = "../brix-ir" }
-brix-oracle = { path = "../brix-oracle" }
-brix-rt = { path = "../brix-rt" }
 
 [dev-dependencies]
 brix-ast = { path = "../brix-ast" }
-brix-cli = { path = "../brix-cli" }
 brix-diag = { path = "../brix-diag" }
 brix-semantic = { path = "../brix-semantic" }
-brixc = { path = "../brixc" }
 soc-core = { path = "../soc-core" }
 soc-regimes = { path = "../soc-regimes" }
 insta = { workspace = true }
