@@ -1,6 +1,6 @@
 # ADR-0006 — Proof Kernel Profile 1.2: Realization Tensor (Parallel Composition) Rule
 
-Status: **Proposed** (2026-07-29) (extends [ADR-0004](./ADR-0004_Kernel_Profile_1_1.md) and [ADR-0003](./ADR-0003_Proof_Kernel_Profile.md) §5; governs `brix-kernel`).
+Status: **Accepted** (2026-07-29, ratified by user) (extends [ADR-0004](./ADR-0004_Kernel_Profile_1_1.md) and [ADR-0003](./ADR-0003_Proof_Kernel_Profile.md) §5; governs `brix-kernel`).
 
 Date: 2026-07-29.
 
