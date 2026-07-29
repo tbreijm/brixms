@@ -44,4 +44,6 @@ pub use structural::{
     HasTypeProjection, ProjectedConflict, StructuralProjection, StructuralRegime,
 };
 pub use structural_incremental::StructuralIncremental;
-pub use type_realization::{g_lit, g_var, type_check, Expr, Ty, TyCtx, TypeError};
+pub use type_realization::{
+    audited_type_check, g_lit, g_var, type_check, Expr, Ty, TyCtx, TypeError,
+};

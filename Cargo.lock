@@ -670,7 +670,9 @@ name = "soc-regimes"
 version = "0.0.0"
 dependencies = [
  "brix-canon",
+ "brix-elaborate",
  "brix-ir",
+ "brix-kernel",
  "brix-semantic",
  "soc-core",
 ]
