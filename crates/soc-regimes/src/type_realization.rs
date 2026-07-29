@@ -346,9 +346,48 @@ pub fn type_check(expr: &Expr, ctx: &TyCtx, context: ContextId) -> Result<Judgem
     Ok(Judgement::new(context, prop, Outcome::Derived, evidence))
 }
 
+/// Upgrades a native `type_check` derivation to an `Audited` `Judgement` and
+/// verified `Decomposition` (ADR-0005 Stage 2 depth slice).
+///
+/// Produces a replay-verified decomposition and an `Outcome::Audited` judgement,
+/// suitable for proof kernel elaboration via `brix_elaborate::elaborate_decomposition`.
+pub fn audited_type_check(
+    expr: &Expr,
+    ctx: &TyCtx,
+    context: ContextId,
+) -> Result<(Judgement, Decomposition), TypeError> {
+    let st = Infer::new();
+    let (ty, derivation, final_st) = infer(expr, ctx, st)?;
+    let final_ty = zonk(&ty, &final_st.subst);
+
+    let derivation_witness: WitnessId = compose_chain(&derivation)
+        .expect("derivation chain must contain at least one generator step");
+
+    let src = expr.config_id();
+    let dst = final_ty.config_id();
+
+    let prop = Realizes::new(derivation_witness, src, dst).proposition_id();
+
+    let mut configs = vec![src];
+    configs.resize(derivation.len() + 1, dst);
+
+    let verified_decomp =
+        Decomposition::replay_verified(derivation, configs).expect("replay verified decomposition");
+    let evidence = Evidence::SettlementReplay {
+        body: verified_decomp.id().digest(),
+    }
+    .id();
+
+    let audited = Judgement::new(context, prop, Outcome::Audited, evidence);
+    Ok((audited, verified_decomp))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use brix_elaborate::{elaborate_decomposition, ElaborationResult};
+    use brix_kernel::Budget;
+    use brix_semantic::{Authority, CertificateId, EdgeKind, GeneratorRegistry, VerifierId};
 
     #[test]
     fn test_lit_type_check() {
@@ -511,5 +550,147 @@ mod tests {
 
         let expected_prop = Realizes::new(witness, src, dst).proposition_id();
         assert_eq!(j.proposition, expected_prop);
+    }
+
+    #[test]
+    fn test_literal_elaboration_to_proven() {
+        let expr = Expr::Lit(42);
+        let ctx = TyCtx::new();
+        let context = ContextId::root();
+
+        let (audited_judgement, verified_decomp) =
+            audited_type_check(&expr, &ctx, context).expect("audited type check lit");
+
+        assert_eq!(audited_judgement.outcome, Outcome::Audited);
+
+        let budget = Budget::new(1000, 1000);
+        let res = elaborate_decomposition(&audited_judgement, &verified_decomp, budget);
+
+        match res {
+            ElaborationResult::Proven { judgement, edge } => {
+                assert_eq!(judgement.outcome, Outcome::Proven);
+                assert_eq!(judgement.outcome.authority(), Authority::ProofKernel);
+                assert_eq!(judgement.context, context);
+
+                // Edge assertion: ElaborationBoundary pointing to audited_judgement's id
+                assert_eq!(edge.kind, EdgeKind::ElaborationBoundary);
+                assert_eq!(edge.target, audited_judgement.id().digest());
+
+                // Evidence assertion: KernelCertificate
+                let expected_verifier = VerifierId::named("brix.kernel@0.1");
+                let g1 = g_lit();
+                let src = expr.config_id();
+                let dst = Ty::Con("Int").config_id();
+
+                let h1 = brix_kernel::Prop::Realizes(
+                    brix_kernel::ObjectTerm::Const(brix_semantic::PropositionId(g1.digest())),
+                    brix_kernel::ObjectTerm::Const(brix_semantic::PropositionId(src.digest())),
+                    brix_kernel::ObjectTerm::Const(brix_semantic::PropositionId(dst.digest())),
+                );
+                let goal_prop = brix_kernel::Prop::Realizes(
+                    brix_kernel::ObjectTerm::Const(brix_semantic::PropositionId(g1.digest())),
+                    brix_kernel::ObjectTerm::Const(brix_semantic::PropositionId(src.digest())),
+                    brix_kernel::ObjectTerm::Const(brix_semantic::PropositionId(dst.digest())),
+                );
+                let implication_prop = brix_kernel::Prop::Impl(Box::new(h1), Box::new(goal_prop));
+
+                let explicit_term = brix_kernel::ExplicitTerm::new(
+                    context,
+                    brix_kernel::TermKind::Lam {
+                        var_name: Some("h1".to_string()),
+                        body: Box::new(brix_kernel::TermKind::Hyp(brix_kernel::Var::Index(0))),
+                    },
+                );
+
+                let cert_payload = format!("{context:?}:{implication_prop:?}:{explicit_term:?}");
+                let cert_id = CertificateId::from_canon(cert_payload.as_bytes());
+                let expected_evidence = Evidence::KernelCertificate {
+                    verifier: expected_verifier,
+                    certificate: cert_id,
+                };
+
+                assert_eq!(judgement.evidence, expected_evidence.id());
+                assert_eq!(judgement.proposition, implication_prop.proposition_id());
+            }
+            ElaborationResult::NotElaborated(verdict) => {
+                panic!("Expected Proven, got NotElaborated({verdict:?})");
+            }
+        }
+    }
+
+    #[test]
+    fn test_multi_step_elaboration_tree_vs_linear_tension() {
+        let expr = Expr::App(
+            Box::new(Expr::Lam("x", Box::new(Expr::Var("x")))),
+            Box::new(Expr::Lit(42)),
+        );
+        let ctx = TyCtx::new();
+        let context = ContextId::root();
+
+        let (audited_judgement, verified_decomp) =
+            audited_type_check(&expr, &ctx, context).expect("audited type check identity app");
+
+        // 1. Syntactic elaboration passes via endpoints-only padding because dst == dst in RealizesComp
+        let budget = Budget::new(1000, 1000);
+        let res = elaborate_decomposition(&audited_judgement, &verified_decomp, budget);
+        assert!(
+            matches!(res, ElaborationResult::Proven { .. }),
+            "Padded configs pass syntactic RealizesComp because dst == dst middle match holds"
+        );
+
+        // 2. But padded configs fail semantic audit because g_lam, g_var, g_lit, etc. do NOT realize (dst, dst)
+        let mut registry = GeneratorRegistry::new();
+        registry.insert(g_app());
+        registry.insert(g_lam());
+        registry.insert(g_var());
+        registry.insert(g_lit());
+        registry.insert(g_unify());
+
+        struct NonPaddedSemantics;
+        impl soc_core::GeneratorSemantics for NonPaddedSemantics {
+            fn realizes(&self, _g: &GeneratorId, src: &ConfigId, dst: &ConfigId) -> bool {
+                src != dst
+            }
+        }
+
+        let unverified_decomp = Decomposition::recorded(
+            verified_decomp.generators.clone(),
+            verified_decomp.configs.clone(),
+        )
+        .unwrap();
+
+        let derived_evidence = Evidence::SettlementReplay {
+            body: unverified_decomp.id().digest(),
+        }
+        .id();
+        let derived_id = Judgement::new(
+            context,
+            audited_judgement.proposition,
+            Outcome::Derived,
+            derived_evidence,
+        )
+        .id();
+
+        let step = soc_core::CommittedStep {
+            key: soc_core::Key::new(
+                0,
+                0,
+                brix_canon::Digest::of(brix_canon::Domain::Value, b"app_tiebreak"),
+            ),
+            observation: soc_core::Observation {
+                outcome_class: Outcome::Derived,
+                judgement_digest: derived_id.digest(),
+            },
+            decomposition: unverified_decomp,
+            src: expr.config_id(),
+            dst: Ty::Con("Int").config_id(),
+            witness: compose_chain(&verified_decomp.generators).unwrap(),
+        };
+
+        let audit_res = soc_core::audit_step(&step, context, &registry, &NonPaddedSemantics);
+        assert!(
+            matches!(audit_res, soc_core::AuditResult::Unknown(_)),
+            "Audit MUST fail for endpoints-padded configs under sound generator semantics"
+        );
     }
 }

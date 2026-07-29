@@ -12,5 +12,10 @@ brix-ir = { path = "../brix-ir" }
 brix-semantic = { workspace = true }
 brix-canon = { workspace = true }
 
+[dev-dependencies]
+brix-elaborate = { path = "../brix-elaborate" }
+brix-kernel = { path = "../brix-kernel" }
+
 [lints]
 workspace = true
+
