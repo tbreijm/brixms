@@ -88,9 +88,6 @@ pub fn occurs(v: TyVar, ty: &Ty, subst: &BTreeMap<TyVar, Ty>) -> bool {
         | Ty::Estimate(x)
         | Ty::Missing(x) => occurs(v, x, subst),
         Ty::Result(a, b) | Ty::Map(a, b) => occurs(v, a, subst) || occurs(v, b, subst),
-        Ty::Fn { params, ret, .. } => {
-            params.iter().any(|p| occurs(v, p, subst)) || occurs(v, ret, subst)
-        }
         Ty::Record(row) | Ty::Rel(row) => row.fields.iter().any(|f| occurs(v, &f.ty, subst)),
         _ => false,
     }

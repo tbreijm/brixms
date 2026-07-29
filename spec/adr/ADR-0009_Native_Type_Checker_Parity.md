@@ -45,7 +45,7 @@ The frozen parity contract to reproduce natively (per `type_parity.rs`): **verdi
 
 ## 4. Slice Roadmap (category-driven; each: Fable pins semantics → agy implements → Fable reviews → differential green, coverage up)
 
-- **N1 — Foundation + `Mismatch` + `Occurs`** (this ADR §5). Native `syntax` (core `Expr`/`Ty`), signature table, `translate` (partial), native `analyze` with unification, the differential harness. Covers the fixtures whose only conflicts are `Mismatch`/`Occurs`.
+- **N1 — Foundation + `Mismatch`** (this ADR §5). Native `syntax` (core `Expr`/`Ty`), signature table, `translate` (partial), native `analyze` with unification, the differential harness. Differentially covers scalar `Mismatch` fixtures. **`Occurs` detection is built into the native unifier (a correct unifier needs occurs-check) and unit-tested, but its *differential* coverage defers to the container slice** — every real corpus `Occurs` fixture forces occurs *into a container* (`Option`/`Rel`), untranslatable by the scalar fragment; there is no scalar-only occurs case in the language. **Deliberately NOT patching the brix-ir oracle to manufacture one** (an early N1 draft did; reverted — the oracle's independence is the differential's whole value).
 - **N2 — `Arity`.** Call/op arity checking.
 - **N3 — `UnknownField`.** Records/rows (`Ty::Record(Row)`, `Field`, `Record`).
 - **N4 — `NonBool`.** `If`/guards.
@@ -77,7 +77,7 @@ On failure, the offending expression's type becomes `NTy::Error` (isolation) and
 
 **Native differential harness** (`crates/brix-conformance/tests/native_type_parity.rs`, new): for every `typecorpus` `TypeFixture`:
 1. `translate(&fixture.source)`. If `None`, `covered += 0` (skip, count as not-yet-covered).
-2. Else run native `analyze` **and** `brix_ir::reflect::analyze` on the same source; assert **native conflict-`Category` set == the `Category` set the parity harness already derives from `brix_ir`** (restricted, for N1, to fixtures whose full brix-ir category set ⊆ {`Mismatch`, `Occurs`} — those are the ones N1 fully covers; a fixture with any other category is *not-yet-covered* even if translatable).
+2. Else run native `analyze` **and** `brix_ir::reflect::analyze` on the same source; assert **native conflict-`Category` set == the `Category` set the parity harness already derives from `brix_ir`** (restricted, for N1, to fixtures whose full brix-ir category set ⊆ {`Mismatch`} — the ones N1 fully covers; a fixture with any other category is *not-yet-covered* even if translatable). The native oracle (`brix-ir`) is **never modified** to make a fixture cover.
 3. Assert the **coverage count ≥ a pinned floor** (so future slices cannot silently regress it) and print it.
 
 **Scope note.** N1 does **not** touch `structural.rs`, the flat/tree paths, or `Proven`. It adds a parallel native `analyze` + harness. `brix-ir` remains the oracle. No `.github/workflows/` change (new test binary `native_type_parity` is additive — but confirm CI's nextest filters don't need it named to run; if the acceptance/parity job filters by binary, add it).

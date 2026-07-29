@@ -12,7 +12,15 @@ use brix_ir::types::{IntWidth, Ty};
 use soc_regimes::native::{analyze as native_analyze, translate, NConflict};
 
 /// Pin the observed coverage floor for slice N1.
-const COVERAGE_FLOOR: usize = 2;
+///
+/// N1 covers `Mismatch` differentially (scalar fragment). `Occurs` is NOT
+/// covered here: every real corpus `Occurs` fixture forces occurs *into a
+/// container* (`Option`/`Rel`), which the N1 scalar fragment cannot translate;
+/// a scalar-only occurs case is not exercised by the language. Native occurs
+/// detection is unit-tested in `soc_regimes::native::analyze`; its differential
+/// coverage arrives with the container slice. Do NOT fabricate a scalar occurs
+/// fixture (it would require patching the brix-ir oracle).
+const COVERAGE_FLOOR: usize = 1;
 
 fn reflect_category(kind: &ConflictKind) -> Option<Category> {
     match kind {
@@ -44,10 +52,10 @@ fn conflict_category(c: &NConflict) -> Category {
 fn native_type_parity_corpus_coverage() {
     let mut fixtures = typecorpus::all_type_fixtures();
     fixtures.push(typecorpus::plain_scalar_mismatch());
-    fixtures.push(typecorpus::scalar_occurs_check());
     let total = fixtures.len();
     let mut covered = 0;
-    let allowed_cats = BTreeSet::from([Category::Mismatch, Category::Occurs]);
+    // N1 covers Mismatch only (see COVERAGE_FLOOR). Occurs deferred to the container slice.
+    let allowed_cats = BTreeSet::from([Category::Mismatch]);
 
     for fixture in &fixtures {
         let brix_report = brix_analyze(&fixture.source, &fixture.resolver);

@@ -286,3 +286,53 @@ pub fn analyze(src: &NativeSource) -> NativeReport {
         conflicts: cx.conflicts,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unify_occurs_into_fn_is_detected() {
+        // unify(?0, Fn(?0) -> Int) must fail the occurs-check (?0 occurs in the
+        // function type it would be bound to). Exercises the native occurs path
+        // directly — the container corpus fixtures cover it differentially later.
+        let mut subst = BTreeMap::new();
+        let mut conflicts = Vec::new();
+        let fn_ty = NTy::Fn {
+            params: vec![NTy::Var(0)],
+            ret: Box::new(NTy::Int),
+        };
+        let result = unify(&NTy::Var(0), &fn_ty, &mut subst, &mut conflicts);
+        assert_eq!(result, NTy::Error, "occurs failure must yield Error");
+        assert_eq!(conflicts.len(), 1);
+        assert!(
+            matches!(conflicts[0], NConflict::Occurs { var: 0, .. }),
+            "expected Occurs, got {:?}",
+            conflicts[0]
+        );
+        // ?0 must NOT have been bound (Error never enters the substitution).
+        assert!(!subst.contains_key(&0), "occurs var must stay unbound");
+    }
+
+    #[test]
+    fn unify_scalar_mismatch_is_detected() {
+        let mut subst = BTreeMap::new();
+        let mut conflicts = Vec::new();
+        let result = unify(&NTy::Int, &NTy::Bool, &mut subst, &mut conflicts);
+        assert_eq!(result, NTy::Error);
+        assert!(matches!(conflicts.as_slice(), [NConflict::Mismatch { .. }]));
+    }
+
+    #[test]
+    fn error_unifies_with_anything_without_binding() {
+        let mut subst = BTreeMap::new();
+        let mut conflicts = Vec::new();
+        let result = unify(&NTy::Error, &NTy::Var(0), &mut subst, &mut conflicts);
+        assert_eq!(result, NTy::Error);
+        assert!(
+            conflicts.is_empty(),
+            "Error isolation raises no new conflict"
+        );
+        assert!(subst.is_empty(), "Error must not bind the variable");
+    }
+}
