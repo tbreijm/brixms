@@ -1,9 +1,0 @@
----
-source: crates/brix-conformance/tests/errata.rs
-expression: "render(&revisions[1])"
----
-revision 2
-  Flagged:
-    { code: "x1" }
-  SourceB:
-    { code: "x1" }
