@@ -150,6 +150,10 @@ pub enum TypeError {
     Mismatch,
     InfiniteType,
     Unsupported,
+    /// The built derivation tree is not well-formed (a `Seq` middle does not match),
+    /// so it cannot be honestly labelled `Audited`. Arises when a leaf endpoint config
+    /// captured at sub-inference time is later refined by unification (ADR-0007 §7 limitation).
+    IllFormedDerivation,
 }
 
 /// Immutable inference state containing substitution map and fresh variable counter.
@@ -492,6 +496,11 @@ pub fn audited_type_check_tree(
     context: ContextId,
 ) -> Result<(Judgement, RealizesTree), TypeError> {
     let (ty, tree, _st) = infer_tree(expr, ctx, Infer::new())?;
+    // `Audited` must imply the derivation is a verified decomposition: refuse to label a
+    // malformed tree (a `Seq` middle that does not match) as `Audited`.
+    if !tree.well_formed() {
+        return Err(TypeError::IllFormedDerivation);
+    }
     let witness_id = tree.witness_object().witness_digest();
     let prop = Realizes::new(witness_id, expr.config_id(), ty.config_id()).proposition_id();
     let evidence = Evidence::SettlementReplay {
