@@ -108,6 +108,16 @@ pub fn g_lam() -> GeneratorId {
     GeneratorId::named("type.rule.lam@1")
 }
 
+/// Typing-rule generator for lambda abstraction introduction (`"type.rule.lam.intro@1"`).
+pub fn g_lam_intro() -> GeneratorId {
+    GeneratorId::named("type.rule.lam.intro@1")
+}
+
+/// Typing-rule generator for lambda abstraction closure (`"type.rule.lam.close@1"`).
+pub fn g_lam_close() -> GeneratorId {
+    GeneratorId::named("type.rule.lam.close@1")
+}
+
 /// Typing-rule generator for application splitting (`"type.rule.app.split@1"`).
 pub fn g_split() -> GeneratorId {
     GeneratorId::named("type.rule.app.split@1")
@@ -398,19 +408,81 @@ pub fn audited_type_check(
     Ok((audited, verified_decomp))
 }
 
-/// Infer tree-structured realization derivation for {Lit, Var, App} (ADR-0007).
-pub fn infer_tree(
-    expr: &Expr,
-    ctx: &TyCtx,
-    st: Infer,
-) -> Result<(Ty, RealizesTree, Infer), TypeError> {
+/// Deferred-materialization atom for tree leaf endpoints (ADR-0008).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum CfgAtom {
+    Expr(Expr),
+    Type(Ty),
+}
+
+/// Deferred-materialization tree object (ADR-0008).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TyObj {
+    Atom(CfgAtom),
+    Prod(Box<TyObj>, Box<TyObj>),
+}
+
+/// Deferred-materialization derivation tree (ADR-0008).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TyTree {
+    Leaf {
+        generator: GeneratorId,
+        src: TyObj,
+        dst: TyObj,
+    },
+    Seq {
+        left: Box<TyTree>,
+        right: Box<TyTree>,
+    },
+    Tensor {
+        left: Box<TyTree>,
+        right: Box<TyTree>,
+    },
+}
+
+fn materialize_obj(obj: &TyObj, subst: &BTreeMap<u32, Ty>) -> TreeObj {
+    match obj {
+        TyObj::Atom(CfgAtom::Expr(e)) => TreeObj::Atom(e.config_id()),
+        TyObj::Atom(CfgAtom::Type(t)) => TreeObj::Atom(zonk(t, subst).config_id()),
+        TyObj::Prod(a, b) => TreeObj::Prod(
+            Box::new(materialize_obj(a, subst)),
+            Box::new(materialize_obj(b, subst)),
+        ),
+    }
+}
+
+/// Materializes a `TyTree` into a `RealizesTree` by zonking all type endpoints against `subst` (ADR-0008).
+pub fn materialize(tree: &TyTree, subst: &BTreeMap<u32, Ty>) -> RealizesTree {
+    match tree {
+        TyTree::Leaf {
+            generator,
+            src,
+            dst,
+        } => RealizesTree::Leaf {
+            generator: *generator,
+            src: materialize_obj(src, subst),
+            dst: materialize_obj(dst, subst),
+        },
+        TyTree::Seq { left, right } => RealizesTree::Seq {
+            left: Box::new(materialize(left, subst)),
+            right: Box::new(materialize(right, subst)),
+        },
+        TyTree::Tensor { left, right } => RealizesTree::Tensor {
+            left: Box::new(materialize(left, subst)),
+            right: Box::new(materialize(right, subst)),
+        },
+    }
+}
+
+/// Infer tree-structured realization derivation with deferred config materialization (ADR-0008).
+pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer), TypeError> {
     match expr {
         Expr::Lit(n) => Ok((
             Ty::Con("Int"),
-            RealizesTree::Leaf {
+            TyTree::Leaf {
                 generator: g_lit(),
-                src: TreeObj::Atom(Expr::Lit(*n).config_id()),
-                dst: TreeObj::Atom(Ty::Con("Int").config_id()),
+                src: TyObj::Atom(CfgAtom::Expr(Expr::Lit(*n))),
+                dst: TyObj::Atom(CfgAtom::Type(Ty::Con("Int"))),
             },
             st,
         )),
@@ -421,15 +493,40 @@ pub fn infer_tree(
                 .ok_or_else(|| TypeError::Unbound((*name).to_string()))?;
             Ok((
                 t.clone(),
-                RealizesTree::Leaf {
+                TyTree::Leaf {
                     generator: g_var(),
-                    src: TreeObj::Atom(Expr::Var(name).config_id()),
-                    dst: TreeObj::Atom(t.config_id()),
+                    src: TyObj::Atom(CfgAtom::Expr(Expr::Var(name))),
+                    dst: TyObj::Atom(CfgAtom::Type(t.clone())),
                 },
                 st,
             ))
         }
-        Expr::Lam(_, _) => Err(TypeError::Unsupported),
+        Expr::Lam(p, body) => {
+            let (alpha, st_alpha) = st.fresh_var();
+            let ctx_ext = ctx.extend(p, Ty::Var(alpha));
+            let (tb, d_body, st_prime) = infer_tree(body, &ctx_ext, st_alpha)?;
+            let param_ty = resolve(&Ty::Var(alpha), &st_prime.subst).clone();
+            let fn_ty = Ty::Fn(Box::new(param_ty.clone()), Box::new(tb.clone()));
+
+            let intro = TyTree::Leaf {
+                generator: g_lam_intro(),
+                src: TyObj::Atom(CfgAtom::Expr(Expr::Lam(p, body.clone()))),
+                dst: TyObj::Atom(CfgAtom::Expr((**body).clone())),
+            };
+            let close = TyTree::Leaf {
+                generator: g_lam_close(),
+                src: TyObj::Atom(CfgAtom::Type(tb.clone())),
+                dst: TyObj::Atom(CfgAtom::Type(fn_ty.clone())),
+            };
+            let tree = TyTree::Seq {
+                left: Box::new(intro),
+                right: Box::new(TyTree::Seq {
+                    left: Box::new(d_body),
+                    right: Box::new(close),
+                }),
+            };
+            Ok((fn_ty, tree, st_prime))
+        }
         Expr::App(f, x) => {
             let (tf, df, s1) = infer_tree(f, ctx, st)?;
             let (tx, dx, s2) = infer_tree(x, ctx, s1)?;
@@ -446,32 +543,32 @@ pub fn infer_tree(
             let b = zonk(&Ty::Var(beta), &s3);
             let fn_ty = Ty::Fn(Box::new(a.clone()), Box::new(b.clone()));
 
-            let split = RealizesTree::Leaf {
+            let split = TyTree::Leaf {
                 generator: g_split(),
-                src: TreeObj::Atom(expr.config_id()),
-                dst: TreeObj::Prod(
-                    Box::new(TreeObj::Atom(f.config_id())),
-                    Box::new(TreeObj::Atom(x.config_id())),
+                src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+                dst: TyObj::Prod(
+                    Box::new(TyObj::Atom(CfgAtom::Expr((**f).clone()))),
+                    Box::new(TyObj::Atom(CfgAtom::Expr((**x).clone()))),
                 ),
             };
 
-            let tensor = RealizesTree::Tensor {
+            let tensor = TyTree::Tensor {
                 left: Box::new(df),
                 right: Box::new(dx),
             };
 
-            let app = RealizesTree::Leaf {
+            let app = TyTree::Leaf {
                 generator: g_app2(),
-                src: TreeObj::Prod(
-                    Box::new(TreeObj::Atom(fn_ty.config_id())),
-                    Box::new(TreeObj::Atom(a.config_id())),
+                src: TyObj::Prod(
+                    Box::new(TyObj::Atom(CfgAtom::Type(fn_ty.clone()))),
+                    Box::new(TyObj::Atom(CfgAtom::Type(a.clone()))),
                 ),
-                dst: TreeObj::Atom(b.config_id()),
+                dst: TyObj::Atom(CfgAtom::Type(b.clone())),
             };
 
-            let tree = RealizesTree::Seq {
+            let tree = TyTree::Seq {
                 left: Box::new(split),
-                right: Box::new(RealizesTree::Seq {
+                right: Box::new(TyTree::Seq {
                     left: Box::new(tensor),
                     right: Box::new(app),
                 }),
@@ -489,20 +586,24 @@ pub fn infer_tree(
     }
 }
 
-/// Upgrades a native `infer_tree` derivation to an `Audited` `Judgement` and `RealizesTree` (ADR-0007).
+/// Upgrades a native `infer_tree` derivation to an `Audited` `Judgement` and `RealizesTree` (ADR-0008).
 pub fn audited_type_check_tree(
     expr: &Expr,
     ctx: &TyCtx,
     context: ContextId,
 ) -> Result<(Judgement, RealizesTree), TypeError> {
-    let (ty, tree, _st) = infer_tree(expr, ctx, Infer::new())?;
-    // `Audited` must imply the derivation is a verified decomposition: refuse to label a
-    // malformed tree (a `Seq` middle that does not match) as `Audited`.
+    let (ty, ty_tree, st) = infer_tree(expr, ctx, Infer::new())?;
+    let tree = materialize(&ty_tree, &st.subst);
     if !tree.well_formed() {
         return Err(TypeError::IllFormedDerivation);
     }
     let witness_id = tree.witness_object().witness_digest();
-    let prop = Realizes::new(witness_id, expr.config_id(), ty.config_id()).proposition_id();
+    let prop = Realizes::new(
+        witness_id,
+        expr.config_id(),
+        zonk(&ty, &st.subst).config_id(),
+    )
+    .proposition_id();
     let evidence = Evidence::SettlementReplay {
         body: brix_canon::Digest::of(brix_canon::Domain::Value, prop.digest().as_bytes()),
     }
@@ -878,5 +979,78 @@ mod tests {
         let (aud2, tree2) = audited_type_check_tree(&expr, &ctx, context).unwrap();
         assert_eq!(aud, aud2);
         assert_eq!(tree, tree2);
+    }
+
+    #[test]
+    fn test_lambda_end_to_end() {
+        let expr = Expr::App(
+            Box::new(Expr::Lam("x", Box::new(Expr::Var("x")))),
+            Box::new(Expr::Lit(42)),
+        );
+        let ctx = TyCtx::new();
+        let (aud, tree) = audited_type_check_tree(&expr, &ctx, ContextId::root()).unwrap();
+        assert_eq!(aud.outcome, Outcome::Audited);
+
+        let res = brix_elaborate::elaborate_tree(&aud, &tree, Budget::new(2000, 2000));
+        match res {
+            ElaborationResult::Proven { judgement, edge } => {
+                assert_eq!(judgement.outcome, Outcome::Proven);
+                assert_eq!(judgement.outcome.authority(), Authority::ProofKernel);
+                assert_eq!(edge.kind, EdgeKind::ElaborationBoundary);
+                assert_eq!(edge.target, aud.id().digest());
+            }
+            other => panic!("Expected Proven, got {:?}", other),
+        }
+
+        let expected_prop = Realizes::new(
+            tree.witness_object().witness_digest(),
+            expr.config_id(),
+            Ty::Con("Int").config_id(),
+        )
+        .proposition_id();
+        assert_eq!(aud.proposition, expected_prop);
+    }
+
+    #[test]
+    fn test_lambda_zonk_fired() {
+        let expr = Expr::App(
+            Box::new(Expr::Lam("x", Box::new(Expr::Var("x")))),
+            Box::new(Expr::Lit(42)),
+        );
+        let ctx = TyCtx::new();
+        let (_, ty_tree, st) = infer_tree(&expr, &ctx, Infer::new()).unwrap();
+        let tree = materialize(&ty_tree, &st.subst);
+
+        if let RealizesTree::Seq { right: app_seq, .. } = &tree {
+            if let RealizesTree::Seq { left: tensor, .. } = app_seq.as_ref() {
+                if let RealizesTree::Tensor { left: df, .. } = tensor.as_ref() {
+                    if let RealizesTree::Seq { right: lam_seq, .. } = df.as_ref() {
+                        if let RealizesTree::Seq {
+                            right: close_box, ..
+                        } = lam_seq.as_ref()
+                        {
+                            if let RealizesTree::Leaf { generator, dst, .. } = close_box.as_ref() {
+                                assert_eq!(*generator, g_lam_close());
+                                let expected_fn_config =
+                                    Ty::Fn(Box::new(Ty::Con("Int")), Box::new(Ty::Con("Int")))
+                                        .config_id();
+                                assert_eq!(*dst, TreeObj::Atom(expected_fn_config));
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        panic!("Failed to navigate tree to g_lam_close leaf");
+    }
+
+    #[test]
+    fn test_bare_lambda_audited() {
+        let expr = Expr::Lam("x", Box::new(Expr::Var("x")));
+        let ctx = TyCtx::new();
+        let (aud, tree) = audited_type_check_tree(&expr, &ctx, ContextId::root()).unwrap();
+        assert_eq!(aud.outcome, Outcome::Audited);
+        assert!(tree.well_formed());
     }
 }
