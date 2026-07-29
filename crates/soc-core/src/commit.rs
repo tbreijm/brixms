@@ -26,9 +26,7 @@
 //! call site differs, for the reason above.
 
 use brix_canon::{CanonWriter, Canonical, Digest};
-use brix_semantic::{
-    ConfigId, ContextId, Decomposition, Evidence, Judgement, Outcome, Realizes, WitnessId,
-};
+use brix_semantic::{ConfigId, ContextId, Decomposition, Evidence, Judgement, Outcome, Realizes};
 
 use crate::adm::Adm;
 use crate::calendar::{Frontier, Key};
@@ -113,10 +111,11 @@ pub trait SettlementRegime: Regime {
 ///    [`Committed::Quiescent`] (the `1` summand); otherwise the selected
 ///    `(Candidate, regime)` commits.
 /// 3. **Commit boundary** (ADR-0002 §9.2: "digests computed at boundaries,
-///    not in the hot loop") — resolve `e.world`/`candidate.successor`/
-///    `candidate.witness` through `interner` to digests, build
-///    `Realizes(witness, src, dst)`'s `PropositionId`, obtain the regime's
-///    recorded (unverified) [`Decomposition`], wrap it as
+///    not in the hot loop") — resolve `e.world`/`candidate.successor` through
+///    `interner` to digests, obtain the regime's recorded (unverified)
+///    [`Decomposition`], set `witness` to the canonical composition of its
+///    generators ([`brix_semantic::compose_chain`]), build
+///    `Realizes(witness, src, dst)`'s `PropositionId`, wrap the decomposition as
 ///    `Evidence::SettlementReplay`, and build the committed
 ///    `Judgement::new(context, proposition, Outcome::Derived, evidence)`.
 ///    The [`Observation`] is `{ outcome_class: Derived, judgement_digest }`.
@@ -181,11 +180,11 @@ where
 
     let src = ConfigId(interner.resolve(e.world));
     let dst = ConfigId(interner.resolve(candidate.successor));
-    // WitnessId is a `pub Digest` newtype (see `brix_semantic::id::digest_id!`);
-    // the interned digest *is* already the witness's canonical identity, so
-    // we wrap it directly rather than re-hashing it through `from_canon`
-    // (which would produce a different, wrong id).
-    let witness = WitnessId(interner.resolve(candidate.witness));
+    // Option 1 step 3: committed witness identity IS the canonical composition
+    // of its generators (`k = g_n ∘ … ∘ g_1`). `candidate.witness` is the
+    // regime's proposal; the COMMITTED identity is derived from the factorization.
+    let witness = brix_semantic::compose_chain(&decomposition.generators)
+        .expect("a committed step has >= 1 generator");
 
     let proposition = Realizes::new(witness, src, dst).proposition_id();
     let evidence = Evidence::SettlementReplay {
@@ -427,8 +426,6 @@ mod tests {
         // known handles — non-vacuous, since this does not call commit_tick.
         let src = ConfigId(i.resolve(e.world));
         let dst = ConfigId(i.resolve(regime.successor));
-        let witness = WitnessId(i.resolve(regime.witness));
-        let proposition = Realizes::new(witness, src, dst).proposition_id();
         let decomposition = Decomposition::recorded(
             vec![GeneratorId::named("fixture.step@1")],
             vec![
@@ -437,6 +434,8 @@ mod tests {
             ],
         )
         .unwrap();
+        let witness = brix_semantic::compose_chain(&decomposition.generators).unwrap();
+        let proposition = Realizes::new(witness, src, dst).proposition_id();
         let evidence = Evidence::SettlementReplay {
             body: decomposition.id().digest(),
         }
@@ -565,5 +564,88 @@ mod tests {
             Journal::replay_chain(journal_a.steps()),
             journal_a.step_digests()
         );
+    }
+
+    struct MultiGenRegime {
+        id: Handle,
+        witness: Handle,
+        successor: Handle,
+        generators: Vec<GeneratorId>,
+        configs: Vec<ConfigId>,
+    }
+
+    impl Regime for MultiGenRegime {
+        fn candidates(&self, _e: &ExecConfig) -> Vec<Candidate> {
+            vec![Candidate {
+                regime: self.id,
+                witness: self.witness,
+                successor: self.successor,
+            }]
+        }
+    }
+
+    impl SettlementRegime for MultiGenRegime {
+        fn decompose(&self, _e: &ExecConfig, _c: &Candidate) -> Decomposition {
+            Decomposition::recorded(self.generators.clone(), self.configs.clone()).unwrap()
+        }
+    }
+
+    #[test]
+    fn committed_witness_is_generator_composition_over_multi_generator_decomposition() {
+        let mut i = Interner::new();
+        let world = i.intern(Digest::of(Domain::Value, b"mw0"));
+        let policy = i.intern(Digest::of(Domain::Value, b"mp0"));
+        let regime = i.intern(Digest::of(Domain::Value, b"mr"));
+        let witness_handle = i.intern(Digest::of(Domain::Value, b"mwit"));
+        let successor = i.intern(Digest::of(Domain::Value, b"mw1"));
+        let e = ExecConfig::new(world, policy, History::empty().digest());
+
+        let generators = vec![
+            GeneratorId::named("multi.step@1"),
+            GeneratorId::named("multi.step@2"),
+            GeneratorId::named("multi.step@3"),
+        ];
+        let configs = vec![
+            ConfigId::from_canon(b"multi-x0"),
+            ConfigId::from_canon(b"multi-x1"),
+            ConfigId::from_canon(b"multi-x2"),
+            ConfigId::from_canon(b"multi-x3"),
+        ];
+
+        let multi_regime = MultiGenRegime {
+            id: regime,
+            witness: witness_handle,
+            successor,
+            generators: generators.clone(),
+            configs: configs.clone(),
+        };
+
+        let regimes: Vec<&dyn SettlementRegime> = vec![&multi_regime];
+        let context = ContextId::root();
+        let (committed, step_opt, _cost) =
+            commit_tick(&regimes, &AdmAll, &i, &e, context, 0, &mut |c, phase| {
+                Key::new(phase, 0, tiebreak_of(c))
+            });
+
+        let step = step_opt.expect("expected a committed step");
+        let Committed::Step { observation, .. } = committed else {
+            panic!("expected a committed step");
+        };
+
+        let expected_witness = brix_semantic::compose_chain(&generators).unwrap();
+        assert_eq!(step.witness, expected_witness);
+
+        let src = ConfigId(i.resolve(e.world));
+        let dst = ConfigId(i.resolve(multi_regime.successor));
+        let expected_proposition = Realizes::new(expected_witness, src, dst).proposition_id();
+
+        let evidence = Evidence::SettlementReplay {
+            body: step.decomposition.id().digest(),
+        }
+        .id();
+        let expected_judgement_id =
+            Judgement::new(context, expected_proposition, Outcome::Derived, evidence).id();
+
+        assert_eq!(observation.judgement_digest, expected_judgement_id.digest());
     }
 }
