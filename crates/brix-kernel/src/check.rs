@@ -106,10 +106,15 @@ fn obj_term_contains(term: &ObjectTerm, target: &ObjectTerm) -> bool {
     if term == target {
         return true;
     }
-    if let ObjectTerm::Compose(g2, g1) = term {
-        return obj_term_contains(g2, target) || obj_term_contains(g1, target);
+    match term {
+        ObjectTerm::Compose(g2, g1) => {
+            obj_term_contains(g2, target) || obj_term_contains(g1, target)
+        }
+        ObjectTerm::Tensor(left, right) => {
+            obj_term_contains(left, target) || obj_term_contains(right, target)
+        }
+        _ => false,
     }
-    false
 }
 
 /// Helper to check if an object term `target` occurs free in `prop`.
@@ -339,6 +344,62 @@ fn check_type(
                 brix_semantic::compose(g2.witness_digest(), g1.witness_digest());
             if w.witness_digest() != expected_witness_id {
                 let expected_witness = ObjectTerm::Compose(Box::new(g2), Box::new(g1));
+                return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                    expected: format!("Witness {expected_witness:?}"),
+                    found: format!("{w:?}"),
+                }));
+            }
+
+            Ok(())
+        }
+
+        // (RealizesTensor) Realization Tensor (Profile 1.2)
+        (TermKind::RealizesTensor { left, right }, Prop::Realizes(w, x, z)) => {
+            let left_type = infer_type(state, gamma, left)?;
+            let (w1, x1, y1) = match left_type {
+                Prop::Realizes(w1, x1, y1) => (w1, x1, y1),
+                other => {
+                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                        expected: "Realizes(w1, x1, y1)".into(),
+                        found: format!("{other:?}"),
+                    }));
+                }
+            };
+
+            let right_type = infer_type(state, gamma, right)?;
+            let (w2, x2, y2) = match right_type {
+                Prop::Realizes(w2, x2, y2) => (w2, x2, y2),
+                other => {
+                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                        expected: "Realizes(w2, x2, y2)".into(),
+                        found: format!("{other:?}"),
+                    }));
+                }
+            };
+
+            // Side condition (a): Source match: *x MUST structurally equal ObjectTerm::Tensor(x1, x2)
+            let expected_source = ObjectTerm::Tensor(Box::new(x1), Box::new(x2));
+            if *x != expected_source {
+                return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                    expected: format!("Source endpoint {expected_source:?}"),
+                    found: format!("{x:?}"),
+                }));
+            }
+
+            // Side condition (b): Target match: *z MUST structurally equal ObjectTerm::Tensor(y1, y2)
+            let expected_target = ObjectTerm::Tensor(Box::new(y1), Box::new(y2));
+            if *z != expected_target {
+                return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                    expected: format!("Target endpoint {expected_target:?}"),
+                    found: format!("{z:?}"),
+                }));
+            }
+
+            // Side condition (c): Witness match (digest-based): w.witness_digest() == tensor(w1.witness_digest(), w2.witness_digest())
+            let expected_witness_id =
+                brix_semantic::tensor(w1.witness_digest(), w2.witness_digest());
+            if w.witness_digest() != expected_witness_id {
+                let expected_witness = ObjectTerm::Tensor(Box::new(w1), Box::new(w2));
                 return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
                     expected: format!("Witness {expected_witness:?}"),
                     found: format!("{w:?}"),
@@ -582,6 +643,37 @@ fn infer_type(
             ))
         }
 
+        // (RealizesTensor) Realization Tensor (Profile 1.2)
+        TermKind::RealizesTensor { left, right } => {
+            let left_type = infer_type(state, gamma, left)?;
+            let (w1, x1, y1) = match left_type {
+                Prop::Realizes(w1, x1, y1) => (w1, x1, y1),
+                other => {
+                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                        expected: "Realizes(w1, x1, y1)".into(),
+                        found: format!("{other:?}"),
+                    }));
+                }
+            };
+
+            let right_type = infer_type(state, gamma, right)?;
+            let (w2, x2, y2) = match right_type {
+                Prop::Realizes(w2, x2, y2) => (w2, x2, y2),
+                other => {
+                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                        expected: "Realizes(w2, x2, y2)".into(),
+                        found: format!("{other:?}"),
+                    }));
+                }
+            };
+
+            Ok(Prop::Realizes(
+                ObjectTerm::Tensor(Box::new(w1), Box::new(w2)),
+                ObjectTerm::Tensor(Box::new(x1), Box::new(x2)),
+                ObjectTerm::Tensor(Box::new(y1), Box::new(y2)),
+            ))
+        }
+
         // Out-of-slice unsupported construct placeholder
         TermKind::Unsupported(msg) => Err(Verdict::Unsupported(UnsupportedConstruct::Construct(
             msg.clone(),
@@ -594,7 +686,7 @@ fn infer_type(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brix_semantic::{compose_chain, GeneratorId};
+    use brix_semantic::{compose_chain, GeneratorId, WitnessId};
 
     #[test]
     fn test_realizes_comp_const_composite_witness_accepted() {
@@ -689,6 +781,372 @@ mod tests {
         assert!(
             matches!(verdict, Verdict::Rejected(_)),
             "RealizesComp with wrong Const composite witness should be Rejected, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn test_realizes_tensor_accept() {
+        let ctx = ContextId::from_canon(b"test_context");
+        let w1 = ObjectTerm::Const(PropositionId::from_canon(b"w1"));
+        let w2 = ObjectTerm::Const(PropositionId::from_canon(b"w2"));
+
+        let x1 = ObjectTerm::Const(PropositionId::from_canon(b"x1"));
+        let y1 = ObjectTerm::Const(PropositionId::from_canon(b"y1"));
+        let x2 = ObjectTerm::Const(PropositionId::from_canon(b"x2"));
+        let y2 = ObjectTerm::Const(PropositionId::from_canon(b"y2"));
+
+        let p1 = Prop::Realizes(w1.clone(), x1.clone(), y1.clone());
+        let p2 = Prop::Realizes(w2.clone(), x2.clone(), y2.clone());
+
+        let goal_w = ObjectTerm::Tensor(Box::new(w1), Box::new(w2));
+        let goal_x = ObjectTerm::Tensor(Box::new(x1), Box::new(x2));
+        let goal_y = ObjectTerm::Tensor(Box::new(y1), Box::new(y2));
+        let goal = Prop::Realizes(goal_w, goal_x, goal_y);
+
+        let full_goal = Prop::Impl(
+            Box::new(p1),
+            Box::new(Prop::Impl(Box::new(p2), Box::new(goal))),
+        );
+
+        let term = ExplicitTerm::new(
+            ctx,
+            TermKind::Lam {
+                var_name: Some("h1".into()),
+                body: Box::new(TermKind::Lam {
+                    var_name: Some("h2".into()),
+                    body: Box::new(TermKind::RealizesTensor {
+                        left: Box::new(TermKind::Hyp(Var::Named("h1".into()))),
+                        right: Box::new(TermKind::Hyp(Var::Named("h2".into()))),
+                    }),
+                }),
+            },
+        );
+
+        let budget = Budget::new(100, 100);
+        let verdict = acceptance(&ctx, &full_goal, &term, budget);
+
+        assert!(
+            matches!(verdict, Verdict::Accepted(_)),
+            "RealizesTensor should be Accepted, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn test_realizes_tensor_const_composite_witness_accepted() {
+        let ctx = ContextId::from_canon(b"test_context");
+        let w1_gen = GeneratorId::named("gen_1");
+        let w2_gen = GeneratorId::named("gen_2");
+
+        let w1 = ObjectTerm::Const(PropositionId(w1_gen.digest()));
+        let w2 = ObjectTerm::Const(PropositionId(w2_gen.digest()));
+
+        let x1 = ObjectTerm::Const(PropositionId::from_canon(b"x1"));
+        let y1 = ObjectTerm::Const(PropositionId::from_canon(b"y1"));
+        let x2 = ObjectTerm::Const(PropositionId::from_canon(b"x2"));
+        let y2 = ObjectTerm::Const(PropositionId::from_canon(b"y2"));
+
+        let p1 = Prop::Realizes(w1, x1.clone(), y1.clone());
+        let p2 = Prop::Realizes(w2, x2.clone(), y2.clone());
+
+        let tens_witness_id =
+            brix_semantic::tensor(WitnessId::from(w1_gen), WitnessId::from(w2_gen));
+        let goal_witness = ObjectTerm::Const(PropositionId(tens_witness_id.digest()));
+
+        let goal_x = ObjectTerm::Tensor(Box::new(x1), Box::new(x2));
+        let goal_y = ObjectTerm::Tensor(Box::new(y1), Box::new(y2));
+        let goal = Prop::Realizes(goal_witness, goal_x, goal_y);
+
+        let full_goal = Prop::Impl(
+            Box::new(p1),
+            Box::new(Prop::Impl(Box::new(p2), Box::new(goal))),
+        );
+
+        let term = ExplicitTerm::new(
+            ctx,
+            TermKind::Lam {
+                var_name: Some("h1".into()),
+                body: Box::new(TermKind::Lam {
+                    var_name: Some("h2".into()),
+                    body: Box::new(TermKind::RealizesTensor {
+                        left: Box::new(TermKind::Hyp(Var::Named("h1".into()))),
+                        right: Box::new(TermKind::Hyp(Var::Named("h2".into()))),
+                    }),
+                }),
+            },
+        );
+
+        let budget = Budget::new(100, 100);
+        let verdict = acceptance(&ctx, &full_goal, &term, budget);
+
+        assert!(
+            matches!(verdict, Verdict::Accepted(_)),
+            "RealizesTensor with Const of tensored witness identity should be Accepted, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn test_realizes_tensor_reject_wrong_witness() {
+        let ctx = ContextId::from_canon(b"test_context");
+        let w1 = ObjectTerm::Const(PropositionId::from_canon(b"w1"));
+        let w2 = ObjectTerm::Const(PropositionId::from_canon(b"w2"));
+
+        let x1 = ObjectTerm::Const(PropositionId::from_canon(b"x1"));
+        let y1 = ObjectTerm::Const(PropositionId::from_canon(b"y1"));
+        let x2 = ObjectTerm::Const(PropositionId::from_canon(b"x2"));
+        let y2 = ObjectTerm::Const(PropositionId::from_canon(b"y2"));
+
+        let p1 = Prop::Realizes(w1, x1.clone(), y1.clone());
+        let p2 = Prop::Realizes(w2, x2.clone(), y2.clone());
+
+        let wrong_witness = ObjectTerm::Const(PropositionId::from_canon(b"wrong_witness"));
+        let goal_x = ObjectTerm::Tensor(Box::new(x1), Box::new(x2));
+        let goal_y = ObjectTerm::Tensor(Box::new(y1), Box::new(y2));
+        let goal = Prop::Realizes(wrong_witness, goal_x, goal_y);
+
+        let full_goal = Prop::Impl(
+            Box::new(p1),
+            Box::new(Prop::Impl(Box::new(p2), Box::new(goal))),
+        );
+
+        let term = ExplicitTerm::new(
+            ctx,
+            TermKind::Lam {
+                var_name: Some("h1".into()),
+                body: Box::new(TermKind::Lam {
+                    var_name: Some("h2".into()),
+                    body: Box::new(TermKind::RealizesTensor {
+                        left: Box::new(TermKind::Hyp(Var::Named("h1".into()))),
+                        right: Box::new(TermKind::Hyp(Var::Named("h2".into()))),
+                    }),
+                }),
+            },
+        );
+
+        let budget = Budget::new(100, 100);
+        let verdict = acceptance(&ctx, &full_goal, &term, budget);
+
+        assert!(
+            matches!(verdict, Verdict::Rejected(_)),
+            "RealizesTensor with wrong witness should be Rejected, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn test_realizes_tensor_reject_swapped_order() {
+        let ctx = ContextId::from_canon(b"test_context");
+        let w1 = ObjectTerm::Const(PropositionId::from_canon(b"w1"));
+        let w2 = ObjectTerm::Const(PropositionId::from_canon(b"w2"));
+
+        let x1 = ObjectTerm::Const(PropositionId::from_canon(b"x1"));
+        let y1 = ObjectTerm::Const(PropositionId::from_canon(b"y1"));
+        let x2 = ObjectTerm::Const(PropositionId::from_canon(b"x2"));
+        let y2 = ObjectTerm::Const(PropositionId::from_canon(b"y2"));
+
+        let p1 = Prop::Realizes(w1.clone(), x1.clone(), y1.clone());
+        let p2 = Prop::Realizes(w2.clone(), x2.clone(), y2.clone());
+
+        let goal_w = ObjectTerm::Tensor(Box::new(w1), Box::new(w2));
+        // Swapped source: Tensor(x2, x1) instead of Tensor(x1, x2)
+        let swapped_source = ObjectTerm::Tensor(Box::new(x2), Box::new(x1));
+        let goal_y = ObjectTerm::Tensor(Box::new(y1), Box::new(y2));
+        let goal = Prop::Realizes(goal_w, swapped_source, goal_y);
+
+        let full_goal = Prop::Impl(
+            Box::new(p1),
+            Box::new(Prop::Impl(Box::new(p2), Box::new(goal))),
+        );
+
+        let term = ExplicitTerm::new(
+            ctx,
+            TermKind::Lam {
+                var_name: Some("h1".into()),
+                body: Box::new(TermKind::Lam {
+                    var_name: Some("h2".into()),
+                    body: Box::new(TermKind::RealizesTensor {
+                        left: Box::new(TermKind::Hyp(Var::Named("h1".into()))),
+                        right: Box::new(TermKind::Hyp(Var::Named("h2".into()))),
+                    }),
+                }),
+            },
+        );
+
+        let budget = Budget::new(100, 100);
+        let verdict = acceptance(&ctx, &full_goal, &term, budget);
+
+        assert!(
+            matches!(verdict, Verdict::Rejected(_)),
+            "RealizesTensor with swapped source order should be Rejected, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn test_realizes_tensor_reject_wrong_source_or_target() {
+        let ctx = ContextId::from_canon(b"test_context");
+        let w1 = ObjectTerm::Const(PropositionId::from_canon(b"w1"));
+        let w2 = ObjectTerm::Const(PropositionId::from_canon(b"w2"));
+
+        let x1 = ObjectTerm::Const(PropositionId::from_canon(b"x1"));
+        let y1 = ObjectTerm::Const(PropositionId::from_canon(b"y1"));
+        let x2 = ObjectTerm::Const(PropositionId::from_canon(b"x2"));
+        let y2 = ObjectTerm::Const(PropositionId::from_canon(b"y2"));
+
+        let p1 = Prop::Realizes(w1.clone(), x1.clone(), y1.clone());
+        let p2 = Prop::Realizes(w2.clone(), x2.clone(), y2.clone());
+
+        let goal_w = ObjectTerm::Tensor(Box::new(w1), Box::new(w2));
+        let wrong_source = ObjectTerm::Const(PropositionId::from_canon(b"wrong_source"));
+        let goal_y = ObjectTerm::Tensor(Box::new(y1), Box::new(y2));
+        let goal = Prop::Realizes(goal_w, wrong_source, goal_y);
+
+        let full_goal = Prop::Impl(
+            Box::new(p1),
+            Box::new(Prop::Impl(Box::new(p2), Box::new(goal))),
+        );
+
+        let term = ExplicitTerm::new(
+            ctx,
+            TermKind::Lam {
+                var_name: Some("h1".into()),
+                body: Box::new(TermKind::Lam {
+                    var_name: Some("h2".into()),
+                    body: Box::new(TermKind::RealizesTensor {
+                        left: Box::new(TermKind::Hyp(Var::Named("h1".into()))),
+                        right: Box::new(TermKind::Hyp(Var::Named("h2".into()))),
+                    }),
+                }),
+            },
+        );
+
+        let budget = Budget::new(100, 100);
+        let verdict = acceptance(&ctx, &full_goal, &term, budget);
+
+        assert!(
+            matches!(verdict, Verdict::Rejected(_)),
+            "RealizesTensor with wrong source should be Rejected, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn test_realizes_tensor_reject_non_realizes_branch() {
+        let ctx = ContextId::from_canon(b"test_context");
+        let non_realizes_p1 = Prop::Atom(PropositionId::from_canon(b"atom"));
+        let p2 = Prop::Realizes(
+            ObjectTerm::Const(PropositionId::from_canon(b"w2")),
+            ObjectTerm::Const(PropositionId::from_canon(b"x2")),
+            ObjectTerm::Const(PropositionId::from_canon(b"y2")),
+        );
+
+        let goal = Prop::Atom(PropositionId::from_canon(b"dummy"));
+
+        let full_goal = Prop::Impl(
+            Box::new(non_realizes_p1),
+            Box::new(Prop::Impl(Box::new(p2), Box::new(goal))),
+        );
+
+        let term = ExplicitTerm::new(
+            ctx,
+            TermKind::Lam {
+                var_name: Some("h1".into()),
+                body: Box::new(TermKind::Lam {
+                    var_name: Some("h2".into()),
+                    body: Box::new(TermKind::RealizesTensor {
+                        left: Box::new(TermKind::Hyp(Var::Named("h1".into()))),
+                        right: Box::new(TermKind::Hyp(Var::Named("h2".into()))),
+                    }),
+                }),
+            },
+        );
+
+        let budget = Budget::new(100, 100);
+        let verdict = acceptance(&ctx, &full_goal, &term, budget);
+
+        assert!(
+            matches!(verdict, Verdict::Rejected(_)),
+            "RealizesTensor with non-Realizes branch should be Rejected, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn test_realizes_tensor_adequacy_app_shape() {
+        let ctx = ContextId::from_canon(b"test_context");
+
+        let w_f = ObjectTerm::Const(PropositionId::from_canon(b"w_f"));
+        let w_x = ObjectTerm::Const(PropositionId::from_canon(b"w_x"));
+        let g_split = ObjectTerm::Const(PropositionId::from_canon(b"g_split"));
+        let g_app = ObjectTerm::Const(PropositionId::from_canon(b"g_app"));
+
+        let cfg_f_x = ObjectTerm::Const(PropositionId::from_canon(b"cfg(f_x)"));
+        let cfg_f = ObjectTerm::Const(PropositionId::from_canon(b"cfg(f)"));
+        let cfg_x = ObjectTerm::Const(PropositionId::from_canon(b"cfg(x)"));
+        let cfg_a_to_b = ObjectTerm::Const(PropositionId::from_canon(b"cfg(A->B)"));
+        let cfg_a = ObjectTerm::Const(PropositionId::from_canon(b"cfg(A)"));
+        let cfg_b = ObjectTerm::Const(PropositionId::from_canon(b"cfg(B)"));
+
+        let tens_f_x_src = ObjectTerm::Tensor(Box::new(cfg_f.clone()), Box::new(cfg_x.clone()));
+        let tens_arr_a_dst =
+            ObjectTerm::Tensor(Box::new(cfg_a_to_b.clone()), Box::new(cfg_a.clone()));
+
+        // Premises
+        let p_df = Prop::Realizes(w_f.clone(), cfg_f, cfg_a_to_b);
+        let p_dx = Prop::Realizes(w_x.clone(), cfg_x, cfg_a);
+        let p_split = Prop::Realizes(g_split.clone(), cfg_f_x.clone(), tens_f_x_src);
+        let p_app = Prop::Realizes(g_app.clone(), tens_arr_a_dst, cfg_b.clone());
+
+        // Composite witness: compose(g_app, compose(tensor(w_f, w_x), g_split))
+        let w_tens = ObjectTerm::Tensor(Box::new(w_f), Box::new(w_x));
+        let w_inner_comp = ObjectTerm::Compose(Box::new(w_tens), Box::new(g_split));
+        let w_total = ObjectTerm::Compose(Box::new(g_app), Box::new(w_inner_comp));
+
+        let goal = Prop::Realizes(w_total, cfg_f_x, cfg_b);
+
+        let full_goal = Prop::Impl(
+            Box::new(p_df),
+            Box::new(Prop::Impl(
+                Box::new(p_dx),
+                Box::new(Prop::Impl(
+                    Box::new(p_split),
+                    Box::new(Prop::Impl(Box::new(p_app), Box::new(goal))),
+                )),
+            )),
+        );
+
+        // term: \df. \dx. \gsplit. \gapp. compose(gapp, compose(tensor(df, dx), gsplit))
+        let inner_tensor = TermKind::RealizesTensor {
+            left: Box::new(TermKind::Hyp(Var::Named("df".into()))),
+            right: Box::new(TermKind::Hyp(Var::Named("dx".into()))),
+        };
+        let inner_comp = TermKind::RealizesComp {
+            left: Box::new(TermKind::Hyp(Var::Named("gsplit".into()))),
+            right: Box::new(inner_tensor),
+        };
+        let total_comp = TermKind::RealizesComp {
+            left: Box::new(inner_comp),
+            right: Box::new(TermKind::Hyp(Var::Named("gapp".into()))),
+        };
+
+        let term = ExplicitTerm::new(
+            ctx,
+            TermKind::Lam {
+                var_name: Some("df".into()),
+                body: Box::new(TermKind::Lam {
+                    var_name: Some("dx".into()),
+                    body: Box::new(TermKind::Lam {
+                        var_name: Some("gsplit".into()),
+                        body: Box::new(TermKind::Lam {
+                            var_name: Some("gapp".into()),
+                            body: Box::new(total_comp),
+                        }),
+                    }),
+                }),
+            },
+        );
+
+        let budget = Budget::new(100, 100);
+        let verdict = acceptance(&ctx, &full_goal, &term, budget);
+
+        assert!(
+            matches!(verdict, Verdict::Accepted(_)),
+            "App-shape adequacy tensor/compose derivation should be Accepted, got {verdict:?}"
         );
     }
 }
