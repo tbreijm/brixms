@@ -257,8 +257,10 @@ dependencies = [
 name = "brix-elaborate"
 version = "0.0.0"
 dependencies = [
+ "brix-canon",
  "brix-kernel",
  "brix-semantic",
+ "soc-core",
 ]
 
 [[package]]

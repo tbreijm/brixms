@@ -41,7 +41,8 @@ fn positive_elaboration_produces_proven_judgement() {
             assert_eq!(judgement.outcome, Outcome::Proven);
             assert_eq!(judgement.outcome.authority(), Authority::ProofKernel);
             assert_eq!(judgement.context, source.context);
-            assert_eq!(judgement.proposition, source.proposition);
+            assert_eq!(judgement.proposition, kernel_prop.proposition_id());
+            assert_ne!(judgement.proposition, source.proposition);
 
             // Assert edge is ElaborationBoundary pointing to source
             assert_eq!(edge.kind, EdgeKind::ElaborationBoundary);

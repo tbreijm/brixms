@@ -66,6 +66,13 @@ pub enum Prop {
     Preserves(ObjectTerm, Box<Prop>),
 }
 
+impl Prop {
+    /// Compute the [`PropositionId`] of this canonical proposition.
+    pub fn proposition_id(&self) -> PropositionId {
+        PropositionId::of(self)
+    }
+}
+
 /// Variable reference into context \(\Gamma\).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Var {
