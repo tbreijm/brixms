@@ -1,7 +1,7 @@
 //! Proof term representations (`ExplicitTerm`, `TermKind`, `Var`), object terms (`ObjectTerm`), and propositions (`Prop`).
 
 use brix_canon::{CanonWriter, Canonical};
-use brix_semantic::{ContextId, PropositionId};
+use brix_semantic::{compose, ContextId, PropositionId, WitnessId};
 
 /// Object terms (ADR-0003 §5).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -12,6 +12,28 @@ pub enum ObjectTerm {
     BoundVar(usize),
     /// Generator composition compose(g2, g1) meaning outer g2, inner g1 (Profile 1.1).
     Compose(Box<ObjectTerm>, Box<ObjectTerm>),
+}
+
+impl ObjectTerm {
+    /// Compute the [`WitnessId`] identity of this object term.
+    ///
+    /// - `Const(id)`: returns `WitnessId(id.digest())`, matching `brix-semantic`'s primitive
+    ///   generator witness identity derivation (`WitnessId(generator_id.digest())`).
+    /// - `Compose(outer, inner)`: recursively computes and returns
+    ///   `compose(outer.witness_digest(), inner.witness_digest())`.
+    /// - `BoundVar(_)`: a bound variable in witness position is malformed; returns a deterministic
+    ///   sentinel `WitnessId::from_canon(b"brix.kernel.witness_digest.bound_var")`.
+    pub fn witness_digest(&self) -> WitnessId {
+        match self {
+            ObjectTerm::Const(id) => WitnessId(id.digest()),
+            ObjectTerm::Compose(outer, inner) => {
+                compose(outer.witness_digest(), inner.witness_digest())
+            }
+            ObjectTerm::BoundVar(_) => {
+                WitnessId::from_canon(b"brix.kernel.witness_digest.bound_var")
+            }
+        }
+    }
 }
 
 /// A proposition in intuitionistic propositional logic (Profile 1, extended in Slice 2b).
@@ -363,5 +385,49 @@ impl Canonical for ExplicitTerm {
     fn canon_write(&self, w: &mut CanonWriter) {
         self.context.canon_write(w);
         self.kind.canon_write(w);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use brix_semantic::{compose_chain, GeneratorId};
+
+    #[test]
+    fn test_witness_digest_alignment_with_brix_semantic_compose() {
+        let g1_gen = GeneratorId::named("gen-step-1");
+        let g2_gen = GeneratorId::named("gen-step-2");
+
+        let g1_const = ObjectTerm::Const(PropositionId(g1_gen.digest()));
+        let g2_const = ObjectTerm::Const(PropositionId(g2_gen.digest()));
+
+        let term_comp = ObjectTerm::Compose(Box::new(g2_const), Box::new(g1_const));
+
+        let expected = compose(WitnessId::from(g2_gen), WitnessId::from(g1_gen));
+        assert_eq!(term_comp.witness_digest(), expected);
+    }
+
+    #[test]
+    fn test_witness_digest_alignment_with_brix_semantic_compose_chain() {
+        let g1 = GeneratorId::named("gen-1");
+        let g2 = GeneratorId::named("gen-2");
+        let g3 = GeneratorId::named("gen-3");
+
+        let c1 = ObjectTerm::Const(PropositionId(g1.digest()));
+        let c2 = ObjectTerm::Const(PropositionId(g2.digest()));
+        let c3 = ObjectTerm::Const(PropositionId(g3.digest()));
+
+        let c12 = ObjectTerm::Compose(Box::new(c2), Box::new(c1));
+        let c123 = ObjectTerm::Compose(Box::new(c3), Box::new(c12));
+
+        let expected_chain = compose_chain(&[g1, g2, g3]).unwrap();
+        assert_eq!(c123.witness_digest(), expected_chain);
+    }
+
+    #[test]
+    fn test_bound_var_witness_digest_returns_sentinel() {
+        let bv = ObjectTerm::BoundVar(0);
+        let sentinel = WitnessId::from_canon(b"brix.kernel.witness_digest.bound_var");
+        assert_eq!(bv.witness_digest(), sentinel);
     }
 }

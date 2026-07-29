@@ -334,9 +334,11 @@ fn check_type(
                 }));
             }
 
-            // Side condition (ii): Witness match compose(outer g2, inner g1)
-            let expected_witness = ObjectTerm::Compose(Box::new(g2), Box::new(g1));
-            if *w != expected_witness {
+            // Side condition (ii): Witness match compose(outer g2, inner g1) via digest comparison
+            let expected_witness_id =
+                brix_semantic::compose(g2.witness_digest(), g1.witness_digest());
+            if w.witness_digest() != expected_witness_id {
+                let expected_witness = ObjectTerm::Compose(Box::new(g2), Box::new(g1));
                 return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
                     expected: format!("Witness {expected_witness:?}"),
                     found: format!("{w:?}"),
@@ -587,4 +589,106 @@ fn infer_type(
 
         _ => Err(Verdict::Rejected(RejectionReason::ProofGoalNotReached)),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use brix_semantic::{compose_chain, GeneratorId};
+
+    #[test]
+    fn test_realizes_comp_const_composite_witness_accepted() {
+        let ctx = ContextId::from_canon(b"test_context");
+        let g1_gen = GeneratorId::named("gen_1");
+        let g2_gen = GeneratorId::named("gen_2");
+
+        let g1 = ObjectTerm::Const(PropositionId(g1_gen.digest()));
+        let g2 = ObjectTerm::Const(PropositionId(g2_gen.digest()));
+
+        let x0 = ObjectTerm::Const(PropositionId::from_canon(b"x0"));
+        let x1 = ObjectTerm::Const(PropositionId::from_canon(b"x1"));
+        let x2 = ObjectTerm::Const(PropositionId::from_canon(b"x2"));
+
+        let p1 = Prop::Realizes(g1, x0.clone(), x1.clone());
+        let p2 = Prop::Realizes(g2, x1, x2.clone());
+
+        let composite_witness_id = compose_chain(&[g1_gen, g2_gen]).unwrap();
+        let goal_witness = ObjectTerm::Const(PropositionId(composite_witness_id.digest()));
+        let goal = Prop::Realizes(goal_witness, x0, x2);
+
+        let full_goal = Prop::Impl(
+            Box::new(p1),
+            Box::new(Prop::Impl(Box::new(p2), Box::new(goal))),
+        );
+
+        let term = ExplicitTerm::new(
+            ctx,
+            TermKind::Lam {
+                var_name: Some("h1".into()),
+                body: Box::new(TermKind::Lam {
+                    var_name: Some("h2".into()),
+                    body: Box::new(TermKind::RealizesComp {
+                        left: Box::new(TermKind::Hyp(Var::Named("h1".into()))),
+                        right: Box::new(TermKind::Hyp(Var::Named("h2".into()))),
+                    }),
+                }),
+            },
+        );
+
+        let budget = Budget::new(100, 100);
+        let verdict = acceptance(&ctx, &full_goal, &term, budget);
+
+        assert!(
+            matches!(verdict, Verdict::Accepted(_)),
+            "RealizesComp with Const of composite identity witness should be Accepted, got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn test_realizes_comp_wrong_const_composite_witness_rejected() {
+        let ctx = ContextId::from_canon(b"test_context");
+        let g1_gen = GeneratorId::named("gen_1");
+        let g2_gen = GeneratorId::named("gen_2");
+
+        let g1 = ObjectTerm::Const(PropositionId(g1_gen.digest()));
+        let g2 = ObjectTerm::Const(PropositionId(g2_gen.digest()));
+
+        let x0 = ObjectTerm::Const(PropositionId::from_canon(b"x0"));
+        let x1 = ObjectTerm::Const(PropositionId::from_canon(b"x1"));
+        let x2 = ObjectTerm::Const(PropositionId::from_canon(b"x2"));
+
+        let p1 = Prop::Realizes(g1, x0.clone(), x1.clone());
+        let p2 = Prop::Realizes(g2, x1, x2.clone());
+
+        let wrong_composite_witness =
+            ObjectTerm::Const(PropositionId::from_canon(b"wrong_composite_id"));
+        let goal = Prop::Realizes(wrong_composite_witness, x0, x2);
+
+        let full_goal = Prop::Impl(
+            Box::new(p1),
+            Box::new(Prop::Impl(Box::new(p2), Box::new(goal))),
+        );
+
+        let term = ExplicitTerm::new(
+            ctx,
+            TermKind::Lam {
+                var_name: Some("h1".into()),
+                body: Box::new(TermKind::Lam {
+                    var_name: Some("h2".into()),
+                    body: Box::new(TermKind::RealizesComp {
+                        left: Box::new(TermKind::Hyp(Var::Named("h1".into()))),
+                        right: Box::new(TermKind::Hyp(Var::Named("h2".into()))),
+                    }),
+                }),
+            },
+        );
+
+        let budget = Budget::new(100, 100);
+        let verdict = acceptance(&ctx, &full_goal, &term, budget);
+
+        assert!(
+            matches!(verdict, Verdict::Rejected(_)),
+            "RealizesComp with wrong Const composite witness should be Rejected, got {verdict:?}"
+        );
+    }
 }
