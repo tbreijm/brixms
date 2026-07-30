@@ -53,7 +53,10 @@ fn conflict_category(c: &NConflict) -> Category {
         NConflict::EpistemicErasure { .. } => Category::EpistemicErasure,
         NConflict::ImpureRule { .. }
         | NConflict::NondeterministicRule { .. }
-        | NConflict::DivergentRule { .. } => {
+        | NConflict::DivergentRule { .. }
+        | NConflict::UnboundHeadKey { .. }
+        | NConflict::MaskRefNotEdgeBound { .. }
+        | NConflict::OrdinaryFnOnDerivedRel { .. } => {
             unreachable!("rule side-conditions are covered in native_rule_parity.rs")
         }
     }

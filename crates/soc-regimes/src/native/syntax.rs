@@ -150,6 +150,7 @@ impl NEffectRow {
 pub struct NSig {
     pub params: Vec<NTy>,
     pub ret: NTy,
+    pub is_aggregate: bool,
     pub may_diverge: bool,
 }
 
@@ -179,6 +180,7 @@ impl SigTable {
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct NRelSchema {
     pub roles: Vec<(Sym, NTy)>,
+    pub derived: bool,
 }
 
 /// Argument inside an edge clause (literal value or variable name).
@@ -204,12 +206,24 @@ pub struct NativeQuery {
     pub result: NTy,
 }
 
-/// Native rule representation (ADR-0009 N8b-1).
+/// Native rule head shape (ADR-0009 N8b-2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NHead {
+    Tuple,
+    Node { keyed_by: Vec<Sym> },
+    Mask { target: Sym, reason: Sym },
+}
+
+/// Native rule representation (ADR-0009 N8b-1 / N8b-2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NRule {
     pub name: Sym,
+    pub head: NHead,
     pub effects: NEffectRow,
     pub called_fns: Vec<Sym>,
+    pub bound_vars: Vec<Sym>,
+    pub edge_refs: Vec<Sym>,
+    pub derived_rel_ordinary_consumption: Vec<Sym>,
 }
 
 /// Native source container holding queries, function signatures, guard expressions, relations, edges, and rules.
