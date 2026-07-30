@@ -14,14 +14,9 @@ use soc_regimes::native::{analyze as native_analyze, translate, NConflict};
 /// Pin the observed coverage floor (monotonic across ADR-0009 slices).
 ///
 /// N1: `Mismatch` (scalar). N2: `Arity` (call arg-count vs candidate
-/// signatures) — `arity_mismatch` (single-fn wrong count) plus the
-/// `arity_non_first_candidate...` discriminator (an overload whose *non-first*
-/// candidate matches → NO conflict). `Occurs` is still NOT covered: every real
-/// corpus `Occurs` fixture forces occurs *into a container* (`Option`/`Rel`),
-/// untranslatable by the scalar fragment; native occurs is unit-tested in
-/// `soc_regimes::native::analyze`, its differential coverage arriving with the
-/// container slice. Do NOT fabricate fixtures nor patch the brix-ir oracle.
-const COVERAGE_FLOOR: usize = 3;
+/// signatures). N3: `UnknownField` (records/rows) and `Occurs` (activated now
+/// that container types Option/Rel/Record are translatable).
+const COVERAGE_FLOOR: usize = 7;
 
 fn reflect_category(kind: &ConflictKind) -> Option<Category> {
     match kind {
@@ -47,6 +42,7 @@ fn conflict_category(c: &NConflict) -> Category {
         NConflict::Mismatch { .. } => Category::Mismatch,
         NConflict::Occurs { .. } => Category::Occurs,
         NConflict::Arity { .. } => Category::Arity,
+        NConflict::UnknownField { .. } => Category::UnknownField,
     }
 }
 
@@ -59,8 +55,13 @@ fn native_type_parity_corpus_coverage() {
     fixtures.push(typecorpus::arity_non_first_candidate_match_is_not_a_conflict());
     let total = fixtures.len();
     let mut covered = 0;
-    // N1: Mismatch. N2: Arity. Occurs deferred to the container slice (see COVERAGE_FLOOR).
-    let allowed_cats = BTreeSet::from([Category::Mismatch, Category::Arity]);
+    // N1: Mismatch. N2: Arity. N3: UnknownField and Occurs (containers: Record/Rel/Option).
+    let allowed_cats = BTreeSet::from([
+        Category::Mismatch,
+        Category::Arity,
+        Category::UnknownField,
+        Category::Occurs,
+    ]);
 
     for fixture in &fixtures {
         let brix_report = brix_analyze(&fixture.source, &fixture.resolver);
@@ -134,18 +135,18 @@ fn unsupported_construct_returns_none() {
         queries: vec![Query {
             name: Ident::new("Unsupported"),
             params: vec![(
-                Ident::new("opt"),
-                Ty::Option(Box::new(Ty::Int(IntWidth::Int))),
+                Ident::new("res"),
+                Ty::Result(Box::new(Ty::Int(IntWidth::Int)), Box::new(Ty::Bool)),
             )],
             body: Pattern::default(),
-            yields: o.var("opt"),
-            result: Ty::Option(Box::new(Ty::Int(IntWidth::Int))),
+            yields: o.var("res"),
+            result: Ty::Result(Box::new(Ty::Int(IntWidth::Int)), Box::new(Ty::Bool)),
         }],
     };
     let resolver = TableResolver::new();
     let native_src = translate(&source, &resolver);
     assert!(
         native_src.is_none(),
-        "Option type construct should return None"
+        "Result type construct should return None"
     );
 }

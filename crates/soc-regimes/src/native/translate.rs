@@ -3,9 +3,20 @@
 use brix_ir::core::{Expr, ExprKind};
 use brix_ir::frontend::{FrontendSource, SchemaResolver, TableResolver};
 use brix_ir::pattern::Lit;
-use brix_ir::types::{IntWidth, Ty, TyVar};
+use brix_ir::types::{IntWidth, Row, RowTail, Ty, TyVar};
 
-use super::syntax::{NExpr, NLit, NSig, NTy, NativeQuery, NativeSource, Origin, SigTable};
+use super::syntax::{NExpr, NLit, NRow, NSig, NTy, NativeQuery, NativeSource, Origin, SigTable};
+
+/// Translates a `brix_ir::types::Row` to a native `NRow`.
+pub fn translate_row(row: &Row) -> Option<NRow> {
+    let mut fields = Vec::with_capacity(row.fields.len());
+    for field in &row.fields {
+        let fty = translate_ty(&field.ty)?;
+        fields.push((field.name.to_string(), fty));
+    }
+    let open = matches!(row.tail, RowTail::Open(_));
+    Some(NRow { fields, open })
+}
 
 /// Translates a `brix_ir::types::Ty` to a native `NTy`.
 ///
@@ -29,9 +40,12 @@ pub fn translate_ty(ty: &Ty) -> Option<NTy> {
                 ret: nret,
             })
         }
+        Ty::Option(inner) => Some(NTy::Option(Box::new(translate_ty(inner)?))),
+        Ty::Record(row) => Some(NTy::Record(translate_row(row)?)),
+        Ty::Rel(row) => Some(NTy::Rel(translate_row(row)?)),
         Ty::Var(TyVar(v)) => Some(NTy::Var(*v)),
         Ty::Error => Some(NTy::Error),
-        // Return None for all unsupported type constructs (Option, Result, Rel, Record, Dimensions, etc.)
+        // Return None for all unsupported type constructs (Result, Dimensions, etc.)
         _ => None,
     }
 }
@@ -94,7 +108,26 @@ pub fn translate_expr(
                 args: nargs,
             })
         }
-        // Return None for unsupported expression kinds (Field, Record, If, Try, Comprehension, Let)
+        ExprKind::Field { base, field } => {
+            let nbase = translate_expr(base, resolver, sigs)?;
+            Some(NExpr::Field {
+                origin,
+                base: Box::new(nbase),
+                field: field.to_string(),
+            })
+        }
+        ExprKind::Record { fields } => {
+            let mut nfields = Vec::with_capacity(fields.len());
+            for (name, expr) in fields {
+                let nexpr = translate_expr(expr, resolver, sigs)?;
+                nfields.push((name.to_string(), nexpr));
+            }
+            Some(NExpr::Record {
+                origin,
+                fields: nfields,
+            })
+        }
+        // Return None for unsupported expression kinds (If, Try, Comprehension, Let)
         _ => None,
     }
 }
@@ -122,16 +155,7 @@ pub fn translate(source: &FrontendSource, resolver: &impl SchemaResolver) -> Opt
         }
 
         let yields = translate_expr(&query.yields, resolver, &mut sigs)?;
-        let result = match &query.result {
-            Ty::Rel(row) => {
-                if row.fields.len() == 1 && row.fields[0].name.as_str() == "value" {
-                    translate_ty(&row.fields[0].ty)?
-                } else {
-                    translate_ty(&query.result)?
-                }
-            }
-            other => translate_ty(other)?,
-        };
+        let result = translate_ty(&query.result)?;
 
         native_queries.push(NativeQuery {
             name: query.name.to_string(),
