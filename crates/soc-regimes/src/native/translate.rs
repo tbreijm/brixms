@@ -7,9 +7,32 @@ use brix_ir::pattern::{Arg, Clause, Lit, RoleArg};
 use brix_ir::types::{IntWidth, Row, RowTail, Ty, TyVar};
 
 use super::syntax::{
-    NArg, NEdge, NExpr, NLit, NRelSchema, NRow, NSig, NTy, NativeQuery, NativeSource, Origin,
-    SigTable, Sym,
+    NArg, NEdge, NEffect, NEffectRow, NExpr, NLit, NRelSchema, NRow, NRule, NSig, NTy, NativeQuery,
+    NativeSource, Origin, SigTable, Sym,
 };
+
+/// Translates a `brix_ir::effects::Effect` to a native `NEffect`.
+pub fn translate_effect_atom(effect: &brix_ir::effects::Effect) -> NEffect {
+    match effect {
+        brix_ir::effects::Effect::Net(_) => NEffect::Net,
+        brix_ir::effects::Effect::Fs(_) => NEffect::Fs,
+        brix_ir::effects::Effect::Clock => NEffect::Clock,
+        brix_ir::effects::Effect::Random => NEffect::Random,
+        brix_ir::effects::Effect::Console => NEffect::Console,
+        brix_ir::effects::Effect::GraphRead(_) => NEffect::GraphRead,
+        brix_ir::effects::Effect::GraphWrite(_) => NEffect::GraphWrite,
+        brix_ir::effects::Effect::Panic => NEffect::Panic,
+        brix_ir::effects::Effect::Diverge => NEffect::Diverge,
+        brix_ir::effects::Effect::Solver(_) => NEffect::Solver,
+    }
+}
+
+/// Translates a `brix_ir::effects::EffectRow` to a native `NEffectRow`.
+pub fn translate_effect_row(row: &brix_ir::effects::EffectRow) -> NEffectRow {
+    let atoms = row.atoms().iter().map(translate_effect_atom).collect();
+    let open_tail = row.tail().is_some();
+    NEffectRow { atoms, open_tail }
+}
 
 /// Translates a `brix_ir::types::Row` to a native `NRow`.
 pub fn translate_row(row: &Row) -> Option<NRow> {
@@ -86,6 +109,64 @@ pub fn expr_origin(expr: &Expr) -> Origin {
     u64::from_le_bytes(bytes[..8].try_into().unwrap_or([0; 8]))
 }
 
+/// Scans `expr` for function calls and populates `called` names and `sigs`.
+pub fn scan_expr_calls(
+    expr: &Expr,
+    resolver: &impl SchemaResolver,
+    called: &mut Vec<Sym>,
+    sigs: &mut SigTable,
+) {
+    match &*expr.kind {
+        ExprKind::Call { func, args } => {
+            let fname = func.to_string();
+            called.push(fname.clone());
+            for sig in resolver.functions(func) {
+                if let (Some(params), Some(ret)) = (
+                    sig.params.iter().map(translate_ty).collect(),
+                    translate_ty(&sig.ret),
+                ) {
+                    sigs.insert(
+                        fname.clone(),
+                        NSig {
+                            params,
+                            ret,
+                            may_diverge: sig.may_diverge,
+                        },
+                    );
+                }
+            }
+            for arg in args {
+                scan_expr_calls(arg, resolver, called, sigs);
+            }
+        }
+        ExprKind::Field { base, .. } => scan_expr_calls(base, resolver, called, sigs),
+        ExprKind::Record { fields } => {
+            for (_, v) in fields {
+                scan_expr_calls(v, resolver, called, sigs);
+            }
+        }
+        ExprKind::If { cond, then, els } => {
+            scan_expr_calls(cond, resolver, called, sigs);
+            scan_expr_calls(then, resolver, called, sigs);
+            scan_expr_calls(els, resolver, called, sigs);
+        }
+        ExprKind::Try { inner, .. } => scan_expr_calls(inner, resolver, called, sigs),
+        ExprKind::Comprehension { pattern, yields } => {
+            for e in pattern.body_exprs() {
+                scan_expr_calls(e, resolver, called, sigs);
+            }
+            if let Some(y) = yields {
+                scan_expr_calls(y, resolver, called, sigs);
+            }
+        }
+        ExprKind::Let { value, body, .. } => {
+            scan_expr_calls(value, resolver, called, sigs);
+            scan_expr_calls(body, resolver, called, sigs);
+        }
+        ExprKind::Var(_) | ExprKind::Lit(_) => {}
+    }
+}
+
 /// Translates a `brix_ir::core::Expr` to `NExpr`, collecting function signatures into `sigs`.
 pub fn translate_expr(
     expr: &Expr,
@@ -120,7 +201,14 @@ pub fn translate_expr(
                         .collect::<Option<Vec<_>>>(),
                     translate_ty(&sig.ret),
                 ) {
-                    sigs.insert(func.to_string(), NSig { params, ret });
+                    sigs.insert(
+                        func.to_string(),
+                        NSig {
+                            params,
+                            ret,
+                            may_diverge: sig.may_diverge,
+                        },
+                    );
                 }
             }
 
@@ -207,8 +295,17 @@ pub fn translate(source: &FrontendSource, resolver: &impl SchemaResolver) -> Opt
     let mut guards = Vec::new();
     let mut relations = BTreeMap::new();
     let mut edges = Vec::new();
+    let mut native_rules = Vec::new();
 
     for rule in &source.rules {
+        let effects = translate_effect_row(&rule.effects);
+        let mut called_fns = Vec::new();
+        for expr in rule.body.body_exprs() {
+            scan_expr_calls(expr, resolver, &mut called_fns, &mut sigs);
+        }
+        called_fns.sort();
+        called_fns.dedup();
+
         for clause in &rule.body.clauses {
             match clause {
                 Clause::When(expr) => {
@@ -219,9 +316,18 @@ pub fn translate(source: &FrontendSource, resolver: &impl SchemaResolver) -> Opt
                     let edge = translate_edge(relation, args, resolver, &mut relations)?;
                     edges.push(edge);
                 }
+                Clause::Let { expr, .. } => {
+                    let _nexpr = translate_expr(expr, resolver, &mut sigs)?;
+                }
                 _ => return None,
             }
         }
+
+        native_rules.push(NRule {
+            name: rule.name.to_string(),
+            effects,
+            called_fns,
+        });
     }
 
     for constraint in &source.constraints {
@@ -268,6 +374,7 @@ pub fn translate(source: &FrontendSource, resolver: &impl SchemaResolver) -> Opt
         guards,
         relations,
         edges,
+        rules: native_rules,
     })
 }
 

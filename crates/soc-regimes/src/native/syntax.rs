@@ -99,11 +99,58 @@ impl NExpr {
     }
 }
 
+/// Native effect representation (ADR-0009 §5).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NEffect {
+    Net,
+    Fs,
+    Clock,
+    Random,
+    Console,
+    GraphRead,
+    GraphWrite,
+    Panic,
+    Diverge,
+    Solver,
+}
+
+/// Native effect row representation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct NEffectRow {
+    pub atoms: Vec<NEffect>,
+    pub open_tail: bool,
+}
+
+impl NEffectRow {
+    pub fn is_pure(&self) -> bool {
+        !self.open_tail
+            && self
+                .atoms
+                .iter()
+                .all(|a| matches!(a, NEffect::Panic | NEffect::Diverge))
+    }
+
+    pub fn nondet(&self) -> bool {
+        self.open_tail
+            || self.atoms.iter().any(|a| {
+                matches!(
+                    a,
+                    NEffect::Random | NEffect::Clock | NEffect::Net | NEffect::Fs | NEffect::Solver
+                )
+            })
+    }
+
+    pub fn may_diverge(&self) -> bool {
+        self.open_tail || self.atoms.contains(&NEffect::Diverge)
+    }
+}
+
 /// Native function signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NSig {
     pub params: Vec<NTy>,
     pub ret: NTy,
+    pub may_diverge: bool,
 }
 
 /// Signature table mapping function names to candidate signatures.
@@ -157,7 +204,15 @@ pub struct NativeQuery {
     pub result: NTy,
 }
 
-/// Native source container holding queries, function signatures, guard expressions, relations, and edges.
+/// Native rule representation (ADR-0009 N8b-1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NRule {
+    pub name: Sym,
+    pub effects: NEffectRow,
+    pub called_fns: Vec<Sym>,
+}
+
+/// Native source container holding queries, function signatures, guard expressions, relations, edges, and rules.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct NativeSource {
     pub queries: Vec<NativeQuery>,
@@ -165,4 +220,5 @@ pub struct NativeSource {
     pub guards: Vec<NExpr>,
     pub relations: BTreeMap<Sym, NRelSchema>,
     pub edges: Vec<NEdge>,
+    pub rules: Vec<NRule>,
 }

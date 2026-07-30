@@ -51,6 +51,11 @@ fn conflict_category(c: &NConflict) -> Category {
         NConflict::Dimension { .. } => Category::Dimension,
         NConflict::TryNonResult { .. } => Category::TryNonResult,
         NConflict::EpistemicErasure { .. } => Category::EpistemicErasure,
+        NConflict::ImpureRule { .. }
+        | NConflict::NondeterministicRule { .. }
+        | NConflict::DivergentRule { .. } => {
+            unreachable!("rule side-conditions are covered in native_rule_parity.rs")
+        }
     }
 }
 
