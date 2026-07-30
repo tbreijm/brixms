@@ -17,8 +17,9 @@ use soc_regimes::native::{analyze as native_analyze, translate, NConflict};
 /// signatures). N3: `UnknownField` (records/rows) and `Occurs` (activated now
 /// that container types Option/Rel/Record are translatable). N4: `NonBoolGuard`
 /// (When-guards in Rule / Constraint bodies). N5: `Dimension` (unit conflict detection).
-/// N6: `TryNonResult` (postfix `?` on non-Result values).
-const COVERAGE_FLOOR: usize = 13;
+/// N6: `TryNonResult` (postfix `?` on non-Result values). N7: `EpistemicErasure`
+/// (Estimate/Missing to plain type, or Probability to Bool).
+const COVERAGE_FLOOR: usize = 22;
 
 fn reflect_category(kind: &ConflictKind) -> Option<Category> {
     match kind {
@@ -48,6 +49,7 @@ fn conflict_category(c: &NConflict) -> Category {
         NConflict::NonBool { .. } => Category::NonBoolGuard,
         NConflict::Dimension { .. } => Category::Dimension,
         NConflict::TryNonResult { .. } => Category::TryNonResult,
+        NConflict::EpistemicErasure { .. } => Category::EpistemicErasure,
     }
 }
 
@@ -61,9 +63,14 @@ fn native_type_parity_corpus_coverage() {
     fixtures.push(typecorpus::quantity_add_dimension_mismatch());
     fixtures.push(typecorpus::quantity_add_same_dimension_is_not_a_conflict());
     fixtures.push(typecorpus::try_over_result_is_not_a_conflict());
+    fixtures.push(typecorpus::probability_f64_bridge_is_not_a_conflict());
+    fixtures.push(typecorpus::estimate_vs_container_erasure());
+    fixtures.push(typecorpus::cross_epistemic_wrapper_mismatch());
+    fixtures.push(typecorpus::estimate_same_ctor_mismatch());
+    fixtures.push(typecorpus::same_container_leaf_no_double_count());
     let total = fixtures.len();
     let mut covered = 0;
-    // N1: Mismatch. N2: Arity. N3: UnknownField and Occurs. N4: NonBoolGuard. N5: Dimension. N6: TryNonResult.
+    // N1: Mismatch. N2: Arity. N3: UnknownField and Occurs. N4: NonBoolGuard. N5: Dimension. N6: TryNonResult. N7: EpistemicErasure.
     let allowed_cats = BTreeSet::from([
         Category::Mismatch,
         Category::Arity,
@@ -72,6 +79,7 @@ fn native_type_parity_corpus_coverage() {
         Category::NonBoolGuard,
         Category::Dimension,
         Category::TryNonResult,
+        Category::EpistemicErasure,
     ]);
 
     for fixture in &fixtures {
