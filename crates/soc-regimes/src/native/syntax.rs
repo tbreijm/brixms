@@ -128,6 +128,26 @@ impl SigTable {
     }
 }
 
+/// Relation schema specification mapping role names to native types.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct NRelSchema {
+    pub roles: Vec<(Sym, NTy)>,
+}
+
+/// Argument inside an edge clause (literal value or variable name).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NArg {
+    Lit(NLit),
+    Var(Sym),
+}
+
+/// Relation Edge clause representation (ADR-0009 §5).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NEdge {
+    pub relation: Sym,
+    pub args: Vec<(Sym, NArg)>,
+}
+
 /// Native query representation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeQuery {
@@ -137,10 +157,12 @@ pub struct NativeQuery {
     pub result: NTy,
 }
 
-/// Native source container holding queries, function signatures, and guard expressions.
+/// Native source container holding queries, function signatures, guard expressions, relations, and edges.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct NativeSource {
     pub queries: Vec<NativeQuery>,
     pub sigs: SigTable,
     pub guards: Vec<NExpr>,
+    pub relations: BTreeMap<Sym, NRelSchema>,
+    pub edges: Vec<NEdge>,
 }

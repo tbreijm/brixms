@@ -5,5 +5,8 @@ pub mod syntax;
 pub mod translate;
 
 pub use analyze::{analyze, occurs, resolve, unify, zonk, NConflict, NativeReport};
-pub use syntax::{NExpr, NLit, NSig, NTy, NativeQuery, NativeSource, Origin, SigTable, Sym};
+pub use syntax::{
+    NArg, NEdge, NExpr, NLit, NRelSchema, NSig, NTy, NativeQuery, NativeSource, Origin, SigTable,
+    Sym,
+};
 pub use translate::{translate, translate_source, translate_ty};
