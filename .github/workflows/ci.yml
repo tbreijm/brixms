@@ -133,8 +133,8 @@ jobs:
           name: nextest-archive
       - name: Fetch dependencies (for offline nested builds)
         run: cargo fetch
-      - name: Errata fixtures + oracle/compiled-engine differential
-        run: cargo nextest run --archive-file nextest-archive.tar.zst -E 'package(brix-conformance)'
+      - name: SOC regimes — native type checker + type-realization
+        run: cargo nextest run --archive-file nextest-archive.tar.zst -E 'package(soc-regimes)'
 
   acceptance:
     name: acceptance
@@ -155,8 +155,8 @@ jobs:
           name: nextest-archive
       - name: Fetch dependencies (for offline nested builds)
         run: cargo fetch
-      - name: Spec-derived acceptance corpus (parse/lower/check/phase + negative fixtures + coverage report)
-        run: cargo nextest run --archive-file nextest-archive.tar.zst -E 'package(brix-conformance) and binary(type_parity)'
+      - name: Kernel acceptance — adversarial certificate vectors
+        run: cargo nextest run --archive-file nextest-archive.tar.zst -E 'package(brix-kernel)'
 
   reproducibility:
     name: reproducibility

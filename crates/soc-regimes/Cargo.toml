@@ -8,7 +8,6 @@ repository.workspace = true
 
 [dependencies]
 soc-core = { path = "../soc-core" }
-brix-ir = { path = "../brix-ir" }
 brix-semantic = { workspace = true }
 brix-canon = { workspace = true }
 brix-elaborate = { path = "../brix-elaborate" }
