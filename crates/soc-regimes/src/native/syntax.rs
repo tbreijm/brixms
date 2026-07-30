@@ -8,6 +8,13 @@ pub type Origin = u64;
 /// Symbol identifier for names.
 pub type Sym = String;
 
+/// Native row representation for record and rel types.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NRow {
+    pub fields: Vec<(Sym, NTy)>,
+    pub open: bool,
+}
+
 /// Native type representation in the native checker (ADR-0009 §5).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NTy {
@@ -20,6 +27,9 @@ pub enum NTy {
         params: Vec<NTy>,
         ret: Box<NTy>,
     },
+    Record(NRow),
+    Rel(NRow),
+    Option(Box<NTy>),
     Var(u32),
     /// Error unifies ONLY with itself; never bindable — mirrors brix_ir Ty::Error isolation.
     Error,
@@ -50,6 +60,15 @@ pub enum NExpr {
         func: Sym,
         args: Vec<NExpr>,
     },
+    Field {
+        origin: Origin,
+        base: Box<NExpr>,
+        field: Sym,
+    },
+    Record {
+        origin: Origin,
+        fields: Vec<(Sym, NExpr)>,
+    },
 }
 
 impl NExpr {
@@ -58,6 +77,8 @@ impl NExpr {
             NExpr::Lit { origin, .. } => *origin,
             NExpr::Var { origin, .. } => *origin,
             NExpr::Call { origin, .. } => *origin,
+            NExpr::Field { origin, .. } => *origin,
+            NExpr::Record { origin, .. } => *origin,
         }
     }
 }

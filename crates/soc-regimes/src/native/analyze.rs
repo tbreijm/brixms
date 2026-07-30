@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use super::syntax::{NExpr, NLit, NTy, NativeQuery, NativeSource, Origin, Sym};
+use super::syntax::{NExpr, NLit, NRow, NTy, NativeQuery, NativeSource, Origin, Sym};
 
 /// Native type conflicts (grows per ADR-0009 slice).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,6 +19,10 @@ pub enum NConflict {
     Arity {
         expected: u32,
         found: u32,
+    },
+    /// Unknown field on record/rel or closed row mismatch.
+    UnknownField {
+        field: Sym,
     },
 }
 
@@ -55,6 +59,8 @@ pub fn occurs(v: u32, ty: &NTy, subst: &BTreeMap<u32, NTy>) -> bool {
         NTy::Fn { params, ret } => {
             params.iter().any(|p| occurs(v, p, subst)) || occurs(v, ret, subst)
         }
+        NTy::Option(inner) => occurs(v, inner, subst),
+        NTy::Record(row) | NTy::Rel(row) => row.fields.iter().any(|(_, fty)| occurs(v, fty, subst)),
         _ => false,
     }
 }
@@ -73,7 +79,63 @@ pub fn zonk(ty: &NTy, subst: &BTreeMap<u32, NTy>) -> NTy {
             params: params.iter().map(|p| zonk(p, subst)).collect(),
             ret: Box::new(zonk(ret, subst)),
         },
+        NTy::Option(inner) => NTy::Option(Box::new(zonk(inner, subst))),
+        NTy::Record(row) => NTy::Record(zonk_row(row, subst)),
+        NTy::Rel(row) => NTy::Rel(zonk_row(row, subst)),
     }
+}
+
+fn zonk_row(row: &NRow, subst: &BTreeMap<u32, NTy>) -> NRow {
+    NRow {
+        fields: row
+            .fields
+            .iter()
+            .map(|(name, fty)| (name.clone(), zonk(fty, subst)))
+            .collect(),
+        open: row.open,
+    }
+}
+
+fn unify_rows(
+    r1: &NRow,
+    r2: &NRow,
+    subst: &mut BTreeMap<u32, NTy>,
+    conflicts: &mut Vec<NConflict>,
+) -> (Vec<(Sym, NTy)>, bool, bool) {
+    let mut unified_fields = Vec::new();
+    let mut has_err = false;
+
+    for (name1, fty1) in &r1.fields {
+        if let Some((_, fty2)) = r2.fields.iter().find(|(n, _)| n == name1) {
+            let u = unify(fty1, fty2, subst, conflicts);
+            if u == NTy::Error {
+                has_err = true;
+            }
+            unified_fields.push((name1.clone(), u));
+        } else {
+            if !r2.open {
+                conflicts.push(NConflict::UnknownField {
+                    field: name1.clone(),
+                });
+                has_err = true;
+            }
+            unified_fields.push((name1.clone(), zonk(fty1, subst)));
+        }
+    }
+
+    for (name2, fty2) in &r2.fields {
+        if !r1.fields.iter().any(|(n, _)| n == name2) {
+            if !r1.open {
+                conflicts.push(NConflict::UnknownField {
+                    field: name2.clone(),
+                });
+                has_err = true;
+            }
+            unified_fields.push((name2.clone(), zonk(fty2, subst)));
+        }
+    }
+
+    (unified_fields, r1.open && r2.open, has_err)
 }
 
 /// Unifies two native types `t1` and `t2` under `subst`.
@@ -123,6 +185,30 @@ pub fn unify(
         (NTy::Str, NTy::Str) => NTy::Str,
         (NTy::Int, NTy::Int) => NTy::Int,
         (NTy::F64, NTy::F64) => NTy::F64,
+        (NTy::Option(a), NTy::Option(b)) => {
+            let u = unify(a, b, subst, conflicts);
+            if u == NTy::Error {
+                NTy::Error
+            } else {
+                NTy::Option(Box::new(u))
+            }
+        }
+        (NTy::Record(row1), NTy::Record(row2)) => {
+            let (fields, open, has_err) = unify_rows(row1, row2, subst, conflicts);
+            if has_err {
+                NTy::Error
+            } else {
+                NTy::Record(NRow { fields, open })
+            }
+        }
+        (NTy::Rel(row1), NTy::Rel(row2)) => {
+            let (fields, open, has_err) = unify_rows(row1, row2, subst, conflicts);
+            if has_err {
+                NTy::Error
+            } else {
+                NTy::Rel(NRow { fields, open })
+            }
+        }
         (
             NTy::Fn {
                 params: p1,
@@ -246,6 +332,39 @@ impl<'a> InferContext<'a> {
                     NTy::Error
                 }
             }
+            NExpr::Record { fields, .. } => {
+                let inf_fields = fields
+                    .iter()
+                    .map(|(name, expr)| (name.clone(), self.infer_expr(expr)))
+                    .collect();
+                NTy::Record(NRow {
+                    fields: inf_fields,
+                    open: false,
+                })
+            }
+            NExpr::Field { base, field, .. } => {
+                let base_ty = self.infer_expr(base);
+                let resolved = resolve(&base_ty, &self.subst).clone();
+                match resolved {
+                    NTy::Record(row) | NTy::Rel(row) => {
+                        if let Some((_, fty)) = row.fields.iter().find(|(n, _)| n == field) {
+                            fty.clone()
+                        } else {
+                            self.conflicts.push(NConflict::UnknownField {
+                                field: field.clone(),
+                            });
+                            NTy::Error
+                        }
+                    }
+                    NTy::Var(_) | NTy::Error => NTy::Error,
+                    _ => {
+                        self.conflicts.push(NConflict::UnknownField {
+                            field: field.clone(),
+                        });
+                        NTy::Error
+                    }
+                }
+            }
         };
 
         self.has_types.push((origin, ty.clone()));
@@ -257,8 +376,18 @@ impl<'a> InferContext<'a> {
             self.env.insert(param_name.clone(), param_ty.clone());
         }
         let yielded_ty = self.infer_expr(&query.yields);
+        let expected = match (&yielded_ty, resolve(&query.result, &self.subst)) {
+            (_, NTy::Rel(_)) => match yielded_ty {
+                NTy::Record(ref row) | NTy::Rel(ref row) => NTy::Rel(row.clone()),
+                ref ty => NTy::Rel(NRow {
+                    fields: vec![("value".to_string(), ty.clone())],
+                    open: false,
+                }),
+            },
+            _ => yielded_ty,
+        };
         unify(
-            &yielded_ty,
+            &expected,
             &query.result,
             &mut self.subst,
             &mut self.conflicts,
@@ -295,6 +424,7 @@ pub fn analyze(src: &NativeSource) -> NativeReport {
 
 #[cfg(test)]
 mod tests {
+    use super::super::syntax::SigTable;
     use super::*;
 
     #[test]
@@ -429,5 +559,122 @@ mod tests {
             "Error isolation raises no new conflict"
         );
         assert!(subst.is_empty(), "Error must not bind the variable");
+    }
+
+    #[test]
+    fn record_field_present_is_ok() {
+        let rec_ty = NTy::Record(NRow {
+            fields: vec![("a".to_string(), NTy::Int)],
+            open: false,
+        });
+        let src = NativeSource {
+            queries: vec![NativeQuery {
+                name: "Q".to_string(),
+                params: vec![("r".to_string(), rec_ty)],
+                yields: NExpr::Field {
+                    origin: 0,
+                    base: Box::new(NExpr::Var {
+                        origin: 1,
+                        name: "r".to_string(),
+                    }),
+                    field: "a".to_string(),
+                },
+                result: NTy::Int,
+            }],
+            sigs: SigTable::new(),
+        };
+        let report = analyze(&src);
+        assert!(
+            report.is_consistent(),
+            "expected clean field access, got {:?}",
+            report.conflicts
+        );
+    }
+
+    #[test]
+    fn record_field_absent_closed_gives_unknown_field() {
+        let rec_ty = NTy::Record(NRow {
+            fields: vec![("a".to_string(), NTy::Int)],
+            open: false,
+        });
+        let src = NativeSource {
+            queries: vec![NativeQuery {
+                name: "Q".to_string(),
+                params: vec![("r".to_string(), rec_ty)],
+                yields: NExpr::Field {
+                    origin: 0,
+                    base: Box::new(NExpr::Var {
+                        origin: 1,
+                        name: "r".to_string(),
+                    }),
+                    field: "absent".to_string(),
+                },
+                result: NTy::Int,
+            }],
+            sigs: SigTable::new(),
+        };
+        let report = analyze(&src);
+        assert!(
+            matches!(report.conflicts.as_slice(), [NConflict::UnknownField { field }] if field == "absent"),
+            "expected UnknownField for 'absent', got {:?}",
+            report.conflicts
+        );
+    }
+
+    #[test]
+    fn open_row_extra_field_gives_no_conflict() {
+        let mut subst = BTreeMap::new();
+        let mut conflicts = Vec::new();
+        let r1 = NRow {
+            fields: vec![("a".to_string(), NTy::Int), ("b".to_string(), NTy::Bool)],
+            open: false,
+        };
+        let r2 = NRow {
+            fields: vec![("a".to_string(), NTy::Int)],
+            open: true,
+        };
+        let res = unify(
+            &NTy::Record(r1),
+            &NTy::Record(r2),
+            &mut subst,
+            &mut conflicts,
+        );
+        assert_ne!(res, NTy::Error);
+        assert!(
+            conflicts.is_empty(),
+            "open row extra field must give no conflict, got {:?}",
+            conflicts
+        );
+    }
+
+    #[test]
+    fn occurs_into_option_gives_occurs() {
+        let mut subst = BTreeMap::new();
+        let mut conflicts = Vec::new();
+        let opt_ty = NTy::Option(Box::new(NTy::Var(0)));
+        let res = unify(&NTy::Var(0), &opt_ty, &mut subst, &mut conflicts);
+        assert_eq!(res, NTy::Error);
+        assert!(
+            matches!(conflicts.as_slice(), [NConflict::Occurs { var: 0, .. }]),
+            "expected Occurs into Option, got {:?}",
+            conflicts
+        );
+    }
+
+    #[test]
+    fn occurs_into_rel_row_gives_occurs() {
+        let mut subst = BTreeMap::new();
+        let mut conflicts = Vec::new();
+        let rel_ty = NTy::Rel(NRow {
+            fields: vec![("inner".to_string(), NTy::Var(0))],
+            open: false,
+        });
+        let res = unify(&NTy::Var(0), &rel_ty, &mut subst, &mut conflicts);
+        assert_eq!(res, NTy::Error);
+        assert!(
+            matches!(conflicts.as_slice(), [NConflict::Occurs { var: 0, .. }]),
+            "expected Occurs into Rel row, got {:?}",
+            conflicts
+        );
     }
 }
