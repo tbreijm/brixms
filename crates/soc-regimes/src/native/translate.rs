@@ -41,6 +41,10 @@ pub fn translate_ty(ty: &Ty) -> Option<NTy> {
             })
         }
         Ty::Option(inner) => Some(NTy::Option(Box::new(translate_ty(inner)?))),
+        Ty::Result(ok, err) => Some(NTy::Result(
+            Box::new(translate_ty(ok)?),
+            Box::new(translate_ty(err)?),
+        )),
         Ty::Record(row) => Some(NTy::Record(translate_row(row)?)),
         Ty::Rel(row) => Some(NTy::Rel(translate_row(row)?)),
         Ty::Quantity(m) => Some(NTy::Quantity(m.to_string())),
@@ -52,7 +56,7 @@ pub fn translate_ty(ty: &Ty) -> Option<NTy> {
         )),
         Ty::Var(TyVar(v)) => Some(NTy::Var(*v)),
         Ty::Error => Some(NTy::Error),
-        // Return None for all unsupported type constructs (Result, etc.)
+        // Return None for all unsupported type constructs
         _ => None,
     }
 }
@@ -134,7 +138,14 @@ pub fn translate_expr(
                 fields: nfields,
             })
         }
-        // Return None for unsupported expression kinds (If, Try, Comprehension, Let)
+        ExprKind::Try { inner, .. } => {
+            let ninner = translate_expr(inner, resolver, sigs)?;
+            Some(NExpr::Try {
+                origin,
+                inner: Box::new(ninner),
+            })
+        }
+        // Return None for unsupported expression kinds (If, Comprehension, Let)
         _ => None,
     }
 }

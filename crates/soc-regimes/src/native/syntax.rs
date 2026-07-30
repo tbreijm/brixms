@@ -30,6 +30,7 @@ pub enum NTy {
     Record(NRow),
     Rel(NRow),
     Option(Box<NTy>),
+    Result(Box<NTy>, Box<NTy>),
     Quantity(Sym),
     Money(Sym),
     Dimensioned(Vec<(Sym, i64)>),
@@ -72,6 +73,10 @@ pub enum NExpr {
         origin: Origin,
         fields: Vec<(Sym, NExpr)>,
     },
+    Try {
+        origin: Origin,
+        inner: Box<NExpr>,
+    },
 }
 
 impl NExpr {
@@ -82,6 +87,7 @@ impl NExpr {
             NExpr::Call { origin, .. } => *origin,
             NExpr::Field { origin, .. } => *origin,
             NExpr::Record { origin, .. } => *origin,
+            NExpr::Try { origin, .. } => *origin,
         }
     }
 }

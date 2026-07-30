@@ -17,7 +17,8 @@ use soc_regimes::native::{analyze as native_analyze, translate, NConflict};
 /// signatures). N3: `UnknownField` (records/rows) and `Occurs` (activated now
 /// that container types Option/Rel/Record are translatable). N4: `NonBoolGuard`
 /// (When-guards in Rule / Constraint bodies). N5: `Dimension` (unit conflict detection).
-const COVERAGE_FLOOR: usize = 11;
+/// N6: `TryNonResult` (postfix `?` on non-Result values).
+const COVERAGE_FLOOR: usize = 13;
 
 fn reflect_category(kind: &ConflictKind) -> Option<Category> {
     match kind {
@@ -46,6 +47,7 @@ fn conflict_category(c: &NConflict) -> Category {
         NConflict::UnknownField { .. } => Category::UnknownField,
         NConflict::NonBool { .. } => Category::NonBoolGuard,
         NConflict::Dimension { .. } => Category::Dimension,
+        NConflict::TryNonResult { .. } => Category::TryNonResult,
     }
 }
 
@@ -58,9 +60,10 @@ fn native_type_parity_corpus_coverage() {
     fixtures.push(typecorpus::arity_non_first_candidate_match_is_not_a_conflict());
     fixtures.push(typecorpus::quantity_add_dimension_mismatch());
     fixtures.push(typecorpus::quantity_add_same_dimension_is_not_a_conflict());
+    fixtures.push(typecorpus::try_over_result_is_not_a_conflict());
     let total = fixtures.len();
     let mut covered = 0;
-    // N1: Mismatch. N2: Arity. N3: UnknownField and Occurs. N4: NonBoolGuard. N5: Dimension.
+    // N1: Mismatch. N2: Arity. N3: UnknownField and Occurs. N4: NonBoolGuard. N5: Dimension. N6: TryNonResult.
     let allowed_cats = BTreeSet::from([
         Category::Mismatch,
         Category::Arity,
@@ -68,6 +71,7 @@ fn native_type_parity_corpus_coverage() {
         Category::Occurs,
         Category::NonBoolGuard,
         Category::Dimension,
+        Category::TryNonResult,
     ]);
 
     for fixture in &fixtures {
@@ -143,17 +147,17 @@ fn unsupported_construct_returns_none() {
             name: Ident::new("Unsupported"),
             params: vec![(
                 Ident::new("res"),
-                Ty::Result(Box::new(Ty::Int(IntWidth::Int)), Box::new(Ty::Bool)),
+                Ty::List(Box::new(Ty::Int(IntWidth::Int))),
             )],
             body: Pattern::default(),
             yields: o.var("res"),
-            result: Ty::Result(Box::new(Ty::Int(IntWidth::Int)), Box::new(Ty::Bool)),
+            result: Ty::List(Box::new(Ty::Int(IntWidth::Int))),
         }],
     };
     let resolver = TableResolver::new();
     let native_src = translate(&source, &resolver);
     assert!(
         native_src.is_none(),
-        "Result type construct should return None"
+        "List type construct should return None"
     );
 }
