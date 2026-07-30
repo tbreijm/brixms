@@ -2,7 +2,7 @@
 
 use brix_ir::core::{Expr, ExprKind};
 use brix_ir::frontend::{FrontendSource, SchemaResolver, TableResolver};
-use brix_ir::pattern::Lit;
+use brix_ir::pattern::{Clause, Lit};
 use brix_ir::types::{IntWidth, Row, RowTail, Ty, TyVar};
 
 use super::syntax::{NExpr, NLit, NRow, NSig, NTy, NativeQuery, NativeSource, Origin, SigTable};
@@ -136,12 +136,37 @@ pub fn translate_expr(
 ///
 /// Total and panic-safe: returns `None` for any unsupported construct.
 pub fn translate(source: &FrontendSource, resolver: &impl SchemaResolver) -> Option<NativeSource> {
-    if !source.rules.is_empty() || !source.constraints.is_empty() || !source.functions.is_empty() {
+    if !source.functions.is_empty() {
         return None;
     }
 
     let mut sigs = SigTable::new();
     let mut native_queries = Vec::new();
+    let mut guards = Vec::new();
+
+    for rule in &source.rules {
+        for clause in &rule.body.clauses {
+            match clause {
+                Clause::When(expr) => {
+                    let nexpr = translate_expr(expr, resolver, &mut sigs)?;
+                    guards.push(nexpr);
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    for constraint in &source.constraints {
+        for clause in &constraint.body.clauses {
+            match clause {
+                Clause::When(expr) => {
+                    let nexpr = translate_expr(expr, resolver, &mut sigs)?;
+                    guards.push(nexpr);
+                }
+                _ => return None,
+            }
+        }
+    }
 
     for query in &source.queries {
         if !query.body.clauses.is_empty() {
@@ -168,6 +193,7 @@ pub fn translate(source: &FrontendSource, resolver: &impl SchemaResolver) -> Opt
     Some(NativeSource {
         queries: native_queries,
         sigs,
+        guards,
     })
 }
 

@@ -24,6 +24,10 @@ pub enum NConflict {
     UnknownField {
         field: Sym,
     },
+    /// A guard expression whose type is not Bool (N4).
+    NonBool {
+        found: NTy,
+    },
 }
 
 /// Analysis report for the native checker.
@@ -415,6 +419,15 @@ pub fn analyze(src: &NativeSource) -> NativeReport {
         cx.analyze_query(query);
     }
 
+    for guard in &src.guards {
+        cx.env = BTreeMap::new();
+        let guard_ty = cx.infer_expr(guard);
+        let resolved_ty = zonk(&guard_ty, &cx.subst);
+        if resolved_ty != NTy::Bool && !matches!(resolved_ty, NTy::Var(_) | NTy::Error) {
+            cx.conflicts.push(NConflict::NonBool { found: resolved_ty });
+        }
+    }
+
     let has_types = cx
         .has_types
         .into_iter()
@@ -488,6 +501,7 @@ mod tests {
                 result: NTy::Var(0),
             }],
             sigs,
+            ..Default::default()
         };
         let report = analyze(&src);
         assert!(
@@ -544,6 +558,7 @@ mod tests {
                 result: NTy::Var(0),
             }],
             sigs,
+            ..Default::default()
         };
         let report = analyze(&src);
         assert!(
@@ -587,6 +602,7 @@ mod tests {
                 result: NTy::Int,
             }],
             sigs: SigTable::new(),
+            ..Default::default()
         };
         let report = analyze(&src);
         assert!(
@@ -617,6 +633,7 @@ mod tests {
                 result: NTy::Int,
             }],
             sigs: SigTable::new(),
+            ..Default::default()
         };
         let report = analyze(&src);
         assert!(
@@ -680,6 +697,63 @@ mod tests {
             matches!(conflicts.as_slice(), [NConflict::Occurs { var: 0, .. }]),
             "expected Occurs into Rel row, got {:?}",
             conflicts
+        );
+    }
+
+    #[test]
+    fn bool_guard_gives_no_conflict() {
+        let src = NativeSource {
+            queries: vec![],
+            sigs: SigTable::new(),
+            guards: vec![NExpr::Lit {
+                origin: 1,
+                lit: NLit::Bool(true),
+            }],
+        };
+        let report = analyze(&src);
+        assert!(
+            report.is_consistent(),
+            "expected no conflicts for Bool guard, got {:?}",
+            report.conflicts
+        );
+    }
+
+    #[test]
+    fn int_guard_gives_non_bool_conflict() {
+        let src = NativeSource {
+            queries: vec![],
+            sigs: SigTable::new(),
+            guards: vec![NExpr::Lit {
+                origin: 1,
+                lit: NLit::Int(42),
+            }],
+        };
+        let report = analyze(&src);
+        assert!(
+            matches!(
+                report.conflicts.as_slice(),
+                [NConflict::NonBool { found: NTy::Int }]
+            ),
+            "expected NonBool conflict for Int guard, got {:?}",
+            report.conflicts
+        );
+    }
+
+    #[test]
+    fn unresolved_var_guard_gives_no_conflict() {
+        let src = NativeSource {
+            queries: vec![],
+            sigs: SigTable::new(),
+            guards: vec![NExpr::Var {
+                origin: 1,
+                name: "unbound_var".to_string(),
+            }],
+        };
+        let report = analyze(&src);
+        assert!(
+            report.is_consistent(),
+            "unresolved var guard must give no conflict, got {:?}",
+            report.conflicts
         );
     }
 }
