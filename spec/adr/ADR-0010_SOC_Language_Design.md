@@ -1,6 +1,6 @@
 # ADR-0010 — The SOC Language: Design & Staged Plan
 
-Status: **Proposed** (2026-07-31) — the design pin for the "make it usable" arc, opened the moment zero-legacy landed (N9, #210).
+Status: **Accepted** (2026-07-31, ratified by user) — the design pin for the "make it usable" arc, opened the moment zero-legacy landed (N9, #210). **§6 decision: Option (A) — a general SOC language** (typing is one regime; witnesses/grades/regimes in the surface DNA). L1 (grammar + fresh surface AST) is now unblocked.
 
 Date: 2026-07-31.
 
@@ -102,7 +102,7 @@ Design commitments already agreed:
 - **(A) General SOC language (recommended).** Typing is *one regime*; witnesses, grades, and regimes are in the surface DNA. Distinctive, matches the "has-type = one regime" thesis, and is the only version that makes first-class composable witnesses ergonomic. Higher design cost.
 - **(B) Typed FP language that *uses* SOC underneath.** Grades/witnesses as a library behind a conventional typed core. Faster to a usable REPL; throws away most of what makes SOC SOC — first-class witnesses quietly become a side-channel.
 
-**Fable's recommendation: (A).** Zero-legacy exists precisely to earn the freedom to build (A); (B) spends that freedom on convention. This is the one call to make with the user before any parser code.
+**Fable's recommendation: (A).** Zero-legacy exists precisely to earn the freedom to build (A); (B) spends that freedom on convention. This is the one call to make with the user before any parser code. **→ RATIFIED (A) by user, 2026-07-31.**
 
 Lineage (honest): Datalog / Datomic (facts + rules + settlement) × dependent types / Lean (proofs as values) × differential dataflow (incremental O(Δ)) × **graded modal types** (the novel core).
 
