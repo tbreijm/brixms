@@ -15,8 +15,9 @@ use soc_regimes::native::{analyze as native_analyze, translate, NConflict};
 ///
 /// N1: `Mismatch` (scalar). N2: `Arity` (call arg-count vs candidate
 /// signatures). N3: `UnknownField` (records/rows) and `Occurs` (activated now
-/// that container types Option/Rel/Record are translatable).
-const COVERAGE_FLOOR: usize = 7;
+/// that container types Option/Rel/Record are translatable). N4: `NonBoolGuard`
+/// (When-guards in Rule / Constraint bodies).
+const COVERAGE_FLOOR: usize = 9;
 
 fn reflect_category(kind: &ConflictKind) -> Option<Category> {
     match kind {
@@ -43,6 +44,7 @@ fn conflict_category(c: &NConflict) -> Category {
         NConflict::Occurs { .. } => Category::Occurs,
         NConflict::Arity { .. } => Category::Arity,
         NConflict::UnknownField { .. } => Category::UnknownField,
+        NConflict::NonBool { .. } => Category::NonBoolGuard,
     }
 }
 
@@ -55,12 +57,13 @@ fn native_type_parity_corpus_coverage() {
     fixtures.push(typecorpus::arity_non_first_candidate_match_is_not_a_conflict());
     let total = fixtures.len();
     let mut covered = 0;
-    // N1: Mismatch. N2: Arity. N3: UnknownField and Occurs (containers: Record/Rel/Option).
+    // N1: Mismatch. N2: Arity. N3: UnknownField and Occurs. N4: NonBoolGuard.
     let allowed_cats = BTreeSet::from([
         Category::Mismatch,
         Category::Arity,
         Category::UnknownField,
         Category::Occurs,
+        Category::NonBoolGuard,
     ]);
 
     for fixture in &fixtures {

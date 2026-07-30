@@ -121,9 +121,10 @@ pub struct NativeQuery {
     pub result: NTy,
 }
 
-/// Native source container holding queries and function signatures.
+/// Native source container holding queries, function signatures, and guard expressions.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct NativeSource {
     pub queries: Vec<NativeQuery>,
     pub sigs: SigTable,
+    pub guards: Vec<NExpr>,
 }
