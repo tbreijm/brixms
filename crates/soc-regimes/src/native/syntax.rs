@@ -30,6 +30,7 @@ pub enum NTy {
     Record(NRow),
     Rel(NRow),
     Option(Box<NTy>),
+    Result(Box<NTy>, Box<NTy>),
     Quantity(Sym),
     Money(Sym),
     Dimensioned(Vec<(Sym, i64)>),
@@ -57,6 +58,10 @@ pub enum NExpr {
     Var {
         origin: Origin,
         name: Sym,
+        /// The node's own type annotation (`brix_ir::Expr::ty`). Used as the
+        /// fallback when `name` is absent from the environment, mirroring
+        /// `reflect`'s `env.get(name).unwrap_or(expr.ty)` (reflect.rs:1554).
+        ty: Option<NTy>,
     },
     Call {
         origin: Origin,
@@ -72,6 +77,10 @@ pub enum NExpr {
         origin: Origin,
         fields: Vec<(Sym, NExpr)>,
     },
+    Try {
+        origin: Origin,
+        inner: Box<NExpr>,
+    },
 }
 
 impl NExpr {
@@ -82,6 +91,7 @@ impl NExpr {
             NExpr::Call { origin, .. } => *origin,
             NExpr::Field { origin, .. } => *origin,
             NExpr::Record { origin, .. } => *origin,
+            NExpr::Try { origin, .. } => *origin,
         }
     }
 }

@@ -34,6 +34,10 @@ pub enum NConflict {
         left: NTy,
         right: NTy,
     },
+    /// Postfix ? applied to a non-Result value (N6).
+    TryNonResult {
+        found: NTy,
+    },
 }
 
 /// Analysis report for the native checker.
@@ -123,6 +127,7 @@ pub fn occurs(v: u32, ty: &NTy, subst: &BTreeMap<u32, NTy>) -> bool {
             params.iter().any(|p| occurs(v, p, subst)) || occurs(v, ret, subst)
         }
         NTy::Option(inner) => occurs(v, inner, subst),
+        NTy::Result(ok, err) => occurs(v, ok, subst) || occurs(v, err, subst),
         NTy::Record(row) | NTy::Rel(row) => row.fields.iter().any(|(_, fty)| occurs(v, fty, subst)),
         NTy::Quantity(_) | NTy::Money(_) | NTy::Dimensioned(_) => false,
         _ => false,
@@ -144,6 +149,7 @@ pub fn zonk(ty: &NTy, subst: &BTreeMap<u32, NTy>) -> NTy {
             ret: Box::new(zonk(ret, subst)),
         },
         NTy::Option(inner) => NTy::Option(Box::new(zonk(inner, subst))),
+        NTy::Result(ok, err) => NTy::Result(Box::new(zonk(ok, subst)), Box::new(zonk(err, subst))),
         NTy::Record(row) => NTy::Record(zonk_row(row, subst)),
         NTy::Rel(row) => NTy::Rel(zonk_row(row, subst)),
         NTy::Quantity(m) => NTy::Quantity(m.clone()),
@@ -265,6 +271,15 @@ pub fn unify(
                 NTy::Error
             } else {
                 NTy::Option(Box::new(u))
+            }
+        }
+        (NTy::Result(ok1, err1), NTy::Result(ok2, err2)) => {
+            let u_ok = unify(ok1, ok2, subst, conflicts);
+            let u_err = unify(err1, err2, subst, conflicts);
+            if u_ok == NTy::Error || u_err == NTy::Error {
+                NTy::Error
+            } else {
+                NTy::Result(Box::new(u_ok), Box::new(u_err))
             }
         }
         (NTy::Record(row1), NTy::Record(row2)) => {
@@ -389,9 +404,14 @@ impl<'a> InferContext<'a> {
                 NLit::Str(_) => NTy::Str,
                 NLit::Unit => NTy::Unit,
             },
-            NExpr::Var { name, .. } => {
+            NExpr::Var { name, ty, .. } => {
                 if let Some(t) = self.env.get(name) {
                     t.clone()
+                } else if let Some(ann) = ty {
+                    // Env miss: fall back to the node's annotation, mirroring
+                    // reflect (`env.get(name).unwrap_or(expr.ty)`). This lets a
+                    // Var carrying e.g. Result/Int be seen concretely.
+                    ann.clone()
                 } else {
                     let v = self.fresh_var();
                     let t = NTy::Var(v);
@@ -563,6 +583,18 @@ impl<'a> InferContext<'a> {
                         self.conflicts.push(NConflict::UnknownField {
                             field: field.clone(),
                         });
+                        NTy::Error
+                    }
+                }
+            }
+            NExpr::Try { inner, .. } => {
+                let inner_ty = self.infer_expr(inner);
+                let resolved = zonk(&inner_ty, &self.subst);
+                match resolved {
+                    NTy::Result(ok, _) => *ok,
+                    NTy::Var(_) | NTy::Error => NTy::Error,
+                    found => {
+                        self.conflicts.push(NConflict::TryNonResult { found });
                         NTy::Error
                     }
                 }
@@ -794,6 +826,7 @@ mod tests {
                     base: Box::new(NExpr::Var {
                         origin: 1,
                         name: "r".to_string(),
+                        ty: None,
                     }),
                     field: "a".to_string(),
                 },
@@ -825,6 +858,7 @@ mod tests {
                     base: Box::new(NExpr::Var {
                         origin: 1,
                         name: "r".to_string(),
+                        ty: None,
                     }),
                     field: "absent".to_string(),
                 },
@@ -945,6 +979,7 @@ mod tests {
             guards: vec![NExpr::Var {
                 origin: 1,
                 name: "unbound_var".to_string(),
+                ty: None,
             }],
         };
         let report = analyze(&src);
@@ -971,10 +1006,12 @@ mod tests {
                         NExpr::Var {
                             origin: 2,
                             name: "a".to_string(),
+                            ty: None,
                         },
                         NExpr::Var {
                             origin: 3,
                             name: "b".to_string(),
+                            ty: None,
                         },
                     ],
                 },
@@ -1013,10 +1050,12 @@ mod tests {
                         NExpr::Var {
                             origin: 2,
                             name: "a".to_string(),
+                            ty: None,
                         },
                         NExpr::Var {
                             origin: 3,
                             name: "b".to_string(),
+                            ty: None,
                         },
                     ],
                 },
@@ -1049,10 +1088,12 @@ mod tests {
                         NExpr::Var {
                             origin: 2,
                             name: "a".to_string(),
+                            ty: None,
                         },
                         NExpr::Var {
                             origin: 3,
                             name: "b".to_string(),
+                            ty: None,
                         },
                     ],
                 },
@@ -1065,6 +1106,134 @@ mod tests {
         assert!(
             report.is_consistent(),
             "expected solving for dimension-vs-variable, got {:?}",
+            report.conflicts
+        );
+    }
+
+    #[test]
+    fn try_on_int_gives_try_non_result_conflict() {
+        let src = NativeSource {
+            queries: vec![NativeQuery {
+                name: "Q".to_string(),
+                params: vec![],
+                yields: NExpr::Try {
+                    origin: 1,
+                    inner: Box::new(NExpr::Lit {
+                        origin: 2,
+                        lit: NLit::Int(42),
+                    }),
+                },
+                result: NTy::Var(0),
+            }],
+            sigs: SigTable::new(),
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert!(
+            matches!(
+                report.conflicts.as_slice(),
+                [NConflict::TryNonResult { found: NTy::Int }]
+            ),
+            "expected TryNonResult conflict, got {:?}",
+            report.conflicts
+        );
+    }
+
+    #[test]
+    fn try_on_result_gives_ok_type_and_no_conflict() {
+        let src = NativeSource {
+            queries: vec![NativeQuery {
+                name: "Q".to_string(),
+                params: vec![(
+                    "x".to_string(),
+                    NTy::Result(Box::new(NTy::Int), Box::new(NTy::Str)),
+                )],
+                yields: NExpr::Try {
+                    origin: 1,
+                    inner: Box::new(NExpr::Var {
+                        origin: 2,
+                        name: "x".to_string(),
+                        ty: None,
+                    }),
+                },
+                result: NTy::Var(0),
+            }],
+            sigs: SigTable::new(),
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert!(
+            report.is_consistent(),
+            "expected no conflict for try on Result, got {:?}",
+            report.conflicts
+        );
+        let origin1_ty = report
+            .has_types
+            .iter()
+            .find(|(o, _)| *o == 1)
+            .map(|(_, ty)| ty);
+        assert_eq!(origin1_ty, Some(&NTy::Int));
+    }
+
+    #[test]
+    fn try_on_unresolved_var_gives_no_conflict() {
+        let src = NativeSource {
+            queries: vec![NativeQuery {
+                name: "Q".to_string(),
+                params: vec![("x".to_string(), NTy::Var(1))],
+                yields: NExpr::Try {
+                    origin: 1,
+                    inner: Box::new(NExpr::Var {
+                        origin: 2,
+                        name: "x".to_string(),
+                        ty: None,
+                    }),
+                },
+                result: NTy::Var(0),
+            }],
+            sigs: SigTable::new(),
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert!(
+            report.is_consistent(),
+            "expected no conflict for try on unresolved var, got {:?}",
+            report.conflicts
+        );
+    }
+
+    #[test]
+    fn try_on_annotated_non_result_var_gives_try_non_result() {
+        // A Var absent from env but annotated with a concrete non-Result type
+        // (via NExpr::Var.ty, mirroring reflect's expr.ty fallback) must be seen
+        // concretely — so `?` on it is a TryNonResult conflict. This closes the
+        // native-Var annotation gap: before the fallback, native saw a bare
+        // unresolved var and (correctly, per reflect) raised nothing, but it
+        // could not see a Var's concrete annotation at all.
+        let src = NativeSource {
+            queries: vec![NativeQuery {
+                name: "Q".to_string(),
+                params: vec![],
+                yields: NExpr::Try {
+                    origin: 1,
+                    inner: Box::new(NExpr::Var {
+                        origin: 2,
+                        name: "x".to_string(),
+                        ty: Some(NTy::Int),
+                    }),
+                },
+                result: NTy::Var(0),
+            }],
+            sigs: SigTable::new(),
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert!(
+            matches!(
+                report.conflicts.as_slice(),
+                [NConflict::TryNonResult { found: NTy::Int }]
+            ),
+            "annotated non-Result Var should give TryNonResult, got {:?}",
             report.conflicts
         );
     }
