@@ -18,8 +18,9 @@ use soc_regimes::native::{analyze as native_analyze, translate, NConflict};
 /// that container types Option/Rel/Record are translatable). N4: `NonBoolGuard`
 /// (When-guards in Rule / Constraint bodies). N5: `Dimension` (unit conflict detection).
 /// N6: `TryNonResult` (postfix `?` on non-Result values). N7: `EpistemicErasure`
-/// (Estimate/Missing to plain type, or Probability to Bool).
-const COVERAGE_FLOOR: usize = 22;
+/// (Estimate/Missing to plain type, or Probability to Bool). N8a: `Mismatch`
+/// (edge-clause role-type mismatch in Rule / Constraint bodies).
+const COVERAGE_FLOOR: usize = 24;
 
 fn reflect_category(kind: &ConflictKind) -> Option<Category> {
     match kind {

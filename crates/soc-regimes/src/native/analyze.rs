@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use super::syntax::{NExpr, NLit, NRow, NTy, NativeQuery, NativeSource, Origin, Sym};
+use super::syntax::{NArg, NExpr, NLit, NRow, NTy, NativeQuery, NativeSource, Origin, Sym};
 
 /// Native type conflicts (grows per ADR-0009 slice).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -712,6 +712,32 @@ pub fn analyze(src: &NativeSource) -> NativeReport {
         }
     }
 
+    for edge in &src.edges {
+        if let Some(schema) = src.relations.get(&edge.relation) {
+            for (role_name, arg) in &edge.args {
+                if let Some((_, expected_ty)) = schema.roles.iter().find(|(r, _)| r == role_name) {
+                    let arg_ty = match arg {
+                        NArg::Lit(lit) => match lit {
+                            NLit::Int(_) => NTy::Int,
+                            NLit::Bool(_) => NTy::Bool,
+                            NLit::Str(_) => NTy::Str,
+                            NLit::Unit => NTy::Unit,
+                        },
+                        NArg::Var(name) => {
+                            if let Some(existing) = cx.env.get(name) {
+                                existing.clone()
+                            } else {
+                                cx.env.insert(name.clone(), expected_ty.clone());
+                                expected_ty.clone()
+                            }
+                        }
+                    };
+                    unify(expected_ty, &arg_ty, &mut cx.subst, &mut cx.conflicts);
+                }
+            }
+        }
+    }
+
     let has_types = cx
         .has_types
         .into_iter()
@@ -726,8 +752,78 @@ pub fn analyze(src: &NativeSource) -> NativeReport {
 
 #[cfg(test)]
 mod tests {
-    use super::super::syntax::SigTable;
+    use super::super::syntax::{NArg, NEdge, NRelSchema, SigTable};
     use super::*;
+
+    #[test]
+    fn edge_clause_role_type_mismatch() {
+        let mut relations = BTreeMap::new();
+        relations.insert(
+            "R".to_string(),
+            NRelSchema {
+                roles: vec![("n".to_string(), NTy::Int)],
+            },
+        );
+        let src = NativeSource {
+            edges: vec![NEdge {
+                relation: "R".to_string(),
+                args: vec![("n".to_string(), NArg::Lit(NLit::Bool(true)))],
+            }],
+            relations,
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert_eq!(report.conflicts.len(), 1);
+        assert!(matches!(
+            report.conflicts[0],
+            NConflict::Mismatch {
+                left: NTy::Int,
+                right: NTy::Bool
+            }
+        ));
+    }
+
+    #[test]
+    fn edge_clause_role_type_matching() {
+        let mut relations = BTreeMap::new();
+        relations.insert(
+            "R".to_string(),
+            NRelSchema {
+                roles: vec![("n".to_string(), NTy::Int)],
+            },
+        );
+        let src = NativeSource {
+            edges: vec![NEdge {
+                relation: "R".to_string(),
+                args: vec![("n".to_string(), NArg::Lit(NLit::Int(42)))],
+            }],
+            relations,
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn edge_clause_var_role_arg_binds_to_role_type() {
+        let mut relations = BTreeMap::new();
+        relations.insert(
+            "R".to_string(),
+            NRelSchema {
+                roles: vec![("n".to_string(), NTy::Int)],
+            },
+        );
+        let src = NativeSource {
+            edges: vec![NEdge {
+                relation: "R".to_string(),
+                args: vec![("n".to_string(), NArg::Var("x".to_string()))],
+            }],
+            relations,
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert!(report.is_consistent());
+    }
 
     #[test]
     fn unify_occurs_into_fn_is_detected() {
@@ -995,6 +1091,7 @@ mod tests {
                 origin: 1,
                 lit: NLit::Bool(true),
             }],
+            ..Default::default()
         };
         let report = analyze(&src);
         assert!(
@@ -1013,6 +1110,7 @@ mod tests {
                 origin: 1,
                 lit: NLit::Int(42),
             }],
+            ..Default::default()
         };
         let report = analyze(&src);
         assert!(
@@ -1035,6 +1133,7 @@ mod tests {
                 name: "unbound_var".to_string(),
                 ty: None,
             }],
+            ..Default::default()
         };
         let report = analyze(&src);
         assert!(

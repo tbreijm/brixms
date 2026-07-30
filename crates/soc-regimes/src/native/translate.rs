@@ -1,11 +1,15 @@
-//! Translation bridge from `brix_ir::frontend::FrontendSource` to `NativeSource` (ADR-0009 §5).
+use std::collections::BTreeMap;
 
 use brix_ir::core::{Expr, ExprKind};
 use brix_ir::frontend::{FrontendSource, SchemaResolver, TableResolver};
-use brix_ir::pattern::{Clause, Lit};
+use brix_ir::ident::QualIdent;
+use brix_ir::pattern::{Arg, Clause, Lit, RoleArg};
 use brix_ir::types::{IntWidth, Row, RowTail, Ty, TyVar};
 
-use super::syntax::{NExpr, NLit, NRow, NSig, NTy, NativeQuery, NativeSource, Origin, SigTable};
+use super::syntax::{
+    NArg, NEdge, NExpr, NLit, NRelSchema, NRow, NSig, NTy, NativeQuery, NativeSource, Origin,
+    SigTable, Sym,
+};
 
 /// Translates a `brix_ir::types::Row` to a native `NRow`.
 pub fn translate_row(row: &Row) -> Option<NRow> {
@@ -157,6 +161,39 @@ pub fn translate_expr(
     }
 }
 
+fn translate_edge(
+    relation: &QualIdent,
+    args: &[RoleArg],
+    resolver: &impl SchemaResolver,
+    relations: &mut BTreeMap<Sym, NRelSchema>,
+) -> Option<NEdge> {
+    let rel_name = relation.to_string();
+    if let Some(schema) = resolver.relation(relation) {
+        if !relations.contains_key(&rel_name) {
+            let mut roles = Vec::with_capacity(schema.roles.len());
+            for (rname, rty) in &schema.roles {
+                let nty = translate_ty(rty)?;
+                roles.push((rname.to_string(), nty));
+            }
+            relations.insert(rel_name.clone(), NRelSchema { roles });
+        }
+    }
+
+    let mut nargs = Vec::with_capacity(args.len());
+    for role_arg in args {
+        let narg = match &role_arg.arg {
+            Arg::Var(v) => NArg::Var(v.to_string()),
+            Arg::Lit(l) => NArg::Lit(translate_lit(l)?),
+        };
+        nargs.push((role_arg.role.to_string(), narg));
+    }
+
+    Some(NEdge {
+        relation: rel_name,
+        args: nargs,
+    })
+}
+
 /// Translates a `FrontendSource` with a `SchemaResolver` to `NativeSource`.
 ///
 /// Total and panic-safe: returns `None` for any unsupported construct.
@@ -168,6 +205,8 @@ pub fn translate(source: &FrontendSource, resolver: &impl SchemaResolver) -> Opt
     let mut sigs = SigTable::new();
     let mut native_queries = Vec::new();
     let mut guards = Vec::new();
+    let mut relations = BTreeMap::new();
+    let mut edges = Vec::new();
 
     for rule in &source.rules {
         for clause in &rule.body.clauses {
@@ -175,6 +214,10 @@ pub fn translate(source: &FrontendSource, resolver: &impl SchemaResolver) -> Opt
                 Clause::When(expr) => {
                     let nexpr = translate_expr(expr, resolver, &mut sigs)?;
                     guards.push(nexpr);
+                }
+                Clause::Edge { relation, args, .. } => {
+                    let edge = translate_edge(relation, args, resolver, &mut relations)?;
+                    edges.push(edge);
                 }
                 _ => return None,
             }
@@ -187,6 +230,10 @@ pub fn translate(source: &FrontendSource, resolver: &impl SchemaResolver) -> Opt
                 Clause::When(expr) => {
                     let nexpr = translate_expr(expr, resolver, &mut sigs)?;
                     guards.push(nexpr);
+                }
+                Clause::Edge { relation, args, .. } => {
+                    let edge = translate_edge(relation, args, resolver, &mut relations)?;
+                    edges.push(edge);
                 }
                 _ => return None,
             }
@@ -219,6 +266,8 @@ pub fn translate(source: &FrontendSource, resolver: &impl SchemaResolver) -> Opt
         queries: native_queries,
         sigs,
         guards,
+        relations,
+        edges,
     })
 }
 
