@@ -4,11 +4,22 @@ use std::collections::BTreeMap;
 
 use super::syntax::{NExpr, NLit, NTy, NativeQuery, NativeSource, Origin, Sym};
 
-/// Native type conflicts supported in Slice N1.
+/// Native type conflicts (grows per ADR-0009 slice).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NConflict {
-    Mismatch { left: NTy, right: NTy },
-    Occurs { var: u32, into: NTy },
+    Mismatch {
+        left: NTy,
+        right: NTy,
+    },
+    Occurs {
+        var: u32,
+        into: NTy,
+    },
+    /// A call whose argument count matches NO candidate signature (N2).
+    Arity {
+        expected: u32,
+        found: u32,
+    },
 }
 
 /// Analysis report for the native checker.
@@ -207,21 +218,16 @@ impl<'a> InferContext<'a> {
                         }
                         sig.ret.clone()
                     } else {
-                        // Arity or overload mismatch
-                        let expected = sigs
-                            .first()
-                            .map(|s| NTy::Fn {
-                                params: s.params.clone(),
-                                ret: Box::new(s.ret.clone()),
-                            })
-                            .unwrap_or(NTy::Error);
-                        let found = NTy::Fn {
-                            params: arg_tys,
-                            ret: Box::new(NTy::Error),
-                        };
-                        self.conflicts.push(NConflict::Mismatch {
-                            left: expected,
-                            right: found,
+                        // Function resolves, but NO candidate signature matches the
+                        // argument count (N2). This is an Arity conflict — distinct
+                        // from a same-arity type Mismatch, which the unify branch
+                        // above reports. `expected` reports the first candidate's
+                        // arity (category-set parity does not depend on the value;
+                        // brix-ir's `arity_ok` filter likewise keys on the count).
+                        let expected = sigs.first().map(|s| s.params.len()).unwrap_or(0) as u32;
+                        self.conflicts.push(NConflict::Arity {
+                            expected,
+                            found: arg_tys.len() as u32,
                         });
                         NTy::Error
                     }
@@ -321,6 +327,95 @@ mod tests {
         let result = unify(&NTy::Int, &NTy::Bool, &mut subst, &mut conflicts);
         assert_eq!(result, NTy::Error);
         assert!(matches!(conflicts.as_slice(), [NConflict::Mismatch { .. }]));
+    }
+
+    #[test]
+    fn call_with_no_arity_matching_candidate_is_arity() {
+        use crate::native::syntax::{NSig, NativeQuery, SigTable};
+        // f() called with 0 args, but f : (Int) -> Int (1 param) => Arity, not Mismatch.
+        let mut sigs = SigTable::new();
+        sigs.insert(
+            "f".to_string(),
+            NSig {
+                params: vec![NTy::Int],
+                ret: NTy::Int,
+            },
+        );
+        let src = NativeSource {
+            queries: vec![NativeQuery {
+                name: "Q".to_string(),
+                params: vec![],
+                yields: NExpr::Call {
+                    origin: 0,
+                    func: "f".to_string(),
+                    args: vec![],
+                },
+                result: NTy::Var(0),
+            }],
+            sigs,
+        };
+        let report = analyze(&src);
+        assert!(
+            matches!(
+                report.conflicts.as_slice(),
+                [NConflict::Arity {
+                    expected: 1,
+                    found: 0
+                }]
+            ),
+            "expected one Arity{{1,0}}, got {:?}",
+            report.conflicts
+        );
+    }
+
+    #[test]
+    fn call_matching_a_non_first_overload_candidate_is_no_conflict() {
+        use crate::native::syntax::{NSig, NativeQuery, SigTable};
+        // g(Int, Int) with overloads g(Int) and g(Int,Int) => the 2-param
+        // candidate matches => NO Arity conflict (discriminator).
+        let mut sigs = SigTable::new();
+        sigs.insert(
+            "g".to_string(),
+            NSig {
+                params: vec![NTy::Int],
+                ret: NTy::Int,
+            },
+        );
+        sigs.insert(
+            "g".to_string(),
+            NSig {
+                params: vec![NTy::Int, NTy::Int],
+                ret: NTy::Int,
+            },
+        );
+        let src = NativeSource {
+            queries: vec![NativeQuery {
+                name: "Q".to_string(),
+                params: vec![],
+                yields: NExpr::Call {
+                    origin: 0,
+                    func: "g".to_string(),
+                    args: vec![
+                        NExpr::Lit {
+                            origin: 1,
+                            lit: NLit::Int(1),
+                        },
+                        NExpr::Lit {
+                            origin: 2,
+                            lit: NLit::Int(2),
+                        },
+                    ],
+                },
+                result: NTy::Var(0),
+            }],
+            sigs,
+        };
+        let report = analyze(&src);
+        assert!(
+            report.is_consistent(),
+            "matching a non-first candidate must not conflict, got {:?}",
+            report.conflicts
+        );
     }
 
     #[test]
