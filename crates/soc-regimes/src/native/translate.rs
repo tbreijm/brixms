@@ -43,9 +43,16 @@ pub fn translate_ty(ty: &Ty) -> Option<NTy> {
         Ty::Option(inner) => Some(NTy::Option(Box::new(translate_ty(inner)?))),
         Ty::Record(row) => Some(NTy::Record(translate_row(row)?)),
         Ty::Rel(row) => Some(NTy::Rel(translate_row(row)?)),
+        Ty::Quantity(m) => Some(NTy::Quantity(m.to_string())),
+        Ty::Money(c) => Some(NTy::Money(c.to_string())),
+        Ty::Dimensioned(ds) => Some(NTy::Dimensioned(
+            ds.iter()
+                .map(|d| (d.name.to_string(), d.exponent as i64))
+                .collect(),
+        )),
         Ty::Var(TyVar(v)) => Some(NTy::Var(*v)),
         Ty::Error => Some(NTy::Error),
-        // Return None for all unsupported type constructs (Result, Dimensions, etc.)
+        // Return None for all unsupported type constructs (Result, etc.)
         _ => None,
     }
 }

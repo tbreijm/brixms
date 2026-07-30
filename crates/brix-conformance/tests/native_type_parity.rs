@@ -16,8 +16,8 @@ use soc_regimes::native::{analyze as native_analyze, translate, NConflict};
 /// N1: `Mismatch` (scalar). N2: `Arity` (call arg-count vs candidate
 /// signatures). N3: `UnknownField` (records/rows) and `Occurs` (activated now
 /// that container types Option/Rel/Record are translatable). N4: `NonBoolGuard`
-/// (When-guards in Rule / Constraint bodies).
-const COVERAGE_FLOOR: usize = 9;
+/// (When-guards in Rule / Constraint bodies). N5: `Dimension` (unit conflict detection).
+const COVERAGE_FLOOR: usize = 11;
 
 fn reflect_category(kind: &ConflictKind) -> Option<Category> {
     match kind {
@@ -45,6 +45,7 @@ fn conflict_category(c: &NConflict) -> Category {
         NConflict::Arity { .. } => Category::Arity,
         NConflict::UnknownField { .. } => Category::UnknownField,
         NConflict::NonBool { .. } => Category::NonBoolGuard,
+        NConflict::Dimension { .. } => Category::Dimension,
     }
 }
 
@@ -55,15 +56,18 @@ fn native_type_parity_corpus_coverage() {
     // Discriminator (selfhost-only, not in all_type_fixtures): an overload whose
     // *non-first* candidate matches the arg count → NO Arity conflict.
     fixtures.push(typecorpus::arity_non_first_candidate_match_is_not_a_conflict());
+    fixtures.push(typecorpus::quantity_add_dimension_mismatch());
+    fixtures.push(typecorpus::quantity_add_same_dimension_is_not_a_conflict());
     let total = fixtures.len();
     let mut covered = 0;
-    // N1: Mismatch. N2: Arity. N3: UnknownField and Occurs. N4: NonBoolGuard.
+    // N1: Mismatch. N2: Arity. N3: UnknownField and Occurs. N4: NonBoolGuard. N5: Dimension.
     let allowed_cats = BTreeSet::from([
         Category::Mismatch,
         Category::Arity,
         Category::UnknownField,
         Category::Occurs,
         Category::NonBoolGuard,
+        Category::Dimension,
     ]);
 
     for fixture in &fixtures {

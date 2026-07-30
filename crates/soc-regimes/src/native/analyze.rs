@@ -28,6 +28,12 @@ pub enum NConflict {
     NonBool {
         found: NTy,
     },
+    /// Dimension mismatch for operator call (N5).
+    Dimension {
+        op: String,
+        left: NTy,
+        right: NTy,
+    },
 }
 
 /// Analysis report for the native checker.
@@ -56,6 +62,59 @@ pub fn resolve<'a>(ty: &'a NTy, subst: &'a BTreeMap<u32, NTy>) -> &'a NTy {
     curr
 }
 
+/// Compares and normalizes dimension vectors by sorting by name, dropping exponent-0,
+/// and summing exponents for repeated names.
+pub fn normalize_dims(dims: &[(Sym, i64)]) -> Vec<(Sym, i64)> {
+    let mut map: BTreeMap<Sym, i64> = BTreeMap::new();
+    for (name, exp) in dims {
+        *map.entry(name.clone()).or_default() += exp;
+    }
+    map.into_iter().filter(|(_, exp)| *exp != 0).collect()
+}
+
+pub fn combine_dims(a: &[(Sym, i64)], b: &[(Sym, i64)], sign: i64) -> Vec<(Sym, i64)> {
+    let mut map: BTreeMap<Sym, i64> = BTreeMap::new();
+    for (name, exp) in a {
+        *map.entry(name.clone()).or_default() += exp;
+    }
+    for (name, exp) in b {
+        *map.entry(name.clone()).or_default() += sign * exp;
+    }
+    map.into_iter().filter(|(_, exp)| *exp != 0).collect()
+}
+
+pub fn dims(ty: &NTy, subst: &BTreeMap<u32, NTy>) -> Option<Vec<(Sym, i64)>> {
+    match resolve(ty, subst) {
+        NTy::Quantity(m) => Some(vec![(m.clone(), 1)]),
+        NTy::Money(c) => Some(vec![(format!("money:{c}"), 1)]),
+        NTy::Dimensioned(d) => Some(d.clone()),
+        _ => None,
+    }
+}
+
+pub fn from_dims(dims: Vec<(Sym, i64)>) -> NTy {
+    let norm = normalize_dims(&dims);
+    if norm.len() == 1 && norm[0].1 == 1 {
+        if let Some(c) = norm[0].0.strip_prefix("money:") {
+            return NTy::Money(c.to_string());
+        }
+        return NTy::Quantity(norm[0].0.clone());
+    }
+    NTy::Dimensioned(norm)
+}
+
+pub fn has_money(dims: &[(Sym, i64)]) -> bool {
+    dims.iter().any(|(name, _)| name.starts_with("money:"))
+}
+
+pub fn has_distinct_currencies(left: &[(Sym, i64)], right: &[(Sym, i64)]) -> bool {
+    let currency = |dims: &[(Sym, i64)]| {
+        dims.iter()
+            .find_map(|(name, _)| name.strip_prefix("money:").map(str::to_owned))
+    };
+    matches!((currency(left), currency(right)), (Some(a), Some(b)) if a != b)
+}
+
 /// Occurs check: returns true if variable `v` appears free in `ty` under `subst`.
 pub fn occurs(v: u32, ty: &NTy, subst: &BTreeMap<u32, NTy>) -> bool {
     match resolve(ty, subst) {
@@ -65,6 +124,7 @@ pub fn occurs(v: u32, ty: &NTy, subst: &BTreeMap<u32, NTy>) -> bool {
         }
         NTy::Option(inner) => occurs(v, inner, subst),
         NTy::Record(row) | NTy::Rel(row) => row.fields.iter().any(|(_, fty)| occurs(v, fty, subst)),
+        NTy::Quantity(_) | NTy::Money(_) | NTy::Dimensioned(_) => false,
         _ => false,
     }
 }
@@ -86,6 +146,9 @@ pub fn zonk(ty: &NTy, subst: &BTreeMap<u32, NTy>) -> NTy {
         NTy::Option(inner) => NTy::Option(Box::new(zonk(inner, subst))),
         NTy::Record(row) => NTy::Record(zonk_row(row, subst)),
         NTy::Rel(row) => NTy::Rel(zonk_row(row, subst)),
+        NTy::Quantity(m) => NTy::Quantity(m.clone()),
+        NTy::Money(c) => NTy::Money(c.clone()),
+        NTy::Dimensioned(d) => NTy::Dimensioned(d.clone()),
     }
 }
 
@@ -189,6 +252,13 @@ pub fn unify(
         (NTy::Str, NTy::Str) => NTy::Str,
         (NTy::Int, NTy::Int) => NTy::Int,
         (NTy::F64, NTy::F64) => NTy::F64,
+        (NTy::Quantity(m1), NTy::Quantity(m2)) if m1 == m2 => NTy::Quantity(m1.clone()),
+        (NTy::Money(c1), NTy::Money(c2)) if c1 == c2 => NTy::Money(c1.clone()),
+        (NTy::Dimensioned(d1), NTy::Dimensioned(d2))
+            if normalize_dims(d1) == normalize_dims(d2) =>
+        {
+            NTy::Dimensioned(d1.clone())
+        }
         (NTy::Option(a), NTy::Option(b)) => {
             let u = unify(a, b, subst, conflicts);
             if u == NTy::Error {
@@ -280,6 +350,36 @@ impl<'a> InferContext<'a> {
         v
     }
 
+    fn infer_call_sig(&mut self, func: &str, arg_tys: &[NTy]) -> NTy {
+        if let Some(sigs) = self.src.sigs.get(func) {
+            if let Some(sig) = sigs.iter().find(|s| s.params.len() == arg_tys.len()) {
+                for (arg_ty, param_ty) in arg_tys.iter().zip(&sig.params) {
+                    unify(arg_ty, param_ty, &mut self.subst, &mut self.conflicts);
+                }
+                sig.ret.clone()
+            } else {
+                let expected = sigs.first().map(|s| s.params.len()).unwrap_or(0) as u32;
+                self.conflicts.push(NConflict::Arity {
+                    expected,
+                    found: arg_tys.len() as u32,
+                });
+                NTy::Error
+            }
+        } else {
+            let dummy_ret = NTy::Var(self.fresh_var());
+            let expected = NTy::Fn {
+                params: arg_tys.to_vec(),
+                ret: Box::new(dummy_ret),
+            };
+            let found = NTy::Error;
+            self.conflicts.push(NConflict::Mismatch {
+                left: expected,
+                right: found,
+            });
+            NTy::Error
+        }
+    }
+
     fn infer_expr(&mut self, expr: &NExpr) -> NTy {
         let origin = expr.origin();
         let ty = match expr {
@@ -301,39 +401,137 @@ impl<'a> InferContext<'a> {
             }
             NExpr::Call { func, args, .. } => {
                 let arg_tys: Vec<NTy> = args.iter().map(|a| self.infer_expr(a)).collect();
-                if let Some(sigs) = self.src.sigs.get(func) {
-                    if let Some(sig) = sigs.iter().find(|s| s.params.len() == arg_tys.len()) {
-                        for (arg_ty, param_ty) in arg_tys.iter().zip(&sig.params) {
-                            unify(arg_ty, param_ty, &mut self.subst, &mut self.conflicts);
+                if let Some(opname) = func.strip_prefix("brix.ops.") {
+                    match opname {
+                        "add" | "sub" | "eq" | "ne" | "lt" | "le" | "gt" | "ge" => {
+                            if arg_tys.len() != 2 {
+                                self.conflicts.push(NConflict::Arity {
+                                    expected: 2,
+                                    found: arg_tys.len() as u32,
+                                });
+                                NTy::Error
+                            } else {
+                                let a = &arg_tys[0];
+                                let b = &arg_tys[1];
+                                let da = dims(a, &self.subst);
+                                let db = dims(b, &self.subst);
+                                match (da, db) {
+                                    (Some(x), Some(y)) => {
+                                        if normalize_dims(&x) == normalize_dims(&y) {
+                                            if matches!(opname, "add" | "sub") {
+                                                a.clone()
+                                            } else {
+                                                NTy::Bool
+                                            }
+                                        } else {
+                                            self.conflicts.push(NConflict::Dimension {
+                                                op: opname.to_string(),
+                                                left: zonk(a, &self.subst),
+                                                right: zonk(b, &self.subst),
+                                            });
+                                            NTy::Error
+                                        }
+                                    }
+                                    _ => {
+                                        let u = unify(a, b, &mut self.subst, &mut self.conflicts);
+                                        if matches!(opname, "add" | "sub") {
+                                            u
+                                        } else {
+                                            NTy::Bool
+                                        }
+                                    }
+                                }
+                            }
                         }
-                        sig.ret.clone()
-                    } else {
-                        // Function resolves, but NO candidate signature matches the
-                        // argument count (N2). This is an Arity conflict — distinct
-                        // from a same-arity type Mismatch, which the unify branch
-                        // above reports. `expected` reports the first candidate's
-                        // arity (category-set parity does not depend on the value;
-                        // brix-ir's `arity_ok` filter likewise keys on the count).
-                        let expected = sigs.first().map(|s| s.params.len()).unwrap_or(0) as u32;
-                        self.conflicts.push(NConflict::Arity {
-                            expected,
-                            found: arg_tys.len() as u32,
-                        });
-                        NTy::Error
+                        "mul" | "div" => {
+                            if arg_tys.len() != 2 {
+                                self.conflicts.push(NConflict::Arity {
+                                    expected: 2,
+                                    found: arg_tys.len() as u32,
+                                });
+                                NTy::Error
+                            } else {
+                                let a = &arg_tys[0];
+                                let b = &arg_tys[1];
+                                let da = dims(a, &self.subst);
+                                let db = dims(b, &self.subst);
+                                match (da, db) {
+                                    (Some(x), Some(y)) => {
+                                        let is_mul = opname == "mul";
+                                        if has_distinct_currencies(&x, &y)
+                                            || (is_mul && has_money(&x) && has_money(&y))
+                                        {
+                                            self.conflicts.push(NConflict::Dimension {
+                                                op: opname.to_string(),
+                                                left: zonk(a, &self.subst),
+                                                right: zonk(b, &self.subst),
+                                            });
+                                            NTy::Error
+                                        } else {
+                                            let sign = if is_mul { 1 } else { -1 };
+                                            let combined = combine_dims(&x, &y, sign);
+                                            from_dims(combined)
+                                        }
+                                    }
+                                    _ => unify(a, b, &mut self.subst, &mut self.conflicts),
+                                }
+                            }
+                        }
+                        "and" | "or" => {
+                            if arg_tys.len() != 2 {
+                                self.conflicts.push(NConflict::Arity {
+                                    expected: 2,
+                                    found: arg_tys.len() as u32,
+                                });
+                                NTy::Error
+                            } else {
+                                unify(
+                                    &arg_tys[0],
+                                    &NTy::Bool,
+                                    &mut self.subst,
+                                    &mut self.conflicts,
+                                );
+                                unify(
+                                    &arg_tys[1],
+                                    &NTy::Bool,
+                                    &mut self.subst,
+                                    &mut self.conflicts,
+                                );
+                                NTy::Bool
+                            }
+                        }
+                        "not" => {
+                            if arg_tys.len() != 1 {
+                                self.conflicts.push(NConflict::Arity {
+                                    expected: 1,
+                                    found: arg_tys.len() as u32,
+                                });
+                                NTy::Error
+                            } else {
+                                unify(
+                                    &arg_tys[0],
+                                    &NTy::Bool,
+                                    &mut self.subst,
+                                    &mut self.conflicts,
+                                );
+                                NTy::Bool
+                            }
+                        }
+                        "neg" => {
+                            if arg_tys.len() != 1 {
+                                self.conflicts.push(NConflict::Arity {
+                                    expected: 1,
+                                    found: arg_tys.len() as u32,
+                                });
+                                NTy::Error
+                            } else {
+                                arg_tys[0].clone()
+                            }
+                        }
+                        _ => self.infer_call_sig(func, arg_tys.as_slice()),
                     }
                 } else {
-                    // Unknown function
-                    let dummy_ret = NTy::Var(self.fresh_var());
-                    let expected = NTy::Fn {
-                        params: arg_tys.clone(),
-                        ret: Box::new(dummy_ret.clone()),
-                    };
-                    let found = NTy::Error;
-                    self.conflicts.push(NConflict::Mismatch {
-                        left: expected,
-                        right: found,
-                    });
-                    NTy::Error
+                    self.infer_call_sig(func, arg_tys.as_slice())
                 }
             }
             NExpr::Record { fields, .. } => {
@@ -753,6 +951,120 @@ mod tests {
         assert!(
             report.is_consistent(),
             "unresolved var guard must give no conflict, got {:?}",
+            report.conflicts
+        );
+    }
+
+    #[test]
+    fn quantity_add_dimension_mismatch_gives_dimension_conflict() {
+        let src = NativeSource {
+            queries: vec![NativeQuery {
+                name: "Q".to_string(),
+                params: vec![
+                    ("a".to_string(), NTy::Quantity("Mass".to_string())),
+                    ("b".to_string(), NTy::Quantity("Kilometre".to_string())),
+                ],
+                yields: NExpr::Call {
+                    origin: 1,
+                    func: "brix.ops.add".to_string(),
+                    args: vec![
+                        NExpr::Var {
+                            origin: 2,
+                            name: "a".to_string(),
+                        },
+                        NExpr::Var {
+                            origin: 3,
+                            name: "b".to_string(),
+                        },
+                    ],
+                },
+                result: NTy::Var(0),
+            }],
+            sigs: SigTable::new(),
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert!(
+            matches!(
+                report.conflicts.as_slice(),
+                [NConflict::Dimension { op, left, right }]
+                    if op == "add"
+                        && *left == NTy::Quantity("Mass".to_string())
+                        && *right == NTy::Quantity("Kilometre".to_string())
+            ),
+            "expected Dimension conflict, got {:?}",
+            report.conflicts
+        );
+    }
+
+    #[test]
+    fn quantity_add_same_dimension_is_no_conflict() {
+        let src = NativeSource {
+            queries: vec![NativeQuery {
+                name: "Q".to_string(),
+                params: vec![
+                    ("a".to_string(), NTy::Quantity("Kilometre".to_string())),
+                    ("b".to_string(), NTy::Quantity("Kilometre".to_string())),
+                ],
+                yields: NExpr::Call {
+                    origin: 1,
+                    func: "brix.ops.add".to_string(),
+                    args: vec![
+                        NExpr::Var {
+                            origin: 2,
+                            name: "a".to_string(),
+                        },
+                        NExpr::Var {
+                            origin: 3,
+                            name: "b".to_string(),
+                        },
+                    ],
+                },
+                result: NTy::Var(0),
+            }],
+            sigs: SigTable::new(),
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert!(
+            report.is_consistent(),
+            "expected no conflicts for same dimension add, got {:?}",
+            report.conflicts
+        );
+    }
+
+    #[test]
+    fn quantity_add_variable_solves_without_dimension_conflict() {
+        let src = NativeSource {
+            queries: vec![NativeQuery {
+                name: "Q".to_string(),
+                params: vec![
+                    ("a".to_string(), NTy::Quantity("Mass".to_string())),
+                    ("b".to_string(), NTy::Var(1)),
+                ],
+                yields: NExpr::Call {
+                    origin: 1,
+                    func: "brix.ops.add".to_string(),
+                    args: vec![
+                        NExpr::Var {
+                            origin: 2,
+                            name: "a".to_string(),
+                        },
+                        NExpr::Var {
+                            origin: 3,
+                            name: "b".to_string(),
+                        },
+                    ],
+                },
+                result: NTy::Var(0),
+            }],
+            sigs: SigTable::new(),
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert!(
+            report.is_consistent(),
+            "expected solving for dimension-vs-variable, got {:?}",
             report.conflicts
         );
     }
