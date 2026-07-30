@@ -7,8 +7,8 @@ use brix_ir::pattern::{Arg, Clause, Lit, RoleArg};
 use brix_ir::types::{IntWidth, Row, RowTail, Ty, TyVar};
 
 use super::syntax::{
-    NArg, NEdge, NEffect, NEffectRow, NExpr, NLit, NRelSchema, NRow, NRule, NSig, NTy, NativeQuery,
-    NativeSource, Origin, SigTable, Sym,
+    NArg, NEdge, NEffect, NEffectRow, NExpr, NHead, NLit, NRelSchema, NRow, NRule, NSig, NTy,
+    NativeQuery, NativeSource, Origin, SigTable, Sym,
 };
 
 /// Translates a `brix_ir::effects::Effect` to a native `NEffect`.
@@ -130,6 +130,7 @@ pub fn scan_expr_calls(
                         NSig {
                             params,
                             ret,
+                            is_aggregate: sig.is_aggregate,
                             may_diverge: sig.may_diverge,
                         },
                     );
@@ -206,6 +207,7 @@ pub fn translate_expr(
                         NSig {
                             params,
                             ret,
+                            is_aggregate: sig.is_aggregate,
                             may_diverge: sig.may_diverge,
                         },
                     );
@@ -263,7 +265,13 @@ fn translate_edge(
                 let nty = translate_ty(rty)?;
                 roles.push((rname.to_string(), nty));
             }
-            relations.insert(rel_name.clone(), NRelSchema { roles });
+            relations.insert(
+                rel_name.clone(),
+                NRelSchema {
+                    roles,
+                    derived: schema.derived,
+                },
+            );
         }
     }
 
@@ -298,6 +306,37 @@ pub fn translate(source: &FrontendSource, resolver: &impl SchemaResolver) -> Opt
     let mut native_rules = Vec::new();
 
     for rule in &source.rules {
+        let head = match &rule.head {
+            brix_ir::core::Head::Tuple { .. } => NHead::Tuple,
+            brix_ir::core::Head::Node { keyed_by, .. } => NHead::Node {
+                keyed_by: keyed_by.iter().map(|k| k.to_string()).collect(),
+            },
+            brix_ir::core::Head::Mask { target, reason } => NHead::Mask {
+                target: target.to_string(),
+                reason: reason.to_string(),
+            },
+        };
+
+        let bound_vars = rule
+            .body
+            .bound_vars()
+            .into_iter()
+            .map(|v| v.to_string())
+            .collect();
+        let edge_refs = rule
+            .body
+            .edge_refs()
+            .into_iter()
+            .map(|v| v.to_string())
+            .collect();
+
+        let calls = brix_ir::check::scan_rule_calls(rule, resolver);
+        let derived_rel_ordinary_consumption = calls
+            .ordinary_on_derived
+            .into_iter()
+            .map(|r| r.to_string())
+            .collect();
+
         let effects = translate_effect_row(&rule.effects);
         let mut called_fns = Vec::new();
         for expr in rule.body.body_exprs() {
@@ -317,7 +356,7 @@ pub fn translate(source: &FrontendSource, resolver: &impl SchemaResolver) -> Opt
                     edges.push(edge);
                 }
                 Clause::Let { expr, .. } => {
-                    let _nexpr = translate_expr(expr, resolver, &mut sigs)?;
+                    let _ = translate_expr(expr, resolver, &mut sigs);
                 }
                 _ => return None,
             }
@@ -325,8 +364,12 @@ pub fn translate(source: &FrontendSource, resolver: &impl SchemaResolver) -> Opt
 
         native_rules.push(NRule {
             name: rule.name.to_string(),
+            head,
             effects,
             called_fns,
+            bound_vars,
+            edge_refs,
+            derived_rel_ordinary_consumption,
         });
     }
 

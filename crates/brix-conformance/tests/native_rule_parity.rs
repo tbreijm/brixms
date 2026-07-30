@@ -1,4 +1,4 @@
-//! Differential parity test harness for native rule effect side-conditions (ADR-0009 §5 / N8b-1).
+//! Differential parity test harness for native rule side-conditions (ADR-0009 §5 / N8b-1 / N8b-2).
 
 use std::collections::BTreeSet;
 
@@ -7,7 +7,7 @@ use brix_ir::frontend::FrontendSource;
 use brix_ir::reflect::{analyze as brix_analyze, ConflictKind};
 use soc_regimes::native::{analyze as native_analyze, translate, NConflict};
 
-const RULE_COVERAGE_FLOOR: usize = 3;
+const RULE_COVERAGE_FLOOR: usize = 6;
 
 fn conflict_rule_category(kind: &ConflictKind) -> Option<RuleCategory> {
     match kind {
@@ -26,6 +26,9 @@ fn native_conflict_rule_category(conflict: &NConflict) -> Option<RuleCategory> {
         NConflict::ImpureRule { .. } => Some(RuleCategory::Impure),
         NConflict::NondeterministicRule { .. } => Some(RuleCategory::Nondeterministic),
         NConflict::DivergentRule { .. } => Some(RuleCategory::Divergent),
+        NConflict::UnboundHeadKey { .. } => Some(RuleCategory::UnboundHeadKey),
+        NConflict::MaskRefNotEdgeBound { .. } => Some(RuleCategory::MaskRefNotEdgeBound),
+        NConflict::OrdinaryFnOnDerivedRel { .. } => Some(RuleCategory::OrdinaryFnOnDerivedRel),
         _ => None,
     }
 }
@@ -35,10 +38,13 @@ fn native_rule_effects_parity_corpus_coverage() {
     let fixtures = typecorpus::all_rule_fixtures();
     let mut covered = 0;
 
-    let effects_axis = [
+    let rule_axis = [
         RuleCategory::Impure,
         RuleCategory::Nondeterministic,
         RuleCategory::Divergent,
+        RuleCategory::UnboundHeadKey,
+        RuleCategory::MaskRefNotEdgeBound,
+        RuleCategory::OrdinaryFnOnDerivedRel,
     ];
 
     for fixture in &fixtures {
@@ -56,7 +62,7 @@ fn native_rule_effects_parity_corpus_coverage() {
             .filter_map(|c| conflict_rule_category(&c.kind))
             .collect();
 
-        if brix_cats.iter().all(|cat| effects_axis.contains(cat)) {
+        if brix_cats.iter().all(|cat| rule_axis.contains(cat)) {
             if let Some(native_src) = translate(&source, &fixture.resolver) {
                 let native_report = native_analyze(&native_src);
                 let native_cats: BTreeSet<RuleCategory> = native_report
@@ -81,7 +87,7 @@ fn native_rule_effects_parity_corpus_coverage() {
     }
 
     println!(
-        "Rule effect side-condition coverage: {}/3 fixtures verified",
+        "Rule side-condition coverage: {}/6 fixtures verified",
         covered
     );
     assert!(

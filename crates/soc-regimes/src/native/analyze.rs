@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use super::syntax::{NArg, NExpr, NLit, NRow, NTy, NativeQuery, NativeSource, Origin, Sym};
+use super::syntax::{NArg, NExpr, NHead, NLit, NRow, NTy, NativeQuery, NativeSource, Origin, Sym};
 
 /// Native type conflicts (grows per ADR-0009 slice).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +54,21 @@ pub enum NConflict {
     /// Appendix E nondiverge(B, H) rule side condition violation (N8b-1).
     DivergentRule {
         rule: Sym,
+    },
+    /// Appendix E keys(H) ⊆ Bindings rule side condition violation (N8b-2).
+    UnboundHeadKey {
+        rule: Sym,
+        key: Sym,
+    },
+    /// Appendix E mask-head side condition violation (N8b-2).
+    MaskRefNotEdgeBound {
+        rule: Sym,
+        var: Sym,
+    },
+    /// Appendix E Ordinary fn on graph-derived relation side condition violation (N8b-2).
+    OrdinaryFnOnDerivedRel {
+        rule: Sym,
+        relation: Sym,
     },
 }
 
@@ -780,6 +795,32 @@ pub fn analyze(src: &NativeSource) -> NativeReport {
                 rule: rule.name.clone(),
             });
         }
+        if let NHead::Node { keyed_by } = &rule.head {
+            for key in keyed_by {
+                if !rule.bound_vars.contains(key) {
+                    cx.conflicts.push(NConflict::UnboundHeadKey {
+                        rule: rule.name.clone(),
+                        key: key.clone(),
+                    });
+                }
+            }
+        }
+        if let NHead::Mask { target, reason } = &rule.head {
+            for var in [target, reason] {
+                if !rule.edge_refs.contains(var) {
+                    cx.conflicts.push(NConflict::MaskRefNotEdgeBound {
+                        rule: rule.name.clone(),
+                        var: var.clone(),
+                    });
+                }
+            }
+        }
+        for relation in &rule.derived_rel_ordinary_consumption {
+            cx.conflicts.push(NConflict::OrdinaryFnOnDerivedRel {
+                rule: rule.name.clone(),
+                relation: relation.clone(),
+            });
+        }
     }
 
     let has_types = cx
@@ -806,6 +847,7 @@ mod tests {
             "R".to_string(),
             NRelSchema {
                 roles: vec![("n".to_string(), NTy::Int)],
+                derived: false,
             },
         );
         let src = NativeSource {
@@ -834,6 +876,7 @@ mod tests {
             "R".to_string(),
             NRelSchema {
                 roles: vec![("n".to_string(), NTy::Int)],
+                derived: false,
             },
         );
         let src = NativeSource {
@@ -855,6 +898,7 @@ mod tests {
             "R".to_string(),
             NRelSchema {
                 roles: vec![("n".to_string(), NTy::Int)],
+                derived: false,
             },
         );
         let src = NativeSource {
@@ -911,6 +955,7 @@ mod tests {
             NSig {
                 params: vec![NTy::Int],
                 ret: NTy::Int,
+                is_aggregate: false,
                 may_diverge: false,
             },
         );
@@ -953,6 +998,7 @@ mod tests {
             NSig {
                 params: vec![NTy::Int],
                 ret: NTy::Int,
+                is_aggregate: false,
                 may_diverge: false,
             },
         );
@@ -961,6 +1007,7 @@ mod tests {
             NSig {
                 params: vec![NTy::Int, NTy::Int],
                 ret: NTy::Int,
+                is_aggregate: false,
                 may_diverge: false,
             },
         );
@@ -1522,15 +1569,19 @@ mod tests {
 
     #[test]
     fn rule_impure_effect_row_flagged() {
-        use super::super::syntax::{NEffect, NEffectRow, NRule};
+        use super::super::syntax::{NEffect, NEffectRow, NHead, NRule};
         let src = NativeSource {
             rules: vec![NRule {
                 name: "Loud".to_string(),
+                head: NHead::Tuple,
                 effects: NEffectRow {
                     atoms: vec![NEffect::Console],
                     open_tail: false,
                 },
                 called_fns: vec![],
+                bound_vars: vec![],
+                edge_refs: vec![],
+                derived_rel_ordinary_consumption: vec![],
             }],
             ..Default::default()
         };
@@ -1544,15 +1595,19 @@ mod tests {
 
     #[test]
     fn rule_nondeterministic_effect_row_flagged() {
-        use super::super::syntax::{NEffect, NEffectRow, NRule};
+        use super::super::syntax::{NEffect, NEffectRow, NHead, NRule};
         let src = NativeSource {
             rules: vec![NRule {
                 name: "Roll".to_string(),
+                head: NHead::Tuple,
                 effects: NEffectRow {
                     atoms: vec![NEffect::Random],
                     open_tail: false,
                 },
                 called_fns: vec![],
+                bound_vars: vec![],
+                edge_refs: vec![],
+                derived_rel_ordinary_consumption: vec![],
             }],
             ..Default::default()
         };
@@ -1568,13 +1623,14 @@ mod tests {
 
     #[test]
     fn rule_divergent_call_flagged() {
-        use super::super::syntax::{NEffectRow, NRule, NSig, SigTable};
+        use super::super::syntax::{NEffectRow, NHead, NRule, NSig, SigTable};
         let mut sigs = SigTable::new();
         sigs.insert(
             "loopForever".to_string(),
             NSig {
                 params: vec![],
                 ret: NTy::Int,
+                is_aggregate: false,
                 may_diverge: true,
             },
         );
@@ -1582,8 +1638,12 @@ mod tests {
             sigs,
             rules: vec![NRule {
                 name: "Spins".to_string(),
+                head: NHead::Tuple,
                 effects: NEffectRow::default(),
                 called_fns: vec!["loopForever".to_string()],
+                bound_vars: vec![],
+                edge_refs: vec![],
+                derived_rel_ordinary_consumption: vec![],
             }],
             ..Default::default()
         };
@@ -1597,16 +1657,147 @@ mod tests {
 
     #[test]
     fn empty_effects_no_call_rule_passes() {
-        use super::super::syntax::{NEffectRow, NRule};
+        use super::super::syntax::{NEffectRow, NHead, NRule};
         let src = NativeSource {
             rules: vec![NRule {
                 name: "Clean".to_string(),
+                head: NHead::Tuple,
                 effects: NEffectRow::default(),
                 called_fns: vec![],
+                bound_vars: vec![],
+                edge_refs: vec![],
+                derived_rel_ordinary_consumption: vec![],
             }],
             ..Default::default()
         };
         let report = analyze(&src);
         assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn unbound_head_key_flagged() {
+        use super::super::syntax::{NEffectRow, NHead, NRule};
+        let src = NativeSource {
+            rules: vec![NRule {
+                name: "Mint".to_string(),
+                head: NHead::Node {
+                    keyed_by: vec!["missing".to_string()],
+                },
+                effects: NEffectRow::default(),
+                called_fns: vec![],
+                bound_vars: vec![],
+                edge_refs: vec![],
+                derived_rel_ordinary_consumption: vec![],
+            }],
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(
+            report.conflicts[0],
+            NConflict::UnboundHeadKey {
+                rule: "Mint".to_string(),
+                key: "missing".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn bound_head_key_passes() {
+        use super::super::syntax::{NEffectRow, NHead, NRule};
+        let src = NativeSource {
+            rules: vec![NRule {
+                name: "Mint".to_string(),
+                head: NHead::Node {
+                    keyed_by: vec!["bound_key".to_string()],
+                },
+                effects: NEffectRow::default(),
+                called_fns: vec![],
+                bound_vars: vec!["bound_key".to_string()],
+                edge_refs: vec![],
+                derived_rel_ordinary_consumption: vec![],
+            }],
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn mask_ref_not_edge_bound_flagged() {
+        use super::super::syntax::{NEffectRow, NHead, NRule};
+        let src = NativeSource {
+            rules: vec![NRule {
+                name: "Override".to_string(),
+                head: NHead::Mask {
+                    target: "price".to_string(),
+                    reason: "manual".to_string(),
+                },
+                effects: NEffectRow::default(),
+                called_fns: vec![],
+                bound_vars: vec![],
+                edge_refs: vec![],
+                derived_rel_ordinary_consumption: vec![],
+            }],
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert_eq!(report.conflicts.len(), 2);
+        assert!(report.conflicts.contains(&NConflict::MaskRefNotEdgeBound {
+            rule: "Override".to_string(),
+            var: "price".to_string(),
+        }));
+        assert!(report.conflicts.contains(&NConflict::MaskRefNotEdgeBound {
+            rule: "Override".to_string(),
+            var: "manual".to_string(),
+        }));
+    }
+
+    #[test]
+    fn mask_ref_edge_bound_passes() {
+        use super::super::syntax::{NEffectRow, NHead, NRule};
+        let src = NativeSource {
+            rules: vec![NRule {
+                name: "Override".to_string(),
+                head: NHead::Mask {
+                    target: "price".to_string(),
+                    reason: "manual".to_string(),
+                },
+                effects: NEffectRow::default(),
+                called_fns: vec![],
+                bound_vars: vec!["price".to_string(), "manual".to_string()],
+                edge_refs: vec!["price".to_string(), "manual".to_string()],
+                derived_rel_ordinary_consumption: vec![],
+            }],
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert!(report.is_consistent());
+    }
+
+    #[test]
+    fn ordinary_fn_on_derived_rel_flagged() {
+        use super::super::syntax::{NEffectRow, NHead, NRule};
+        let src = NativeSource {
+            rules: vec![NRule {
+                name: "Summary".to_string(),
+                head: NHead::Tuple,
+                effects: NEffectRow::default(),
+                called_fns: vec!["sumUp".to_string()],
+                bound_vars: vec![],
+                edge_refs: vec![],
+                derived_rel_ordinary_consumption: vec!["ComputedPrice".to_string()],
+            }],
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert_eq!(report.conflicts.len(), 1);
+        assert_eq!(
+            report.conflicts[0],
+            NConflict::OrdinaryFnOnDerivedRel {
+                rule: "Summary".to_string(),
+                relation: "ComputedPrice".to_string()
+            }
+        );
     }
 }
