@@ -6,10 +6,6 @@ resolver = "2"
 members = [
     "crates/brix-canon",
     "crates/brix-semantic",
-    "crates/brix-diag",
-    "crates/brix-ast",
-    "crates/brix-ir",
-    "crates/brix-conformance",
     "crates/soc-core",
     "crates/soc-regimes",
     "crates/brix-kernel",

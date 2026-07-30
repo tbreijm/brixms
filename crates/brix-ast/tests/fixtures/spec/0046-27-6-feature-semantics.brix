@@ -1,8 +1,0 @@
-// source: 27.6 Feature semantics (block 46)
-feature ClientLateRate(client: Client)
-  -> Estimate<Probability> {
-  observationTime dispatchTime
-  window 365 days
-  source CompletedDelivery
-  leakage SafeBeforeLabel
-}

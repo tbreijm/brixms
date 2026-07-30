@@ -26,25 +26,18 @@
 //!   audit-factorization checker's upgrade to `Audited` — exercising the
 //!   whole SOC loop end to end for the first time.
 //!
-//! - [`structural`] — the **structural** (`brix.type`) regime (Step 5(b)):
-//!   consumes `brix_ir::reflect::analyze` (the retained differential oracle,
-//!   ADR-0002 §12) and re-projects `Fact`/`TypeConflict` into SOC artifacts —
-//!   `Realizes`/`Derived` judgements for `HasType`, `Unknown` judgements for
-//!   conflicts. See `crates/brix-conformance/tests/structural_regime.rs` for
-//!   the 14/14 differential parity, `FactId`-for-`FactId` shadow parity, and
-//!   `ScopedWorldNonLeak` gates.
+//! - [`native`] — the **native SOC type checker** (ADR-0009): conflict
+//!   detection (all 8 type-inference categories + all 6 rule-side-conditions)
+//!   and, via [`type_realization`], `HasType` judgements that elaborate to
+//!   `Proven` (ADR-0005/0007/0008). The legacy `brix-ir` differential oracle
+//!   it was built against was deleted at zero-legacy (N9); native is now the
+//!   sole checker.
 
 pub mod literal;
 pub mod native;
-pub mod structural;
-pub mod structural_incremental;
 pub mod type_realization;
 
 pub use literal::{LiteralEqualityRegime, LiteralEqualitySemantics};
-pub use structural::{
-    HasTypeProjection, ProjectedConflict, StructuralProjection, StructuralRegime,
-};
-pub use structural_incremental::StructuralIncremental;
 pub use type_realization::{
     audited_type_check, g_lit, g_var, type_check, Expr, Ty, TyCtx, TypeError,
 };

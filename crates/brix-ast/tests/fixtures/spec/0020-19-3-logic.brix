@@ -1,7 +1,0 @@
-// source: 19.3 Logic (block 20)
-logic {
-  forall o: Order {
-    HighValue(o) and Open(o)
-    implies RequiresReview(o)
-  }
-}
