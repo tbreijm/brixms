@@ -38,6 +38,11 @@ pub enum NConflict {
     TryNonResult {
         found: NTy,
     },
+    /// Epistemic status erasure (Estimate/Missing to plain type, or Probability to Bool) (N7).
+    EpistemicErasure {
+        from: NTy,
+        to: NTy,
+    },
 }
 
 /// Analysis report for the native checker.
@@ -126,7 +131,7 @@ pub fn occurs(v: u32, ty: &NTy, subst: &BTreeMap<u32, NTy>) -> bool {
         NTy::Fn { params, ret } => {
             params.iter().any(|p| occurs(v, p, subst)) || occurs(v, ret, subst)
         }
-        NTy::Option(inner) => occurs(v, inner, subst),
+        NTy::Option(inner) | NTy::Estimate(inner) | NTy::Missing(inner) => occurs(v, inner, subst),
         NTy::Result(ok, err) => occurs(v, ok, subst) || occurs(v, err, subst),
         NTy::Record(row) | NTy::Rel(row) => row.fields.iter().any(|(_, fty)| occurs(v, fty, subst)),
         NTy::Quantity(_) | NTy::Money(_) | NTy::Dimensioned(_) => false,
@@ -150,6 +155,9 @@ pub fn zonk(ty: &NTy, subst: &BTreeMap<u32, NTy>) -> NTy {
         },
         NTy::Option(inner) => NTy::Option(Box::new(zonk(inner, subst))),
         NTy::Result(ok, err) => NTy::Result(Box::new(zonk(ok, subst)), Box::new(zonk(err, subst))),
+        NTy::Estimate(inner) => NTy::Estimate(Box::new(zonk(inner, subst))),
+        NTy::Missing(inner) => NTy::Missing(Box::new(zonk(inner, subst))),
+        NTy::Probability => NTy::Probability,
         NTy::Record(row) => NTy::Record(zonk_row(row, subst)),
         NTy::Rel(row) => NTy::Rel(zonk_row(row, subst)),
         NTy::Quantity(m) => NTy::Quantity(m.clone()),
@@ -258,6 +266,8 @@ pub fn unify(
         (NTy::Str, NTy::Str) => NTy::Str,
         (NTy::Int, NTy::Int) => NTy::Int,
         (NTy::F64, NTy::F64) => NTy::F64,
+        (NTy::Probability, NTy::Probability) => NTy::Probability,
+        (NTy::Probability, NTy::F64) | (NTy::F64, NTy::Probability) => NTy::F64,
         (NTy::Quantity(m1), NTy::Quantity(m2)) if m1 == m2 => NTy::Quantity(m1.clone()),
         (NTy::Money(c1), NTy::Money(c2)) if c1 == c2 => NTy::Money(c1.clone()),
         (NTy::Dimensioned(d1), NTy::Dimensioned(d2))
@@ -280,6 +290,22 @@ pub fn unify(
                 NTy::Error
             } else {
                 NTy::Result(Box::new(u_ok), Box::new(u_err))
+            }
+        }
+        (NTy::Estimate(a), NTy::Estimate(b)) => {
+            let u = unify(a, b, subst, conflicts);
+            if u == NTy::Error {
+                NTy::Error
+            } else {
+                NTy::Estimate(Box::new(u))
+            }
+        }
+        (NTy::Missing(a), NTy::Missing(b)) => {
+            let u = unify(a, b, subst, conflicts);
+            if u == NTy::Error {
+                NTy::Error
+            } else {
+                NTy::Missing(Box::new(u))
             }
         }
         (NTy::Record(row1), NTy::Record(row2)) => {
@@ -338,6 +364,14 @@ pub fn unify(
                 }
             }
         }
+        _ if native_epistemic_erasure(&r1, &r2).is_some() => {
+            let (from, to) = native_epistemic_erasure(&r1, &r2).unwrap();
+            conflicts.push(NConflict::EpistemicErasure {
+                from: zonk(&from, subst),
+                to: zonk(&to, subst),
+            });
+            NTy::Error
+        }
         _ => {
             conflicts.push(NConflict::Mismatch {
                 left: zonk(&r1, subst),
@@ -345,6 +379,26 @@ pub fn unify(
             });
             NTy::Error
         }
+    }
+}
+
+fn native_epistemic_erasure(a: &NTy, b: &NTy) -> Option<(NTy, NTy)> {
+    fn is_plain(t: &NTy) -> bool {
+        !matches!(
+            t,
+            NTy::Var(_) | NTy::Error | NTy::Estimate(_) | NTy::Missing(_) | NTy::Probability
+        )
+    }
+    match (a, b) {
+        (NTy::Estimate(_), other) | (NTy::Missing(_), other) if is_plain(other) => {
+            Some((a.clone(), b.clone()))
+        }
+        (other, NTy::Estimate(_)) | (other, NTy::Missing(_)) if is_plain(other) => {
+            Some((b.clone(), a.clone()))
+        }
+        (NTy::Probability, NTy::Bool) => Some((a.clone(), b.clone())),
+        (NTy::Bool, NTy::Probability) => Some((b.clone(), a.clone())),
+        _ => None,
     }
 }
 
@@ -1236,5 +1290,87 @@ mod tests {
             "annotated non-Result Var should give TryNonResult, got {:?}",
             report.conflicts
         );
+    }
+
+    #[test]
+    fn epistemic_erasure_unit_tests() {
+        let mut subst = BTreeMap::new();
+        let mut conflicts = Vec::new();
+
+        // Estimate<Int> ~ Int => EpistemicErasure
+        conflicts.clear();
+        unify(
+            &NTy::Estimate(Box::new(NTy::Int)),
+            &NTy::Int,
+            &mut subst,
+            &mut conflicts,
+        );
+        assert_eq!(
+            conflicts,
+            vec![NConflict::EpistemicErasure {
+                from: NTy::Estimate(Box::new(NTy::Int)),
+                to: NTy::Int,
+            }]
+        );
+
+        // Probability ~ Bool => EpistemicErasure
+        conflicts.clear();
+        unify(&NTy::Probability, &NTy::Bool, &mut subst, &mut conflicts);
+        assert_eq!(
+            conflicts,
+            vec![NConflict::EpistemicErasure {
+                from: NTy::Probability,
+                to: NTy::Bool,
+            }]
+        );
+
+        // Probability ~ F64 => NO conflict
+        conflicts.clear();
+        let res = unify(&NTy::Probability, &NTy::F64, &mut subst, &mut conflicts);
+        assert!(conflicts.is_empty());
+        assert_eq!(res, NTy::F64);
+
+        // Missing<Int> ~ Int => EpistemicErasure
+        conflicts.clear();
+        unify(
+            &NTy::Missing(Box::new(NTy::Int)),
+            &NTy::Int,
+            &mut subst,
+            &mut conflicts,
+        );
+        assert_eq!(
+            conflicts,
+            vec![NConflict::EpistemicErasure {
+                from: NTy::Missing(Box::new(NTy::Int)),
+                to: NTy::Int,
+            }]
+        );
+
+        // Estimate<Int> ~ Missing<Int> => Mismatch (NOT erasure)
+        conflicts.clear();
+        unify(
+            &NTy::Estimate(Box::new(NTy::Int)),
+            &NTy::Missing(Box::new(NTy::Int)),
+            &mut subst,
+            &mut conflicts,
+        );
+        assert_eq!(
+            conflicts,
+            vec![NConflict::Mismatch {
+                left: NTy::Estimate(Box::new(NTy::Int)),
+                right: NTy::Missing(Box::new(NTy::Int)),
+            }]
+        );
+
+        // Estimate<Int> ~ Estimate<Int> => no conflict
+        conflicts.clear();
+        let res = unify(
+            &NTy::Estimate(Box::new(NTy::Int)),
+            &NTy::Estimate(Box::new(NTy::Int)),
+            &mut subst,
+            &mut conflicts,
+        );
+        assert!(conflicts.is_empty());
+        assert_eq!(res, NTy::Estimate(Box::new(NTy::Int)));
     }
 }
