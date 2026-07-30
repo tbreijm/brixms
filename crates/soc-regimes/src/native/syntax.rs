@@ -58,6 +58,10 @@ pub enum NExpr {
     Var {
         origin: Origin,
         name: Sym,
+        /// The node's own type annotation (`brix_ir::Expr::ty`). Used as the
+        /// fallback when `name` is absent from the environment, mirroring
+        /// `reflect`'s `env.get(name).unwrap_or(expr.ty)` (reflect.rs:1554).
+        ty: Option<NTy>,
     },
     Call {
         origin: Origin,

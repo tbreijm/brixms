@@ -90,6 +90,10 @@ pub fn translate_expr(
         ExprKind::Var(ident) => Some(NExpr::Var {
             origin,
             name: ident.to_string(),
+            // Carry the node's own type annotation, so an env-miss falls back to
+            // it (mirrors reflect's `env.get(name).unwrap_or(expr.ty)`). `None`
+            // when the annotation is an unsupported type.
+            ty: translate_ty(&expr.ty),
         }),
         ExprKind::Lit(lit) => {
             let nlit = translate_lit(lit)?;

@@ -404,9 +404,14 @@ impl<'a> InferContext<'a> {
                 NLit::Str(_) => NTy::Str,
                 NLit::Unit => NTy::Unit,
             },
-            NExpr::Var { name, .. } => {
+            NExpr::Var { name, ty, .. } => {
                 if let Some(t) = self.env.get(name) {
                     t.clone()
+                } else if let Some(ann) = ty {
+                    // Env miss: fall back to the node's annotation, mirroring
+                    // reflect (`env.get(name).unwrap_or(expr.ty)`). This lets a
+                    // Var carrying e.g. Result/Int be seen concretely.
+                    ann.clone()
                 } else {
                     let v = self.fresh_var();
                     let t = NTy::Var(v);
@@ -821,6 +826,7 @@ mod tests {
                     base: Box::new(NExpr::Var {
                         origin: 1,
                         name: "r".to_string(),
+                        ty: None,
                     }),
                     field: "a".to_string(),
                 },
@@ -852,6 +858,7 @@ mod tests {
                     base: Box::new(NExpr::Var {
                         origin: 1,
                         name: "r".to_string(),
+                        ty: None,
                     }),
                     field: "absent".to_string(),
                 },
@@ -972,6 +979,7 @@ mod tests {
             guards: vec![NExpr::Var {
                 origin: 1,
                 name: "unbound_var".to_string(),
+                ty: None,
             }],
         };
         let report = analyze(&src);
@@ -998,10 +1006,12 @@ mod tests {
                         NExpr::Var {
                             origin: 2,
                             name: "a".to_string(),
+                            ty: None,
                         },
                         NExpr::Var {
                             origin: 3,
                             name: "b".to_string(),
+                            ty: None,
                         },
                     ],
                 },
@@ -1040,10 +1050,12 @@ mod tests {
                         NExpr::Var {
                             origin: 2,
                             name: "a".to_string(),
+                            ty: None,
                         },
                         NExpr::Var {
                             origin: 3,
                             name: "b".to_string(),
+                            ty: None,
                         },
                     ],
                 },
@@ -1076,10 +1088,12 @@ mod tests {
                         NExpr::Var {
                             origin: 2,
                             name: "a".to_string(),
+                            ty: None,
                         },
                         NExpr::Var {
                             origin: 3,
                             name: "b".to_string(),
+                            ty: None,
                         },
                     ],
                 },
@@ -1139,6 +1153,7 @@ mod tests {
                     inner: Box::new(NExpr::Var {
                         origin: 2,
                         name: "x".to_string(),
+                        ty: None,
                     }),
                 },
                 result: NTy::Var(0),
@@ -1171,6 +1186,7 @@ mod tests {
                     inner: Box::new(NExpr::Var {
                         origin: 2,
                         name: "x".to_string(),
+                        ty: None,
                     }),
                 },
                 result: NTy::Var(0),
@@ -1182,6 +1198,42 @@ mod tests {
         assert!(
             report.is_consistent(),
             "expected no conflict for try on unresolved var, got {:?}",
+            report.conflicts
+        );
+    }
+
+    #[test]
+    fn try_on_annotated_non_result_var_gives_try_non_result() {
+        // A Var absent from env but annotated with a concrete non-Result type
+        // (via NExpr::Var.ty, mirroring reflect's expr.ty fallback) must be seen
+        // concretely — so `?` on it is a TryNonResult conflict. This closes the
+        // native-Var annotation gap: before the fallback, native saw a bare
+        // unresolved var and (correctly, per reflect) raised nothing, but it
+        // could not see a Var's concrete annotation at all.
+        let src = NativeSource {
+            queries: vec![NativeQuery {
+                name: "Q".to_string(),
+                params: vec![],
+                yields: NExpr::Try {
+                    origin: 1,
+                    inner: Box::new(NExpr::Var {
+                        origin: 2,
+                        name: "x".to_string(),
+                        ty: Some(NTy::Int),
+                    }),
+                },
+                result: NTy::Var(0),
+            }],
+            sigs: SigTable::new(),
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert!(
+            matches!(
+                report.conflicts.as_slice(),
+                [NConflict::TryNonResult { found: NTy::Int }]
+            ),
+            "annotated non-Result Var should give TryNonResult, got {:?}",
             report.conflicts
         );
     }
