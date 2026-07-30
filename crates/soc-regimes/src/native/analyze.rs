@@ -376,6 +376,11 @@ impl<'a> InferContext<'a> {
             self.env.insert(param_name.clone(), param_ty.clone());
         }
         let yielded_ty = self.infer_expr(&query.yields);
+        // When the result is a Rel, the yield corresponds to the result row's field.
+        // A scalar yield is wrapped as a single-field row; the field name "value" is a
+        // HEURISTIC that matches the current corpus (occurs_check/_row use `value`).
+        // FRAGILE: a future Rel-yield fixture with a different single-field name would
+        // need the real yield-to-row-field correspondence brix uses — revisit then (N-later).
         let expected = match (&yielded_ty, resolve(&query.result, &self.subst)) {
             (_, NTy::Rel(_)) => match yielded_ty {
                 NTy::Record(ref row) | NTy::Rel(ref row) => NTy::Rel(row.clone()),
