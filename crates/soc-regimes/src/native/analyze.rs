@@ -43,6 +43,18 @@ pub enum NConflict {
         from: NTy,
         to: NTy,
     },
+    /// Appendix E pure(B, H) rule side condition violation (N8b-1).
+    ImpureRule {
+        rule: Sym,
+    },
+    /// Appendix E det(B, H) rule side condition violation (N8b-1).
+    NondeterministicRule {
+        rule: Sym,
+    },
+    /// Appendix E nondiverge(B, H) rule side condition violation (N8b-1).
+    DivergentRule {
+        rule: Sym,
+    },
 }
 
 /// Analysis report for the native checker.
@@ -688,6 +700,14 @@ impl<'a> InferContext<'a> {
     }
 }
 
+/// Computes Appendix E rule side-condition flags (pure, det, nondiverge) for a rule effect row.
+pub fn rule_flags(row: &super::syntax::NEffectRow) -> (bool, bool, bool) {
+    let pure = row.is_pure();
+    let det = !row.nondet();
+    let nondiverge = !row.may_diverge();
+    (pure, det, nondiverge)
+}
+
 /// Runs type analysis over a `NativeSource` and returns a `NativeReport`.
 pub fn analyze(src: &NativeSource) -> NativeReport {
     let mut cx = InferContext {
@@ -735,6 +755,30 @@ pub fn analyze(src: &NativeSource) -> NativeReport {
                     unify(expected_ty, &arg_ty, &mut cx.subst, &mut cx.conflicts);
                 }
             }
+        }
+    }
+
+    for rule in &src.rules {
+        let (pure, det, nondiverge) = rule_flags(&rule.effects);
+        let calls_diverge = rule.called_fns.iter().any(|f| {
+            src.sigs
+                .get(f)
+                .is_some_and(|sigs| sigs.iter().any(|s| s.may_diverge))
+        });
+        if !pure {
+            cx.conflicts.push(NConflict::ImpureRule {
+                rule: rule.name.clone(),
+            });
+        }
+        if !det {
+            cx.conflicts.push(NConflict::NondeterministicRule {
+                rule: rule.name.clone(),
+            });
+        }
+        if !nondiverge || calls_diverge {
+            cx.conflicts.push(NConflict::DivergentRule {
+                rule: rule.name.clone(),
+            });
         }
     }
 
@@ -867,6 +911,7 @@ mod tests {
             NSig {
                 params: vec![NTy::Int],
                 ret: NTy::Int,
+                may_diverge: false,
             },
         );
         let src = NativeSource {
@@ -908,6 +953,7 @@ mod tests {
             NSig {
                 params: vec![NTy::Int],
                 ret: NTy::Int,
+                may_diverge: false,
             },
         );
         sigs.insert(
@@ -915,6 +961,7 @@ mod tests {
             NSig {
                 params: vec![NTy::Int, NTy::Int],
                 ret: NTy::Int,
+                may_diverge: false,
             },
         );
         let src = NativeSource {
@@ -1471,5 +1518,95 @@ mod tests {
         );
         assert!(conflicts.is_empty());
         assert_eq!(res, NTy::Estimate(Box::new(NTy::Int)));
+    }
+
+    #[test]
+    fn rule_impure_effect_row_flagged() {
+        use super::super::syntax::{NEffect, NEffectRow, NRule};
+        let src = NativeSource {
+            rules: vec![NRule {
+                name: "Loud".to_string(),
+                effects: NEffectRow {
+                    atoms: vec![NEffect::Console],
+                    open_tail: false,
+                },
+                called_fns: vec![],
+            }],
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert_eq!(report.conflicts.len(), 1);
+        assert!(matches!(
+            &report.conflicts[0],
+            NConflict::ImpureRule { rule } if rule == "Loud"
+        ));
+    }
+
+    #[test]
+    fn rule_nondeterministic_effect_row_flagged() {
+        use super::super::syntax::{NEffect, NEffectRow, NRule};
+        let src = NativeSource {
+            rules: vec![NRule {
+                name: "Roll".to_string(),
+                effects: NEffectRow {
+                    atoms: vec![NEffect::Random],
+                    open_tail: false,
+                },
+                called_fns: vec![],
+            }],
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert_eq!(report.conflicts.len(), 2);
+        assert!(report.conflicts.contains(&NConflict::ImpureRule {
+            rule: "Roll".to_string()
+        }));
+        assert!(report.conflicts.contains(&NConflict::NondeterministicRule {
+            rule: "Roll".to_string()
+        }));
+    }
+
+    #[test]
+    fn rule_divergent_call_flagged() {
+        use super::super::syntax::{NEffectRow, NRule, NSig, SigTable};
+        let mut sigs = SigTable::new();
+        sigs.insert(
+            "loopForever".to_string(),
+            NSig {
+                params: vec![],
+                ret: NTy::Int,
+                may_diverge: true,
+            },
+        );
+        let src = NativeSource {
+            sigs,
+            rules: vec![NRule {
+                name: "Spins".to_string(),
+                effects: NEffectRow::default(),
+                called_fns: vec!["loopForever".to_string()],
+            }],
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert_eq!(report.conflicts.len(), 1);
+        assert!(matches!(
+            &report.conflicts[0],
+            NConflict::DivergentRule { rule } if rule == "Spins"
+        ));
+    }
+
+    #[test]
+    fn empty_effects_no_call_rule_passes() {
+        use super::super::syntax::{NEffectRow, NRule};
+        let src = NativeSource {
+            rules: vec![NRule {
+                name: "Clean".to_string(),
+                effects: NEffectRow::default(),
+                called_fns: vec![],
+            }],
+            ..Default::default()
+        };
+        let report = analyze(&src);
+        assert!(report.is_consistent());
     }
 }
