@@ -30,6 +30,9 @@ pub enum NTy {
     Record(NRow),
     Rel(NRow),
     Option(Box<NTy>),
+    Quantity(Sym),
+    Money(Sym),
+    Dimensioned(Vec<(Sym, i64)>),
     Var(u32),
     /// Error unifies ONLY with itself; never bindable — mirrors brix_ir Ty::Error isolation.
     Error,
