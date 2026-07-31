@@ -41,8 +41,8 @@ fn test_let_lit_proven() {
 
 #[test]
 fn test_unsupported_construct_negative() {
-    let source = "let y = SomeRecord { a: 1 }";
-    let module = parse(source).expect("record literal expression should parse");
+    let source = r#"let y = "hello""#;
+    let module = parse(source).expect("string literal expression should parse");
     let results = check_module(&module);
 
     assert_eq!(results.len(), 1);
@@ -76,4 +76,36 @@ fn test_unresolved_function_call() {
 
     assert_eq!(name, "z");
     assert_eq!(err, LowerError::Unresolved("unknown".to_string()));
+}
+
+#[test]
+fn test_record_and_field_proven() {
+    let source = r#"
+        let p = Item { x: 1, y: 2 }
+        let a = p.x
+    "#;
+    let module = parse(source).expect("record program should parse");
+    let results = check_module(&module);
+
+    assert_eq!(results.len(), 2);
+
+    let res_p = results[0]
+        .as_ref()
+        .expect("let p should lower & prove successfully");
+    assert_eq!(res_p.name, "p");
+    assert_eq!(res_p.outcome, Outcome::Proven);
+    assert_eq!(
+        res_p.ty,
+        Some(TrTy::Record(vec![
+            ("x".to_string(), TrTy::Con("Int")),
+            ("y".to_string(), TrTy::Con("Int")),
+        ]))
+    );
+
+    let res_a = results[1]
+        .as_ref()
+        .expect("let a should lower & prove successfully");
+    assert_eq!(res_a.name, "a");
+    assert_eq!(res_a.outcome, Outcome::Proven);
+    assert_eq!(res_a.ty, Some(TrTy::Con("Int")));
 }
