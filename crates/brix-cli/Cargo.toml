@@ -1,0 +1,19 @@
+[package]
+name = "brix-cli"
+description = "The `brix` command-line driver (ADR-0010): `brix check <file.brix>` — parse, lower, and type-check a Brix program, reporting each binding's type + epistemic grade."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "brix"
+path = "src/main.rs"
+
+[dependencies]
+brix-syntax = { path = "../brix-syntax" }
+brix-lower = { path = "../brix-lower" }
+soc-regimes = { path = "../soc-regimes" }
+
+[lints]
+workspace = true
