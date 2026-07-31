@@ -1,0 +1,11 @@
+// Algebraic config + a pure (lax) helper + Scala-like matching.
+// Exhaustiveness is a provable coverage property (checked at lowering, not here).
+
+config Nat = Zero | Succ(Nat)
+
+fn double(n: Nat): Nat = match n {
+  Zero => Zero
+  Succ(k) => Succ(Succ(double(k)))
+}
+
+show double(Succ(Succ(Zero)))

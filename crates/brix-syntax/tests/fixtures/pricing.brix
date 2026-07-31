@@ -1,0 +1,14 @@
+// Everyday .brix — SOC is invisible: no grades, no witnesses, types inferred.
+// Underneath, `cost(widget)` is a committed Derived fact carrying a witness.
+
+config Item = { name: Str, base: Money }
+
+regime pricing {
+  gen taxed(m: Money) = m * 1.2
+}
+
+rule cost(i: Item) = taxed(i.base)
+
+let widget = Item { name: "widget", base: 10 }
+
+show cost(widget)

@@ -10,6 +10,7 @@ members = [
     "crates/soc-regimes",
     "crates/brix-kernel",
     "crates/brix-elaborate",
+    "crates/brix-syntax",
 ]
 
 [workspace.package]
