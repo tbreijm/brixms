@@ -103,35 +103,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checks_identity_application_to_proven_int() {
+    fn checks_identity_application_to_audited_int() {
         let src = "fn id(n) = n\nlet r = id(42)\n";
         let (report, had_error) = check_report(src);
         assert!(!had_error, "report: {report}");
         assert!(
-            report.contains("r : Int @Proven"),
-            "expected `r : Int @Proven`, got:\n{report}"
+            report.contains("r : Int @Audited"),
+            "expected `r : Int @Audited`, got:\n{report}"
         );
     }
 
     #[test]
     fn checks_literal_to_proven_int() {
+        // A pure literal rests only on the discharged (tight) `g_lit`, so it
+        // honestly earns Proven.
         let (report, had_error) = check_report("let x = 42\n");
         assert!(!had_error);
         assert!(report.contains("x : Int @Proven"), "{report}");
     }
 
     #[test]
-    fn checks_record_and_field_access_to_proven() {
+    fn checks_record_and_field_access_to_audited() {
         let src = "let p = Item { x: 1, y: 2 }\nlet a = p.x\n";
         let (report, had_error) = check_report(src);
         assert!(!had_error, "report: {report}");
         assert!(
-            report.contains("p : {x: Int, y: Int} @Proven"),
-            "expected `p : {{x: Int, y: Int}} @Proven`, got:\n{report}"
+            report.contains("p : {x: Int, y: Int} @Audited"),
+            "expected `p : {{x: Int, y: Int}} @Audited`, got:\n{report}"
         );
         assert!(
-            report.contains("a : Int @Proven"),
-            "expected `a : Int @Proven`, got:\n{report}"
+            report.contains("a : Int @Audited"),
+            "expected `a : Int @Audited`, got:\n{report}"
         );
     }
 
