@@ -194,3 +194,87 @@ fn str_literal_earns_proven_record_and_field_stay_audited() {
         assert_eq!(cr.outcome, grade, "{name} has wrong grade");
     }
 }
+
+#[test]
+fn test_declared_record_config_success() {
+    let src = r#"
+        config Item = { name: Str, base: Int }
+        let w = Item { name: "widget", base: 10 }
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    assert_eq!(results.len(), 1);
+    let check_res = results[0]
+        .as_ref()
+        .expect("declared record literal should lower & type-check");
+    assert_eq!(check_res.name, "w");
+    assert_eq!(check_res.outcome, Outcome::Audited);
+}
+
+#[test]
+fn test_declared_record_config_missing_field() {
+    let src = r#"
+        config Item = { name: Str, base: Int }
+        let w = Item { name: "widget" }
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    assert_eq!(results.len(), 1);
+    let (name, err) = results[0]
+        .as_ref()
+        .expect_err("missing field should fail lowering");
+    assert_eq!(name, "w");
+    assert_eq!(
+        *err,
+        LowerError::MissingField {
+            config: "Item".to_string(),
+            field: "base".to_string(),
+        }
+    );
+}
+
+#[test]
+fn test_declared_record_config_unknown_field() {
+    let src = r#"
+        config Item = { name: Str, base: Int }
+        let w = Item { name: "widget", base: 10, extra: 1 }
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    assert_eq!(results.len(), 1);
+    let (name, err) = results[0]
+        .as_ref()
+        .expect_err("unknown field should fail lowering");
+    assert_eq!(name, "w");
+    assert_eq!(
+        *err,
+        LowerError::UnknownField {
+            config: "Item".to_string(),
+            field: "extra".to_string(),
+        }
+    );
+}
+
+#[test]
+fn test_sum_config_used_as_record_literal_error() {
+    let src = r#"
+        config Item = Zero | Succ(Nat)
+        let w = Item { name: "widget" }
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    assert_eq!(results.len(), 1);
+    let (name, err) = results[0]
+        .as_ref()
+        .expect_err("sum config used as record literal should fail lowering");
+    assert_eq!(name, "w");
+    match err {
+        LowerError::Unsupported(msg) => {
+            assert!(
+                msg.contains("sum config"),
+                "expected 'sum config' in message, got: {msg}"
+            );
+        }
+        _ => panic!("Expected LowerError::Unsupported, got {:?}", err),
+    }
+}
