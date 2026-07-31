@@ -28,6 +28,13 @@ use soc_regimes::type_realization::{
     Infer, Ty as TrTy, TyCtx, TypeError,
 };
 
+/// Lowering context holding top-level functions and config declarations.
+#[derive(Clone, Copy, Debug)]
+pub struct LowerCtx<'a> {
+    pub fns: &'a BTreeMap<String, &'a ast::Callable>,
+    pub configs: &'a BTreeMap<String, &'a ast::ConfigBody>,
+}
+
 /// Errors surfaced while lowering a surface construct not yet supported by the
 /// current L2 fragment (or an ill-formed reference or type/elaboration failure).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +47,10 @@ pub enum LowerError {
     TypeError(TypeError),
     /// Elaboration to `Proven` failed.
     ElaborationFailed(String),
+    /// A declared record field is missing from a record literal.
+    MissingField { config: String, field: String },
+    /// A record literal field is not present in the declared record config.
+    UnknownField { config: String, field: String },
 }
 
 impl From<TypeError> for LowerError {
@@ -49,10 +60,7 @@ impl From<TypeError> for LowerError {
 }
 
 /// Lower a surface AST expression into a native [`soc_regimes::type_realization::Expr`].
-pub fn lower_expr(
-    e: &ast::Expr,
-    fns: &BTreeMap<String, &ast::Callable>,
-) -> Result<TrExpr, LowerError> {
+pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
     match e {
         ast::Expr::Num(s) => {
             if let Ok(n) = s.parse::<i64>() {
@@ -68,7 +76,7 @@ pub fn lower_expr(
         }
         ast::Expr::Var(name) => Ok(TrExpr::Var(name.clone())),
         ast::Expr::Call { func, args } => {
-            if let Some(c) = fns.get(func) {
+            if let Some(c) = ctx.fns.get(func) {
                 if c.params.len() != args.len() {
                     return Err(LowerError::Unsupported(format!(
                         "arity mismatch for function '{func}': expected {}, got {}",
@@ -76,9 +84,9 @@ pub fn lower_expr(
                         args.len()
                     )));
                 }
-                let mut acc = lower_fn(c, fns)?;
+                let mut acc = lower_fn(c, ctx)?;
                 for arg in args {
-                    let lowered_arg = lower_expr(arg, fns)?;
+                    let lowered_arg = lower_expr(arg, ctx)?;
                     acc = TrExpr::App(Box::new(acc), Box::new(lowered_arg));
                 }
                 Ok(acc)
@@ -87,15 +95,42 @@ pub fn lower_expr(
             }
         }
         ast::Expr::Str(s) => Ok(TrExpr::StrLit(s.clone())),
-        ast::Expr::Record { config: _, fields } => {
+        ast::Expr::Record { config, fields } => {
+            if let Some(body) = ctx.configs.get(config) {
+                match body {
+                    ast::ConfigBody::Sum(_) => {
+                        return Err(LowerError::Unsupported(format!(
+                            "'{config}' is a sum config, not a record"
+                        )));
+                    }
+                    ast::ConfigBody::Record(decls) => {
+                        for decl in decls {
+                            if !fields.iter().any(|(name, _)| name == &decl.name) {
+                                return Err(LowerError::MissingField {
+                                    config: config.clone(),
+                                    field: decl.name.clone(),
+                                });
+                            }
+                        }
+                        for (name, _) in fields {
+                            if !decls.iter().any(|decl| &decl.name == name) {
+                                return Err(LowerError::UnknownField {
+                                    config: config.clone(),
+                                    field: name.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
             let lowered_fields: Result<Vec<(String, TrExpr)>, LowerError> = fields
                 .iter()
-                .map(|(name, e)| Ok((name.clone(), lower_expr(e, fns)?)))
+                .map(|(name, e)| Ok((name.clone(), lower_expr(e, ctx)?)))
                 .collect();
             Ok(TrExpr::Record(lowered_fields?))
         }
         ast::Expr::Field(base, name) => Ok(TrExpr::Field(
-            Box::new(lower_expr(base, fns)?),
+            Box::new(lower_expr(base, ctx)?),
             name.clone(),
         )),
         ast::Expr::Bin { op, lhs, rhs } => {
@@ -114,8 +149,8 @@ pub fn lower_expr(
             };
             Ok(TrExpr::Arith(
                 arith_op,
-                Box::new(lower_expr(lhs, fns)?),
-                Box::new(lower_expr(rhs, fns)?),
+                Box::new(lower_expr(lhs, ctx)?),
+                Box::new(lower_expr(rhs, ctx)?),
             ))
         }
         ast::Expr::Match { .. } => Err(LowerError::Unsupported(
@@ -134,11 +169,8 @@ pub fn lower_expr(
 }
 
 /// Lower a function definition (`ast::Callable`) to a curried [`soc_regimes::type_realization::Expr::Lam`].
-pub fn lower_fn(
-    c: &ast::Callable,
-    fns: &BTreeMap<String, &ast::Callable>,
-) -> Result<TrExpr, LowerError> {
-    let body_tr = lower_expr(&c.body, fns)?;
+pub fn lower_fn(c: &ast::Callable, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
+    let body_tr = lower_expr(&c.body, ctx)?;
     Ok(c.params.iter().rfold(body_tr, |acc, param| {
         TrExpr::Lam(param.name.clone(), Box::new(acc))
     }))
@@ -159,11 +191,23 @@ pub struct CheckResult {
 /// type-check them, and elaborate them to `Proven HasType`.
 pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerError)>> {
     let mut fns = BTreeMap::new();
+    let mut configs = BTreeMap::new();
     for item in &m.items {
-        if let Item::Fn(c) = item {
-            fns.insert(c.name.clone(), c);
+        match item {
+            Item::Fn(c) => {
+                fns.insert(c.name.clone(), c);
+            }
+            Item::Config(c) => {
+                configs.insert(c.name.clone(), &c.body);
+            }
+            _ => {}
         }
     }
+
+    let ctx = LowerCtx {
+        fns: &fns,
+        configs: &configs,
+    };
 
     let mut ty_ctx = TyCtx::new();
     let mut results = Vec::new();
@@ -171,7 +215,7 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
     for item in &m.items {
         if let Item::Let(let_decl) = item {
             let res = (|| {
-                let tr_expr = lower_expr(&let_decl.value, &fns)?;
+                let tr_expr = lower_expr(&let_decl.value, ctx)?;
                 let (ty, _ty_tree, st) = infer_tree(&tr_expr, &ty_ctx, Infer::new())?;
                 let inferred_ty = zonk(&ty, &st.subst);
                 let (audited_judgement, tree) =

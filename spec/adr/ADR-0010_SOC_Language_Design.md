@@ -1,6 +1,6 @@
-# ADR-0010 — The SOC Language: Design & Staged Plan
+# ADR-0010 — Brix (SOC Paradigm): Design & Staged Plan
 
-Status: **Accepted** (2026-07-31, ratified by user) — the design pin for the "make it usable" arc, opened the moment zero-legacy landed (N9, #210). **§6 decision: Option (A) — a general SOC language** (typing is one regime; witnesses/grades/regimes in the surface DNA). L1 (grammar + fresh surface AST) is now unblocked.
+Status: **Accepted** (2026-07-31, ratified by user) — the design pin for the "make it usable" arc, opened the moment zero-legacy landed (N9, #210). **§6 decision: Option (A) — Brix (SOC paradigm)** (typing is one regime; witnesses/grades/regimes in the surface DNA). L1 (grammar + fresh surface AST) is now unblocked.
 
 Date: 2026-07-31.
 
@@ -16,7 +16,7 @@ This ADR designs a language that is **SOC-native from the surface down** — and
 
 ## 2. Thesis: three pillars
 
-A clean SOC language is **not** "a typed λ-calculus with SOC bolted on." Its semantics *are* settlement, and three things make it distinctively SOC:
+Brix (in the SOC paradigm) is **not** "a typed λ-calculus with SOC bolted on." Its semantics *are* settlement, and three things make it distinctively SOC:
 
 ### 2.1 Witnesses (the deepest primitive)
 A value is never bare `T`; it is `T` **because `w`**, where `w` is a content-addressed **realization derivation** — the *why*. SOC's thesis "instance-of = carrier of an identity witness" means membership is *always* witnessed. Witnesses are **first-class, composable, checkable values**, not logs or metadata.
@@ -99,7 +99,7 @@ Design commitments already agreed:
 
 ## 6. THE decision this ADR needs: ambitious vs conservative
 
-- **(A) General SOC language (recommended).** Typing is *one regime*; witnesses, grades, and regimes are in the surface DNA. Distinctive, matches the "has-type = one regime" thesis, and is the only version that makes first-class composable witnesses ergonomic. Higher design cost.
+- **(A) Brix (SOC paradigm) (recommended).** Typing is *one regime*; witnesses, grades, and regimes are in the surface DNA. Distinctive, matches the "has-type = one regime" thesis, and is the only version that makes first-class composable witnesses ergonomic. Higher design cost.
 - **(B) Typed FP language that *uses* SOC underneath.** Grades/witnesses as a library behind a conventional typed core. Faster to a usable REPL; throws away most of what makes SOC SOC — first-class witnesses quietly become a side-channel.
 
 **Fable's recommendation: (A).** Zero-legacy exists precisely to earn the freedom to build (A); (B) spends that freedom on convention. This is the one call to make with the user before any parser code. **→ RATIFIED (A) by user, 2026-07-31.**
@@ -125,3 +125,12 @@ Each stage gets its own ADR/slice; L0 (this decision) is the blocker for all of 
 - **Corpus.** Native `.soc` fixtures replace the deleted `FrontendSource` corpus; what's the golden format (settlement outcomes + optional proofs)?
 
 This ADR is the design pin; §6 is the decision to ratify before L1.
+
+## 9. Implementation status (as merged)
+
+The initial implementation arc for Brix (in the SOC paradigm) has established the following components:
+
+- **L1 surface parser done (`brix-syntax`):** Pure Rust lexer and recursive-descent parser for `.brix` files, producing a fresh surface AST ([`brix_syntax::ast`]).
+- **L2 lowering fragment done (`brix-lower`):** Bridges surface AST expressions onto native [`soc_regimes::type_realization::Expr`] nodes. Supports integer, string, and float literals, `let` bindings, `fn` definitions / lambda / `Call` (inlined to `App(Lam, arg)`), structural records (`Item { a: 1, b: 2 }`) & field access (`p.a`), and arithmetic operators (`+`, `-`, `*`, `/`) over a numeric coercion lattice with witnessed `Int ↪ Float` promotion (`Div` yields the field of fractions, `Int / Int → Float`).
+- **Honest outcome propagation done:** The proof kernel certifies the *composition* theorem — GIVEN the primitive typing-rule leaves as generators, the derivation establishes `e : T`. It does NOT yet prove the semantic validity of those leaves themselves (the open "tight-generator soundness obligation"). Therefore the honest grade of a typing RESULT is `@Audited` by default. It is `@Proven` ONLY when every generator in its derivation has been discharged to "tight". So far ONLY the literal introduction rules (integer/string/float literals) are discharged (they are definitional — an introduction rule IS the type's definition). Concretely: `let x = 42` → `x : Int @Proven`; `let s = "hi"` → `s : Str @Proven`; but `let c = 1 + 2` → `c : Int @Audited` (arithmetic generator not discharged), records/fields → `@Audited`, functions/application → `@Audited`.
+- **Coercion-lattice type normalization done (`CoercionLattice`):** A single unified code path powering both the `NUMERIC` lattice (ℕ⊂ℤ⊂ℚ⊂ℝ⊂ℂ with safe widening, plus a lossy `Int ↪ Float` branch incomparable to exact ℚ/ℝ/ℂ) and the `GRADE` lattice (`Proven ↪ Audited ↪ Derived` representing safe weakening of certainty; illegal strengthening `Derived → Proven` has no up-path and triggers epistemic erasure).

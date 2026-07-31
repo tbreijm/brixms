@@ -26,7 +26,7 @@
 //!   audit-factorization checker's upgrade to `Audited` — exercising the
 //!   whole SOC loop end to end for the first time.
 //!
-//! - [`native`] — the **native SOC type checker** (ADR-0009): conflict
+//! - [`native`] — the **native Brix type checker (SOC paradigm)** (ADR-0009): conflict
 //!   detection (all 8 type-inference categories + all 6 rule-side-conditions)
 //!   and, via [`type_realization`], `HasType` judgements that elaborate to
 //!   `Proven` (ADR-0005/0007/0008). The legacy `brix-ir` differential oracle
