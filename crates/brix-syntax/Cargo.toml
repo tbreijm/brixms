@@ -1,0 +1,12 @@
+[package]
+name = "brix-syntax"
+description = "Brix surface language (SOC paradigm): AST, lexer, and parser for .brix files (ADR-0010, L1). Fresh — not the legacy NExpr mirror. No external deps (hand-written lexer + recursive-descent parser)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
