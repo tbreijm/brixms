@@ -41,8 +41,9 @@ fn test_let_lit_proven() {
 
 #[test]
 fn test_unsupported_construct_negative() {
-    let source = r#"let y = "hello""#;
-    let module = parse(source).expect("string literal expression should parse");
+    // A binary-arithmetic expression is still outside the current fragment.
+    let source = "let y = 1 + 2";
+    let module = parse(source).expect("arithmetic expression should parse");
     let results = check_module(&module);
 
     assert_eq!(results.len(), 1);
@@ -108,4 +109,24 @@ fn test_record_and_field_proven() {
     assert_eq!(res_a.name, "a");
     assert_eq!(res_a.outcome, Outcome::Proven);
     assert_eq!(res_a.ty, Some(TrTy::Con("Int")));
+}
+
+#[test]
+fn str_literal_and_str_record_field_reach_proven() {
+    // Str literal, a record with a Str field, and field access on it all prove.
+    let src = "let s = \"hi\"\nlet w = Item { name: \"widget\", base: 10 }\nlet n = w.name\n";
+    let module = brix_syntax::parse(src).expect("parse");
+    let results = brix_lower::check_module(&module);
+    assert_eq!(results.len(), 3);
+    for r in &results {
+        let cr = r
+            .as_ref()
+            .unwrap_or_else(|(name, e)| panic!("{name}: {e:?}"));
+        assert_eq!(
+            cr.outcome,
+            brix_semantic::Outcome::Proven,
+            "{} not Proven",
+            cr.name
+        );
+    }
 }

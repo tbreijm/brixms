@@ -69,6 +69,8 @@ pub enum Expr {
     Lam(String, Box<Expr>),
     Record(Vec<(String, Expr)>),
     Field(Box<Expr>, String),
+    /// String literal (append-only ordinal 6). Types to `Str`.
+    StrLit(String),
 }
 
 impl Canonical for Expr {
@@ -110,6 +112,9 @@ impl Canonical for Expr {
                     w.write_str(fname);
                 });
             }
+            Expr::StrLit(s) => {
+                w.write_enum(6, |w| w.write_str(s));
+            }
         }
     }
 }
@@ -124,6 +129,11 @@ impl Expr {
 /// Typing-rule generator for literal constants (`"type.rule.lit@1"`).
 pub fn g_lit() -> GeneratorId {
     GeneratorId::named("type.rule.lit@1")
+}
+
+/// Typing-rule generator for string literals (`"type.rule.strlit@1"`).
+pub fn g_str_lit() -> GeneratorId {
+    GeneratorId::named("type.rule.strlit@1")
 }
 
 /// Typing-rule generator for variable lookups (`"type.rule.var@1"`).
@@ -372,6 +382,7 @@ pub fn infer(
 ) -> Result<(Ty, Vec<GeneratorId>, Infer), TypeError> {
     match expr {
         Expr::Lit(_) => Ok((Ty::Con("Int"), vec![g_lit()], st)),
+        Expr::StrLit(_) => Ok((Ty::Con("Str"), vec![g_str_lit()], st)),
         Expr::Var(name) => {
             let ty = ctx
                 .get(name)
@@ -599,6 +610,15 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                 generator: g_lit(),
                 src: TyObj::Atom(CfgAtom::Expr(Expr::Lit(*n))),
                 dst: TyObj::Atom(CfgAtom::Type(Ty::Con("Int"))),
+            },
+            st,
+        )),
+        Expr::StrLit(s) => Ok((
+            Ty::Con("Str"),
+            TyTree::Leaf {
+                generator: g_str_lit(),
+                src: TyObj::Atom(CfgAtom::Expr(Expr::StrLit(s.clone()))),
+                dst: TyObj::Atom(CfgAtom::Type(Ty::Con("Str"))),
             },
             st,
         )),
