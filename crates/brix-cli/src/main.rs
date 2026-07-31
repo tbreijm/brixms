@@ -2,7 +2,7 @@
 //!
 //! `brix check <file.brix>`: parse a `.brix` program, lower it, and type-check
 //! each `let` binding, printing its inferred type and epistemic grade
-//! (`@Derived`/`@Audited`/`@Audited`). This is the first runnable Brix tool: it
+//! (`@Derived`/`@Audited`/`@Proven`). This is the first runnable Brix tool: it
 //! exposes the L1 parser + L2 lowering as a command. Bindings outside the
 //! current lowering fragment are reported honestly as not-yet-supported rather
 //! than failing the whole file.
@@ -103,7 +103,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checks_identity_application_to_proven_int() {
+    fn checks_identity_application_to_audited_int() {
         let src = "fn id(n) = n\nlet r = id(42)\n";
         let (report, had_error) = check_report(src);
         assert!(!had_error, "report: {report}");
@@ -115,13 +115,15 @@ mod tests {
 
     #[test]
     fn checks_literal_to_proven_int() {
+        // A pure literal rests only on the discharged (tight) `g_lit`, so it
+        // honestly earns Proven.
         let (report, had_error) = check_report("let x = 42\n");
         assert!(!had_error);
-        assert!(report.contains("x : Int @Audited"), "{report}");
+        assert!(report.contains("x : Int @Proven"), "{report}");
     }
 
     #[test]
-    fn checks_record_and_field_access_to_proven() {
+    fn checks_record_and_field_access_to_audited() {
         let src = "let p = Item { x: 1, y: 2 }\nlet a = p.x\n";
         let (report, had_error) = check_report(src);
         assert!(!had_error, "report: {report}");
