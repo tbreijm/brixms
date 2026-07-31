@@ -51,9 +51,9 @@ impl Ty {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Expr {
     Lit(i64),
-    Var(&'static str),
+    Var(String),
     App(Box<Expr>, Box<Expr>),
-    Lam(&'static str, Box<Expr>),
+    Lam(String, Box<Expr>),
 }
 
 impl Canonical for Expr {
@@ -135,16 +135,16 @@ pub fn g_unify() -> GeneratorId {
 
 /// Immutable typing context mapping variable names to types for variable lookup.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
-pub struct TyCtx(pub BTreeMap<&'static str, Ty>);
+pub struct TyCtx(pub BTreeMap<String, Ty>);
 
 impl TyCtx {
     pub fn new() -> Self {
         Self(BTreeMap::new())
     }
 
-    pub fn extend(&self, var: &'static str, ty: Ty) -> Self {
+    pub fn extend(&self, var: impl Into<String>, ty: Ty) -> Self {
         let mut map = self.0.clone();
-        map.insert(var, ty);
+        map.insert(var.into(), ty);
         Self(map)
     }
 
@@ -291,12 +291,12 @@ pub fn infer(
             let ty = ctx
                 .get(name)
                 .cloned()
-                .ok_or_else(|| TypeError::Unbound((*name).to_string()))?;
+                .ok_or_else(|| TypeError::Unbound(name.clone()))?;
             Ok((ty, vec![g_var()], st))
         }
         Expr::Lam(p, body) => {
             let (alpha, st_alpha) = st.fresh_var();
-            let ctx_ext = ctx.extend(p, Ty::Var(alpha));
+            let ctx_ext = ctx.extend(p.clone(), Ty::Var(alpha));
             let (tb, dv, st_prime) = infer(body, &ctx_ext, st_alpha)?;
             let param_ty = resolve(&Ty::Var(alpha), &st_prime.subst).clone();
             let fn_ty = Ty::Fn(Box::new(param_ty), Box::new(tb));
@@ -490,12 +490,12 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             let t = ctx
                 .get(name)
                 .cloned()
-                .ok_or_else(|| TypeError::Unbound((*name).to_string()))?;
+                .ok_or_else(|| TypeError::Unbound(name.clone()))?;
             Ok((
                 t.clone(),
                 TyTree::Leaf {
                     generator: g_var(),
-                    src: TyObj::Atom(CfgAtom::Expr(Expr::Var(name))),
+                    src: TyObj::Atom(CfgAtom::Expr(Expr::Var(name.clone()))),
                     dst: TyObj::Atom(CfgAtom::Type(t.clone())),
                 },
                 st,
@@ -503,14 +503,14 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
         }
         Expr::Lam(p, body) => {
             let (alpha, st_alpha) = st.fresh_var();
-            let ctx_ext = ctx.extend(p, Ty::Var(alpha));
+            let ctx_ext = ctx.extend(p.clone(), Ty::Var(alpha));
             let (tb, d_body, st_prime) = infer_tree(body, &ctx_ext, st_alpha)?;
             let param_ty = resolve(&Ty::Var(alpha), &st_prime.subst).clone();
             let fn_ty = Ty::Fn(Box::new(param_ty.clone()), Box::new(tb.clone()));
 
             let intro = TyTree::Leaf {
                 generator: g_lam_intro(),
-                src: TyObj::Atom(CfgAtom::Expr(Expr::Lam(p, body.clone()))),
+                src: TyObj::Atom(CfgAtom::Expr(Expr::Lam(p.clone(), body.clone()))),
                 dst: TyObj::Atom(CfgAtom::Expr((**body).clone())),
             };
             let close = TyTree::Leaf {
@@ -641,7 +641,7 @@ mod tests {
 
     #[test]
     fn test_var_type_check() {
-        let expr = Expr::Var("x");
+        let expr = Expr::Var("x".to_string());
         let ctx = TyCtx::new().extend("x", Ty::Con("Bool"));
         let context = ContextId::root();
 
@@ -660,7 +660,7 @@ mod tests {
 
     #[test]
     fn test_unbound_var() {
-        let expr = Expr::Var("y");
+        let expr = Expr::Var("y".to_string());
         let ctx = TyCtx::new();
         let context = ContextId::root();
 
@@ -672,7 +672,10 @@ mod tests {
     fn test_identity_applied() {
         // App(Lam("x", Var("x")), Lit(42))
         let expr = Expr::App(
-            Box::new(Expr::Lam("x", Box::new(Expr::Var("x")))),
+            Box::new(Expr::Lam(
+                "x".to_string(),
+                Box::new(Expr::Var("x".to_string())),
+            )),
             Box::new(Expr::Lit(42)),
         );
         let ctx = TyCtx::new();
@@ -702,7 +705,7 @@ mod tests {
     #[test]
     fn test_const_function() {
         // Lam("x", Lit(7))
-        let expr = Expr::Lam("x", Box::new(Expr::Lit(7)));
+        let expr = Expr::Lam("x".to_string(), Box::new(Expr::Lit(7)));
         let ctx = TyCtx::new();
         let context = ContextId::root();
 
@@ -732,7 +735,10 @@ mod tests {
     fn test_occurs_check_via_app() {
         // ctx: f : Var(0)
         // expr: App(Var("f"), Var("f")) -> unifying Var(0) with Fn(Var(0), Var(beta)) triggers InfiniteType
-        let expr = Expr::App(Box::new(Expr::Var("f")), Box::new(Expr::Var("f")));
+        let expr = Expr::App(
+            Box::new(Expr::Var("f".to_string())),
+            Box::new(Expr::Var("f".to_string())),
+        );
         let ctx = TyCtx::new().extend("f", Ty::Var(0));
         let context = ContextId::root();
 
@@ -743,7 +749,10 @@ mod tests {
     #[test]
     fn test_determinism() {
         let expr = Expr::App(
-            Box::new(Expr::Lam("x", Box::new(Expr::Var("x")))),
+            Box::new(Expr::Lam(
+                "x".to_string(),
+                Box::new(Expr::Var("x".to_string())),
+            )),
             Box::new(Expr::Lit(42)),
         );
         let ctx = TyCtx::new();
@@ -759,7 +768,10 @@ mod tests {
     #[test]
     fn test_decomposition_round_trip() {
         let expr = Expr::App(
-            Box::new(Expr::Lam("x", Box::new(Expr::Var("x")))),
+            Box::new(Expr::Lam(
+                "x".to_string(),
+                Box::new(Expr::Var("x".to_string())),
+            )),
             Box::new(Expr::Lit(42)),
         );
         let ctx = TyCtx::new();
@@ -851,7 +863,10 @@ mod tests {
     #[test]
     fn test_multi_step_elaboration_tree_vs_linear_tension() {
         let expr = Expr::App(
-            Box::new(Expr::Lam("x", Box::new(Expr::Var("x")))),
+            Box::new(Expr::Lam(
+                "x".to_string(),
+                Box::new(Expr::Var("x".to_string())),
+            )),
             Box::new(Expr::Lit(42)),
         );
         let ctx = TyCtx::new();
@@ -926,7 +941,7 @@ mod tests {
 
     #[test]
     fn test_tree_elaboration_end_to_end() {
-        let expr = Expr::App(Box::new(Expr::Var("f")), Box::new(Expr::Lit(1)));
+        let expr = Expr::App(Box::new(Expr::Var("f".to_string())), Box::new(Expr::Lit(1)));
         let ctx = TyCtx::new().extend(
             "f",
             Ty::Fn(Box::new(Ty::Con("Int")), Box::new(Ty::Con("Bool"))),
@@ -984,7 +999,10 @@ mod tests {
     #[test]
     fn test_lambda_end_to_end() {
         let expr = Expr::App(
-            Box::new(Expr::Lam("x", Box::new(Expr::Var("x")))),
+            Box::new(Expr::Lam(
+                "x".to_string(),
+                Box::new(Expr::Var("x".to_string())),
+            )),
             Box::new(Expr::Lit(42)),
         );
         let ctx = TyCtx::new();
@@ -1014,7 +1032,10 @@ mod tests {
     #[test]
     fn test_lambda_zonk_fired() {
         let expr = Expr::App(
-            Box::new(Expr::Lam("x", Box::new(Expr::Var("x")))),
+            Box::new(Expr::Lam(
+                "x".to_string(),
+                Box::new(Expr::Var("x".to_string())),
+            )),
             Box::new(Expr::Lit(42)),
         );
         let ctx = TyCtx::new();
@@ -1047,7 +1068,7 @@ mod tests {
 
     #[test]
     fn test_bare_lambda_audited() {
-        let expr = Expr::Lam("x", Box::new(Expr::Var("x")));
+        let expr = Expr::Lam("x".to_string(), Box::new(Expr::Var("x".to_string())));
         let ctx = TyCtx::new();
         let (aud, tree) = audited_type_check_tree(&expr, &ctx, ContextId::root()).unwrap();
         assert_eq!(aud.outcome, Outcome::Audited);
