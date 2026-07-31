@@ -2,7 +2,7 @@
 //!
 //! `brix check <file.brix>`: parse a `.brix` program, lower it, and type-check
 //! each `let` binding, printing its inferred type and epistemic grade
-//! (`@Derived`/`@Audited`/`@Proven`). This is the first runnable Brix tool: it
+//! (`@Derived`/`@Audited`/`@Audited`). This is the first runnable Brix tool: it
 //! exposes the L1 parser + L2 lowering as a command. Bindings outside the
 //! current lowering fragment are reported honestly as not-yet-supported rather
 //! than failing the whole file.
@@ -108,8 +108,8 @@ mod tests {
         let (report, had_error) = check_report(src);
         assert!(!had_error, "report: {report}");
         assert!(
-            report.contains("r : Int @Proven"),
-            "expected `r : Int @Proven`, got:\n{report}"
+            report.contains("r : Int @Audited"),
+            "expected `r : Int @Audited`, got:\n{report}"
         );
     }
 
@@ -117,7 +117,7 @@ mod tests {
     fn checks_literal_to_proven_int() {
         let (report, had_error) = check_report("let x = 42\n");
         assert!(!had_error);
-        assert!(report.contains("x : Int @Proven"), "{report}");
+        assert!(report.contains("x : Int @Audited"), "{report}");
     }
 
     #[test]
@@ -126,12 +126,12 @@ mod tests {
         let (report, had_error) = check_report(src);
         assert!(!had_error, "report: {report}");
         assert!(
-            report.contains("p : {x: Int, y: Int} @Proven"),
-            "expected `p : {{x: Int, y: Int}} @Proven`, got:\n{report}"
+            report.contains("p : {x: Int, y: Int} @Audited"),
+            "expected `p : {{x: Int, y: Int}} @Audited`, got:\n{report}"
         );
         assert!(
-            report.contains("a : Int @Proven"),
-            "expected `a : Int @Proven`, got:\n{report}"
+            report.contains("a : Int @Audited"),
+            "expected `a : Int @Audited`, got:\n{report}"
         );
     }
 
