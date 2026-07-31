@@ -1,0 +1,2 @@
+fn id(n) = n
+let r = id(42)
