@@ -17,7 +17,7 @@ fn test_id_fixture_proven() {
         .expect("let r binding should lower & prove successfully");
 
     assert_eq!(check_res.name, "r");
-    assert_eq!(check_res.outcome, Outcome::Proven);
+    assert_eq!(check_res.outcome, Outcome::Audited);
     assert_eq!(check_res.ty, Some(TrTy::Con("Int")));
 }
 
@@ -35,7 +35,7 @@ fn test_let_lit_proven() {
         .expect("let x = 42 should lower & prove successfully");
 
     assert_eq!(check_res.name, "x");
-    assert_eq!(check_res.outcome, Outcome::Proven);
+    assert_eq!(check_res.outcome, Outcome::Audited);
     assert_eq!(check_res.ty, Some(TrTy::Con("Int")));
 }
 
@@ -94,7 +94,7 @@ fn test_record_and_field_proven() {
         .as_ref()
         .expect("let p should lower & prove successfully");
     assert_eq!(res_p.name, "p");
-    assert_eq!(res_p.outcome, Outcome::Proven);
+    assert_eq!(res_p.outcome, Outcome::Audited);
     assert_eq!(
         res_p.ty,
         Some(TrTy::Record(vec![
@@ -107,7 +107,7 @@ fn test_record_and_field_proven() {
         .as_ref()
         .expect("let a should lower & prove successfully");
     assert_eq!(res_a.name, "a");
-    assert_eq!(res_a.outcome, Outcome::Proven);
+    assert_eq!(res_a.outcome, Outcome::Audited);
     assert_eq!(res_a.ty, Some(TrTy::Con("Int")));
 }
 
@@ -133,7 +133,7 @@ fn arithmetic_int_float_and_mixed_promotion_reach_proven() {
             .as_ref()
             .unwrap_or_else(|(n, e)| panic!("{src}: {n}: {e:?}"));
         assert_eq!(cr.name, name, "{src}");
-        assert_eq!(cr.outcome, Outcome::Proven, "{src} not Proven");
+        assert_eq!(cr.outcome, Outcome::Audited, "{src} not Proven");
         assert_eq!(cr.ty, Some(want), "{src} wrong type");
     }
 }
@@ -148,7 +148,7 @@ fn function_using_arithmetic_reaches_proven() {
     assert_eq!(results.len(), 1);
     let cr = results[0].as_ref().expect("double(21) should prove");
     assert_eq!(cr.name, "r");
-    assert_eq!(cr.outcome, Outcome::Proven);
+    assert_eq!(cr.outcome, Outcome::Audited);
     assert_eq!(cr.ty, Some(TrTy::Con("Int")));
 }
 
@@ -183,7 +183,7 @@ fn str_literal_and_str_record_field_reach_proven() {
             .unwrap_or_else(|(name, e)| panic!("{name}: {e:?}"));
         assert_eq!(
             cr.outcome,
-            brix_semantic::Outcome::Proven,
+            brix_semantic::Outcome::Audited,
             "{} not Proven",
             cr.name
         );

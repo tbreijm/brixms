@@ -245,6 +245,52 @@ pub fn g_unify() -> GeneratorId {
 }
 
 // ---------------------------------------------------------------------------
+// Honest outcome propagation (the SOC tight-generator obligation, ADR-0009/0010).
+//
+// The proof kernel certifies the *composition* theorem: given the primitive
+// typing-rule leaves as generators, the derivation establishes `e : T`. It does
+// NOT yet prove the semantic validity of those leaves themselves. In SOC an
+// outcome is monotone over composition — a judgement is only as strong as its
+// weakest generator — so the honest status of the typing *result* is the meet of
+// the composition outcome and every leaf generator's discharge status. Until a
+// leaf is discharged to "tight" (a kernel proof of its realization semantics),
+// it caps the result at the replay-verified `Audited`. Discharging generators
+// one at a time then lifts real programs to `Proven` automatically, with no
+// change to this reporting code.
+// ---------------------------------------------------------------------------
+
+/// Whether a typing-rule generator's *realization semantics* has been discharged
+/// to "tight" — kernel-proven sound, not merely asserted (the tight-generator
+/// obligation). No primitive typing rule is discharged yet, so today every real
+/// derivation's honest result outcome is capped at `Audited`.
+pub fn generator_is_tight(_g: &GeneratorId) -> bool {
+    false
+}
+
+/// Whether every leaf generator in an elaborated derivation is discharged tight.
+fn all_generators_tight(tree: &RealizesTree) -> bool {
+    match tree {
+        RealizesTree::Leaf { generator, .. } => generator_is_tight(generator),
+        RealizesTree::Seq { left, right } | RealizesTree::Tensor { left, right } => {
+            all_generators_tight(left) && all_generators_tight(right)
+        }
+    }
+}
+
+/// The honest epistemic status of a typing *result* `e : T`: the composition
+/// outcome capped by the least-discharged leaf. The kernel proves `composition`
+/// (e.g. `Proven`) *conditional on* the primitive typing-rule leaves, so the
+/// result is only `composition` when every leaf is tight; otherwise it is the
+/// replay-verified `Audited`.
+pub fn honest_result_outcome(composition: Outcome, tree: &RealizesTree) -> Outcome {
+    if all_generators_tight(tree) {
+        composition
+    } else {
+        Outcome::Audited
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Coercion lattices (ADR-0010): the general type-normalization mechanism.
 //
 // A `CoercionLattice` is a declared category of witnessed coercions over one

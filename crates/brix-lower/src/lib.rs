@@ -3,9 +3,14 @@
 //!
 //! **L2-first slice (this crate, initial):** lower the `{fn, let, Call, Num,
 //! Var}` fragment of Brix onto [`soc_regimes::type_realization::Expr`]
-//! (`Lam`/`App`/`Lit`/`Var`) and run it through the existing tree-elaboration
-//! path to **`Proven HasType`** — a real `.brix` program whose type is a
-//! machine-checked theorem. `fn` definitions are inlined into `App(Lam, arg)`.
+//! (`Lam`/`App`/`Lit`/`Var`) and run it through the tree-elaboration path. The
+//! kernel proves the *composition* theorem — given the primitive typing-rule
+//! leaves, the derivation establishes `e : T` — so the honest status of the
+//! typing result is **`Audited`** (see
+//! [`soc_regimes::type_realization::honest_result_outcome`]); it upgrades to
+//! `Proven` per-result once the leaf generators are discharged to tight (the
+//! SOC tight-generator obligation). `fn` definitions are inlined into
+//! `App(Lam, arg)`.
 //!
 //! Deliberately deferred (later L2 slices): `config`/record/`match`/`regime`/
 //! `rule`; and the reconciliation of the two internal type reps
@@ -19,8 +24,8 @@ use brix_kernel::Budget;
 use brix_semantic::{ContextId, Outcome};
 use brix_syntax::ast::{self, Item};
 use soc_regimes::type_realization::{
-    audited_type_check_tree, infer_tree, zonk, ArithOp, Expr as TrExpr, Infer, Ty as TrTy, TyCtx,
-    TypeError,
+    audited_type_check_tree, honest_result_outcome, infer_tree, zonk, ArithOp, Expr as TrExpr,
+    Infer, Ty as TrTy, TyCtx, TypeError,
 };
 
 /// Errors surfaced while lowering a surface construct not yet supported by the
@@ -174,8 +179,13 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                 match elaborate_tree(&audited_judgement, &tree, Budget::new(2000, 2000)) {
                     ElaborationResult::Proven { judgement, .. } => Ok((
                         CheckResult {
+                            // The kernel proves the *composition* (judgement.outcome,
+                            // e.g. Proven) conditional on the primitive typing-rule
+                            // leaves. The honest status of the typing result is that
+                            // capped by leaf discharge — Audited until the leaves are
+                            // proven tight (the SOC tight-generator obligation).
                             name: let_decl.name.clone(),
-                            outcome: judgement.outcome,
+                            outcome: honest_result_outcome(judgement.outcome, &tree),
                             ty: Some(inferred_ty.clone()),
                         },
                         inferred_ty,
