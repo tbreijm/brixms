@@ -245,6 +245,66 @@ pub fn g_unify() -> GeneratorId {
 }
 
 // ---------------------------------------------------------------------------
+// Honest outcome propagation (the SOC tight-generator obligation, ADR-0009/0010).
+//
+// The proof kernel certifies the *composition* theorem: given the primitive
+// typing-rule leaves as generators, the derivation establishes `e : T`. It does
+// NOT yet prove the semantic validity of those leaves themselves. In SOC an
+// outcome is monotone over composition — a judgement is only as strong as its
+// weakest generator — so the honest status of the typing *result* is the meet of
+// the composition outcome and every leaf generator's discharge status. Until a
+// leaf is discharged to "tight" (a kernel proof of its realization semantics),
+// it caps the result at the replay-verified `Audited`. Discharging generators
+// one at a time then lifts real programs to `Proven` automatically, with no
+// change to this reporting code.
+// ---------------------------------------------------------------------------
+
+/// Whether a typing-rule generator's *realization semantics* has been discharged
+/// to "tight" — its soundness established, not merely asserted (the
+/// tight-generator obligation).
+///
+/// Discharged so far: the **literal introduction rules** `g_lit`/`g_str_lit`/
+/// `g_float_lit`. These are the legitimate *base case* of tightness — an
+/// introduction rule *is* the definition of its type (`42 : Int`, `"…" : Str`,
+/// `1.5 : Float`), so there is nothing beneath it to prove; the rule is the
+/// irreducible axiom that a type theory rests on. Each is emitted at exactly one
+/// site (the corresponding `infer_tree` arm) with a fixed `literal → Con`
+/// endpoint, pinned by `literal_intro_generators_are_faithful` — so declaring it
+/// tight is honest, not a flip.
+///
+/// Deliberately **not** discharged (they carry real semantic content and get
+/// genuine soundness arguments later): `g_var`/`g_app*`/`g_lam*` (substitution),
+/// `g_arith` + the coercion-edge promotions (operator/embedding semantics),
+/// `g_record*`/`g_field` (products/projection). Programs using any of these stay
+/// `Audited` until it is discharged.
+pub fn generator_is_tight(g: &GeneratorId) -> bool {
+    *g == g_lit() || *g == g_str_lit() || *g == g_float_lit()
+}
+
+/// Whether every leaf generator in an elaborated derivation is discharged tight.
+fn all_generators_tight(tree: &RealizesTree) -> bool {
+    match tree {
+        RealizesTree::Leaf { generator, .. } => generator_is_tight(generator),
+        RealizesTree::Seq { left, right } | RealizesTree::Tensor { left, right } => {
+            all_generators_tight(left) && all_generators_tight(right)
+        }
+    }
+}
+
+/// The honest epistemic status of a typing *result* `e : T`: the composition
+/// outcome capped by the least-discharged leaf. The kernel proves `composition`
+/// (e.g. `Proven`) *conditional on* the primitive typing-rule leaves, so the
+/// result is only `composition` when every leaf is tight; otherwise it is the
+/// replay-verified `Audited`.
+pub fn honest_result_outcome(composition: Outcome, tree: &RealizesTree) -> Outcome {
+    if all_generators_tight(tree) {
+        composition
+    } else {
+        Outcome::Audited
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Coercion lattices (ADR-0010): the general type-normalization mechanism.
 //
 // A `CoercionLattice` is a declared category of witnessed coercions over one
@@ -1895,6 +1955,69 @@ mod tests {
         assert!(
             matches!(res, ElaborationResult::Proven { .. }),
             "expected Proven, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn literal_intro_generators_are_faithful() {
+        // Each discharged literal generator is emitted at exactly one site with a
+        // fixed `literal → Con` endpoint. This pins the discharge: if a literal
+        // arm ever emitted a different generator or result type, tightness would
+        // no longer be honest and this test would catch it.
+        let cases: [(Expr, GeneratorId, Ty); 3] = [
+            (Expr::Lit(7), g_lit(), Ty::Con("Int")),
+            (Expr::StrLit("hi".to_string()), g_str_lit(), Ty::Con("Str")),
+            (
+                Expr::FloatLit("1.5".to_string()),
+                g_float_lit(),
+                Ty::Con("Float"),
+            ),
+        ];
+        for (expr, gen, ty) in cases {
+            assert!(generator_is_tight(&gen), "{gen:?} should be discharged");
+            let (_, tree, _) = infer_tree(&expr, &TyCtx::new(), Infer::new()).unwrap();
+            match tree {
+                TyTree::Leaf {
+                    generator,
+                    src,
+                    dst,
+                } => {
+                    assert_eq!(generator, gen);
+                    assert_eq!(src, TyObj::Atom(CfgAtom::Expr(expr)));
+                    assert_eq!(dst, TyObj::Atom(CfgAtom::Type(ty)));
+                }
+                other => panic!("expected a single faithful leaf, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn literal_binding_earns_proven_but_composite_stays_audited() {
+        // A pure literal rests only on a discharged (tight) generator, so its
+        // honest result outcome is the kernel's Proven composition.
+        let (_, lit_tree) =
+            audited_type_check_tree(&Expr::Lit(42), &TyCtx::new(), ContextId::root()).unwrap();
+        assert_eq!(
+            honest_result_outcome(Outcome::Proven, &lit_tree),
+            Outcome::Proven,
+            "a discharged literal should earn Proven"
+        );
+
+        // `(λx.x) 42` also uses g_var/g_app*/g_lam* (not yet discharged), so its
+        // honest outcome is capped at Audited even though the composition proves.
+        let app = Expr::App(
+            Box::new(Expr::Lam(
+                "x".to_string(),
+                Box::new(Expr::Var("x".to_string())),
+            )),
+            Box::new(Expr::Lit(42)),
+        );
+        let (_, app_tree) =
+            audited_type_check_tree(&app, &TyCtx::new(), ContextId::root()).unwrap();
+        assert_eq!(
+            honest_result_outcome(Outcome::Proven, &app_tree),
+            Outcome::Audited,
+            "an undischarged generator must cap the result at Audited"
         );
     }
 }
