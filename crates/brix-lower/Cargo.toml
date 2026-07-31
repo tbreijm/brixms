@@ -1,0 +1,17 @@
+[package]
+name = "brix-lower"
+description = "Brix lowering (ADR-0010, L2): surface AST (brix-syntax) → SOC realizations. First slice: the {fn,let,Call,Num,Var} fragment → type_realization::Expr → Proven HasType, reusing the existing tree-elaboration path."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+brix-syntax = { path = "../brix-syntax" }
+soc-regimes = { path = "../soc-regimes" }
+brix-elaborate = { path = "../brix-elaborate" }
+brix-semantic = { workspace = true }
+brix-kernel = { path = "../brix-kernel" }
+
+[lints]
+workspace = true

@@ -85,6 +85,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "brix-lower"
+version = "0.0.0"
+dependencies = [
+ "brix-elaborate",
+ "brix-kernel",
+ "brix-semantic",
+ "brix-syntax",
+ "soc-regimes",
+]
+
+[[package]]
 name = "brix-semantic"
 version = "0.0.0"
 dependencies = [
