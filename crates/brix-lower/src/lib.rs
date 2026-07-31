@@ -42,13 +42,6 @@ impl From<TypeError> for LowerError {
     }
 }
 
-/// L2-first shortcut — type_realization::Expr uses &'static str (built for hand-written tests).
-/// We intern (leak) identifiers at compile-time lowering; the real fix is migrating
-/// type_realization::Expr to String (reconciliation debt, later L2 slice).
-fn intern(s: &str) -> &'static str {
-    Box::leak(s.to_string().into_boxed_str())
-}
-
 /// Lower a surface AST expression into a native [`soc_regimes::type_realization::Expr`].
 pub fn lower_expr(
     e: &ast::Expr,
@@ -59,7 +52,7 @@ pub fn lower_expr(
             Ok(n) => Ok(TrExpr::Lit(n)),
             Err(_) => Err(LowerError::Unsupported("non-integer literal".to_string())),
         },
-        ast::Expr::Var(name) => Ok(TrExpr::Var(intern(name))),
+        ast::Expr::Var(name) => Ok(TrExpr::Var(name.clone())),
         ast::Expr::Call { func, args } => {
             if let Some(c) = fns.get(func) {
                 if c.params.len() != args.len() {
@@ -113,7 +106,7 @@ pub fn lower_fn(
 ) -> Result<TrExpr, LowerError> {
     let body_tr = lower_expr(&c.body, fns)?;
     Ok(c.params.iter().rfold(body_tr, |acc, param| {
-        TrExpr::Lam(intern(&param.name), Box::new(acc))
+        TrExpr::Lam(param.name.clone(), Box::new(acc))
     }))
 }
 
