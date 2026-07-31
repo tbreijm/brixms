@@ -19,7 +19,8 @@ use brix_kernel::Budget;
 use brix_semantic::{ContextId, Outcome};
 use brix_syntax::ast::{self, Item};
 use soc_regimes::type_realization::{
-    audited_type_check_tree, infer_tree, zonk, Expr as TrExpr, Infer, Ty as TrTy, TyCtx, TypeError,
+    audited_type_check_tree, infer_tree, zonk, ArithOp, Expr as TrExpr, Infer, Ty as TrTy, TyCtx,
+    TypeError,
 };
 
 /// Errors surfaced while lowering a surface construct not yet supported by the
@@ -48,10 +49,18 @@ pub fn lower_expr(
     fns: &BTreeMap<String, &ast::Callable>,
 ) -> Result<TrExpr, LowerError> {
     match e {
-        ast::Expr::Num(s) => match s.parse::<i64>() {
-            Ok(n) => Ok(TrExpr::Lit(n)),
-            Err(_) => Err(LowerError::Unsupported("non-integer literal".to_string())),
-        },
+        ast::Expr::Num(s) => {
+            if let Ok(n) = s.parse::<i64>() {
+                Ok(TrExpr::Lit(n))
+            } else if s.parse::<f64>().is_ok() {
+                // A well-formed decimal literal that is not an integer → Float.
+                Ok(TrExpr::FloatLit(s.clone()))
+            } else {
+                Err(LowerError::Unsupported(format!(
+                    "unrecognized numeric literal '{s}'"
+                )))
+            }
+        }
         ast::Expr::Var(name) => Ok(TrExpr::Var(name.clone())),
         ast::Expr::Call { func, args } => {
             if let Some(c) = fns.get(func) {
@@ -84,9 +93,26 @@ pub fn lower_expr(
             Box::new(lower_expr(base, fns)?),
             name.clone(),
         )),
-        ast::Expr::Bin { .. } => Err(LowerError::Unsupported(
-            "Bin not in L2-first fragment".to_string(),
-        )),
+        ast::Expr::Bin { op, lhs, rhs } => {
+            let arith_op = match op {
+                ast::BinOp::Add => ArithOp::Add,
+                ast::BinOp::Sub => ArithOp::Sub,
+                ast::BinOp::Mul => ArithOp::Mul,
+                ast::BinOp::Div => ArithOp::Div,
+                // `then`/`and` are witness composition, not numeric arithmetic —
+                // deferred to the L4 witness/proof surface.
+                ast::BinOp::Then | ast::BinOp::And => {
+                    return Err(LowerError::Unsupported(
+                        "witness composition ('then'/'and') not in L2-first fragment".to_string(),
+                    ))
+                }
+            };
+            Ok(TrExpr::Arith(
+                arith_op,
+                Box::new(lower_expr(lhs, fns)?),
+                Box::new(lower_expr(rhs, fns)?),
+            ))
+        }
         ast::Expr::Match { .. } => Err(LowerError::Unsupported(
             "Match not in L2-first fragment".to_string(),
         )),

@@ -41,9 +41,9 @@ fn test_let_lit_proven() {
 
 #[test]
 fn test_unsupported_construct_negative() {
-    // A binary-arithmetic expression is still outside the current fragment.
-    let source = "let y = 1 + 2";
-    let module = parse(source).expect("arithmetic expression should parse");
+    // Witness composition (`then`/`and`) is still outside the current fragment.
+    let source = "let y = 1 then 2";
+    let module = parse(source).expect("witness-composition expression should parse");
     let results = check_module(&module);
 
     assert_eq!(results.len(), 1);
@@ -109,6 +109,65 @@ fn test_record_and_field_proven() {
     assert_eq!(res_a.name, "a");
     assert_eq!(res_a.outcome, Outcome::Proven);
     assert_eq!(res_a.ty, Some(TrTy::Con("Int")));
+}
+
+#[test]
+fn arithmetic_int_float_and_mixed_promotion_reach_proven() {
+    // Int+Int→Int, Float+Float→Float, and mixed Int+Float→Float (via the
+    // Int↪Float promotion witness) all reach Proven with the expected type.
+    let cases = [
+        ("let a = 1 + 2", "a", TrTy::Con("Int")),
+        ("let b = 1.5 + 2.5", "b", TrTy::Con("Float")),
+        ("let c = 1 + 2.5", "c", TrTy::Con("Float")),
+        ("let d = 3.0 * 2", "d", TrTy::Con("Float")),
+        ("let e = 10 - 4 * 2", "e", TrTy::Con("Int")),
+        // Div forces the field of fractions: Int/Int → Float.
+        ("let q = 7 / 2", "q", TrTy::Con("Float")),
+        ("let h = 9.0 / 4.0", "h", TrTy::Con("Float")),
+    ];
+    for (src, name, want) in cases {
+        let module = parse(src).unwrap_or_else(|e| panic!("{src}: parse {e:?}"));
+        let results = check_module(&module);
+        assert_eq!(results.len(), 1, "{src}");
+        let cr = results[0]
+            .as_ref()
+            .unwrap_or_else(|(n, e)| panic!("{src}: {n}: {e:?}"));
+        assert_eq!(cr.name, name, "{src}");
+        assert_eq!(cr.outcome, Outcome::Proven, "{src} not Proven");
+        assert_eq!(cr.ty, Some(want), "{src} wrong type");
+    }
+}
+
+#[test]
+fn function_using_arithmetic_reaches_proven() {
+    // `n + n` defaults the parameter to Int, so `double : Int → Int` and the
+    // applied result proves as Int.
+    let src = "fn double(n) = n + n\nlet r = double(21)";
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    assert_eq!(results.len(), 1);
+    let cr = results[0].as_ref().expect("double(21) should prove");
+    assert_eq!(cr.name, "r");
+    assert_eq!(cr.outcome, Outcome::Proven);
+    assert_eq!(cr.ty, Some(TrTy::Con("Int")));
+}
+
+#[test]
+fn arithmetic_on_string_is_a_type_error() {
+    // "hi" + 1 mixes a non-numeric operand → a real type error, not Proven.
+    let module = parse("let bad = 1 + \"hi\"").expect("parse");
+    let results = check_module(&module);
+    assert_eq!(results.len(), 1);
+    let (name, err) = results
+        .into_iter()
+        .next()
+        .unwrap()
+        .expect_err("string arithmetic should fail type checking");
+    assert_eq!(name, "bad");
+    assert!(
+        matches!(err, LowerError::TypeError(_)),
+        "expected a TypeError, got {err:?}"
+    );
 }
 
 #[test]

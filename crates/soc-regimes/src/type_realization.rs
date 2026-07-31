@@ -60,6 +60,28 @@ impl Ty {
     }
 }
 
+/// Binary numeric arithmetic operators. All four share one typing rule
+/// (numeric operands in, numeric result out) — the op only affects runtime
+/// value, not the type — so they carry a single `g_arith` generator.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+impl ArithOp {
+    fn ordinal(self) -> u64 {
+        match self {
+            ArithOp::Add => 0,
+            ArithOp::Sub => 1,
+            ArithOp::Mul => 2,
+            ArithOp::Div => 3,
+        }
+    }
+}
+
 /// Expression AST for the native type-realization regime (ADR-0005).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Expr {
@@ -71,6 +93,12 @@ pub enum Expr {
     Field(Box<Expr>, String),
     /// String literal (append-only ordinal 6). Types to `Str`.
     StrLit(String),
+    /// Floating-point literal, stored as its source text for canonical identity
+    /// (append-only ordinal 7). Types to `Float`.
+    FloatLit(String),
+    /// Binary numeric arithmetic (append-only ordinal 8). Types to `Int`,
+    /// `Float`, or — on a mixed `Int`/`Float` — `Float` via a promotion witness.
+    Arith(ArithOp, Box<Expr>, Box<Expr>),
 }
 
 impl Canonical for Expr {
@@ -114,6 +142,16 @@ impl Canonical for Expr {
             }
             Expr::StrLit(s) => {
                 w.write_enum(6, |w| w.write_str(s));
+            }
+            Expr::FloatLit(s) => {
+                w.write_enum(7, |w| w.write_str(s));
+            }
+            Expr::Arith(op, a, b) => {
+                w.write_enum(8, |w| {
+                    w.write_uint(op.ordinal());
+                    a.canon_write(w);
+                    b.canon_write(w);
+                });
             }
         }
     }
@@ -186,9 +224,243 @@ pub fn g_record_split() -> GeneratorId {
     GeneratorId::named("type.rule.record.split@1")
 }
 
+/// Typing-rule generator for float literals (`"type.rule.floatlit@1"`).
+pub fn g_float_lit() -> GeneratorId {
+    GeneratorId::named("type.rule.floatlit@1")
+}
+
+/// Typing-rule generator for binary numeric arithmetic (`"type.rule.arith@1"`).
+pub fn g_arith() -> GeneratorId {
+    GeneratorId::named("type.rule.arith@1")
+}
+
+/// Typing-rule generator for arithmetic operand splitting (`"type.rule.arith.split@1"`).
+pub fn g_arith_split() -> GeneratorId {
+    GeneratorId::named("type.rule.arith.split@1")
+}
+
 /// Typing-rule generator for unification steps (`"type.rule.unify@1"`).
 pub fn g_unify() -> GeneratorId {
     GeneratorId::named("type.rule.unify@1")
+}
+
+// ---------------------------------------------------------------------------
+// Coercion lattices (ADR-0010): the general type-normalization mechanism.
+//
+// A `CoercionLattice` is a declared category of witnessed coercions over one
+// *sort* of type name — objects = node names, morphisms = the *safe*
+// (information-preserving) coercion generators on its edges, each `from ↪ to`.
+// Normalization at a multi-input site = `join` (least upper bound in the ↪
+// order) + the composed witness-path from each input up to the join. An edge is
+// always the SAFE direction; a required coercion with NO up-path is a real
+// conflict (numeric: incomparable types; epistemic: illegal strengthening =
+// erasure). Only upward moves are ever inserted implicitly.
+//
+// The numeric tower and the epistemic-grade modality are two instances of the
+// SAME code — `Int ↪ Float` and `Proven ↪ Audited` run through one mechanism.
+// Up-paths are unique here (the coherence condition), so composed witnesses are
+// well-defined; adding a class is a data change to the `edges`, not new logic.
+// ---------------------------------------------------------------------------
+
+/// A declared category of witnessed coercions over one sort of type name.
+pub struct CoercionLattice {
+    /// Hasse edges `(from, to)` in the *safe* coercion direction; each names a
+    /// promotion generator via `generator_prefix`.
+    edges: &'static [(&'static str, &'static str)],
+    /// Prefix for per-edge generator ids, e.g. `"type.rule.num.promote"`.
+    generator_prefix: &'static str,
+}
+
+impl CoercionLattice {
+    /// Whether `name` is a node of this lattice.
+    fn contains(&self, name: &str) -> bool {
+        self.edges.iter().any(|(a, b)| *a == name || *b == name)
+    }
+
+    /// The canonical `&'static str` node for `name`, if present.
+    fn node(&self, name: &str) -> Option<&'static str> {
+        self.edges.iter().find_map(|(a, b)| {
+            if *a == name {
+                Some(*a)
+            } else if *b == name {
+                Some(*b)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// The witnessed-coercion generator for the edge `from ↪ to`.
+    pub fn promote_generator(&self, from: &str, to: &str) -> GeneratorId {
+        GeneratorId::named(&format!("{}.{from}_{to}@1", self.generator_prefix))
+    }
+
+    /// Reflexive–transitive upward closure of `name` (includes `name`).
+    fn ancestors(&self, name: &'static str) -> Vec<&'static str> {
+        let mut out = vec![name];
+        let mut i = 0;
+        while i < out.len() {
+            let cur = out[i];
+            for (a, b) in self.edges {
+                if *a == cur && !out.contains(b) {
+                    out.push(*b);
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// `a ≤ b`: a value of type `a` safely coerces to `b`.
+    fn le(&self, a: &'static str, b: &'static str) -> bool {
+        self.ancestors(a).contains(&b)
+    }
+
+    /// The join (least upper bound), or `None` if incomparable — a real
+    /// "cannot coerce" error (numeric mismatch or epistemic erasure).
+    fn join(&self, a: &'static str, b: &'static str) -> Option<&'static str> {
+        let aa = self.ancestors(a);
+        let bb = self.ancestors(b);
+        let common: Vec<&'static str> = aa.into_iter().filter(|x| bb.contains(x)).collect();
+        common
+            .iter()
+            .copied()
+            .find(|&x| common.iter().all(|&y| self.le(x, y)))
+    }
+
+    /// The ordered edge path `(from, to)` from `from` up to `to`
+    /// (empty if equal). Up-paths are unique, so the composed witness is unique.
+    fn edge_path(&self, from: &'static str, to: &'static str) -> Vec<(&'static str, &'static str)> {
+        if from == to {
+            return Vec::new();
+        }
+        let mut reached_via: BTreeMap<&'static str, (&'static str, &'static str)> = BTreeMap::new();
+        let mut queue = vec![from];
+        let mut i = 0;
+        while i < queue.len() {
+            let cur = queue[i];
+            i += 1;
+            for (a, b) in self.edges {
+                if *a == cur && *b != from && !reached_via.contains_key(b) {
+                    reached_via.insert(*b, (*a, *b));
+                    if *b == to {
+                        queue.clear();
+                        break;
+                    }
+                    queue.push(*b);
+                }
+            }
+        }
+        let mut path = Vec::new();
+        let mut node = to;
+        while node != from {
+            let edge = reached_via[node];
+            path.push(edge);
+            node = edge.0;
+        }
+        path.reverse();
+        path
+    }
+
+    /// Wrap a derivation `d` with the witnessed coercion path `from ↪ … ↪ to`,
+    /// one `Seq`-composed embedding leaf per edge (identity when `from == to`).
+    fn coerce(&self, d: TyTree, from: &'static str, to: &'static str) -> TyTree {
+        let mut tree = d;
+        for (a, b) in self.edge_path(from, to) {
+            tree = TyTree::Seq {
+                left: Box::new(tree),
+                right: Box::new(TyTree::Leaf {
+                    generator: self.promote_generator(a, b),
+                    src: TyObj::Atom(CfgAtom::Type(Ty::Con(a))),
+                    dst: TyObj::Atom(CfgAtom::Type(Ty::Con(b))),
+                }),
+            };
+        }
+        tree
+    }
+}
+
+/// The numeric coercion tower ℕ⊂ℤ⊂ℚ⊂ℝ⊂ℂ (safe = widening) plus the pragmatic
+/// lossy `Int ↪ Float` branch — `Float` is incomparable to the exact ℚ/ℝ/ℂ
+/// nodes, so `join(Float, Rat)` is `None` (mixing them is a type error).
+pub static NUMERIC: CoercionLattice = CoercionLattice {
+    edges: &[
+        ("Nat", "Int"),
+        ("Int", "Rat"),
+        ("Rat", "Real"),
+        ("Real", "Complex"),
+        ("Int", "Float"),
+    ],
+    generator_prefix: "type.rule.num.promote",
+};
+
+/// The epistemic-grade modality as a coercion lattice. The *safe* direction is
+/// weakening certainty (`Proven ↪ Audited ↪ Derived` — a stronger guarantee may
+/// always be forgotten). The forbidden strengthening (`Derived → Proven`
+/// without evidence) has no up-path, so `join`/`le` reject it: that is exactly
+/// **epistemic erasure**, caught by the same code as a numeric mismatch.
+pub static GRADE: CoercionLattice = CoercionLattice {
+    edges: &[("Proven", "Audited"), ("Audited", "Derived")],
+    generator_prefix: "epistemic.grade.weaken",
+};
+
+/// The least numeric *field* (closed under division) at or above `name`. The
+/// exact field of fractions of `Nat`/`Int` is `Rat`; here it is `Float`, the
+/// reachable representation (a fuller tower would return `Rat`).
+fn field_of(name: &'static str) -> &'static str {
+    match name {
+        "Nat" | "Int" => "Float",
+        other => other,
+    }
+}
+
+/// The plan for typing a binary arithmetic node: where operands meet (`base`),
+/// the result type (`base`, or its field of fractions for `Div`), each
+/// operand's effective type, and whether an operand was an unbound var to unify.
+struct ArithPlan {
+    base: &'static str,
+    result: &'static str,
+    eff_a: &'static str,
+    eff_b: &'static str,
+    unify_a: bool,
+    unify_b: bool,
+}
+
+/// Classify a *resolved* operand type: `Ok(Some(node))` for a concrete numeric
+/// type, `Ok(None)` for an unbound var (defaults to `base`), `Err(Mismatch)`
+/// for a concrete non-numeric type (`Str`/`Fn`/`Record`).
+fn arith_operand(resolved: &Ty) -> Result<Option<&'static str>, TypeError> {
+    match resolved {
+        Ty::Con(n) if NUMERIC.contains(n) => Ok(NUMERIC.node(n)),
+        Ty::Var(_) => Ok(None),
+        _ => Err(TypeError::Mismatch),
+    }
+}
+
+/// Compute the arithmetic plan for `op` over resolved operand types `ra`, `rb`.
+fn plan_arith(op: ArithOp, ra: &Ty, rb: &Ty) -> Result<ArithPlan, TypeError> {
+    let na = arith_operand(ra)?;
+    let nb = arith_operand(rb)?;
+    let base = match (na, nb) {
+        (Some(a), Some(b)) => NUMERIC.join(a, b).ok_or(TypeError::Mismatch)?,
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        // Both operands are unbound type vars: default the arithmetic to `Int`.
+        (None, None) => "Int",
+    };
+    let result = if op == ArithOp::Div {
+        field_of(base)
+    } else {
+        base
+    };
+    Ok(ArithPlan {
+        base,
+        result,
+        eff_a: na.unwrap_or(base),
+        eff_b: nb.unwrap_or(base),
+        unify_a: na.is_none(),
+        unify_b: nb.is_none(),
+    })
 }
 
 /// Immutable typing context mapping variable names to types for variable lookup.
@@ -383,6 +655,44 @@ pub fn infer(
     match expr {
         Expr::Lit(_) => Ok((Ty::Con("Int"), vec![g_lit()], st)),
         Expr::StrLit(_) => Ok((Ty::Con("Str"), vec![g_str_lit()], st)),
+        Expr::FloatLit(_) => Ok((Ty::Con("Float"), vec![g_float_lit()], st)),
+        Expr::Arith(op, a, b) => {
+            let (ta, da, s1) = infer(a, ctx, st)?;
+            let (tb, db, s2) = infer(b, ctx, s1)?;
+            let ra = resolve(&ta, &s2.subst).clone();
+            let rb = resolve(&tb, &s2.subst).clone();
+            let plan = plan_arith(*op, &ra, &rb)?;
+
+            // Bind any type-variable operand to the meet point `base`.
+            let mut subst = s2.subst.clone();
+            if plan.unify_a {
+                let (s, _) = unify(&ra, &Ty::Con(plan.base), &subst)?;
+                subst = s;
+            }
+            if plan.unify_b {
+                let (s, _) = unify(&rb, &Ty::Con(plan.base), &subst)?;
+                subst = s;
+            }
+
+            let mut deriv = vec![g_arith()];
+            deriv.extend(da);
+            deriv.extend(db);
+            for (c, p) in NUMERIC.edge_path(plan.eff_a, plan.result) {
+                deriv.push(NUMERIC.promote_generator(c, p));
+            }
+            for (c, p) in NUMERIC.edge_path(plan.eff_b, plan.result) {
+                deriv.push(NUMERIC.promote_generator(c, p));
+            }
+
+            Ok((
+                Ty::Con(plan.result),
+                deriv,
+                Infer {
+                    subst,
+                    next_var: s2.next_var,
+                },
+            ))
+        }
         Expr::Var(name) => {
             let ty = ctx
                 .get(name)
@@ -622,6 +932,76 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             },
             st,
         )),
+        Expr::FloatLit(s) => Ok((
+            Ty::Con("Float"),
+            TyTree::Leaf {
+                generator: g_float_lit(),
+                src: TyObj::Atom(CfgAtom::Expr(Expr::FloatLit(s.clone()))),
+                dst: TyObj::Atom(CfgAtom::Type(Ty::Con("Float"))),
+            },
+            st,
+        )),
+        Expr::Arith(op, a, b) => {
+            let (ta, da, s1) = infer_tree(a, ctx, st)?;
+            let (tb, db, s2) = infer_tree(b, ctx, s1)?;
+            let ra = resolve(&ta, &s2.subst).clone();
+            let rb = resolve(&tb, &s2.subst).clone();
+            let plan = plan_arith(*op, &ra, &rb)?;
+
+            let mut subst = s2.subst.clone();
+            if plan.unify_a {
+                let (s, _) = unify(&ra, &Ty::Con(plan.base), &subst)?;
+                subst = s;
+            }
+            if plan.unify_b {
+                let (s, _) = unify(&rb, &Ty::Con(plan.base), &subst)?;
+                subst = s;
+            }
+
+            let result_ty = Ty::Con(plan.result);
+
+            // Splice each operand's witnessed embedding path up to the result
+            // type (empty when the operand is already there).
+            let da = NUMERIC.coerce(da, plan.eff_a, plan.result);
+            let db = NUMERIC.coerce(db, plan.eff_b, plan.result);
+
+            let split = TyTree::Leaf {
+                generator: g_arith_split(),
+                src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+                dst: TyObj::Prod(
+                    Box::new(TyObj::Atom(CfgAtom::Expr((**a).clone()))),
+                    Box::new(TyObj::Atom(CfgAtom::Expr((**b).clone()))),
+                ),
+            };
+            let tensor = TyTree::Tensor {
+                left: Box::new(da),
+                right: Box::new(db),
+            };
+            let arith_leaf = TyTree::Leaf {
+                generator: g_arith(),
+                src: TyObj::Prod(
+                    Box::new(TyObj::Atom(CfgAtom::Type(result_ty.clone()))),
+                    Box::new(TyObj::Atom(CfgAtom::Type(result_ty.clone()))),
+                ),
+                dst: TyObj::Atom(CfgAtom::Type(result_ty.clone())),
+            };
+            let tree = TyTree::Seq {
+                left: Box::new(split),
+                right: Box::new(TyTree::Seq {
+                    left: Box::new(tensor),
+                    right: Box::new(arith_leaf),
+                }),
+            };
+
+            Ok((
+                result_ty,
+                tree,
+                Infer {
+                    subst,
+                    next_var: s2.next_var,
+                },
+            ))
+        }
         Expr::Var(name) => {
             let t = ctx
                 .get(name)
@@ -1417,5 +1797,104 @@ mod tests {
 
         let res = audited_type_check_tree(&expr, &ctx, ContextId::root());
         assert_eq!(res, Err(TypeError::NoField("y".to_string())));
+    }
+
+    #[test]
+    fn numeric_lattice_join_paths_and_fields() {
+        // Joins along the chain and across the Int↪Float branch.
+        assert_eq!(NUMERIC.join("Int", "Float"), Some("Float"));
+        assert_eq!(NUMERIC.join("Int", "Rat"), Some("Rat"));
+        assert_eq!(NUMERIC.join("Nat", "Complex"), Some("Complex"));
+        assert_eq!(NUMERIC.join("Rat", "Real"), Some("Real"));
+        assert_eq!(NUMERIC.join("Int", "Int"), Some("Int"));
+        // Float is incomparable to the exact ℚ/ℝ/ℂ nodes → no join (a type error).
+        assert_eq!(NUMERIC.join("Float", "Rat"), None);
+        assert_eq!(NUMERIC.join("Float", "Real"), None);
+        assert_eq!(NUMERIC.join("Float", "Complex"), None);
+
+        // Witness paths: empty when already there, one edge per hop.
+        assert_eq!(NUMERIC.edge_path("Int", "Int"), Vec::new());
+        assert_eq!(NUMERIC.edge_path("Int", "Float"), vec![("Int", "Float")]);
+        assert_eq!(
+            NUMERIC.edge_path("Nat", "Real"),
+            vec![("Nat", "Int"), ("Int", "Rat"), ("Rat", "Real")]
+        );
+
+        // Div forces at least the field of fractions.
+        assert_eq!(field_of("Int"), "Float");
+        assert_eq!(field_of("Nat"), "Float");
+        assert_eq!(field_of("Rat"), "Rat");
+        assert_eq!(field_of("Complex"), "Complex");
+    }
+
+    #[test]
+    fn epistemic_grades_ride_the_same_coercion_lattice() {
+        // Weakening certainty is the safe direction: Proven ↪ Audited ↪ Derived.
+        assert!(GRADE.le("Proven", "Derived"));
+        assert!(GRADE.le("Audited", "Derived"));
+        assert!(GRADE.le("Proven", "Proven"));
+
+        // Combining two grades meets at the weaker guarantee (their join).
+        assert_eq!(GRADE.join("Proven", "Audited"), Some("Audited"));
+        assert_eq!(GRADE.join("Derived", "Proven"), Some("Derived"));
+        assert_eq!(GRADE.join("Audited", "Audited"), Some("Audited"));
+
+        // Strengthening without evidence has NO up-path — this is epistemic
+        // erasure, rejected by the very same code as a numeric mismatch.
+        assert!(!GRADE.le("Derived", "Proven"));
+        assert!(!GRADE.le("Audited", "Proven"));
+        assert_eq!(GRADE.edge_path("Proven", "Derived").len(), 2);
+
+        // Erasure surfaces as "no join in the strengthening direction": there is
+        // no witness from Derived up to Proven, so a Proven-demanding site fed a
+        // Derived value cannot be coerced. (join is symmetric; the *directed*
+        // check `le(from, to)` is the erasure guard.)
+        assert!(!GRADE.le("Derived", "Proven"));
+    }
+
+    #[test]
+    fn arith_over_exact_tower_nodes_promotes_and_proves() {
+        // x:Rat, y:Int → x + y : Rat, splicing a witnessed Int↪Rat promotion,
+        // and the resulting tree elaborates to Proven. Exercises lattice nodes
+        // not yet reachable from surface literals.
+        let ctx = TyCtx::new()
+            .extend("x", Ty::Con("Rat"))
+            .extend("y", Ty::Con("Int"));
+        let expr = Expr::Arith(
+            ArithOp::Add,
+            Box::new(Expr::Var("x".to_string())),
+            Box::new(Expr::Var("y".to_string())),
+        );
+
+        let (ty, _tree, _st) = infer_tree(&expr, &ctx, Infer::new()).unwrap();
+        assert_eq!(ty, Ty::Con("Rat"));
+
+        let (judgement, tree) =
+            audited_type_check_tree(&expr, &ctx, ContextId::root()).expect("audited arith");
+        assert_eq!(judgement.outcome, Outcome::Audited);
+
+        let res = brix_elaborate::elaborate_tree(&judgement, &tree, Budget::new(2000, 2000));
+        assert!(
+            matches!(res, ElaborationResult::Proven { .. }),
+            "expected Proven, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn integer_division_promotes_to_the_field_of_fractions() {
+        // 7 / 2 : Float (Div forces the field of fractions), reaching Proven.
+        let expr = Expr::Arith(ArithOp::Div, Box::new(Expr::Lit(7)), Box::new(Expr::Lit(2)));
+        let ctx = TyCtx::new();
+        let (ty, _, _) = infer_tree(&expr, &ctx, Infer::new()).unwrap();
+        assert_eq!(ty, Ty::Con("Float"));
+
+        let (judgement, tree) =
+            audited_type_check_tree(&expr, &ctx, ContextId::root()).expect("audited div");
+        assert_eq!(judgement.outcome, Outcome::Audited);
+        let res = brix_elaborate::elaborate_tree(&judgement, &tree, Budget::new(2000, 2000));
+        assert!(
+            matches!(res, ElaborationResult::Proven { .. }),
+            "expected Proven, got {res:?}"
+        );
     }
 }
