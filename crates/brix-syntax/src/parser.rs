@@ -531,8 +531,7 @@ impl Parser {
 
         if self.check(&TokenKind::OpenParen) {
             self.advance();
-            let args =
-                self.parse_comma_separated(TokenKind::CloseParen, |p| p.parse_pattern())?;
+            let args = self.parse_comma_separated(TokenKind::CloseParen, |p| p.parse_pattern())?;
             self.consume(TokenKind::CloseParen, "pattern ')'")?;
             Ok(Pattern::Ctor { name, args })
         } else if is_capitalized {
