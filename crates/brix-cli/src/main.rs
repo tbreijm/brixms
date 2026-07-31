@@ -137,9 +137,9 @@ mod tests {
 
     #[test]
     fn unsupported_binding_is_reported_not_crashed() {
-        let (report, had_error) = check_report("let w = \"hello\"\n");
+        let (report, had_error) = check_report("let y = 1 + 2\n");
         assert!(had_error);
-        assert!(report.contains("w : — (not checked"), "{report}");
+        assert!(report.contains("y : — (not checked"), "{report}");
     }
 
     #[test]

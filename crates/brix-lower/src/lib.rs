@@ -72,9 +72,7 @@ pub fn lower_expr(
                 Err(LowerError::Unresolved(func.clone()))
             }
         }
-        ast::Expr::Str(_) => Err(LowerError::Unsupported(
-            "Str not in L2-first fragment".to_string(),
-        )),
+        ast::Expr::Str(s) => Ok(TrExpr::StrLit(s.clone())),
         ast::Expr::Record { config: _, fields } => {
             let lowered_fields: Result<Vec<(String, TrExpr)>, LowerError> = fields
                 .iter()
