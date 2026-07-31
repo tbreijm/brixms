@@ -19,6 +19,7 @@ pub enum Ty {
     Con(&'static str),
     Fn(Box<Ty>, Box<Ty>),
     Var(u32),
+    Record(Vec<(String, Ty)>),
 }
 
 impl Canonical for Ty {
@@ -35,6 +36,18 @@ impl Canonical for Ty {
             }
             Ty::Var(v) => {
                 w.write_enum(2, |w| w.write_uint(*v as u64));
+            }
+            Ty::Record(fields) => {
+                w.write_enum(3, |w| {
+                    let mut sorted = fields.clone();
+                    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                    sorted.dedup_by(|a, b| a.0 == b.0);
+                    w.write_uint(sorted.len() as u64);
+                    for (name, ty) in &sorted {
+                        w.write_str(name);
+                        ty.canon_write(w);
+                    }
+                });
             }
         }
     }
@@ -54,6 +67,8 @@ pub enum Expr {
     Var(String),
     App(Box<Expr>, Box<Expr>),
     Lam(String, Box<Expr>),
+    Record(Vec<(String, Expr)>),
+    Field(Box<Expr>, String),
 }
 
 impl Canonical for Expr {
@@ -75,6 +90,24 @@ impl Canonical for Expr {
                 w.write_enum(3, |w| {
                     w.write_str(param);
                     body.canon_write(w);
+                });
+            }
+            Expr::Record(fields) => {
+                w.write_enum(4, |w| {
+                    let mut sorted = fields.clone();
+                    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                    sorted.dedup_by(|a, b| a.0 == b.0);
+                    w.write_uint(sorted.len() as u64);
+                    for (name, val) in &sorted {
+                        w.write_str(name);
+                        val.canon_write(w);
+                    }
+                });
+            }
+            Expr::Field(base, fname) => {
+                w.write_enum(5, |w| {
+                    base.canon_write(w);
+                    w.write_str(fname);
                 });
             }
         }
@@ -128,6 +161,21 @@ pub fn g_app2() -> GeneratorId {
     GeneratorId::named("type.rule.app@2")
 }
 
+/// Typing-rule generator for record literals (`"type.rule.record@1"`).
+pub fn g_record() -> GeneratorId {
+    GeneratorId::named("type.rule.record@1")
+}
+
+/// Typing-rule generator for record field access (`"type.rule.field@1"`).
+pub fn g_field() -> GeneratorId {
+    GeneratorId::named("type.rule.field@1")
+}
+
+/// Typing-rule generator for record splitting (`"type.rule.record.split@1"`).
+pub fn g_record_split() -> GeneratorId {
+    GeneratorId::named("type.rule.record.split@1")
+}
+
 /// Typing-rule generator for unification steps (`"type.rule.unify@1"`).
 pub fn g_unify() -> GeneratorId {
     GeneratorId::named("type.rule.unify@1")
@@ -160,6 +208,7 @@ pub enum TypeError {
     Mismatch,
     InfiniteType,
     Unsupported,
+    NoField(String),
     /// The built derivation tree is not well-formed (a `Seq` middle does not match),
     /// so it cannot be honestly labelled `Audited`. Arises when a leaf endpoint config
     /// captured at sub-inference time is later refined by unification (ADR-0007 §7 limitation).
@@ -216,6 +265,15 @@ pub fn zonk(ty: &Ty, subst: &BTreeMap<u32, Ty>) -> Ty {
         Ty::Con(name) => Ty::Con(name),
         Ty::Var(v) => Ty::Var(*v),
         Ty::Fn(a, b) => Ty::Fn(Box::new(zonk(a, subst)), Box::new(zonk(b, subst))),
+        Ty::Record(fields) => {
+            let mut sorted: Vec<(String, Ty)> = fields
+                .iter()
+                .map(|(name, t)| (name.clone(), zonk(t, subst)))
+                .collect();
+            sorted.sort_by(|a, b| a.0.cmp(&b.0));
+            sorted.dedup_by(|a, b| a.0 == b.0);
+            Ty::Record(sorted)
+        }
     }
 }
 
@@ -225,6 +283,7 @@ pub fn occurs(v: u32, ty: &Ty, subst: &BTreeMap<u32, Ty>) -> bool {
         Ty::Var(v2) => v == *v2,
         Ty::Con(_) => false,
         Ty::Fn(a, b) => occurs(v, a, subst) || occurs(v, b, subst),
+        Ty::Record(fields) => fields.iter().any(|(_, t)| occurs(v, t, subst)),
     }
 }
 
@@ -274,6 +333,32 @@ pub fn unify(
             steps.append(&mut steps1);
             steps.extend(steps2);
             Ok((s2, steps))
+        }
+        (Ty::Record(f1), Ty::Record(f2)) => {
+            let mut s1_fields = f1.clone();
+            s1_fields.sort_by(|a, b| a.0.cmp(&b.0));
+            s1_fields.dedup_by(|a, b| a.0 == b.0);
+
+            let mut s2_fields = f2.clone();
+            s2_fields.sort_by(|a, b| a.0.cmp(&b.0));
+            s2_fields.dedup_by(|a, b| a.0 == b.0);
+
+            if s1_fields.len() != s2_fields.len() {
+                return Err(TypeError::Mismatch);
+            }
+            for (a, b) in s1_fields.iter().zip(s2_fields.iter()) {
+                if a.0 != b.0 {
+                    return Err(TypeError::Mismatch);
+                }
+            }
+            let mut curr_subst = subst.clone();
+            let mut all_steps = vec![g_unify()];
+            for (a, b) in s1_fields.iter().zip(s2_fields.iter()) {
+                let (next_subst, steps) = unify(&a.1, &b.1, &curr_subst)?;
+                curr_subst = next_subst;
+                all_steps.extend(steps);
+            }
+            Ok((curr_subst, all_steps))
         }
         _ => Err(TypeError::Mismatch),
     }
@@ -330,6 +415,37 @@ pub fn infer(
             };
 
             Ok((res_ty, deriv, st_final))
+        }
+        Expr::Record(fields) => {
+            let mut sorted_fields = fields.clone();
+            sorted_fields.sort_by(|a, b| a.0.cmp(&b.0));
+            sorted_fields.dedup_by(|a, b| a.0 == b.0);
+
+            let mut res_fields = Vec::new();
+            let mut deriv = vec![g_record()];
+            let mut curr_st = st;
+            for (name, val) in sorted_fields {
+                let (t_i, d_i, next_st) = infer(&val, ctx, curr_st)?;
+                res_fields.push((name, t_i));
+                deriv.extend(d_i);
+                curr_st = next_st;
+            }
+            Ok((Ty::Record(res_fields), deriv, curr_st))
+        }
+        Expr::Field(base, fname) => {
+            let (t_base, d_base, st1) = infer(base, ctx, st)?;
+            let zonked_base = zonk(&t_base, &st1.subst);
+            if let Ty::Record(fields) = zonked_base {
+                if let Some((_, t_f)) = fields.iter().find(|(n, _)| n == fname) {
+                    let mut deriv = vec![g_field()];
+                    deriv.extend(d_base);
+                    Ok((t_f.clone(), deriv, st1))
+                } else {
+                    Err(TypeError::NoField(fname.clone()))
+                }
+            } else {
+                Err(TypeError::Mismatch)
+            }
         }
     }
 }
@@ -583,7 +699,117 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                 },
             ))
         }
+        Expr::Record(fields) => {
+            let mut sorted_fields = fields.clone();
+            sorted_fields.sort_by(|a, b| a.0.cmp(&b.0));
+            sorted_fields.dedup_by(|a, b| a.0 == b.0);
+
+            if sorted_fields.is_empty() {
+                let rec_ty = Ty::Record(vec![]);
+                let split = TyTree::Leaf {
+                    generator: g_record_split(),
+                    src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+                    dst: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+                };
+                let record_leaf = TyTree::Leaf {
+                    generator: g_record(),
+                    src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+                    dst: TyObj::Atom(CfgAtom::Type(rec_ty.clone())),
+                };
+                let tree = TyTree::Seq {
+                    left: Box::new(split),
+                    right: Box::new(record_leaf),
+                };
+                return Ok((rec_ty, tree, st));
+            }
+
+            let mut sorted_types = Vec::new();
+            let mut expr_atoms = Vec::new();
+            let mut type_atoms = Vec::new();
+            let mut d_trees = Vec::new();
+            let mut curr_st = st;
+
+            for (name, val_expr) in sorted_fields {
+                let (t_i, d_i, next_st) = infer_tree(&val_expr, ctx, curr_st)?;
+                sorted_types.push((name, t_i.clone()));
+                expr_atoms.push(TyObj::Atom(CfgAtom::Expr(val_expr)));
+                type_atoms.push(TyObj::Atom(CfgAtom::Type(t_i)));
+                d_trees.push(d_i);
+                curr_st = next_st;
+            }
+
+            let result_ty = Ty::Record(sorted_types);
+
+            let split = TyTree::Leaf {
+                generator: g_record_split(),
+                src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+                dst: right_nest_prod(expr_atoms),
+            };
+
+            let fields_tensor = right_nest_tensor(d_trees);
+
+            let record_leaf = TyTree::Leaf {
+                generator: g_record(),
+                src: right_nest_prod(type_atoms),
+                dst: TyObj::Atom(CfgAtom::Type(result_ty.clone())),
+            };
+
+            let tree = TyTree::Seq {
+                left: Box::new(split),
+                right: Box::new(TyTree::Seq {
+                    left: Box::new(fields_tensor),
+                    right: Box::new(record_leaf),
+                }),
+            };
+
+            Ok((result_ty, tree, curr_st))
+        }
+        Expr::Field(base, fname) => {
+            let (t_base, d_base, st1) = infer_tree(base, ctx, st)?;
+            let zonked_base = zonk(&t_base, &st1.subst);
+            if let Ty::Record(fields) = &zonked_base {
+                if let Some((_, t_f)) = fields.iter().find(|(n, _)| n == fname) {
+                    let field_leaf = TyTree::Leaf {
+                        generator: g_field(),
+                        src: TyObj::Atom(CfgAtom::Type(zonked_base.clone())),
+                        dst: TyObj::Atom(CfgAtom::Type(t_f.clone())),
+                    };
+                    let tree = TyTree::Seq {
+                        left: Box::new(d_base),
+                        right: Box::new(field_leaf),
+                    };
+                    Ok((t_f.clone(), tree, st1))
+                } else {
+                    Err(TypeError::NoField(fname.clone()))
+                }
+            } else {
+                Err(TypeError::Mismatch)
+            }
+        }
     }
+}
+
+fn right_nest_prod(items: Vec<TyObj>) -> TyObj {
+    assert!(
+        !items.is_empty(),
+        "right_nest_prod requires at least 1 element"
+    );
+    let mut iter = items.into_iter().rev();
+    let last = iter.next().unwrap();
+    iter.fold(last, |acc, elem| TyObj::Prod(Box::new(elem), Box::new(acc)))
+}
+
+fn right_nest_tensor(items: Vec<TyTree>) -> TyTree {
+    assert!(
+        !items.is_empty(),
+        "right_nest_tensor requires at least 1 element"
+    );
+    let mut iter = items.into_iter().rev();
+    let last = iter.next().unwrap();
+    iter.fold(last, |acc, elem| TyTree::Tensor {
+        left: Box::new(elem),
+        right: Box::new(acc),
+    })
 }
 
 /// Upgrades a native `infer_tree` derivation to an `Audited` `Judgement` and `RealizesTree` (ADR-0008).
@@ -1073,5 +1299,103 @@ mod tests {
         let (aud, tree) = audited_type_check_tree(&expr, &ctx, ContextId::root()).unwrap();
         assert_eq!(aud.outcome, Outcome::Audited);
         assert!(tree.well_formed());
+    }
+
+    #[test]
+    fn test_record_2_fields_proven() {
+        // Record literal with 2 fields in reverse order: {y: 2, x: 1}
+        let expr = Expr::Record(vec![
+            ("y".to_string(), Expr::Lit(2)),
+            ("x".to_string(), Expr::Lit(1)),
+        ]);
+        let ctx = TyCtx::new();
+        let context = ContextId::root();
+
+        let (ty, _ty_tree, st) = infer_tree(&expr, &ctx, Infer::new()).expect("infer record");
+        let final_ty = zonk(&ty, &st.subst);
+        let expected_ty = Ty::Record(vec![
+            ("x".to_string(), Ty::Con("Int")),
+            ("y".to_string(), Ty::Con("Int")),
+        ]);
+        assert_eq!(final_ty, expected_ty);
+
+        // Canonical identity check: {y: 2, x: 1} and {x: 1, y: 2} have the same config_id
+        let expr_sorted = Expr::Record(vec![
+            ("x".to_string(), Expr::Lit(1)),
+            ("y".to_string(), Expr::Lit(2)),
+        ]);
+        assert_eq!(expr.config_id(), expr_sorted.config_id());
+
+        let (aud, tree) = audited_type_check_tree(&expr, &ctx, context).expect("audited record");
+        assert_eq!(aud.outcome, Outcome::Audited);
+        assert!(tree.well_formed());
+
+        let res = brix_elaborate::elaborate_tree(&aud, &tree, Budget::new(2000, 2000));
+        match res {
+            ElaborationResult::Proven { judgement, .. } => {
+                assert_eq!(judgement.outcome, Outcome::Proven);
+            }
+            other => panic!("Expected Proven, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_record_1_field_and_nested_proven() {
+        // 1-field record: {a: 42}
+        let expr1 = Expr::Record(vec![("a".to_string(), Expr::Lit(42))]);
+        let ctx = TyCtx::new();
+        let (aud1, tree1) = audited_type_check_tree(&expr1, &ctx, ContextId::root()).unwrap();
+        assert!(tree1.well_formed());
+        assert!(matches!(
+            brix_elaborate::elaborate_tree(&aud1, &tree1, Budget::new(1000, 1000)),
+            ElaborationResult::Proven { .. }
+        ));
+
+        // Nested record: {inner: {val: 7}}
+        let expr_nested = Expr::Record(vec![(
+            "inner".to_string(),
+            Expr::Record(vec![("val".to_string(), Expr::Lit(7))]),
+        )]);
+        let (aud2, tree2) = audited_type_check_tree(&expr_nested, &ctx, ContextId::root()).unwrap();
+        assert!(tree2.well_formed());
+        let res2 = brix_elaborate::elaborate_tree(&aud2, &tree2, Budget::new(2000, 2000));
+        assert!(matches!(res2, ElaborationResult::Proven { .. }));
+    }
+
+    #[test]
+    fn test_field_access_proven() {
+        // r.base where r: {base: Int, name: Int}
+        let r_ty = Ty::Record(vec![
+            ("base".to_string(), Ty::Con("Int")),
+            ("name".to_string(), Ty::Con("Int")),
+        ]);
+        let ctx = TyCtx::new().extend("r", r_ty);
+        let expr = Expr::Field(Box::new(Expr::Var("r".to_string())), "base".to_string());
+        let context = ContextId::root();
+
+        let (ty, _tree, st) = infer_tree(&expr, &ctx, Infer::new()).expect("infer field access");
+        let final_ty = zonk(&ty, &st.subst);
+        assert_eq!(final_ty, Ty::Con("Int"));
+
+        let (aud, tree) = audited_type_check_tree(&expr, &ctx, context).expect("audited field");
+        assert!(tree.well_formed());
+
+        let res = brix_elaborate::elaborate_tree(&aud, &tree, Budget::new(1000, 1000));
+        match res {
+            ElaborationResult::Proven { judgement, .. } => {
+                assert_eq!(judgement.outcome, Outcome::Proven);
+            }
+            other => panic!("Expected Proven, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_field_access_missing_field_type_error() {
+        let r_ty = Ty::Record(vec![("x".to_string(), Ty::Con("Int"))]);
+        let ctx = TyCtx::new().extend("r", r_ty);
+        let expr = Expr::Field(Box::new(Expr::Var("r".to_string())), "y".to_string());
+
+        let res = audited_type_check_tree(&expr, &ctx, ContextId::root());
+        assert_eq!(res, Err(TypeError::NoField("y".to_string())));
     }
 }

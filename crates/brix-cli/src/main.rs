@@ -88,6 +88,13 @@ fn fmt_ty(ty: Option<&Ty>) -> String {
         Some(Ty::Con(name)) => name.to_string(),
         Some(Ty::Var(v)) => format!("?{v}"),
         Some(Ty::Fn(a, b)) => format!("({} -> {})", fmt_ty(Some(a)), fmt_ty(Some(b))),
+        Some(Ty::Record(fields)) => {
+            let elems: Vec<String> = fields
+                .iter()
+                .map(|(k, v)| format!("{k}: {}", fmt_ty(Some(v))))
+                .collect();
+            format!("{{{}}}", elems.join(", "))
+        }
     }
 }
 
@@ -114,9 +121,23 @@ mod tests {
     }
 
     #[test]
+    fn checks_record_and_field_access_to_proven() {
+        let src = "let p = Item { x: 1, y: 2 }\nlet a = p.x\n";
+        let (report, had_error) = check_report(src);
+        assert!(!had_error, "report: {report}");
+        assert!(
+            report.contains("p : {x: Int, y: Int} @Proven"),
+            "expected `p : {{x: Int, y: Int}} @Proven`, got:\n{report}"
+        );
+        assert!(
+            report.contains("a : Int @Proven"),
+            "expected `a : Int @Proven`, got:\n{report}"
+        );
+    }
+
+    #[test]
     fn unsupported_binding_is_reported_not_crashed() {
-        // Record literal is outside the current lowering fragment.
-        let (report, had_error) = check_report("let w = Item { name: 1 }\n");
+        let (report, had_error) = check_report("let w = \"hello\"\n");
         assert!(had_error);
         assert!(report.contains("w : — (not checked"), "{report}");
     }

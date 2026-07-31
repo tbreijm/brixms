@@ -75,11 +75,16 @@ pub fn lower_expr(
         ast::Expr::Str(_) => Err(LowerError::Unsupported(
             "Str not in L2-first fragment".to_string(),
         )),
-        ast::Expr::Record { .. } => Err(LowerError::Unsupported(
-            "Record not in L2-first fragment".to_string(),
-        )),
-        ast::Expr::Field(..) => Err(LowerError::Unsupported(
-            "Field not in L2-first fragment".to_string(),
+        ast::Expr::Record { config: _, fields } => {
+            let lowered_fields: Result<Vec<(String, TrExpr)>, LowerError> = fields
+                .iter()
+                .map(|(name, e)| Ok((name.clone(), lower_expr(e, fns)?)))
+                .collect();
+            Ok(TrExpr::Record(lowered_fields?))
+        }
+        ast::Expr::Field(base, name) => Ok(TrExpr::Field(
+            Box::new(lower_expr(base, fns)?),
+            name.clone(),
         )),
         ast::Expr::Bin { .. } => Err(LowerError::Unsupported(
             "Bin not in L2-first fragment".to_string(),
@@ -131,28 +136,41 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
         }
     }
 
+    let mut ty_ctx = TyCtx::new();
     let mut results = Vec::new();
+
     for item in &m.items {
         if let Item::Let(let_decl) = item {
             let res = (|| {
                 let tr_expr = lower_expr(&let_decl.value, &fns)?;
-                let (ty, _ty_tree, st) = infer_tree(&tr_expr, &TyCtx::new(), Infer::new())?;
+                let (ty, _ty_tree, st) = infer_tree(&tr_expr, &ty_ctx, Infer::new())?;
                 let inferred_ty = zonk(&ty, &st.subst);
                 let (audited_judgement, tree) =
-                    audited_type_check_tree(&tr_expr, &TyCtx::new(), ContextId::root())?;
+                    audited_type_check_tree(&tr_expr, &ty_ctx, ContextId::root())?;
                 match elaborate_tree(&audited_judgement, &tree, Budget::new(2000, 2000)) {
-                    ElaborationResult::Proven { judgement, .. } => Ok(CheckResult {
-                        name: let_decl.name.clone(),
-                        outcome: judgement.outcome,
-                        ty: Some(inferred_ty),
-                    }),
+                    ElaborationResult::Proven { judgement, .. } => Ok((
+                        CheckResult {
+                            name: let_decl.name.clone(),
+                            outcome: judgement.outcome,
+                            ty: Some(inferred_ty.clone()),
+                        },
+                        inferred_ty,
+                    )),
                     ElaborationResult::NotElaborated(verdict) => {
                         Err(LowerError::ElaborationFailed(format!("{verdict:?}")))
                     }
                 }
             })();
 
-            results.push(res.map_err(|err| (let_decl.name.clone(), err)));
+            match res {
+                Ok((check_res, inferred_ty)) => {
+                    ty_ctx = ty_ctx.extend(let_decl.name.clone(), inferred_ty);
+                    results.push(Ok(check_res));
+                }
+                Err(err) => {
+                    results.push(Err((let_decl.name.clone(), err)));
+                }
+            }
         }
     }
 
