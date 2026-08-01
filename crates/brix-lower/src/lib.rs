@@ -26,8 +26,8 @@ use brix_syntax::ast::{self, Item};
 use soc_regimes::coverage::certify_exhaustive;
 pub use soc_regimes::coverage::CoverageOutcome;
 use soc_regimes::type_realization::{
-    audited_type_check_tree, honest_result_outcome, infer_tree, zonk, ArithOp, Expr as TrExpr,
-    Infer, Pattern as TrPattern, Ty as TrTy, TyCtx, TypeError,
+    audited_type_check_tree, grade_assertion_satisfied, honest_result_outcome, infer_tree, zonk,
+    ArithOp, Expr as TrExpr, Infer, Pattern as TrPattern, Ty as TrTy, TyCtx, TypeError,
 };
 
 /// Lowering context holding top-level functions, config declarations, and constructors.
@@ -54,6 +54,10 @@ pub enum LowerError {
     MissingField { config: String, field: String },
     /// A record literal field is not present in the declared record config.
     UnknownField { config: String, field: String },
+    /// A `@grade` assertion claims a stronger epistemic grade than the binding
+    /// earned — an over-claim (epistemic erasure). `actual` may only weaken to
+    /// `asserted`, never strengthen.
+    GradeErasure { asserted: String, actual: String },
 }
 
 impl From<TypeError> for LowerError {
@@ -285,6 +289,31 @@ fn coverage_for(value: &ast::Expr, tr_expr: &TrExpr, ctx: LowerCtx) -> Option<Co
     })
 }
 
+/// The grade a `let` annotation asserts (the outer grade of a `Graded` type),
+/// as a GRADE-lattice node name, or `None` if the binding is unannotated /
+/// annotated without a grade.
+fn asserted_grade(ty: &Option<ast::Ty>) -> Option<&'static str> {
+    match ty {
+        Some(ast::Ty::Graded(_, g)) => Some(match g {
+            ast::Grade::Derived => "Derived",
+            ast::Grade::Audited => "Audited",
+            ast::Grade::Proven => "Proven",
+        }),
+        _ => None,
+    }
+}
+
+/// The GRADE-lattice node name for an actual outcome (non-grade outcomes map to
+/// a sentinel that satisfies no assertion).
+fn outcome_grade_name(o: Outcome) -> &'static str {
+    match o {
+        Outcome::Proven => "Proven",
+        Outcome::Audited => "Audited",
+        Outcome::Derived => "Derived",
+        _ => "Unknown",
+    }
+}
+
 pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerError)>> {
     let mut fns = BTreeMap::new();
     let mut configs = BTreeMap::new();
@@ -377,20 +406,38 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                 let (audited_judgement, tree) =
                     audited_type_check_tree(&tr_expr, &ty_ctx, ContextId::root())?;
                 match elaborate_tree(&audited_judgement, &tree, Budget::new(2000, 2000)) {
-                    ElaborationResult::Proven { judgement, .. } => Ok((
-                        CheckResult {
-                            // The kernel proves the *composition* (judgement.outcome,
-                            // e.g. Proven) conditional on the primitive typing-rule
-                            // leaves. The honest status of the typing result is that
-                            // capped by leaf discharge — Audited until the leaves are
-                            // proven tight (the SOC tight-generator obligation).
-                            name: let_decl.name.clone(),
-                            outcome: honest_result_outcome(judgement.outcome, &tree),
-                            ty: Some(inferred_ty.clone()),
-                            coverage,
-                        },
-                        inferred_ty,
-                    )),
+                    ElaborationResult::Proven { judgement, .. } => {
+                        // The kernel proves the *composition* (judgement.outcome,
+                        // e.g. Proven) conditional on the primitive typing-rule
+                        // leaves. The honest status of the typing result is that
+                        // capped by leaf discharge — Audited until the leaves are
+                        // proven tight (the SOC tight-generator obligation).
+                        let outcome = honest_result_outcome(judgement.outcome, &tree);
+
+                        // Discharge any `@grade` assertion against the earned grade
+                        // via the GRADE coercion lattice: the actual grade may only
+                        // WEAKEN to the assertion (downgrade is free); asserting a
+                        // stronger grade than earned is epistemic erasure.
+                        if let Some(asserted) = asserted_grade(&let_decl.ty) {
+                            let actual = outcome_grade_name(outcome);
+                            if !grade_assertion_satisfied(actual, asserted) {
+                                return Err(LowerError::GradeErasure {
+                                    asserted: asserted.to_string(),
+                                    actual: actual.to_string(),
+                                });
+                            }
+                        }
+
+                        Ok((
+                            CheckResult {
+                                name: let_decl.name.clone(),
+                                outcome,
+                                ty: Some(inferred_ty.clone()),
+                                coverage,
+                            },
+                            inferred_ty,
+                        ))
+                    }
                     ElaborationResult::NotElaborated(verdict) => {
                         Err(LowerError::ElaborationFailed(format!("{verdict:?}")))
                     }

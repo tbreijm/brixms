@@ -100,6 +100,44 @@ fn ordinary_match_has_no_coverage_claim() {
 }
 
 #[test]
+fn grade_assertion_satisfied_and_downgrade_ok() {
+    // @Proven on a discharged literal is satisfied; @Derived on an Audited
+    // value is a free downgrade (still checks; the earned grade is reported).
+    for (src, name, grade) in [
+        ("let a: Int @Proven = 42", "a", Outcome::Proven),
+        ("let b: Int @Audited = 1 + 2", "b", Outcome::Audited),
+        ("let c: Int @Derived = 1 + 2", "c", Outcome::Audited),
+    ] {
+        let module = parse(src).expect("parse");
+        let results = check_module(&module);
+        let cr = results[0]
+            .as_ref()
+            .unwrap_or_else(|(n, e)| panic!("{src}: {n}: {e:?}"));
+        assert_eq!(cr.name, name, "{src}");
+        assert_eq!(cr.outcome, grade, "{src}");
+    }
+}
+
+#[test]
+fn grade_over_claim_is_epistemic_erasure() {
+    // Asserting @Proven on an Audited (arithmetic) value over-claims → erasure.
+    let module = parse("let d: Int @Proven = 1 + 2").expect("parse");
+    let (name, err) = check_module(&module)
+        .into_iter()
+        .next()
+        .unwrap()
+        .expect_err("over-claiming @Proven must fail");
+    assert_eq!(name, "d");
+    assert_eq!(
+        err,
+        LowerError::GradeErasure {
+            asserted: "Proven".to_string(),
+            actual: "Audited".to_string(),
+        }
+    );
+}
+
+#[test]
 fn test_unresolved_function_call() {
     let source = "let z = unknown(42)";
     let module = parse(source).expect("call expression should parse");
