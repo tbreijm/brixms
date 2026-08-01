@@ -1,0 +1,329 @@
+{
+  "schema_version": 1,
+  "governed_by": "spec/SOC_Semantic_Laws.md",
+  "laws": [
+    {
+      "id": "SOC-LAW-01",
+      "title": "Canonical identity",
+      "status": "partial",
+      "authority": ["brix-canon", "brix-semantic canonical implementations"],
+      "normative_anchors": [
+        "spec/adr/ADR-0002_SOC_Constitution.md",
+        "docs/audit/issue-63/tcb-canonical.md"
+      ],
+      "implementation_anchors": [
+        "crates/brix-canon/src/lib.rs",
+        "crates/brix-semantic/src/context.rs",
+        "crates/brix-semantic/src/decomposition.rs"
+      ],
+      "executable_gates": [
+        {
+          "path": "crates/brix-canon/tests/vectors.rs",
+          "tests": ["golden_vectors_are_frozen", "case_names_unique"]
+        },
+        {
+          "path": "crates/brix-semantic/src/context.rs",
+          "tests": ["golden_vector_root_extend_reproduced_independently"]
+        },
+        {
+          "path": "crates/brix-semantic/src/decomposition.rs",
+          "tests": ["golden_vector_recorded_decomposition", "golden_vector_replay_verified_decomposition"]
+        }
+      ],
+      "failure_mode": "Reject canonical drift, malformed encodings, and unknown versions; never accept an alternate identity.",
+      "open_issues": [56, 229]
+    },
+    {
+      "id": "SOC-LAW-02",
+      "title": "Realization compositionality",
+      "status": "partial",
+      "authority": ["brix-kernel", "primitive regime/generator semantics"],
+      "normative_anchors": [
+        "spec/adr/ADR-0002_SOC_Constitution.md",
+        "spec/adr/ADR-0004_Kernel_Profile_1_1.md",
+        "spec/adr/ADR-0006_Kernel_Profile_1_2.md"
+      ],
+      "implementation_anchors": [
+        "crates/brix-kernel/src/check.rs",
+        "crates/brix-semantic/src/witness.rs",
+        "crates/soc-regimes/src/type_realization.rs"
+      ],
+      "executable_gates": [
+        {
+          "path": "crates/brix-kernel/tests/adversarial.rs",
+          "tests": ["test_realizes_comp_valid_returns_accepted", "test_realizes_comp_middle_mismatch_returns_rejected", "test_realizes_comp_witness_mismatch_returns_rejected"]
+        },
+        {
+          "path": "crates/brix-kernel/src/check.rs",
+          "tests": ["test_realizes_tensor_accept", "test_realizes_tensor_reject_wrong_witness"]
+        },
+        {
+          "path": "crates/soc-regimes/src/type_realization.rs",
+          "tests": ["literal_binding_earns_proven_but_composite_stays_audited"]
+        }
+      ],
+      "failure_mode": "Reject malformed composition; leave undischarged primitive leaves Audited or Unknown rather than Proven.",
+      "open_issues": [53, 178]
+    },
+    {
+      "id": "SOC-LAW-03",
+      "title": "Audit honesty",
+      "status": "enforced",
+      "authority": ["soc-core::audit"],
+      "normative_anchors": [
+        "spec/adr/ADR-0002_SOC_Constitution.md",
+        "docs/audit/issue-63/tcb-audit.md"
+      ],
+      "implementation_anchors": [
+        "crates/soc-core/src/audit.rs",
+        "crates/brix-semantic/src/decomposition.rs"
+      ],
+      "executable_gates": [
+        {
+          "path": "crates/soc-core/tests/audit_factorization.rs",
+          "tests": ["good_decomposition_upgrades_to_audited_with_correct_authority", "corrupted_intermediate_configuration_yields_unknown_never_a_pass", "generator_outside_registry_yields_unknown_never_a_pass", "derived_judgement_is_never_mutated_upgrade_is_a_new_judgement_and_edge", "log_integrity_mismatch_yields_unknown", "non_recorded_decomposition_is_rejected"]
+        }
+      ],
+      "failure_mode": "Return AuditResult::Unknown for every incomplete or inconsistent replay; never publish a partial pass.",
+      "open_issues": [228]
+    },
+    {
+      "id": "SOC-LAW-04",
+      "title": "Epistemic non-escalation",
+      "status": "partial",
+      "authority": ["brix-semantic outcome lattice", "audit and proof validators"],
+      "normative_anchors": [
+        "spec/adr/ADR-0002_SOC_Constitution.md",
+        "spec/adr/ADR-0011_Match_And_Certified_Exhaustiveness.md",
+        "docs/audit/issue-63/README.md"
+      ],
+      "implementation_anchors": [
+        "crates/brix-semantic/src/outcome.rs",
+        "crates/brix-elaborate/src/lib.rs",
+        "crates/soc-regimes/src/type_realization.rs",
+        "crates/soc-regimes/src/coverage.rs"
+      ],
+      "executable_gates": [
+        {
+          "path": "crates/brix-semantic/src/outcome.rs",
+          "tests": ["every_outcome_has_exactly_one_authority", "only_kernel_outcomes_are_theorems", "lattice_le_unknown_is_bottom_of_the_order"]
+        },
+        {
+          "path": "crates/brix-kernel/tests/adversarial.rs",
+          "tests": ["test_tiny_budget_returns_resource_exhausted_mapping_to_unknown_never_refuted"]
+        },
+        {
+          "path": "crates/brix-lower/tests/lower_proven.rs",
+          "tests": ["test_let_lit_earns_proven", "test_id_fixture_audited", "proving_exhaustive_match_gets_kernel_certified_coverage", "proving_exhaustive_with_wildcard_is_not_certified_but_still_checks"]
+        }
+      ],
+      "failure_mode": "Preserve rejected, unsupported, context-mismatch, and exhausted states; Unknown never becomes truth or falsity.",
+      "open_issues": [178, 228]
+    },
+    {
+      "id": "SOC-LAW-05",
+      "title": "Authority non-escalation",
+      "status": "partial",
+      "authority": ["settlement kernel", "audit checker", "proof kernel", "named external drivers"],
+      "normative_anchors": [
+        "spec/adr/ADR-0002_SOC_Constitution.md",
+        "docs/audit/issue-63/README.md"
+      ],
+      "implementation_anchors": [
+        "scripts/check_tcb_dependencies.py",
+        "scripts/test_tcb_dependency_gate.sh",
+        "crates/brix-semantic/src/judgement.rs"
+      ],
+      "executable_gates": [
+        {
+          "path": "crates/brix-semantic/src/outcome.rs",
+          "tests": ["every_outcome_has_exactly_one_authority"]
+        },
+        {
+          "path": "crates/brix-semantic/tests/judgment_core.rs",
+          "tests": ["only_elaboration_boundary_edges_report_as_the_boundary"]
+        }
+      ],
+      "failure_mode": "Reject unrecognized publishers and mismatched outcome/evidence authority without constructing a judgement.",
+      "open_issues": [228]
+    },
+    {
+      "id": "SOC-LAW-06",
+      "title": "Context confinement",
+      "status": "open",
+      "authority": ["future context validator and transport checker"],
+      "normative_anchors": [
+        "spec/adr/ADR-0001_Proof_Substrate.md",
+        "spec/adr/ADR-0002_SOC_Constitution.md"
+      ],
+      "implementation_anchors": [
+        "crates/brix-semantic/src/context.rs",
+        "crates/brix-kernel/src/check.rs"
+      ],
+      "executable_gates": [
+        {
+          "path": "crates/brix-semantic/src/context.rs",
+          "tests": ["root_context_id_matches_frozen_scope_root_digest", "extend_is_stable_for_the_same_parent_and_assumption"]
+        },
+        {
+          "path": "crates/brix-kernel/tests/adversarial.rs",
+          "tests": ["test_context_mismatch_returns_context_mismatch"]
+        }
+      ],
+      "failure_mode": "Report malformed, unavailable, incompatible, or unauthorized context as a context/provenance failure or Unknown, not rejection of the proposition.",
+      "open_issues": [59]
+    },
+    {
+      "id": "SOC-LAW-07",
+      "title": "Governance monotonicity",
+      "status": "enforced",
+      "authority": ["soc-core reference oracle over Regime and Adm"],
+      "normative_anchors": ["spec/adr/ADR-0002_SOC_Constitution.md"],
+      "implementation_anchors": [
+        "crates/soc-core/src/adm.rs",
+        "crates/soc-core/src/oracle.rs"
+      ],
+      "executable_gates": [
+        {
+          "path": "crates/soc-core/tests/governance_conservation.rs",
+          "tests": ["tightening_adm_shrinks_cand_and_succ_pointwise_over_every_reachable_config", "a_second_independently_tightened_adm_also_conserves", "composing_two_tightenings_via_and_adm_conserves_transitively"]
+        }
+      ],
+      "failure_mode": "Emit the reachable configuration, policies, and candidate/successor present only under the tighter policy as a counterexample.",
+      "open_issues": [52]
+    },
+    {
+      "id": "SOC-LAW-08",
+      "title": "Incremental agreement and cost honesty",
+      "status": "enforced",
+      "authority": ["soc-core naive oracle", "soc-core incremental engine"],
+      "normative_anchors": [
+        "spec/adr/ADR-0002_SOC_Constitution.md",
+        "spec/Build_Plan_v3_SOC.md"
+      ],
+      "implementation_anchors": [
+        "crates/soc-core/src/engine.rs",
+        "crates/soc-core/src/cost.rs"
+      ],
+      "executable_gates": [
+        {
+          "path": "crates/soc-core/tests/incremental_differential.rs",
+          "tests": ["incremental_view_equals_naive_recompute_under_adm_all", "incremental_view_equals_naive_recompute_under_a_tightened_adm"]
+        },
+        {
+          "path": "crates/soc-core/tests/o_delta_gate.rs",
+          "tests": ["naive_oracle_is_world_proportional_expected_fail", "o_delta_gate_incremental_engine_is_flat", "incremental_cost_is_constant_while_naive_grows_across_a_scaling_sweep"]
+        }
+      ],
+      "failure_mode": "Report the first differing delta/view or deterministic work-count regression; wall-clock timing alone is not evidence.",
+      "open_issues": [52, 178]
+    },
+    {
+      "id": "SOC-LAW-09",
+      "title": "Correction and retraction non-erasure",
+      "status": "partial",
+      "authority": ["evidence durability taxonomy", "future dependency invalidation engine"],
+      "normative_anchors": [
+        "spec/adr/ADR-0001_Proof_Substrate.md",
+        "spec/adr/ADR-0002_SOC_Constitution.md"
+      ],
+      "implementation_anchors": [
+        "crates/brix-semantic/src/evidence.rs",
+        "crates/brix-semantic/src/dependency.rs",
+        "crates/soc-core/src/audit.rs"
+      ],
+      "executable_gates": [
+        {
+          "path": "crates/brix-semantic/tests/judgment_core.rs",
+          "tests": ["kernel_evidence_is_durable_everything_else_is_revision_scoped", "judgement_id_depends_on_exactly_its_four_fields"]
+        },
+        {
+          "path": "crates/soc-core/tests/audit_factorization.rs",
+          "tests": ["derived_judgement_is_never_mutated_upgrade_is_a_new_judgement_and_edge"]
+        }
+      ],
+      "failure_mode": "Invalidate current dependents with provenance while preserving the immutable historical judgement; missing support is Unknown, not Refuted.",
+      "open_issues": [59, 178]
+    },
+    {
+      "id": "SOC-LAW-10",
+      "title": "Observable-behavior fidelity",
+      "status": "open",
+      "authority": ["future saturated settlement and refinement checker"],
+      "normative_anchors": ["spec/adr/ADR-0002_SOC_Constitution.md"],
+      "implementation_anchors": [
+        "crates/soc-core/src/commit.rs",
+        "crates/soc-core/src/journal.rs"
+      ],
+      "executable_gates": [
+        {
+          "path": "crates/soc-core/tests/calendar_commit.rs",
+          "tests": ["committed_coalgebra_steps_when_admissible_and_is_quiescent_otherwise", "deterministic_replay_is_byte_identical_across_two_runs"]
+        }
+      ],
+      "failure_mode": "Return an unmatched visible trace; divergence, unsupported saturation, or exhaustion is Unknown and never a quiescence certificate.",
+      "open_issues": [61]
+    },
+    {
+      "id": "SOC-LAW-11",
+      "title": "Translation fidelity",
+      "status": "partial",
+      "authority": ["each translator and its declared source/target relation"],
+      "normative_anchors": [
+        "spec/adr/ADR-0009_Native_Type_Checker_Parity.md",
+        "spec/adr/ADR-0010_SOC_Language_Design.md",
+        "spec/adr/ADR-0011_Match_And_Certified_Exhaustiveness.md"
+      ],
+      "implementation_anchors": [
+        "crates/brix-syntax/src/lib.rs",
+        "crates/brix-lower/src/lib.rs",
+        "crates/soc-regimes/src/native/analyze.rs"
+      ],
+      "executable_gates": [
+        {
+          "path": "crates/brix-lower/tests/lower_proven.rs",
+          "tests": ["test_id_fixture_audited", "test_unsupported_construct_negative", "test_unresolved_function_call", "arithmetic_on_string_is_a_type_error", "test_sum_match_audited", "test_sum_match_non_exhaustive"]
+        },
+        {
+          "path": "crates/soc-regimes/src/type_realization.rs",
+          "tests": ["test_determinism", "test_mismatch_non_function_application"]
+        }
+      ],
+      "failure_mode": "Return an unsupported/error diagnostic or a source/target differential counterexample; never fabricate a successful translation judgement.",
+      "open_issues": [52, 53, 178]
+    },
+    {
+      "id": "SOC-LAW-12",
+      "title": "Verifier closure",
+      "status": "partial",
+      "authority": ["brix-kernel", "canonical certificate validator"],
+      "normative_anchors": [
+        "spec/adr/ADR-0003_Proof_Kernel_Profile.md",
+        "spec/adr/ADR-0011_Match_And_Certified_Exhaustiveness.md",
+        "docs/audit/issue-63/tcb-proof.md"
+      ],
+      "implementation_anchors": [
+        "crates/brix-kernel/src/check.rs",
+        "crates/brix-kernel/src/verdict.rs",
+        "crates/brix-elaborate/src/lib.rs",
+        "crates/soc-regimes/src/coverage.rs"
+      ],
+      "executable_gates": [
+        {
+          "path": "crates/brix-kernel/tests/adversarial.rs",
+          "tests": ["test_valid_implication_proof_returns_accepted_with_verifier_id", "test_well_formed_false_proof_returns_rejected", "test_unsupported_construct_returns_unsupported", "test_context_mismatch_returns_context_mismatch", "test_tiny_budget_returns_resource_exhausted_mapping_to_unknown_never_refuted"]
+        },
+        {
+          "path": "crates/brix-elaborate/tests/b3_end_to_end.rs",
+          "tests": ["test_b3_end_to_end_audited_decomposition_to_proven"]
+        },
+        {
+          "path": "crates/soc-regimes/src/coverage.rs",
+          "tests": ["exhaustive_two_variant_match_is_kernel_certified", "missing_variant_is_not_certified", "wildcard_is_outside_the_certified_fragment"]
+        }
+      ],
+      "failure_mode": "Fail closed for missing, malformed, unsupported, mismatched, or exhausted artifacts; candidate rejection is not a refutation certificate.",
+      "open_issues": [56, 229]
+    }
+  ]
+}
