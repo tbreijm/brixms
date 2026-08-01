@@ -146,9 +146,14 @@ fn test_parse_nat_fixture() {
             assert_eq!(params[0].ty, Some(Ty::Named("Nat".into())));
             assert_eq!(*ret, Some(Ty::Named("Nat".into())));
             match body {
-                Expr::Match { scrutinee, arms } => {
+                Expr::Match {
+                    scrutinee,
+                    arms,
+                    proving_exhaustive,
+                } => {
                     assert_eq!(**scrutinee, Expr::Var("n".into()));
                     assert_eq!(arms.len(), 2);
+                    assert!(!proving_exhaustive);
 
                     // Zero => Zero
                     assert_eq!(
@@ -314,6 +319,8 @@ fn test_negative_parse_inputs() {
         "let a: Money @InvalidGrade = 10",
         "witness = 10",
         "show \"unterminated string",
+        // `proving` not followed by `exhaustive` is a clear parse error.
+        "show match x { Zero => 1 } proving foo",
     ];
 
     for input in &invalid_inputs {
@@ -323,5 +330,61 @@ fn test_negative_parse_inputs() {
             "Expected parse error for malformed input: '{}'",
             input
         );
+    }
+}
+
+#[test]
+fn test_match_proving_exhaustive_true() {
+    let source = "show match x { A => 1  B => 2 } proving exhaustive";
+    let module = parse(source).expect("match ... proving exhaustive should parse");
+    assert_eq!(module.items.len(), 1);
+    match &module.items[0] {
+        Item::Show(Expr::Match {
+            arms,
+            proving_exhaustive,
+            ..
+        }) => {
+            assert_eq!(arms.len(), 2);
+            assert!(*proving_exhaustive);
+        }
+        other => panic!("Expected Item::Show(Expr::Match), got {:?}", other),
+    }
+}
+
+#[test]
+fn test_match_without_proving_exhaustive_suffix() {
+    let source = "show match x { A => 1  B => 2 }";
+    let module = parse(source).expect("plain match should still parse");
+    assert_eq!(module.items.len(), 1);
+    match &module.items[0] {
+        Item::Show(Expr::Match {
+            arms,
+            proving_exhaustive,
+            ..
+        }) => {
+            assert_eq!(arms.len(), 2);
+            assert!(!*proving_exhaustive);
+        }
+        other => panic!("Expected Item::Show(Expr::Match), got {:?}", other),
+    }
+}
+
+#[test]
+fn test_proving_identifier_regression() {
+    // `proving` is only contextual immediately after a match's closing '}';
+    // as an ordinary identifier elsewhere it must keep working.
+    let source = "let proving = 1\nshow proving";
+    let module = parse(source).expect("'proving' should parse as an ordinary identifier");
+    assert_eq!(module.items.len(), 2);
+    match &module.items[0] {
+        Item::Let(LetDecl { name, value, .. }) => {
+            assert_eq!(name, "proving");
+            assert_eq!(*value, Expr::Num("1".into()));
+        }
+        other => panic!("Expected Item::Let, got {:?}", other),
+    }
+    match &module.items[1] {
+        Item::Show(expr) => assert_eq!(*expr, Expr::Var("proving".into())),
+        other => panic!("Expected Item::Show, got {:?}", other),
     }
 }
