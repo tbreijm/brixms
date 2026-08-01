@@ -351,22 +351,41 @@ pub fn g_unify() -> GeneratorId {
 /// to "tight" — its soundness established, not merely asserted (the
 /// tight-generator obligation).
 ///
-/// Discharged so far: the **literal introduction rules** `g_lit`/`g_str_lit`/
-/// `g_float_lit`. These are the legitimate *base case* of tightness — an
-/// introduction rule *is* the definition of its type (`42 : Int`, `"…" : Str`,
-/// `1.5 : Float`), so there is nothing beneath it to prove; the rule is the
-/// irreducible axiom that a type theory rests on. Each is emitted at exactly one
-/// site (the corresponding `infer_tree` arm) with a fixed `literal → Con`
-/// endpoint, pinned by `literal_intro_generators_are_faithful` — so declaring it
-/// tight is honest, not a flip.
+/// Discharged:
 ///
-/// Deliberately **not** discharged (they carry real semantic content and get
-/// genuine soundness arguments later): `g_var`/`g_app*`/`g_lam*` (substitution),
-/// `g_arith` + the coercion-edge promotions (operator/embedding semantics),
-/// `g_record*`/`g_field` (products/projection). Programs using any of these stay
-/// `Audited` until it is discharged.
+/// 1. The **literal introduction rules** `g_lit`/`g_str_lit`/`g_float_lit` — an
+///    introduction rule *is* the definition of its type (`42 : Int`), the
+///    irreducible axiom a type theory rests on. Emission-pinned by
+///    `literal_intro_generators_are_faithful`.
+/// 2. The **simply-typed λ-calculus core** `g_var` (hypothesis), `g_lam_intro` /
+///    `g_lam_close` (→I), `g_split` / `g_app2` (→E). These are the *defining
+///    rules* of the STLC — likewise the axiomatic base of the type theory — and
+///    each corresponds directly to a **primitive natural-deduction rule the
+///    proof kernel already accepts as sound**: `g_var` ↔ `Hyp`, `g_lam_*` ↔
+///    `Lam` (→I), `g_split`/`g_app2` ↔ product elimination + `App` (→E, i.e.
+///    modus ponens `(A→B)×A → B`, a kernel theorem — see
+///    `application_rule_is_a_kernel_theorem`). Discharging them is honest: their
+///    realization *is* the kernel's own primitive, not a fresh assertion. As a
+///    result the pure λ-calculus fragment (`id(42)` etc.) reaches genuine
+///    `Proven`.
+///
+/// Deliberately **NOT** discharged — these assert *operation/representation*
+/// semantics, not logical rules, and have no established value semantics yet
+/// (they wait for the execution layer): `g_arith` (a primitive operation is
+/// total & type-preserving) and the coercion-edge promotions `g_promote_edge`
+/// (a real numeric embedding). Also not yet discharged: `g_record*`/`g_field`
+/// (products/projection), `g_ctor`/`g_match` (co/products) — separate slices.
+/// Any program touching an undischarged generator stays `Audited`; e.g.
+/// `1 + 2` remains `Audited` because `g_arith` is not tight.
 pub fn generator_is_tight(g: &GeneratorId) -> bool {
-    *g == g_lit() || *g == g_str_lit() || *g == g_float_lit()
+    *g == g_lit()
+        || *g == g_str_lit()
+        || *g == g_float_lit()
+        || *g == g_var()
+        || *g == g_lam_intro()
+        || *g == g_lam_close()
+        || *g == g_split()
+        || *g == g_app2()
 }
 
 /// Whether every leaf generator in an elaborated derivation is discharged tight.
@@ -2409,8 +2428,8 @@ mod tests {
             "a discharged literal should earn Proven"
         );
 
-        // `(λx.x) 42` also uses g_var/g_app*/g_lam* (not yet discharged), so its
-        // honest outcome is capped at Audited even though the composition proves.
+        // `(λx.x) 42` rests on the discharged λ-calculus core (g_var/g_lam_*/
+        // g_split/g_app2) + g_lit — all tight — so it now earns Proven too.
         let app = Expr::App(
             Box::new(Expr::Lam(
                 "x".to_string(),
@@ -2422,8 +2441,55 @@ mod tests {
             audited_type_check_tree(&app, &TyCtx::new(), ContextId::root()).unwrap();
         assert_eq!(
             honest_result_outcome(Outcome::Proven, &app_tree),
+            Outcome::Proven,
+            "the discharged λ-calculus core should earn Proven"
+        );
+
+        // `1 + 2` uses g_arith, which asserts operation semantics and is NOT
+        // discharged, so it is honestly capped at Audited.
+        let arith = Expr::Arith(ArithOp::Add, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2)));
+        let (_, arith_tree) =
+            audited_type_check_tree(&arith, &TyCtx::new(), ContextId::root()).unwrap();
+        assert_eq!(
+            honest_result_outcome(Outcome::Proven, &arith_tree),
             Outcome::Audited,
-            "an undischarged generator must cap the result at Audited"
+            "an undischarged operation generator (g_arith) must cap at Audited"
+        );
+    }
+
+    #[test]
+    fn application_rule_is_a_kernel_theorem() {
+        // Soundness evidence for discharging g_app2: its realization is modus
+        // ponens `((A→B) × A) → B`, a kernel theorem witnessed by λp.(π₁p)(π₂p).
+        use brix_kernel::{ExplicitTerm, Prop, TermKind, Var, Verdict};
+        use brix_semantic::PropositionId;
+
+        let a = Prop::Atom(PropositionId::from_canon(b"A"));
+        let b = Prop::Atom(PropositionId::from_canon(b"B"));
+        let a_to_b = Prop::Impl(Box::new(a.clone()), Box::new(b.clone()));
+        let goal = Prop::Impl(
+            Box::new(Prop::Prod(Box::new(a_to_b), Box::new(a))),
+            Box::new(b),
+        );
+        let term = TermKind::Lam {
+            var_name: Some("p".to_string()),
+            body: Box::new(TermKind::App {
+                function: Box::new(TermKind::Proj1(Box::new(TermKind::Hyp(Var::Named(
+                    "p".to_string(),
+                ))))),
+                argument: Box::new(TermKind::Proj2(Box::new(TermKind::Hyp(Var::Named(
+                    "p".to_string(),
+                ))))),
+            }),
+        };
+        let ctx = ContextId::root();
+        let explicit = ExplicitTerm::new(ctx, term);
+        assert!(
+            matches!(
+                brix_kernel::acceptance(&ctx, &goal, &explicit, Budget::new(1000, 1000)),
+                Verdict::Accepted(_)
+            ),
+            "modus ponens must be a kernel theorem"
         );
     }
 

@@ -109,13 +109,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checks_identity_application_to_audited_int() {
+    fn checks_identity_application_to_proven_int() {
+        // The pure λ-calculus core (var/λ/app) is discharged, so `id(42)` earns Proven.
         let src = "fn id(n) = n\nlet r = id(42)\n";
         let (report, had_error) = check_report(src);
         assert!(!had_error, "report: {report}");
         assert!(
-            report.contains("r : Int @Audited"),
-            "expected `r : Int @Audited`, got:\n{report}"
+            report.contains("r : Int @Proven"),
+            "expected `r : Int @Proven`, got:\n{report}"
         );
     }
 

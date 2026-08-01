@@ -4,7 +4,7 @@ use brix_syntax::parse;
 use soc_regimes::type_realization::{Ty as TrTy, TypeError};
 
 #[test]
-fn test_id_fixture_audited() {
+fn test_id_fixture_proven() {
     let source = include_str!("fixtures/id.brix");
     let module = parse(source).expect("id.brix should parse");
     let results = check_module(&module);
@@ -17,7 +17,8 @@ fn test_id_fixture_audited() {
         .expect("let r binding should lower & type-check successfully");
 
     assert_eq!(check_res.name, "r");
-    assert_eq!(check_res.outcome, Outcome::Audited);
+    // The λ-calculus core (var/λ/app) is discharged, so `id(42)` earns Proven.
+    assert_eq!(check_res.outcome, Outcome::Proven);
     assert_eq!(check_res.ty, Some(TrTy::Con("Int")));
 }
 
