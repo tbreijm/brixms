@@ -64,6 +64,42 @@ fn test_unsupported_construct_negative() {
 }
 
 #[test]
+fn proving_exhaustive_match_gets_kernel_certified_coverage() {
+    use brix_lower::CoverageOutcome;
+    let src = "config Opt = None | Some(Int)\nlet a = match Some(3) {\n  None => 0\n  Some(k) => k\n} proving exhaustive\n";
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    let cr = results[0].as_ref().expect("should check");
+    assert_eq!(cr.name, "a");
+    // The typing result stays Audited; coverage is a separate, kernel-Proven claim.
+    assert_eq!(cr.outcome, Outcome::Audited);
+    assert_eq!(cr.coverage, Some(CoverageOutcome::Proven));
+}
+
+#[test]
+fn proving_exhaustive_with_wildcard_is_not_certified_but_still_checks() {
+    use brix_lower::CoverageOutcome;
+    // A wildcard is structurally exhaustive (ordinary match is fine) but is
+    // outside the certified fragment → coverage Unknown, never a false Proven.
+    let src = "config Opt = None | Some(Int)\nlet a = match Some(3) {\n  Some(k) => k\n  _ => 0\n} proving exhaustive\n";
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    let cr = results[0].as_ref().expect("should check");
+    assert_eq!(cr.outcome, Outcome::Audited);
+    assert!(matches!(cr.coverage, Some(CoverageOutcome::Unknown(_))));
+}
+
+#[test]
+fn ordinary_match_has_no_coverage_claim() {
+    let src =
+        "config Opt = None | Some(Int)\nlet a = match Some(3) {\n  None => 0\n  Some(k) => k\n}\n";
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    let cr = results[0].as_ref().expect("should check");
+    assert_eq!(cr.coverage, None);
+}
+
+#[test]
 fn test_unresolved_function_call() {
     let source = "let z = unknown(42)";
     let module = parse(source).expect("call expression should parse");

@@ -65,8 +65,13 @@ fn check_report(source: &str) -> (String, bool) {
     for r in &results {
         match r {
             Ok(cr) => {
+                let coverage = match &cr.coverage {
+                    Some(brix_lower::CoverageOutcome::Proven) => "  [coverage: exhaustive @Proven]",
+                    Some(brix_lower::CoverageOutcome::Unknown(_)) => "  [coverage: not certified]",
+                    None => "",
+                };
                 out.push_str(&format!(
-                    "  {} : {} @{:?}\n",
+                    "  {} : {} @{:?}{coverage}\n",
                     cr.name,
                     fmt_ty(cr.ty.as_ref()),
                     cr.outcome

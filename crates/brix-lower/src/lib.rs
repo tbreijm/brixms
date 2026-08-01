@@ -23,6 +23,8 @@ use brix_elaborate::{elaborate_tree, ElaborationResult};
 use brix_kernel::Budget;
 use brix_semantic::{ContextId, Outcome};
 use brix_syntax::ast::{self, Item};
+use soc_regimes::coverage::certify_exhaustive;
+pub use soc_regimes::coverage::CoverageOutcome;
 use soc_regimes::type_realization::{
     audited_type_check_tree, honest_result_outcome, infer_tree, zonk, ArithOp, Expr as TrExpr,
     Infer, Pattern as TrPattern, Ty as TrTy, TyCtx, TypeError,
@@ -202,7 +204,11 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
                 Box::new(lower_expr(rhs, ctx)?),
             ))
         }
-        ast::Expr::Match { scrutinee, arms } => {
+        ast::Expr::Match {
+            scrutinee,
+            arms,
+            proving_exhaustive: _,
+        } => {
             let scrutinee_tr = lower_expr(scrutinee, ctx)?;
             let arms_tr = arms
                 .iter()
@@ -243,10 +249,42 @@ pub struct CheckResult {
     pub outcome: Outcome,
     /// The inferred type of the binding value.
     pub ty: Option<TrTy>,
+    /// For a top-level `match … proving exhaustive` value: the kernel-certified
+    /// coverage outcome (a separate proposition from the typing result).
+    pub coverage: Option<CoverageOutcome>,
 }
 
 /// Lower each `let` binding in a parsed surface AST module to native SOC expressions,
 /// type-check them, and elaborate them to `Proven HasType`.
+/// The kernel-certified coverage outcome for a top-level
+/// `match … proving exhaustive` value, or `None` if the value is not a
+/// proving-exhaustive match at the top level.
+fn coverage_for(value: &ast::Expr, tr_expr: &TrExpr, ctx: LowerCtx) -> Option<CoverageOutcome> {
+    match value {
+        ast::Expr::Match {
+            proving_exhaustive: true,
+            ..
+        } => {}
+        _ => return None,
+    }
+    let TrExpr::Match(_scrutinee, arms) = tr_expr else {
+        return None;
+    };
+    // Resolve the scrutinee sum type from the first constructor pattern.
+    let sum_ty = arms.iter().find_map(|(p, _)| match p {
+        TrPattern::Ctor(vname, _) => ctx.ctors.get(vname).map(|(t, _, _)| t.clone()),
+        _ => None,
+    });
+    Some(match sum_ty {
+        Some(sum_ty) => {
+            certify_exhaustive(&sum_ty, arms, ContextId::root(), Budget::new(4000, 4000))
+        }
+        None => CoverageOutcome::Unknown(
+            "could not resolve the scrutinee sum for `proving exhaustive`".into(),
+        ),
+    })
+}
+
 pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerError)>> {
     let mut fns = BTreeMap::new();
     let mut configs = BTreeMap::new();
@@ -329,6 +367,13 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                 let tr_expr = lower_expr(&let_decl.value, ctx)?;
                 let (ty, _ty_tree, st) = infer_tree(&tr_expr, &ty_ctx, Infer::new())?;
                 let inferred_ty = zonk(&ty, &st.subst);
+
+                // `match … proving exhaustive` on a top-level value: request a
+                // kernel-certified coverage certificate. The typing result's grade
+                // is unchanged (the match is a value like any other); coverage is a
+                // *separate* proposition, @Proven only when the kernel accepts.
+                let coverage = coverage_for(&let_decl.value, &tr_expr, ctx);
+
                 let (audited_judgement, tree) =
                     audited_type_check_tree(&tr_expr, &ty_ctx, ContextId::root())?;
                 match elaborate_tree(&audited_judgement, &tree, Budget::new(2000, 2000)) {
@@ -342,6 +387,7 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                             name: let_decl.name.clone(),
                             outcome: honest_result_outcome(judgement.outcome, &tree),
                             ty: Some(inferred_ty.clone()),
+                            coverage,
                         },
                         inferred_ty,
                     )),
