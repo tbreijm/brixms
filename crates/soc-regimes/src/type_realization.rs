@@ -20,6 +20,7 @@ pub enum Ty {
     Fn(Box<Ty>, Box<Ty>),
     Var(u32),
     Record(Vec<(String, Ty)>),
+    Sum(String, Vec<(String, Vec<Ty>)>),
 }
 
 impl Canonical for Ty {
@@ -46,6 +47,19 @@ impl Canonical for Ty {
                     for (name, ty) in &sorted {
                         w.write_str(name);
                         ty.canon_write(w);
+                    }
+                });
+            }
+            Ty::Sum(sum_name, variants) => {
+                w.write_enum(4, |w| {
+                    w.write_str(sum_name);
+                    w.write_uint(variants.len() as u64);
+                    for (vname, fields) in variants {
+                        w.write_str(vname);
+                        w.write_uint(fields.len() as u64);
+                        for f in fields {
+                            f.canon_write(w);
+                        }
                     }
                 });
             }
@@ -99,6 +113,8 @@ pub enum Expr {
     /// Binary numeric arithmetic (append-only ordinal 8). Types to `Int`,
     /// `Float`, or — on a mixed `Int`/`Float` — `Float` via a promotion witness.
     Arith(ArithOp, Box<Expr>, Box<Expr>),
+    /// Sum constructor application (append-only ordinal 9).
+    Ctor(Ty, String, Vec<Expr>),
 }
 
 impl Canonical for Expr {
@@ -151,6 +167,16 @@ impl Canonical for Expr {
                     w.write_uint(op.ordinal());
                     a.canon_write(w);
                     b.canon_write(w);
+                });
+            }
+            Expr::Ctor(sum_ty, variant, args) => {
+                w.write_enum(9, |w| {
+                    sum_ty.canon_write(w);
+                    w.write_str(variant);
+                    w.write_uint(args.len() as u64);
+                    for a in args {
+                        a.canon_write(w);
+                    }
                 });
             }
         }
@@ -222,6 +248,16 @@ pub fn g_field() -> GeneratorId {
 /// Typing-rule generator for record splitting (`"type.rule.record.split@1"`).
 pub fn g_record_split() -> GeneratorId {
     GeneratorId::named("type.rule.record.split@1")
+}
+
+/// Typing-rule generator for sum constructor application (`"type.rule.ctor@1"`).
+pub fn g_ctor() -> GeneratorId {
+    GeneratorId::named("type.rule.ctor@1")
+}
+
+/// Typing-rule generator for constructor splitting (`"type.rule.ctor.split@1"`).
+pub fn g_ctor_split() -> GeneratorId {
+    GeneratorId::named("type.rule.ctor.split@1")
 }
 
 /// Typing-rule generator for float literals (`"type.rule.floatlit@1"`).
@@ -616,6 +652,16 @@ pub fn zonk(ty: &Ty, subst: &BTreeMap<u32, Ty>) -> Ty {
             sorted.dedup_by(|a, b| a.0 == b.0);
             Ty::Record(sorted)
         }
+        Ty::Sum(sum_name, variants) => {
+            let zonked_vars = variants
+                .iter()
+                .map(|(vname, fields)| {
+                    let z_fields = fields.iter().map(|f| zonk(f, subst)).collect();
+                    (vname.clone(), z_fields)
+                })
+                .collect();
+            Ty::Sum(sum_name.clone(), zonked_vars)
+        }
     }
 }
 
@@ -626,6 +672,9 @@ pub fn occurs(v: u32, ty: &Ty, subst: &BTreeMap<u32, Ty>) -> bool {
         Ty::Con(_) => false,
         Ty::Fn(a, b) => occurs(v, a, subst) || occurs(v, b, subst),
         Ty::Record(fields) => fields.iter().any(|(_, t)| occurs(v, t, subst)),
+        Ty::Sum(_, variants) => variants
+            .iter()
+            .any(|(_, fields)| fields.iter().any(|f| occurs(v, f, subst))),
     }
 }
 
@@ -699,6 +748,26 @@ pub fn unify(
                 let (next_subst, steps) = unify(&a.1, &b.1, &curr_subst)?;
                 curr_subst = next_subst;
                 all_steps.extend(steps);
+            }
+            Ok((curr_subst, all_steps))
+        }
+        (Ty::Sum(n1, vs1), Ty::Sum(n2, vs2)) => {
+            if n1 != n2 || vs1.len() != vs2.len() {
+                return Err(TypeError::Mismatch);
+            }
+            for ((v1_name, v1_fields), (v2_name, v2_fields)) in vs1.iter().zip(vs2.iter()) {
+                if v1_name != v2_name || v1_fields.len() != v2_fields.len() {
+                    return Err(TypeError::Mismatch);
+                }
+            }
+            let mut curr_subst = subst.clone();
+            let mut all_steps = vec![g_unify()];
+            for ((_, v1_fields), (_, v2_fields)) in vs1.iter().zip(vs2.iter()) {
+                for (f1, f2) in v1_fields.iter().zip(v2_fields.iter()) {
+                    let (next_subst, steps) = unify(f1, f2, &curr_subst)?;
+                    curr_subst = next_subst;
+                    all_steps.extend(steps);
+                }
             }
             Ok((curr_subst, all_steps))
         }
@@ -828,6 +897,33 @@ pub fn infer(
                 Err(TypeError::Mismatch)
             }
         }
+        Expr::Ctor(sum_ty, variant, args) => {
+            let resolved = resolve(sum_ty, &st.subst);
+            if let Ty::Sum(_sum_name, variants) = resolved {
+                let (_, declared_fields) = variants
+                    .iter()
+                    .find(|(vname, _)| vname == variant)
+                    .ok_or(TypeError::Mismatch)?;
+                if args.len() != declared_fields.len() {
+                    return Err(TypeError::Mismatch);
+                }
+                let declared_fields = declared_fields.clone();
+                let mut deriv = vec![g_ctor()];
+                let mut curr_st = st;
+                for (arg_expr, declared_field_ty) in args.iter().zip(declared_fields.iter()) {
+                    let (t_i, d_i, next_st) = infer(arg_expr, ctx, curr_st)?;
+                    deriv.extend(d_i);
+                    let (next_subst, _) = unify(&t_i, declared_field_ty, &next_st.subst)?;
+                    curr_st = Infer {
+                        subst: next_subst,
+                        next_var: next_st.next_var,
+                    };
+                }
+                Ok((sum_ty.clone(), deriv, curr_st))
+            } else {
+                Err(TypeError::Mismatch)
+            }
+        }
     }
 }
 
@@ -921,6 +1017,7 @@ pub enum TyObj {
 
 /// Deferred-materialization derivation tree (ADR-0008).
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum TyTree {
     Leaf {
         generator: GeneratorId,
@@ -1242,6 +1339,80 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                 } else {
                     Err(TypeError::NoField(fname.clone()))
                 }
+            } else {
+                Err(TypeError::Mismatch)
+            }
+        }
+        Expr::Ctor(sum_ty, variant, args) => {
+            let resolved = resolve(sum_ty, &st.subst);
+            if let Ty::Sum(_sum_name, variants) = resolved {
+                let (_, declared_fields) = variants
+                    .iter()
+                    .find(|(vname, _)| vname == variant)
+                    .ok_or(TypeError::Mismatch)?;
+                if args.len() != declared_fields.len() {
+                    return Err(TypeError::Mismatch);
+                }
+                let declared_fields = declared_fields.clone();
+                if args.is_empty() {
+                    let split = TyTree::Leaf {
+                        generator: g_ctor_split(),
+                        src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+                        dst: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+                    };
+                    let ctor_leaf = TyTree::Leaf {
+                        generator: g_ctor(),
+                        src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+                        dst: TyObj::Atom(CfgAtom::Type(sum_ty.clone())),
+                    };
+                    let tree = TyTree::Seq {
+                        left: Box::new(split),
+                        right: Box::new(ctor_leaf),
+                    };
+                    return Ok((sum_ty.clone(), tree, st));
+                }
+
+                let mut expr_atoms = Vec::new();
+                let mut type_atoms = Vec::new();
+                let mut d_trees = Vec::new();
+                let mut curr_st = st;
+
+                for (arg_expr, declared_field_ty) in args.iter().zip(declared_fields.iter()) {
+                    let (t_i, d_i, next_st) = infer_tree(arg_expr, ctx, curr_st)?;
+                    let (next_subst, _) = unify(&t_i, declared_field_ty, &next_st.subst)?;
+                    expr_atoms.push(TyObj::Atom(CfgAtom::Expr(arg_expr.clone())));
+                    let zonked_field = zonk(declared_field_ty, &next_subst);
+                    type_atoms.push(TyObj::Atom(CfgAtom::Type(zonked_field)));
+                    d_trees.push(d_i);
+                    curr_st = Infer {
+                        subst: next_subst,
+                        next_var: next_st.next_var,
+                    };
+                }
+
+                let split = TyTree::Leaf {
+                    generator: g_ctor_split(),
+                    src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+                    dst: right_nest_prod(expr_atoms),
+                };
+
+                let args_tensor = right_nest_tensor(d_trees);
+
+                let ctor_leaf = TyTree::Leaf {
+                    generator: g_ctor(),
+                    src: right_nest_prod(type_atoms),
+                    dst: TyObj::Atom(CfgAtom::Type(sum_ty.clone())),
+                };
+
+                let tree = TyTree::Seq {
+                    left: Box::new(split),
+                    right: Box::new(TyTree::Seq {
+                        left: Box::new(args_tensor),
+                        right: Box::new(ctor_leaf),
+                    }),
+                };
+
+                Ok((sum_ty.clone(), tree, curr_st))
             } else {
                 Err(TypeError::Mismatch)
             }
@@ -2019,5 +2190,132 @@ mod tests {
             Outcome::Audited,
             "an undischarged generator must cap the result at Audited"
         );
+    }
+
+    #[test]
+    fn test_ctor_nullary_bool_proven() {
+        let bool_ty = Ty::Sum(
+            "Bool".into(),
+            vec![("True".into(), vec![]), ("False".into(), vec![])],
+        );
+        let expr = Expr::Ctor(bool_ty.clone(), "True".into(), vec![]);
+        let ctx = TyCtx::new();
+        let context = ContextId::root();
+
+        let (ty, _ty_tree, st) = infer_tree(&expr, &ctx, Infer::new()).expect("infer ctor nullary");
+        let final_ty = zonk(&ty, &st.subst);
+        assert_eq!(final_ty, bool_ty);
+
+        let (aud, tree) =
+            audited_type_check_tree(&expr, &ctx, context).expect("audited ctor nullary");
+        assert_eq!(aud.outcome, Outcome::Audited);
+        assert!(tree.well_formed());
+
+        let res = brix_elaborate::elaborate_tree(&aud, &tree, Budget::new(1000, 1000));
+        match res {
+            ElaborationResult::Proven { judgement, .. } => {
+                assert_eq!(judgement.outcome, Outcome::Proven);
+            }
+            other => panic!("Expected Proven, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ctor_opt_some_proven() {
+        let opt_ty = Ty::Sum(
+            "Option".into(),
+            vec![
+                ("None".into(), vec![]),
+                ("Some".into(), vec![Ty::Con("Int")]),
+            ],
+        );
+        let expr = Expr::Ctor(opt_ty.clone(), "Some".into(), vec![Expr::Lit(3)]);
+        let ctx = TyCtx::new();
+        let context = ContextId::root();
+
+        let (ty, _ty_tree, st) = infer_tree(&expr, &ctx, Infer::new()).expect("infer ctor opt");
+        let final_ty = zonk(&ty, &st.subst);
+        assert_eq!(final_ty, opt_ty);
+
+        let (aud, tree) = audited_type_check_tree(&expr, &ctx, context).expect("audited ctor opt");
+        assert_eq!(aud.outcome, Outcome::Audited);
+        assert!(tree.well_formed());
+
+        let res = brix_elaborate::elaborate_tree(&aud, &tree, Budget::new(1000, 1000));
+        match res {
+            ElaborationResult::Proven { judgement, .. } => {
+                assert_eq!(judgement.outcome, Outcome::Proven);
+            }
+            other => panic!("Expected Proven, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ctor_pair_proven() {
+        let pair_ty = Ty::Sum(
+            "Pair".into(),
+            vec![("MkPair".into(), vec![Ty::Con("Int"), Ty::Con("Str")])],
+        );
+        let expr = Expr::Ctor(
+            pair_ty.clone(),
+            "MkPair".into(),
+            vec![Expr::Lit(1), Expr::StrLit("x".into())],
+        );
+        let ctx = TyCtx::new();
+        let context = ContextId::root();
+
+        let (ty, _ty_tree, st) = infer_tree(&expr, &ctx, Infer::new()).expect("infer ctor pair");
+        let final_ty = zonk(&ty, &st.subst);
+        assert_eq!(final_ty, pair_ty);
+
+        let (aud, tree) = audited_type_check_tree(&expr, &ctx, context).expect("audited ctor pair");
+        assert_eq!(aud.outcome, Outcome::Audited);
+        assert!(tree.well_formed());
+
+        let res = brix_elaborate::elaborate_tree(&aud, &tree, Budget::new(1000, 1000));
+        match res {
+            ElaborationResult::Proven { judgement, .. } => {
+                assert_eq!(judgement.outcome, Outcome::Proven);
+            }
+            other => panic!("Expected Proven, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ctor_arg_type_mismatch() {
+        let opt_ty = Ty::Sum(
+            "Option".into(),
+            vec![
+                ("None".into(), vec![]),
+                ("Some".into(), vec![Ty::Con("Int")]),
+            ],
+        );
+        let expr = Expr::Ctor(opt_ty, "Some".into(), vec![Expr::StrLit("bad".into())]);
+        let ctx = TyCtx::new();
+
+        let res = audited_type_check_tree(&expr, &ctx, ContextId::root());
+        assert_eq!(res, Err(TypeError::Mismatch));
+    }
+
+    #[test]
+    fn test_ctor_unknown_variant() {
+        let opt_ty = Ty::Sum(
+            "Option".into(),
+            vec![
+                ("None".into(), vec![]),
+                ("Some".into(), vec![Ty::Con("Int")]),
+            ],
+        );
+        let expr = Expr::Ctor(opt_ty, "Nope".into(), vec![]);
+        let ctx = TyCtx::new();
+
+        let res = audited_type_check_tree(&expr, &ctx, ContextId::root());
+        assert_eq!(res, Err(TypeError::Mismatch));
+    }
+
+    #[test]
+    fn test_ctor_generator_not_tight() {
+        assert!(!generator_is_tight(&g_ctor()));
+        assert!(!generator_is_tight(&g_ctor_split()));
     }
 }

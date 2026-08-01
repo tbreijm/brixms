@@ -95,6 +95,7 @@ fn fmt_ty(ty: Option<&Ty>) -> String {
                 .collect();
             format!("{{{}}}", elems.join(", "))
         }
+        Some(Ty::Sum(name, _)) => name.clone(),
     }
 }
 
