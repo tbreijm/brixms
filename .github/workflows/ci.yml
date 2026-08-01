@@ -28,6 +28,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
+      - name: Trusted-boundary dependency policy
+        run: |
+          python3 scripts/check_tcb_dependencies.py --check
+          scripts/test_tcb_dependency_gate.sh
       - name: Clippy (warnings are errors)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
