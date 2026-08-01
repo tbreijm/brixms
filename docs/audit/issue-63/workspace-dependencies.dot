@@ -1,0 +1,32 @@
+digraph brixms_workspace {
+  rankdir=LR;
+  node [shape=box];
+  "brix-canon";
+  "brix-cli";
+  "brix-elaborate";
+  "brix-kernel";
+  "brix-lower";
+  "brix-semantic";
+  "brix-syntax";
+  "soc-core";
+  "soc-regimes";
+  "brix-cli" -> "brix-lower";
+  "brix-cli" -> "brix-syntax";
+  "brix-cli" -> "soc-regimes";
+  "brix-elaborate" -> "brix-kernel";
+  "brix-elaborate" -> "brix-semantic";
+  "brix-kernel" -> "brix-canon";
+  "brix-kernel" -> "brix-semantic";
+  "brix-lower" -> "brix-elaborate";
+  "brix-lower" -> "brix-kernel";
+  "brix-lower" -> "brix-semantic";
+  "brix-lower" -> "brix-syntax";
+  "brix-lower" -> "soc-regimes";
+  "brix-semantic" -> "brix-canon";
+  "soc-core" -> "brix-canon";
+  "soc-core" -> "brix-semantic";
+  "soc-regimes" -> "brix-canon";
+  "soc-regimes" -> "brix-elaborate";
+  "soc-regimes" -> "brix-semantic";
+  "soc-regimes" -> "soc-core";
+}

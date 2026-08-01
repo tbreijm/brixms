@@ -1,0 +1,10 @@
+{
+  "workspace_members": ["canon", "semantic", "kernel", "regimes", "core"],
+  "packages": [
+    {"id": "canon", "name": "brix-canon", "dependencies": []},
+    {"id": "semantic", "name": "brix-semantic", "dependencies": [{"name": "brix-canon", "kind": null}]},
+    {"id": "kernel", "name": "brix-kernel", "dependencies": [{"name": "brix-canon", "kind": null}, {"name": "brix-semantic", "kind": null}, {"name": "soc-regimes", "kind": null}]},
+    {"id": "regimes", "name": "soc-regimes", "dependencies": []},
+    {"id": "core", "name": "soc-core", "dependencies": [{"name": "brix-canon", "kind": null}, {"name": "brix-semantic", "kind": null}]}
+  ]
+}
