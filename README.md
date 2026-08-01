@@ -13,6 +13,8 @@ BrixMS is governed by the **SOC constitution**
 foundation document
 [`docs/SOC_core_foundations_revised.tex`](./docs/SOC_core_foundations_revised.tex).
 Read the constitution first; this README is the map to the territory it defines.
+The shared normative obligations and their executable anchors are indexed by
+[`spec/SOC_Semantic_Laws.md`](./spec/SOC_Semantic_Laws.md).
 
 ## The constitution in one screen
 
