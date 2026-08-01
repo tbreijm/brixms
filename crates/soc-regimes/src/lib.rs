@@ -33,6 +33,7 @@
 //!   it was built against was deleted at zero-legacy (N9); native is now the
 //!   sole checker.
 
+pub mod coverage;
 pub mod literal;
 pub mod native;
 pub mod type_realization;
