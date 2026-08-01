@@ -96,6 +96,36 @@ impl ArithOp {
     }
 }
 
+/// Pattern representation for match expressions (ADR-0011 Slice 2).
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum Pattern {
+    Wildcard,
+    Var(String),
+    Ctor(String, Vec<Pattern>),
+}
+
+impl Canonical for Pattern {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        match self {
+            Pattern::Wildcard => {
+                w.write_enum(0, |_w| {});
+            }
+            Pattern::Var(name) => {
+                w.write_enum(1, |w| w.write_str(name));
+            }
+            Pattern::Ctor(variant, subpats) => {
+                w.write_enum(2, |w| {
+                    w.write_str(variant);
+                    w.write_uint(subpats.len() as u64);
+                    for p in subpats {
+                        p.canon_write(w);
+                    }
+                });
+            }
+        }
+    }
+}
+
 /// Expression AST for the native type-realization regime (ADR-0005).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Expr {
@@ -115,6 +145,8 @@ pub enum Expr {
     Arith(ArithOp, Box<Expr>, Box<Expr>),
     /// Sum constructor application (append-only ordinal 9).
     Ctor(Ty, String, Vec<Expr>),
+    /// Pattern match expression (append-only ordinal 10).
+    Match(Box<Expr>, Vec<(Pattern, Expr)>),
 }
 
 impl Canonical for Expr {
@@ -176,6 +208,16 @@ impl Canonical for Expr {
                     w.write_uint(args.len() as u64);
                     for a in args {
                         a.canon_write(w);
+                    }
+                });
+            }
+            Expr::Match(scrutinee, arms) => {
+                w.write_enum(10, |w| {
+                    scrutinee.canon_write(w);
+                    w.write_uint(arms.len() as u64);
+                    for (p, b) in arms {
+                        p.canon_write(w);
+                        b.canon_write(w);
                     }
                 });
             }
@@ -258,6 +300,16 @@ pub fn g_ctor() -> GeneratorId {
 /// Typing-rule generator for constructor splitting (`"type.rule.ctor.split@1"`).
 pub fn g_ctor_split() -> GeneratorId {
     GeneratorId::named("type.rule.ctor.split@1")
+}
+
+/// Typing-rule generator for match expressions (`"type.rule.match@1"`).
+pub fn g_match() -> GeneratorId {
+    GeneratorId::named("type.rule.match@1")
+}
+
+/// Typing-rule generator for match arm splitting (`"type.rule.match.split@1"`).
+pub fn g_match_split() -> GeneratorId {
+    GeneratorId::named("type.rule.match.split@1")
 }
 
 /// Typing-rule generator for float literals (`"type.rule.floatlit@1"`).
@@ -591,6 +643,81 @@ pub enum TypeError {
     /// so it cannot be honestly labelled `Audited`. Arises when a leaf endpoint config
     /// captured at sub-inference time is later refined by unification (ADR-0007 §7 limitation).
     IllFormedDerivation,
+    /// Non-exhaustive match expression with list of uncovered variant names.
+    NonExhaustive(Vec<String>),
+}
+
+/// Binds pattern variables against a scrutinee type under substitution.
+pub fn bind_pattern(
+    pat: &Pattern,
+    scrutinee_ty: &Ty,
+    subst: &BTreeMap<u32, Ty>,
+) -> Result<Vec<(String, Ty)>, TypeError> {
+    match pat {
+        Pattern::Wildcard => Ok(vec![]),
+        Pattern::Var(x) => Ok(vec![(x.clone(), scrutinee_ty.clone())]),
+        Pattern::Ctor(vname, subpats) => {
+            let resolved = resolve(scrutinee_ty, subst);
+            if let Ty::Sum(_sum_name, variants) = resolved {
+                let (_, declared_fields) = variants
+                    .iter()
+                    .find(|(name, _)| name == vname)
+                    .ok_or(TypeError::Mismatch)?;
+                if subpats.len() != declared_fields.len() {
+                    return Err(TypeError::Mismatch);
+                }
+                let mut bindings = Vec::new();
+                for (subp, f_ty) in subpats.iter().zip(declared_fields.iter()) {
+                    match subp {
+                        Pattern::Wildcard => {}
+                        Pattern::Var(x) => {
+                            bindings.push((x.clone(), zonk(f_ty, subst)));
+                        }
+                        Pattern::Ctor(_, _) => {
+                            return Err(TypeError::Unsupported);
+                        }
+                    }
+                }
+                Ok(bindings)
+            } else {
+                Err(TypeError::Mismatch)
+            }
+        }
+    }
+}
+
+/// Checks structural pattern-matrix coverage of match arms against a scrutinee type.
+pub fn check_coverage(
+    scrutinee_ty: &Ty,
+    arms: &[(Pattern, Expr)],
+    subst: &BTreeMap<u32, Ty>,
+) -> Result<(), TypeError> {
+    let resolved = resolve(scrutinee_ty, subst);
+    if let Ty::Sum(_sum_name, variants) = resolved {
+        let mut uncovered: Vec<String> = variants.iter().map(|(vname, _)| vname.clone()).collect();
+        for (pat, _) in arms {
+            match pat {
+                Pattern::Wildcard | Pattern::Var(_) => {
+                    uncovered.clear();
+                }
+                Pattern::Ctor(vname, _) => {
+                    if !variants.iter().any(|(n, _)| n == vname) {
+                        return Err(TypeError::Mismatch);
+                    }
+                    if let Some(pos) = uncovered.iter().position(|n| n == vname) {
+                        uncovered.remove(pos);
+                    }
+                }
+            }
+        }
+        if !uncovered.is_empty() {
+            Err(TypeError::NonExhaustive(uncovered))
+        } else {
+            Ok(())
+        }
+    } else {
+        Err(TypeError::Mismatch)
+    }
 }
 
 /// Immutable inference state containing substitution map and fresh variable counter.
@@ -923,6 +1050,35 @@ pub fn infer(
             } else {
                 Err(TypeError::Mismatch)
             }
+        }
+        Expr::Match(scrutinee, arms) => {
+            let (t_s, d_s, s1) = infer(scrutinee, ctx, st)?;
+            check_coverage(&t_s, arms, &s1.subst)?;
+            let mut deriv = vec![g_match()];
+            deriv.extend(d_s);
+            let mut curr_st = s1;
+            let mut res_ty: Option<Ty> = None;
+            for (pat, body) in arms {
+                let bindings = bind_pattern(pat, &t_s, &curr_st.subst)?;
+                let mut arm_ctx = ctx.clone();
+                for (x, t) in bindings {
+                    arm_ctx = arm_ctx.extend(x, t);
+                }
+                let (t_i, d_i, next_st) = infer(body, &arm_ctx, curr_st)?;
+                deriv.extend(d_i);
+                if let Some(ref r_ty) = res_ty {
+                    let (next_subst, _) = unify(r_ty, &t_i, &next_st.subst)?;
+                    curr_st = Infer {
+                        subst: next_subst,
+                        next_var: next_st.next_var,
+                    };
+                } else {
+                    res_ty = Some(t_i);
+                    curr_st = next_st;
+                }
+            }
+            let result_ty = res_ty.ok_or(TypeError::Mismatch)?;
+            Ok((result_ty, deriv, curr_st))
         }
     }
 }
@@ -1416,6 +1572,68 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             } else {
                 Err(TypeError::Mismatch)
             }
+        }
+        Expr::Match(scrutinee, arms) => {
+            let (t_s, d_s, s1) = infer_tree(scrutinee, ctx, st)?;
+            check_coverage(&t_s, arms, &s1.subst)?;
+            let mut curr_st = s1;
+            let mut parts_exprs = vec![TyObj::Atom(CfgAtom::Expr((**scrutinee).clone()))];
+            let mut parts_derivs = vec![d_s];
+            let mut res_ty: Option<Ty> = None;
+
+            for (pat, body) in arms {
+                let bindings = bind_pattern(pat, &t_s, &curr_st.subst)?;
+                let mut arm_ctx = ctx.clone();
+                for (x, t) in bindings {
+                    arm_ctx = arm_ctx.extend(x, t);
+                }
+                let (t_i, d_i, next_st) = infer_tree(body, &arm_ctx, curr_st)?;
+                parts_exprs.push(TyObj::Atom(CfgAtom::Expr(body.clone())));
+                parts_derivs.push(d_i);
+                if let Some(ref r_ty) = res_ty {
+                    let (next_subst, _) = unify(r_ty, &t_i, &next_st.subst)?;
+                    curr_st = Infer {
+                        subst: next_subst,
+                        next_var: next_st.next_var,
+                    };
+                } else {
+                    res_ty = Some(t_i);
+                    curr_st = next_st;
+                }
+            }
+
+            let result_ty = res_ty.ok_or(TypeError::Mismatch)?;
+            let zonked_t_s = zonk(&t_s, &curr_st.subst);
+            let zonked_t_res = zonk(&result_ty, &curr_st.subst);
+
+            let mut parts_types = vec![TyObj::Atom(CfgAtom::Type(zonked_t_s))];
+            for _ in arms {
+                parts_types.push(TyObj::Atom(CfgAtom::Type(zonked_t_res.clone())));
+            }
+
+            let split = TyTree::Leaf {
+                generator: g_match_split(),
+                src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+                dst: right_nest_prod(parts_exprs),
+            };
+
+            let parts_tensor = right_nest_tensor(parts_derivs);
+
+            let match_leaf = TyTree::Leaf {
+                generator: g_match(),
+                src: right_nest_prod(parts_types),
+                dst: TyObj::Atom(CfgAtom::Type(result_ty.clone())),
+            };
+
+            let tree = TyTree::Seq {
+                left: Box::new(split),
+                right: Box::new(TyTree::Seq {
+                    left: Box::new(parts_tensor),
+                    right: Box::new(match_leaf),
+                }),
+            };
+
+            Ok((result_ty, tree, curr_st))
         }
     }
 }
@@ -2317,5 +2535,146 @@ mod tests {
     fn test_ctor_generator_not_tight() {
         assert!(!generator_is_tight(&g_ctor()));
         assert!(!generator_is_tight(&g_ctor_split()));
+    }
+
+    #[test]
+    fn test_match_opt_some_var_binding_proven() {
+        let opt_ty = Ty::Sum(
+            "Opt".into(),
+            vec![
+                ("None".into(), vec![]),
+                ("Some".into(), vec![Ty::Con("Int")]),
+            ],
+        );
+        // match o { None => 0, Some(k) => k }
+        let expr = Expr::Match(
+            Box::new(Expr::Var("o".into())),
+            vec![
+                (Pattern::Ctor("None".into(), vec![]), Expr::Lit(0)),
+                (
+                    Pattern::Ctor("Some".into(), vec![Pattern::Var("k".into())]),
+                    Expr::Var("k".into()),
+                ),
+            ],
+        );
+        let ctx = TyCtx::new().extend("o", opt_ty);
+        let context = ContextId::root();
+
+        let (ty, _tree, _st) = infer_tree(&expr, &ctx, Infer::new()).expect("infer match opt");
+        assert_eq!(ty, Ty::Con("Int"));
+
+        let (aud, real_tree) =
+            audited_type_check_tree(&expr, &ctx, context).expect("audited match opt");
+        assert_eq!(aud.outcome, Outcome::Audited);
+        assert!(real_tree.well_formed());
+
+        let res = brix_elaborate::elaborate_tree(&aud, &real_tree, Budget::new(2000, 2000));
+        match res {
+            ElaborationResult::Proven { judgement, .. } => {
+                assert_eq!(judgement.outcome, Outcome::Proven);
+            }
+            other => panic!("Expected Proven, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_match_wildcard_catch_all_proven() {
+        let bool_ty = Ty::Sum(
+            "Bool".into(),
+            vec![("True".into(), vec![]), ("False".into(), vec![])],
+        );
+        // match b { True => 1, _ => 0 }
+        let expr = Expr::Match(
+            Box::new(Expr::Var("b".into())),
+            vec![
+                (Pattern::Ctor("True".into(), vec![]), Expr::Lit(1)),
+                (Pattern::Wildcard, Expr::Lit(0)),
+            ],
+        );
+        let ctx = TyCtx::new().extend("b", bool_ty);
+        let context = ContextId::root();
+
+        let (ty, _tree, _st) = infer_tree(&expr, &ctx, Infer::new()).expect("infer match wildcard");
+        assert_eq!(ty, Ty::Con("Int"));
+
+        let (aud, real_tree) =
+            audited_type_check_tree(&expr, &ctx, context).expect("audited match wildcard");
+        assert_eq!(aud.outcome, Outcome::Audited);
+        assert!(real_tree.well_formed());
+
+        let res = brix_elaborate::elaborate_tree(&aud, &real_tree, Budget::new(2000, 2000));
+        match res {
+            ElaborationResult::Proven { judgement, .. } => {
+                assert_eq!(judgement.outcome, Outcome::Proven);
+            }
+            other => panic!("Expected Proven, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_match_non_exhaustive() {
+        let opt_ty = Ty::Sum(
+            "Opt".into(),
+            vec![
+                ("None".into(), vec![]),
+                ("Some".into(), vec![Ty::Con("Int")]),
+            ],
+        );
+        // match o { None => 0 } -> missing Some
+        let expr = Expr::Match(
+            Box::new(Expr::Var("o".into())),
+            vec![(Pattern::Ctor("None".into(), vec![]), Expr::Lit(0))],
+        );
+        let ctx = TyCtx::new().extend("o", opt_ty);
+
+        let res = infer_tree(&expr, &ctx, Infer::new());
+        assert_eq!(
+            res.unwrap_err(),
+            TypeError::NonExhaustive(vec!["Some".into()])
+        );
+    }
+
+    #[test]
+    fn test_match_on_non_sum() {
+        // match (1) { _ => 0 } -> 1 is Int, not a Sum
+        let expr = Expr::Match(
+            Box::new(Expr::Lit(1)),
+            vec![(Pattern::Wildcard, Expr::Lit(0))],
+        );
+        let ctx = TyCtx::new();
+
+        let res = infer_tree(&expr, &ctx, Infer::new());
+        assert_eq!(res.unwrap_err(), TypeError::Mismatch);
+    }
+
+    #[test]
+    fn test_match_generators_not_tight() {
+        assert!(!generator_is_tight(&g_match()));
+        assert!(!generator_is_tight(&g_match_split()));
+    }
+
+    #[test]
+    fn test_nested_ctor_pattern_unsupported() {
+        let opt_ty = Ty::Sum(
+            "Opt".into(),
+            vec![
+                ("None".into(), vec![]),
+                ("Some".into(), vec![Ty::Con("Int")]),
+            ],
+        );
+        let expr = Expr::Match(
+            Box::new(Expr::Var("o".into())),
+            vec![
+                (
+                    Pattern::Ctor("Some".into(), vec![Pattern::Ctor("Some".into(), vec![])]),
+                    Expr::Lit(0),
+                ),
+                (Pattern::Wildcard, Expr::Lit(0)),
+            ],
+        );
+        let ctx = TyCtx::new().extend("o", opt_ty);
+
+        let res = infer_tree(&expr, &ctx, Infer::new());
+        assert_eq!(res.unwrap_err(), TypeError::Unsupported);
     }
 }
