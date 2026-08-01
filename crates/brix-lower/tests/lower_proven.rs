@@ -1,7 +1,7 @@
 use brix_lower::{check_module, LowerError};
 use brix_semantic::Outcome;
 use brix_syntax::parse;
-use soc_regimes::type_realization::Ty as TrTy;
+use soc_regimes::type_realization::{Ty as TrTy, TypeError};
 
 #[test]
 fn test_id_fixture_audited() {
@@ -277,4 +277,67 @@ fn test_sum_config_used_as_record_literal_error() {
         }
         _ => panic!("Expected LowerError::Unsupported, got {:?}", err),
     }
+}
+
+#[test]
+fn test_sum_match_audited() {
+    let src = r#"
+        config Opt = None | Some(Int)
+        let a = match Some(3) { None => 0 Some(k) => k }
+        let b = match None { None => 0 Some(k) => k }
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    assert_eq!(results.len(), 2);
+
+    let res_a = results[0]
+        .as_ref()
+        .expect("let a should lower & type-check");
+    assert_eq!(res_a.name, "a");
+    assert_eq!(res_a.outcome, Outcome::Audited);
+    assert_eq!(res_a.ty, Some(TrTy::Con("Int")));
+
+    let res_b = results[1]
+        .as_ref()
+        .expect("let b should lower & type-check");
+    assert_eq!(res_b.name, "b");
+    assert_eq!(res_b.outcome, Outcome::Audited);
+    assert_eq!(res_b.ty, Some(TrTy::Con("Int")));
+}
+
+#[test]
+fn test_sum_match_non_exhaustive() {
+    let src = r#"
+        config Opt = None | Some(Int)
+        let c = match Some(3) { Some(k) => k }
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    assert_eq!(results.len(), 1);
+
+    let (name, err) = results[0]
+        .as_ref()
+        .expect_err("non-exhaustive match should fail type check");
+    assert_eq!(name, "c");
+    assert_eq!(
+        *err,
+        LowerError::TypeError(TypeError::NonExhaustive(vec!["None".to_string()]))
+    );
+}
+
+#[test]
+fn test_recursive_sum_unregistered() {
+    let src = r#"
+        config Nat = Zero | Succ(Nat)
+        let x = Succ(1)
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    assert_eq!(results.len(), 1);
+
+    let (name, err) = results[0]
+        .as_ref()
+        .expect_err("recursive sum should leave constructors unregistered");
+    assert_eq!(name, "x");
+    assert_eq!(*err, LowerError::Unresolved("Succ".to_string()));
 }
