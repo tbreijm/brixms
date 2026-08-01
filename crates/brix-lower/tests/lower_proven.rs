@@ -72,8 +72,8 @@ fn proving_exhaustive_match_gets_kernel_certified_coverage() {
     let results = check_module(&module);
     let cr = results[0].as_ref().expect("should check");
     assert_eq!(cr.name, "a");
-    // The typing result stays Audited; coverage is a separate, kernel-Proven claim.
-    assert_eq!(cr.outcome, Outcome::Audited);
+    // The typing result is Proven; coverage is a separate, kernel-Proven claim.
+    assert_eq!(cr.outcome, Outcome::Proven);
     assert_eq!(cr.coverage, Some(CoverageOutcome::Proven));
 }
 
@@ -86,6 +86,9 @@ fn proving_exhaustive_with_wildcard_is_not_certified_but_still_checks() {
     let module = parse(src).expect("parse");
     let results = check_module(&module);
     let cr = results[0].as_ref().expect("should check");
+    // The catch-all is structurally exhaustive, but its repeated coproduct
+    // premises are not represented in the realization tree yet. Its type and
+    // distinct coverage certificate therefore both remain below Proven.
     assert_eq!(cr.outcome, Outcome::Audited);
     assert!(matches!(cr.coverage, Some(CoverageOutcome::Unknown(_))));
 }
@@ -97,6 +100,7 @@ fn ordinary_match_has_no_coverage_claim() {
     let module = parse(src).expect("parse");
     let results = check_module(&module);
     let cr = results[0].as_ref().expect("should check");
+    assert_eq!(cr.outcome, Outcome::Proven);
     assert_eq!(cr.coverage, None);
 }
 
@@ -156,7 +160,7 @@ fn test_unresolved_function_call() {
 }
 
 #[test]
-fn test_record_and_field_audited() {
+fn test_record_and_field_proven() {
     let source = r#"
         let p = Item { x: 1, y: 2 }
         let a = p.x
@@ -170,7 +174,7 @@ fn test_record_and_field_audited() {
         .as_ref()
         .expect("let p should lower & type-check successfully");
     assert_eq!(res_p.name, "p");
-    assert_eq!(res_p.outcome, Outcome::Audited);
+    assert_eq!(res_p.outcome, Outcome::Proven);
     assert_eq!(
         res_p.ty,
         Some(TrTy::Record(vec![
@@ -183,7 +187,7 @@ fn test_record_and_field_audited() {
         .as_ref()
         .expect("let a should lower & type-check successfully");
     assert_eq!(res_a.name, "a");
-    assert_eq!(res_a.outcome, Outcome::Audited);
+    assert_eq!(res_a.outcome, Outcome::Proven);
     assert_eq!(res_a.ty, Some(TrTy::Con("Int")));
 }
 
@@ -248,9 +252,9 @@ fn arithmetic_on_string_is_a_type_error() {
 }
 
 #[test]
-fn str_literal_earns_proven_record_and_field_stay_audited() {
-    // The Str literal rests only on the discharged `g_str_lit` → Proven; the
-    // record and field access use undischarged `g_record*`/`g_field` → Audited.
+fn str_literal_record_and_field_earn_proven() {
+    // String literals, nonempty records, and field access all rest only on
+    // discharged introduction/elimination rules.
     let src = "let s = \"hi\"\nlet w = Item { name: \"widget\", base: 10 }\nlet n = w.name\n";
     let module = brix_syntax::parse(src).expect("parse");
     let results = brix_lower::check_module(&module);
@@ -258,8 +262,8 @@ fn str_literal_earns_proven_record_and_field_stay_audited() {
 
     let expected = [
         ("s", Outcome::Proven),
-        ("w", Outcome::Audited),
-        ("n", Outcome::Audited),
+        ("w", Outcome::Proven),
+        ("n", Outcome::Proven),
     ];
     for (r, (name, grade)) in results.iter().zip(expected) {
         let cr = r
@@ -283,7 +287,7 @@ fn test_declared_record_config_success() {
         .as_ref()
         .expect("declared record literal should lower & type-check");
     assert_eq!(check_res.name, "w");
-    assert_eq!(check_res.outcome, Outcome::Audited);
+    assert_eq!(check_res.outcome, Outcome::Proven);
 }
 
 #[test]
@@ -355,7 +359,7 @@ fn test_sum_config_used_as_record_literal_error() {
 }
 
 #[test]
-fn test_sum_match_audited() {
+fn test_sum_match_honest_outcomes() {
     let src = r#"
         config Opt = None | Some(Int)
         let a = match Some(3) { None => 0 Some(k) => k }
@@ -369,13 +373,15 @@ fn test_sum_match_audited() {
         .as_ref()
         .expect("let a should lower & type-check");
     assert_eq!(res_a.name, "a");
-    assert_eq!(res_a.outcome, Outcome::Audited);
+    assert_eq!(res_a.outcome, Outcome::Proven);
     assert_eq!(res_a.ty, Some(TrTy::Con("Int")));
 
     let res_b = results[1]
         .as_ref()
         .expect("let b should lower & type-check");
     assert_eq!(res_b.name, "b");
+    // `None` is a nullary constructor. The current kernel has no zero/unit
+    // introduction, so its source value honestly remains Audited.
     assert_eq!(res_b.outcome, Outcome::Audited);
     assert_eq!(res_b.ty, Some(TrTy::Con("Int")));
 }

@@ -39,8 +39,10 @@ The current L2 implementation fragment supports:
 - **Literals:** Integer (e.g. `42`), String (e.g. `"hi"`), and Float (e.g. `3.14`) literals.
 - **Let Bindings:** `let name = expr` top-level declarations.
 - **Functions & Application:** `fn` definitions, lambdas, and function calls (`Call`), inlined to application `App(Lam, arg)`.
-- **Structural Records & Field Access:** Record construction `Item { a: 1, b: 2 }` and field access `p.a` (evaluated structurally; the config name is currently ignored).
+- **Records & Field Access:** Structural record construction and projection, plus validation of declared record configs for missing and unknown fields.
+- **Finite Sums & Matching:** Primitive-payload sum configs, constructor application, exhaustive `match`, and optional kernel-certified `proving exhaustive` coverage.
 - **Arithmetic:** Operators `+`, `-`, `*`, `/` over a numeric coercion lattice with witnessed `Int ↪ Float` promotion (division `/` yields the field of fractions, `Int / Int → Float`).
+- **Grade Assertions:** `@Proven`, `@Audited`, and `@Derived` assertions checked through the grade lattice; strengthening beyond the earned grade is rejected.
 
 ### Runnable `.brix` Snippets and Exact Output Grades
 
@@ -59,7 +61,7 @@ Output of `brix check`:
   f : Float @Proven
 ```
 
-#### Composite Expressions (Earn `@Audited`)
+#### Composite Expressions (Earn Their Weakest Leaf Grade)
 
 ```brix
 let c = 1 + 2
@@ -74,8 +76,8 @@ let r = double(2)
 Output of `brix check`:
 ```text
   c : Int @Audited
-  p : {a: Int, b: Int} @Audited
-  v : Int @Audited
+  p : {a: Int, b: Int} @Proven
+  v : Int @Proven
   r : Int @Audited
 ```
 
@@ -91,7 +93,7 @@ Brix categorizes statement outcomes using three epistemic grades:
 
 ### Honest Status of Type Checking
 
-The proof kernel certifies the *composition* theorem — GIVEN the primitive typing-rule leaves as generators, the derivation establishes `e : T`. It does NOT yet prove the semantic validity of those leaves themselves (the open "tight-generator soundness obligation"). Therefore the honest grade of a typing RESULT is `@Audited` by default. It is `@Proven` ONLY when every generator in its derivation has been discharged to "tight". So far ONLY the literal introduction rules (integer/string/float literals) are discharged (they are definitional — an introduction rule IS the type's definition). Concretely: `let x = 42` → `x : Int @Proven`; `let s = "hi"` → `s : Str @Proven`; but `let c = 1 + 2` → `c : Int @Audited` (arithmetic generator not discharged), records/fields → `@Audited`, functions/application → `@Audited`.
+The proof kernel certifies the *composition* theorem — GIVEN the primitive typing-rule leaves as generators, the derivation establishes `e : T`. The honest grade is `@Proven` only when every leaf is discharged tight. Literals, the simply typed λ-calculus core, nonempty records/field access, nonnullary constructors, and explicit-constructor matches now meet that condition. Arithmetic remains `@Audited`; so do zero-field records, nullary constructors, and wildcard/variable catch-all matches, whose kernel rules are not yet available or fully represented.
 
 ---
 
@@ -130,16 +132,16 @@ Output of `brix check`:
 
 The following surface features are not yet in the L2 lowering fragment:
 
-- **Named-config resolution:** Record fields are checked structurally; explicit `config` definition matching is deferred.
-- **Pattern matching:** `match` expressions.
 - **Witness composition:** Sequential composition (`then` / $\circ$) and parallel composition (`and` / $\otimes$).
 - **Proof & Explanation Keywords:** `prove`, `why`, and `audit`.
-- **Regime & Rule Declarations:** Surface `config`, `rule`, and `regime` checking.
+- **Regime & Rule Declarations:** Surface `regime`, `gen`, and `rule` checking.
+- **Recursive/Custom Sum Payloads:** Constructor payloads are currently limited to `Int`, `Str`, and `Float`; recursive sums remain deferred.
+- **Full Structural Discharge:** Empty records and nullary constructors require a kernel unit proposition, while wildcard/variable catch-all matches require explicit repeated-branch premises; these forms type-check but remain `@Audited`.
 
 ---
 
 ## 6. Roadmap
 
-- **Generator Discharge:** Discharge primitive typing-rule leaves to "tight", promoting composite typing results from `@Audited` to `@Proven`.
-- **Fragment Expansion:** Add named-config resolution, `match`, and witness composition (`then`/`and`).
+- **Generator Discharge:** Add unit/nullary and catch-all proof schemas, then discharge arithmetic and numeric coercion semantics when value execution exists.
+- **Fragment Expansion:** Add recursive/custom sum payloads and witness composition (`then`/`and`).
 - **Fixpoint Execution:** Introduce L3 `brix run` settlement to evaluate programs to fixpoints.

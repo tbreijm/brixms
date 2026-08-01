@@ -130,17 +130,17 @@ mod tests {
     }
 
     #[test]
-    fn checks_record_and_field_access_to_audited() {
+    fn checks_record_and_field_access_to_proven() {
         let src = "let p = Item { x: 1, y: 2 }\nlet a = p.x\n";
         let (report, had_error) = check_report(src);
         assert!(!had_error, "report: {report}");
         assert!(
-            report.contains("p : {x: Int, y: Int} @Audited"),
-            "expected `p : {{x: Int, y: Int}} @Audited`, got:\n{report}"
+            report.contains("p : {x: Int, y: Int} @Proven"),
+            "expected `p : {{x: Int, y: Int}} @Proven`, got:\n{report}"
         );
         assert!(
-            report.contains("a : Int @Audited"),
-            "expected `a : Int @Audited`, got:\n{report}"
+            report.contains("a : Int @Proven"),
+            "expected `a : Int @Proven`, got:\n{report}"
         );
     }
 
