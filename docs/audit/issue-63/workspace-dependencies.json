@@ -1,0 +1,165 @@
+{
+  "generated_by": "python3 scripts/check_tcb_dependencies.py --write",
+  "production_dependency_closure": {
+    "brix-canon": [
+      "blake3",
+      "indexmap",
+      "unicode-normalization"
+    ],
+    "brix-cli": [
+      "blake3",
+      "brix-canon",
+      "brix-elaborate",
+      "brix-kernel",
+      "brix-lower",
+      "brix-semantic",
+      "brix-syntax",
+      "indexmap",
+      "soc-core",
+      "soc-regimes",
+      "unicode-normalization"
+    ],
+    "brix-elaborate": [
+      "blake3",
+      "brix-canon",
+      "brix-kernel",
+      "brix-semantic",
+      "indexmap",
+      "unicode-normalization"
+    ],
+    "brix-kernel": [
+      "blake3",
+      "brix-canon",
+      "brix-semantic",
+      "indexmap",
+      "unicode-normalization"
+    ],
+    "brix-lower": [
+      "blake3",
+      "brix-canon",
+      "brix-elaborate",
+      "brix-kernel",
+      "brix-semantic",
+      "brix-syntax",
+      "indexmap",
+      "soc-core",
+      "soc-regimes",
+      "unicode-normalization"
+    ],
+    "brix-semantic": [
+      "blake3",
+      "brix-canon",
+      "indexmap",
+      "unicode-normalization"
+    ],
+    "brix-syntax": [],
+    "soc-core": [
+      "blake3",
+      "brix-canon",
+      "brix-semantic",
+      "indexmap",
+      "unicode-normalization"
+    ],
+    "soc-regimes": [
+      "blake3",
+      "brix-canon",
+      "brix-elaborate",
+      "brix-kernel",
+      "brix-semantic",
+      "indexmap",
+      "soc-core",
+      "unicode-normalization"
+    ]
+  },
+  "production_dependency_edges": [
+    {
+      "from": "brix-cli",
+      "to": "brix-lower"
+    },
+    {
+      "from": "brix-cli",
+      "to": "brix-syntax"
+    },
+    {
+      "from": "brix-cli",
+      "to": "soc-regimes"
+    },
+    {
+      "from": "brix-elaborate",
+      "to": "brix-kernel"
+    },
+    {
+      "from": "brix-elaborate",
+      "to": "brix-semantic"
+    },
+    {
+      "from": "brix-kernel",
+      "to": "brix-canon"
+    },
+    {
+      "from": "brix-kernel",
+      "to": "brix-semantic"
+    },
+    {
+      "from": "brix-lower",
+      "to": "brix-elaborate"
+    },
+    {
+      "from": "brix-lower",
+      "to": "brix-kernel"
+    },
+    {
+      "from": "brix-lower",
+      "to": "brix-semantic"
+    },
+    {
+      "from": "brix-lower",
+      "to": "brix-syntax"
+    },
+    {
+      "from": "brix-lower",
+      "to": "soc-regimes"
+    },
+    {
+      "from": "brix-semantic",
+      "to": "brix-canon"
+    },
+    {
+      "from": "soc-core",
+      "to": "brix-canon"
+    },
+    {
+      "from": "soc-core",
+      "to": "brix-semantic"
+    },
+    {
+      "from": "soc-regimes",
+      "to": "brix-canon"
+    },
+    {
+      "from": "soc-regimes",
+      "to": "brix-elaborate"
+    },
+    {
+      "from": "soc-regimes",
+      "to": "brix-semantic"
+    },
+    {
+      "from": "soc-regimes",
+      "to": "soc-core"
+    }
+  ],
+  "schema_version": 1,
+  "source": "cargo metadata --format-version 1 --no-deps",
+  "workspace_crates": [
+    "brix-canon",
+    "brix-cli",
+    "brix-elaborate",
+    "brix-kernel",
+    "brix-lower",
+    "brix-semantic",
+    "brix-syntax",
+    "soc-core",
+    "soc-regimes"
+  ]
+}
