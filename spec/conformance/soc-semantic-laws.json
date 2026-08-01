@@ -114,7 +114,7 @@
         },
         {
           "path": "crates/brix-lower/tests/lower_proven.rs",
-          "tests": ["test_let_lit_earns_proven", "test_id_fixture_audited", "proving_exhaustive_match_gets_kernel_certified_coverage", "proving_exhaustive_with_wildcard_is_not_certified_but_still_checks"]
+          "tests": ["test_let_lit_earns_proven", "test_id_fixture_proven", "proving_exhaustive_match_gets_kernel_certified_coverage", "proving_exhaustive_with_wildcard_is_not_certified_but_still_checks"]
         }
       ],
       "failure_mode": "Preserve rejected, unsupported, context-mismatch, and exhausted states; Unknown never becomes truth or falsity.",
@@ -282,7 +282,7 @@
       "executable_gates": [
         {
           "path": "crates/brix-lower/tests/lower_proven.rs",
-          "tests": ["test_id_fixture_audited", "test_unsupported_construct_negative", "test_unresolved_function_call", "arithmetic_on_string_is_a_type_error", "test_sum_match_audited", "test_sum_match_non_exhaustive"]
+          "tests": ["test_id_fixture_proven", "test_unsupported_construct_negative", "test_unresolved_function_call", "arithmetic_on_string_is_a_type_error", "test_sum_match_honest_outcomes", "test_sum_match_non_exhaustive"]
         },
         {
           "path": "crates/soc-regimes/src/type_realization.rs",

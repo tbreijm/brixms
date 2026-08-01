@@ -169,6 +169,19 @@ pub fn certify_exhaustive(
         })
         .collect();
 
+    // The certified fragment has exactly one handler premise per variant. A
+    // duplicate arm is ordinary-match syntax but is not the canonical coverage
+    // proof shape, so it must not obtain a certificate by silently ignoring a
+    // handler below.
+    for (arm, &variant) in arm_variant.iter().enumerate() {
+        if arm_variant[..arm].contains(&variant) {
+            return CoverageOutcome::Unknown(format!(
+                "duplicate arm for variant '{}' is outside the certified fragment",
+                variants[variant].0
+            ));
+        }
+    }
+
     // For each variant, the first arm that covers it (None ⇒ uncovered).
     let handler_for: Vec<Option<usize>> = (0..n)
         .map(|i| arm_variant.iter().position(|&vi| vi == i))
@@ -257,6 +270,25 @@ mod tests {
             ),
             CoverageOutcome::Proven => panic!("a missing variant must never be Proven"),
         }
+    }
+
+    #[test]
+    fn duplicate_variant_is_not_certified() {
+        let arms = vec![
+            arm("None", vec![]),
+            arm("Some", vec![Pattern::Var("k".into())]),
+            arm("Some", vec![Pattern::Wildcard]),
+        ];
+        let out = certify_exhaustive(
+            &opt_ty(),
+            &arms,
+            ContextId::root(),
+            Budget::new(10_000, 10_000),
+        );
+        assert!(matches!(
+            out,
+            CoverageOutcome::Unknown(reason) if reason.contains("duplicate arm for variant 'Some'")
+        ));
     }
 
     #[test]

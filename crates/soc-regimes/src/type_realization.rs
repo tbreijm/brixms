@@ -282,9 +282,23 @@ pub fn g_record() -> GeneratorId {
     GeneratorId::named("type.rule.record@1")
 }
 
+/// Typing-rule generator for zero-field record literals (`"type.rule.record.empty@1"`).
+///
+/// This remains undischarged: the current kernel profile has binary products but
+/// no terminal/unit proposition, so `{}` is not an instance of product
+/// introduction yet.
+pub fn g_record_empty() -> GeneratorId {
+    GeneratorId::named("type.rule.record.empty@1")
+}
+
 /// Typing-rule generator for record field access (`"type.rule.field@1"`).
 pub fn g_field() -> GeneratorId {
     GeneratorId::named("type.rule.field@1")
+}
+
+/// Typing-rule generator for field-expression decomposition (`"type.rule.field.split@1"`).
+pub fn g_field_split() -> GeneratorId {
+    GeneratorId::named("type.rule.field.split@1")
 }
 
 /// Typing-rule generator for record splitting (`"type.rule.record.split@1"`).
@@ -297,6 +311,14 @@ pub fn g_ctor() -> GeneratorId {
     GeneratorId::named("type.rule.ctor@1")
 }
 
+/// Typing-rule generator for nullary sum constructors (`"type.rule.ctor.nullary@1"`).
+///
+/// This remains undischarged: there is no payload proof to inject, and the
+/// kernel profile has no nullary/zero coproduct introduction rule.
+pub fn g_ctor_nullary() -> GeneratorId {
+    GeneratorId::named("type.rule.ctor.nullary@1")
+}
+
 /// Typing-rule generator for constructor splitting (`"type.rule.ctor.split@1"`).
 pub fn g_ctor_split() -> GeneratorId {
     GeneratorId::named("type.rule.ctor.split@1")
@@ -305,6 +327,16 @@ pub fn g_ctor_split() -> GeneratorId {
 /// Typing-rule generator for match expressions (`"type.rule.match@1"`).
 pub fn g_match() -> GeneratorId {
     GeneratorId::named("type.rule.match@1")
+}
+
+/// Typing-rule generator for a top-level wildcard/variable catch-all match arm
+/// (`"type.rule.match.catchall@1"`).
+///
+/// This remains undischarged. A catch-all arm can stand for several coproduct
+/// branches, but the current realization tree records that arm only once; it
+/// therefore is not yet the kernel's explicit `Case` premise structure.
+pub fn g_match_catchall() -> GeneratorId {
+    GeneratorId::named("type.rule.match.catchall@1")
 }
 
 /// Typing-rule generator for match arm splitting (`"type.rule.match.split@1"`).
@@ -351,22 +383,62 @@ pub fn g_unify() -> GeneratorId {
 /// to "tight" — its soundness established, not merely asserted (the
 /// tight-generator obligation).
 ///
-/// Discharged so far: the **literal introduction rules** `g_lit`/`g_str_lit`/
-/// `g_float_lit`. These are the legitimate *base case* of tightness — an
-/// introduction rule *is* the definition of its type (`42 : Int`, `"…" : Str`,
-/// `1.5 : Float`), so there is nothing beneath it to prove; the rule is the
-/// irreducible axiom that a type theory rests on. Each is emitted at exactly one
-/// site (the corresponding `infer_tree` arm) with a fixed `literal → Con`
-/// endpoint, pinned by `literal_intro_generators_are_faithful` — so declaring it
-/// tight is honest, not a flip.
+/// Discharged:
 ///
-/// Deliberately **not** discharged (they carry real semantic content and get
-/// genuine soundness arguments later): `g_var`/`g_app*`/`g_lam*` (substitution),
-/// `g_arith` + the coercion-edge promotions (operator/embedding semantics),
-/// `g_record*`/`g_field` (products/projection). Programs using any of these stay
-/// `Audited` until it is discharged.
+/// 1. The **literal introduction rules** `g_lit`/`g_str_lit`/`g_float_lit` — an
+///    introduction rule *is* the definition of its type (`42 : Int`), the
+///    irreducible axiom a type theory rests on. Emission-pinned by
+///    `literal_intro_generators_are_faithful`.
+/// 2. The **simply-typed λ-calculus core** `g_var` (hypothesis), `g_lam_intro` /
+///    `g_lam_close` (→I), `g_split` / `g_app2` (→E). These are the *defining
+///    rules* of the STLC — likewise the axiomatic base of the type theory — and
+///    each corresponds directly to a **primitive natural-deduction rule the
+///    proof kernel already accepts as sound**: `g_var` ↔ `Hyp`, `g_lam_*` ↔
+///    `Lam` (→I), `g_split`/`g_app2` ↔ product elimination + `App` (→E, i.e.
+///    modus ponens `(A→B)×A → B`, a kernel theorem — see
+///    `application_rule_is_a_kernel_theorem`). Discharging them is honest: their
+///    realization *is* the kernel's own primitive, not a fresh assertion. As a
+///    result the pure λ-calculus fragment (`id(42)` etc.) reaches genuine
+///    `Proven`.
+///
+/// 3. The **structural product/coproduct fragment**: `g_record*`/`g_field*`
+///    (product introduction/elimination) and `g_ctor*`/`g_match*` (coproduct
+///    introduction/elimination). The `*_split` leaves are the canonical
+///    structural packaging of an expression's premises into the same
+///    right-nested product shape used by the kernel rule; they carry no
+///    operation or representation claim of their own. Their emissions, and the
+///    four corresponding kernel theorems, are pinned by
+///    `structural_generators_are_faithful_kernel_rules`. Consequently records,
+///    field projections, constructors, and well-typed matches made solely from
+///    this fragment can earn `Proven`.
+///    Top-level wildcard/variable catch-all matches are excluded: they emit the
+///    distinct, undischarged `g_match_catchall` until their repeated branch
+///    premises are represented explicitly.
+///
+/// Deliberately **NOT** discharged — these assert *operation/representation*
+/// semantics, not logical rules, and have no established value semantics yet
+/// (they wait for the execution layer): `g_arith` (a primitive operation is
+/// total & type-preserving) and the coercion-edge promotions `g_promote_edge`
+/// (a real numeric embedding). Any program touching an undischarged generator
+/// stays `Audited`; e.g. `1 + 2` remains `Audited` because `g_arith` is not
+/// tight.
 pub fn generator_is_tight(g: &GeneratorId) -> bool {
-    *g == g_lit() || *g == g_str_lit() || *g == g_float_lit()
+    *g == g_lit()
+        || *g == g_str_lit()
+        || *g == g_float_lit()
+        || *g == g_var()
+        || *g == g_lam_intro()
+        || *g == g_lam_close()
+        || *g == g_split()
+        || *g == g_app2()
+        || *g == g_record_split()
+        || *g == g_record()
+        || *g == g_field_split()
+        || *g == g_field()
+        || *g == g_ctor_split()
+        || *g == g_ctor()
+        || *g == g_match_split()
+        || *g == g_match()
 }
 
 /// Whether every leaf generator in an elaborated derivation is discharged tight.
@@ -1016,7 +1088,11 @@ pub fn infer(
             sorted_fields.dedup_by(|a, b| a.0 == b.0);
 
             let mut res_fields = Vec::new();
-            let mut deriv = vec![g_record()];
+            let mut deriv = vec![if sorted_fields.is_empty() {
+                g_record_empty()
+            } else {
+                g_record()
+            }];
             let mut curr_st = st;
             for (name, val) in sorted_fields {
                 let (t_i, d_i, next_st) = infer(&val, ctx, curr_st)?;
@@ -1052,7 +1128,11 @@ pub fn infer(
                     return Err(TypeError::Mismatch);
                 }
                 let declared_fields = declared_fields.clone();
-                let mut deriv = vec![g_ctor()];
+                let mut deriv = vec![if args.is_empty() {
+                    g_ctor_nullary()
+                } else {
+                    g_ctor()
+                }];
                 let mut curr_st = st;
                 for (arg_expr, declared_field_ty) in args.iter().zip(declared_fields.iter()) {
                     let (t_i, d_i, next_st) = infer(arg_expr, ctx, curr_st)?;
@@ -1071,7 +1151,15 @@ pub fn infer(
         Expr::Match(scrutinee, arms) => {
             let (t_s, d_s, s1) = infer(scrutinee, ctx, st)?;
             check_coverage(&t_s, arms, &s1.subst)?;
-            let mut deriv = vec![g_match()];
+            let match_generator = if arms
+                .iter()
+                .any(|(pattern, _)| matches!(pattern, Pattern::Wildcard | Pattern::Var(_)))
+            {
+                g_match_catchall()
+            } else {
+                g_match()
+            };
+            let mut deriv = vec![match_generator];
             deriv.extend(d_s);
             let mut curr_st = s1;
             let mut res_ty: Option<Ty> = None;
@@ -1442,7 +1530,7 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                     dst: TyObj::Atom(CfgAtom::Expr(expr.clone())),
                 };
                 let record_leaf = TyTree::Leaf {
-                    generator: g_record(),
+                    generator: g_record_empty(),
                     src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
                     dst: TyObj::Atom(CfgAtom::Type(rec_ty.clone())),
                 };
@@ -1499,14 +1587,22 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             let zonked_base = zonk(&t_base, &st1.subst);
             if let Ty::Record(fields) = &zonked_base {
                 if let Some((_, t_f)) = fields.iter().find(|(n, _)| n == fname) {
+                    let split = TyTree::Leaf {
+                        generator: g_field_split(),
+                        src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+                        dst: TyObj::Atom(CfgAtom::Expr((**base).clone())),
+                    };
                     let field_leaf = TyTree::Leaf {
                         generator: g_field(),
                         src: TyObj::Atom(CfgAtom::Type(zonked_base.clone())),
                         dst: TyObj::Atom(CfgAtom::Type(t_f.clone())),
                     };
                     let tree = TyTree::Seq {
-                        left: Box::new(d_base),
-                        right: Box::new(field_leaf),
+                        left: Box::new(split),
+                        right: Box::new(TyTree::Seq {
+                            left: Box::new(d_base),
+                            right: Box::new(field_leaf),
+                        }),
                     };
                     Ok((t_f.clone(), tree, st1))
                 } else {
@@ -1534,7 +1630,7 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                         dst: TyObj::Atom(CfgAtom::Expr(expr.clone())),
                     };
                     let ctor_leaf = TyTree::Leaf {
-                        generator: g_ctor(),
+                        generator: g_ctor_nullary(),
                         src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
                         dst: TyObj::Atom(CfgAtom::Type(sum_ty.clone())),
                     };
@@ -1636,8 +1732,16 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
 
             let parts_tensor = right_nest_tensor(parts_derivs);
 
+            let match_generator = if arms
+                .iter()
+                .any(|(pattern, _)| matches!(pattern, Pattern::Wildcard | Pattern::Var(_)))
+            {
+                g_match_catchall()
+            } else {
+                g_match()
+            };
             let match_leaf = TyTree::Leaf {
-                generator: g_match(),
+                generator: match_generator,
                 src: right_nest_prod(parts_types),
                 dst: TyObj::Atom(CfgAtom::Type(result_ty.clone())),
             };
@@ -1686,16 +1790,15 @@ pub fn audited_type_check_tree(
 ) -> Result<(Judgement, RealizesTree), TypeError> {
     let (ty, ty_tree, st) = infer_tree(expr, ctx, Infer::new())?;
     let tree = materialize(&ty_tree, &st.subst);
-    if !tree.well_formed() {
+    let final_ty = zonk(&ty, &st.subst);
+    if !tree.well_formed()
+        || tree.src() != TreeObj::Atom(expr.config_id())
+        || tree.dst() != TreeObj::Atom(final_ty.config_id())
+    {
         return Err(TypeError::IllFormedDerivation);
     }
     let witness_id = tree.witness_object().witness_digest();
-    let prop = Realizes::new(
-        witness_id,
-        expr.config_id(),
-        zonk(&ty, &st.subst).config_id(),
-    )
-    .proposition_id();
+    let prop = Realizes::new(witness_id, expr.config_id(), final_ty.config_id()).proposition_id();
     let evidence = Evidence::SettlementReplay {
         body: brix_canon::Digest::of(brix_canon::Domain::Value, prop.digest().as_bytes()),
     }
@@ -2409,8 +2512,8 @@ mod tests {
             "a discharged literal should earn Proven"
         );
 
-        // `(λx.x) 42` also uses g_var/g_app*/g_lam* (not yet discharged), so its
-        // honest outcome is capped at Audited even though the composition proves.
+        // `(λx.x) 42` rests on the discharged λ-calculus core (g_var/g_lam_*/
+        // g_split/g_app2) + g_lit — all tight — so it now earns Proven too.
         let app = Expr::App(
             Box::new(Expr::Lam(
                 "x".to_string(),
@@ -2422,13 +2525,294 @@ mod tests {
             audited_type_check_tree(&app, &TyCtx::new(), ContextId::root()).unwrap();
         assert_eq!(
             honest_result_outcome(Outcome::Proven, &app_tree),
+            Outcome::Proven,
+            "the discharged λ-calculus core should earn Proven"
+        );
+
+        // `1 + 2` uses g_arith, which asserts operation semantics and is NOT
+        // discharged, so it is honestly capped at Audited.
+        let arith = Expr::Arith(ArithOp::Add, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2)));
+        let (_, arith_tree) =
+            audited_type_check_tree(&arith, &TyCtx::new(), ContextId::root()).unwrap();
+        assert_eq!(
+            honest_result_outcome(Outcome::Proven, &arith_tree),
             Outcome::Audited,
-            "an undischarged generator must cap the result at Audited"
+            "an undischarged operation generator (g_arith) must cap at Audited"
         );
     }
 
     #[test]
-    fn test_ctor_nullary_bool_proven() {
+    fn application_rule_is_a_kernel_theorem() {
+        // Soundness evidence for discharging g_app2: its realization is modus
+        // ponens `((A→B) × A) → B`, a kernel theorem witnessed by λp.(π₁p)(π₂p).
+        use brix_kernel::{ExplicitTerm, Prop, TermKind, Var, Verdict};
+        use brix_semantic::PropositionId;
+
+        let a = Prop::Atom(PropositionId::from_canon(b"A"));
+        let b = Prop::Atom(PropositionId::from_canon(b"B"));
+        let a_to_b = Prop::Impl(Box::new(a.clone()), Box::new(b.clone()));
+        let goal = Prop::Impl(
+            Box::new(Prop::Prod(Box::new(a_to_b), Box::new(a))),
+            Box::new(b),
+        );
+        let term = TermKind::Lam {
+            var_name: Some("p".to_string()),
+            body: Box::new(TermKind::App {
+                function: Box::new(TermKind::Proj1(Box::new(TermKind::Hyp(Var::Named(
+                    "p".to_string(),
+                ))))),
+                argument: Box::new(TermKind::Proj2(Box::new(TermKind::Hyp(Var::Named(
+                    "p".to_string(),
+                ))))),
+            }),
+        };
+        let ctx = ContextId::root();
+        let explicit = ExplicitTerm::new(ctx, term);
+        assert!(
+            matches!(
+                brix_kernel::acceptance(&ctx, &goal, &explicit, Budget::new(1000, 1000)),
+                Verdict::Accepted(_)
+            ),
+            "modus ponens must be a kernel theorem"
+        );
+    }
+
+    #[test]
+    fn structural_generators_are_faithful_kernel_rules() {
+        // The discharged structural rules are precisely the primitive rules the
+        // kernel accepts: product introduction/projection and coproduct
+        // introduction/elimination.  The n-ary Brix forms use right-nested
+        // binary products/coproducts, so the examples below pin that encoding
+        // rather than assuming an n-ary rule in the kernel.
+        use brix_kernel::{ExplicitTerm, Prop, TermKind, Var, Verdict};
+        use brix_semantic::PropositionId;
+
+        let atom = |name| Prop::Atom(PropositionId::from_canon(name));
+        let a = atom(b"A");
+        let b = atom(b"B");
+        let c = atom(b"C");
+        let r = atom(b"R");
+        let ctx = ContextId::root();
+        let accepts = |goal, term| {
+            matches!(
+                brix_kernel::acceptance(
+                    &ctx,
+                    &goal,
+                    &ExplicitTerm::new(ctx, term),
+                    Budget::new(1_000, 1_000),
+                ),
+                Verdict::Accepted(_)
+            )
+        };
+
+        // g_record: A -> B -> A × B (product introduction).
+        let product_intro = Prop::Impl(
+            Box::new(a.clone()),
+            Box::new(Prop::Impl(
+                Box::new(b.clone()),
+                Box::new(Prop::Prod(Box::new(a.clone()), Box::new(b.clone()))),
+            )),
+        );
+        assert!(accepts(
+            product_intro,
+            TermKind::Lam {
+                var_name: Some("a".into()),
+                body: Box::new(TermKind::Lam {
+                    var_name: Some("b".into()),
+                    body: Box::new(TermKind::Pair {
+                        fst: Box::new(TermKind::Hyp(Var::Named("a".into()))),
+                        snd: Box::new(TermKind::Hyp(Var::Named("b".into()))),
+                    }),
+                }),
+            },
+        ));
+
+        // g_field: the final field of A × (B × C) is selected with the
+        // right-nested product projection π₂(π₂ p).
+        let nested_product = Prop::Prod(
+            Box::new(a.clone()),
+            Box::new(Prop::Prod(Box::new(b.clone()), Box::new(c.clone()))),
+        );
+        assert!(accepts(
+            Prop::Impl(Box::new(nested_product), Box::new(c.clone())),
+            TermKind::Lam {
+                var_name: Some("p".into()),
+                body: Box::new(TermKind::Proj2(Box::new(TermKind::Proj2(Box::new(
+                    TermKind::Hyp(Var::Named("p".into())),
+                ))))),
+            },
+        ));
+
+        // g_ctor: inject the middle alternative into A + (B + C), matching
+        // Brix's right-nested nominal-sum representation.
+        let nested_sum = Prop::Sum(
+            Box::new(a.clone()),
+            Box::new(Prop::Sum(Box::new(b.clone()), Box::new(c.clone()))),
+        );
+        assert!(accepts(
+            Prop::Impl(Box::new(b.clone()), Box::new(nested_sum.clone())),
+            TermKind::Lam {
+                var_name: Some("b".into()),
+                body: Box::new(TermKind::Inr(Box::new(TermKind::Inl(Box::new(
+                    TermKind::Hyp(Var::Named("b".into())),
+                ))))),
+            },
+        ));
+
+        // g_match: (A -> R) -> (B -> R) -> (A + B -> R), the kernel's
+        // coproduct eliminator. Pattern coverage is deliberately separate: a
+        // `proving exhaustive` annotation may still have no coverage
+        // certificate even when ordinary match typing is `Proven`.
+        let match_elim = Prop::Impl(
+            Box::new(Prop::Impl(Box::new(a.clone()), Box::new(r.clone()))),
+            Box::new(Prop::Impl(
+                Box::new(Prop::Impl(Box::new(b.clone()), Box::new(r.clone()))),
+                Box::new(Prop::Impl(
+                    Box::new(Prop::Sum(Box::new(a.clone()), Box::new(b.clone()))),
+                    Box::new(r),
+                )),
+            )),
+        );
+        assert!(accepts(
+            match_elim,
+            TermKind::Lam {
+                var_name: Some("ha".into()),
+                body: Box::new(TermKind::Lam {
+                    var_name: Some("hb".into()),
+                    body: Box::new(TermKind::Lam {
+                        var_name: Some("s".into()),
+                        body: Box::new(TermKind::Case {
+                            discriminant: Box::new(TermKind::Hyp(Var::Named("s".into()))),
+                            left_var: Some("x".into()),
+                            left_body: Box::new(TermKind::App {
+                                function: Box::new(TermKind::Hyp(Var::Named("ha".into()))),
+                                argument: Box::new(TermKind::Hyp(Var::Named("x".into()))),
+                            }),
+                            right_var: Some("y".into()),
+                            right_body: Box::new(TermKind::App {
+                                function: Box::new(TermKind::Hyp(Var::Named("hb".into()))),
+                                argument: Box::new(TermKind::Hyp(Var::Named("y".into()))),
+                            }),
+                        }),
+                    }),
+                }),
+            },
+        ));
+
+        // The empty record and a nullary constructor are intentionally NOT
+        // smuggled into those binary rules: Profile 1.2 lacks unit/zero rules.
+        fn has_leaf(tree: &RealizesTree, want: &GeneratorId) -> bool {
+            match tree {
+                RealizesTree::Leaf { generator, .. } => generator == want,
+                RealizesTree::Seq { left, right } | RealizesTree::Tensor { left, right } => {
+                    has_leaf(left, want) || has_leaf(right, want)
+                }
+            }
+        }
+
+        let empty_record = Expr::Record(vec![]);
+        let (_, empty_tree) =
+            audited_type_check_tree(&empty_record, &TyCtx::new(), ctx).expect("empty record");
+        assert!(has_leaf(&empty_tree, &g_record_empty()));
+        assert_eq!(
+            honest_result_outcome(Outcome::Proven, &empty_tree),
+            Outcome::Audited
+        );
+
+        let bool_ty = Ty::Sum(
+            "Bool".into(),
+            vec![("True".into(), vec![]), ("False".into(), vec![])],
+        );
+        let nullary_ctor = Expr::Ctor(bool_ty, "True".into(), vec![]);
+        let (_, nullary_tree) =
+            audited_type_check_tree(&nullary_ctor, &TyCtx::new(), ctx).expect("nullary ctor");
+        assert!(has_leaf(&nullary_tree, &g_ctor_nullary()));
+        assert_eq!(
+            honest_result_outcome(Outcome::Proven, &nullary_tree),
+            Outcome::Audited
+        );
+    }
+
+    #[test]
+    fn structural_tree_endpoints_match_the_checked_expression() {
+        // The tree handed to elaboration must prove exactly the same source and
+        // target as the audited typing claim. In particular, field projection
+        // needs an explicit `g_field_split`: without it the old tree began at
+        // the base expression rather than at `base.field`.
+        let assert_endpoints = |expr: Expr, ctx: TyCtx| {
+            let (ty, _tree, state) = infer_tree(&expr, &ctx, Infer::new()).expect("infer");
+            let expected_src = TreeObj::Atom(expr.config_id());
+            let expected_dst = TreeObj::Atom(zonk(&ty, &state.subst).config_id());
+            let (_audited, tree) =
+                audited_type_check_tree(&expr, &ctx, ContextId::root()).expect("audited");
+            assert_eq!(tree.src(), expected_src, "wrong tree source for {expr:?}");
+            assert_eq!(tree.dst(), expected_dst, "wrong tree target for {expr:?}");
+        };
+
+        assert_endpoints(Expr::Record(vec![("x".into(), Expr::Lit(1))]), TyCtx::new());
+        assert_endpoints(
+            Expr::Record(vec![("x".into(), Expr::Lit(1)), ("y".into(), Expr::Lit(2))]),
+            TyCtx::new(),
+        );
+        assert_endpoints(
+            Expr::Field(Box::new(Expr::Var("r".into())), "x".into()),
+            TyCtx::new().extend("r", Ty::Record(vec![("x".into(), Ty::Con("Int"))])),
+        );
+
+        let opt = Ty::Sum(
+            "Opt".into(),
+            vec![
+                ("None".into(), vec![]),
+                ("Some".into(), vec![Ty::Con("Int")]),
+            ],
+        );
+        assert_endpoints(
+            Expr::Ctor(opt.clone(), "Some".into(), vec![Expr::Lit(1)]),
+            TyCtx::new(),
+        );
+        let pair = Ty::Sum(
+            "Pair".into(),
+            vec![("MkPair".into(), vec![Ty::Con("Int"), Ty::Con("Str")])],
+        );
+        assert_endpoints(
+            Expr::Ctor(
+                pair,
+                "MkPair".into(),
+                vec![Expr::Lit(1), Expr::StrLit("x".into())],
+            ),
+            TyCtx::new(),
+        );
+        assert_endpoints(
+            Expr::Match(
+                Box::new(Expr::Var("o".into())),
+                vec![
+                    (Pattern::Ctor("None".into(), vec![]), Expr::Lit(0)),
+                    (
+                        Pattern::Ctor("Some".into(), vec![Pattern::Var("n".into())]),
+                        Expr::Var("n".into()),
+                    ),
+                ],
+            ),
+            TyCtx::new().extend("o", opt),
+        );
+        let bool_ty = Ty::Sum(
+            "Bool".into(),
+            vec![("True".into(), vec![]), ("False".into(), vec![])],
+        );
+        assert_endpoints(
+            Expr::Match(
+                Box::new(Expr::Var("b".into())),
+                vec![
+                    (Pattern::Ctor("True".into(), vec![]), Expr::Lit(1)),
+                    (Pattern::Wildcard, Expr::Lit(0)),
+                ],
+            ),
+            TyCtx::new().extend("b", bool_ty),
+        );
+    }
+
+    #[test]
+    fn test_ctor_nullary_bool_stays_audited() {
         let bool_ty = Ty::Sum(
             "Bool".into(),
             vec![("True".into(), vec![]), ("False".into(), vec![])],
@@ -2444,6 +2828,11 @@ mod tests {
         let (aud, tree) =
             audited_type_check_tree(&expr, &ctx, context).expect("audited ctor nullary");
         assert_eq!(aud.outcome, Outcome::Audited);
+        assert_eq!(
+            honest_result_outcome(Outcome::Proven, &tree),
+            Outcome::Audited,
+            "nullary constructor lacks a kernel zero/unit introduction rule"
+        );
         assert!(tree.well_formed());
 
         let res = brix_elaborate::elaborate_tree(&aud, &tree, Budget::new(1000, 1000));
@@ -2549,9 +2938,28 @@ mod tests {
     }
 
     #[test]
-    fn test_ctor_generator_not_tight() {
-        assert!(!generator_is_tight(&g_ctor()));
-        assert!(!generator_is_tight(&g_ctor_split()));
+    fn structural_generators_are_tight() {
+        for generator in [
+            g_record_split(),
+            g_record(),
+            g_field_split(),
+            g_field(),
+            g_ctor_split(),
+            g_ctor(),
+            g_match_split(),
+            g_match(),
+        ] {
+            assert!(
+                generator_is_tight(&generator),
+                "{generator:?} should be discharged"
+            );
+        }
+        for generator in [g_record_empty(), g_ctor_nullary(), g_match_catchall()] {
+            assert!(
+                !generator_is_tight(&generator),
+                "{generator:?} must remain undischarged"
+            );
+        }
     }
 
     #[test]
@@ -2595,7 +3003,7 @@ mod tests {
     }
 
     #[test]
-    fn test_match_wildcard_catch_all_proven() {
+    fn test_match_wildcard_catch_all_stays_audited() {
         let bool_ty = Ty::Sum(
             "Bool".into(),
             vec![("True".into(), vec![]), ("False".into(), vec![])],
@@ -2617,6 +3025,11 @@ mod tests {
         let (aud, real_tree) =
             audited_type_check_tree(&expr, &ctx, context).expect("audited match wildcard");
         assert_eq!(aud.outcome, Outcome::Audited);
+        assert_eq!(
+            honest_result_outcome(Outcome::Proven, &real_tree),
+            Outcome::Audited,
+            "a catch-all arm is not yet represented as explicit Case premises"
+        );
         assert!(real_tree.well_formed());
 
         let res = brix_elaborate::elaborate_tree(&aud, &real_tree, Budget::new(2000, 2000));
@@ -2662,12 +3075,6 @@ mod tests {
 
         let res = infer_tree(&expr, &ctx, Infer::new());
         assert_eq!(res.unwrap_err(), TypeError::Mismatch);
-    }
-
-    #[test]
-    fn test_match_generators_not_tight() {
-        assert!(!generator_is_tight(&g_match()));
-        assert!(!generator_is_tight(&g_match_split()));
     }
 
     #[test]

@@ -399,13 +399,14 @@ The current executable path makes the distinction visible:
    That kernel certificate is genuinely `Proven` as a proposition about the
    supplied premises, but SOC-LAW-02/04 forbid laundering it into an
    unconditional typing result.
-5. `honest_result_outcome` inspects leaf discharge. `literal` rests only on the
-   discharged tight literal generator, so its final contextual typing result is
-   `@Proven`. `through_id` also uses undischarged application/lambda/variable
-   generators, so its final result remains `@Audited` even though the kernel
-   accepted the conditional composition term.
+5. `honest_result_outcome` inspects leaf discharge. Literals, the STLC core,
+   and the nonempty product/coproduct typing schemas rest only on discharged
+   tight generators, so their final contextual typing results can be
+   `@Proven`. Arithmetic, zero-field records, nullary constructors, and
+   wildcard/variable catch-all matches retain undischarged leaves and remain
+   `@Audited` even though the kernel accepts their conditional composition term.
 
-The fixtures `test_let_lit_earns_proven`, `test_id_fixture_audited`,
+The fixtures `test_let_lit_earns_proven`, `test_id_fixture_proven`,
 `literal_equality_derives_then_audits_the_reflexive_witness`, and
 `test_b3_end_to_end_audited_decomposition_to_proven` pin the four distinct
 steps. They do not close #228's publisher API gap, #59's context semantics, or
@@ -421,11 +422,12 @@ let selected = match Some(3) {
 } proving exhaustive
 ```
 
-Here the match typing result is `@Audited`, while the separate coverage
-proposition is `@Proven` because the kernel independently accepts the closed-
-sum eliminator. Removing `None` makes coverage non-provable; using the currently
-unsupported wildcard certificate shape yields `CoverageOutcome::Unknown` even
-though ordinary structural coverage can still type-check. The fixtures
+Here the explicit-constructor match typing result is `@Proven`, while the
+separate coverage proposition is independently `@Proven` because the kernel
+accepts the closed-sum eliminator. Removing `None` makes coverage non-provable;
+using the currently unsupported wildcard certificate shape yields
+`CoverageOutcome::Unknown`, and its catch-all typing leaf remains `@Audited`.
+The fixtures
 `proving_exhaustive_match_gets_kernel_certified_coverage`,
 `missing_variant_is_not_certified`, and
 `wildcard_is_outside_the_certified_fragment` make that separation executable.
