@@ -1,7 +1,7 @@
 use brix_lower::{check_module, LowerError};
 use brix_semantic::Outcome;
 use brix_syntax::parse;
-use soc_regimes::type_realization::Ty as TrTy;
+use soc_regimes::type_realization::{Ty as TrTy, TypeError};
 
 #[test]
 fn test_id_fixture_audited() {
@@ -61,6 +61,42 @@ fn test_unsupported_construct_negative() {
         }
         _ => panic!("Expected LowerError::Unsupported, got {:?}", err),
     }
+}
+
+#[test]
+fn proving_exhaustive_match_gets_kernel_certified_coverage() {
+    use brix_lower::CoverageOutcome;
+    let src = "config Opt = None | Some(Int)\nlet a = match Some(3) {\n  None => 0\n  Some(k) => k\n} proving exhaustive\n";
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    let cr = results[0].as_ref().expect("should check");
+    assert_eq!(cr.name, "a");
+    // The typing result stays Audited; coverage is a separate, kernel-Proven claim.
+    assert_eq!(cr.outcome, Outcome::Audited);
+    assert_eq!(cr.coverage, Some(CoverageOutcome::Proven));
+}
+
+#[test]
+fn proving_exhaustive_with_wildcard_is_not_certified_but_still_checks() {
+    use brix_lower::CoverageOutcome;
+    // A wildcard is structurally exhaustive (ordinary match is fine) but is
+    // outside the certified fragment → coverage Unknown, never a false Proven.
+    let src = "config Opt = None | Some(Int)\nlet a = match Some(3) {\n  Some(k) => k\n  _ => 0\n} proving exhaustive\n";
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    let cr = results[0].as_ref().expect("should check");
+    assert_eq!(cr.outcome, Outcome::Audited);
+    assert!(matches!(cr.coverage, Some(CoverageOutcome::Unknown(_))));
+}
+
+#[test]
+fn ordinary_match_has_no_coverage_claim() {
+    let src =
+        "config Opt = None | Some(Int)\nlet a = match Some(3) {\n  None => 0\n  Some(k) => k\n}\n";
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    let cr = results[0].as_ref().expect("should check");
+    assert_eq!(cr.coverage, None);
 }
 
 #[test]
@@ -277,4 +313,67 @@ fn test_sum_config_used_as_record_literal_error() {
         }
         _ => panic!("Expected LowerError::Unsupported, got {:?}", err),
     }
+}
+
+#[test]
+fn test_sum_match_audited() {
+    let src = r#"
+        config Opt = None | Some(Int)
+        let a = match Some(3) { None => 0 Some(k) => k }
+        let b = match None { None => 0 Some(k) => k }
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    assert_eq!(results.len(), 2);
+
+    let res_a = results[0]
+        .as_ref()
+        .expect("let a should lower & type-check");
+    assert_eq!(res_a.name, "a");
+    assert_eq!(res_a.outcome, Outcome::Audited);
+    assert_eq!(res_a.ty, Some(TrTy::Con("Int")));
+
+    let res_b = results[1]
+        .as_ref()
+        .expect("let b should lower & type-check");
+    assert_eq!(res_b.name, "b");
+    assert_eq!(res_b.outcome, Outcome::Audited);
+    assert_eq!(res_b.ty, Some(TrTy::Con("Int")));
+}
+
+#[test]
+fn test_sum_match_non_exhaustive() {
+    let src = r#"
+        config Opt = None | Some(Int)
+        let c = match Some(3) { Some(k) => k }
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    assert_eq!(results.len(), 1);
+
+    let (name, err) = results[0]
+        .as_ref()
+        .expect_err("non-exhaustive match should fail type check");
+    assert_eq!(name, "c");
+    assert_eq!(
+        *err,
+        LowerError::TypeError(TypeError::NonExhaustive(vec!["None".to_string()]))
+    );
+}
+
+#[test]
+fn test_recursive_sum_unregistered() {
+    let src = r#"
+        config Nat = Zero | Succ(Nat)
+        let x = Succ(1)
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    assert_eq!(results.len(), 1);
+
+    let (name, err) = results[0]
+        .as_ref()
+        .expect_err("recursive sum should leave constructors unregistered");
+    assert_eq!(name, "x");
+    assert_eq!(*err, LowerError::Unresolved("Succ".to_string()));
 }

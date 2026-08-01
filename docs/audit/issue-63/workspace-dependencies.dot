@@ -27,6 +27,7 @@ digraph brixms_workspace {
   "soc-core" -> "brix-semantic";
   "soc-regimes" -> "brix-canon";
   "soc-regimes" -> "brix-elaborate";
+  "soc-regimes" -> "brix-kernel";
   "soc-regimes" -> "brix-semantic";
   "soc-regimes" -> "soc-core";
 }

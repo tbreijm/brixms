@@ -11,9 +11,9 @@ soc-core = { path = "../soc-core" }
 brix-semantic = { workspace = true }
 brix-canon = { workspace = true }
 brix-elaborate = { path = "../brix-elaborate" }
+brix-kernel = { path = "../brix-kernel" }
 
 [dev-dependencies]
-brix-kernel = { path = "../brix-kernel" }
 
 [lints]
 workspace = true

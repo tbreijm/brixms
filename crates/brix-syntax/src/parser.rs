@@ -476,7 +476,12 @@ impl Parser {
                     arms.push(self.parse_match_arm()?);
                 }
                 self.consume(TokenKind::CloseBrace, "match body '}'")?;
-                Ok(Expr::Match { scrutinee, arms })
+                let proving_exhaustive = self.parse_optional_proving_exhaustive()?;
+                Ok(Expr::Match {
+                    scrutinee,
+                    arms,
+                    proving_exhaustive,
+                })
             }
             TokenKind::OpenParen => {
                 self.advance();
@@ -510,6 +515,28 @@ impl Parser {
                 }
             }
             other => Err(self.error(format!("Unexpected token {:?} in expression", other))),
+        }
+    }
+
+    /// Optionally consume a trailing `proving exhaustive` after a match
+    /// block's closing `}`. `proving`/`exhaustive` are contextual — plain
+    /// identifiers everywhere else — so this only looks for them in this
+    /// specific post-match position and never reserves the words.
+    fn parse_optional_proving_exhaustive(&mut self) -> Result<bool, ParseError> {
+        let is_proving = matches!(self.peek(), TokenKind::Ident(id) if id == "proving");
+        if !is_proving {
+            return Ok(false);
+        }
+        self.advance();
+        match self.peek() {
+            TokenKind::Ident(id) if id == "exhaustive" => {
+                self.advance();
+                Ok(true)
+            }
+            other => Err(self.error(format!(
+                "Expected 'exhaustive' after 'proving', found {:?}",
+                other
+            ))),
         }
     }
 

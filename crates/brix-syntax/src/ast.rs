@@ -154,10 +154,15 @@ pub enum Expr {
         lhs: Box<Expr>,
         rhs: Box<Expr>,
     },
-    /// `match e { pat => e, … }`.
+    /// `match e { pat => e, … } [proving exhaustive]`.
     Match {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
+        /// `true` when the source wrote `proving exhaustive` after the match
+        /// block — a request that exhaustiveness be kernel-certified.
+        /// Semantics (coverage checking) are handled downstream; this field
+        /// only carries the surface request.
+        proving_exhaustive: bool,
     },
     /// `prove e` — power-user: elaborate to the kernel → a `@Proven` value.
     Prove(Box<Expr>),
