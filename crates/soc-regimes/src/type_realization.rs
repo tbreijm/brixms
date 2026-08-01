@@ -552,6 +552,23 @@ pub static GRADE: CoercionLattice = CoercionLattice {
     generator_prefix: "epistemic.grade.weaken",
 };
 
+/// Whether an *actual* epistemic grade satisfies an *asserted* one (both as
+/// GRADE-lattice node names `"Derived"`/`"Audited"`/`"Proven"`).
+///
+/// A grade assertion is discharged iff the actual grade may **safely weaken** to
+/// the assertion along the GRADE coercion lattice (`Proven ↪ Audited ↪
+/// Derived`): you may assert a *weaker-or-equal* grade than you earned
+/// (downgrade is free), but asserting a *stronger* grade has no up-path — that is
+/// **epistemic erasure** and fails. An `actual` outside the lattice (e.g.
+/// `Unknown`) satisfies nothing.
+pub fn grade_assertion_satisfied(actual: &str, asserted: &str) -> bool {
+    match (GRADE.node(actual), GRADE.node(asserted)) {
+        (Some(a), Some(b)) => GRADE.le(a, b),
+        // An unknown grade name (e.g. a non-grade outcome) satisfies nothing.
+        _ => false,
+    }
+}
+
 /// The least numeric *field* (closed under division) at or above `name`. The
 /// exact field of fractions of `Nat`/`Int` is `Rat`; here it is `Float`, the
 /// reachable representation (a fuller tower would return `Rat`).
