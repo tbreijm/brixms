@@ -142,6 +142,10 @@
     },
     {
       "from": "soc-regimes",
+      "to": "brix-kernel"
+    },
+    {
+      "from": "soc-regimes",
       "to": "brix-semantic"
     },
     {
