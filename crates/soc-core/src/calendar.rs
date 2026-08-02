@@ -94,6 +94,21 @@ pub struct KeyConflict<V> {
     pub attempted: V,
 }
 
+/// Why a transactional [`Frontier::apply_delta`] was rejected. On any of these
+/// the frontier is left **exactly as it was** (the delta is staged on a copy
+/// and only published if every operation succeeds — ADR-0012 §2.6).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum FrontierDeltaError<V> {
+    /// A removal named a key that is not present.
+    RemoveMissing(Key),
+    /// A removal named a key present with a *different* value than expected
+    /// (a stale caller expectation — an integrity failure, not a no-op).
+    RemoveMismatch(KeyConflict<V>),
+    /// An addition collided with an existing, different value at its key
+    /// (the B^uk unique-key discipline — see [`KeyConflict`]).
+    InsertConflict(KeyConflict<V>),
+}
+
 /// The unique-key deliberation frontier `B^uk_{K,O}` for one tick: a
 /// `BTreeMap<Key, V>` (deterministic — Ring0 §0, never a `HashMap`) where
 /// [`Frontier::insert`] enforces the B^uk invariant ("duplicate key ⇒ same
@@ -118,6 +133,15 @@ impl<V> Frontier<V> {
     /// Number of distinct keys currently in the frontier.
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Non-mutating [`select_least`](Self::select_least): the globally least
+    /// key/value pair *without* removing it, or `None` if empty. Required by
+    /// the L3 adapter (ADR-0012 §2.6, §4.7), which peeks the least candidate,
+    /// computes its prospective successor, and only removes it once its commit
+    /// succeeds.
+    pub fn peek_least(&self) -> Option<(&Key, &V)> {
+        self.entries.first_key_value()
     }
 
     /// Whether the frontier holds no candidates.
@@ -158,6 +182,55 @@ impl<V: Clone + PartialEq> Frontier<V> {
                 attempted: value,
             }),
         }
+    }
+
+    /// Atomically apply a candidate delta: first remove each `(key, expected)`
+    /// (each key must be present **and equal** to `expected`), then insert each
+    /// addition under the same B^uk discipline as [`insert`](Self::insert)
+    /// (idempotent on an equal existing value, `InsertConflict` on a different
+    /// one). The whole delta is staged on a private copy and only published if
+    /// **every** operation succeeds; on any error the frontier is left exactly
+    /// as it was. This is the L3 adapter's committed-step frontier maintenance
+    /// (ADR-0012 §2.6, §4.7): a committed head candidate is removed and at most
+    /// one successor candidate inserted, transactionally.
+    pub fn apply_delta(
+        &mut self,
+        removals: &[(Key, V)],
+        additions: &[(Key, V)],
+    ) -> Result<(), FrontierDeltaError<V>> {
+        let mut staged = self.entries.clone();
+        for (key, expected) in removals {
+            match staged.get(key) {
+                Some(v) if v == expected => {
+                    staged.remove(key);
+                }
+                Some(v) => {
+                    return Err(FrontierDeltaError::RemoveMismatch(KeyConflict {
+                        key: *key,
+                        existing: v.clone(),
+                        attempted: expected.clone(),
+                    }));
+                }
+                None => return Err(FrontierDeltaError::RemoveMissing(*key)),
+            }
+        }
+        for (key, value) in additions {
+            match staged.get(key) {
+                None => {
+                    staged.insert(*key, value.clone());
+                }
+                Some(v) if v == value => {}
+                Some(v) => {
+                    return Err(FrontierDeltaError::InsertConflict(KeyConflict {
+                        key: *key,
+                        existing: v.clone(),
+                        attempted: value.clone(),
+                    }));
+                }
+            }
+        }
+        self.entries = staged;
+        Ok(())
     }
 
     /// `select_K`: pop and return the frontier's globally least key/value
@@ -252,5 +325,36 @@ mod tests {
         expected.write_bytes(digest("t").as_bytes());
 
         assert_eq!(got.finish(), expected.finish());
+    }
+
+    #[test]
+    fn peek_least_returns_the_least_without_removing() {
+        let mut f = Frontier::new();
+        f.insert(Key::new(0, 1, digest("b")), "b").unwrap();
+        f.insert(Key::new(0, 0, digest("a")), "a").unwrap();
+        assert_eq!(f.peek_least().map(|(_, v)| *v), Some("a"));
+        assert_eq!(f.len(), 2, "peek must not remove");
+        // The subsequently-selected least is still the same value.
+        assert_eq!(f.select_least().map(|(_, v)| v), Some("a"));
+    }
+
+    #[test]
+    fn apply_delta_is_transactional_and_rolls_back() {
+        let ka = Key::new(0, 0, digest("a"));
+        let kb = Key::new(0, 1, digest("b"));
+        let kc = Key::new(0, 2, digest("c"));
+        let mut f = Frontier::new();
+        f.insert(ka, "a").unwrap();
+
+        // Remove a, add b — succeeds atomically.
+        f.apply_delta(&[(ka, "a")], &[(kb, "b")]).unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f.peek_least().map(|(_, v)| *v), Some("b"));
+
+        // A delta whose removal is now stale fails and leaves f UNCHANGED.
+        let err = f.apply_delta(&[(ka, "a")], &[(kc, "c")]).unwrap_err();
+        assert!(matches!(err, FrontierDeltaError::RemoveMissing(_)));
+        assert_eq!(f.len(), 1, "a failed delta must not mutate");
+        assert_eq!(f.peek_least().map(|(_, v)| *v), Some("b"));
     }
 }
