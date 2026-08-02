@@ -1,7 +1,8 @@
 //! Total, strictly-terminating bidirectional proof-term acceptance checker (ADR-0003 §4, §5).
 
-use brix_semantic::{CertificateId, ContextId, PropositionId, VerifierId};
+use brix_semantic::{ContextId, PropositionId};
 
+use crate::certificate::{certificate_id_v1, native_verifier, CertificateMaterialV1};
 use crate::term::{instantiate, ExplicitTerm, ObjectTerm, Prop, TermKind, Var};
 use crate::verdict::{
     Certificate, RejectionReason, ResourceBudgetReason, UnsupportedConstruct, Verdict,
@@ -88,16 +89,14 @@ pub fn acceptance(
 
     // 2. Bidirectional type check of term against proposition
     match check_type(&mut state, &mut gamma, &term.kind, proposition) {
-        Ok(()) => {
-            let cert_payload = format!("{context:?}:{proposition:?}:{term:?}");
-            let certificate_id = CertificateId::from_canon(cert_payload.as_bytes());
-            let verifier = VerifierId::named("brix.kernel@0.1");
-
-            Verdict::Accepted(Certificate {
-                verifier,
-                certificate_id,
-            })
-        }
+        Ok(()) => Verdict::Accepted(Certificate {
+            verifier: native_verifier(),
+            certificate_id: certificate_id_v1(&CertificateMaterialV1::new(
+                context,
+                proposition,
+                term,
+            )),
+        }),
         Err(verdict) => verdict,
     }
 }

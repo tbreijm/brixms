@@ -184,6 +184,8 @@ pub struct Certificate {
 
 No Lean adapter is built in this phase; the interface is strictly adapter-ready.
 
+The `CertificateId` payload is deliberately left to each kernel. The **native** kernel's payload is pinned by [ADR-0013](./ADR-0013_Canonical_Certificate_Envelope.md) as a versioned canonical envelope over `(marker, version, profile, verifier, context, proposition, explicit term)`, frozen by `vectors/kernel_certificate_v1.json`.
+
 ---
 
 ## 7. First Theorem Target: Decomposition-Validity

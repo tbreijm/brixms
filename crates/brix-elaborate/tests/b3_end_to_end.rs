@@ -2,8 +2,8 @@ use brix_canon::{CanonWriter, Digest, Domain};
 use brix_elaborate::{elaborate_decomposition, ElaborationResult};
 use brix_kernel::Budget;
 use brix_semantic::{
-    compose_chain, Authority, CertificateId, ConfigId, ContextId, Decomposition, EdgeKind,
-    Evidence, GeneratorId, GeneratorRegistry, Outcome, Realizes, VerifierId,
+    compose_chain, Authority, ConfigId, ContextId, Decomposition, EdgeKind, Evidence, GeneratorId,
+    GeneratorRegistry, Outcome, Realizes,
 };
 use soc_core::{
     audit_step, commit_tick, AdmAll, AuditResult, AuditedStep, Candidate, ExecConfig,
@@ -138,7 +138,7 @@ fn test_b3_end_to_end_audited_decomposition_to_proven() {
 
             // Verify evidence is a KernelCertificate
             // EvidenceId matches Evidence::KernelCertificate
-            let expected_verifier = VerifierId::named("brix.kernel@0.1");
+            let expected_verifier = brix_kernel::native_verifier();
             // Check that judgement.evidence matches a KernelCertificate by building expected evidence
             // Or verifying that it matches Evidence::KernelCertificate with expected_verifier
             let witness_chain = compose_chain(&decomposition.generators).unwrap();
@@ -194,8 +194,11 @@ fn test_b3_end_to_end_audited_decomposition_to_proven() {
             };
             let explicit_term = brix_kernel::ExplicitTerm::new(context, term_kind);
 
-            let cert_payload = format!("{context:?}:{implication_prop:?}:{explicit_term:?}");
-            let cert_id = CertificateId::from_canon(cert_payload.as_bytes());
+            let cert_id = brix_kernel::certificate_id_v1(&brix_kernel::CertificateMaterialV1::new(
+                &context,
+                &implication_prop,
+                &explicit_term,
+            ));
             let expected_evidence = Evidence::KernelCertificate {
                 verifier: expected_verifier,
                 certificate: cert_id,
