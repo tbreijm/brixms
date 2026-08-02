@@ -146,6 +146,9 @@ are marked ⋈.
 
 ## Step 8 — S5 · Saturation layer + settlement interface (quiescence certificates)
 
+- **Pinned by:** [ADR-0014](./adr/ADR-0014_Divergence_Sensitive_Saturation.md)
+  (Proposed) — tracked by #61, staged A–D.
+
 - **Produces:** administrative-vs-realizing trace tagging
   ($m\xrightarrow{\tau}m'$ vs $m\xrightarrow{o}m'$), divergence-sensitive
   saturation $\sat\gamma$ (weak transitions + administrative-divergence

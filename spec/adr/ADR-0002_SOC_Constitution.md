@@ -48,7 +48,8 @@ Three structures sit on this one category:
    administrative search. The **universal world** (a faithful $F_O$-self-image)
    is a *conjecture* requiring a **settlement interface** (a total one-step
    procedure returning the full $F_O$-structure, including explicit quiescence
-   certificates).
+   certificates). The saturation layer and that interface are pinned by
+   [ADR-0014](./ADR-0014_Divergence_Sensitive_Saturation.md).
 
 The distinctive contribution — the reason this is *a different perspective on
 reality* — is unchanged from ADR-0001 and re-anchored here: BrixMS carries
@@ -414,7 +415,9 @@ gets a GitHub issue (see [`Issue_Disposition_2026-07.md`](../Issue_Disposition_2
 
 **Tracked conjectures (not obligations — do not block the core loop):**
 
-- **CJ-1 — Faithful $F_O$-self-image** (SOC, *Conjecture*). A finitely
+- **CJ-1 — Faithful $F_O$-self-image** (SOC, *Conjecture*; its prerequisite
+  settlement interface is pinned by
+  [ADR-0014](./ADR-0014_Divergence_Sensitive_Saturation.md)). A finitely
   presented world $\U_{F_O}$ whose saturated realizing semantics is an
   $F_O$-coalgebra satisfying the faithfulness square for every
   $F_O$-presentation with a settlement interface. Requires the settlement
