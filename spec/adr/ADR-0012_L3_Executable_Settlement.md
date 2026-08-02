@@ -521,9 +521,12 @@ In particular, L3 v1 has none of:
 - saturation/refinement/bisimulation checks or behavioral counterexamples;
 - correction/retraction or cross-revision invalidation semantics.
 
-Those remain #61 (and the relevant #59/#178 integration work). A future
+Those remain #61 (and the relevant #59/#178 integration work), and are pinned by
+[ADR-0014](./ADR-0014_Divergence_Sensitive_Saturation.md). A future
 saturated profile MUST use a new versioned result status/artifact; it MUST NOT
-reinterpret v1 `PlanComplete` or `FrontierStalled` retrospectively.
+reinterpret v1 `PlanComplete` or `FrontierStalled` retrospectively. ADR-0014
+honors that boundary: its `SaturatedStep`/`SaturatedRun` vocabulary is disjoint
+from v1's, and it never emits or reinterprets `PlanComplete`/`FrontierStalled`.
 
 Accordingly, #178's older “drive `commit_tick` to a fixpoint” wording is
 planning shorthand superseded by this pin: the public L3-v1 path is the
@@ -648,4 +651,7 @@ fixtures pass.
 4. The current audit API is unbudgeted; a resource-bounded audit operation is
    required before L3 can make any audit-latency guarantee.
 5. #61 remains the blocker for claims about saturation, certified quiescence,
-   observable behavior, or a true general “run to fixpoint.”
+   observable behavior, or a true general “run to fixpoint.” Its semantics are
+   pinned by [ADR-0014](./ADR-0014_Divergence_Sensitive_Saturation.md)
+   (Proposed); an L3 profile may consume that interface only under a new
+   execution-profile marker, never by re-grading a v1 status.
