@@ -9,12 +9,14 @@
       "authority": ["brix-canon", "brix-semantic canonical implementations"],
       "normative_anchors": [
         "spec/adr/ADR-0002_SOC_Constitution.md",
-        "docs/audit/issue-63/tcb-canonical.md"
+        "docs/audit/issue-63/tcb-canonical.md",
+        "spec/adr/ADR-0013_Canonical_Certificate_Envelope.md"
       ],
       "implementation_anchors": [
         "crates/brix-canon/src/lib.rs",
         "crates/brix-semantic/src/context.rs",
-        "crates/brix-semantic/src/decomposition.rs"
+        "crates/brix-semantic/src/decomposition.rs",
+        "crates/brix-kernel/src/certificate.rs"
       ],
       "executable_gates": [
         {
@@ -28,10 +30,17 @@
         {
           "path": "crates/brix-semantic/src/decomposition.rs",
           "tests": ["golden_vector_recorded_decomposition", "golden_vector_replay_verified_decomposition"]
+        },
+        {
+          "path": "crates/brix-kernel/tests/certificate_vectors.rs",
+          "tests": [
+            "kernel_certificate_vectors_are_frozen",
+            "kernel_certificate_vectors_reproduced_by_primitive_canon_writes"
+          ]
         }
       ],
       "failure_mode": "Reject canonical drift, malformed encodings, and unknown versions; never accept an alternate identity.",
-      "open_issues": [56, 229]
+      "open_issues": [56]
     },
     {
       "id": "SOC-LAW-02",
@@ -300,13 +309,15 @@
       "normative_anchors": [
         "spec/adr/ADR-0003_Proof_Kernel_Profile.md",
         "spec/adr/ADR-0011_Match_And_Certified_Exhaustiveness.md",
-        "docs/audit/issue-63/tcb-proof.md"
+        "docs/audit/issue-63/tcb-proof.md",
+        "spec/adr/ADR-0013_Canonical_Certificate_Envelope.md"
       ],
       "implementation_anchors": [
         "crates/brix-kernel/src/check.rs",
         "crates/brix-kernel/src/verdict.rs",
         "crates/brix-elaborate/src/lib.rs",
-        "crates/soc-regimes/src/coverage.rs"
+        "crates/soc-regimes/src/coverage.rs",
+        "crates/brix-kernel/src/certificate.rs"
       ],
       "executable_gates": [
         {
@@ -320,10 +331,19 @@
         {
           "path": "crates/soc-regimes/src/coverage.rs",
           "tests": ["exhaustive_two_variant_match_is_kernel_certified", "missing_variant_is_not_certified", "wildcard_is_outside_the_certified_fragment"]
+        },
+        {
+          "path": "crates/brix-kernel/tests/certificate_identity.rs",
+          "tests": [
+            "accepted_certificate_id_equals_public_v1_encoder",
+            "certificate_id_is_independent_of_budget",
+            "no_malformed_envelope_mints_theorem_evidence",
+            "certificate_identity_does_not_use_debug_or_display"
+          ]
         }
       ],
       "failure_mode": "Fail closed for missing, malformed, unsupported, mismatched, or exhausted artifacts; candidate rejection is not a refutation certificate.",
-      "open_issues": [56, 229]
+      "open_issues": [56]
     }
   ]
 }

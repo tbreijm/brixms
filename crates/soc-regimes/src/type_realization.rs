@@ -1812,7 +1812,7 @@ mod tests {
     use super::*;
     use brix_elaborate::{elaborate_decomposition, ElaborationResult};
     use brix_kernel::Budget;
-    use brix_semantic::{Authority, CertificateId, EdgeKind, GeneratorRegistry, VerifierId};
+    use brix_semantic::{Authority, EdgeKind, GeneratorRegistry};
 
     #[test]
     fn test_lit_type_check() {
@@ -2014,7 +2014,7 @@ mod tests {
                 assert_eq!(edge.target, audited_judgement.id().digest());
 
                 // Evidence assertion: KernelCertificate
-                let expected_verifier = VerifierId::named("brix.kernel@0.1");
+                let expected_verifier = brix_kernel::native_verifier();
                 let g1 = g_lit();
                 let src = expr.config_id();
                 let dst = Ty::Con("Int").config_id();
@@ -2039,8 +2039,12 @@ mod tests {
                     },
                 );
 
-                let cert_payload = format!("{context:?}:{implication_prop:?}:{explicit_term:?}");
-                let cert_id = CertificateId::from_canon(cert_payload.as_bytes());
+                let cert_id =
+                    brix_kernel::certificate_id_v1(&brix_kernel::CertificateMaterialV1::new(
+                        &context,
+                        &implication_prop,
+                        &explicit_term,
+                    ));
                 let expected_evidence = Evidence::KernelCertificate {
                     verifier: expected_verifier,
                     certificate: cert_id,

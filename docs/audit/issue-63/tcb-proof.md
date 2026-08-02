@@ -13,6 +13,7 @@
   a refutation certificate.
 - **Assumptions:** structural checker correctness, complete budget accounting,
   explicit-term/context match, canonical identity substrate, and a stable
-  certificate encoding. The final assumption is currently weakened by C-1.
+  certificate encoding. The final assumption is discharged for the native path
+  by the pinned v1 envelope (ADR-0013, C-1 resolved).
 - **Excluded:** parsing, tactics/proof search, inference, regimes, settlement,
   audit, CLI/presentation, and any reverse dependency on them.

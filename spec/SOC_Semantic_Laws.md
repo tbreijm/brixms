@@ -38,7 +38,7 @@ fixture.
 
 | ID | Law | Current status | Owning authority or validator | Open obligation |
 | --- | --- | --- | --- | --- |
-| SOC-LAW-01 | Canonical identity | Partial | `brix-canon` plus semantic canonical implementations | #56, #229 |
+| SOC-LAW-01 | Canonical identity | Partial | `brix-canon` plus semantic canonical implementations | #56 |
 | SOC-LAW-02 | Realization compositionality | Partial | `brix-kernel` for proof claims; regime owners for primitive relations | #53, #178 |
 | SOC-LAW-03 | Audit honesty | Enforced | `soc-core::audit` in the current journal profile | #228 for publication hardening |
 | SOC-LAW-04 | Epistemic non-escalation | Partial | outcome lattice, audit, elaboration, and result-grade cap | #228, #178 |
@@ -49,7 +49,7 @@ fixture.
 | SOC-LAW-09 | Correction and retraction non-erasure | Partial | evidence durability taxonomy and future invalidation engine | #59, #178 |
 | SOC-LAW-10 | Observable-behavior fidelity | Open | future saturated settlement/refinement checker | #61 |
 | SOC-LAW-11 | Translation fidelity | Partial | each frontend/adapter plus its reference relation | #52, #53, #178 |
-| SOC-LAW-12 | Verifier closure | Partial | `brix-kernel` and canonical artifact validator | #56, #229 |
+| SOC-LAW-12 | Verifier closure | Partial | `brix-kernel` and canonical artifact validator | #56 |
 
 ## SOC-LAW-01 — Canonical identity
 
@@ -69,8 +69,10 @@ Frozen vectors and an independent reproduction are executable evidence.
 
 **Failure form.** A vector mismatch, unknown version/tag, malformed bytes, or
 noncanonical representation is a compatibility/validation failure, never an
-alternate identity. Certificate identity is currently `Debug`-derived; #229
-therefore keeps this law Partial despite the general vector corpus.
+alternate identity. Native proof-certificate identity is the pinned canonical
+v1 envelope (ADR-0013), frozen by `vectors/kernel_certificate_v1.json` and
+reproduced independently; #56 keeps this law Partial for the remaining durable
+artifact encodings.
 
 **Evolution.** Existing tags, field orders, domain separators, and ordinals are
 append-only ABI. An intentional incompatible encoding requires a new profile or
@@ -338,8 +340,10 @@ certificates.
 
 **Failure form.** Missing/malformed artifacts, unknown profiles/verifiers,
 context mismatch, unsupported constructs, and exhausted budgets fail closed.
-The current `Debug`-derived certificate identity and missing durable decoder/
-vectors keep this law Partial under #56/#229.
+Certificate identity, its total envelope validator
+(`brix_kernel::validate_material_v1`), and its frozen vectors are in place
+(ADR-0013); the absence of a durable on-disk explicit-term artifact format
+keeps this law Partial under #56/#58.
 
 **Evolution.** A verifier or calculus profile needs a canonical versioned
 artifact format, frozen independent vectors, total validation, and an explicit
@@ -410,7 +414,7 @@ The fixtures `test_let_lit_earns_proven`, `test_id_fixture_proven`,
 `literal_equality_derives_then_audits_the_reflexive_witness`, and
 `test_b3_end_to_end_audited_decomposition_to_proven` pin the four distinct
 steps. They do not close #228's publisher API gap, #59's context semantics, or
-#229's durable certificate encoding.
+#56's durable proof-artifact encoding.
 
 ADR-0011 adds an orthogonal example:
 

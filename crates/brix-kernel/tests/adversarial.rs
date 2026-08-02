@@ -4,7 +4,7 @@ use brix_kernel::{
     acceptance, Budget, ExplicitTerm, Prop, RejectionReason, ResourceBudgetReason, TermKind,
     UnsupportedConstruct, Var, Verdict,
 };
-use brix_semantic::{ContextId, Outcome, PropositionId, VerifierId};
+use brix_semantic::{ContextId, Outcome, PropositionId};
 
 fn sample_context_a() -> ContextId {
     ContextId::from_canon(b"context_a")
@@ -43,7 +43,7 @@ fn test_valid_implication_proof_returns_accepted_with_verifier_id() {
 
     match &verdict {
         Verdict::Accepted(cert) => {
-            assert_eq!(cert.verifier, VerifierId::named("brix.kernel@0.1"));
+            assert_eq!(cert.verifier, brix_kernel::native_verifier());
             assert_eq!(verdict.outcome(), Some(Outcome::Proven));
         }
         other => panic!("Expected Accepted, got {other:?}"),

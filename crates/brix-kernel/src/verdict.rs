@@ -5,9 +5,12 @@ use brix_semantic::{CertificateId, ContextId, Outcome, VerifierId};
 /// Proof certificate emitted upon an [`Verdict::Accepted`] acceptance decision.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Certificate {
-    /// Identity of the verifier kernel (`"brix.kernel@0.1"` for native kernel).
+    /// Identity of the verifier kernel — [`crate::native_verifier`] for the
+    /// native kernel.
     pub verifier: VerifierId,
-    /// Opaque certificate handle identifying the accepted term payload.
+    /// Opaque certificate handle identifying the accepted term payload. For the
+    /// native kernel this digests the pinned canonical v1 envelope (ADR-0013);
+    /// see [`crate::encode_material_v1`].
     pub certificate_id: CertificateId,
 }
 

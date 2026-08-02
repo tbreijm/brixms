@@ -49,9 +49,10 @@ fn positive_elaboration_produces_proven_judgement() {
             assert_eq!(edge.target, source.id().digest());
 
             // Assert evidence is a KernelCertificate naming brix-kernel verifier
-            let verifier = VerifierId::named("brix.kernel@0.1");
-            let expected_cert_payload = format!("{context:?}:{kernel_prop:?}:{term:?}");
-            let expected_cert_id = CertificateId::from_canon(expected_cert_payload.as_bytes());
+            let verifier = brix_kernel::native_verifier();
+            let expected_cert_id = brix_kernel::certificate_id_v1(
+                &brix_kernel::CertificateMaterialV1::new(&context, &kernel_prop, &term),
+            );
             let expected_evidence = Evidence::KernelCertificate {
                 verifier,
                 certificate: expected_cert_id,
