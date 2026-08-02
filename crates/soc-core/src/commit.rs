@@ -71,9 +71,19 @@ impl Canonical for Observation {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Committed {
     /// The `1` summand: the keyed frontier was empty — no admissible
-    /// candidate this tick. Quiescence (ADR-0002 §2 — divergence-sensitive
-    /// saturation is a later slice; here quiescence is simply "the
-    /// oracle-shared enumeration found nothing to commit").
+    /// candidate **this tick**.
+    ///
+    /// This is the *unsaturated, uncertified* notion of quiescence: it says the
+    /// oracle-shared enumeration found nothing to commit right here, and
+    /// nothing more. It is **not** a quiescence certificate, and it does not
+    /// distinguish a terminal configuration from one whose administrative
+    /// search has not finished.
+    ///
+    /// The certified notion — divergence-sensitive, profile/context/revision
+    /// bound, independently checkable — is
+    /// [`crate::saturate::SaturatedStep::Quiescent`] (ADR-0014, tracked by
+    /// #61). Do not report this variant as "quiescent", "settled", or "at a
+    /// fixpoint".
     Quiescent,
     /// The `O×X` summand: `select_K` committed exactly one observation and
     /// advanced to exactly one successor configuration.
@@ -301,9 +311,51 @@ pub fn run<F>(
     interner: &Interner,
     e0: ExecConfig,
     context: ContextId,
-    mut keyer: F,
+    keyer: F,
     max_ticks: usize,
 ) -> (Journal, Vec<CostRecord>)
+where
+    F: FnMut(&Candidate, u64) -> Key,
+{
+    let (journal, costs, _) = run_reason(regimes, adm, interner, e0, context, keyer, max_ticks);
+    (journal, costs)
+}
+
+/// Why the unsaturated driver stopped.
+///
+/// Neither variant is a quiescence certificate: this is the *unsaturated*
+/// vocabulary, and [`UnsaturatedStop::ImmediateFrontierEmpty`] carries exactly
+/// the weak claim [`Committed::Quiescent`] does. The certified notion lives in
+/// [`crate::saturate`] (ADR-0014).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum UnsaturatedStop {
+    /// A tick found no admissible candidate. **Not** certified quiescence, and
+    /// not a fixpoint claim.
+    ImmediateFrontierEmpty,
+    /// `max_ticks` was reached with work possibly remaining. Establishes
+    /// nothing — never report this as settled.
+    TickBudgetExhausted {
+        /// The bound that was hit.
+        max_ticks: usize,
+    },
+}
+
+/// [`run`], plus the reason it stopped.
+///
+/// `run` alone cannot distinguish "the frontier went empty" from "we ran out of
+/// ticks" — both simply end its loop and return the same value. Conflating
+/// those is exactly the collapse ADR-0002 §5.3 forbids ("a search that has not
+/// terminated has proved nothing"), so callers that care about the difference
+/// MUST use this entry point.
+pub fn run_reason<F>(
+    regimes: &[&dyn SettlementRegime],
+    adm: &dyn Adm,
+    interner: &Interner,
+    e0: ExecConfig,
+    context: ContextId,
+    mut keyer: F,
+    max_ticks: usize,
+) -> (Journal, Vec<CostRecord>, UnsaturatedStop)
 where
     F: FnMut(&Candidate, u64) -> Key,
 {
@@ -315,7 +367,9 @@ where
         let (committed, step, cost) =
             commit_tick(regimes, adm, interner, &e, context, phase, &mut keyer);
         match committed {
-            Committed::Quiescent => break,
+            Committed::Quiescent => {
+                return (journal, costs, UnsaturatedStop::ImmediateFrontierEmpty)
+            }
             Committed::Step { successor, .. } => {
                 journal.append(step.expect(
                     "Committed::Step always carries Some(CommittedStep) — see commit_tick",
@@ -326,7 +380,11 @@ where
         }
     }
 
-    (journal, costs)
+    (
+        journal,
+        costs,
+        UnsaturatedStop::TickBudgetExhausted { max_ticks },
+    )
 }
 
 /// The world-configuration [`Delta`] a committed step induces (ADR-0002 §9.2;

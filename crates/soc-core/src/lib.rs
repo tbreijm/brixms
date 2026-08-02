@@ -56,6 +56,18 @@
 //!   decompositions, never verifies them (ADR-0002 §5.1) — verification is
 //!   [`audit`]'s job, off the hot path.
 //!
+//! - **S5, Stage A** ([`saturate`]): divergence-sensitive saturation
+//!   (ADR-0014, tracked by #61). [`saturate::StepLabel`] and
+//!   [`saturate::ObservationProfile`] declare which committed steps are
+//!   administrative (`τ`) at one observation boundary;
+//!   [`saturate::sat_step`] hides a finite `τ`-prefix and exports the
+//!   realizing observation that follows it, returning the total
+//!   [`saturate::SaturatedStep`] vocabulary. `F_O`, `O_min`, `select_K`,
+//!   [`commit::Committed`], and the journal ABI are unchanged: saturation
+//!   layers *above* `γ`. Stage A does **not** certify divergence — an
+//!   unbounded administrative orbit is an explicit `Unknown`, never
+//!   quiescence.
+//!
 //! **Gate.** The executable governance-conservation law — tightening `Adm`
 //! shrinks `cand(e)`/`Succ(e)` pointwise over every reachable `e`
 //! (ADR-0002 §5 point 5, §5.5) — lives in
@@ -84,14 +96,15 @@ pub mod intern;
 pub mod journal;
 pub mod oracle;
 pub mod regime;
+pub mod saturate;
 pub mod store;
 
 pub use adm::{Adm, AdmAll, AdmNone, AdmRegimeAllowlist, AdmSuccessorFilter, AndAdm};
 pub use audit::{audit_journal, audit_step, AuditResult, AuditedStep, GeneratorSemantics};
 pub use calendar::{Frontier, FrontierDeltaError, Key, KeyConflict};
 pub use commit::{
-    commit_tick, prospective_successor, run, step_world_delta, try_commit_selected, CommitError,
-    Committed, Observation, SettlementRegime,
+    commit_tick, prospective_successor, run, run_reason, step_world_delta, try_commit_selected,
+    CommitError, Committed, Observation, SettlementRegime, UnsaturatedStop,
 };
 pub use cost::CostRecord;
 pub use delta::{CandidateDelta, Delta, Footprint};
@@ -104,4 +117,10 @@ pub use intern::{Handle, Interner};
 pub use journal::{CommittedStep, Journal};
 pub use oracle::{cand, cand_instrumented, succ};
 pub use regime::{Candidate, Regime};
+pub use saturate::{
+    project, sat_step, AssumptionId, DeclaredAssumptions, DivergenceCertificateV1,
+    EnumerationCompleteness, GeneratorPartitionProfile, ObservableState, ObservationProfile,
+    ObservationProfileId, OverlappingPartitions, PresentationIdV1, PresentationV1, ProfileError,
+    QuiescenceCertificateV1, SaturatedStep, SaturationBudget, SaturationUnknown, StepLabel,
+};
 pub use store::{ArcMap, PersistentMap};
