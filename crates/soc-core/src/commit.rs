@@ -175,16 +175,77 @@ where
     };
 
     // Commit boundary: handles → digests (ADR-0002 §9.2), never earlier.
+    // Factored into the shared fallible `try_commit_selected` (ADR-0012 §2.5):
+    // this reference driver commits a valid selected candidate, so the fallible
+    // conditions cannot arise — an error here is an internal-consistency bug,
+    // exactly like the previous `interner.resolve` / `compose_chain` panics.
     let regime = regimes[regime_idx];
-    let decomposition = regime.decompose(e, &candidate);
+    let (committed, step) = try_commit_selected(key, &candidate, regime, interner, e, context)
+        .expect("commit_tick: reference driver committing a valid selected candidate");
 
-    let src = ConfigId(interner.resolve(e.world));
-    let dst = ConfigId(interner.resolve(candidate.successor));
-    // Option 1 step 3: committed witness identity IS the canonical composition
-    // of its generators (`k = g_n ∘ … ∘ g_1`). `candidate.witness` is the
-    // regime's proposal; the COMMITTED identity is derived from the factorization.
+    (committed, Some(step), cost)
+}
+
+/// A recoverable failure at the fallible commit boundary (ADR-0012 §6). These
+/// are the conditions the reference [`commit_tick`] previously panicked on;
+/// [`try_commit_selected`] surfaces them so the L3 runtime can convert
+/// untrusted/source-derived state into a `RuntimeUnknown` result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommitError {
+    /// A world or successor handle was not resolvable in the interner.
+    UnresolvedHandle,
+    /// The committed decomposition had no generators, so no witness can be
+    /// composed (`k = g_n ∘ … ∘ g_1` requires at least one generator).
+    EmptyDecomposition,
+}
+
+/// The pure prospective successor of committing `candidate` from `e`: the same
+/// [`oracle::apply`] fold the deliberation frontier's successors use, computed
+/// **without** constructing an observation or committing anything. The L3
+/// adapter uses this to peek a candidate's resulting world before deciding to
+/// commit; [`try_commit_selected`] uses the very same operation so a committed
+/// successor always equals the previously-probed prospect (ADR-0012 §2.5).
+pub fn prospective_successor(e: &ExecConfig, candidate: &Candidate) -> ExecConfig {
+    oracle::apply(e, candidate)
+}
+
+/// The **sole** constructor of a `Derived` settlement judgement, factored out of
+/// [`commit_tick`] (ADR-0012 §2.5). Given an already-selected `key`/`candidate`
+/// and its `regime`, it validates/decomposes the candidate, resolves the world
+/// endpoints, composes the committed witness `k = g_n ∘ … ∘ g_1`, constructs
+/// the `Derived` [`Judgement`]/[`Observation`] and [`CommittedStep`], and
+/// computes the successor via [`prospective_successor`]. Both the naive
+/// `commit_tick` and the incremental L3 adapter call this; the adapter selects
+/// and schedules but never mints a settlement judgement itself.
+///
+/// Fallible where the reference driver panicked: an unresolved handle or an
+/// empty decomposition returns [`CommitError`] instead of panicking, so the
+/// L3 boundary can fail closed on untrusted source-derived state.
+pub fn try_commit_selected(
+    key: Key,
+    candidate: &Candidate,
+    regime: &dyn SettlementRegime,
+    interner: &Interner,
+    e: &ExecConfig,
+    context: ContextId,
+) -> Result<(Committed, CommittedStep), CommitError> {
+    let decomposition = regime.decompose(e, candidate);
+
+    let src = ConfigId(
+        interner
+            .try_resolve(e.world)
+            .ok_or(CommitError::UnresolvedHandle)?,
+    );
+    let dst = ConfigId(
+        interner
+            .try_resolve(candidate.successor)
+            .ok_or(CommitError::UnresolvedHandle)?,
+    );
+    // Committed witness identity IS the canonical composition of its generators;
+    // `candidate.witness` is the regime's proposal, the COMMITTED identity is
+    // derived from the factorization.
     let witness = brix_semantic::compose_chain(&decomposition.generators)
-        .expect("a committed step has >= 1 generator");
+        .ok_or(CommitError::EmptyDecomposition)?;
 
     let proposition = Realizes::new(witness, src, dst).proposition_id();
     let evidence = Evidence::SettlementReplay {
@@ -198,10 +259,7 @@ where
         judgement_digest: judgement_id.digest(),
     };
 
-    // Reuse the oracle's apply verbatim (see its doc comment) so the
-    // committed successor's history component folds identically to the
-    // deliberation frontier's successors.
-    let successor = oracle::apply(e, &candidate);
+    let successor = prospective_successor(e, candidate);
 
     let step = CommittedStep {
         key,
@@ -212,14 +270,13 @@ where
         witness,
     };
 
-    (
+    Ok((
         Committed::Step {
             observation,
             successor,
         },
-        Some(step),
-        cost,
-    )
+        step,
+    ))
 }
 
 /// The committed step loop / driver: repeatedly ticks [`commit_tick`],
@@ -647,5 +704,61 @@ mod tests {
             Judgement::new(context, expected_proposition, Outcome::Derived, evidence).id();
 
         assert_eq!(observation.judgement_digest, expected_judgement_id.digest());
+    }
+
+    #[test]
+    fn commit_tick_delegates_byte_identically_to_try_commit_selected() {
+        // The seam-factoring guard (ADR-0012 §2.5): commit_tick's committed
+        // result MUST be byte-identical to reproducing its select boundary and
+        // committing through the factored `try_commit_selected`. CommittedStep
+        // and Committed derive Eq over content-addressed fields, so equality is
+        // byte-identity.
+        let (i, regime, e) = setup();
+        let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+        let context = ContextId::root();
+        let key_of = |c: &Candidate, phase: u64| Key::new(phase, 0, tiebreak_of(c));
+
+        let (committed_tick, step_tick, _cost) =
+            commit_tick(&regimes, &AdmAll, &i, &e, context, 0, &mut |c, p| {
+                key_of(c, p)
+            });
+
+        // Reproduce commit_tick's δ-enumeration + select boundary by hand.
+        let mut frontier: Frontier<(Candidate, usize)> = Frontier::new();
+        for (idx, r) in regimes.iter().enumerate() {
+            for c in r.candidates(&e) {
+                if AdmAll.admits(&e, &c) {
+                    frontier.insert(key_of(&c, 0), (c, idx)).unwrap();
+                }
+            }
+        }
+        let (key, (candidate, idx)) = frontier.select_least().expect("one admissible candidate");
+        let (committed_direct, step_direct) =
+            try_commit_selected(key, &candidate, regimes[idx], &i, &e, context)
+                .expect("valid candidate commits");
+
+        assert_eq!(committed_tick, committed_direct);
+        assert_eq!(step_tick, Some(step_direct));
+    }
+
+    #[test]
+    fn try_commit_selected_reports_unresolved_handle_instead_of_panicking() {
+        // The fallible seam (ADR-0012 §6): a successor handle not resolvable in
+        // the commit interner is a recoverable error, not a panic.
+        let (i, regime, e) = setup();
+        let mut other = Interner::new();
+        let bad = (0..64)
+            .map(|n| other.intern(Digest::of(Domain::Value, format!("x{n}").as_bytes())))
+            .last()
+            .unwrap();
+        let candidate = Candidate {
+            regime: regime.id,
+            witness: regime.witness,
+            successor: bad,
+        };
+        let key = Key::new(0, 0, tiebreak_of(&candidate));
+        let err = try_commit_selected(key, &candidate, &regime, &i, &e, ContextId::root())
+            .expect_err("an unresolvable handle must fail, not panic");
+        assert_eq!(err, CommitError::UnresolvedHandle);
     }
 }

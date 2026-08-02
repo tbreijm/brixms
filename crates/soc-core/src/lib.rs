@@ -88,8 +88,11 @@ pub mod store;
 
 pub use adm::{Adm, AdmAll, AdmNone, AdmRegimeAllowlist, AdmSuccessorFilter, AndAdm};
 pub use audit::{audit_journal, audit_step, AuditResult, AuditedStep, GeneratorSemantics};
-pub use calendar::{Frontier, Key, KeyConflict};
-pub use commit::{commit_tick, run, step_world_delta, Committed, Observation, SettlementRegime};
+pub use calendar::{Frontier, FrontierDeltaError, Key, KeyConflict};
+pub use commit::{
+    commit_tick, prospective_successor, run, step_world_delta, try_commit_selected, CommitError,
+    Committed, Observation, SettlementRegime,
+};
 pub use cost::CostRecord;
 pub use delta::{CandidateDelta, Delta, Footprint};
 pub use engine::{

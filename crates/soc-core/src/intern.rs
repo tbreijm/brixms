@@ -75,6 +75,15 @@ impl Interner {
         self.by_handle[handle.index()]
     }
 
+    /// Fallible [`resolve`](Self::resolve): returns `None` (instead of
+    /// panicking) if `handle` was not produced by this interner. Required by
+    /// the L3 runtime boundary (ADR-0012 §6), which must convert an
+    /// untrusted/source-derived bad handle into a `RuntimeUnknown` result
+    /// rather than a panic.
+    pub fn try_resolve(&self, handle: Handle) -> Option<Digest> {
+        self.by_handle.get(handle.index()).copied()
+    }
+
     /// Number of digests interned so far.
     pub fn len(&self) -> usize {
         self.by_handle.len()
