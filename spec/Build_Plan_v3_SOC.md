@@ -147,7 +147,9 @@ are marked ⋈.
 ## Step 8 — S5 · Saturation layer + settlement interface (quiescence certificates)
 
 - **Pinned by:** [ADR-0014](./adr/ADR-0014_Divergence_Sensitive_Saturation.md)
-  (Proposed) — tracked by #61, staged A–D.
+  (Accepted) — tracked by #61, staged A–D, all four landed. SOC-LAW-10 moved
+  `Open → Partial`; it stays Partial pending #59 (observation-profile taxonomy)
+  and #178 (revision identity), per ADR-0014 §10.
 
 - **Produces:** administrative-vs-realizing trace tagging
   ($m\xrightarrow{\tau}m'$ vs $m\xrightarrow{o}m'$), divergence-sensitive

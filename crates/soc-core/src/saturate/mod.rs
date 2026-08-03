@@ -64,6 +64,19 @@
 //! Because `F_O` is deterministic, comparison is a lockstep walk and its
 //! counterexample is the *unique shortest* disagreeing visible trace, with no
 //! search and no shrinking.
+//!
+//! # Safety and adequacy (Stage D)
+//!
+//! [`closure::check_closure`] decides one-step closure for a safety predicate,
+//! under a [`closure::ClosureMode`] the caller must state: `Visible` constrains
+//! only what an observer at the boundary can see, `Raw` constrains every
+//! committed γ-state. The two genuinely differ, which is the operational proof
+//! that saturation hides something semantically consequential.
+//!
+//! [`adequacy`] states the CJ-1 adequacy interface — total, effective, returns
+//! the encoded `F_O`-structure, explicit certificates, honest `⊥` — and makes
+//! the `F_O` sub-carrier computable via [`adequacy::fo_definedness`]. It does
+//! **not** prove CJ-1; that is Build Plan Step 12.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -78,13 +91,22 @@ use crate::intern::{Handle, Interner};
 use crate::journal::CommittedStep;
 use crate::regime::Candidate;
 
+pub mod adequacy;
 pub mod bisimulation;
 pub mod certificate;
+pub mod closure;
 pub mod driver;
 
+pub use adequacy::{
+    adequacy_of, fo_definedness, AdequacyReport, FoDefinedness, FoUndefined, FoValue,
+};
 pub use bisimulation::{
     check_saturated, ComparisonUnknown, Contract, MismatchKind, SaturatedComparison,
     SaturatedCounterexample, Summand,
+};
+pub use closure::{
+    check_closure, ClosureMode, ClosureResult, ClosureUnknown, ClosureViolation, SafetyState,
+    ViolationSite,
 };
 pub use driver::{
     run_saturated, PresentedSystem, SaturatedRun, SaturatedStop, SaturatedSystem, SystemBoundary,

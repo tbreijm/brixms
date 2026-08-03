@@ -47,7 +47,7 @@ fixture.
 | SOC-LAW-07 | Governance monotonicity | Enforced | `Adm` conformance over the current candidate interface | #52 |
 | SOC-LAW-08 | Incremental agreement and cost honesty | Enforced | reference oracle, incremental engine, deterministic cost gate | #52, #178 for future regimes |
 | SOC-LAW-09 | Correction and retraction non-erasure | Partial | evidence durability taxonomy and future invalidation engine | #59, #178 |
-| SOC-LAW-10 | Observable-behavior fidelity | Open | future saturated settlement/refinement checker | #61 |
+| SOC-LAW-10 | Observable-behavior fidelity | Partial | soc-core saturation, certificate, and bisimulation checkers | #59, #178 |
 | SOC-LAW-11 | Translation fidelity | Partial | each frontend/adapter plus its reference relation | #52, #53, #178 |
 | SOC-LAW-12 | Verifier closure | Partial | `brix-kernel` and canonical artifact validator | #56 |
 
@@ -281,14 +281,31 @@ hidden to `o`; infinite or exhausted administrative work MUST NOT be called
 quiescent. Directional refinement may replace symmetric equivalence only when
 the contract states that direction.
 
-**Authority and evidence.** Current deterministic commit/replay fixtures cover
-the unsaturated immediate-step prerequisite only. #61 owns canonical labels,
-quiescence certificates, saturation, weak bisimulation/refinement, and minimal
-counterexamples.
+**Authority and evidence.** `soc-core`'s saturation, certificate, and
+bisimulation checkers (ADR-0014). Canonical `τ`/realizing labels are a declared
+profile projection over fully committed steps; quiescence and divergence are
+versioned certificates with frozen vectors, fail-closed readers, and semantic
+checkers that **re-derive** each claim rather than trusting it; weak
+bisimulation and directional refinement are a lockstep walk whose counterexample
+is minimal by construction.
 
-**Failure form.** An unmatched visible trace is a counterexample. Divergence,
-unsupported analysis, or budget exhaustion is `Unknown`; only a replayable
-quiescence certificate establishes quiescence.
+**Failure form.** The unique shortest unmatched visible trace is the
+counterexample. Certified divergence, unsupported analysis, and budget
+exhaustion are all `Unknown` — certified divergence being a positive fact about
+the system, exhaustion merely a fact about the analysis — and none of them is a
+quiescence certificate. Only a replayable, independently re-derived certificate
+establishes quiescence.
+
+**Why Partial, not Enforced.** Four independent reasons (ADR-0014 §10), each
+sufficient. The law's own domain is *"one declared observation profile"*, and
+**#59** owns whether a profile identity is a valid context dimension — #61 ships
+*a* boundary (`generator-partition@1`), not *the* boundary. Certification is
+conditional on P1/P6, which the presentation **declares** and the engine only
+bounded-checks, so a pass covers the profile plus a promise. The evolution
+clause is undischarged: `soc-core` has no lowering dependency and cannot
+validate that a caller derived its revision identity canonically (**#178**).
+And by precedent — ADR-0013 fully pinned certificate identity with frozen
+vectors and independent reproduction, and SOC-LAW-01/12 still stayed Partial.
 
 **Evolution.** Observation profiles and saturation certificates are versioned
 semantic artifacts and include the exact context and program/world revision.
