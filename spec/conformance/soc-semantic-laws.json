@@ -257,21 +257,51 @@
     {
       "id": "SOC-LAW-10",
       "title": "Observable-behavior fidelity",
-      "status": "open",
-      "authority": ["future saturated settlement and refinement checker"],
-      "normative_anchors": ["spec/adr/ADR-0002_SOC_Constitution.md"],
+      "status": "partial",
+      "authority": ["soc-core saturation, certificate, and bisimulation checkers"],
+      "normative_anchors": [
+        "spec/adr/ADR-0002_SOC_Constitution.md",
+        "spec/adr/ADR-0014_Divergence_Sensitive_Saturation.md"
+      ],
       "implementation_anchors": [
         "crates/soc-core/src/commit.rs",
-        "crates/soc-core/src/journal.rs"
+        "crates/soc-core/src/journal.rs",
+        "crates/soc-core/src/saturate/mod.rs",
+        "crates/soc-core/src/saturate/certificate.rs",
+        "crates/soc-core/src/saturate/driver.rs",
+        "crates/soc-core/src/saturate/bisimulation.rs",
+        "crates/soc-core/src/saturate/closure.rs",
+        "crates/soc-core/src/saturate/adequacy.rs",
+        "crates/brix-semantic/src/quiescent.rs"
       ],
       "executable_gates": [
         {
           "path": "crates/soc-core/tests/calendar_commit.rs",
           "tests": ["committed_coalgebra_steps_when_admissible_and_is_quiescent_otherwise", "deterministic_replay_is_byte_identical_across_two_runs"]
+        },
+        {
+          "path": "crates/soc-core/tests/saturation_labels.rs",
+          "tests": ["finite_tau_prefix_exports_the_same_observation_as_the_unsaturated_step", "one_journal_under_two_profiles_has_two_visible_traces_and_one_chain_digest", "saturated_stepping_is_deterministic_across_two_runs", "run_reason_distinguishes_an_empty_frontier_from_an_exhausted_tick_budget", "administrative_steps_audit_exactly_like_realizing_ones"]
+        },
+        {
+          "path": "crates/soc-core/tests/saturation_certificates.rs",
+          "tests": ["a_terminal_state_and_an_infinitely_searching_state_are_distinguished", "a_terminal_state_certifies_and_the_certificate_re_derives", "a_well_formed_certificate_over_a_live_frontier_is_refused", "an_exhausted_budget_produces_neither_certificate"]
+        },
+        {
+          "path": "crates/soc-core/tests/saturation_vectors.rs",
+          "tests": ["quiescence_vectors_are_frozen", "divergence_vectors_are_frozen", "quiescence_vectors_reproduced_by_primitive_canon_writes", "the_observation_profile_id_is_reproduced_from_its_frozen_preimage"]
+        },
+        {
+          "path": "crates/soc-core/tests/saturated_bisimulation.rs",
+          "tests": ["the_incremental_and_naive_candidate_sources_are_saturated_bisimilar", "different_administrative_layouts_with_equal_visible_behavior_are_bisimilar", "an_observation_mismatch_at_visible_depth_two_yields_a_prefix_of_exactly_two", "a_terminating_impl_refines_a_diverging_spec_but_is_not_bisimilar_to_it", "the_visible_budget_is_an_explicit_unknown_never_a_quiescent_stop"]
+        },
+        {
+          "path": "crates/soc-core/tests/saturation_closure.rs",
+          "tests": ["the_acceptance_fixture_is_closed_under_visible_and_violated_under_raw", "a_violation_at_a_visible_successor_is_caught_under_visible", "an_exhausted_run_yields_unknown_never_closed", "every_saturated_summand_classifies_against_the_fo_sub_carrier"]
         }
       ],
-      "failure_mode": "Return an unmatched visible trace; divergence, unsupported saturation, or exhaustion is Unknown and never a quiescence certificate.",
-      "open_issues": [61]
+      "failure_mode": "Return the unique shortest unmatched visible trace as a counterexample. Certified divergence, unsupported analysis, and budget exhaustion are all Unknown and never a quiescence certificate; only a replayable, independently re-derived certificate establishes quiescence.",
+      "open_issues": [59, 178]
     },
     {
       "id": "SOC-LAW-11",

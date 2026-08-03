@@ -590,3 +590,100 @@ fn run_reason_distinguishes_an_empty_frontier_from_an_exhausted_tick_budget() {
         "the two stop reasons are exactly what `run` alone conflated"
     );
 }
+
+// ---------------------------------------------------------------------------
+// ⟨D-TAU⟩'s load-bearing claim, made executable.
+// ---------------------------------------------------------------------------
+
+/// Every semantics this fixture needs: an edge's generator realizes exactly
+/// that edge's endpoints.
+struct EdgeSemantics {
+    edges: BTreeSet<(GeneratorId, ConfigId, ConfigId)>,
+}
+
+impl soc_core::audit::GeneratorSemantics for EdgeSemantics {
+    fn realizes(&self, g: &GeneratorId, src: &ConfigId, dst: &ConfigId) -> bool {
+        self.edges.contains(&(*g, *src, *dst))
+    }
+}
+
+/// **The claim ⟨D-TAU⟩ rests on**: an administrative step is committed,
+/// journaled, `Derived`, and *auditable* — hidden at the observation boundary
+/// and in no other way diminished.
+///
+/// ADR-0014 §3 forbids the "τ as a committed step with its `Observation`
+/// suppressed" alternative precisely because it would break `audit_step`,
+/// which requires `step.observation.judgement_digest` to match the `Derived`
+/// judgement it reconstructs. That argument is stated in several places in
+/// prose; this is the executable form of it. If a τ step ever failed to audit,
+/// the reason τ is a profile projection rather than a new summand would be
+/// false, and nothing else in the suite would notice.
+#[test]
+fn administrative_steps_audit_exactly_like_realizing_ones() {
+    let fx = linear_fixture(); // w0 -τa-> w1 -τb-> w2 -o-> w3
+    let profile = hiding_profile();
+    let regime: &dyn SettlementRegime = &fx.regime;
+    let regimes = std::slice::from_ref(&regime);
+    let pres = presentation(regimes, &profile, &fx.interner);
+    let mut k = keyer();
+
+    let (step, consumed, _) = sat_step(&pres, &fx.exec_at("w0"), 0, &mut k, budget());
+    assert!(matches!(step, SaturatedStep::Realizing { .. }));
+    assert_eq!(
+        consumed.len(),
+        3,
+        "two hidden τ steps plus the realizing one"
+    );
+
+    // Two of the three are administrative — otherwise this test would be
+    // auditing realizing steps only and proving nothing about τ.
+    let labels: Vec<StepLabel> = consumed
+        .iter()
+        .map(|s| profile.label(s).expect("classifiable"))
+        .collect();
+    assert_eq!(
+        labels,
+        vec![
+            StepLabel::Administrative,
+            StepLabel::Administrative,
+            StepLabel::Realizing
+        ]
+    );
+
+    let mut journal = Journal::new();
+    for committed in &consumed {
+        journal.append(committed.clone());
+    }
+
+    let mut registry = brix_semantic::GeneratorRegistry::new();
+    for g in [gen_tau_a(), gen_tau_b(), gen_realizing()] {
+        registry.insert(g);
+    }
+    let semantics = EdgeSemantics {
+        edges: consumed
+            .iter()
+            .flat_map(|s| {
+                s.decomposition
+                    .generators
+                    .iter()
+                    .map(|g| (*g, s.src, s.dst))
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
+    };
+
+    let results =
+        soc_core::audit::audit_journal(&journal, ContextId::root(), &registry, &semantics);
+
+    assert_eq!(results.len(), 3);
+    for (index, result) in results.iter().enumerate() {
+        match result {
+            soc_core::audit::AuditResult::Audited(_) => {}
+            soc_core::audit::AuditResult::Unknown(reason) => panic!(
+                "step {index} ({:?}) failed to audit: {reason} — a hidden step must \
+                 still be fully auditable, or ⟨D-TAU⟩'s argument collapses",
+                labels[index]
+            ),
+        }
+    }
+}

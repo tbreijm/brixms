@@ -1,6 +1,6 @@
 # ADR-0014 — Divergence-Sensitive Saturation, the Settlement Interface, and Weak Bisimulation (v1 Saturation Profile)
 
-Status: **Proposed** (2026-08-02) (refines [ADR-0002](./ADR-0002_SOC_Constitution.md) §1.3, §5.3, §8, §10; bounded against [ADR-0012](./ADR-0012_L3_Executable_Settlement.md) §7; governs `crates/soc-core/src/saturate/` and its frozen vectors).
+Status: **Accepted** (2026-08-03; Proposed 2026-08-02 — every ⟨D-…⟩ mark ratified, all four stages landed) (refines [ADR-0002](./ADR-0002_SOC_Constitution.md) §1.3, §5.3, §8, §10; bounded against [ADR-0012](./ADR-0012_L3_Executable_Settlement.md) §7; governs `crates/soc-core/src/saturate/` and its frozen vectors).
 
 Date: 2026-08-02.
 
@@ -345,6 +345,8 @@ Fixtures: two `SaturatedSystem` impls over the same presentation — one backed 
 
 Ships §8's closure checker, an explicit statement of the CJ-1 adequacy interface (total + effective + returns the encoded `F_O`-structure + explicit certificates + honest `⊥`, with no proof-search, elaboration, or UI), and the SOC-LAW-10 update.
 
+**Landed 2026-08-03** in `saturate/closure.rs` and `saturate/adequacy.rs`, gated by `tests/saturation_closure.rs`, plus `administrative_steps_audit_exactly_like_realizing_ones` in `tests/saturation_labels.rs` — the executable form of ⟨D-TAU⟩'s load-bearing claim, which §3's alternatives table asserts (a suppressed observation would be unauditable) and which nothing else in the suite would have caught if it were false. Two notes. The safety predicate is evaluated at a `SafetyState { world, policy }` of **`ConfigId` digests**, not at the `ObservableState` of interner handles: same information content minus one run's allocation order, so a violation is reportable in a durable artifact — the same reasoning that puts `ConfigId`s in the divergence certificate. And `adequacy.rs` makes §5's sub-carrier *computable* rather than only prose: `fo_definedness` decides membership, keeping `CertifiedDivergence` (a fact about the system) apart from `Unestablished` (a fact about the analysis), because a CJ-1 statement must quantify over the first and exclude the second.
+
 *Closes AC-7.*
 
 No `brix run` surface is added by any stage.
@@ -383,14 +385,18 @@ All new artifacts are append-only and versioned. A future nondeterministic or qu
 
 ## 13. Decisions and their ratification state
 
+Every mark below is ratified and the ADR is Accepted. The *Status* column
+records when, and what each ratification committed us to — the constraints are
+recorded here so they are not rediscovered later as surprises.
+
 | Marker | Decision | Status |
 |---|---|---|
-| **⟨D-TAU⟩** | τ is a profile projection over fully committed steps; `Committed`/`F_O`/`O_min` unchanged; administrative steps stay journaled and `Derived`. The alternative widens the frozen signature. | Proposed — ratify as stated |
+| **⟨D-TAU⟩** | τ is a profile projection over fully committed steps; `Committed`/`F_O`/`O_min` unchanged; administrative steps stay journaled and `Derived`. The alternative widens the frozen signature. | **Ratified 2026-08-03.** Shipped with `Committed`/`F_O`/`O_min` untouched |
 | **⟨D-OBS⟩** | v1 profile = generator partition `𝒢 = 𝒢_τ ⊎ 𝒢_o`, canonically identified; mixed decompositions fail closed. | **Ratified 2026-08-03.** The v1 preimage (`brix.soc.obs-profile` / `…generator-partition@1`) is frozen; the profile *taxonomy* stays with #59 |
-| **⟨D-PROJ⟩** | State identity is `(world, policy)`; `history` excluded; P1/P6 declared and bounded-checked. Without it nothing terminates; with it we assert a hypothesis about arbitrary regimes. | Proposed — ratify, with the structural alternative below as follow-up |
-| **⟨D-DIV⟩** | Certified divergence is a fourth summand outside `F_O`, `Unknown`-graded for completion, never `Refuted`, never the `1` summand. | Proposed — ratify |
-| **⟨D-QP⟩** | Quiescence proposition lives in `brix-semantic` (kernel-targetable) vs soc-core-local. | Proposed — `brix-semantic` |
-| **⟨D-REF⟩** | Refinement's sole asymmetry: `sat_S = ↑` imposes no obligation; `sat_S = 1` forbids implementation divergence. | Proposed — ratify. Implemented and exercised in both directions by Stage C's direction fixture; the API shape is settled, the *decision* is not |
+| **⟨D-PROJ⟩** | State identity is `(world, policy)`; `history` excluded; P1/P6 declared and bounded-checked. Without it nothing terminates; with it we assert a hypothesis about arbitrary regimes. | **Ratified 2026-08-03.** The structural `HistoryIndependentRegime` alternative (risk 2) stays open as follow-up, not as a blocker |
+| **⟨D-DIV⟩** | Certified divergence is a fourth summand outside `F_O`, `Unknown`-graded for completion, never `Refuted`, never the `1` summand. | **Ratified 2026-08-03.** The `Divergent`/`Unknown` split is what makes the Step 8 conformance test expressible at all |
+| **⟨D-QP⟩** | Quiescence proposition lives in `brix-semantic` (kernel-targetable) vs soc-core-local. | **Ratified 2026-08-03.** Landed as `brix_semantic::Quiescent` |
+| **⟨D-REF⟩** | Refinement's sole asymmetry: `sat_S = ↑` imposes no obligation; `sat_S = 1` forbids implementation divergence. | **Ratified 2026-08-03.** Exercised in both directions by Stage C's direction fixture, which runs both contracts over one pair |
 | **⟨D-QCERT⟩** | The certificates' exact field lists and byte tags (§6.2). | **Ratified 2026-08-03.** Stage B mints `vectors/soc_quiescence_v1.json` and `vectors/soc_divergence_v1.json` against it; both field lists are frozen ABI from that point |
 
 **What ratifying ⟨D-QCERT⟩ committed us to.** The v1 quiescence certificate can only ever assert a *complete* enumeration, because [`EnumerationCompleteness`] admits exactly one ordinal and the reader accepts exactly that one. That is sound only while `Regime::candidates -> Vec<Candidate>` stays unbounded and total. If ADR-0012 §4's contemplated bounded/fallible regime API ever lands, every v1 certificate stays valid for the regimes it was minted against, and the new API MUST mint v2 — see risk 1. This was the load-bearing consideration at ratification, and it is recorded here so the constraint is not rediscovered as a surprise.

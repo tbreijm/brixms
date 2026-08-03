@@ -56,7 +56,7 @@
 //!   decompositions, never verifies them (ADR-0002 §5.1) — verification is
 //!   [`audit`]'s job, off the hot path.
 //!
-//! - **S5, Stages A–C** ([`saturate`]): divergence-sensitive saturation
+//! - **S5** ([`saturate`]): divergence-sensitive saturation
 //!   (ADR-0014, tracked by #61). [`saturate::StepLabel`] and
 //!   [`saturate::ObservationProfile`] declare which committed steps are
 //!   administrative (`τ`) at one observation boundary;
@@ -89,6 +89,16 @@
 //!   Because `F_O` is deterministic the comparison is a lockstep walk, so its
 //!   counterexample is the *unique shortest* disagreeing visible trace —
 //!   observations only, never administrative steps.
+//!
+//!   Stage D closes the slice. [`saturate::check_closure`] decides one-step
+//!   closure for a safety predicate under a [`saturate::ClosureMode`] the
+//!   caller must state — `Visible` or `Raw` — and the two genuinely differ,
+//!   which is the operational proof that hiding is semantically consequential.
+//!   [`saturate::adequacy`] states the CJ-1 adequacy interface and makes the
+//!   `F_O` sub-carrier computable, keeping certified divergence (a fact about
+//!   the system) apart from an unestablished result (a fact about the
+//!   analysis). It supplies the interface CJ-1 will be stated against; it does
+//!   not prove CJ-1, which is `Build_Plan_v3_SOC.md` Step 12.
 //!
 //! **Gate.** The executable governance-conservation law — tightening `Adm`
 //! shrinks `cand(e)`/`Succ(e)` pointwise over every reachable `e`
@@ -139,19 +149,22 @@ pub use intern::{Handle, Interner};
 pub use journal::{CommittedStep, Journal};
 pub use oracle::{cand, cand_instrumented, succ};
 pub use regime::{Candidate, Regime};
-pub use saturate::{bisimulation, certificate, driver};
+pub use saturate::{adequacy, bisimulation, certificate, closure, driver};
 pub use saturate::{
-    check_divergence_certificate, check_quiescence_certificate, check_saturated,
-    decode_divergence_v1, decode_quiescence_v1, divergence_certificate_id, encode_divergence_v1,
-    encode_quiescence_v1, project, quiescence_certificate_id, quiescence_judgement, run_saturated,
-    sat_step, validate_divergence_v1, validate_quiescence_v1, AssumptionId, AssumptionMode,
-    CertEnvelopeError, CertificateCheck, CertificateCheckError, ComparisonUnknown, Contract,
-    DeclaredAssumptions, DivergenceCertificateId, DivergenceCertificateV1, EnumerationCompleteness,
+    adequacy_of, check_closure, check_divergence_certificate, check_quiescence_certificate,
+    check_saturated, decode_divergence_v1, decode_quiescence_v1, divergence_certificate_id,
+    encode_divergence_v1, encode_quiescence_v1, fo_definedness, project, quiescence_certificate_id,
+    quiescence_judgement, run_saturated, sat_step, validate_divergence_v1, validate_quiescence_v1,
+    AdequacyReport, AssumptionId, AssumptionMode, CertEnvelopeError, CertificateCheck,
+    CertificateCheckError, ClosureMode, ClosureResult, ClosureUnknown, ClosureViolation,
+    ComparisonUnknown, Contract, DeclaredAssumptions, DivergenceCertificateId,
+    DivergenceCertificateV1, EnumerationCompleteness, FoDefinedness, FoUndefined, FoValue,
     GeneratorPartitionProfile, MismatchKind, ObservableState, ObservationProfile,
     ObservationProfileId, OverlappingPartitions, PresentationIdV1, PresentationV1, PresentedSystem,
-    ProfileError, QuiescenceCertificateId, QuiescenceCertificateV1, SaturatedComparison,
-    SaturatedCounterexample, SaturatedRun, SaturatedStep, SaturatedStop, SaturatedSystem,
-    SaturationBudget, SaturationUnknown, StepLabel, Summand, SystemBoundary, CERTIFICATE_FORMAT_V1,
-    DIVERGENCE_MARKER, QUIESCENCE_MARKER, SATURATION_PROFILE_V1,
+    ProfileError, QuiescenceCertificateId, QuiescenceCertificateV1, SafetyState,
+    SaturatedComparison, SaturatedCounterexample, SaturatedRun, SaturatedStep, SaturatedStop,
+    SaturatedSystem, SaturationBudget, SaturationUnknown, StepLabel, Summand, SystemBoundary,
+    ViolationSite, CERTIFICATE_FORMAT_V1, DIVERGENCE_MARKER, QUIESCENCE_MARKER,
+    SATURATION_PROFILE_V1,
 };
 pub use store::{ArcMap, PersistentMap};
