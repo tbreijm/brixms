@@ -281,7 +281,7 @@
         },
         {
           "path": "crates/soc-core/tests/saturation_labels.rs",
-          "tests": ["finite_tau_prefix_exports_the_same_observation_as_the_unsaturated_step", "one_journal_under_two_profiles_has_two_visible_traces_and_one_chain_digest", "saturated_stepping_is_deterministic_across_two_runs", "run_reason_distinguishes_an_empty_frontier_from_an_exhausted_tick_budget"]
+          "tests": ["finite_tau_prefix_exports_the_same_observation_as_the_unsaturated_step", "one_journal_under_two_profiles_has_two_visible_traces_and_one_chain_digest", "saturated_stepping_is_deterministic_across_two_runs", "run_reason_distinguishes_an_empty_frontier_from_an_exhausted_tick_budget", "administrative_steps_audit_exactly_like_realizing_ones"]
         },
         {
           "path": "crates/soc-core/tests/saturation_certificates.rs",
