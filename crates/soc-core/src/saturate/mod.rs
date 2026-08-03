@@ -28,15 +28,30 @@
 //! whose administrative partition is empty makes saturation degenerate exactly
 //! to today's behavior, so every existing regime keeps its current meaning.
 //!
-//! # Stage A scope
+//! # Divergence, and what a lasso is worth (Stage B)
 //!
-//! Divergence detection is **not** enabled yet: a non-terminating
-//! administrative orbit is reported as
-//! [`SaturationUnknown::AdministrativeBudgetExhausted`], never as certified
-//! divergence. Lasso detection arrives with Stage B, which also adds the
-//! `Canonical` impls, the certificate identities, and the fail-closed readers.
+//! [`sat_step`] now detects administrative lassos: if the orbit returns to an
+//! [`ObservableState`] it has already visited, it never reaches a realizing
+//! step, and that is certified as [`SaturatedStep::Divergent`] — a fourth
+//! summand, `Unknown`-graded for the completion question and **never**
+//! `Refuted`, **never** the `1` summand (⟨D-DIV⟩).
+//!
+//! A lasso is a divergence proof only under two hypotheses the presentation
+//! *declares* and this module *bounded-checks*, never proves: **P1**, that
+//! candidate enumeration and admissibility read the config only through
+//! [`project`]; and **P6**, that keying does not read the calendar phase.
+//! Without both, returning to the same `(world, policy)` says nothing about
+//! what the engine will do next. So the certificate records which mode it was
+//! minted under, an undeclared hypothesis yields
+//! [`SaturationUnknown::UndeclaredAssumption`] rather than a certificate, and a
+//! declaration the bounded check falsifies yields
+//! [`SaturationUnknown::AssumptionViolated`].
+//!
+//! Budget exhaustion remains what it always was: an honest "we do not know",
+//! structurally distinct from certified divergence. Distinguishing the two is
+//! the whole point of ADR-0014 §5.1.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_semantic::{ConfigId, ContextId, GeneratorId, Outcome};
@@ -46,7 +61,20 @@ use crate::commit::{commit_tick, CommitError, Committed, Observation, Settlement
 use crate::cost::CostRecord;
 use crate::exec::ExecConfig;
 use crate::intern::{Handle, Interner};
-use crate::journal::{CommittedStep, Journal};
+use crate::journal::CommittedStep;
+use crate::regime::Candidate;
+
+pub mod certificate;
+
+pub use certificate::{
+    check_divergence_certificate, check_quiescence_certificate, decode_divergence_v1,
+    decode_quiescence_v1, divergence_certificate_id, encode_divergence_v1, encode_quiescence_v1,
+    quiescence_certificate_id, quiescence_judgement, validate_divergence_v1,
+    validate_quiescence_v1, AssumptionMode, CertEnvelopeError, CertificateCheck,
+    CertificateCheckError, DivergenceCertificateId, DivergenceCertificateV1,
+    EnumerationCompleteness, QuiescenceCertificateId, QuiescenceCertificateV1,
+    CERTIFICATE_FORMAT_V1, DIVERGENCE_MARKER, QUIESCENCE_MARKER, SATURATION_PROFILE_V1,
+};
 
 /// Whether a committed step is visible at the declared observation boundary.
 ///
@@ -363,75 +391,32 @@ impl SaturationBudget {
     }
 }
 
-/// Whether the frontier enumeration backing a quiescence claim was exhaustive.
+/// Enumerate the admissible candidates at `e`, returning the set and the work
+/// units the scan cost.
 ///
-/// The load-bearing honesty field of the certificate: "the frontier is empty"
-/// is a decided negative **only if** enumeration was complete. That holds in v1
-/// solely because `Regime::candidates -> Vec<Candidate>` is unbounded and
-/// total. A bounded or fallible regime API requires a v2 certificate and MUST
-/// NOT emit v1 (ADR-0014 §6.2, risk 1).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub enum EnumerationCompleteness {
-    /// The whole admissible frontier was enumerated.
-    Complete,
-}
-
-/// A certified claim that no admissible candidate exists at the terminal world.
-///
-/// **Stage A declares this type; Stage B adds its `Canonical` impl, its
-/// identity, the quiescence-proposition binding ⟨D-QP⟩, and the fail-closed
-/// reader.** Until then a value of this type is an in-memory claim, not yet an
-/// independently checkable artifact.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct QuiescenceCertificateV1 {
-    /// The declared observation boundary.
-    pub profile: ObservationProfileId,
-    /// The exact context.
-    pub context: ContextId,
-    /// The program/world revision.
-    pub presentation: PresentationIdV1,
-    /// The policy in force.
-    pub policy: ConfigId,
-    /// The world saturation started from.
-    pub src_world: ConfigId,
-    /// The world at which the frontier was found empty.
-    pub terminal_world: ConfigId,
-    /// The hidden administrative prefix, as committed-step digests in order.
-    pub hidden: Vec<Digest>,
-    /// The chain digest of the hidden prefix, replayed from scratch.
-    pub prefix_chain: Option<Digest>,
-    /// The ordered regime-set identity.
-    pub regime_set: Digest,
-    /// The admissibility-policy identity.
-    pub adm_id: Digest,
-    /// Whether enumeration was exhaustive.
-    pub enumeration: EnumerationCompleteness,
-    /// The grade this certificate claims. Always [`Outcome::Derived`]: a
-    /// settlement-kernel certificate is never a proof-kernel theorem.
-    pub grade: Outcome,
-}
-
-/// A certified administrative divergence (a closed lasso).
-///
-/// **Stage A declares this type; it is never constructed before Stage B**,
-/// which enables lasso detection. A non-terminating administrative orbit is
-/// reported as [`SaturationUnknown::AdministrativeBudgetExhausted`] until then.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct DivergenceCertificateV1 {
-    /// The declared observation boundary.
-    pub profile: ObservationProfileId,
-    /// The exact context.
-    pub context: ContextId,
-    /// The program/world revision.
-    pub presentation: PresentationIdV1,
-    /// Steps before the cycle closes.
-    pub stem: u64,
-    /// Length of the closed administrative cycle, at least 1.
-    pub cycle: u64,
-    /// The lasso, as committed-step digests in order.
-    pub lasso: Vec<Digest>,
-    /// The observable state the orbit revisits.
-    pub revisited: ObservableState,
+/// Mirrors [`commit_tick`]'s `δ` exactly — one unit per regime scanned, one per
+/// raw candidate tested — which is the point: a quiescence certificate's
+/// re-enumeration and the engine's own enumeration must be the *same*
+/// enumeration, or the certificate checks something the engine never did.
+/// [`commit_tick`] keeps its own inline copy because it keys and frontiers as
+/// it goes; this one only needs the set.
+pub(crate) fn enumerate_admissible(
+    regimes: &[&dyn SettlementRegime],
+    adm: &dyn Adm,
+    e: &ExecConfig,
+) -> (BTreeSet<Candidate>, u64) {
+    let mut out = BTreeSet::new();
+    let mut work: u64 = 0;
+    for regime in regimes {
+        work += 1;
+        for c in regime.candidates(e) {
+            work += 1;
+            if adm.admits(e, &c) {
+                out.insert(c);
+            }
+        }
+    }
+    (out, work)
 }
 
 /// The full encoded `F_O`-structure after divergence-sensitive saturation.
@@ -461,7 +446,7 @@ pub enum SaturatedStep {
     Quiescent(Box<QuiescenceCertificateV1>),
     /// `↑_τ`, **certified** by a closed lasso. Graded `Unknown` for the
     /// completion/quiescence question — never `Refuted`, and never the `1`
-    /// summand. Not constructed before Stage B.
+    /// summand.
     Divergent(Box<DivergenceCertificateV1>),
     /// Nothing was established. Never a pass, never a certificate, never
     /// `Refuted`.
@@ -486,8 +471,7 @@ pub enum SaturationUnknown {
         /// The bound that was hit.
         budget: u64,
     },
-    /// The visited-state bound for lasso detection was hit. Not reachable in
-    /// Stage A.
+    /// The visited-state bound for lasso detection was hit.
     AdministrativeStateBudgetExhausted {
         /// Distinct states retained before the bound was hit.
         states: u64,
@@ -565,8 +549,11 @@ fn fold_cost(running: Option<u64>, tick: &CostRecord) -> Option<u64> {
 /// committed-step convention. A caller driving successive saturated steps
 /// advances `phase` by the number of steps returned.
 ///
-/// **Stage A does not detect divergence.** A non-terminating administrative
-/// orbit exhausts `budget.max_hidden_steps` and is reported as
+/// **Divergence versus exhaustion.** An administrative orbit that revisits an
+/// [`ObservableState`] is a closed lasso and yields
+/// [`SaturatedStep::Divergent`] — but only when the presentation declares P1
+/// and P6 *and* the bounded checks at the revisited state hold. Otherwise the
+/// orbit simply exhausts `budget.max_hidden_steps` and is reported as
 /// [`SaturationUnknown::AdministrativeBudgetExhausted`] — an honest "we do not
 /// know", never a quiescence certificate and never `Refuted`.
 pub fn sat_step<F>(
@@ -583,6 +570,12 @@ where
     let mut current = *e;
     let mut work: Option<u64> = Some(0);
     let mut hidden: u64 = 0;
+    // Observable state → the index in `consumed` at which the orbit was in that
+    // state. Index 0 is the start state, before any administrative step. This
+    // is the *whole* reason `project` exists: `ExecConfig` equality could never
+    // populate a repeat, because `history` grows monotonically (§1.1).
+    let mut visited: BTreeMap<ObservableState, VisitRecord> = BTreeMap::new();
+    visited.insert(project(&current), record_visit(pres, &current, 0));
 
     loop {
         let tick_phase = phase.saturating_add(consumed.len() as u64);
@@ -640,6 +633,31 @@ where
                         consumed.push(step);
                         hidden += 1;
                         current = successor;
+
+                        // Lasso check, before the budget check: a closed cycle
+                        // is a *result*, and reporting exhaustion for an orbit
+                        // we can already certify would throw information away.
+                        let state = project(&current);
+                        if let Some(previous) = visited.get(&state) {
+                            let outcome =
+                                close_lasso(pres, e, &current, &consumed, previous, phase, keyer);
+                            return (outcome, consumed, finish_cost(work));
+                        }
+
+                        if visited.len() as u64 >= budget.max_administrative_states {
+                            return (
+                                SaturatedStep::Unknown(
+                                    SaturationUnknown::AdministrativeStateBudgetExhausted {
+                                        states: visited.len() as u64,
+                                        budget: budget.max_administrative_states,
+                                    },
+                                ),
+                                consumed,
+                                finish_cost(work),
+                            );
+                        }
+                        visited.insert(state, record_visit(pres, &current, consumed.len() as u64));
+
                         if hidden > budget.max_hidden_steps {
                             return (
                                 SaturatedStep::Unknown(
@@ -666,10 +684,11 @@ fn finish_cost(work: Option<u64>) -> CostRecord {
     }
 }
 
-/// Build the in-memory quiescence claim for a terminal configuration.
+/// Build the quiescence certificate for a terminal configuration.
 ///
-/// Stage A populates the claim's fields; Stage B gives it a canonical encoding,
-/// an identity, and an independent checker.
+/// Every field is derived here; nothing is asserted that
+/// [`check_quiescence_certificate`] cannot independently re-derive from the
+/// presentation and the prefix.
 fn quiescence_certificate(
     pres: &PresentationV1<'_>,
     start: &ExecConfig,
@@ -686,7 +705,7 @@ fn quiescence_certificate(
         .iter()
         .map(|step| step.canon_digest(Domain::Value))
         .collect();
-    let prefix_chain = Journal::replay_chain(prefix).last().copied();
+    let prefix_chain = certificate::replay_chain_digest(prefix);
 
     QuiescenceCertificateV1 {
         profile: pres.profile.id(),
@@ -701,5 +720,123 @@ fn quiescence_certificate(
         adm_id: pres.adm_id,
         enumeration: EnumerationCompleteness::Complete,
         grade: Outcome::Derived,
+        // A function of the other fields, never an independent input: a caller
+        // cannot mint a certificate whose judgement names something else.
+        judgement: certificate::quiescence_judgement_of(
+            pres.context,
+            terminal_world,
+            policy,
+            pres.regime_set,
+            pres.adm_id,
+            prefix_chain,
+        ),
     }
+}
+
+/// What we remember about an observable state the administrative orbit has
+/// already been in.
+struct VisitRecord {
+    /// Index into the consumed-step vector at which the orbit was in this
+    /// state. `0` is the start state, before any administrative step.
+    index: u64,
+    /// The admissible candidate set enumerated at this state, retained only
+    /// when P1 is declared — it is the baseline the bounded check compares
+    /// against, and is pure overhead otherwise.
+    candidates: Option<BTreeSet<Candidate>>,
+}
+
+fn record_visit(pres: &PresentationV1<'_>, e: &ExecConfig, index: u64) -> VisitRecord {
+    let candidates = pres
+        .assumptions
+        .declares(AssumptionId::HistoryIndependence)
+        .then(|| enumerate_admissible(pres.regimes, pres.adm, e).0);
+    VisitRecord { index, candidates }
+}
+
+/// Decide what a revisited observable state means.
+///
+/// A revisit is only a *proof* of divergence under P1 and P6, so this is where
+/// the conditionality is discharged — or refused. Three outcomes, in order of
+/// how much they claim: an undeclared hypothesis is
+/// [`SaturationUnknown::UndeclaredAssumption`] (we noticed the repeat but may
+/// not conclude from it); a declared hypothesis the bounded check falsifies is
+/// [`SaturationUnknown::AssumptionViolated`] (the presentation's declaration is
+/// *wrong*, which is worse than not declaring); and only with both declared and
+/// both checks passing does this mint a certificate.
+#[allow(clippy::too_many_arguments)]
+fn close_lasso<F>(
+    pres: &PresentationV1<'_>,
+    start: &ExecConfig,
+    revisited: &ExecConfig,
+    consumed: &[CommittedStep],
+    previous: &VisitRecord,
+    phase: u64,
+    keyer: &mut F,
+) -> SaturatedStep
+where
+    F: FnMut(&Candidate, u64) -> crate::calendar::Key,
+{
+    let at_step = consumed.len() as u64;
+
+    if !pres.assumptions.declares(AssumptionId::HistoryIndependence) {
+        return SaturatedStep::Unknown(SaturationUnknown::UndeclaredAssumption(
+            AssumptionId::HistoryIndependence,
+        ));
+    }
+    if !pres.assumptions.declares(AssumptionId::PhaseStableKeying) {
+        return SaturatedStep::Unknown(SaturationUnknown::UndeclaredAssumption(
+            AssumptionId::PhaseStableKeying,
+        ));
+    }
+
+    // P1, bounded: the same observable state must offer the same admissible
+    // candidates now as it did on the first visit. A regime that branches on
+    // `history` fails exactly here — the two visits differ only in history.
+    let (candidates_now, _) = enumerate_admissible(pres.regimes, pres.adm, revisited);
+    let baseline = previous
+        .candidates
+        .as_ref()
+        .expect("P1 declared ⇒ the visit record retained its candidate set");
+    if *baseline != candidates_now {
+        return SaturatedStep::Unknown(SaturationUnknown::AssumptionViolated {
+            assumption: AssumptionId::HistoryIndependence,
+            at_step,
+        });
+    }
+
+    // P6, bounded: keying this state's candidates at the phase we are at now
+    // must agree — on priority and tie-break, the two components `select_K`
+    // orders by within a phase — with keying them at the phase of the first
+    // visit. Otherwise the repeat of the candidate *set* need not produce a
+    // repeat of the *selection*, and the orbit is not a cycle at all.
+    let phase_then = phase.saturating_add(previous.index);
+    let phase_now = phase.saturating_add(at_step);
+    for candidate in &candidates_now {
+        let then = keyer(candidate, phase_then);
+        let now = keyer(candidate, phase_now);
+        if (then.priority, then.tiebreak) != (now.priority, now.tiebreak) {
+            return SaturatedStep::Unknown(SaturationUnknown::AssumptionViolated {
+                assumption: AssumptionId::PhaseStableKeying,
+                at_step,
+            });
+        }
+    }
+
+    SaturatedStep::Divergent(Box::new(DivergenceCertificateV1 {
+        profile: pres.profile.id(),
+        context: pres.context,
+        presentation: pres.id,
+        policy: ConfigId(pres.interner.resolve(start.policy)),
+        src_world: ConfigId(pres.interner.resolve(start.world)),
+        stem: previous.index,
+        cycle: at_step - previous.index,
+        lasso: consumed
+            .iter()
+            .map(|step| step.canon_digest(Domain::Value))
+            .collect(),
+        cycle_world: ConfigId(pres.interner.resolve(revisited.world)),
+        cycle_policy: ConfigId(pres.interner.resolve(revisited.policy)),
+        assumptions: AssumptionMode::DeclaredP1P6,
+        grade: Outcome::Unknown,
+    }))
 }

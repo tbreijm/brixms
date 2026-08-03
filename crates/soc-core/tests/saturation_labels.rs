@@ -454,7 +454,11 @@ fn a_terminal_configuration_yields_a_quiescence_claim_graded_derived() {
             assert_eq!(cert.grade, brix_semantic::Outcome::Derived);
             assert_eq!(cert.src_world, cert.terminal_world, "no τ prefix at w3");
             assert!(cert.hidden.is_empty());
-            assert_eq!(cert.prefix_chain, None, "an empty prefix has no chain");
+            assert_eq!(
+                cert.prefix_chain,
+                History::empty().digest(),
+                "an empty prefix chains to the empty history, not to a sentinel"
+            );
             assert_eq!(cert.profile, profile.id());
         }
         other => panic!("expected Quiescent at the terminal world, got {other:?}"),
@@ -480,17 +484,35 @@ fn a_tau_prefix_before_quiescence_is_recorded_in_the_claim() {
                 cert.src_world, cert.terminal_world,
                 "saturation advanced the world before quiescing"
             );
-            assert!(cert.prefix_chain.is_some());
+            assert_ne!(
+                cert.prefix_chain,
+                History::empty().digest(),
+                "a non-empty prefix must chain past the empty history"
+            );
         }
         other => panic!("expected Quiescent after a finite τ prefix, got {other:?}"),
     }
     assert_eq!(consumed.len(), 1, "the hidden step is still committed");
 }
 
+/// A τ-chain longer than the budget. Note this is a chain, not a loop: it never
+/// revisits a state, so Stage B's lasso detection has nothing to find and the
+/// only honest answer is exhaustion. The self-loop case — which *is* a lasso and
+/// so is certified rather than bounded — lives in `saturation_certificates.rs`.
 #[test]
-fn an_unbounded_tau_orbit_exhausts_its_budget_and_never_certifies_quiescence() {
-    // A pure administrative self-loop: w0 -τa-> w0, forever.
-    let fx = build_fixture(&[("w0", "w0", vec![gen_tau_a()])]);
+fn a_tau_chain_past_the_budget_exhausts_and_never_certifies_quiescence() {
+    let fx = build_fixture(&[
+        ("w0", "w1", vec![gen_tau_a()]),
+        ("w1", "w2", vec![gen_tau_a()]),
+        ("w2", "w3", vec![gen_tau_a()]),
+        ("w3", "w4", vec![gen_tau_a()]),
+        ("w4", "w5", vec![gen_tau_a()]),
+        ("w5", "w6", vec![gen_tau_a()]),
+        ("w6", "w7", vec![gen_tau_a()]),
+        ("w7", "w8", vec![gen_tau_a()]),
+        ("w8", "w9", vec![gen_tau_a()]),
+        ("w9", "w10", vec![gen_realizing()]),
+    ]);
     let profile = hiding_profile();
     let regime: &dyn SettlementRegime = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
@@ -501,7 +523,11 @@ fn an_unbounded_tau_orbit_exhausts_its_budget_and_never_certifies_quiescence() {
         &fx.exec_at("w0"),
         0,
         &mut k,
-        SaturationBudget::uniform(5),
+        SaturationBudget {
+            max_hidden_steps: 3,
+            max_administrative_states: 64,
+            max_visible_steps: 64,
+        },
     );
 
     match step {
@@ -509,10 +535,10 @@ fn an_unbounded_tau_orbit_exhausts_its_budget_and_never_certifies_quiescence() {
             hidden_steps,
             budget,
         }) => {
-            assert_eq!(budget, 5);
-            assert_eq!(hidden_steps, 6, "the bound is hit one step past the budget");
+            assert_eq!(budget, 3);
+            assert_eq!(hidden_steps, 4, "the bound is hit one step past the budget");
         }
-        other => panic!("an unbounded τ-orbit must be Unknown, got {other:?}"),
+        other => panic!("a τ-chain past its budget must be Unknown, got {other:?}"),
     }
 }
 

@@ -1,0 +1,26 @@
+{
+  "format": "brix.soc.divergence",
+  "version": 1,
+  "saturation_profile": "brix.soc.saturation@1",
+  "observation_profile_id": "103a7ea5aa429160d3ed70b21a0ae5cb5c8f37ce56acfae34290c8296a1cf613",
+  "note": "Frozen saturation divergence-certificate vectors (ADR-0014 §6.2, ⟨D-QCERT⟩ ratified 2026-08-03). A divergence certificate is Unknown-graded for the completion question — never Refuted, never the 1 summand. Append-only; regenerate with BLESS_VECTORS=1.",
+  "cases": [
+    {
+      "name": "two_step_administrative_loop",
+      "description": "the administrative orbit w0 -> w1 -> w0 closes a lasso with stem 0 and cycle 2, under declared P1 and P6",
+      "context_id": "a7d1f9a56c727ac00ad5dd6dd97d4af1e943df9f605efcc265248c2c7b355c5c",
+      "presentation_id": "845fc8b522d1b5caf506ec592b18676cc1c366340c1aa9dc95e659fb4f44dc9c",
+      "policy": "209f627c2573e2ca42fd3ca87558b2885901ed8140cc8f4f07af2392d1b26521",
+      "src_world": "267031a7005c1483f0bcb7012072babdcd5ca23354f5955589d692df978eff20",
+      "stem": 0,
+      "cycle": 2,
+      "lasso": ["da5a7f820112e42153d39a07888df0ba5670345095319ab735d465cd95446dae", "2241c0f126a9a4d98db121c6825ad05e9dcdd036b20491402a720cbb381aa1ed"],
+      "cycle_world": "267031a7005c1483f0bcb7012072babdcd5ca23354f5955589d692df978eff20",
+      "cycle_policy": "209f627c2573e2ca42fd3ca87558b2885901ed8140cc8f4f07af2392d1b26521",
+      "assumptions": "DeclaredP1P6",
+      "grade": "Unknown",
+      "envelope_hex": "0113627269782e736f632e646976657267656e636501010115627269782e736f632e73617475726174696f6e40310120103a7ea5aa429160d3ed70b21a0ae5cb5c8f37ce56acfae34290c8296a1cf6130120a7d1f9a56c727ac00ad5dd6dd97d4af1e943df9f605efcc265248c2c7b355c5c0120845fc8b522d1b5caf506ec592b18676cc1c366340c1aa9dc95e659fb4f44dc9c0120209f627c2573e2ca42fd3ca87558b2885901ed8140cc8f4f07af2392d1b265210120267031a7005c1483f0bcb7012072babdcd5ca23354f5955589d692df978eff200001020120da5a7f820112e42153d39a07888df0ba5670345095319ab735d465cd95446dae01202241c0f126a9a4d98db121c6825ad05e9dcdd036b20491402a720cbb381aa1ed0120267031a7005c1483f0bcb7012072babdcd5ca23354f5955589d692df978eff200120209f627c2573e2ca42fd3ca87558b2885901ed8140cc8f4f07af2392d1b26521000104",
+      "certificate_id": "00a25f5383ac06f27b809403299e3de1d550cdfc8f662066fcdbd66a6498bbee"
+    }
+  ]
+}
