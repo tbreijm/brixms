@@ -325,7 +325,7 @@ Fixtures: `w0 -τ→ w1 -τ→ w2 -o→ w3` gives `sat_step(e(w0)).observation =
 
 ### Stage B — certificates
 
-Ships `Canonical` impls, the fail-closed readers, both semantic checkers, the full `CertEnvelopeError` taxonomy, lasso detection under declared P1+P6, `brix-semantic::Quiescent`, and frozen vectors with an **independent second construction path** built from primitive `CanonWriter` calls that repeats the frozen literals rather than importing the constants and never calls the production encoder. **Blocked on ⟨D-QCERT⟩/⟨D-OBS⟩ ratification.**
+Ships `Canonical` impls, the fail-closed readers, both semantic checkers, the full `CertEnvelopeError` taxonomy, lasso detection under declared P1+P6, `brix-semantic::Quiescent`, and frozen vectors with an **independent second construction path** built from primitive `CanonWriter` calls that repeats the frozen literals rather than importing the constants and never calls the production encoder. **⟨D-QCERT⟩ and ⟨D-OBS⟩ were ratified 2026-08-03 (§13); the vectors are minted and both field lists are frozen ABI.**
 
 Fixtures: a terminal state certifies and independently verifies; tampering each field yields its exact error; truncation, trailing bytes, non-minimal int, unknown version, unknown profile all reject; a prefix containing one realizing step yields `PrefixNotAdministrative`; `w0 -τ→ w1 -τ→ w0` yields `Divergent{stem 0, cycle 2}` which the quiescence checker refuses and which is not `Refuted`; a 10-long τ-chain under `max_hidden_steps = 3` yields exhaustion with **no certificate of either kind**; **the Build Plan's named conformance test** places a terminal state and an infinitely-searching state side by side and shows structurally distinct, non-interconvertible results; divergence requested without declared P1 yields `UndeclaredAssumption`; and a P1 violation (equal projections, different histories, different candidates) yields `AssumptionViolated`.
 
@@ -379,17 +379,21 @@ All new artifacts are append-only and versioned. A future nondeterministic or qu
 
 **Non-goals:** deciding equivalence for arbitrary Brix programs; hiding nondeterministic external outcomes; requiring internal support layout, scheduling, or administrative traces to match; Studio UI; the multiscale runtime; the `brix run` loop; proving CJ-1 (Step 12 — this ADR supplies the interface it will be stated against); any change to ADR-0012's L3 v1 profile.
 
-## 13. Open decisions requiring ratification
+## 13. Decisions and their ratification state
 
-| Marker | Decision | Recommendation |
+| Marker | Decision | Status |
 |---|---|---|
-| **⟨D-TAU⟩** | τ is a profile projection over fully committed steps; `Committed`/`F_O`/`O_min` unchanged; administrative steps stay journaled and `Derived`. The alternative widens the frozen signature. | Ratify as stated |
-| **⟨D-OBS⟩** | v1 profile = generator partition `𝒢 = 𝒢_τ ⊎ 𝒢_o`, canonically identified; mixed decompositions fail closed. | Ratify, v1 preimage frozen, taxonomy left to #59 |
-| **⟨D-PROJ⟩** | State identity is `(world, policy)`; `history` excluded; P1/P6 declared and bounded-checked. Without it nothing terminates; with it we assert a hypothesis about arbitrary regimes. | Ratify, with the structural alternative below as follow-up |
-| **⟨D-DIV⟩** | Certified divergence is a fourth summand outside `F_O`, `Unknown`-graded for completion, never `Refuted`, never the `1` summand. | Ratify |
-| **⟨D-QP⟩** | Quiescence proposition lives in `brix-semantic` (kernel-targetable) vs soc-core-local. | `brix-semantic` |
-| **⟨D-REF⟩** | Refinement's sole asymmetry: `sat_S = ↑` imposes no obligation; `sat_S = 1` forbids implementation divergence. | Ratify |
-| **⟨D-QCERT⟩** | The certificates' exact field lists and byte tags. **Stage B must not mint vectors before this is ratified.** | Ratify with Stage B review |
+| **⟨D-TAU⟩** | τ is a profile projection over fully committed steps; `Committed`/`F_O`/`O_min` unchanged; administrative steps stay journaled and `Derived`. The alternative widens the frozen signature. | Proposed — ratify as stated |
+| **⟨D-OBS⟩** | v1 profile = generator partition `𝒢 = 𝒢_τ ⊎ 𝒢_o`, canonically identified; mixed decompositions fail closed. | **Ratified 2026-08-03.** The v1 preimage (`brix.soc.obs-profile` / `…generator-partition@1`) is frozen; the profile *taxonomy* stays with #59 |
+| **⟨D-PROJ⟩** | State identity is `(world, policy)`; `history` excluded; P1/P6 declared and bounded-checked. Without it nothing terminates; with it we assert a hypothesis about arbitrary regimes. | Proposed — ratify, with the structural alternative below as follow-up |
+| **⟨D-DIV⟩** | Certified divergence is a fourth summand outside `F_O`, `Unknown`-graded for completion, never `Refuted`, never the `1` summand. | Proposed — ratify |
+| **⟨D-QP⟩** | Quiescence proposition lives in `brix-semantic` (kernel-targetable) vs soc-core-local. | Proposed — `brix-semantic` |
+| **⟨D-REF⟩** | Refinement's sole asymmetry: `sat_S = ↑` imposes no obligation; `sat_S = 1` forbids implementation divergence. | Proposed — ratify |
+| **⟨D-QCERT⟩** | The certificates' exact field lists and byte tags (§6.2). | **Ratified 2026-08-03.** Stage B mints `vectors/soc_quiescence_v1.json` and `vectors/soc_divergence_v1.json` against it; both field lists are frozen ABI from that point |
+
+**What ratifying ⟨D-QCERT⟩ committed us to.** The v1 quiescence certificate can only ever assert a *complete* enumeration, because [`EnumerationCompleteness`] admits exactly one ordinal and the reader accepts exactly that one. That is sound only while `Regime::candidates -> Vec<Candidate>` stays unbounded and total. If ADR-0012 §4's contemplated bounded/fallible regime API ever lands, every v1 certificate stays valid for the regimes it was minted against, and the new API MUST mint v2 — see risk 1. This was the load-bearing consideration at ratification, and it is recorded here so the constraint is not rediscovered as a surprise.
+
+**One field-shape refinement made while implementing Stage B.** §6.2's "cycle-entry world and policy" are carried as two `ConfigId`s, not as the in-memory `ObservableState` Stage A declared on `DivergenceCertificateV1`. `ObservableState` holds `Handle`s — allocation-order-dependent interner indices with no canonical encoding — so it can identify a state *inside one run* but can never appear in a durable artifact. The projection ⟨D-PROJ⟩ is unchanged; only its certificate rendering is pinned to digests.
 
 ### Risks
 

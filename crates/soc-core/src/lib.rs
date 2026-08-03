@@ -56,7 +56,7 @@
 //!   decompositions, never verifies them (ADR-0002 §5.1) — verification is
 //!   [`audit`]'s job, off the hot path.
 //!
-//! - **S5, Stage A** ([`saturate`]): divergence-sensitive saturation
+//! - **S5, Stages A–B** ([`saturate`]): divergence-sensitive saturation
 //!   (ADR-0014, tracked by #61). [`saturate::StepLabel`] and
 //!   [`saturate::ObservationProfile`] declare which committed steps are
 //!   administrative (`τ`) at one observation boundary;
@@ -64,9 +64,18 @@
 //!   realizing observation that follows it, returning the total
 //!   [`saturate::SaturatedStep`] vocabulary. `F_O`, `O_min`, `select_K`,
 //!   [`commit::Committed`], and the journal ABI are unchanged: saturation
-//!   layers *above* `γ`. Stage A does **not** certify divergence — an
-//!   unbounded administrative orbit is an explicit `Unknown`, never
-//!   quiescence.
+//!   layers *above* `γ`.
+//!
+//!   Stage B ([`saturate::certificate`]) makes the two decided answers
+//!   *artifacts*: [`saturate::QuiescenceCertificateV1`] carries the `1` summand
+//!   under a frozen ADR-0013-style envelope, and
+//!   [`saturate::DivergenceCertificateV1`] carries a closed administrative
+//!   lasso — `Unknown`-graded, never `Refuted`, never the `1` summand. Both
+//!   have fail-closed readers and semantic checkers that **re-derive** the
+//!   claim (re-enumerating the frontier, relabelling every step) rather than
+//!   trusting it. Divergence is conditional on the presentation's declared P1
+//!   and P6, bounded-checked at the revisited state; budget exhaustion stays a
+//!   structurally distinct `Unknown` that certifies nothing.
 //!
 //! **Gate.** The executable governance-conservation law — tightening `Adm`
 //! shrinks `cand(e)`/`Succ(e)` pointwise over every reachable `e`
@@ -117,10 +126,17 @@ pub use intern::{Handle, Interner};
 pub use journal::{CommittedStep, Journal};
 pub use oracle::{cand, cand_instrumented, succ};
 pub use regime::{Candidate, Regime};
+pub use saturate::certificate;
 pub use saturate::{
-    project, sat_step, AssumptionId, DeclaredAssumptions, DivergenceCertificateV1,
+    check_divergence_certificate, check_quiescence_certificate, decode_divergence_v1,
+    decode_quiescence_v1, divergence_certificate_id, encode_divergence_v1, encode_quiescence_v1,
+    project, quiescence_certificate_id, quiescence_judgement, sat_step, validate_divergence_v1,
+    validate_quiescence_v1, AssumptionId, AssumptionMode, CertEnvelopeError, CertificateCheck,
+    CertificateCheckError, DeclaredAssumptions, DivergenceCertificateId, DivergenceCertificateV1,
     EnumerationCompleteness, GeneratorPartitionProfile, ObservableState, ObservationProfile,
     ObservationProfileId, OverlappingPartitions, PresentationIdV1, PresentationV1, ProfileError,
-    QuiescenceCertificateV1, SaturatedStep, SaturationBudget, SaturationUnknown, StepLabel,
+    QuiescenceCertificateId, QuiescenceCertificateV1, SaturatedStep, SaturationBudget,
+    SaturationUnknown, StepLabel, CERTIFICATE_FORMAT_V1, DIVERGENCE_MARKER, QUIESCENCE_MARKER,
+    SATURATION_PROFILE_V1,
 };
 pub use store::{ArcMap, PersistentMap};

@@ -35,7 +35,10 @@
 //!   verified replay are *different* evidence with *different* ids — never
 //!   confusable, never silently upgraded. [`Realizes`] — the
 //!   `Realizes(w, x, y)` proposition kind that makes a realization judgment
-//!   a first-class statement.
+//!   a first-class statement. [`Quiescent`] — the dual statement that the
+//!   admissible frontier at a configuration is *empty* under a named regime
+//!   set and admissibility policy, so the `F_O` `1` summand can carry an
+//!   epistemic grade like any other proposition (ADR-0014 §6.4, ⟨D-QP⟩).
 //!
 //! Next slices add `DiscoveryRun`, the observational cost records (§5.7), the
 //! `Proven`-provenance validator (the elaboration-boundary rule), and the
@@ -51,6 +54,7 @@ mod id;
 mod judgement;
 mod outcome;
 mod proposition;
+mod quiescent;
 mod realizes;
 mod regime;
 mod witness;
@@ -64,6 +68,7 @@ pub use generator::{GeneratorId, GeneratorRegistry, GeneratorRegistryId};
 pub use judgement::{Judgement, JudgementId};
 pub use outcome::{Authority, Outcome};
 pub use proposition::PropositionId;
+pub use quiescent::Quiescent;
 pub use realizes::Realizes;
 pub use regime::RegimeId;
 pub use witness::{

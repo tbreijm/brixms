@@ -1,0 +1,47 @@
+{
+  "format": "brix.soc.quiescence",
+  "version": 1,
+  "saturation_profile": "brix.soc.saturation@1",
+  "observation_profile_id": "103a7ea5aa429160d3ed70b21a0ae5cb5c8f37ce56acfae34290c8296a1cf613",
+  "note": "Frozen saturation quiescence-certificate vectors (ADR-0014 §6.2, ⟨D-QCERT⟩ ratified 2026-08-03). Append-only: an existing case may never change without a new envelope format version. Regenerate with BLESS_VECTORS=1.",
+  "cases": [
+    {
+      "name": "terminal_without_prefix",
+      "description": "quiescence at a terminal world with no administrative prefix; the prefix chain is the empty history",
+      "context_id": "a7d1f9a56c727ac00ad5dd6dd97d4af1e943df9f605efcc265248c2c7b355c5c",
+      "presentation_id": "845fc8b522d1b5caf506ec592b18676cc1c366340c1aa9dc95e659fb4f44dc9c",
+      "policy": "209f627c2573e2ca42fd3ca87558b2885901ed8140cc8f4f07af2392d1b26521",
+      "src_world": "a0a30c304d8257e8026d41bd9cface50b600a7f00d8a13051728c99e8fb2fdcb",
+      "terminal_world": "a0a30c304d8257e8026d41bd9cface50b600a7f00d8a13051728c99e8fb2fdcb",
+      "hidden_steps": 0,
+      "hidden": [],
+      "prefix_chain": "63bc5564a81abd71dd451f27896c9d2d3b1283d5231b7cb64c7f6d69e1dbf742",
+      "regime_set": "6e76a96e6939240fae5fa2daad949654d7ed7bc738445b0c99660cf078fedb50",
+      "adm": "6b1f8bba6a8243ecc0f63ecad59eb1376d08d2bd35d29d80e637dcf8e859f360",
+      "enumeration": "Complete",
+      "grade": "Derived",
+      "judgement": "d27bbac3b1ad43bea5075dad53c1f88f6223e8f5ec09a134df9fc87cbdadc22a",
+      "envelope_hex": "0113627269782e736f632e717569657363656e636501010115627269782e736f632e73617475726174696f6e40310120103a7ea5aa429160d3ed70b21a0ae5cb5c8f37ce56acfae34290c8296a1cf6130120a7d1f9a56c727ac00ad5dd6dd97d4af1e943df9f605efcc265248c2c7b355c5c0120845fc8b522d1b5caf506ec592b18676cc1c366340c1aa9dc95e659fb4f44dc9c0120209f627c2573e2ca42fd3ca87558b2885901ed8140cc8f4f07af2392d1b265210120a0a30c304d8257e8026d41bd9cface50b600a7f00d8a13051728c99e8fb2fdcb0120a0a30c304d8257e8026d41bd9cface50b600a7f00d8a13051728c99e8fb2fdcb00012063bc5564a81abd71dd451f27896c9d2d3b1283d5231b7cb64c7f6d69e1dbf74201206e76a96e6939240fae5fa2daad949654d7ed7bc738445b0c99660cf078fedb5001206b1f8bba6a8243ecc0f63ecad59eb1376d08d2bd35d29d80e637dcf8e859f3600001020120d27bbac3b1ad43bea5075dad53c1f88f6223e8f5ec09a134df9fc87cbdadc22a",
+      "certificate_id": "f0805e5dc080d340ba3d1332c489dd4a22fafccf267c81578989405a819da2b2"
+    },
+    {
+      "name": "terminal_after_two_administrative_steps",
+      "description": "quiescence at w2 after hiding the τ prefix w0 -> w1 -> w2",
+      "context_id": "a7d1f9a56c727ac00ad5dd6dd97d4af1e943df9f605efcc265248c2c7b355c5c",
+      "presentation_id": "845fc8b522d1b5caf506ec592b18676cc1c366340c1aa9dc95e659fb4f44dc9c",
+      "policy": "209f627c2573e2ca42fd3ca87558b2885901ed8140cc8f4f07af2392d1b26521",
+      "src_world": "267031a7005c1483f0bcb7012072babdcd5ca23354f5955589d692df978eff20",
+      "terminal_world": "a0a30c304d8257e8026d41bd9cface50b600a7f00d8a13051728c99e8fb2fdcb",
+      "hidden_steps": 2,
+      "hidden": ["e7e8d2baca262996285e6cc7b90978a5074c1b9a5e278f20e1ac53e90545137a", "0b15d21115db3ff7804503468c90120e8908fa6d1f56166bae037cc88074f2dc"],
+      "prefix_chain": "d2b6c113c5c65c0f8ce3adab0d9fdf9926d8865faab2aaa3f8d7b0dcf05e3111",
+      "regime_set": "6e76a96e6939240fae5fa2daad949654d7ed7bc738445b0c99660cf078fedb50",
+      "adm": "6b1f8bba6a8243ecc0f63ecad59eb1376d08d2bd35d29d80e637dcf8e859f360",
+      "enumeration": "Complete",
+      "grade": "Derived",
+      "judgement": "c52a535868372306858fa7039e1ac44acd7bb1a7324fbd9a31464682e091f314",
+      "envelope_hex": "0113627269782e736f632e717569657363656e636501010115627269782e736f632e73617475726174696f6e40310120103a7ea5aa429160d3ed70b21a0ae5cb5c8f37ce56acfae34290c8296a1cf6130120a7d1f9a56c727ac00ad5dd6dd97d4af1e943df9f605efcc265248c2c7b355c5c0120845fc8b522d1b5caf506ec592b18676cc1c366340c1aa9dc95e659fb4f44dc9c0120209f627c2573e2ca42fd3ca87558b2885901ed8140cc8f4f07af2392d1b265210120267031a7005c1483f0bcb7012072babdcd5ca23354f5955589d692df978eff200120a0a30c304d8257e8026d41bd9cface50b600a7f00d8a13051728c99e8fb2fdcb01020120e7e8d2baca262996285e6cc7b90978a5074c1b9a5e278f20e1ac53e90545137a01200b15d21115db3ff7804503468c90120e8908fa6d1f56166bae037cc88074f2dc0120d2b6c113c5c65c0f8ce3adab0d9fdf9926d8865faab2aaa3f8d7b0dcf05e311101206e76a96e6939240fae5fa2daad949654d7ed7bc738445b0c99660cf078fedb5001206b1f8bba6a8243ecc0f63ecad59eb1376d08d2bd35d29d80e637dcf8e859f3600001020120c52a535868372306858fa7039e1ac44acd7bb1a7324fbd9a31464682e091f314",
+      "certificate_id": "5f8e077b08566bb48f8975f7b7c2facb6274e97fe221f238ac5975dfe11a1e46"
+    }
+  ]
+}
