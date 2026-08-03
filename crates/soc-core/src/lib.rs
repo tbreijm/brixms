@@ -56,7 +56,7 @@
 //!   decompositions, never verifies them (ADR-0002 §5.1) — verification is
 //!   [`audit`]'s job, off the hot path.
 //!
-//! - **S5, Stages A–B** ([`saturate`]): divergence-sensitive saturation
+//! - **S5, Stages A–C** ([`saturate`]): divergence-sensitive saturation
 //!   (ADR-0014, tracked by #61). [`saturate::StepLabel`] and
 //!   [`saturate::ObservationProfile`] declare which committed steps are
 //!   administrative (`τ`) at one observation boundary;
@@ -76,6 +76,19 @@
 //!   trusting it. Divergence is conditional on the presentation's declared P1
 //!   and P6, bounded-checked at the revisited state; budget exhaustion stays a
 //!   structurally distinct `Unknown` that certifies nothing.
+//!
+//!   Stage C drives and compares. [`saturate::run_saturated`] runs to a
+//!   [`saturate::SaturatedStop`] in which **every** exit is a claim — certified
+//!   quiescence, certified divergence, or an explicit `Unknown` — so the
+//!   settled-versus-exhausted conflation is gone at both layers.
+//!   [`saturate::check_saturated`] holds two [`saturate::SaturatedSystem`]s to
+//!   a [`saturate::Contract`]: symmetric weak bisimulation (the correct
+//!   contract for naive-versus-incremental parity) or directional refinement,
+//!   whose sole asymmetry is that a specification's divergence imposes no
+//!   obligation while its quiescence forbids the implementation from spinning.
+//!   Because `F_O` is deterministic the comparison is a lockstep walk, so its
+//!   counterexample is the *unique shortest* disagreeing visible trace —
+//!   observations only, never administrative steps.
 //!
 //! **Gate.** The executable governance-conservation law — tightening `Adm`
 //! shrinks `cand(e)`/`Succ(e)` pointwise over every reachable `e`
@@ -126,17 +139,19 @@ pub use intern::{Handle, Interner};
 pub use journal::{CommittedStep, Journal};
 pub use oracle::{cand, cand_instrumented, succ};
 pub use regime::{Candidate, Regime};
-pub use saturate::certificate;
+pub use saturate::{bisimulation, certificate, driver};
 pub use saturate::{
-    check_divergence_certificate, check_quiescence_certificate, decode_divergence_v1,
-    decode_quiescence_v1, divergence_certificate_id, encode_divergence_v1, encode_quiescence_v1,
-    project, quiescence_certificate_id, quiescence_judgement, sat_step, validate_divergence_v1,
-    validate_quiescence_v1, AssumptionId, AssumptionMode, CertEnvelopeError, CertificateCheck,
-    CertificateCheckError, DeclaredAssumptions, DivergenceCertificateId, DivergenceCertificateV1,
-    EnumerationCompleteness, GeneratorPartitionProfile, ObservableState, ObservationProfile,
-    ObservationProfileId, OverlappingPartitions, PresentationIdV1, PresentationV1, ProfileError,
-    QuiescenceCertificateId, QuiescenceCertificateV1, SaturatedStep, SaturationBudget,
-    SaturationUnknown, StepLabel, CERTIFICATE_FORMAT_V1, DIVERGENCE_MARKER, QUIESCENCE_MARKER,
-    SATURATION_PROFILE_V1,
+    check_divergence_certificate, check_quiescence_certificate, check_saturated,
+    decode_divergence_v1, decode_quiescence_v1, divergence_certificate_id, encode_divergence_v1,
+    encode_quiescence_v1, project, quiescence_certificate_id, quiescence_judgement, run_saturated,
+    sat_step, validate_divergence_v1, validate_quiescence_v1, AssumptionId, AssumptionMode,
+    CertEnvelopeError, CertificateCheck, CertificateCheckError, ComparisonUnknown, Contract,
+    DeclaredAssumptions, DivergenceCertificateId, DivergenceCertificateV1, EnumerationCompleteness,
+    GeneratorPartitionProfile, MismatchKind, ObservableState, ObservationProfile,
+    ObservationProfileId, OverlappingPartitions, PresentationIdV1, PresentationV1, PresentedSystem,
+    ProfileError, QuiescenceCertificateId, QuiescenceCertificateV1, SaturatedComparison,
+    SaturatedCounterexample, SaturatedRun, SaturatedStep, SaturatedStop, SaturatedSystem,
+    SaturationBudget, SaturationUnknown, StepLabel, Summand, SystemBoundary, CERTIFICATE_FORMAT_V1,
+    DIVERGENCE_MARKER, QUIESCENCE_MARKER, SATURATION_PROFILE_V1,
 };
 pub use store::{ArcMap, PersistentMap};

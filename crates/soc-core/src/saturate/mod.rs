@@ -50,6 +50,20 @@
 //! Budget exhaustion remains what it always was: an honest "we do not know",
 //! structurally distinct from certified divergence. Distinguishing the two is
 //! the whole point of ADR-0014 §5.1.
+//!
+//! # Driving and comparing (Stage C)
+//!
+//! [`driver::run_saturated`] drives saturation to a stop, and every stop is a
+//! *claim*: certified quiescence, certified divergence, or an explicit
+//! `Unknown`. [`bisimulation::check_saturated`] holds two
+//! [`driver::SaturatedSystem`]s to a [`bisimulation::Contract`] — symmetric
+//! weak bisimulation, or directional refinement whose sole asymmetry is that a
+//! specification's divergence imposes no obligation while its quiescence
+//! forbids the implementation from spinning.
+//!
+//! Because `F_O` is deterministic, comparison is a lockstep walk and its
+//! counterexample is the *unique shortest* disagreeing visible trace, with no
+//! search and no shrinking.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -64,7 +78,17 @@ use crate::intern::{Handle, Interner};
 use crate::journal::CommittedStep;
 use crate::regime::Candidate;
 
+pub mod bisimulation;
 pub mod certificate;
+pub mod driver;
+
+pub use bisimulation::{
+    check_saturated, ComparisonUnknown, Contract, MismatchKind, SaturatedComparison,
+    SaturatedCounterexample, Summand,
+};
+pub use driver::{
+    run_saturated, PresentedSystem, SaturatedRun, SaturatedStop, SaturatedSystem, SystemBoundary,
+};
 
 pub use certificate::{
     check_divergence_certificate, check_quiescence_certificate, decode_divergence_v1,
