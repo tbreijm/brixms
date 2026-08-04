@@ -8,9 +8,18 @@
 //!
 //! 1. this test itself — its encoder is `brix-canon`, and it re-reads the
 //!    committed manifest to guard against silent drift (a changed encoding fails
-//!    the test unless `BLESS_VECTORS=1` regenerates it);
-//! 2. `scripts/canon_crosscheck.py` — an independent from-spec implementation
-//!    that replays the same specs and must reproduce the same bytes.
+//!    the test unless `BLESS_VECTORS=1` regenerates it). Note this consumer
+//!    **cannot** cross-check the corpus: `Spec::encode` drives a real
+//!    `CanonWriter`, so it is the production encoder checking itself;
+//! 2. `scripts/canon_crosscheck.py` — a genuinely independent implementation, in
+//!    another language, written from `spec/BrixMS_v9_0.md` Appendix G plus the
+//!    canon-lane errata 0001, 0002, and 0003 in `spec/errata/`. It replays the
+//!    same declarative specs and must
+//!    reproduce the same bytes, and it never reads this crate. CI runs it beside
+//!    this test (`.github/workflows/ci.yml`).
+//!
+//! Consumer 2 is what makes these bytes *verified* rather than merely *frozen*.
+//! If the two disagree, exactly one is wrong.
 //!
 //! After G0 this manifest is append-only; any change to an existing vector is a
 //! spec erratum plus a `CANON_VERSION` bump (see `crates/brix-canon/OWNER.md`).

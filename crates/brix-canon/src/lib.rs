@@ -14,8 +14,17 @@
 //! §"Numerics and ordering"). That forces the integer, decimal, and string
 //! encodings to be *order-preserving*, which is stronger than the appendix's
 //! sketch text spells out; the two encodings whose order-preserving layout is
-//! not literally dictated by the sketch are ruled in `spec/errata/0001` and
-//! `spec/errata/0002`. Every other rule is a direct reading of the appendix.
+//! not literally dictated by the sketch are ruled in
+//! `spec/errata/0001-integer-canonical-encoding.md` and
+//! `spec/errata/0002-decimal-canonical-encoding.md`. A third,
+//! `spec/errata/0003-char-is-not-a-single-tagged-byte.md`, splits Appendix G's
+//! "Bool/Unit/Char: single tagged bytes" bullet, which `Char` cannot satisfy.
+//! Every other rule is a direct reading of the appendix.
+//!
+//! These bytes are not merely frozen, they are **verified**:
+//! `scripts/canon_crosscheck.py` is an independent implementation, in another
+//! language, written from the appendix and those three errata, and CI requires
+//! it to reproduce every vector in `vectors/canon_vectors.json`.
 //!
 //! Coverage of the Appendix G bullet list:
 //! - integers — [`CanonWriter::write_uint`] / [`CanonWriter::write_int`]
@@ -24,8 +33,9 @@
 //! - strings — [`CanonWriter::write_str`]; identifiers NFC-folded in
 //!   [`CanonWriter::write_ident`];
 //! - bytes — [`CanonWriter::write_bytes`];
-//! - Bool/Unit/Char — [`CanonWriter::write_bool`] / [`CanonWriter::write_unit`]
-//!   / [`CanonWriter::write_char`];
+//! - Bool/Unit — [`CanonWriter::write_bool`] / [`CanonWriter::write_unit`]
+//!   (single raw bytes); Char — [`CanonWriter::write_char`], the scalar value as
+//!   a canon uint, **not** a single tagged byte (erratum 0003);
 //! - enums — [`CanonWriter::write_enum`] (variant ordinal is ABI);
 //! - records/rows — [`CanonWriter::write_record`] (fields sorted by field-name
 //!   bytes);
