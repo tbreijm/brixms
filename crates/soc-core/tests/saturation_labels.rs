@@ -17,7 +17,9 @@ use brix_canon::{CanonWriter, Digest, Domain};
 use brix_semantic::{ConfigId, ContextId, Decomposition, GeneratorId};
 use soc_core::adm::AdmAll;
 use soc_core::calendar::Key;
-use soc_core::commit::{commit_tick, run_reason, Committed, SettlementRegime, UnsaturatedStop};
+use soc_core::commit::{
+    commit_tick, run_reason, CommitError, Committed, SettlementRegime, UnsaturatedStop,
+};
 use soc_core::exec::ExecConfig;
 use soc_core::history::History;
 use soc_core::intern::{Handle, Interner};
@@ -63,8 +65,11 @@ impl Regime for ChainRegime {
 }
 
 impl SettlementRegime for ChainRegime {
-    fn decompose(&self, e: &ExecConfig, c: &Candidate) -> Decomposition {
-        let edge = self.edges.get(&e.world).expect("decompose on a live edge");
+    fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError> {
+        let edge = self
+            .edges
+            .get(&e.world)
+            .expect("try_decompose on a live edge");
         let src = self.configs[&e.world];
         let dst = self.configs[&c.successor];
         // `configs.len() == generators.len() + 1` — chain the endpoints through
@@ -75,7 +80,7 @@ impl SettlementRegime for ChainRegime {
             configs.push(src);
         }
         configs.push(dst);
-        Decomposition::recorded(edge.generators.clone(), configs).expect("well-formed chain")
+        Ok(Decomposition::recorded(edge.generators.clone(), configs).expect("well-formed chain"))
     }
 }
 

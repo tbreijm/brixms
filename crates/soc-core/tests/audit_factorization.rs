@@ -26,7 +26,7 @@ use brix_semantic::{
 use soc_core::adm::AdmAll;
 use soc_core::audit::{audit_step, AuditResult, GeneratorSemantics};
 use soc_core::calendar::Key;
-use soc_core::commit::{run, SettlementRegime};
+use soc_core::commit::{run, CommitError, SettlementRegime};
 use soc_core::exec::ExecConfig;
 use soc_core::history::History;
 use soc_core::intern::{Handle, Interner};
@@ -73,8 +73,8 @@ fn fixture_decomposition() -> Decomposition {
 }
 
 impl SettlementRegime for FixtureRegime {
-    fn decompose(&self, _e: &ExecConfig, _c: &Candidate) -> Decomposition {
-        fixture_decomposition()
+    fn try_decompose(&self, _e: &ExecConfig, _c: &Candidate) -> Result<Decomposition, CommitError> {
+        Ok(fixture_decomposition())
     }
 }
 

@@ -6,7 +6,7 @@ use brix_semantic::{
     GeneratorRegistry, Outcome, Realizes,
 };
 use soc_core::{
-    audit_step, commit_tick, AdmAll, AuditResult, AuditedStep, Candidate, ExecConfig,
+    audit_step, commit_tick, AdmAll, AuditResult, AuditedStep, Candidate, CommitError, ExecConfig,
     GeneratorSemantics, Handle, History, Interner, Key, Regime, SettlementRegime,
 };
 
@@ -30,9 +30,11 @@ impl Regime for MultiGenFixtureRegime {
 }
 
 impl SettlementRegime for MultiGenFixtureRegime {
-    fn decompose(&self, _e: &ExecConfig, _c: &Candidate) -> Decomposition {
-        Decomposition::recorded(self.generators.clone(), self.configs.clone())
-            .expect("valid recorded decomposition")
+    fn try_decompose(&self, _e: &ExecConfig, _c: &Candidate) -> Result<Decomposition, CommitError> {
+        Ok(
+            Decomposition::recorded(self.generators.clone(), self.configs.clone())
+                .expect("valid recorded decomposition"),
+        )
     }
 }
 

@@ -17,7 +17,7 @@ use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_semantic::{ConfigId, ContextId, Decomposition, GeneratorId, Outcome};
 use soc_core::adm::AdmAll;
 use soc_core::calendar::Key;
-use soc_core::commit::SettlementRegime;
+use soc_core::commit::{CommitError, SettlementRegime};
 use soc_core::exec::ExecConfig;
 use soc_core::history::History;
 use soc_core::intern::{Handle, Interner};
@@ -64,8 +64,11 @@ impl Regime for ChainRegime {
 }
 
 impl SettlementRegime for ChainRegime {
-    fn decompose(&self, e: &ExecConfig, c: &Candidate) -> Decomposition {
-        let edge = self.edges.get(&e.world).expect("decompose on a live edge");
+    fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError> {
+        let edge = self
+            .edges
+            .get(&e.world)
+            .expect("try_decompose on a live edge");
         let src = self.configs[&e.world];
         let dst = self.configs[&c.successor];
         let mut configs = vec![src];
@@ -73,7 +76,7 @@ impl SettlementRegime for ChainRegime {
             configs.push(src);
         }
         configs.push(dst);
-        Decomposition::recorded(edge.generators.clone(), configs).expect("well-formed chain")
+        Ok(Decomposition::recorded(edge.generators.clone(), configs).expect("well-formed chain"))
     }
 }
 
@@ -115,12 +118,12 @@ impl Regime for HistoryPeekingRegime {
 }
 
 impl SettlementRegime for HistoryPeekingRegime {
-    fn decompose(&self, e: &ExecConfig, c: &Candidate) -> Decomposition {
-        Decomposition::recorded(
+    fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError> {
+        Ok(Decomposition::recorded(
             self.generators.clone(),
             vec![self.configs[&e.world], self.configs[&c.successor]],
         )
-        .expect("well-formed decomposition")
+        .expect("well-formed decomposition"))
     }
 }
 

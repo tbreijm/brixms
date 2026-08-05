@@ -14,7 +14,7 @@
 //! Doing so would need `regimes: &[&dyn SettlementRegime]` converted to a
 //! fresh `Vec<&dyn Regime>` (an extra allocation) and then a *second*,
 //! redundant enumeration pass to recover which concrete regime produced the
-//! selected candidate (needed to call [`SettlementRegime::decompose`] on the
+//! selected candidate (needed to call [`SettlementRegime::try_decompose`] on the
 //! right regime — [`crate::regime::Candidate::regime`] is only a bare
 //! interned [`crate::intern::Handle`], not a way back to the `&dyn
 //! SettlementRegime` that produced it). Instead, `commit_tick` enumerates
@@ -105,7 +105,26 @@ pub trait SettlementRegime: Regime {
     /// (unverified) form (ADR-0002 §5.1 — the hot loop records, never
     /// verifies). Called at the commit boundary, not in the `Ord`-set hot
     /// path.
-    fn decompose(&self, e: &ExecConfig, c: &Candidate) -> Decomposition;
+    ///
+    /// Fallible (ADR-0012 §2 item 6, §6.3): a regime driven from untrusted
+    /// source-derived state (a malformed plan, a missing interner entry, an
+    /// empty decomposition) cannot honour an infallible signature without
+    /// panicking or fabricating a `Decomposition`. Rejecting is reported
+    /// through the same [`CommitError`] vocabulary [`try_commit_selected`]
+    /// already uses at the commit boundary — `SettlementRegime` is already
+    /// commit-boundary-specific (see the trait doc above), so there is no
+    /// need for a second, regime-local error type; extending `CommitError`
+    /// keeps exactly one rejection vocabulary instead of two that would need
+    /// to be kept in sync.
+    ///
+    /// This is deliberately the trait's only decomposition method — no
+    /// infallible `decompose` survives beside it. A blanket default
+    /// (`decompose` kept, `try_decompose` wrapping it in `Ok`) would let a
+    /// future regime silently opt out of the fail-closed contract by
+    /// implementing only the infallible half; every current implementor in
+    /// this workspace already constructs a fixed, valid `Decomposition`, so
+    /// migrating them is mechanical (ADR-0012 §2 item 6).
+    fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError>;
 }
 
 /// One tick of the committed coalgebra `γ = select_K ∘ δ`:
@@ -200,13 +219,62 @@ where
 /// are the conditions the reference [`commit_tick`] previously panicked on;
 /// [`try_commit_selected`] surfaces them so the L3 runtime can convert
 /// untrusted/source-derived state into a `RuntimeUnknown` result.
+///
+/// This is also the rejection vocabulary [`SettlementRegime::try_decompose`]
+/// reports through (ADR-0012 §2 item 6): rather than mint a second,
+/// decompose-local error type, the fallible decomposition seam extends this
+/// one, since `SettlementRegime` is already commit-boundary-specific. The
+/// four variants below are the "at minimum" set #244 calls for — an empty
+/// decomposition, a chain-length mismatch, an endpoint mismatch, and an
+/// unresolvable handle — and are exactly what ADR-0012 §6.3 needs a
+/// source-derived Stage B regime to be able to express (candidate-vs-plan
+/// mismatch, witness identity mismatch, generator-chain mismatch, and
+/// endpoint mismatch each map onto one of these).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommitError {
-    /// A world or successor handle was not resolvable in the interner.
+    /// A world or successor handle was not resolvable in the interner (or,
+    /// from [`SettlementRegime::try_decompose`], some other handle the
+    /// regime needed to resolve while building the decomposition).
     UnresolvedHandle,
     /// The committed decomposition had no generators, so no witness can be
-    /// composed (`k = g_n ∘ … ∘ g_1` requires at least one generator).
+    /// composed (`k = g_n ∘ … ∘ g_1` requires at least one generator). Also
+    /// returned by a regime whose source-derived plan yielded no rule/step to
+    /// decompose at all.
     EmptyDecomposition,
+    /// The proposed generator chain and configuration chain are structurally
+    /// inconsistent with a finite factorization: `configs.len() !=
+    /// generators.len() + 1` (mirrors
+    /// [`brix_semantic::DecompositionError::ChainLengthMismatch`], which a
+    /// `try_decompose` implementation typically discovers by calling
+    /// [`Decomposition::recorded`]/`replay_verified` and propagating its
+    /// error via `?`).
+    ChainLengthMismatch {
+        /// The proposed generator count.
+        generators: usize,
+        /// The proposed configuration count.
+        configs: usize,
+    },
+    /// The decomposition's endpoints do not match what the candidate/plan
+    /// requires — e.g. (ADR-0012 §6.3) `decomposition.configs` is not exactly
+    /// `[expected_src, expected_dst]` for the candidate being committed. Not
+    /// produced by any regime in this issue's scope (that check is Stage B's
+    /// source-derived regime, ADR-0012 §6.3); the variant exists so the
+    /// interface can express it.
+    EndpointMismatch,
+}
+
+impl From<brix_semantic::DecompositionError> for CommitError {
+    fn from(e: brix_semantic::DecompositionError) -> Self {
+        match e {
+            brix_semantic::DecompositionError::ChainLengthMismatch {
+                generators,
+                configs,
+            } => CommitError::ChainLengthMismatch {
+                generators,
+                configs,
+            },
+        }
+    }
 }
 
 /// The pure prospective successor of committing `candidate` from `e`: the same
@@ -228,9 +296,14 @@ pub fn prospective_successor(e: &ExecConfig, candidate: &Candidate) -> ExecConfi
 /// `commit_tick` and the incremental L3 adapter call this; the adapter selects
 /// and schedules but never mints a settlement judgement itself.
 ///
-/// Fallible where the reference driver panicked: an unresolved handle or an
-/// empty decomposition returns [`CommitError`] instead of panicking, so the
-/// L3 boundary can fail closed on untrusted source-derived state.
+/// Fallible where the reference driver panicked: an unresolved handle, a
+/// rejected decomposition (malformed, empty, or endpoint-mismatched — see
+/// [`SettlementRegime::try_decompose`]), or an empty composed witness each
+/// return [`CommitError`] instead of panicking, so the L3 boundary can fail
+/// closed on untrusted source-derived state. A rejected decomposition short-
+/// circuits before any `CommittedStep` is built and before any `Derived`
+/// judgement is minted — this function's only `Ok` path is the one that
+/// builds both.
 pub fn try_commit_selected(
     key: Key,
     candidate: &Candidate,
@@ -239,7 +312,7 @@ pub fn try_commit_selected(
     e: &ExecConfig,
     context: ContextId,
 ) -> Result<(Committed, CommittedStep), CommitError> {
-    let decomposition = regime.decompose(e, candidate);
+    let decomposition = regime.try_decompose(e, candidate)?;
 
     let src = ConfigId(
         interner
@@ -436,15 +509,19 @@ mod tests {
     }
 
     impl SettlementRegime for FixtureRegime {
-        fn decompose(&self, _e: &ExecConfig, _c: &Candidate) -> Decomposition {
-            Decomposition::recorded(
+        fn try_decompose(
+            &self,
+            _e: &ExecConfig,
+            _c: &Candidate,
+        ) -> Result<Decomposition, CommitError> {
+            Ok(Decomposition::recorded(
                 vec![GeneratorId::named("fixture.step@1")],
                 vec![
                     ConfigId::from_canon(b"fixture-x0"),
                     ConfigId::from_canon(b"fixture-x1"),
                 ],
             )
-            .unwrap()
+            .unwrap())
         }
     }
 
@@ -700,8 +777,12 @@ mod tests {
     }
 
     impl SettlementRegime for MultiGenRegime {
-        fn decompose(&self, _e: &ExecConfig, _c: &Candidate) -> Decomposition {
-            Decomposition::recorded(self.generators.clone(), self.configs.clone()).unwrap()
+        fn try_decompose(
+            &self,
+            _e: &ExecConfig,
+            _c: &Candidate,
+        ) -> Result<Decomposition, CommitError> {
+            Ok(Decomposition::recorded(self.generators.clone(), self.configs.clone()).unwrap())
         }
     }
 
@@ -818,5 +899,148 @@ mod tests {
         let err = try_commit_selected(key, &candidate, &regime, &i, &e, ContextId::root())
             .expect_err("an unresolvable handle must fail, not panic");
         assert_eq!(err, CommitError::UnresolvedHandle);
+    }
+
+    /// A regime whose `try_decompose` always rejects with a fixed
+    /// [`CommitError`] — exercising the fail-closed contract
+    /// [`SettlementRegime::try_decompose`] documents (ADR-0012 §2 item 6): a
+    /// malformed/empty/endpoint-mismatched decomposition must produce a typed
+    /// commit failure, never a panic and never a fabricated `Decomposition`.
+    struct RejectingRegime {
+        id: Handle,
+        witness: Handle,
+        successor: Handle,
+        error: CommitError,
+    }
+
+    impl Regime for RejectingRegime {
+        fn candidates(&self, _e: &ExecConfig) -> Vec<Candidate> {
+            vec![Candidate {
+                regime: self.id,
+                witness: self.witness,
+                successor: self.successor,
+            }]
+        }
+    }
+
+    impl SettlementRegime for RejectingRegime {
+        fn try_decompose(
+            &self,
+            _e: &ExecConfig,
+            _c: &Candidate,
+        ) -> Result<Decomposition, CommitError> {
+            Err(self.error.clone())
+        }
+    }
+
+    fn rejecting_fixture(error: CommitError) -> (Interner, RejectingRegime, ExecConfig, Candidate) {
+        let (i, base, e) = setup();
+        let regime = RejectingRegime {
+            id: base.id,
+            witness: base.witness,
+            successor: base.successor,
+            error,
+        };
+        let candidate = Candidate {
+            regime: regime.id,
+            witness: regime.witness,
+            successor: regime.successor,
+        };
+        (i, regime, e, candidate)
+    }
+
+    #[test]
+    fn try_commit_selected_reports_empty_decomposition_instead_of_panicking() {
+        // Acceptance (#244): an empty decomposition is a typed failure, not a
+        // panic and not a fabricated Decomposition — and no CommittedStep or
+        // Derived judgement is ever constructed on this path, since
+        // try_commit_selected short-circuits on `?` before building either.
+        let (i, regime, e, candidate) = rejecting_fixture(CommitError::EmptyDecomposition);
+        let key = Key::new(0, 0, tiebreak_of(&candidate));
+        let err = try_commit_selected(key, &candidate, &regime, &i, &e, ContextId::root())
+            .expect_err("an empty decomposition must fail, not panic");
+        assert_eq!(err, CommitError::EmptyDecomposition);
+    }
+
+    #[test]
+    fn try_commit_selected_reports_endpoint_mismatch_instead_of_panicking() {
+        // Acceptance (#244): the interface makes an endpoint-mismatched
+        // decomposition expressible (ADR-0012 §6.3 condition 4) even though
+        // no regime in this issue's scope produces it yet (that is Stage B's
+        // source-derived regime).
+        let (i, regime, e, candidate) = rejecting_fixture(CommitError::EndpointMismatch);
+        let key = Key::new(0, 0, tiebreak_of(&candidate));
+        let err = try_commit_selected(key, &candidate, &regime, &i, &e, ContextId::root())
+            .expect_err("an endpoint-mismatched decomposition must fail, not panic");
+        assert_eq!(err, CommitError::EndpointMismatch);
+    }
+
+    /// A regime whose `try_decompose` builds a genuinely malformed chain (two
+    /// generators, only two configs — one short of the three a two-generator
+    /// chain needs) via [`Decomposition::recorded`] and propagates its
+    /// `DecompositionError` with `?`, exercising the real
+    /// `From<DecompositionError> for CommitError` conversion rather than a
+    /// hand-constructed error.
+    struct MismatchedChainRegime {
+        id: Handle,
+        witness: Handle,
+        successor: Handle,
+    }
+
+    impl Regime for MismatchedChainRegime {
+        fn candidates(&self, _e: &ExecConfig) -> Vec<Candidate> {
+            vec![Candidate {
+                regime: self.id,
+                witness: self.witness,
+                successor: self.successor,
+            }]
+        }
+    }
+
+    impl SettlementRegime for MismatchedChainRegime {
+        fn try_decompose(
+            &self,
+            _e: &ExecConfig,
+            _c: &Candidate,
+        ) -> Result<Decomposition, CommitError> {
+            Ok(Decomposition::recorded(
+                vec![
+                    GeneratorId::named("mismatched.step@1"),
+                    GeneratorId::named("mismatched.step@2"),
+                ],
+                vec![
+                    ConfigId::from_canon(b"mismatched-x0"),
+                    ConfigId::from_canon(b"mismatched-x1"),
+                ],
+            )?)
+        }
+    }
+
+    #[test]
+    fn try_commit_selected_reports_chain_length_mismatch_instead_of_panicking() {
+        // Acceptance (#244): a chain-length-mismatched decomposition — the
+        // structural half of "malformed" — fails closed via the real
+        // DecompositionError -> CommitError conversion, not a panic.
+        let (i, base, e) = setup();
+        let regime = MismatchedChainRegime {
+            id: base.id,
+            witness: base.witness,
+            successor: base.successor,
+        };
+        let candidate = Candidate {
+            regime: regime.id,
+            witness: regime.witness,
+            successor: regime.successor,
+        };
+        let key = Key::new(0, 0, tiebreak_of(&candidate));
+        let err = try_commit_selected(key, &candidate, &regime, &i, &e, ContextId::root())
+            .expect_err("a chain-length-mismatched decomposition must fail, not panic");
+        assert_eq!(
+            err,
+            CommitError::ChainLengthMismatch {
+                generators: 2,
+                configs: 2,
+            }
+        );
     }
 }

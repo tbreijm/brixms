@@ -38,7 +38,7 @@ use std::collections::BTreeMap;
 use brix_semantic::{ConfigId, Decomposition, GeneratorId, RegimeId, Witness};
 
 use soc_core::audit::GeneratorSemantics;
-use soc_core::commit::SettlementRegime;
+use soc_core::commit::{CommitError, SettlementRegime};
 use soc_core::delta::{CandidateDelta, Delta, Footprint};
 use soc_core::engine::IncrementalRegime;
 use soc_core::exec::ExecConfig;
@@ -48,7 +48,7 @@ use soc_core::regime::{Candidate, Regime};
 /// A configuration this regime has been [`register`](LiteralEqualityRegime::register)ed
 /// for: its reflexive witness handle (already interned to
 /// `Witness::new(config, config, regime_id).id()`'s digest) plus the
-/// configuration's own canonical [`ConfigId`] (cached so [`decompose`]
+/// configuration's own canonical [`ConfigId`] (cached so `try_decompose`
 /// doesn't need interner access — see that method's doc).
 #[derive(Clone, Copy, Debug)]
 struct Known {
@@ -114,7 +114,7 @@ impl LiteralEqualityRegime {
     /// `ExecConfig::world`) as known to this regime: computes and interns its
     /// reflexive witness `Witness::new(x, x, regime_id)` once (idempotent —
     /// re-registering the same handle is a no-op), so
-    /// [`Regime::candidates`]/[`SettlementRegime::decompose`] can look it up
+    /// [`Regime::candidates`]/[`SettlementRegime::try_decompose`] can look it up
     /// without ever hashing inside the hot enumeration path.
     ///
     /// # Panics
@@ -191,18 +191,21 @@ impl SettlementRegime for LiteralEqualityRegime {
     /// # Panics
     /// Panics if `c` was not produced by [`Self::candidates`] for `e.world`
     /// registered on this regime (an internal-consistency bug: `commit_tick`
-    /// only calls `decompose` on a candidate this same regime just
-    /// enumerated).
-    fn decompose(&self, e: &ExecConfig, _c: &Candidate) -> Decomposition {
-        let known = self
-            .known
-            .get(&e.world)
-            .expect("decompose called on a candidate this regime did not enumerate for e.world");
-        Decomposition::recorded(
+    /// only calls `try_decompose` on a candidate this same regime just
+    /// enumerated — this is a this-regime-only invariant, not a
+    /// source-derived/untrusted-plan condition, so it stays a panic rather
+    /// than a [`CommitError`]).
+    fn try_decompose(&self, e: &ExecConfig, _c: &Candidate) -> Result<Decomposition, CommitError> {
+        let known = self.known.get(&e.world).expect(
+            "try_decompose called on a candidate this regime did not enumerate for e.world",
+        );
+        Ok(Decomposition::recorded(
             vec![GeneratorId::named(Self::GENERATOR_NAME)],
             vec![known.config, known.config],
         )
-        .expect("a 1-generator, 2-identical-config reflexive chain is always a valid Decomposition")
+        .expect(
+            "a 1-generator, 2-identical-config reflexive chain is always a valid Decomposition",
+        ))
     }
 }
 
@@ -299,7 +302,7 @@ mod tests {
         let e = ExecConfig::new(world, policy, Digest::of(Domain::Value, b"history"));
         let cs = regime.candidates(&e);
 
-        let decomposition = regime.decompose(&e, &cs[0]);
+        let decomposition = regime.try_decompose(&e, &cs[0]).unwrap();
         assert_eq!(decomposition.generators.len(), 1);
         assert_eq!(
             decomposition.generators[0],
