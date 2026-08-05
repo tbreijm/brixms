@@ -8,9 +8,9 @@
 //!   type.** [`L3PlanV1`] and its constituents are plain, structurally
 //!   comparable Rust data. Plan/value/rule *identity* (`ProgramIdV1`,
 //!   `L3ValueId`, `RuleId`, …) is a separate, later slice — ADR-0012 §2 item 2
-//!   is explicitly still under review, and an execution-profile marker field
-//!   may be added to that identity. Encoding now would freeze the wrong
-//!   shape.
+//!   fixes their required inputs and versioning, not their byte tags, and
+//!   that schema is under separate encoder review. Encoding now would freeze
+//!   the wrong shape.
 //! - **No `Regime`/`IncrementalRegime`, no settlement adapter/driver, no
 //!   audit semantics, no CLI.** Those are ADR-0012 Stages B–D and are out of
 //!   scope here (ADR-0012 §9).
@@ -33,8 +33,21 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use brix_syntax::ast;
 
-/// The only execution profile this slice recognizes (ADR-0012 §3.1, §3.4).
-pub const L3_PROFILE_MARKER_V1: &str = "brix.l3.rule-agenda@1";
+/// The only execution profile this slice recognizes (ADR-0012 §1, §3.1,
+/// §3.4, ⟨D-PROFILE⟩ in the ADR-0014 re-pin).
+///
+/// The 2026-08-02 draft named this marker `brix.l3.rule-agenda@1` — the
+/// saturation-blind profile that was never implemented. The re-pin retires
+/// that identity permanently: it MUST NOT be minted by any implementation
+/// (ADR-0012 §1, §10). This is the live marker.
+pub const L3_PROFILE_MARKER_V1: &str = "brix.l3.rule-agenda-saturated@1";
+
+/// The retired, saturation-blind profile marker from the 2026-08-02 draft.
+/// No build ever emitted it. It is kept only so callers/tests can name it
+/// explicitly when checking that it is rejected like any other unknown
+/// marker (ADR-0012 §1, §3.1, §10) — it MUST NOT be minted by
+/// [`lower_l3_plan`] or any other implementation.
+pub const L3_PROFILE_MARKER_RETIRED_V0: &str = "brix.l3.rule-agenda@1";
 
 /// A resolved, closed-static-value type: the payload type of a `let`/`rule`
 /// annotation or a config field/variant-parameter type (ADR-0012 §3.1: "the
@@ -105,18 +118,32 @@ pub enum L3PlanItem {
     },
 }
 
-/// Resource limits enforced during plan validation (ADR-0012 §3.3
-/// `RunLimitsV1`), restricted to the subset this validation-only slice can
+/// `PlanLimitsV1` — the *semantic* half of ADR-0012 §3.3's two-limit-set
+/// split ⟨D-LIM⟩, restricted to the subset this validation-only slice can
 /// actually enforce.
 ///
-/// `RunLimitsV1` in the ADR also carries `max_commits`, a Stage C run-loop
-/// budget on *committed steps* during the settlement driver's execution.
-/// There is no committing driver in this slice (no `Regime`, no engine, no
-/// journal — see the module doc), so `max_commits` has nothing to bound here
-/// and is intentionally omitted from this struct rather than stored unused.
-/// It belongs to the Stage C driver's own request/result types.
+/// ADR-0012 §3.3 splits the 2026-08-02 draft's single `RunLimitsV1` into two,
+/// because they have different identity consequences:
+///
+/// - **`PlanLimitsV1`** (this struct) decides whether a plan is an
+///   admissible executable artifact at all — a plan rejected for exceeding
+///   `max_value_depth` is a different question about a different artifact.
+///   It is part of `RunContextV1`'s canonical identity.
+/// - **`SaturationBudget`** (`max_visible_steps`/`max_hidden_steps`/
+///   `max_administrative_states`, replacing the draft's `max_commits`) bounds
+///   a saturated stepping loop instead, and is excluded from every canonical
+///   identity: folding it into `ContextId` — a field of
+///   `QuiescenceCertificateV1` — would give two runs under different
+///   *sufficient* budgets two different certificates for the same fact,
+///   contradicting ADR-0014 §6.2.
+///
+/// There is no stepping loop in this slice (no `Regime`, no engine, no
+/// journal — see the module doc), so `SaturationBudget` has nothing to bound
+/// here. It is intentionally not part of this struct; it belongs to the
+/// Stage B/C driver's own request/result types, which this slice does not
+/// implement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct L3Limits {
+pub struct PlanLimitsV1 {
     /// Caps the number of `rule` items selected (i.e. present) in the
     /// module.
     pub max_selected_rules: u64,
@@ -137,7 +164,7 @@ pub struct L3Limits {
     pub max_value_depth: u64,
 }
 
-impl L3Limits {
+impl PlanLimitsV1 {
     /// Limits wide enough that no ordinary fixture trips them; use this and
     /// override one field to test a specific limit in isolation.
     pub const fn generous() -> Self {
@@ -159,7 +186,7 @@ impl L3Limits {
 pub struct L3PlanV1 {
     pub profile: String,
     pub items: Vec<L3PlanItem>,
-    pub limits: L3Limits,
+    pub limits: PlanLimitsV1,
 }
 
 /// Every distinguishable way a module can fail to lie in the ADR-0012 §1
@@ -286,24 +313,24 @@ pub enum L3LowerError {
         expected: String,
         found: String,
     },
-    /// More `rule` items are selected than `L3Limits::max_selected_rules`
+    /// More `rule` items are selected than `PlanLimitsV1::max_selected_rules`
     /// allows.
     RuleCountExceeded { limit: u64, actual: u64 },
     /// The running total of config nodes exceeds
-    /// `L3Limits::max_config_nodes`.
+    /// `PlanLimitsV1::max_config_nodes`.
     ConfigNodeLimitExceeded { limit: u64, actual: u64 },
     /// The running total of value nodes exceeds
-    /// `L3Limits::max_total_value_nodes`.
+    /// `PlanLimitsV1::max_total_value_nodes`.
     ValueNodeLimitExceeded { limit: u64, actual: u64 },
     /// The running total of decoded value bytes exceeds
-    /// `L3Limits::max_total_value_bytes`.
+    /// `PlanLimitsV1::max_total_value_bytes`.
     ValueByteLimitExceeded { limit: u64, actual: u64 },
-    /// A single value's tree depth exceeds `L3Limits::max_value_depth`.
+    /// A single value's tree depth exceeds `PlanLimitsV1::max_value_depth`.
     ValueDepthExceeded { limit: u64, actual: u64 },
 }
 
 /// Lower and validate a parsed module into an [`L3PlanV1`] under the
-/// ADR-0012 v1 rule-agenda profile.
+/// ADR-0012 `brix.l3.rule-agenda-saturated@1` profile.
 ///
 /// `profile` is the execution profile the caller is compiling under. The
 /// current `.brix` grammar ([`ast::Module`]) has no surface syntax for a
@@ -311,23 +338,28 @@ pub enum L3LowerError {
 /// for it.
 ///
 /// ADR-0012 ambiguity (§3.1): "the profile marker is exactly
-/// `brix.l3.rule-agenda@1`; an unknown or mismatched profile is rejected
-/// before any engine state exists" presumes a profile marker to compare
-/// against, but does not say where a v1 module obtains one absent surface
-/// syntax. This slice fails closed by requiring the caller to assert the
-/// expected profile explicitly (e.g. a future CLI flag or a later surface
-/// pragma would plumb it through here) rather than assuming every module is
-/// automatically the v1 profile; passing anything other than
-/// [`L3_PROFILE_MARKER_V1`] rejects before any other validation runs.
+/// `brix.l3.rule-agenda-saturated@1`; an unknown or mismatched profile is
+/// rejected before any engine state exists" presumes a profile marker to
+/// compare against, but does not say where a module obtains one absent
+/// surface syntax. This slice fails closed by requiring the caller to assert
+/// the expected profile explicitly (e.g. a future CLI flag or a later
+/// surface pragma would plumb it through here) rather than assuming every
+/// module is automatically this profile; passing anything other than
+/// [`L3_PROFILE_MARKER_V1`] rejects before any other validation runs —
+/// including the retired [`L3_PROFILE_MARKER_RETIRED_V0`], which is rejected
+/// the same way as any other unknown marker (ADR-0012 §1, §3.1, §10: it MUST
+/// NOT be minted by any implementation).
 ///
-/// `limits` bounds config/value size (ADR-0012 §3.3 `RunLimitsV1`, minus
-/// `max_commits` — see [`L3Limits`]). Limit failures are reported as soon as
-/// the relevant running total is known, which in this validation-only slice
-/// is always before the function returns a plan at all.
+/// `limits` bounds config/value size (ADR-0012 §3.3 `PlanLimitsV1` — the
+/// semantic half of the two-limit-set split; see [`PlanLimitsV1`] for why
+/// the execution `SaturationBudget` half is not, and cannot be, a parameter
+/// here). Limit failures are reported as soon as the relevant running total
+/// is known, which in this validation-only slice is always before the
+/// function returns a plan at all.
 pub fn lower_l3_plan(
     module: &ast::Module,
     profile: &str,
-    limits: &L3Limits,
+    limits: &PlanLimitsV1,
 ) -> Result<L3PlanV1, L3LowerError> {
     if profile != L3_PROFILE_MARKER_V1 {
         return Err(L3LowerError::ProfileMismatch {
@@ -795,7 +827,7 @@ fn value_metrics(v: &L3ValueV1) -> ValueMetrics {
 /// nodes/decoded string bytes count every visit while normalizing each let
 /// and rule").
 struct ValueBudget {
-    limits: L3Limits,
+    limits: PlanLimitsV1,
     total_nodes: u64,
     total_bytes: u64,
 }

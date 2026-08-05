@@ -4,17 +4,17 @@
 //! than on a digest.
 
 use brix_lower::{
-    lower_l3_plan, L3ConfigBody, L3Limits, L3LowerError, L3PlanItem, L3PlanV1, L3TypeRef,
-    L3ValueV1, L3_PROFILE_MARKER_V1,
+    lower_l3_plan, L3ConfigBody, L3LowerError, L3PlanItem, L3PlanV1, L3TypeRef, L3ValueV1,
+    PlanLimitsV1, L3_PROFILE_MARKER_RETIRED_V0, L3_PROFILE_MARKER_V1,
 };
 use brix_syntax::parse;
 
 fn lower(src: &str) -> Result<L3PlanV1, L3LowerError> {
     let module = parse(src).unwrap_or_else(|e| panic!("parse failed for {src:?}: {e}"));
-    lower_l3_plan(&module, L3_PROFILE_MARKER_V1, &L3Limits::generous())
+    lower_l3_plan(&module, L3_PROFILE_MARKER_V1, &PlanLimitsV1::generous())
 }
 
-fn lower_with_limits(src: &str, limits: &L3Limits) -> Result<L3PlanV1, L3LowerError> {
+fn lower_with_limits(src: &str, limits: &PlanLimitsV1) -> Result<L3PlanV1, L3LowerError> {
     let module = parse(src).unwrap_or_else(|e| panic!("parse failed for {src:?}: {e}"));
     lower_l3_plan(&module, L3_PROFILE_MARKER_V1, limits)
 }
@@ -566,12 +566,35 @@ fn declared_type_match_is_accepted() {
 #[test]
 fn profile_mismatch_rejects_before_any_other_validation() {
     let module = parse("fn totally_bogus_and_unrelated(n) = n\n").expect("parse");
-    let err = lower_l3_plan(&module, "brix.l3.other@1", &L3Limits::generous()).unwrap_err();
+    let err = lower_l3_plan(&module, "brix.l3.other@1", &PlanLimitsV1::generous()).unwrap_err();
     assert_eq!(
         err,
         L3LowerError::ProfileMismatch {
             expected: L3_PROFILE_MARKER_V1.to_string(),
             found: "brix.l3.other@1".to_string(),
+        }
+    );
+}
+
+#[test]
+fn retired_saturation_blind_profile_marker_rejects_like_any_other_unknown_marker() {
+    // ADR-0012 §1/§3.1/§10 (re-pin, ⟨D-PROFILE⟩): `brix.l3.rule-agenda@1`
+    // named the saturation-blind profile that was never implemented. It is
+    // permanently retired and MUST NOT be minted; it is rejected exactly
+    // like any other unrecognized profile marker, not specially recognized
+    // or waived.
+    let module = parse("rule r() = 1\n").expect("parse");
+    let err = lower_l3_plan(
+        &module,
+        L3_PROFILE_MARKER_RETIRED_V0,
+        &PlanLimitsV1::generous(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        L3LowerError::ProfileMismatch {
+            expected: L3_PROFILE_MARKER_V1.to_string(),
+            found: L3_PROFILE_MARKER_RETIRED_V0.to_string(),
         }
     );
 }
@@ -585,9 +608,9 @@ fn profile_mismatch_rejects_before_any_other_validation() {
 #[test]
 fn rule_count_limit_rejects() {
     let src = "rule a() = 1\nrule b() = 2\n";
-    let limits = L3Limits {
+    let limits = PlanLimitsV1 {
         max_selected_rules: 1,
-        ..L3Limits::generous()
+        ..PlanLimitsV1::generous()
     };
     assert_eq!(
         lower_with_limits(src, &limits).unwrap_err(),
@@ -602,9 +625,9 @@ fn rule_count_limit_rejects() {
 fn config_node_limit_rejects() {
     // config Item = { a: Int, b: Int } is 1 (decl) + 2 (fields) = 3 nodes.
     let src = "config Item = { a: Int, b: Int }\n";
-    let limits = L3Limits {
+    let limits = PlanLimitsV1 {
         max_config_nodes: 2,
-        ..L3Limits::generous()
+        ..PlanLimitsV1::generous()
     };
     match lower_with_limits(src, &limits).unwrap_err() {
         L3LowerError::ConfigNodeLimitExceeded { limit, .. } => assert_eq!(limit, 2),
@@ -619,9 +642,9 @@ fn value_node_limit_rejects() {
         let widget = Item { a: 1, b: 2 }
     "#;
     // The record widget has 3 nodes (record + 2 ints); cap below that.
-    let limits = L3Limits {
+    let limits = PlanLimitsV1 {
         max_total_value_nodes: 2,
-        ..L3Limits::generous()
+        ..PlanLimitsV1::generous()
     };
     match lower_with_limits(src, &limits).unwrap_err() {
         L3LowerError::ValueNodeLimitExceeded { limit, .. } => assert_eq!(limit, 2),
@@ -635,9 +658,9 @@ fn value_node_limit_recounts_substituted_let_occurrences() {
     // total after a, b, c is 1 + 1 + 1 = 3, and d (the 4th occurrence)
     // pushes the total to 4.
     let src = "let a = 1\nlet b = a\nlet c = a\nlet d = a\n";
-    let limits = L3Limits {
+    let limits = PlanLimitsV1 {
         max_total_value_nodes: 3,
-        ..L3Limits::generous()
+        ..PlanLimitsV1::generous()
     };
     match lower_with_limits(src, &limits).unwrap_err() {
         L3LowerError::ValueNodeLimitExceeded { limit, actual } => {
@@ -652,9 +675,9 @@ fn value_node_limit_recounts_substituted_let_occurrences() {
 fn value_byte_limit_rejects() {
     let src = r#"let a = "hello world"
 "#;
-    let limits = L3Limits {
+    let limits = PlanLimitsV1 {
         max_total_value_bytes: 3,
-        ..L3Limits::generous()
+        ..PlanLimitsV1::generous()
     };
     match lower_with_limits(src, &limits).unwrap_err() {
         L3LowerError::ValueByteLimitExceeded { limit, .. } => assert_eq!(limit, 3),
@@ -670,9 +693,9 @@ fn value_depth_limit_rejects() {
         let widget = Item { name: "widget", price: Money { amount: 10 } }
     "#;
     // widget's tree: Record(Item) -> [Str, Record(Money) -> [Int]] = depth 3.
-    let limits = L3Limits {
+    let limits = PlanLimitsV1 {
         max_value_depth: 2,
-        ..L3Limits::generous()
+        ..PlanLimitsV1::generous()
     };
     match lower_with_limits(src, &limits).unwrap_err() {
         L3LowerError::ValueDepthExceeded { limit, actual } => {

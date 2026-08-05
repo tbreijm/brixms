@@ -21,8 +21,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub mod l3;
 pub use l3::{
-    lower_l3_plan, L3ConfigBody, L3ConfigDecl, L3Limits, L3LowerError, L3PlanItem, L3PlanV1,
-    L3TypeRef, L3ValueV1, L3_PROFILE_MARKER_V1,
+    lower_l3_plan, L3ConfigBody, L3ConfigDecl, L3LowerError, L3PlanItem, L3PlanV1, L3TypeRef,
+    L3ValueV1, PlanLimitsV1, L3_PROFILE_MARKER_RETIRED_V0, L3_PROFILE_MARKER_V1,
 };
 
 use brix_elaborate::{elaborate_tree, ElaborationResult};
