@@ -102,6 +102,10 @@
     },
     {
       "from": "brix-lower",
+      "to": "brix-canon"
+    },
+    {
+      "from": "brix-lower",
       "to": "brix-elaborate"
     },
     {

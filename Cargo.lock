@@ -97,6 +97,7 @@ dependencies = [
 name = "brix-lower"
 version = "0.0.0"
 dependencies = [
+ "brix-canon",
  "brix-elaborate",
  "brix-kernel",
  "brix-semantic",

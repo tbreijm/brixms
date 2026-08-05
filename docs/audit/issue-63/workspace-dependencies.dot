@@ -17,6 +17,7 @@ digraph brixms_workspace {
   "brix-elaborate" -> "brix-semantic";
   "brix-kernel" -> "brix-canon";
   "brix-kernel" -> "brix-semantic";
+  "brix-lower" -> "brix-canon";
   "brix-lower" -> "brix-elaborate";
   "brix-lower" -> "brix-kernel";
   "brix-lower" -> "brix-semantic";

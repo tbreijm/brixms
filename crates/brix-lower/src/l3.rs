@@ -2,15 +2,13 @@
 //!
 //! This module implements exactly ADR-0012 §3.1 (plan validation and
 //! admissible source) and §3.2 (closed static values), producing an owned,
-//! in-memory [`L3PlanV1`]. It deliberately stops there:
+//! in-memory [`L3PlanV1`]. Canonical identity for these structures
+//! (`ProgramIdV1`, `L3ValueId`, `RuleId`, …) lives in the sibling
+//! [`crate::l3_canon`] module, which this one deliberately does not import
+//! from: validation/lowering and identity are two different concerns, and
+//! [`lower_l3_plan`] never needs a digest to decide whether a module is
+//! admissible.
 //!
-//! - **No canonical encoders, no `Canonical` impl, no digest, no identity
-//!   type.** [`L3PlanV1`] and its constituents are plain, structurally
-//!   comparable Rust data. Plan/value/rule *identity* (`ProgramIdV1`,
-//!   `L3ValueId`, `RuleId`, …) is a separate, later slice — ADR-0012 §2 item 2
-//!   fixes their required inputs and versioning, not their byte tags, and
-//!   that schema is under separate encoder review. Encoding now would freeze
-//!   the wrong shape.
 //! - **No `Regime`/`IncrementalRegime`, no settlement adapter/driver, no
 //!   audit semantics, no CLI.** Those are ADR-0012 Stages B–D and are out of
 //!   scope here (ADR-0012 §9).
