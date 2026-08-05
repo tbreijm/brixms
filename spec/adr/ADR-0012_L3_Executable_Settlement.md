@@ -188,22 +188,45 @@ are additions around these APIs, not replacements for them:
    The Brix-owned adapter selects and schedules; it never mints a settlement
    judgement. The shared pure `prospective_successor` operation exposes the
    oracle successor fold without constructing an observation.
-6. **Fallible seams.** `Interner::try_resolve` and the non-mutating
-   `Frontier::peek_least` landed in PR #235. Still required: transactional
-   exact candidate-delta application (checked `(key, expected_candidate)`
-   removal plus conflict-detecting insertion) and a fallible
-   `try_decompose`/validation interface — tracked as **issue #244** in the
-   `soc` lane. A selected candidate remains in the frontier until its commit
-   succeeds; its following candidate delta performs the removal. The adapter
-   MUST NOT call the current panic paths in `Interner::resolve` or
-   `commit_tick` for untrusted source-derived state. The adapter also
-   maintains a `BTreeMap<Candidate, Key>` reverse index and stages copies of
-   both maps before publishing an update.
+6. **Fallible seams.** ✅ *Landed in PR #235 and PR #249 (#244).*
+   `Interner::try_resolve`, the non-mutating `Frontier::peek_least`, **and
+   transactional exact candidate-delta application** all landed in #235:
+   `Frontier::apply_delta` stages a private copy, performs checked
+   `(key, expected)` removal (`RemoveMismatch`/`RemoveMissing`), inserts under
+   the B^uk unique-key discipline (`InsertConflict`), and publishes only if
+   every operation succeeds — leaving the frontier byte-identically unchanged
+   on any error.
 
-   Making `SettlementRegime::decompose` fallible does **not** touch the
-   quiescence certificate's enumeration-completeness field, which is a
-   property of `Regime::candidates` alone (§4.2). #244 is therefore free to
-   proceed without minting a v2 certificate.
+   > **Erratum (2026-08-06).** The 2026-08-05 re-pin stated that transactional
+   > delta application was still outstanding and tracked it under #244. That was
+   > wrong: #235 had already delivered it. The claim came from reading
+   > `apply_delta`'s signature rather than its body, and it propagated into
+   > #244's scope before being caught. #235 delivered more of this item than the
+   > re-pin credited it with.
+
+   PR #249 closed the genuine remainder: `SettlementRegime::decompose` is now
+   the fallible `try_decompose(&self, e, c) -> Result<Decomposition,
+   CommitError>`, with `CommitError` extended by `ChainLengthMismatch` and
+   `EndpointMismatch` beside the existing `UnresolvedHandle` and
+   `EmptyDecomposition`. `try_commit_selected` propagates a rejection instead of
+   unwinding, so no `CommittedStep` is appended and no `Derived` judgement is
+   minted on a malformed decomposition.
+
+   A selected candidate remains in the frontier until its commit succeeds; its
+   following candidate delta performs the removal. The adapter MUST NOT call the
+   remaining panic paths in `Interner::resolve` or `commit_tick` for untrusted
+   source-derived state.
+
+   The `BTreeMap<Candidate, Key>` reverse index lives **Brix-side on the L3
+   adapter**, not in `soc-core`: `Frontier<V>` stays generic, and
+   `apply_delta`'s `&[(Key, V)]` removals already make the checked-removal
+   contract expressible for a Brix-side index. The adapter stages copies of both
+   maps before publishing an update.
+
+   Making `SettlementRegime::decompose` fallible did **not** touch the
+   quiescence certificate's enumeration-completeness field, which is a property
+   of `Regime::candidates` alone (§4.2) — that signature is unchanged, so v1
+   certificates remain sound and no v2 was needed.
 7. **Plan-specific audit semantics.** The L3 runtime MUST construct the
    `GeneratorRegistry` and `GeneratorSemantics` supplied to `audit_journal`.
    The semantics checks the exact plan, rule, source world, destination world,
@@ -515,7 +538,8 @@ is withdrawn.** Normatively:
 > widening of this one.
 
 `crates/soc-core/OWNER.md` records the same constraint from the other side, and
-issue #244 is scoped to honor it.
+#244 honored it: PR #249 made decomposition fallible while leaving
+`Regime::candidates`'s signature untouched, so v1 certificates remain sound.
 
 **What this costs L3: nothing, and the reason is structural.** The head-only
 regime of §3.3 emits **at most one candidate per world** by construction, from a
@@ -864,8 +888,8 @@ and must not mint any identity type.
 ### Stage B — one-shot dual compiler regime and the observation profile
 
 Implement `Regime` + `IncrementalRegime`, the plan's footprint, fallible
-decomposition (issue #244's `try_decompose`), and exact `Decomposition`
-construction. Fixture: two zero-argument rules in reverse lexical name order.
+decomposition (over `SettlementRegime::try_decompose`, landed in #249), and
+exact `Decomposition` construction. Fixture: two zero-argument rules in reverse lexical name order.
 The module-order rule MUST commit first, then the other; each decomposed
 endpoint MUST equal the pre/post canonical L3 worlds.
 
@@ -997,11 +1021,12 @@ fixtures pass.
    versioning, not their byte tags. The re-pin adds `PresentationIdV1`, the
    `ObservationProfileId`, and the certificate identity to what must be frozen,
    and removes the budget from `RunContextV1` (⟨D-LIM⟩).
-3. ✅ **Discharged.** `try_commit_selected`, `prospective_successor`,
-   `Interner::try_resolve`, and `Frontier::peek_least` landed in PR #235. The
-   remaining §2.6 seams — transactional candidate-delta application and the
-   fallible `try_decompose` — are tracked as **issue #244**, which is a
-   prerequisite for Stage B, not for Stage A.
+3. ✅ **Discharged in full.** `try_commit_selected`, `prospective_successor`,
+   `Interner::try_resolve`, `Frontier::peek_least`, **and** transactional
+   candidate-delta application landed in PR #235; the fallible
+   `SettlementRegime::try_decompose` landed in PR #249 (#244). §2 item 6 is now
+   complete — see the erratum there correcting this ADR's earlier claim that
+   delta application was still outstanding.
 4. The current audit API is unbudgeted; a resource-bounded audit operation is
    required before L3 can make any audit-latency guarantee. **The re-pin does
    not discharge this.** `SaturationBudget` bounds stepping, not auditing; they
