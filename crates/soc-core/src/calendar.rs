@@ -357,4 +357,62 @@ mod tests {
         assert_eq!(f.len(), 1, "a failed delta must not mutate");
         assert_eq!(f.peek_least().map(|(_, v)| *v), Some("b"));
     }
+
+    #[test]
+    fn apply_delta_rejects_a_removal_naming_an_unexpected_candidate_at_a_key() {
+        // ADR-0012 §2.6 / #244 acceptance: removing a key whose current value
+        // is not the expected one is an integrity failure, never a silent
+        // no-op, and the frontier is left byte-identically unchanged.
+        let ka = Key::new(0, 0, digest("a"));
+        let kb = Key::new(0, 1, digest("b"));
+        let mut f = Frontier::new();
+        f.insert(ka, "actual").unwrap();
+        f.insert(kb, "b").unwrap();
+        let before = f.clone();
+
+        let err = f
+            .apply_delta(&[(ka, "expected-but-wrong")], &[])
+            .expect_err("a stale/wrong expected value at a present key must be rejected");
+        match err {
+            FrontierDeltaError::RemoveMismatch(conflict) => {
+                assert_eq!(conflict.key, ka);
+                assert_eq!(conflict.existing, "actual");
+                assert_eq!(conflict.attempted, "expected-but-wrong");
+            }
+            other => panic!("expected RemoveMismatch, got {other:?}"),
+        }
+        assert_eq!(f.len(), before.len());
+        assert_eq!(
+            f.entries, before.entries,
+            "a rejected removal must leave the frontier byte-identically unchanged"
+        );
+    }
+
+    #[test]
+    fn apply_delta_rejects_a_conflicting_insertion_not_silently_resolving_it() {
+        // ADR-0012 §2.6 / #244 acceptance: two distinct candidates proposed at
+        // one key is an error, preserving the B^uk unique-key discipline —
+        // never silently resolved by picking one, and the frontier is left
+        // exactly as it was.
+        let ka = Key::new(0, 0, digest("a"));
+        let mut f = Frontier::new();
+        f.insert(ka, "existing").unwrap();
+        let before = f.clone();
+
+        let err = f
+            .apply_delta(&[], &[(ka, "different")])
+            .expect_err("two distinct values at one key must be rejected");
+        match err {
+            FrontierDeltaError::InsertConflict(conflict) => {
+                assert_eq!(conflict.key, ka);
+                assert_eq!(conflict.existing, "existing");
+                assert_eq!(conflict.attempted, "different");
+            }
+            other => panic!("expected InsertConflict, got {other:?}"),
+        }
+        assert_eq!(
+            f.entries, before.entries,
+            "a rejected insertion must leave the frontier byte-identically unchanged"
+        );
+    }
 }

@@ -23,7 +23,7 @@ use brix_canon::{CanonWriter, Digest, Domain};
 use brix_semantic::{ConfigId, ContextId, Decomposition, GeneratorId};
 use soc_core::adm::AdmAll;
 use soc_core::calendar::Key;
-use soc_core::commit::SettlementRegime;
+use soc_core::commit::{CommitError, SettlementRegime};
 use soc_core::delta::{CandidateDelta, Delta, Footprint};
 use soc_core::engine::{naive_view_over, IncrementalEngine, IncrementalRegime};
 use soc_core::exec::ExecConfig;
@@ -66,7 +66,10 @@ impl ChainRegime {
     }
 
     fn decomposition(&self, world: Handle, successor: Handle) -> Decomposition {
-        let edge = self.edges.get(&world).expect("decompose on a live edge");
+        let edge = self
+            .edges
+            .get(&world)
+            .expect("try_decompose on a live edge");
         Decomposition::recorded(
             edge.generators.clone(),
             vec![self.configs[&world], self.configs[&successor]],
@@ -82,8 +85,8 @@ impl Regime for ChainRegime {
 }
 
 impl SettlementRegime for ChainRegime {
-    fn decompose(&self, e: &ExecConfig, c: &Candidate) -> Decomposition {
-        self.decomposition(e.world, c.successor)
+    fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError> {
+        Ok(self.decomposition(e.world, c.successor))
     }
 }
 
@@ -136,8 +139,8 @@ impl Regime for NaiveSource {
 }
 
 impl SettlementRegime for NaiveSource {
-    fn decompose(&self, e: &ExecConfig, c: &Candidate) -> Decomposition {
-        self.inner.decomposition(e.world, c.successor)
+    fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError> {
+        Ok(self.inner.decomposition(e.world, c.successor))
     }
 }
 
@@ -180,8 +183,8 @@ impl Regime for IncrementalSource {
 }
 
 impl SettlementRegime for IncrementalSource {
-    fn decompose(&self, e: &ExecConfig, c: &Candidate) -> Decomposition {
-        self.shape.decomposition(e.world, c.successor)
+    fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError> {
+        Ok(self.shape.decomposition(e.world, c.successor))
     }
 }
 

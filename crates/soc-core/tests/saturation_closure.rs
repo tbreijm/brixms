@@ -16,7 +16,7 @@ use brix_canon::{CanonWriter, Digest, Domain};
 use brix_semantic::{ConfigId, ContextId, Decomposition, GeneratorId};
 use soc_core::adm::AdmAll;
 use soc_core::calendar::Key;
-use soc_core::commit::SettlementRegime;
+use soc_core::commit::{CommitError, SettlementRegime};
 use soc_core::exec::ExecConfig;
 use soc_core::history::History;
 use soc_core::intern::{Handle, Interner};
@@ -60,13 +60,16 @@ impl Regime for ChainRegime {
 }
 
 impl SettlementRegime for ChainRegime {
-    fn decompose(&self, e: &ExecConfig, c: &Candidate) -> Decomposition {
-        let edge = self.edges.get(&e.world).expect("decompose on a live edge");
-        Decomposition::recorded(
+    fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError> {
+        let edge = self
+            .edges
+            .get(&e.world)
+            .expect("try_decompose on a live edge");
+        Ok(Decomposition::recorded(
             edge.generators.clone(),
             vec![self.configs[&e.world], self.configs[&c.successor]],
         )
-        .expect("well-formed decomposition")
+        .expect("well-formed decomposition"))
     }
 }
 
