@@ -1,0 +1,53 @@
+{
+  "format": "brix.l3.plan",
+  "plan_format_version": 1,
+  "profile": "brix.l3.rule-agenda-saturated@1",
+  "note": "Frozen L3 Stage A canonical-identity vectors (ADR-0012 S3.1-S3.3, S9 Stage A). Append-only: an existing case may never change without a new encoder format version. Regenerate with BLESS_VECTORS=1.",
+  "limits": {
+    "max_selected_rules": 8,
+    "max_config_nodes": 64,
+    "max_total_value_nodes": 256,
+    "max_total_value_bytes": 4096,
+    "max_value_depth": 16
+  },
+  "cases": [
+    {
+      "name": "one_rule_publish",
+      "description": "one config, one let, one rule publishing it: the smallest fixture exercising a plan, rule, initial/terminal world, generator, witness, fact, policy, and run context together",
+      "source": "\n    config Item = { name: Str, base: Int }\n    let widget = Item { name: \"widget\", base: 10 }\n    rule publish() = widget\n",
+      "program_preimage_hex": "010c627269782e6c332e706c616e0101011f627269782e6c332e72756c652d6167656e64612d73617475726174656440310103011d0001044974656d000102010801046e616d650101010701046261736500012c01010106776964676574012050c6a4fe60178172b621524b97485e32d5b406d93a9f9ac6b8b80c7f6e29f547012e01020001077075626c697368012050c6a4fe60178172b621524b97485e32d5b406d93a9f9ac6b8b80c7f6e29f547",
+      "program_id": "84632510aeb09097a8c5a4dddd052b65b10d41afa12e7b1f300dd77ad4b61d06",
+      "rule": {
+        "name": "publish",
+        "ordinal": 0,
+        "preimage_hex": "010e627269782e6c332e72756c654031012084632510aeb09097a8c5a4dddd052b65b10d41afa12e7b1f300dd77ad4b61d060001077075626c697368",
+        "rule_id": "dbe58a3f8b3f2b05f769a7ece57a7446271a03706cd9bbb1cca008927822e912"
+      },
+      "fact_payload": {
+        "shape": "Record(Item, [name: Str(widget), base: Int(10)])",
+        "preimage_hex": "010d627269782e6c332e76616c75650101010201044974656d0102011001046e616d6501010106776964676574010901046261736500810a",
+        "value_id": "50c6a4fe60178172b621524b97485e32d5b406d93a9f9ac6b8b80c7f6e29f547"
+      },
+      "initial_world": {
+        "fact_count": 0,
+        "world_id": "38a3557e1e297092bd570c73a0b2f65bd3f8fa8435f19f4877519dbf8ae8aa35"
+      },
+      "terminal_world": {
+        "fact_count": 1,
+        "world_id": "1eed27a8cb955a27e7e5976f06bb52b121979d06fd4e2ffe795374f1c85cc97b"
+      },
+      "generator": {
+        "preimage_hex": "0113627269782e6c332e67656e657261746f724031012084632510aeb09097a8c5a4dddd052b65b10d41afa12e7b1f300dd77ad4b61d060120dbe58a3f8b3f2b05f769a7ece57a7446271a03706cd9bbb1cca008927822e912012038a3557e1e297092bd570c73a0b2f65bd3f8fa8435f19f4877519dbf8ae8aa3501201eed27a8cb955a27e7e5976f06bb52b121979d06fd4e2ffe795374f1c85cc97b",
+        "generator_id": "d6c3d5998826c7fb1789cb663af119514b28bd926f3a6eef4e850d71cd4ee90b"
+      },
+      "witness_id": "d6c3d5998826c7fb1789cb663af119514b28bd926f3a6eef4e850d71cd4ee90b",
+      "fact_id": "600116ac3c3e532b34747186e2eb6fdf28e046f28d25c953719cc0c80c07a30e",
+      "policy": {
+        "regime_id": "618f7f262a7bf0cf5d7d39f37076d9339ec76f42cf7e65572899846fe34978ab",
+        "policy_id": "43a02f9eb4ceff47f8acd4c6553280fa41687a89a45865a8e18d8f606ecc4741"
+      },
+      "run_context_id": "f55ea2cb0989bc5275b64c6813806837b536b6f8d0e869f47a3edec61827bbf2",
+      "presentation_id": "84632510aeb09097a8c5a4dddd052b65b10d41afa12e7b1f300dd77ad4b61d06"
+    }
+  ]
+}

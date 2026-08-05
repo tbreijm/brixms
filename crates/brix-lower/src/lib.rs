@@ -20,9 +20,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod l3;
+pub mod l3_canon;
 pub use l3::{
     lower_l3_plan, L3ConfigBody, L3ConfigDecl, L3LowerError, L3PlanItem, L3PlanV1, L3TypeRef,
     L3ValueV1, PlanLimitsV1, L3_PROFILE_MARKER_RETIRED_V0, L3_PROFILE_MARKER_V1,
+};
+pub use l3_canon::{
+    build_pending, context_id, fact_id, l3_generator_id, l3_generator_preimage, l3_value_id,
+    l3_value_preimage, l3_witness_id, policy_id, program_id, program_preimage, rule_id,
+    rule_preimage, world_id, FactChainIdV1, FactV1, L3PolicyV1, L3ValueId, L3WorldV1, PendingIdV1,
+    PresentationIdV1, ProgramIdV1, RuleId, RunContextV1, L3_FACT_CHAIN_FORMAT_V1,
+    L3_FACT_CHAIN_MARKER, L3_GENERATOR_TAG, L3_PENDING_FORMAT_V1, L3_PENDING_MARKER,
+    L3_PLAN_FORMAT_V1, L3_PLAN_MARKER, L3_RULE_TAG, L3_RUN_CONTEXT_FORMAT_V1, L3_VALUE_FORMAT_V1,
+    L3_VALUE_MARKER, L3_WORLD_FORMAT_V1, L3_WORLD_MARKER,
 };
 
 use brix_elaborate::{elaborate_tree, ElaborationResult};
