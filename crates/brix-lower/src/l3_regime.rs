@@ -393,64 +393,18 @@ impl IncrementalRegime for L3Regime {
 // Fallible decomposition (ADR-0012 §6.3).
 // ---------------------------------------------------------------------------
 
-/// Ways a candidate/decomposition can fail one of ADR-0012 §6.3's four
-/// required conditions.
-///
-/// Kept as a **local**, fully distinct enum rather than only the
-/// `soc_core::commit::CommitError` [`L3Regime::try_decompose`] ultimately
-/// returns: `soc-core` is out of scope for Stage B (the task constraint is
-/// explicit — no edits under `crates/soc-core/**`), and `CommitError` has
-/// exactly four existing variants, none individually dedicated to three of
-/// these four conditions. Keeping this enum lets [`check_l3_decomposition`]
-/// — and the tests exercising it — tell all four conditions apart
-/// unambiguously, independent of how they fold onto `CommitError` at the
-/// trait boundary (see the `From` impl below for that documented mapping).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum L3DecomposeError {
-    /// §6.3 condition 1: `candidate != transition_table[current_world]`.
-    WrongTransitionCandidate,
-    /// §6.3 condition 2: the candidate's witness handle is not the one this
-    /// table interned for the expected generator's primitive `WitnessId`.
-    WitnessGeneratorMismatch,
-    /// §6.3 condition 3: `decomposition.generators != [expected_generator]`.
-    WrongGeneratorList,
-    /// §6.3 condition 4: `decomposition.configs != [expected_src, expected_dst]`.
-    WrongEndpointPair,
-}
-
-impl From<L3DecomposeError> for CommitError {
-    /// ADR-0012 §6.3, folded onto `soc_core::commit::CommitError`'s four
-    /// existing variants (soc-core is not touched by Stage B):
-    ///
-    /// - `WrongEndpointPair` -> `EndpointMismatch` is exact: that variant's
-    ///   own doc names precisely this case ("`decomposition.configs` is not
-    ///   exactly `[expected_src, expected_dst]`").
-    /// - `WrongTransitionCandidate` -> `UnresolvedHandle`: nothing in this
-    ///   table resolves the given `(world, candidate)` pair to any recorded
-    ///   transition at all.
-    /// - `WitnessGeneratorMismatch` and `WrongGeneratorList` ->
-    ///   `EmptyDecomposition`: in both cases no generator this table
-    ///   associates with the transition composes the claimed
-    ///   witness/generator chain, which is exactly `EmptyDecomposition`'s own
-    ///   documented reading ("so no witness can be composed").
-    ///
-    /// This mapping is many-to-one for the middle two conditions (`soc-core`
-    /// has no fifth/sixth variant to spend), which is why
-    /// [`L3DecomposeError`] — not this converted `CommitError` — is the type
-    /// tests assert on to keep all four conditions independently
-    /// distinguishable.
-    fn from(e: L3DecomposeError) -> Self {
-        match e {
-            L3DecomposeError::WrongTransitionCandidate => CommitError::UnresolvedHandle,
-            L3DecomposeError::WitnessGeneratorMismatch => CommitError::EmptyDecomposition,
-            L3DecomposeError::WrongGeneratorList => CommitError::EmptyDecomposition,
-            L3DecomposeError::WrongEndpointPair => CommitError::EndpointMismatch,
-        }
-    }
-}
-
 /// ADR-0012 §6.3's four required conditions, checked independently, in
-/// order, over already-resolved expectations.
+/// order, over already-resolved expectations, returning
+/// `soc_core::commit::CommitError` directly.
+///
+/// Each condition maps onto its **own** distinct `CommitError` variant —
+/// `CandidateMismatch`, `WitnessMismatch`, `GeneratorMismatch`, and the
+/// pre-existing `EndpointMismatch` — added to `soc-core` additively for
+/// exactly this purpose (ADR-0012 Stage B, #251). There is no shared or
+/// many-to-one mapping here: per ADR-0002 §5.3's overclaiming discipline, the
+/// reason code an operator/auditor eventually reads via
+/// `Unknown(CommitFailed { error })` must name the condition that actually
+/// failed, not one that merely happened to be available.
 ///
 /// A real call through [`L3Regime::try_decompose`] always passes
 /// `candidate`/`decomposition` built from the very same `expected_*` values
@@ -470,10 +424,10 @@ fn check_l3_decomposition(
     expected_dst: ConfigId,
     candidate: &Candidate,
     decomposition: &Decomposition,
-) -> Result<(), L3DecomposeError> {
+) -> Result<(), CommitError> {
     // Condition 1: candidate == transition_table[current_world].
     if candidate != expected_candidate {
-        return Err(L3DecomposeError::WrongTransitionCandidate);
+        return Err(CommitError::CandidateMismatch);
     }
     // Condition 2: the resolved candidate witness equals the expected
     // generator's primitive WitnessId. "Resolved" (ADR-0012 §3.4) means the
@@ -483,15 +437,15 @@ fn check_l3_decomposition(
     // were interned from the same Interner this table was built with (same
     // interner => handle equality iff digest equality).
     if candidate.witness != expected_witness_handle {
-        return Err(L3DecomposeError::WitnessGeneratorMismatch);
+        return Err(CommitError::WitnessMismatch);
     }
     // Condition 3: decomposition.generators == [expected_generator].
     if decomposition.generators != [expected_generator] {
-        return Err(L3DecomposeError::WrongGeneratorList);
+        return Err(CommitError::GeneratorMismatch);
     }
     // Condition 4: decomposition.configs == [expected_src, expected_dst].
     if decomposition.configs != [expected_src, expected_dst] {
-        return Err(L3DecomposeError::WrongEndpointPair);
+        return Err(CommitError::EndpointMismatch);
     }
     Ok(())
 }
@@ -526,8 +480,7 @@ impl SettlementRegime for L3Regime {
             data.expected_dst,
             c,
             &decomposition,
-        )
-        .map_err(CommitError::from)?;
+        )?;
 
         Ok(decomposition)
     }
@@ -793,7 +746,7 @@ mod tests {
         let err = regime
             .try_decompose(&e0, &candidate)
             .expect_err("a candidate not matching the transition table must be rejected");
-        assert_eq!(err, CommitError::UnresolvedHandle);
+        assert_eq!(err, CommitError::CandidateMismatch);
     }
 
     #[test]
@@ -808,7 +761,7 @@ mod tests {
         // ALSO fails for this candidate, since `Candidate`'s equality is over
         // all three fields; to isolate condition 2 specifically, check it
         // directly rather than through the full `try_decompose` chain (which
-        // checks condition 1 first and would report `WrongTransitionCandidate`
+        // checks condition 1 first and would report `CandidateMismatch`
         // instead).
         let mut wrong_candidate = expected_candidate;
         wrong_candidate.witness = interner.intern(Digest::of(Domain::Value, b"wrong-witness"));
@@ -829,7 +782,7 @@ mod tests {
             &decomposition,
         )
         .expect_err("a witness not matching the expected generator's WitnessId must be rejected");
-        assert_eq!(err, L3DecomposeError::WitnessGeneratorMismatch);
+        assert_eq!(err, CommitError::WitnessMismatch);
     }
 
     #[test]
@@ -856,7 +809,7 @@ mod tests {
             &decomposition,
         )
         .expect_err("a decomposition citing the wrong generator must be rejected");
-        assert_eq!(err, L3DecomposeError::WrongGeneratorList);
+        assert_eq!(err, CommitError::GeneratorMismatch);
     }
 
     #[test]
@@ -881,7 +834,110 @@ mod tests {
             &decomposition,
         )
         .expect_err("a decomposition with the wrong endpoint pair must be rejected");
-        assert_eq!(err, L3DecomposeError::WrongEndpointPair);
+        assert_eq!(err, CommitError::EndpointMismatch);
+    }
+
+    #[test]
+    fn the_four_conditions_map_to_four_pairwise_distinct_commit_errors() {
+        // Guards against a future refactor silently re-collapsing two of
+        // §6.3's four conditions onto the same `CommitError` variant (exactly
+        // the bug this fix corrects): construct one violation of each
+        // condition in turn, holding the other three satisfied, and check the
+        // four resulting errors are pairwise distinct — not just each
+        // individually plausible in isolation.
+        let (_, _, mut interner, table) = plan_and_table("rule a() = 1\n");
+        let idx = 0usize;
+        let expected_candidate = table.candidates[idx];
+        let data = table.decomposition_data[idx];
+        let ok_decomposition = Decomposition::recorded(
+            vec![data.generator],
+            vec![data.expected_src, data.expected_dst],
+        )
+        .unwrap();
+
+        let mut wrong_candidate_successor = expected_candidate;
+        wrong_candidate_successor.successor = interner.intern(Digest::of(
+            Domain::Value,
+            b"distinctness-check-wrong-successor",
+        ));
+        let err1 = check_l3_decomposition(
+            &expected_candidate,
+            data.generator,
+            data.witness_handle,
+            data.expected_src,
+            data.expected_dst,
+            &wrong_candidate_successor,
+            &ok_decomposition,
+        )
+        .unwrap_err();
+
+        let mut wrong_witness_candidate = expected_candidate;
+        wrong_witness_candidate.witness = interner.intern(Digest::of(
+            Domain::Value,
+            b"distinctness-check-wrong-witness",
+        ));
+        let err2 = check_l3_decomposition(
+            &wrong_witness_candidate,
+            data.generator,
+            data.witness_handle,
+            data.expected_src,
+            data.expected_dst,
+            &wrong_witness_candidate,
+            &ok_decomposition,
+        )
+        .unwrap_err();
+
+        let wrong_generator_decomposition = Decomposition::recorded(
+            vec![GeneratorId::named("distinctness-check-wrong-generator@1")],
+            vec![data.expected_src, data.expected_dst],
+        )
+        .unwrap();
+        let err3 = check_l3_decomposition(
+            &expected_candidate,
+            data.generator,
+            data.witness_handle,
+            data.expected_src,
+            data.expected_dst,
+            &expected_candidate,
+            &wrong_generator_decomposition,
+        )
+        .unwrap_err();
+
+        let wrong_endpoint_decomposition = Decomposition::recorded(
+            vec![data.generator],
+            vec![
+                data.expected_src,
+                ConfigId::from_canon(b"distinctness-check-wrong-endpoint"),
+            ],
+        )
+        .unwrap();
+        let err4 = check_l3_decomposition(
+            &expected_candidate,
+            data.generator,
+            data.witness_handle,
+            data.expected_src,
+            data.expected_dst,
+            &expected_candidate,
+            &wrong_endpoint_decomposition,
+        )
+        .unwrap_err();
+
+        assert_eq!(err1, CommitError::CandidateMismatch);
+        assert_eq!(err2, CommitError::WitnessMismatch);
+        assert_eq!(err3, CommitError::GeneratorMismatch);
+        assert_eq!(err4, CommitError::EndpointMismatch);
+
+        let errors = [err1, err2, err3, err4];
+        for i in 0..errors.len() {
+            for j in 0..errors.len() {
+                if i != j {
+                    assert_ne!(
+                        errors[i], errors[j],
+                        "condition {i} and condition {j} must not share a CommitError variant"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

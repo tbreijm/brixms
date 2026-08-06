@@ -36,8 +36,8 @@ pub use l3_canon::{
     L3_VALUE_MARKER, L3_WORLD_FORMAT_V1, L3_WORLD_MARKER,
 };
 pub use l3_regime::{
-    build_l3_observation_profile, build_l3_transition_table, l3_adm, l3_policy, L3DecomposeError,
-    L3Regime, L3TransitionTable,
+    build_l3_observation_profile, build_l3_transition_table, l3_adm, l3_policy, L3Regime,
+    L3TransitionTable,
 };
 
 use brix_elaborate::{elaborate_tree, ElaborationResult};
