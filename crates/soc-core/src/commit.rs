@@ -223,13 +223,29 @@ where
 /// This is also the rejection vocabulary [`SettlementRegime::try_decompose`]
 /// reports through (ADR-0012 §2 item 6): rather than mint a second,
 /// decompose-local error type, the fallible decomposition seam extends this
-/// one, since `SettlementRegime` is already commit-boundary-specific. The
-/// four variants below are the "at minimum" set #244 calls for — an empty
-/// decomposition, a chain-length mismatch, an endpoint mismatch, and an
-/// unresolvable handle — and are exactly what ADR-0012 §6.3 needs a
-/// source-derived Stage B regime to be able to express (candidate-vs-plan
-/// mismatch, witness identity mismatch, generator-chain mismatch, and
-/// endpoint mismatch each map onto one of these).
+/// one, since `SettlementRegime` is already commit-boundary-specific.
+/// [`UnresolvedHandle`](Self::UnresolvedHandle),
+/// [`EmptyDecomposition`](Self::EmptyDecomposition),
+/// [`ChainLengthMismatch`](Self::ChainLengthMismatch), and
+/// [`EndpointMismatch`](Self::EndpointMismatch) are the "at minimum" set #244
+/// called for.
+///
+/// [`CandidateMismatch`](Self::CandidateMismatch),
+/// [`WitnessMismatch`](Self::WitnessMismatch), and
+/// [`GeneratorMismatch`](Self::GeneratorMismatch) were added additively for
+/// ADR-0012 Stage B (#251): its source-derived regime validates a candidate
+/// against a precomputed transition table (§6.3's four required conditions),
+/// and three of those four failures have no honest existing variant —
+/// `UnresolvedHandle` means the *interner* failed to resolve a handle, which
+/// is a different cause from "every handle resolved fine, but this is not
+/// the candidate the table expects"; `EmptyDecomposition` means *no*
+/// generator is present, which is a different claim from "a generator is
+/// present and a decomposition composes, it is just the wrong one." Per
+/// ADR-0002 §5.3's discipline against overclaiming, a diagnostic reason code
+/// must not describe a non-empty-but-wrong chain as empty, or a
+/// wrong-candidate as unresolved — each of §6.3's four conditions now has its
+/// own distinct, accurately-named variant, so `Unknown(CommitFailed { error
+/// })`'s reason code is never a false statement about which check failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommitError {
     /// A world or successor handle was not resolvable in the interner (or,
@@ -256,11 +272,34 @@ pub enum CommitError {
     },
     /// The decomposition's endpoints do not match what the candidate/plan
     /// requires — e.g. (ADR-0012 §6.3) `decomposition.configs` is not exactly
-    /// `[expected_src, expected_dst]` for the candidate being committed. Not
-    /// produced by any regime in this issue's scope (that check is Stage B's
-    /// source-derived regime, ADR-0012 §6.3); the variant exists so the
-    /// interface can express it.
+    /// `[expected_src, expected_dst]` for the candidate being committed.
     EndpointMismatch,
+    /// The candidate a regime was asked to decompose is not the one its own
+    /// precomputed transition relation associates with the current world
+    /// (ADR-0012 §6.3 condition 1: `candidate != transition_table[current_world]`).
+    /// Every handle involved resolves fine — this is deliberately distinct
+    /// from [`UnresolvedHandle`](Self::UnresolvedHandle), whose cause (an
+    /// interner miss) and fix (repair interning) are both different: here the
+    /// candidate itself is simply not the expected one, e.g. a stale or
+    /// forged selection reaching the commit boundary.
+    CandidateMismatch,
+    /// The candidate's witness handle does not equal the one the regime
+    /// interned for its expected generator's primitive `WitnessId` (ADR-0012
+    /// §6.3 condition 2). A generator *is* present and a decomposition can be
+    /// built from it — this is deliberately distinct from
+    /// [`EmptyDecomposition`](Self::EmptyDecomposition): the claimed witness
+    /// simply does not match the one that generator would produce.
+    WitnessMismatch,
+    /// The decomposition's generator chain is not exactly the one this
+    /// regime expected for the transition being committed (ADR-0012 §6.3
+    /// condition 3: `decomposition.generators != [expected_generator]`). The
+    /// chain is non-empty and correctly shaped — this is deliberately
+    /// distinct from both [`EmptyDecomposition`](Self::EmptyDecomposition)
+    /// (no generators at all) and
+    /// [`ChainLengthMismatch`](Self::ChainLengthMismatch) (a `configs`/
+    /// `generators` length disagreement): the chain composes structurally
+    /// fine, it just cites the wrong generator(s).
+    GeneratorMismatch,
 }
 
 impl From<brix_semantic::DecompositionError> for CommitError {

@@ -21,6 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub mod l3;
 pub mod l3_canon;
+pub mod l3_regime;
 pub use l3::{
     lower_l3_plan, L3ConfigBody, L3ConfigDecl, L3LowerError, L3PlanItem, L3PlanV1, L3TypeRef,
     L3ValueV1, PlanLimitsV1, L3_PROFILE_MARKER_RETIRED_V0, L3_PROFILE_MARKER_V1,
@@ -33,6 +34,10 @@ pub use l3_canon::{
     L3_FACT_CHAIN_MARKER, L3_GENERATOR_TAG, L3_PENDING_FORMAT_V1, L3_PENDING_MARKER,
     L3_PLAN_FORMAT_V1, L3_PLAN_MARKER, L3_RULE_TAG, L3_RUN_CONTEXT_FORMAT_V1, L3_VALUE_FORMAT_V1,
     L3_VALUE_MARKER, L3_WORLD_FORMAT_V1, L3_WORLD_MARKER,
+};
+pub use l3_regime::{
+    build_l3_observation_profile, build_l3_transition_table, l3_adm, l3_policy, L3Regime,
+    L3TransitionTable,
 };
 
 use brix_elaborate::{elaborate_tree, ElaborationResult};
