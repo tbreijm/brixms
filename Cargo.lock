@@ -102,6 +102,7 @@ dependencies = [
  "brix-kernel",
  "brix-semantic",
  "brix-syntax",
+ "soc-core",
  "soc-regimes",
 ]
 
