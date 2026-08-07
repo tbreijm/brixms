@@ -204,6 +204,32 @@ impl L3TransitionTable {
     pub fn world_index_of(&self, world: Handle) -> Option<usize> {
         self.worlds.iter().position(|&w| w == world)
     }
+
+    /// The exact pre/post canonical world identities this plan's generator
+    /// `g` witnesses (ADR-0012 §2 item 7: "the semantics checks the exact
+    /// plan, rule, source world, destination world, and fact identity"), or
+    /// `None` if `g` is not one of this table's `N` generators.
+    ///
+    /// This is a **re-derivation**, not a lookup into anything a caller
+    /// supplies: the pair returned here comes only from this table's own
+    /// precomputed transition data, built once from the validated,
+    /// normalized plan (Stage A/B) — never from a committed step's recorded
+    /// `src`/`dst`. An audit semantics that instead trusted a journal
+    /// step's own claim about its endpoints would not be auditing anything
+    /// (ADR-0012 Stage D task brief; §2 item 7). See
+    /// [`crate::l3_audit::L3GeneratorSemantics`], the sole caller.
+    ///
+    /// `O(N)`, a linear scan of [`Self::decomposition_data`]: intended for
+    /// the audit boundary, which ADR-0012 §12 blocker 4 explicitly leaves
+    /// unbudgeted — never a hot-loop lookup, and never subject to the
+    /// per-committed-step `O(|Delta| × fanout)` gate (§4.3) that governs
+    /// settlement, not audit.
+    pub fn expected_endpoints(&self, generator: GeneratorId) -> Option<(ConfigId, ConfigId)> {
+        self.decomposition_data
+            .iter()
+            .find(|d| d.generator == generator)
+            .map(|d| (d.expected_src, d.expected_dst))
+    }
 }
 
 /// Precompute and intern the plan's `N + 1` deterministic prefix worlds and
