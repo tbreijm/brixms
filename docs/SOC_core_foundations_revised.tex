@@ -1,0 +1,760 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=28mm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage[nameinlink,noabbrev]{cleveref}
+
+\hypersetup{
+  pdftitle={Settlement-Oriented Computing: Foundational Skeleton},
+  pdfauthor={Anthonie Reijm},
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=black,
+  urlcolor=black
+}
+
+% ---------------------------------------------------------------------------
+% Theorem environments
+% ---------------------------------------------------------------------------
+
+\newtheorem{definition}{Definition}[section]
+\newtheorem{axiom}[definition]{Axiom}
+\newtheorem{assumption}[definition]{Assumption}
+\newtheorem{theorem}[definition]{Theorem}
+\newtheorem{proposition}[definition]{Proposition}
+\newtheorem{corollary}[definition]{Corollary}
+\newtheorem{lemma}[definition]{Lemma}
+\newtheorem{obligation}[definition]{Proof obligation}
+\newtheorem{conjecture}[definition]{Conjecture}
+
+\theoremstyle{remark}
+\newtheorem{remark}[definition]{Remark}
+\newtheorem{example}[definition]{Example}
+\newtheorem{status}[definition]{Status}
+\newtheorem{principle}[definition]{Principle}
+
+% ---------------------------------------------------------------------------
+% Notation
+% ---------------------------------------------------------------------------
+
+\newcommand{\Conf}{\mathcal{C}}
+\newcommand{\Wit}{\mathcal{W}}
+\newcommand{\Exec}{\mathcal{E}}
+\newcommand{\Rel}{\mathbf{Rel}}
+\newcommand{\World}{\mathbb{W}}
+\newcommand{\U}{\mathbb{U}}
+\newcommand{\Pres}{\mathcal{P}}
+\newcommand{\Beh}{\mathcal{B}}
+\newcommand{\id}{\mathrm{id}}
+\newcommand{\powerset}{\mathcal{P}}
+\newcommand{\dist}{\mathcal{D}}
+\newcommand{\cand}{\operatorname{Cand}}
+\newcommand{\adm}{\operatorname{Adm}}
+\newcommand{\settle}{\operatorname{Settle}}
+\newcommand{\beh}{\operatorname{beh}}
+\newcommand{\enc}[1]{\ulcorner #1 \urcorner}
+\newcommand{\weakstep}{\Rightarrow}
+\newcommand{\realizes}[1]{\xRightarrow{#1}}
+\newcommand{\carrier}[1]{\lvert #1 \rvert}
+
+\newcommand{\Established}{\textsc{Established}}
+\newcommand{\Conditional}{\textsc{Conditional}}
+\newcommand{\Target}{\textsc{Target}}
+\newcommand{\Open}{\textsc{Open}}
+
+\title{\textbf{Settlement-Oriented Computing}\\
+Foundational Skeleton for Executable Worlds}
+\author{Anthonie Reijm}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Settlement-Oriented Computing (SOC) is proposed as a computational formalism
+for executable worlds. Its ontology contains only two primitive kinds:
+\emph{configurations}, which are admissible world descriptions, and
+\emph{witnesses}, which are typed lawful correspondences between
+configurations. A configuration is not intrinsically a state, pattern, policy,
+history, or program. Its interpretation depends on the witness in which it
+participates. Consequently, SOC introduces no separate ontology of schemas and
+instances.
+
+This document is deliberately a foundational skeleton rather than a complete
+paper. It fixes the minimal ontology, separates abstract witnesses from their
+concrete realizations without creating a third primitive, places settlement
+within a coalgebraic operational semantics, and states the universal-world
+representation theorem that would internalize evaluation and yield reflection.
+Each central claim is marked as established from definitions, conditional on
+standard assumptions, or an open proof obligation.
+\end{abstract}
+
+\section{Scope and claim ledger}
+
+The purpose of this document is to make the foundation falsifiable before a
+full exposition is written. It therefore distinguishes three levels of claim:
+
+\begin{center}
+\begin{tabular}{@{}p{0.31\textwidth}p{0.17\textwidth}p{0.43\textwidth}@{}}
+\toprule
+Claim & Status & Required basis \\
+\midrule
+Configurations and witnesses form a category &
+\Established &
+Identity, typed composition, associativity, and unit laws. \\
+
+Concrete witness realization respects composition &
+\Conditional &
+A relational interpretation preserving identities and composition. \\
+
+Settlement defines a coalgebra &
+\Established &
+Once a successor functor and policy-induced transition map are fixed. \\
+
+Behavior is determined by a final coalgebra &
+\Conditional &
+Existence of the relevant final coalgebra. \\
+
+Policies and evaluation are internal to an SOC world &
+\Target &
+Construction of a universal world that simulates presented SOC worlds. \\
+
+SOC is self-representationally closed &
+\Target &
+Derived from the universal-world representation theorem. \\
+
+Programs and simulations require one ontology &
+\Conditional &
+Internal execution plus coalgebraic unfolding. \\
+
+A concrete SOC realization is Turing complete &
+\Open &
+An explicit semantics-preserving encoding of a universal machine. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+SOC does not presently claim cartesian closedness, automatic termination,
+confluence, efficient settlement, or a resolution of any complexity-theoretic
+open problem.
+
+\section{Minimal ontology}
+
+\begin{definition}[Configuration]
+A \emph{configuration} is any admissible description that may occur in an SOC
+world. Let $\Conf$ denote the class of configurations.
+\end{definition}
+
+A configuration may be used as a concrete state, an intensional pattern, a
+policy, a goal, an execution history, a program description, a proof state, or
+an encoding of the settlement machinery. These are semantic roles, not
+ontological subclasses.
+
+\begin{definition}[Witness]
+For configurations $A,B\in\Conf$, a \emph{witness}
+\[
+  w:A\longrightarrow B
+\]
+is a typed lawful correspondence from $A$ to $B$. Let
+$\Wit(A,B)$ denote the class of witnesses from $A$ to $B$.
+\end{definition}
+
+The term ``witness'' includes static relations, observations, proofs,
+reductions, state transitions, rewrites, and policy changes. Their operational
+meaning is supplied by interpretation.
+
+\begin{principle}[No schema ontology]
+SOC does not distinguish schemas from instances as primitive kinds. A
+configuration is interpreted intensionally or extensionally only relative to a
+witness.
+\end{principle}
+
+\begin{remark}
+This principle does not deny the semantic distinction between a reusable
+description and one of its concrete applications. It denies that the
+distinction requires a third primitive. Concrete application is represented by
+a realization judgment, introduced next.
+\end{remark}
+
+\section{Witness-relative interpretation}
+
+\begin{definition}[Relational interpretation]
+Each witness $w:A\to B$ carries a realization relation
+\[
+  \rho_w \subseteq \Conf\times\Conf.
+\]
+We write
+\[
+  x \realizes{w} y
+\]
+when $(x,y)\in\rho_w$.
+\end{definition}
+
+The judgment $x\realizes{w}y$ means that the witness $w$, under its own
+interpretation, realizes a concrete settlement possibility from $x$ to $y$.
+It is a judgment about configurations and a witness, not a new ontological
+entity.
+
+\begin{definition}[Witness-relative source and target]
+For $w:A\to B$, define
+\[
+  \operatorname{Src}(w)
+  =
+  \{x\in\Conf\mid \exists y\in\Conf,\;x\realizes{w}y\},
+\]
+and
+\[
+  \operatorname{Tgt}(w)
+  =
+  \{y\in\Conf\mid \exists x\in\Conf,\;x\realizes{w}y\}.
+\]
+\end{definition}
+
+A single configuration may therefore be interpreted differently by distinct
+witnesses. For example, one witness may require literal equality, another
+structural compatibility, another logical entailment, and another a
+probabilistic similarity threshold.
+
+\begin{definition}[Object carrier]
+The concrete carrier of a configuration $A$ is determined by its identity
+witness:
+\[
+  \carrier{A}
+  =
+  \{x\in\Conf\mid x\realizes{\id_A}x\}.
+\]
+\end{definition}
+
+\begin{assumption}[Typing of realizations]
+For every witness $w:A\to B$,
+\[
+  \rho_w \subseteq \carrier{A}\times\carrier{B}.
+\]
+\end{assumption}
+
+\begin{remark}[Rules and applications]
+A witness may be reused across many concrete pairs $(x,y)\in\rho_w$. The
+witness is the intensional lawful correspondence; the pair is one extensional
+realization. Both $x$ and $y$ remain configurations, and no ``instance''
+primitive is introduced.
+\end{remark}
+
+\section{Categorical kernel}
+
+\begin{axiom}[Identity]
+Every configuration $A$ has an identity witness
+\[
+  \id_A:A\to A.
+\]
+\end{axiom}
+
+\begin{axiom}[Composition]
+For witnesses $f:A\to B$ and $g:B\to C$, there is a composite witness
+\[
+  g\circ f:A\to C.
+\]
+\end{axiom}
+
+\begin{axiom}[Associativity]
+For every composable triple,
+\[
+  h\circ(g\circ f)=(h\circ g)\circ f.
+\]
+\end{axiom}
+
+\begin{axiom}[Unit laws]
+For every witness $f:A\to B$,
+\[
+  \id_B\circ f=f
+  \qquad\text{and}\qquad
+  f\circ\id_A=f.
+\]
+\end{axiom}
+
+\begin{proposition}[Category formation]
+Configurations and witnesses form a category, denoted
+$\mathbf{SOC}$.
+\end{proposition}
+
+\begin{proof}
+The objects are configurations, the morphisms are witnesses, and the preceding
+axioms are exactly the category axioms.
+\end{proof}
+
+The proposition is foundational bookkeeping, not the main mathematical result.
+The substantive obligation is compatibility between abstract witness
+composition and concrete realization.
+
+\begin{axiom}[Identity realization]
+For every configuration $A$,
+\[
+  \rho_{\id_A}
+  =
+  \{(x,x)\mid x\in\carrier{A}\}.
+\]
+\end{axiom}
+
+\begin{axiom}[Compositional realization]
+For composable witnesses $f:A\to B$ and $g:B\to C$,
+\[
+  \rho_{g\circ f}
+  =
+  \rho_g\circ\rho_f,
+\]
+where the right-hand side is relational composition:
+\[
+  (x,z)\in\rho_g\circ\rho_f
+  \iff
+  \exists y,\;(x,y)\in\rho_f\land(y,z)\in\rho_g.
+\]
+\end{axiom}
+
+\begin{proposition}[Realization functor]
+Identity realization and compositional realization define a functorial
+semantics from $\mathbf{SOC}$ into relations.
+\end{proposition}
+
+\begin{proof}
+Identity witnesses are mapped to identity relations on their carriers, and
+witness composition is mapped to relational composition. These are the
+functor laws.
+\end{proof}
+
+\begin{corollary}[Sound path compression]
+If
+\[
+  x_0\realizes{f_1}x_1
+  \realizes{f_2}\cdots
+  \realizes{f_n}x_n,
+\]
+then
+\[
+  x_0
+  \realizes{f_n\circ\cdots\circ f_1}
+  x_n.
+\]
+\end{corollary}
+
+\begin{obligation}[Concrete BrixMS composition]
+For a BrixMS realization, prove that the implementation's composition of
+witnesses preserves the relational semantics above. In particular, matching,
+binding, provenance, and update rules must not invalidate compositional
+realization.
+\end{obligation}
+
+\section{Execution configurations and settlement}
+
+\begin{assumption}[Internal packaging]
+Finite tuples of configurations can be represented as configurations. In
+particular, an execution configuration
+\[
+  e=\langle x,p,h\rangle\in\Exec\subseteq\Conf
+\]
+may contain a current world configuration $x$, a policy configuration $p$, and
+a history configuration $h$.
+\end{assumption}
+
+This assumption is representational only. It does not yet prove that policy
+evaluation is internally executable.
+
+\begin{definition}[Candidate settlement]
+For an execution configuration $e=\langle x,p,h\rangle$, a candidate
+settlement is a tuple $(w,y,p',h')$ such that
+\[
+  x\realizes{w}y
+\]
+and the policy semantics admits the transition from $(p,h)$ to $(p',h')$.
+The set of candidates is written $\cand(e)$.
+\end{definition}
+
+\begin{remark}[The evaluation boundary]
+At this stage, the operation that interprets the policy configuration and
+selects from $\cand(e)$ remains part of the metatheory. Encoding a policy as a
+configuration does not by itself internalize evaluation. The universal-world
+theorem in \cref{sec:universal} is the intended solution.
+\end{remark}
+
+\section{Coalgebraic settlement semantics}
+\label{sec:coalgebra}
+
+Let $\Exec$ be the class of execution configurations. A settlement discipline
+chooses an endofunctor
+\[
+  F:\mathbf{Set}\to\mathbf{Set}
+\]
+describing the shape of possible next states.
+
+\begin{definition}[Settlement coalgebra]
+A settlement semantics is a coalgebra
+\[
+  \gamma:\Exec\longrightarrow F(\Exec).
+\]
+For each execution configuration, $\gamma$ returns the next-state structure
+allowed by witness realization and policy.
+\end{definition}
+
+Typical choices include:
+\[
+\begin{array}{rcll}
+F(X)&=&1+X, & \text{partial deterministic settlement},\\
+F(X)&=&\powerset_{\!f}(X), & \text{finitely branching nondeterminism},\\
+F(X)&=&\dist_{\!f}(X), & \text{finitely supported probability},\\
+F(X)&=&K\times X, & \text{weighted or cost-annotated evolution}.
+\end{array}
+\]
+
+More elaborate regimes may combine these constructions. The functor determines
+the branching shape; the policy determines which witness realizations populate
+that shape.
+
+\begin{definition}[SOC program]
+An SOC program is a pointed settlement coalgebra
+\[
+  (\Exec,\gamma,e_0),
+\]
+where $e_0$ is the initial execution configuration.
+\end{definition}
+
+\begin{definition}[Simulation]
+A simulation is a finite or infinite path generated by repeated unfolding of
+$\gamma$ from $e_0$, with branching resolved according to the chosen
+settlement discipline.
+\end{definition}
+
+\begin{theorem}[Behavior map]
+If $F$ has a final coalgebra
+\[
+  (\Beh,\zeta),
+\]
+then every SOC program admits a unique coalgebra morphism
+\[
+  \beh:\Exec\longrightarrow\Beh.
+\]
+\end{theorem}
+
+\begin{proof}
+This is the universal property of the final $F$-coalgebra.
+\end{proof}
+
+\begin{corollary}[Intensional and extensional views]
+The pointed coalgebra $(\Exec,\gamma,e_0)$ is the intensional program
+description, while $\beh(e_0)$ is its extensional behavior.
+\end{corollary}
+
+\begin{remark}
+This is stronger and more precise than merely saying that a program and a
+simulation are ``made of the same stuff.'' The coalgebra determines the
+unfolding, and final semantics identifies behavior independently of one
+particular presentation.
+\end{remark}
+
+\section{Finite presentations without schemas}
+
+The universal construction cannot quantify over arbitrary proper-class-sized
+worlds. It quantifies over effectively presented worlds.
+
+\begin{definition}[Finite SOC presentation]
+A finite SOC presentation is a finite syntactic datum
+\[
+  \Pres=(C_0,W_0,\mathsf{Real},\mathsf{Policy},e_0)
+\]
+where:
+\begin{enumerate}[label=(\roman*)]
+  \item $C_0$ is a finite set of configuration descriptions;
+  \item $W_0$ is a finite set of witness descriptions;
+  \item $\mathsf{Real}$ effectively enumerates the relation
+        $\rho_w(x,-)$ for each described witness $w$ and configuration $x$;
+  \item $\mathsf{Policy}$ effectively determines or enumerates admissible
+        policy updates and selections;
+  \item $e_0$ is an initial execution configuration.
+\end{enumerate}
+\end{definition}
+
+The words ``description,'' ``pattern,'' and ``program'' indicate how a
+configuration or witness is being interpreted. They do not introduce
+additional primitive kinds. Open terms, ground terms, policies, and execution
+states are all configurations.
+
+\begin{assumption}[Effectiveness]
+Configuration and witness descriptions are effectively enumerable; syntactic
+equality is decidable; realization and admissibility are computably
+enumerable.
+\end{assumption}
+
+\begin{definition}[Presented transition system]
+The transition system generated by $\Pres$ has execution configurations as
+states and a transition
+\[
+  e\longrightarrow_{\Pres}e'
+\]
+exactly when $\mathsf{Real}$ produces a witness realization compatible with
+$e$ and $\mathsf{Policy}$ admits the resulting update.
+\end{definition}
+
+\section{The universal world}
+\label{sec:universal}
+
+\begin{definition}[Meta-configuration]
+For a finite presentation $\Pres$ and execution configuration $e$, a
+meta-configuration is an SOC configuration
+\[
+  \langle\enc{\Pres},\enc{e}\rangle.
+\]
+\end{definition}
+
+\begin{definition}[Administrative and realizing steps]
+A universal-world trace may contain:
+\begin{enumerate}[label=(\roman*)]
+  \item \emph{administrative steps}, which decode descriptions, enumerate
+        realizations, and evaluate policy admissibility; and
+  \item one \emph{realizing step}, which commits the represented settlement.
+\end{enumerate}
+Write
+\[
+  m\weakstep m'
+\]
+for zero or more administrative steps followed by one realizing step.
+\end{definition}
+
+\begin{conjecture}[Universal-world representation theorem]
+There exists a finitely presented SOC world $\U$ such that, for every finite
+SOC presentation $\Pres$ and execution configurations $e,e'$:
+\begin{enumerate}[label=(\roman*)]
+  \item \textbf{Soundness:}
+  \[
+    e\to_{\Pres}e'
+    \implies
+    \langle\enc{\Pres},\enc{e}\rangle
+    \weakstep
+    \langle\enc{\Pres},\enc{e'}\rangle.
+  \]
+  \item \textbf{Completeness:}
+  every observable realizing step of $\U$ from
+  $\langle\enc{\Pres},\enc{e}\rangle$ corresponds to a transition
+  $e\to_{\Pres}e'$.
+  \item \textbf{Progress:}
+  if $e$ has an admissible represented successor, the universal world cannot
+  diverge forever in administrative steps.
+\end{enumerate}
+Equivalently, the represented transition system and the corresponding
+meta-level fragment of $\U$ are divergence-sensitive weakly bisimilar.
+\end{conjecture}
+
+\begin{status}
+This is the principal target theorem. It replaces an internal-encoding axiom
+with a construction obligation. The intended proof is a meta-interpreter
+expressed as an SOC world.
+\end{status}
+
+\begin{obligation}[Construction of $\U$]
+Specify a finite presentation for $\U$ and prove soundness, completeness, and
+progress by induction over the meta-interpreter's administrative phases.
+\end{obligation}
+
+\begin{corollary}[Reflection, conditional]
+If the universal-world representation theorem holds and $\U$ is itself
+finitely presented, then $\U$ represents its own settlement semantics.
+\end{corollary}
+
+\begin{proof}
+Instantiate the representation theorem with $\Pres=\Pres_{\U}$.
+\end{proof}
+
+\begin{corollary}[Self-representational closure, conditional]
+Under the representation theorem, policies, policy revisions, scheduler state,
+history, and evaluation can be represented and settled inside $\U$ without a
+new ontology.
+\end{corollary}
+
+\begin{corollary}[Program--simulation co-location, conditional]
+Under the representation theorem, a presented program and every represented
+simulation of it occur inside the same universal SOC world: the program as a
+meta-configuration with available observable steps, and the simulation as an
+observable trace from that configuration.
+\end{corollary}
+
+\begin{remark}
+The claim is co-location in one world, not set-theoretic identity between a
+program description and one execution trace.
+\end{remark}
+
+\section{Behavioral adequacy}
+
+Let $\gamma_{\Pres}$ be the coalgebra induced by a finite presentation and let
+$\gamma_{\U}$ be the observable-step coalgebra of the universal world.
+
+\begin{conjecture}[Adequacy]
+Assuming the representation theorem and existence of the relevant final
+coalgebra,
+\[
+  \beh_{\U}
+  \bigl(\langle\enc{\Pres},\enc{e}\rangle\bigr)
+  =
+  \beh_{\Pres}(e).
+\]
+\end{conjecture}
+
+\begin{proof}[Proof strategy]
+Show that the representation relation is a divergence-sensitive weak
+bisimulation over observable steps. Then apply the standard coalgebraic result
+that bisimilar states have equal final behavior.
+\end{proof}
+
+\section{Worked kernel example: a two-counter machine}
+
+A two-counter machine supplies a small, concrete test of the ontology and
+settlement semantics.
+
+\begin{definition}[Machine configuration]
+A machine configuration is an SOC configuration
+\[
+  \langle q,m,n\rangle,
+\]
+where $q$ is an instruction label and $m,n\in\mathbb{N}$ are counter values.
+\end{definition}
+
+An increment instruction
+\[
+  q:\operatorname{INC}_1\to q'
+\]
+is represented by a witness $w_q$ with realization relation
+\[
+  \rho_{w_q}
+  =
+  \{
+    (\langle q,m,n\rangle,\langle q',m+1,n\rangle)
+    \mid m,n\in\mathbb{N}
+  \}.
+\]
+
+A decrement-or-zero-test instruction
+\[
+  q:\operatorname{DECJZ}_1(q_{\mathrm{nz}},q_0)
+\]
+is represented by two witnesses:
+\[
+\begin{aligned}
+  \rho_{w_q^{\mathrm{nz}}}
+  &=
+  \{
+    (\langle q,m+1,n\rangle,
+     \langle q_{\mathrm{nz}},m,n\rangle)
+    \mid m,n\in\mathbb{N}
+  \},\\
+  \rho_{w_q^{0}}
+  &=
+  \{
+    (\langle q,0,n\rangle,
+     \langle q_0,0,n\rangle)
+    \mid n\in\mathbb{N}
+  \}.
+\end{aligned}
+\]
+
+Instructions for the second counter are analogous.
+
+\begin{proposition}[Single-step correspondence]
+For the encoding above, a machine step
+\[
+  c\to_M c'
+\]
+exists if and only if there is an instruction witness $w$ such that
+\[
+  c\realizes{w}c'.
+\]
+\end{proposition}
+
+\begin{proof}
+By case analysis on the instruction at the control label of $c$. Each machine
+instruction is represented by exactly the relation that defines its
+operational step.
+\end{proof}
+
+\begin{obligation}[Universality transfer]
+Complete the encoding with halting and control policy, then prove trace
+correspondence. Combined with a standard universality theorem for two-counter
+machines, this yields Turing completeness for any SOC realization capable of
+executing the encoding.
+\end{obligation}
+
+\section{Position relative to adjacent formalisms}
+
+Rewriting logic is the closest precedent for the universal-world target:
+reflective rewriting admits a finitely presented universal theory, and Maude
+implements meta-level computation. Universal coalgebra supplies the behavioral
+semantics, finality, and bisimulation. Reflective Lisp systems expose the
+evaluation boundary and reflective-tower problem. TLA treats actions as
+state-transition relations and behaviors as state sequences. Graph
+transformation gives rigorous matching and rewriting semantics, while the
+Chemical Abstract Machine treats computation as rule-governed evolution of a
+single state medium
+\cite{clavel1996reflection,rutten2000universal,smith1984reflection,
+lamport1994tla,konig2018graph,berry1992cham}.
+
+The proposed SOC contribution is not the invention of categories, rewriting,
+coalgebras, or reflection. Its candidate contribution is the combination of:
+
+\begin{enumerate}[label=(\roman*)]
+  \item one ontology of configurations and witnesses;
+  \item witness-relative interpretation, avoiding a schema/instance ontology;
+  \item policy-driven settlement as the operational organizing principle;
+  \item coalgebraic behavior as the primary semantics; and
+  \item a universal executable world as the reflection target.
+\end{enumerate}
+
+Whether this combination is novel and useful remains an empirical and
+comparative research question.
+
+\section{Foundation checklist}
+
+Before expanding this skeleton into a full paper, the following questions
+should have explicit answers.
+
+\begin{enumerate}[label=\textbf{F\arabic*.}]
+  \item Is every BrixMS runtime entity representable as a configuration or
+        witness without hidden host-language objects?
+  \item Does concrete witness composition satisfy compositional realization?
+  \item Is matching entirely witness-relative, or are global interpretation
+        rules still required?
+  \item What exact functor $F$ describes each supported settlement discipline?
+  \item Which final coalgebras are required, and under what existence
+        conditions?
+  \item Can the BrixMS meta-interpreter be finitely presented inside BrixMS?
+  \item Can soundness, completeness, and progress of the meta-interpreter be
+        proved?
+  \item Does reflective ascent preserve observable behavior?
+  \item Is the two-counter-machine encoding executable without hidden
+        unbounded host-language primitives?
+  \item What operational cost is introduced by witness discovery, policy
+        evaluation, and reflective settlement?
+\end{enumerate}
+
+\section{Conclusion}
+
+The foundation proposed here contains only configurations and witnesses.
+There is no separate schema ontology: a configuration's semantic role is
+determined by the witness that interprets it. Concrete applications are
+realization judgments, not new entities. The categorical kernel organizes
+composition, the relational interpretation connects abstract witnesses to
+concrete settlement steps, and coalgebra supplies the dynamics and behavioral
+semantics.
+
+The unresolved center of the theory is evaluation. Encoding policies as
+configurations is not sufficient; a universal world must faithfully execute
+presented worlds, including itself. Constructing that world and proving weak
+bisimulation is therefore the principal next theorem. If successful,
+self-representational closure and program--simulation co-location become
+derived results rather than assumptions.
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

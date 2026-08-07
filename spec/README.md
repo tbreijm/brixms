@@ -27,9 +27,37 @@ This directory holds the **governing decisions** (ADRs), the **master plan**, th
 
 ## Foundation document
 
+**SOC = Settlement-Oriented Computing.** Settlement is the organizing primitive
+the way objects are in OOP: `OOP : Java :: SOC : Brix`. SOC is the *paradigm*;
+**Brix** is the language, and `.brix` its files. Do not call it "the SOC
+language."
+
 The conceptual foundation is **[`../docs/SOC_core_foundations_revised.tex`](../docs/SOC_core_foundations_revised.tex)**
-("SOC"). ADR-0002 is the ratified engineering constitution derived from it; where
-they differ on terminology, SOC's terms are authoritative.
+("SOC") — *Settlement-Oriented Computing: Foundational Skeleton for Executable
+Worlds*, A. Reijm, 2026-07-25. ADR-0002 is the ratified engineering constitution
+derived from it; where they differ on terminology, SOC's terms are
+authoritative.
+
+Two things a reader must know before treating the skeleton as governing:
+
+1. **It is a skeleton, and it labels its own claim strengths.** Its §1 ledger
+   marks each claim `Established` / `Conditional` / `Target` / `Open`. The
+   universal-world representation theorem and behavioral adequacy are
+   **conjectures** (PD-2 and CJ-1), not results.
+2. **⚠ On composition, the constitution is narrower than the skeleton, and the
+   constitution governs.** The skeleton's "Compositional realization" axiom
+   asserts `ρ_{g∘f} = ρ_g ∘ ρ_f` **globally**. ADR-0002 does not ratify that:
+   realization is a *normal lax functor*, and strict equality is claimed **only
+   on the tight generated subcategory 𝒦** (ADR-0002 §1 and the PD-1 obligation,
+   "…a tight subcategory 𝒦 (i.e. `ρ_{g∘f}=ρ_g∘ρ_f` on 𝒦) … lax-only" elsewhere).
+   That lax/tight split is the whole reason `Audited` exists as a lattice member
+   and why the audit-factorization checker is a separate authority. This is a
+   substantive refinement, not a terminology difference, so ADR-0002's
+   "SOC's terms are authoritative" clause does **not** reinstate the global
+   axiom.
+
+The `.tex` cites `\bibliography{references}`; `references.bib` is not in the
+repository, so the document does not currently compile as-is.
 
 ## Layout
 

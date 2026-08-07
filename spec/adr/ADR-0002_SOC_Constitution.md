@@ -4,7 +4,9 @@ Status: **Accepted (2026-07-25, ratified by maintainer)** (constitution freeze �
 
 Date: 2026-07-25.
 
-Foundation document: [`docs/SOC_core_foundations_revised.tex`](../../docs/SOC_core_foundations_revised.tex) ("SOC"). This ADR is the ratified engineering constitution derived from it. Where this ADR and SOC disagree on terminology, SOC's terms (lax/tight, saturation, settlement discipline, settlement interface, keyed determinization) are authoritative and used here exactly.
+Foundation document: [`docs/SOC_core_foundations_revised.tex`](../../docs/SOC_core_foundations_revised.tex) ("SOC") — *Settlement-Oriented Computing: Foundational Skeleton for Executable Worlds*, A. Reijm, 2026-07-25. **SOC expands to Settlement-Oriented Computing**: settlement is the organizing primitive the way objects are in OOP (`OOP : Java :: SOC : Brix`). This ADR is the ratified engineering constitution derived from it. Where this ADR and SOC disagree on terminology, SOC's terms (lax/tight, saturation, settlement discipline, settlement interface, keyed determinization) are authoritative and used here exactly.
+
+**That clause is about terminology only.** Where the two differ on *substance*, this ADR governs. The one live case: SOC's "Compositional realization" axiom asserts `ρ_{g∘f} = ρ_g ∘ ρ_f` globally, whereas §1 below ratifies realization as a *normal lax functor* with strict equality claimed **only** on the tight generated subcategory 𝒦 (see PD-1 in §10). The lax/tight split is what `Audited` and the audit-factorization authority exist for; the global axiom is not reinstated by the terminology clause.
 
 ---
 
