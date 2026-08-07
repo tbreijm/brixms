@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub mod l3;
 pub mod l3_canon;
 pub mod l3_regime;
+pub mod l3_run;
 pub use l3::{
     lower_l3_plan, L3ConfigBody, L3ConfigDecl, L3LowerError, L3PlanItem, L3PlanV1, L3TypeRef,
     L3ValueV1, PlanLimitsV1, L3_PROFILE_MARKER_RETIRED_V0, L3_PROFILE_MARKER_V1,
@@ -38,6 +39,11 @@ pub use l3_canon::{
 pub use l3_regime::{
     build_l3_observation_profile, build_l3_transition_table, l3_adm, l3_policy, L3Regime,
     L3TransitionTable,
+};
+pub use l3_run::{
+    commit_error_reason, frontier_conflict_reason, run_l3_plan, run_l3_plan_with_interner,
+    settlement_run_id, AdapterFailureDetail, L3AdmChoice, L3RunReport, L3UnknownReasonV1,
+    SettlementRunId, SettlementRunV1, SettlementStopV1,
 };
 
 use brix_elaborate::{elaborate_tree, ElaborationResult};
