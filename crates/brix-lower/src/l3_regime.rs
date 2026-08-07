@@ -180,6 +180,30 @@ impl L3TransitionTable {
             .get(&world)
             .map(|&idx| self.candidates[idx])
     }
+
+    /// The candidate at module-order rule ordinal `index` (`index <
+    /// rule_count()`), or `None` past the end.
+    ///
+    /// ADR-0012 Stage C addition: the incremental settlement adapter's
+    /// calendar keyer (§3.4) needs a `witness handle -> rule ordinal` map to
+    /// compute a candidate's `priority` component, and `candidates`/
+    /// `decomposition_data` are private to this module. Exposing lookup by
+    /// index (rather than the raw vectors) keeps the table's internal layout
+    /// free to change without widening its public surface beyond what a
+    /// Stage C driver actually needs.
+    pub fn candidate_at(&self, index: usize) -> Option<Candidate> {
+        self.candidates.get(index).copied()
+    }
+
+    /// The index of `world` among the full `N + 1` world sequence
+    /// ([`Self::worlds`]), covering the terminal world too (unlike the
+    /// internal `world_index` map, which deliberately excludes it — see that
+    /// field's doc). `O(N)`: intended for once-per-run bookkeeping (e.g. a
+    /// Stage C driver computing `agenda_residue` from the terminal world a
+    /// run ended at), never a hot-loop lookup.
+    pub fn world_index_of(&self, world: Handle) -> Option<usize> {
+        self.worlds.iter().position(|&w| w == world)
+    }
 }
 
 /// Precompute and intern the plan's `N + 1` deterministic prefix worlds and
