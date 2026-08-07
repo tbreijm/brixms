@@ -74,7 +74,19 @@
   "production_dependency_edges": [
     {
       "from": "brix-cli",
+      "to": "brix-elaborate"
+    },
+    {
+      "from": "brix-cli",
+      "to": "brix-kernel"
+    },
+    {
+      "from": "brix-cli",
       "to": "brix-lower"
+    },
+    {
+      "from": "brix-cli",
+      "to": "brix-semantic"
     },
     {
       "from": "brix-cli",
