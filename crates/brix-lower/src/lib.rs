@@ -20,6 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod l3;
+pub mod l3_audit;
 pub mod l3_canon;
 pub mod l3_regime;
 pub mod l3_run;
@@ -27,6 +28,7 @@ pub use l3::{
     lower_l3_plan, L3ConfigBody, L3ConfigDecl, L3LowerError, L3PlanItem, L3PlanV1, L3TypeRef,
     L3ValueV1, PlanLimitsV1, L3_PROFILE_MARKER_RETIRED_V0, L3_PROFILE_MARKER_V1,
 };
+pub use l3_audit::{audit_l3_journal, audit_l3_run, l3_generator_registry, L3GeneratorSemantics};
 pub use l3_canon::{
     build_pending, context_id, fact_id, l3_generator_id, l3_generator_preimage, l3_value_id,
     l3_value_preimage, l3_witness_id, policy_id, program_id, program_preimage, rule_id,
