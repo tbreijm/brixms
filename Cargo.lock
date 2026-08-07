@@ -70,8 +70,10 @@ dependencies = [
 name = "brix-cli"
 version = "0.0.0"
 dependencies = [
+ "brix-canon",
  "brix-lower",
  "brix-syntax",
+ "soc-core",
  "soc-regimes",
 ]
 

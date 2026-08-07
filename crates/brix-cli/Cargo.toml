@@ -13,7 +13,11 @@ path = "src/main.rs"
 [dependencies]
 brix-syntax = { path = "../brix-syntax" }
 brix-lower = { path = "../brix-lower" }
+soc-core = { path = "../soc-core" }
 soc-regimes = { path = "../soc-regimes" }
+
+[dev-dependencies]
+brix-canon = { workspace = true }
 
 [lints]
 workspace = true
