@@ -464,6 +464,57 @@ pub fn honest_result_outcome(composition: Outcome, tree: &RealizesTree) -> Outco
     }
 }
 
+/// A short, human-readable name for a typing-rule generator (ADR-0010 L4:
+/// `brix why`/`brix whynot`, issue #43). `GeneratorId` is a one-way content
+/// hash (`GeneratorId::named`), so there is no way back from a digest to a
+/// name in general; this is a reverse lookup over the *closed* set of
+/// generators this regime is known to mint — exactly the set
+/// `generator_is_tight` above classifies, plus the open-ended `NUMERIC`/
+/// `GRADE` coercion edges. Returns `None` for a generator this module did not
+/// mint (a caller should fall back to the raw digest).
+pub fn generator_name(g: &GeneratorId) -> Option<String> {
+    let named: &[(&str, GeneratorId)] = &[
+        ("g_lit", g_lit()),
+        ("g_str_lit", g_str_lit()),
+        ("g_float_lit", g_float_lit()),
+        ("g_var", g_var()),
+        ("g_app", g_app()),
+        ("g_lam", g_lam()),
+        ("g_lam_intro", g_lam_intro()),
+        ("g_lam_close", g_lam_close()),
+        ("g_split", g_split()),
+        ("g_app2", g_app2()),
+        ("g_record", g_record()),
+        ("g_record_empty", g_record_empty()),
+        ("g_field", g_field()),
+        ("g_field_split", g_field_split()),
+        ("g_record_split", g_record_split()),
+        ("g_ctor", g_ctor()),
+        ("g_ctor_nullary", g_ctor_nullary()),
+        ("g_ctor_split", g_ctor_split()),
+        ("g_match", g_match()),
+        ("g_match_catchall", g_match_catchall()),
+        ("g_match_split", g_match_split()),
+        ("g_arith", g_arith()),
+        ("g_arith_split", g_arith_split()),
+        ("g_unify", g_unify()),
+    ];
+    if let Some((name, _)) = named.iter().find(|(_, id)| id == g) {
+        return Some((*name).to_string());
+    }
+    for (from, to) in NUMERIC.edges.iter().copied() {
+        if NUMERIC.promote_generator(from, to) == *g {
+            return Some(format!("promote({from}->{to})"));
+        }
+    }
+    for (from, to) in GRADE.edges.iter().copied() {
+        if GRADE.promote_generator(from, to) == *g {
+            return Some(format!("weaken({from}->{to})"));
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Coercion lattices (ADR-0010): the general type-normalization mechanism.
 //
@@ -1813,6 +1864,31 @@ mod tests {
     use brix_elaborate::{elaborate_decomposition, ElaborationResult};
     use brix_kernel::Budget;
     use brix_semantic::{Authority, EdgeKind, GeneratorRegistry};
+
+    #[test]
+    fn generator_name_finds_tight_and_untight_generators() {
+        assert_eq!(generator_name(&g_lit()).as_deref(), Some("g_lit"));
+        assert_eq!(generator_name(&g_var()).as_deref(), Some("g_var"));
+        // The honest holdouts named in ADR-0010/#43: g_arith, the coercion
+        // edges, and g_match_catchall.
+        assert_eq!(generator_name(&g_arith()).as_deref(), Some("g_arith"));
+        assert_eq!(
+            generator_name(&g_match_catchall()).as_deref(),
+            Some("g_match_catchall")
+        );
+        assert_eq!(
+            generator_name(&NUMERIC.promote_generator("Int", "Float")).as_deref(),
+            Some("promote(Int->Float)")
+        );
+    }
+
+    #[test]
+    fn generator_name_is_none_for_an_unminted_generator() {
+        assert_eq!(
+            generator_name(&GeneratorId::named("not-a-real-generator@1")),
+            None
+        );
+    }
 
     #[test]
     fn test_lit_type_check() {

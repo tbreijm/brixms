@@ -48,9 +48,9 @@ pub use l3_run::{
     SettlementRunId, SettlementRunV1, SettlementStopV1,
 };
 
-use brix_elaborate::{elaborate_tree, ElaborationResult};
-use brix_kernel::Budget;
-use brix_semantic::{ContextId, Outcome};
+use brix_elaborate::{elaborate_tree, ElaborationResult, RealizesTree};
+use brix_kernel::{Budget, Verdict};
+use brix_semantic::{ContextId, Dependency, EvidenceId, Outcome, PropositionId};
 use brix_syntax::ast::{self, Item};
 use soc_regimes::coverage::certify_exhaustive;
 pub use soc_regimes::coverage::CoverageOutcome;
@@ -77,8 +77,13 @@ pub enum LowerError {
     Unresolved(String),
     /// Type checking error from `soc_regimes`.
     TypeError(TypeError),
-    /// Elaboration to `Proven` failed.
-    ElaborationFailed(String),
+    /// `brix_elaborate::elaborate_tree` returned `NotElaborated`: the kernel
+    /// did not accept the composition term. Carries the kernel's own
+    /// [`Verdict`] rather than a formatted string (ADR-0010 L4, issue #43) so
+    /// `brix prove`/`brix whynot` can distinguish, e.g., resource exhaustion
+    /// from an outright rejection — **this is the absence of a proof, never
+    /// evidence that the proposition is false** (ADR-0002 §5.3).
+    ElaborationFailed(Verdict),
     /// A declared record field is missing from a record literal.
     MissingField { config: String, field: String },
     /// A record literal field is not present in the declared record config.
@@ -92,6 +97,55 @@ pub enum LowerError {
 impl From<TypeError> for LowerError {
     fn from(err: TypeError) -> Self {
         LowerError::TypeError(err)
+    }
+}
+
+/// A category of "no proof yet" for `brix whynot` (ADR-0010 L4, issue #43).
+/// ADR-0002 §5.3: "a search that has not terminated has proved nothing" —
+/// none of these variants is, or may be rendered as, a refutation. Only an
+/// actual `Evidence::KernelRefutation` (not produced anywhere in this
+/// codebase yet) would license that word.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProofGap {
+    /// The checker found a positive obstruction — a type mismatch, an
+    /// unbound/unresolved reference, a missing/unknown record field, an
+    /// asserted-grade erasure, a non-exhaustive match. Still not a kernel
+    /// refutation: no `Refuted` outcome exists for any of these today.
+    Conflict(String),
+    /// The construct lies outside the current lowering/execution fragment.
+    /// This says nothing about the program's truth.
+    UnsupportedFragment(String),
+    /// The kernel search exhausted its budget before deciding
+    /// (`Verdict::ResourceExhausted`). Establishes nothing (ADR-0002 §5.3).
+    ExhaustedSearch(String),
+    /// `ElaborationResult::NotElaborated` for a reason other than budget
+    /// exhaustion (`Rejected`/`Malformed`/`Unsupported`/`ContextMismatch`):
+    /// the absence of a proof, not evidence of falsehood.
+    AbsenceOfProof(String),
+}
+
+/// Classify a [`LowerError`] into the `brix whynot` vocabulary above. Pure
+/// and total: every variant of `LowerError` maps to exactly one `ProofGap`.
+pub fn diagnose_gap(err: &LowerError) -> ProofGap {
+    match err {
+        LowerError::Unsupported(msg) => ProofGap::UnsupportedFragment(msg.clone()),
+        LowerError::Unresolved(name) => {
+            ProofGap::Conflict(format!("unresolved reference '{name}'"))
+        }
+        LowerError::TypeError(te) => ProofGap::Conflict(format!("{te:?}")),
+        LowerError::MissingField { config, field } => ProofGap::Conflict(format!(
+            "record literal for '{config}' is missing declared field '{field}'"
+        )),
+        LowerError::UnknownField { config, field } => ProofGap::Conflict(format!(
+            "record literal for '{config}' has no declared field '{field}'"
+        )),
+        LowerError::GradeErasure { asserted, actual } => ProofGap::Conflict(format!(
+            "asserted grade '@{asserted}' exceeds the earned grade '@{actual}' (epistemic erasure)"
+        )),
+        LowerError::ElaborationFailed(Verdict::ResourceExhausted(reason)) => {
+            ProofGap::ExhaustedSearch(format!("{reason:?}"))
+        }
+        LowerError::ElaborationFailed(verdict) => ProofGap::AbsenceOfProof(format!("{verdict:?}")),
     }
 }
 
@@ -285,6 +339,37 @@ pub struct CheckResult {
     /// For a top-level `match … proving exhaustive` value: the kernel-certified
     /// coverage outcome (a separate proposition from the typing result).
     pub coverage: Option<CoverageOutcome>,
+    /// L4 (ADR-0010; issue #43) — additive fields surfacing what
+    /// `elaborate_tree` already computes so `brix prove`/`brix why` can
+    /// report it instead of discarding it. **Not necessarily "`name : ty`"
+    /// itself**: `elaborate_tree` always proves the *composition* theorem
+    /// "leaves ⇒ name : ty" (this field), and the unconditional result only
+    /// inherits that grade when every leaf generator is independently tight
+    /// — i.e. exactly when `outcome == Outcome::Proven`
+    /// (`soc_regimes::type_realization::honest_result_outcome`). A caller
+    /// that prints `certificate`/`proposition` as proof of `name : ty` when
+    /// `outcome != Outcome::Proven` would be rounding `Audited` up to
+    /// `Proven` — the one thing ADR-0012 §9 forbids.
+    ///
+    /// The exact proposition the kernel certified.
+    pub proposition: PropositionId,
+    /// The context the composition was proved in.
+    pub context: ContextId,
+    /// The kernel-certificate evidence identity backing `proposition` in
+    /// `context`. Always present whenever this `CheckResult` is `Ok` — a
+    /// composition certificate exists regardless of whether `outcome` itself
+    /// reached `Proven`.
+    pub certificate: EvidenceId,
+    /// The elaboration-boundary edge (ADR-0001 §5.5) from the
+    /// composition-certified judgement back to the settlement-side `Audited`
+    /// judgement it elaborates — provenance, kept structurally separate from
+    /// `certificate` (proof) per ADR-0002 §4.1/§5.
+    pub elaboration_edge: Dependency,
+    /// The tree-structured realization derivation (ADR-0007) whose leaves are
+    /// the primitive typing-rule generators — provenance, not proof. `brix
+    /// why` walks this to name which leaf(s), if any, capped the result below
+    /// `Proven` (`soc_regimes::type_realization::generator_is_tight`).
+    pub derivation: RealizesTree,
 }
 
 /// Lower each `let` binding in a parsed surface AST module to native SOC expressions,
@@ -435,7 +520,7 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                 let (audited_judgement, tree) =
                     audited_type_check_tree(&tr_expr, &ty_ctx, ContextId::root())?;
                 match elaborate_tree(&audited_judgement, &tree, Budget::new(2000, 2000)) {
-                    ElaborationResult::Proven { judgement, .. } => {
+                    ElaborationResult::Proven { judgement, edge } => {
                         // The kernel proves the *composition* (judgement.outcome,
                         // e.g. Proven) conditional on the primitive typing-rule
                         // leaves. The honest status of the typing result is that
@@ -463,12 +548,17 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                                 outcome,
                                 ty: Some(inferred_ty.clone()),
                                 coverage,
+                                proposition: judgement.proposition,
+                                context: judgement.context,
+                                certificate: judgement.evidence,
+                                elaboration_edge: edge,
+                                derivation: tree,
                             },
                             inferred_ty,
                         ))
                     }
                     ElaborationResult::NotElaborated(verdict) => {
-                        Err(LowerError::ElaborationFailed(format!("{verdict:?}")))
+                        Err(LowerError::ElaborationFailed(verdict))
                     }
                 }
             })();

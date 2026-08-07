@@ -13,6 +13,9 @@ path = "src/main.rs"
 [dependencies]
 brix-syntax = { path = "../brix-syntax" }
 brix-lower = { path = "../brix-lower" }
+brix-elaborate = { path = "../brix-elaborate" }
+brix-kernel = { path = "../brix-kernel" }
+brix-semantic = { workspace = true }
 soc-core = { path = "../soc-core" }
 soc-regimes = { path = "../soc-regimes" }
 
