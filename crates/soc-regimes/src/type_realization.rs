@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use brix_canon::{CanonWriter, Canonical};
 use brix_elaborate::{RealizesTree, TreeObj};
 use brix_semantic::{
-    compose_chain, Authority, ConfigId, ContextId, Decomposition, GeneratorId, Judgement, Outcome,
-    Realizes, Support, TreeDerivation, WitnessId,
+    Authority, ConfigId, ContextId, GeneratorId, Judgement, Outcome, Realizes, Support,
+    TreeDerivation,
 };
 
 use crate::tree_audit::audit_tree;
@@ -1102,282 +1102,18 @@ pub fn unify(
     }
 }
 
-/// Core inference procedure threading immutable `Infer` state.
-pub fn infer(
-    expr: &Expr,
-    ctx: &TyCtx,
-    st: Infer,
-) -> Result<(Ty, Vec<GeneratorId>, Infer), TypeError> {
-    match expr {
-        Expr::Lit(_) => Ok((Ty::Con("Int"), vec![g_lit()], st)),
-        Expr::StrLit(_) => Ok((Ty::Con("Str"), vec![g_str_lit()], st)),
-        Expr::FloatLit(_) => Ok((Ty::Con("Float"), vec![g_float_lit()], st)),
-        Expr::Arith(op, a, b) => {
-            let (ta, da, s1) = infer(a, ctx, st)?;
-            let (tb, db, s2) = infer(b, ctx, s1)?;
-            let ra = resolve(&ta, &s2.subst).clone();
-            let rb = resolve(&tb, &s2.subst).clone();
-            let plan = plan_arith(*op, &ra, &rb)?;
-
-            // Bind any type-variable operand to the meet point `base`.
-            let mut subst = s2.subst.clone();
-            if plan.unify_a {
-                let (s, _) = unify(&ra, &Ty::Con(plan.base), &subst)?;
-                subst = s;
-            }
-            if plan.unify_b {
-                let (s, _) = unify(&rb, &Ty::Con(plan.base), &subst)?;
-                subst = s;
-            }
-
-            let mut deriv = vec![g_arith()];
-            deriv.extend(da);
-            deriv.extend(db);
-            for (c, p) in NUMERIC.edge_path(plan.eff_a, plan.result) {
-                deriv.push(NUMERIC.promote_generator(c, p));
-            }
-            for (c, p) in NUMERIC.edge_path(plan.eff_b, plan.result) {
-                deriv.push(NUMERIC.promote_generator(c, p));
-            }
-
-            Ok((
-                Ty::Con(plan.result),
-                deriv,
-                Infer {
-                    subst,
-                    next_var: s2.next_var,
-                },
-            ))
-        }
-        Expr::Var(name) => {
-            let ty = ctx
-                .get(name)
-                .cloned()
-                .ok_or_else(|| TypeError::Unbound(name.clone()))?;
-            Ok((ty, vec![g_var()], st))
-        }
-        Expr::Lam(p, body) => {
-            let (alpha, st_alpha) = st.fresh_var();
-            let ctx_ext = ctx.extend(p.clone(), Ty::Var(alpha));
-            let (tb, dv, st_prime) = infer(body, &ctx_ext, st_alpha)?;
-            let param_ty = resolve(&Ty::Var(alpha), &st_prime.subst).clone();
-            let fn_ty = Ty::Fn(Box::new(param_ty), Box::new(tb));
-            let mut deriv = vec![g_lam()];
-            deriv.extend(dv);
-            Ok((fn_ty, deriv, st_prime))
-        }
-        Expr::App(f, x) => {
-            let (tf, df, s1) = infer(f, ctx, st)?;
-            let (tx, dx, s2) = infer(x, ctx, s1)?;
-            let (beta, s_beta) = s2.fresh_var();
-
-            let target_fn = Ty::Fn(
-                Box::new(resolve(&tx, &s_beta.subst).clone()),
-                Box::new(Ty::Var(beta)),
-            );
-
-            let (s3_subst, unify_steps) =
-                unify(resolve(&tf, &s_beta.subst), &target_fn, &s_beta.subst)?;
-
-            let res_ty = resolve(&Ty::Var(beta), &s3_subst).clone();
-
-            let mut deriv = vec![g_app()];
-            deriv.extend(df);
-            deriv.extend(dx);
-            deriv.extend(unify_steps);
-
-            let st_final = Infer {
-                subst: s3_subst,
-                next_var: s_beta.next_var,
-            };
-
-            Ok((res_ty, deriv, st_final))
-        }
-        Expr::Record(fields) => {
-            let mut sorted_fields = fields.clone();
-            sorted_fields.sort_by(|a, b| a.0.cmp(&b.0));
-            sorted_fields.dedup_by(|a, b| a.0 == b.0);
-
-            let mut res_fields = Vec::new();
-            let mut deriv = vec![if sorted_fields.is_empty() {
-                g_record_empty()
-            } else {
-                g_record()
-            }];
-            let mut curr_st = st;
-            for (name, val) in sorted_fields {
-                let (t_i, d_i, next_st) = infer(&val, ctx, curr_st)?;
-                res_fields.push((name, t_i));
-                deriv.extend(d_i);
-                curr_st = next_st;
-            }
-            Ok((Ty::Record(res_fields), deriv, curr_st))
-        }
-        Expr::Field(base, fname) => {
-            let (t_base, d_base, st1) = infer(base, ctx, st)?;
-            let zonked_base = zonk(&t_base, &st1.subst);
-            if let Ty::Record(fields) = zonked_base {
-                if let Some((_, t_f)) = fields.iter().find(|(n, _)| n == fname) {
-                    let mut deriv = vec![g_field()];
-                    deriv.extend(d_base);
-                    Ok((t_f.clone(), deriv, st1))
-                } else {
-                    Err(TypeError::NoField(fname.clone()))
-                }
-            } else {
-                Err(TypeError::Mismatch)
-            }
-        }
-        Expr::Ctor(sum_ty, variant, args) => {
-            let resolved = resolve(sum_ty, &st.subst);
-            if let Ty::Sum(_sum_name, variants) = resolved {
-                let (_, declared_fields) = variants
-                    .iter()
-                    .find(|(vname, _)| vname == variant)
-                    .ok_or(TypeError::Mismatch)?;
-                if args.len() != declared_fields.len() {
-                    return Err(TypeError::Mismatch);
-                }
-                let declared_fields = declared_fields.clone();
-                let mut deriv = vec![if args.is_empty() {
-                    g_ctor_nullary()
-                } else {
-                    g_ctor()
-                }];
-                let mut curr_st = st;
-                for (arg_expr, declared_field_ty) in args.iter().zip(declared_fields.iter()) {
-                    let (t_i, d_i, next_st) = infer(arg_expr, ctx, curr_st)?;
-                    deriv.extend(d_i);
-                    let (next_subst, _) = unify(&t_i, declared_field_ty, &next_st.subst)?;
-                    curr_st = Infer {
-                        subst: next_subst,
-                        next_var: next_st.next_var,
-                    };
-                }
-                Ok((sum_ty.clone(), deriv, curr_st))
-            } else {
-                Err(TypeError::Mismatch)
-            }
-        }
-        Expr::Match(scrutinee, arms) => {
-            let (t_s, d_s, s1) = infer(scrutinee, ctx, st)?;
-            check_coverage(&t_s, arms, &s1.subst)?;
-            let match_generator = if arms
-                .iter()
-                .any(|(pattern, _)| matches!(pattern, Pattern::Wildcard | Pattern::Var(_)))
-            {
-                g_match_catchall()
-            } else {
-                g_match()
-            };
-            let mut deriv = vec![match_generator];
-            deriv.extend(d_s);
-            let mut curr_st = s1;
-            let mut res_ty: Option<Ty> = None;
-            for (pat, body) in arms {
-                let bindings = bind_pattern(pat, &t_s, &curr_st.subst)?;
-                let mut arm_ctx = ctx.clone();
-                for (x, t) in bindings {
-                    arm_ctx = arm_ctx.extend(x, t);
-                }
-                let (t_i, d_i, next_st) = infer(body, &arm_ctx, curr_st)?;
-                deriv.extend(d_i);
-                if let Some(ref r_ty) = res_ty {
-                    let (next_subst, _) = unify(r_ty, &t_i, &next_st.subst)?;
-                    curr_st = Infer {
-                        subst: next_subst,
-                        next_var: next_st.next_var,
-                    };
-                } else {
-                    res_ty = Some(t_i);
-                    curr_st = next_st;
-                }
-            }
-            let result_ty = res_ty.ok_or(TypeError::Mismatch)?;
-            Ok((result_ty, deriv, curr_st))
-        }
-    }
-}
-
-/// Type-checks `expr` in environment `ctx` under context `context`.
-///
-/// Produces a native SOC `Judgement` with `Outcome::Derived` asserting
-/// `HasType(expr, ty)` = `Realizes(derivation_witness, expr_config, ty_config)`.
-pub fn type_check(expr: &Expr, ctx: &TyCtx, context: ContextId) -> Result<Judgement, TypeError> {
-    let st = Infer::new();
-    let (ty, derivation, final_st) = infer(expr, ctx, st)?;
-
-    // Fully resolve (zonk) all bound type variables in the resulting type.
-    let final_ty = zonk(&ty, &final_st.subst);
-
-    let derivation_witness: WitnessId = compose_chain(&derivation)
-        .expect("derivation chain must contain at least one generator step");
-
-    // CRITICAL DISCIPLINE (ADR-0005): Materialize canonical digests / ConfigIds ONLY here
-    // at the commit boundary — NOT per unify/infer step.
-    let src = expr.config_id();
-    let dst = final_ty.config_id();
-
-    let prop = Realizes::new(derivation_witness, src, dst).proposition_id();
-
-    // INTERMEDIATE-CONFIG CHAIN DISCIPLINE:
-    // For multi-step derivations in slice 2, we use endpoint padding (`[src, dst, ..., dst]`)
-    // of length `derivation.len() + 1` to fulfill Decomposition's structural invariant
-    // (`configs.len() == generators.len() + 1`) without creating intermediate ConfigIds during inference.
-    let mut configs = vec![src];
-    configs.resize(derivation.len() + 1, dst);
-
-    let decomp = Decomposition::recorded(derivation, configs)
-        .expect("multi-step derivation decomposition is valid");
-
-    Judgement::publish(
-        Authority::SettlementKernel,
-        context,
-        prop,
-        Outcome::Derived,
-        Support::Settlement(&decomp),
-    )
-    .map_err(|_| TypeError::IllFormedDerivation)
-}
-
-/// Upgrades a native `type_check` derivation to an `Audited` `Judgement` and
-/// verified `Decomposition` (ADR-0005 Stage 2 depth slice).
-///
-/// Produces a replay-verified decomposition and an `Outcome::Audited` judgement,
-/// suitable for proof kernel elaboration via `brix_elaborate::elaborate_decomposition`.
-pub fn audited_type_check(
-    expr: &Expr,
-    ctx: &TyCtx,
-    context: ContextId,
-) -> Result<(Judgement, Decomposition), TypeError> {
-    let st = Infer::new();
-    let (ty, derivation, final_st) = infer(expr, ctx, st)?;
-    let final_ty = zonk(&ty, &final_st.subst);
-
-    let derivation_witness: WitnessId = compose_chain(&derivation)
-        .expect("derivation chain must contain at least one generator step");
-
-    let src = expr.config_id();
-    let dst = final_ty.config_id();
-
-    let prop = Realizes::new(derivation_witness, src, dst).proposition_id();
-
-    let mut configs = vec![src];
-    configs.resize(derivation.len() + 1, dst);
-
-    let verified_decomp =
-        Decomposition::replay_verified(derivation, configs).expect("replay verified decomposition");
-
-    let audited = Judgement::publish(
-        Authority::AuditChecker,
-        context,
-        prop,
-        Outcome::Audited,
-        Support::Settlement(&verified_decomp),
-    )
-    .map_err(|_| TypeError::IllFormedDerivation)?;
-    Ok((audited, verified_decomp))
-}
+// The flat typing lane — `infer`, `type_check`, `audited_type_check` — was
+// removed here by ADR-0018. It built its configuration chain by padding
+// (`[src, dst, dst, …, dst]`), so its `Decomposition` misstated its own
+// intermediate configurations; `Audited` on a `replay_verified` padded chain
+// asserted a replay that this repository's own counterexample showed would
+// fail `soc_core::audit_step` under sound generator semantics.
+//
+// ADR-0007 §1 introduced the tree encoding precisely to remove that padding,
+// and §7 kept the flat path only so that no test regressed. It had no caller
+// outside its own tests. `infer_tree`/`audited_type_check_tree` below are the
+// replacement; the padding-free property is guarded by
+// `tree_derivation_carries_no_padded_step`.
 
 /// Deferred-materialization atom for tree leaf endpoints (ADR-0008).
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1940,9 +1676,9 @@ pub fn audited_type_check_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brix_elaborate::{elaborate_decomposition, ElaborationResult};
+    use brix_elaborate::ElaborationResult;
     use brix_kernel::Budget;
-    use brix_semantic::{Authority, EdgeKind, Evidence, GeneratorRegistry, JudgementId};
+    use brix_semantic::{Authority, EdgeKind};
 
     #[test]
     fn generator_name_finds_tight_and_untight_generators() {
@@ -1969,58 +1705,22 @@ mod tests {
         );
     }
 
+    /// The counterexample ADR-0018 §4 preserves.
+    ///
+    /// The retired flat lane padded its configuration chain to
+    /// `[src, dst, dst, …, dst]`, which passes syntactic `RealizesComp`
+    /// (a `dst == dst` middle always matches) but fails a sound audit,
+    /// because no generator realizes `(dst, dst)`. The deleted
+    /// `test_multi_step_elaboration_tree_vs_linear_tension` demonstrated
+    /// exactly that, using a `NonPaddedSemantics` whose whole content was
+    /// `src != dst`.
+    ///
+    /// Stated positively on the surviving path: the tree derivation carries
+    /// no degenerate step, so it would satisfy that same predicate. If
+    /// inference ever starts padding tree endpoints, this fires.
     #[test]
-    fn test_lit_type_check() {
-        let expr = Expr::Lit(42);
-        let ctx = TyCtx::new();
-        let context = ContextId::root();
-
-        let judgement = type_check(&expr, &ctx, context).expect("type check lit");
-        assert_eq!(judgement.outcome, Outcome::Derived);
-        assert_eq!(judgement.context, context);
-
-        let expected_prop = Realizes::new(
-            g_lit().witness_id(),
-            expr.config_id(),
-            Ty::Con("Int").config_id(),
-        )
-        .proposition_id();
-
-        assert_eq!(judgement.proposition, expected_prop);
-    }
-
-    #[test]
-    fn test_var_type_check() {
-        let expr = Expr::Var("x".to_string());
-        let ctx = TyCtx::new().extend("x", Ty::Con("Bool"));
-        let context = ContextId::root();
-
-        let judgement = type_check(&expr, &ctx, context).expect("type check var");
-        assert_eq!(judgement.outcome, Outcome::Derived);
-
-        let expected_prop = Realizes::new(
-            g_var().witness_id(),
-            expr.config_id(),
-            Ty::Con("Bool").config_id(),
-        )
-        .proposition_id();
-
-        assert_eq!(judgement.proposition, expected_prop);
-    }
-
-    #[test]
-    fn test_unbound_var() {
-        let expr = Expr::Var("y".to_string());
-        let ctx = TyCtx::new();
-        let context = ContextId::root();
-
-        let res = type_check(&expr, &ctx, context);
-        assert_eq!(res, Err(TypeError::Unbound("y".to_string())));
-    }
-
-    #[test]
-    fn test_identity_applied() {
-        // App(Lam("x", Var("x")), Lit(42))
+    fn tree_derivation_carries_no_padded_step() {
+        // The same expression the retired test used: (\x. x) 42.
         let expr = Expr::App(
             Box::new(Expr::Lam(
                 "x".to_string(),
@@ -2028,271 +1728,81 @@ mod tests {
             )),
             Box::new(Expr::Lit(42)),
         );
-        let ctx = TyCtx::new();
-        let context = ContextId::root();
+        let (_, derivation) =
+            audited_type_check_tree(&expr, &TyCtx::new(), ContextId::root()).expect("audits");
 
-        let (ty, derivation, st) = infer(&expr, &ctx, Infer::new()).expect("infer identity app");
-        let final_ty = zonk(&ty, &st.subst);
-        assert_eq!(final_ty, Ty::Con("Int"));
-
-        // Multi-generator derivation
-        assert!(derivation.contains(&g_app()));
-        assert!(derivation.contains(&g_lam()));
-        assert!(derivation.contains(&g_var()));
-        assert!(derivation.contains(&g_lit()));
-        assert!(derivation.contains(&g_unify()));
-
-        let witness = compose_chain(&derivation).expect("witness composition");
-
-        let judgement = type_check(&expr, &ctx, context).expect("type check identity app");
-        assert_eq!(judgement.outcome, Outcome::Derived);
-
-        let expected_prop =
-            Realizes::new(witness, expr.config_id(), Ty::Con("Int").config_id()).proposition_id();
-        assert_eq!(judgement.proposition, expected_prop);
+        for leaf in derivation.tree().leaves() {
+            match leaf {
+                RealizesTree::Leaf {
+                    generator,
+                    src,
+                    dst,
+                } => assert_ne!(
+                    src,
+                    dst,
+                    "leaf {:?} is a degenerate src == dst step — the padding ADR-0007 §1 \
+                     removed and ADR-0018 retired the flat lane over",
+                    generator_name(generator).unwrap_or_else(|| generator.to_hex())
+                ),
+                other => panic!("leaves() must yield only Leaf nodes, got {other:?}"),
+            }
+        }
     }
 
-    #[test]
-    fn test_const_function() {
-        // Lam("x", Lit(7))
-        let expr = Expr::Lam("x".to_string(), Box::new(Expr::Lit(7)));
-        let ctx = TyCtx::new();
-        let context = ContextId::root();
-
-        let judgement = type_check(&expr, &ctx, context).expect("type check const fn");
-        assert_eq!(judgement.outcome, Outcome::Derived);
-
-        let (ty, _, st) = infer(&expr, &ctx, Infer::new()).expect("infer const fn");
-        let final_ty = zonk(&ty, &st.subst);
-        assert_eq!(
-            final_ty,
-            Ty::Fn(Box::new(Ty::Var(0)), Box::new(Ty::Con("Int")))
-        );
-    }
+    // --- inference-property coverage carried over from the retired flat lane
+    // (ADR-0018 §3). `unify`/`occurs` are shared, so these properties are still
+    // production behaviour; only their flat-path tests went with the deletion.
 
     #[test]
-    fn test_mismatch_non_function_application() {
-        // App(Lit(1), Lit(2)) -> applying non-function Int
-        let expr = Expr::App(Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2)));
-        let ctx = TyCtx::new();
-        let context = ContextId::root();
-
-        let res = type_check(&expr, &ctx, context);
-        assert_eq!(res, Err(TypeError::Mismatch));
-    }
-
-    #[test]
-    fn test_occurs_check_via_app() {
-        // ctx: f : Var(0)
-        // expr: App(Var("f"), Var("f")) -> unifying Var(0) with Fn(Var(0), Var(beta)) triggers InfiniteType
-        let expr = Expr::App(
-            Box::new(Expr::Var("f".to_string())),
-            Box::new(Expr::Var("f".to_string())),
-        );
-        let ctx = TyCtx::new().extend("f", Ty::Var(0));
-        let context = ContextId::root();
-
-        let res = type_check(&expr, &ctx, context);
-        assert_eq!(res, Err(TypeError::InfiniteType));
-    }
-
-    #[test]
-    fn test_determinism() {
-        let expr = Expr::App(
-            Box::new(Expr::Lam(
-                "x".to_string(),
-                Box::new(Expr::Var("x".to_string())),
-            )),
-            Box::new(Expr::Lit(42)),
-        );
-        let ctx = TyCtx::new();
-        let context = ContextId::root();
-
-        let j1 = type_check(&expr, &ctx, context).unwrap();
-        let j2 = type_check(&expr, &ctx, context).unwrap();
-
-        assert_eq!(j1, j2);
-        assert_eq!(j1.id(), j2.id());
-    }
-
-    #[test]
-    fn test_decomposition_round_trip() {
-        let expr = Expr::App(
-            Box::new(Expr::Lam(
-                "x".to_string(),
-                Box::new(Expr::Var("x".to_string())),
-            )),
-            Box::new(Expr::Lit(42)),
-        );
-        let ctx = TyCtx::new();
-
-        let (ty, derivation, st) = infer(&expr, &ctx, Infer::new()).unwrap();
-        let final_ty = zonk(&ty, &st.subst);
-
-        let src = expr.config_id();
-        let dst = final_ty.config_id();
-        let mut configs = vec![src];
-        configs.resize(derivation.len() + 1, dst);
-
-        let decomp = Decomposition::recorded(derivation.clone(), configs);
-        assert!(decomp.is_ok());
-
-        let witness = compose_chain(&derivation).unwrap();
-        let j = type_check(&expr, &ctx, ContextId::root()).unwrap();
-
-        let expected_prop = Realizes::new(witness, src, dst).proposition_id();
-        assert_eq!(j.proposition, expected_prop);
-    }
-
-    #[test]
-    fn test_literal_elaboration_to_proven() {
-        let expr = Expr::Lit(42);
-        let ctx = TyCtx::new();
-        let context = ContextId::root();
-
-        let (audited_judgement, verified_decomp) =
-            audited_type_check(&expr, &ctx, context).expect("audited type check lit");
-
-        assert_eq!(audited_judgement.outcome, Outcome::Audited);
-
-        let budget = Budget::new(1000, 1000);
-        let res = elaborate_decomposition(&audited_judgement, &verified_decomp, budget);
-
+    fn unbound_var_is_a_type_error() {
+        let res = infer_tree(&Expr::Var("nope".to_string()), &TyCtx::new(), Infer::new());
         match res {
-            ElaborationResult::Proven { judgement, edge } => {
-                assert_eq!(judgement.outcome, Outcome::Proven);
-                assert_eq!(judgement.outcome.authority(), Authority::ProofKernel);
-                assert_eq!(judgement.context, context);
-
-                // Edge assertion: ElaborationBoundary pointing to audited_judgement's id
-                assert_eq!(edge.kind, EdgeKind::ElaborationBoundary);
-                assert_eq!(edge.target, audited_judgement.id().digest());
-
-                // Evidence assertion: KernelCertificate
-                let expected_verifier = brix_kernel::native_verifier();
-                let g1 = g_lit();
-                let src = expr.config_id();
-                let dst = Ty::Con("Int").config_id();
-
-                let h1 = brix_kernel::Prop::Realizes(
-                    brix_kernel::ObjectTerm::Const(brix_semantic::PropositionId(g1.digest())),
-                    brix_kernel::ObjectTerm::Const(brix_semantic::PropositionId(src.digest())),
-                    brix_kernel::ObjectTerm::Const(brix_semantic::PropositionId(dst.digest())),
-                );
-                let goal_prop = brix_kernel::Prop::Realizes(
-                    brix_kernel::ObjectTerm::Const(brix_semantic::PropositionId(g1.digest())),
-                    brix_kernel::ObjectTerm::Const(brix_semantic::PropositionId(src.digest())),
-                    brix_kernel::ObjectTerm::Const(brix_semantic::PropositionId(dst.digest())),
-                );
-                let implication_prop = brix_kernel::Prop::Impl(Box::new(h1), Box::new(goal_prop));
-
-                let explicit_term = brix_kernel::ExplicitTerm::new(
-                    context,
-                    brix_kernel::TermKind::Lam {
-                        var_name: Some("h1".to_string()),
-                        body: Box::new(brix_kernel::TermKind::Hyp(brix_kernel::Var::Index(0))),
-                    },
-                );
-
-                let cert_id =
-                    brix_kernel::certificate_id_v1(&brix_kernel::CertificateMaterialV1::new(
-                        &context,
-                        &implication_prop,
-                        &explicit_term,
-                    ));
-                let expected_evidence = Evidence::KernelCertificate {
-                    verifier: expected_verifier,
-                    certificate: cert_id,
-                };
-
-                assert_eq!(judgement.evidence, expected_evidence.id());
-                assert_eq!(judgement.proposition, implication_prop.proposition_id());
-            }
-            ElaborationResult::NotElaborated(verdict) => {
-                panic!("Expected Proven, got NotElaborated({verdict:?})");
-            }
-            ElaborationResult::Refused(err) => {
-                panic!("Expected Proven, got Refused({err:?})");
-            }
+            Err(TypeError::Unbound(name)) => assert_eq!(name, "nope"),
+            other => panic!("an unbound variable must be a type error, got {other:?}"),
         }
     }
 
     #[test]
-    fn test_multi_step_elaboration_tree_vs_linear_tension() {
-        let expr = Expr::App(
-            Box::new(Expr::Lam(
-                "x".to_string(),
+    fn applying_a_non_function_is_a_mismatch() {
+        let expr = Expr::App(Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2)));
+        match infer_tree(&expr, &TyCtx::new(), Infer::new()) {
+            Err(TypeError::Mismatch) => {}
+            other => panic!("applying a literal must be a mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn self_application_is_rejected_by_the_occurs_check() {
+        // \x. x x — typing it would need `a = a -> b`, the infinite type the
+        // occurs check exists to refuse. Never a panic, never a judgement.
+        let expr = Expr::Lam(
+            "x".to_string(),
+            Box::new(Expr::App(
+                Box::new(Expr::Var("x".to_string())),
                 Box::new(Expr::Var("x".to_string())),
             )),
-            Box::new(Expr::Lit(42)),
         );
-        let ctx = TyCtx::new();
-        let context = ContextId::root();
-
-        let (audited_judgement, verified_decomp) =
-            audited_type_check(&expr, &ctx, context).expect("audited type check identity app");
-
-        // 1. Syntactic elaboration passes via endpoints-only padding because dst == dst in RealizesComp
-        let budget = Budget::new(1000, 1000);
-        let res = elaborate_decomposition(&audited_judgement, &verified_decomp, budget);
-        assert!(
-            matches!(res, ElaborationResult::Proven { .. }),
-            "Padded configs pass syntactic RealizesComp because dst == dst middle match holds"
-        );
-
-        // 2. But padded configs fail semantic audit because g_lam, g_var, g_lit, etc. do NOT realize (dst, dst)
-        let mut registry = GeneratorRegistry::new();
-        registry.insert(g_app());
-        registry.insert(g_lam());
-        registry.insert(g_var());
-        registry.insert(g_lit());
-        registry.insert(g_unify());
-
-        struct NonPaddedSemantics;
-        impl soc_core::GeneratorSemantics for NonPaddedSemantics {
-            fn realizes(&self, _g: &GeneratorId, src: &ConfigId, dst: &ConfigId) -> bool {
-                src != dst
-            }
+        match infer_tree(&expr, &TyCtx::new(), Infer::new()) {
+            Err(TypeError::InfiniteType) | Err(TypeError::Mismatch) => {}
+            other => panic!("self-application must be refused, got {other:?}"),
         }
+    }
 
-        let unverified_decomp = Decomposition::recorded(
-            verified_decomp.generators.clone(),
-            verified_decomp.configs.clone(),
-        )
-        .unwrap();
-
-        let derived_evidence = Evidence::SettlementReplay {
-            body: unverified_decomp.id().digest(),
-        }
-        .id();
-        let derived_id = JudgementId::recompute(
-            context,
-            audited_judgement.proposition,
-            Outcome::Derived,
-            derived_evidence,
+    #[test]
+    fn tree_typing_is_deterministic() {
+        let expr = Expr::App(Box::new(Expr::Var("f".to_string())), Box::new(Expr::Lit(1)));
+        let ctx = TyCtx::new().extend(
+            "f",
+            Ty::Fn(Box::new(Ty::Con("Int")), Box::new(Ty::Con("Bool"))),
         );
-
-        let step = soc_core::CommittedStep {
-            key: soc_core::Key::new(
-                0,
-                0,
-                brix_canon::Digest::of(brix_canon::Domain::Value, b"app_tiebreak"),
-            ),
-            observation: soc_core::Observation {
-                outcome_class: Outcome::Derived,
-                judgement_digest: derived_id.digest(),
-            },
-            decomposition: unverified_decomp,
-            src: expr.config_id(),
-            dst: Ty::Con("Int").config_id(),
-            witness: compose_chain(&verified_decomp.generators).unwrap(),
-        };
-
-        let audit_res = soc_core::audit_step(&step, context, &registry, &NonPaddedSemantics);
-        assert!(
-            matches!(audit_res, soc_core::AuditResult::Unknown(_)),
-            "Audit MUST fail for endpoints-padded configs under sound generator semantics"
+        let (j1, d1) = audited_type_check_tree(&expr, &ctx, ContextId::root()).unwrap();
+        let (j2, d2) = audited_type_check_tree(&expr, &ctx, ContextId::root()).unwrap();
+        assert_eq!(
+            j1.id(),
+            j2.id(),
+            "the same program must yield the same judgement"
         );
+        assert_eq!(d1.id(), d2.id(), "and the same derivation artifact");
     }
 
     #[test]

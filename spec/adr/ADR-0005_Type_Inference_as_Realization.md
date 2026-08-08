@@ -1,6 +1,6 @@
 # ADR-0005 — Type Inference as Realization: Native SOC Type-Realization Regime
 
-Status: **Proposed** (2026-07-29) (governs BrixMS Stage-2 Legacy Retirement; extends [ADR-0002](./ADR-0002_SOC_Constitution.md), [ADR-0003](./ADR-0003_Proof_Kernel_Profile.md), [ADR-0004](./ADR-0004_Kernel_Profile_1_1.md)).
+Status: **Proposed** (2026-07-29) (governs BrixMS Stage-2 Legacy Retirement; extends [ADR-0002](./ADR-0002_SOC_Constitution.md), [ADR-0003](./ADR-0003_Proof_Kernel_Profile.md), [ADR-0004](./ADR-0004_Kernel_Profile_1_1.md)). **Implementation note (2026-08-08):** the *flat* implementation of this ADR's Stage 2 depth slice — `type_realization::{infer, type_check, audited_type_check}` — was retired by [ADR-0018](./ADR-0018_Retire_The_Flat_Typing_Lane.md); it padded its configuration chain and so never performed the replay §3 item 4 describes. The architecture below is unchanged and now runs through the tree encoding of [ADR-0007](./ADR-0007_Tree_Structured_Typing_Elaboration.md) with the artifact of [ADR-0017](./ADR-0017_Tree_Realization_Support.md).
 
 Date: 2026-07-29.
 
