@@ -93,7 +93,7 @@ use soc_core::{
     check_quiescence_certificate, Adm, AuditResult, DeclaredAssumptions, Interner, PresentationV1,
     QuiescenceCertificateId, SaturationBudget, SettlementRegime,
 };
-use soc_regimes::type_realization::{generator_is_tight, generator_name, Ty};
+use soc_regimes::type_realization::{generator_is_tight, generator_name, ClaimKind, Ty};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -218,17 +218,19 @@ fn fmt_ty(ty: Option<&Ty>) -> String {
 // ---------------------------------------------------------------------------
 
 /// The names of every leaf generator in `tree` that is not discharged tight
-/// (`soc_regimes::type_realization::generator_is_tight`) — the honest
-/// holdouts capping a result below `@Proven`. Deduplicated and
-/// lexicographically ordered via `BTreeSet` (never hash-map order) so
-/// repeated runs are byte-identical.
+/// for typing (`soc_regimes::type_realization::generator_is_tight`,
+/// `ClaimKind::Typing`) — the honest holdouts capping a result below
+/// `@Proven`. `why`/`whynot` explain a **typing** derivation, so they always
+/// query the typing claim kind (ADR-0015 ⟨D-JUDGE⟩) — never the empty one.
+/// Deduplicated and lexicographically ordered via `BTreeSet` (never hash-map
+/// order) so repeated runs are byte-identical.
 fn untight_generator_names(
     tree: &brix_elaborate::RealizesTree,
 ) -> std::collections::BTreeSet<String> {
     let mut names = std::collections::BTreeSet::new();
     for leaf in tree.leaves() {
         if let brix_elaborate::RealizesTree::Leaf { generator, .. } = leaf {
-            if !generator_is_tight(generator) {
+            if !generator_is_tight(ClaimKind::Typing, generator) {
                 names.insert(
                     generator_name(generator).unwrap_or_else(|| generator.digest().to_hex()),
                 );
@@ -370,7 +372,7 @@ fn format_why(results: &CheckResults) -> (String, bool) {
                     if let brix_elaborate::RealizesTree::Leaf { generator, .. } = leaf {
                         let name = generator_name(generator)
                             .unwrap_or_else(|| generator.digest().to_hex());
-                        let tightness = if generator_is_tight(generator) {
+                        let tightness = if generator_is_tight(ClaimKind::Typing, generator) {
                             "tight"
                         } else {
                             "undischarged"

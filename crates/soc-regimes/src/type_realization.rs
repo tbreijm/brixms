@@ -379,11 +379,55 @@ pub fn g_unify() -> GeneratorId {
 // change to this reporting code.
 // ---------------------------------------------------------------------------
 
-/// Whether a typing-rule generator's *realization semantics* has been discharged
-/// to "tight" — its soundness established, not merely asserted (the
-/// tight-generator obligation).
+/// The judgment (proposition) kind a tightness query is scoped to (ADR-0015
+/// ⟨D-JUDGE⟩).
 ///
-/// Discharged:
+/// A generator discharge is sound only **relative to the judgment it was
+/// established for** — discharging `g_var` for typing shows `Hyp` is a sound
+/// typing rule; it says nothing about an evaluation, equality, or totality
+/// claim that might one day use the same generator id. Before this type
+/// existed the scoping held only *by absence*: no evaluation claim kind lived
+/// in the workspace, so nothing could misuse [`generator_is_tight`] — the same
+/// shape as the declared-but-unreachable-variant hazard tracked by #254. This
+/// enum converts that invariant from "true because nothing violates it" to
+/// "true by construction."
+///
+/// **Deliberately closed.** An unrecognized claim kind must never silently
+/// fall back to another kind's discharges — that is exactly the failure mode
+/// ADR-0015 §9 rules out ("closed is safer now: an unknown kind cannot
+/// silently default to 'discharged'"). Concretely: adding a variant here for
+/// a future judgment (e.g. evaluation, settlement, coverage) MUST wire it to
+/// return `false` for every generator in [`generator_is_tight`] until a
+/// registry is deliberately built and reviewed for that judgment — it must
+/// never inherit [`ClaimKind::Typing`]'s answers by falling through a
+/// wildcard match arm. [`ClaimKind::Empty`] exists precisely to make that
+/// discipline checkable: it is the "no discharges" judgment kind, proven by
+/// `claim_kind_typing_discharge_is_not_portable` below to disagree with
+/// `Typing` for a generator that is tight there.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum ClaimKind {
+    /// The `HasType` judgment. The only claim kind with a populated
+    /// tightness registry today.
+    Typing,
+    /// A judgment kind with **no discharges, by construction**. Not a
+    /// placeholder to be filled in later — it exists so ⟨D-JUDGE⟩'s scoping
+    /// invariant is enforced by the type system and a test, rather than
+    /// holding only because no second claim kind happens to exist yet
+    /// (ADR-0015 Stage A).
+    Empty,
+}
+
+/// Whether a generator's *realization semantics* has been discharged to
+/// "tight" for the given `kind` — its soundness established for **that
+/// judgment only**, not merely asserted (the tight-generator obligation,
+/// ADR-0015 ⟨D-JUDGE⟩). A generator tight for [`ClaimKind::Typing`] carries no
+/// claim about any other judgment kind; see [`ClaimKind`]'s doc for why this
+/// parameter exists and why the enum is closed.
+///
+/// For [`ClaimKind::Empty`] this always returns `false`, unconditionally, for
+/// every generator — including the sixteen discharged below.
+///
+/// For [`ClaimKind::Typing`], discharged:
 ///
 /// 1. The **literal introduction rules** `g_lit`/`g_str_lit`/`g_float_lit` — an
 ///    introduction rule *is* the definition of its type (`42 : Int`), the
@@ -422,29 +466,41 @@ pub fn g_unify() -> GeneratorId {
 /// (a real numeric embedding). Any program touching an undischarged generator
 /// stays `Audited`; e.g. `1 + 2` remains `Audited` because `g_arith` is not
 /// tight.
-pub fn generator_is_tight(g: &GeneratorId) -> bool {
-    *g == g_lit()
-        || *g == g_str_lit()
-        || *g == g_float_lit()
-        || *g == g_var()
-        || *g == g_lam_intro()
-        || *g == g_lam_close()
-        || *g == g_split()
-        || *g == g_app2()
-        || *g == g_record_split()
-        || *g == g_record()
-        || *g == g_field_split()
-        || *g == g_field()
-        || *g == g_ctor_split()
-        || *g == g_ctor()
-        || *g == g_match_split()
-        || *g == g_match()
+pub fn generator_is_tight(kind: ClaimKind, g: &GeneratorId) -> bool {
+    match kind {
+        // Fail closed: a claim kind added in the future starts here, at
+        // `false` for everything, until a registry is deliberately built and
+        // reviewed for it (see `ClaimKind`'s doc). Never add a fall-through
+        // wildcard arm that reuses `Typing`'s list.
+        ClaimKind::Empty => false,
+        ClaimKind::Typing => {
+            *g == g_lit()
+                || *g == g_str_lit()
+                || *g == g_float_lit()
+                || *g == g_var()
+                || *g == g_lam_intro()
+                || *g == g_lam_close()
+                || *g == g_split()
+                || *g == g_app2()
+                || *g == g_record_split()
+                || *g == g_record()
+                || *g == g_field_split()
+                || *g == g_field()
+                || *g == g_ctor_split()
+                || *g == g_ctor()
+                || *g == g_match_split()
+                || *g == g_match()
+        }
+    }
 }
 
-/// Whether every leaf generator in an elaborated derivation is discharged tight.
+/// Whether every leaf generator in an elaborated derivation is discharged
+/// tight **for typing** — the only judgment kind `honest_result_outcome`
+/// speaks about (ADR-0015 ⟨D-JUDGE⟩; a future evaluation judgment gets its own
+/// caller and its own, separately reviewed, claim kind).
 fn all_generators_tight(tree: &RealizesTree) -> bool {
     match tree {
-        RealizesTree::Leaf { generator, .. } => generator_is_tight(generator),
+        RealizesTree::Leaf { generator, .. } => generator_is_tight(ClaimKind::Typing, generator),
         RealizesTree::Seq { left, right } | RealizesTree::Tensor { left, right } => {
             all_generators_tight(left) && all_generators_tight(right)
         }
@@ -455,7 +511,9 @@ fn all_generators_tight(tree: &RealizesTree) -> bool {
 /// outcome capped by the least-discharged leaf. The kernel proves `composition`
 /// (e.g. `Proven`) *conditional on* the primitive typing-rule leaves, so the
 /// result is only `composition` when every leaf is tight; otherwise it is the
-/// replay-verified `Audited`.
+/// replay-verified `Audited`. Consults the **typing** tightness index only
+/// ([`ClaimKind::Typing`]) — this function is the `HasType` judgment's own
+/// honesty check, not a general one (ADR-0015 ⟨D-JUDGE⟩).
 pub fn honest_result_outcome(composition: Outcome, tree: &RealizesTree) -> Outcome {
     if all_generators_tight(tree) {
         composition
@@ -2563,7 +2621,10 @@ mod tests {
             ),
         ];
         for (expr, gen, ty) in cases {
-            assert!(generator_is_tight(&gen), "{gen:?} should be discharged");
+            assert!(
+                generator_is_tight(ClaimKind::Typing, &gen),
+                "{gen:?} should be discharged"
+            );
             let (_, tree, _) = infer_tree(&expr, &TyCtx::new(), Infer::new()).unwrap();
             match tree {
                 TyTree::Leaf {
@@ -3030,14 +3091,72 @@ mod tests {
             g_match(),
         ] {
             assert!(
-                generator_is_tight(&generator),
+                generator_is_tight(ClaimKind::Typing, &generator),
                 "{generator:?} should be discharged"
             );
         }
         for generator in [g_record_empty(), g_ctor_nullary(), g_match_catchall()] {
             assert!(
-                !generator_is_tight(&generator),
+                !generator_is_tight(ClaimKind::Typing, &generator),
                 "{generator:?} must remain undischarged"
+            );
+        }
+    }
+
+    #[test]
+    fn claim_kind_typing_discharge_is_not_portable() {
+        // ADR-0015 Stage A gate: a generator tight for typing is NOT tight for
+        // the empty claim kind. This is the entire point of `ClaimKind` — it
+        // makes ⟨D-JUDGE⟩'s scoping invariant true by construction rather
+        // than true only because no second claim kind exists yet.
+        let tight_for_typing = [
+            g_lit(),
+            g_str_lit(),
+            g_float_lit(),
+            g_var(),
+            g_lam_intro(),
+            g_lam_close(),
+            g_split(),
+            g_app2(),
+            g_record_split(),
+            g_record(),
+            g_field_split(),
+            g_field(),
+            g_ctor_split(),
+            g_ctor(),
+            g_match_split(),
+            g_match(),
+        ];
+        assert_eq!(
+            tight_for_typing.len(),
+            16,
+            "this test must cover exactly the sixteen typing-tight generators"
+        );
+        for generator in tight_for_typing {
+            assert!(
+                generator_is_tight(ClaimKind::Typing, &generator),
+                "{generator:?} should be discharged for Typing"
+            );
+            assert!(
+                !generator_is_tight(ClaimKind::Empty, &generator),
+                "{generator:?} is tight for Typing but must NOT be tight for the empty claim kind"
+            );
+        }
+
+        // The empty claim kind also returns false for the generators that are
+        // undischarged even for typing, and for an arbitrary generator id —
+        // "not discharged" for every generator, unconditionally.
+        for generator in [
+            g_record_empty(),
+            g_ctor_nullary(),
+            g_match_catchall(),
+            g_arith(),
+            g_arith_split(),
+            g_unify(),
+        ] {
+            assert!(
+                !generator_is_tight(ClaimKind::Empty, &generator),
+                "{generator:?} must not be tight for the empty claim kind"
             );
         }
     }
