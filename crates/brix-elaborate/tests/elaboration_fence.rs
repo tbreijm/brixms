@@ -14,7 +14,7 @@ use brix_elaborate::{
 use brix_kernel::Budget;
 use brix_semantic::{
     Authority, ConfigId, ContextId, DecompVerification, Decomposition, GeneratorId, Judgement,
-    Outcome, PropositionId, PublicationError, Support,
+    Outcome, PropositionId, PublicationError, Support, TreeDerivation,
 };
 
 fn context() -> ContextId {
@@ -189,8 +189,9 @@ fn honest_audited_source_still_reaches_proven() {
 // --- elaborate_tree ------------------------------------------------------
 //
 // `elaborate_tree` runs the same `AuditedSource::verify` boundary check, but
-// against the provisional tree-realization route (ADR-0016 §7): the support
-// is `Support::tree_realization(source.proposition)`, not a `Decomposition`.
+// against the tree lane's route (ADR-0017): the support is
+// `Support::Tree(&derivation)`, a checked `TreeDerivation` artifact, not a
+// `Decomposition`.
 
 fn well_formed_tree() -> RealizesTree {
     let g = GeneratorId::named("elab-fence-tree.g@1");
@@ -201,11 +202,21 @@ fn well_formed_tree() -> RealizesTree {
     }
 }
 
+/// A `StructureVerified` artifact over [`well_formed_tree`]. `brix-elaborate`
+/// cannot reach `soc-regimes`'s tree-audit checker, so — as in
+/// `brix-semantic`'s own tests — the verified tag is constructed directly;
+/// the boundary check under test is `AuditedSource::verify`'s binding, not
+/// the checker itself.
+fn well_formed_tree_derivation() -> TreeDerivation {
+    TreeDerivation::structure_verified(well_formed_tree())
+}
+
 #[test]
 fn derived_source_is_refused_by_elaborate_tree_before_the_kernel_is_ever_reached() {
     let ctx = context();
     let prop = proposition("tree-derived-source");
     let recorded = recorded_decomposition("tree-derived-source");
+    let derivation = well_formed_tree_derivation();
 
     let source = Judgement::publish(
         Authority::SettlementKernel,
@@ -216,7 +227,7 @@ fn derived_source_is_refused_by_elaborate_tree_before_the_kernel_is_ever_reached
     )
     .expect("a Recorded chain legally publishes Derived");
 
-    let result = elaborate_tree(&source, &well_formed_tree(), budget());
+    let result = elaborate_tree(&source, &derivation, budget());
     match result {
         ElaborationResult::Refused(err) => {
             assert_eq!(
@@ -237,10 +248,11 @@ fn derived_source_is_refused_by_elaborate_tree_before_the_kernel_is_ever_reached
 fn honest_audited_source_via_tree_realization_still_reaches_proven() {
     let ctx = context();
     let prop = proposition("tree-honest-path");
-    // The provisional TreeRealization route's support is a digest of the
-    // proposition itself (ADR-0016 §7) — `Support::tree_realization(prop)`
-    // computes it, and `Judgement::publish` derives the matching evidence.
-    let support = Support::tree_realization(prop);
+    // The tree lane's support is a checked `TreeDerivation` artifact
+    // (ADR-0017 §5): `Judgement::publish` derives the matching evidence from
+    // the artifact's own content-addressed id, not from `prop`.
+    let derivation = well_formed_tree_derivation();
+    let support = Support::Tree(&derivation);
 
     let source = Judgement::publish(
         Authority::AuditChecker,
@@ -249,9 +261,9 @@ fn honest_audited_source_via_tree_realization_still_reaches_proven() {
         Outcome::Audited,
         support,
     )
-    .expect("the provisional TreeRealization route legally publishes Audited");
+    .expect("a StructureVerified tree derivation legally publishes Audited");
 
-    let result = elaborate_tree(&source, &well_formed_tree(), budget());
+    let result = elaborate_tree(&source, &derivation, budget());
     match result {
         ElaborationResult::Proven { judgement, edge } => {
             assert_eq!(judgement.outcome, Outcome::Proven);

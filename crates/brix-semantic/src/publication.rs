@@ -34,7 +34,7 @@ use brix_canon::Digest;
 
 use crate::{
     Authority, CertificateId, DecompVerification, Decomposition, Evidence, EvidenceId, Judgement,
-    Outcome, PropositionId, VerifierId,
+    Outcome, TreeDerivation, TreeVerification, VerifierId,
 };
 
 /// What a publisher presents as support for an outcome — [`Evidence`] with the
@@ -67,42 +67,28 @@ pub enum Support<'a> {
     ExternalResult { body: Digest },
     /// A non-authoritative suggestion.
     Suggestion { body: Digest },
-    /// **Provisional (ADR-0016 §7, `spec/errata/0004-tree-realization-audited-support.md`).**
-    /// Tree-realization support with no replay-verified [`Decomposition`]
-    /// behind it — today its body is a digest of the proposition being
-    /// claimed, which distinguishes nothing. This variant exists so the hole
-    /// is *named in the table* rather than invisible inside a general-purpose
-    /// constructor. It is reported, not blessed.
-    TreeRealization { body: Digest },
-}
-
-impl Support<'static> {
-    /// **Provisional (ADR-0016 §7).** The tree-realization support body, in
-    /// one place.
+    /// A checked tree-structured realization derivation — the typing lane's
+    /// support for `Audited` (ADR-0007, ADR-0017).
     ///
-    /// The formula — a value-domain digest of the proposition's own digest —
-    /// is what `soc-regimes::audited_type_check_tree` publishes today, and it
-    /// is exactly what makes the route unsound: the evidence is computable
-    /// from the claim. It lives here rather than being open-coded at each
-    /// site so the erratum has a single anchor, and so the day it is replaced
-    /// with a real artifact there is one definition to delete.
+    /// Borrows the [`TreeDerivation`] rather than taking its id for the same
+    /// reason [`Support::Settlement`] borrows its `Decomposition`: the route
+    /// condition turns on [`TreeVerification`], which an id cannot expose.
     ///
-    /// See `spec/errata/0004-tree-realization-audited-support.md`.
-    pub fn tree_realization(proposition: PropositionId) -> Self {
-        Support::TreeRealization {
-            body: Digest::of(brix_canon::Domain::Value, proposition.digest().as_bytes()),
-        }
-    }
+    /// This replaced a `Provisional` route whose body was a digest of the
+    /// proposition being claimed (ADR-0016 §7). ADR-0017 rules that the
+    /// outcome was right and the support was not; this variant is the support.
+    Tree(&'a TreeDerivation),
 }
 
 impl Support<'_> {
     /// The [`Evidence`] this support encodes. Total.
     ///
-    /// Note that [`Support::Settlement`] and [`Support::TreeRealization`] both
-    /// project to [`Evidence::SettlementReplay`]: they are the same evidence
-    /// *variant* distinguished by what stands behind it. That distinction is
-    /// exactly what the id-only surface could not express, and the reason the
-    /// §7 finding stayed invisible for so long.
+    /// Each support projects to its **own** evidence variant. It did not use
+    /// to: the tree route projected to [`Evidence::SettlementReplay`] like the
+    /// settlement route, which is how ADR-0016 §7's finding stayed invisible —
+    /// the substrate saw one digest and could not tell that nothing stood
+    /// behind it. ADR-0017 §5 D4 appended [`Evidence::TreeDerivation`] so the
+    /// evidence names its own kind.
     pub fn evidence(&self) -> Evidence {
         match *self {
             Support::KernelCertificate {
@@ -126,7 +112,9 @@ impl Support<'_> {
             Support::Measurement { body } => Evidence::Measurement { body },
             Support::ExternalResult { body } => Evidence::CertifiedExternalResult { body },
             Support::Suggestion { body } => Evidence::Suggestion { body },
-            Support::TreeRealization { body } => Evidence::SettlementReplay { body },
+            Support::Tree(derivation) => Evidence::TreeDerivation {
+                body: derivation.id().digest(),
+            },
         }
     }
 
@@ -140,7 +128,7 @@ impl Support<'_> {
             Support::Measurement { .. } => SupportKind::Measurement,
             Support::ExternalResult { .. } => SupportKind::ExternalResult,
             Support::Suggestion { .. } => SupportKind::Suggestion,
-            Support::TreeRealization { .. } => SupportKind::TreeRealization,
+            Support::Tree(_) => SupportKind::Tree,
         }
     }
 
@@ -162,8 +150,8 @@ pub enum SupportKind {
     Measurement,
     ExternalResult,
     Suggestion,
-    /// Provisional — see [`Support::TreeRealization`].
-    TreeRealization,
+    /// A checked tree derivation — see [`Support::Tree`].
+    Tree,
 }
 
 /// Whether a [`Route`] is settled doctrine or a named, reported hole.
@@ -186,6 +174,10 @@ pub enum RouteCondition {
     /// takes `Recorded` (the hot loop's unverified record, ADR-0002 §5.1);
     /// `Audited` takes `ReplayVerified` (the checker's replay, §4.1).
     Decomposition(DecompVerification),
+    /// The [`TreeDerivation`] must carry this verification form. `Audited`
+    /// takes `StructureVerified` — earned by the tree-audit checker, never by
+    /// the inference pass that built the tree (ADR-0017 §5 D3).
+    Tree(TreeVerification),
 }
 
 /// One legal publication route: an authority may publish this outcome on this
@@ -238,16 +230,16 @@ pub const ROUTES: &[Route] = &[
         condition: RouteCondition::Decomposition(DecompVerification::ReplayVerified),
         status: RouteStatus::Settled,
     },
-    // PROVISIONAL — ADR-0016 §7, spec/errata/0004-tree-realization-audited-support.md.
-    // `soc-regimes::audited_type_check_tree` publishes Audited on evidence
-    // computed from the proposition it is claiming. Reported, not blessed;
-    // this row keeps behaviour identical while the hole has a name.
+    // The typing lane's Audited (ADR-0007 §4/§6, ADR-0017). Structure,
+    // endpoints, and leaf-generator membership are verified; ρ-membership is
+    // not, which is why the tag is `StructureVerified` and not
+    // `ReplayVerified` (ADR-0017 §4 row d, §5 D2).
     Route {
         authority: Authority::AuditChecker,
         outcome: Outcome::Audited,
-        support: SupportKind::TreeRealization,
-        condition: RouteCondition::None,
-        status: RouteStatus::Provisional,
+        support: SupportKind::Tree,
+        condition: RouteCondition::Tree(TreeVerification::StructureVerified),
+        status: RouteStatus::Settled,
     },
     // --- ExternalDriver: a named driver, via a certified-result envelope.
     Route {
@@ -320,7 +312,7 @@ pub const ROUTES: &[Route] = &[
     Route {
         authority: Authority::AnyResolver,
         outcome: Outcome::Unknown,
-        support: SupportKind::TreeRealization,
+        support: SupportKind::Tree,
         condition: RouteCondition::None,
         status: RouteStatus::Settled,
     },
@@ -351,6 +343,13 @@ pub enum PublicationError {
         outcome: Outcome,
         expected: DecompVerification,
         found: DecompVerification,
+    },
+    /// `Audited` presented with a tree derivation the tree-audit checker never
+    /// verified (ADR-0017 §5 D3).
+    TreeVerificationMismatch {
+        outcome: Outcome,
+        expected: TreeVerification,
+        found: TreeVerification,
     },
     /// [`AuditedSource::verify`]: the presented artifact is not what the
     /// judgement's evidence id names.
@@ -412,13 +411,26 @@ pub(crate) fn check_route(
                 })
             }
         }
-        // A decomposition condition on a non-settlement support is a table
+        (RouteCondition::Tree(expected), Support::Tree(derivation)) => {
+            if derivation.verification() == expected {
+                Ok(route)
+            } else {
+                Err(PublicationError::TreeVerificationMismatch {
+                    outcome,
+                    expected,
+                    found: derivation.verification(),
+                })
+            }
+        }
+        // A verification condition on a support of the wrong kind is a table
         // authoring error, not a caller error. Refuse rather than pass.
-        (RouteCondition::Decomposition(_), other) => Err(PublicationError::UnsupportedEvidence {
-            authority,
-            outcome,
-            support: other.kind(),
-        }),
+        (RouteCondition::Decomposition(_) | RouteCondition::Tree(_), other) => {
+            Err(PublicationError::UnsupportedEvidence {
+                authority,
+                outcome,
+                support: other.kind(),
+            })
+        }
     }
 }
 
@@ -489,6 +501,14 @@ mod tests {
         Outcome::Audited,
     ];
 
+    fn tree_leaf(name: &str) -> crate::RealizesTree {
+        crate::RealizesTree::Leaf {
+            generator: GeneratorId::named(name),
+            src: crate::TreeObj::Atom(ConfigId::from_canon(b"x0")),
+            dst: crate::TreeObj::Atom(ConfigId::from_canon(b"x1")),
+        }
+    }
+
     fn decomposition(verification: DecompVerification) -> Decomposition {
         let generators = vec![GeneratorId::named("g0@1")];
         let configs = vec![ConfigId::from_canon(b"x0"), ConfigId::from_canon(b"x1")];
@@ -527,20 +547,20 @@ mod tests {
     }
 
     #[test]
-    fn only_the_tree_realization_route_is_provisional() {
-        // Freeze the size of the reported hole (ADR-0016 §7). A second
-        // provisional row must be a deliberate, reviewed act.
+    fn no_route_is_provisional() {
+        // ADR-0017 retired the one Provisional row ADR-0016 §7 opened. The
+        // status stays in the type because the next reported hole should be
+        // nameable the same way — but a row carrying it is a deliberate,
+        // reviewed act, and `check_soc_law_map.py` couples its presence to
+        // SOC-LAW-05 staying `partial` with an open issue.
         let provisional: Vec<_> = ROUTES
             .iter()
             .filter(|r| r.status == RouteStatus::Provisional)
             .collect();
-        assert_eq!(
-            provisional.len(),
-            1,
+        assert!(
+            provisional.is_empty(),
             "unexpected provisional routes: {provisional:?}"
         );
-        assert_eq!(provisional[0].outcome, Outcome::Audited);
-        assert_eq!(provisional[0].support, SupportKind::TreeRealization);
     }
 
     #[test]
@@ -559,21 +579,46 @@ mod tests {
     }
 
     #[test]
-    fn support_kind_agrees_with_evidence_projection() {
-        // Settlement and TreeRealization deliberately share an Evidence
-        // variant while staying distinct routing tags — the distinction the
-        // id-only surface could not express (ADR-0016 §5).
+    fn settlement_and_tree_support_project_to_distinct_evidence_variants() {
+        // They used to share `Evidence::SettlementReplay`, which is how
+        // ADR-0016 §7's finding hid: one digest looks like another. ADR-0017
+        // §5 D4 gave the tree lane its own variant, so the evidence names its
+        // own kind and a tree derivation can never be mistaken for a
+        // settlement replay.
         let verified = decomposition(DecompVerification::ReplayVerified);
         let settlement = Support::Settlement(&verified);
-        let tree = Support::TreeRealization {
-            body: Digest::of(brix_canon::Domain::Value, b"prop"),
-        };
+        let derivation = TreeDerivation::structure_verified(tree_leaf("g_a@1"));
+        let tree = Support::Tree(&derivation);
+
         assert!(matches!(
             settlement.evidence(),
             Evidence::SettlementReplay { .. }
         ));
-        assert!(matches!(tree.evidence(), Evidence::SettlementReplay { .. }));
+        assert!(matches!(tree.evidence(), Evidence::TreeDerivation { .. }));
         assert_ne!(settlement.kind(), tree.kind());
+        assert_ne!(settlement.evidence_id(), tree.evidence_id());
+    }
+
+    #[test]
+    fn audited_from_an_unverified_tree_is_refused() {
+        // The tree analogue of `Audited` from a merely recorded chain: the
+        // inference pass builds, the checker verifies, and only the checker's
+        // tag opens the route (ADR-0017 §5 D3).
+        let recorded = TreeDerivation::recorded(tree_leaf("g_a@1"));
+        let err = check_route(
+            Authority::AuditChecker,
+            Outcome::Audited,
+            Support::Tree(&recorded),
+        )
+        .expect_err("an unverified tree derivation must never support Audited");
+        assert_eq!(
+            err,
+            PublicationError::TreeVerificationMismatch {
+                outcome: Outcome::Audited,
+                expected: TreeVerification::StructureVerified,
+                found: TreeVerification::Recorded,
+            }
+        );
     }
 
     #[test]
