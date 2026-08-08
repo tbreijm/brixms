@@ -536,16 +536,20 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                 // *separate* proposition, @Proven only when the kernel accepts.
                 let coverage = coverage_for(&let_decl.value, &tr_expr, ctx);
 
-                let (audited_judgement, tree) =
+                // `audited_type_check_tree` now returns the checked
+                // `TreeDerivation` artifact its judgement's evidence names
+                // (ADR-0017), not a bare tree — `elaborate_tree` binds the
+                // source to it at the boundary.
+                let (audited_judgement, derivation) =
                     audited_type_check_tree(&tr_expr, &ty_ctx, ContextId::root())?;
-                match elaborate_tree(&audited_judgement, &tree, Budget::new(2000, 2000)) {
+                match elaborate_tree(&audited_judgement, &derivation, Budget::new(2000, 2000)) {
                     ElaborationResult::Proven { judgement, edge } => {
                         // The kernel proves the *composition* (judgement.outcome,
                         // e.g. Proven) conditional on the primitive typing-rule
                         // leaves. The honest status of the typing result is that
                         // capped by leaf discharge — Audited until the leaves are
                         // proven tight (the SOC tight-generator obligation).
-                        let outcome = honest_result_outcome(judgement.outcome, &tree);
+                        let outcome = honest_result_outcome(judgement.outcome, derivation.tree());
 
                         // Discharge any `@grade` assertion against the earned grade
                         // via the GRADE coercion lattice: the actual grade may only
@@ -571,7 +575,7 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                                 context: judgement.context,
                                 certificate: judgement.evidence,
                                 elaboration_edge: edge,
-                                derivation: tree,
+                                derivation: derivation.tree().clone(),
                             },
                             inferred_ty,
                         ))

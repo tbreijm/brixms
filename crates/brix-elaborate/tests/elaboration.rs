@@ -1,9 +1,27 @@
-use brix_elaborate::{elaborate_and_publish, elaborate_decomposition, ElaborationResult};
+use brix_elaborate::{
+    elaborate_and_publish, elaborate_decomposition, ElaborationResult, RealizesTree, TreeObj,
+};
 use brix_kernel::{Budget, ExplicitTerm, ObjectTerm, Prop, TermKind, Var, Verdict};
 use brix_semantic::{
     AuditedSource, Authority, ConfigId, ContextId, Decomposition, EdgeKind, Evidence, GeneratorId,
-    Judgement, Outcome, PropositionId, Support,
+    Judgement, Outcome, PropositionId, Support, TreeDerivation,
 };
+
+/// A `StructureVerified` single-leaf tree derivation — the typing lane's
+/// support for `Audited` (ADR-0017). Used here purely as a generic
+/// `AuditChecker`/`Audited` source for `elaborate_and_publish`, which does
+/// not itself inspect the tree; the tests that exercise tree structure live
+/// in `elaboration_fence.rs`.
+fn tree_derivation(tag: &str) -> TreeDerivation {
+    let g = GeneratorId::named(&format!("elaboration.{tag}.g@1"));
+    let x0 = ConfigId::from_canon(format!("elaboration.{tag}.x0").as_bytes());
+    let x1 = ConfigId::from_canon(format!("elaboration.{tag}.x1").as_bytes());
+    TreeDerivation::structure_verified(RealizesTree::Leaf {
+        generator: g,
+        src: TreeObj::Atom(x0),
+        dst: TreeObj::Atom(x1),
+    })
+}
 
 #[test]
 fn positive_elaboration_produces_proven_judgement() {
@@ -12,20 +30,21 @@ fn positive_elaboration_produces_proven_judgement() {
     let prop_atom = Prop::Atom(prop_atom_id);
     let kernel_prop = Prop::Impl(Box::new(prop_atom.clone()), Box::new(prop_atom.clone()));
 
-    // Source judgement (e.g. Audited settlement judgement), published via the
-    // provisional tree-realization route (ADR-0016 §7) and bound to its own
-    // proposition, since this test exercises `elaborate_and_publish` directly.
+    // Source judgement (e.g. Audited typing judgement), published via the
+    // tree lane's route (ADR-0017) and bound to its own proposition, since
+    // this test exercises `elaborate_and_publish` directly.
     let source_prop_id = PropositionId::from_canon(b"P_implies_P");
+    let derivation = tree_derivation("positive-elaboration");
     let source = Judgement::publish(
         Authority::AuditChecker,
         context,
         source_prop_id,
         Outcome::Audited,
-        Support::tree_realization(source_prop_id),
+        Support::Tree(&derivation),
     )
-    .expect("AuditChecker/Audited/TreeRealization is a legal (provisional) route");
-    let audited_source = AuditedSource::verify(&source, Support::tree_realization(source_prop_id))
-        .expect("source binds to its own tree-realization support");
+    .expect("AuditChecker/Audited/Tree(StructureVerified) is a legal route");
+    let audited_source = AuditedSource::verify(&source, Support::Tree(&derivation))
+        .expect("source binds to its own tree derivation support");
 
     // Explicit term: \x. x (identity term proving P -> P)
     let term_kind = TermKind::Lam {
@@ -79,16 +98,17 @@ fn negative_well_formed_but_wrong_term_yields_not_elaborated() {
     // Proposition P -> Q
     let kernel_prop = Prop::Impl(Box::new(Prop::Atom(p_id)), Box::new(Prop::Atom(q_id)));
 
+    let derivation = tree_derivation("negative-well-formed-wrong-term");
     let source = Judgement::publish(
         Authority::AuditChecker,
         context,
         p_id,
         Outcome::Audited,
-        Support::tree_realization(p_id),
+        Support::Tree(&derivation),
     )
-    .expect("AuditChecker/Audited/TreeRealization is a legal (provisional) route");
-    let audited_source = AuditedSource::verify(&source, Support::tree_realization(p_id))
-        .expect("source binds to its own tree-realization support");
+    .expect("AuditChecker/Audited/Tree(StructureVerified) is a legal route");
+    let audited_source = AuditedSource::verify(&source, Support::Tree(&derivation))
+        .expect("source binds to its own tree derivation support");
 
     // Wrong term: identity term \x. x has type P -> P, not P -> Q
     let term_kind = TermKind::Lam {
@@ -123,16 +143,17 @@ fn budget_exhaustion_yields_not_elaborated_resource_exhausted() {
     let prop_atom = Prop::Atom(prop_atom_id);
     let kernel_prop = Prop::Impl(Box::new(prop_atom.clone()), Box::new(prop_atom.clone()));
 
+    let derivation = tree_derivation("budget-exhaustion");
     let source = Judgement::publish(
         Authority::AuditChecker,
         context,
         prop_atom_id,
         Outcome::Audited,
-        Support::tree_realization(prop_atom_id),
+        Support::Tree(&derivation),
     )
-    .expect("AuditChecker/Audited/TreeRealization is a legal (provisional) route");
-    let audited_source = AuditedSource::verify(&source, Support::tree_realization(prop_atom_id))
-        .expect("source binds to its own tree-realization support");
+    .expect("AuditChecker/Audited/Tree(StructureVerified) is a legal route");
+    let audited_source = AuditedSource::verify(&source, Support::Tree(&derivation))
+        .expect("source binds to its own tree derivation support");
 
     let term_kind = TermKind::Lam {
         var_name: Some("x".to_string()),
@@ -296,16 +317,17 @@ fn decomposition_n1_single_generator_produces_proven() {
 fn broken_chain_steps_do_not_connect_yields_not_elaborated() {
     let context = ContextId::root();
     let source_prop_id = PropositionId::from_canon(b"audited_decomp_prop_broken");
+    let derivation = tree_derivation("broken-chain-steps");
     let source = Judgement::publish(
         Authority::AuditChecker,
         context,
         source_prop_id,
         Outcome::Audited,
-        Support::tree_realization(source_prop_id),
+        Support::Tree(&derivation),
     )
-    .expect("AuditChecker/Audited/TreeRealization is a legal (provisional) route");
-    let audited_source = AuditedSource::verify(&source, Support::tree_realization(source_prop_id))
-        .expect("source binds to its own tree-realization support");
+    .expect("AuditChecker/Audited/Tree(StructureVerified) is a legal route");
+    let audited_source = AuditedSource::verify(&source, Support::Tree(&derivation))
+        .expect("source binds to its own tree derivation support");
 
     let g1 = ObjectTerm::Const(PropositionId(GeneratorId::named("g1@1").digest()));
     let g2 = ObjectTerm::Const(PropositionId(GeneratorId::named("g2@1").digest()));

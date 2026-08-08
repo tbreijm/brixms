@@ -70,6 +70,7 @@ mod publication;
 mod quiescent;
 mod realizes;
 mod regime;
+mod tree;
 mod witness;
 
 pub use config::ConfigId;
@@ -88,6 +89,7 @@ pub use publication::{
 pub use quiescent::Quiescent;
 pub use realizes::Realizes;
 pub use regime::RegimeId;
+pub use tree::{RealizesTree, TreeDerivation, TreeDerivationId, TreeObj, TreeVerification};
 pub use witness::{
     compose, compose_chain, tensor, tensor_chain, Witness, WitnessId, WITNESS_COMPOSE_TAG,
     WITNESS_TENSOR_TAG,

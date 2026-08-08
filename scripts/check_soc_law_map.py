@@ -15,6 +15,21 @@ DEFAULT_MANIFEST = ROOT / "spec" / "conformance" / "soc-semantic-laws.json"
 EXPECTED_IDS = [f"SOC-LAW-{number:02d}" for number in range(1, 13)]
 VALID_STATUSES = {"enforced", "partial", "open"}
 
+# ADR-0017 §8. A `RouteStatus::Provisional` row in `brix-semantic`'s publication
+# route table is a deliberately named, reported hole in the authority fence — a
+# route that exists so a live path keeps working while its soundness question is
+# open. The failure mode worth guarding is not the row itself but the row
+# *outliving its reason*: someone marking SOC-LAW-05 `enforced` while a
+# provisional route is still in the table, and the placeholder going quiet.
+#
+# So couple them structurally rather than by a date or a calendar reminder: if
+# the table carries a provisional row, the law must stay `partial` with a
+# bounded open issue. Deterministic, offline, and it fails the `lint` job the
+# moment the two disagree.
+ROUTES_SOURCE = ROOT / "crates" / "brix-semantic" / "src" / "publication.rs"
+PROVISIONAL_COUPLED_LAW = "SOC-LAW-05"
+PROVISIONAL_ROUTE_PATTERN = re.compile(r"^\s*status:\s*RouteStatus::Provisional\s*,", re.MULTILINE)
+
 
 def error(message: str) -> None:
     print(f"error: {message}", file=sys.stderr)
@@ -132,6 +147,15 @@ def main() -> int:
         default=DEFAULT_MANIFEST,
         help="manifest to validate (defaults to the checked-in normative map)",
     )
+    parser.add_argument(
+        "--routes-source",
+        type=Path,
+        default=ROUTES_SOURCE,
+        help=(
+            "publication route table to read provisional-route status from "
+            "(defaults to the real one; overridden by the negative gate fixture)"
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -161,10 +185,53 @@ def main() -> int:
     ok = True
     for law in laws:
         ok = validate_law(law, document) and ok
+    ok = check_provisional_route_coupling(laws, args.routes_source) and ok
     if not ok:
         return 1
     print("SOC semantic-law map is complete and all traceability anchors resolve.")
     return 0
+
+
+def check_provisional_route_coupling(laws: list, routes_source: Path) -> bool:
+    """A provisional publication route forces its law to stay `partial`.
+
+    See the ROUTES_SOURCE comment above. Counts `RouteStatus::Provisional`
+    occurrences in the route table's own source rather than parsing Rust: the
+    marker is a single deliberate token, and a textual count is exactly as
+    strong as the property being guarded (is there a provisional row at all?).
+    """
+    try:
+        source = routes_source.read_text()
+    except OSError as exc:
+        error(f"cannot read the publication route table: {exc}")
+        return False
+
+    # Exclude the enum declaration and any doc comment; only route rows count.
+    provisional_rows = len(PROVISIONAL_ROUTE_PATTERN.findall(source))
+
+    law = next((l for l in laws if isinstance(l, dict) and l.get("id") == PROVISIONAL_COUPLED_LAW), None)
+    if law is None:
+        error(f"{PROVISIONAL_COUPLED_LAW} is missing from the manifest")
+        return False
+
+    if provisional_rows and law.get("status") != "partial":
+        error(
+            f"{PROVISIONAL_COUPLED_LAW} is '{law.get('status')}' but "
+            f"{routes_source} still carries {provisional_rows} "
+            "RouteStatus::Provisional route(s). A named hole in the authority fence "
+            "cannot be declared closed while it is open (ADR-0017 §8): either retire "
+            "the route or hold the law at 'partial' with a bounded open issue."
+        )
+        return False
+
+    if provisional_rows and not law.get("open_issues"):
+        error(
+            f"{PROVISIONAL_COUPLED_LAW} has a provisional publication route but no "
+            "bounded open issue tracking it (ADR-0017 §8)."
+        )
+        return False
+
+    return True
 
 
 if __name__ == "__main__":

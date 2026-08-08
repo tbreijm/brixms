@@ -14,7 +14,8 @@ use brix_canon::Digest;
 use brix_semantic::{
     AuditedSource, Authority, CertificateId, ConfigId, ContextId, DecompVerification,
     Decomposition, GeneratorId, Judgement, JudgementId, Outcome, PropositionId, PublicationError,
-    Route, RouteCondition, Support, SupportKind, VerifierId, ROUTES,
+    RealizesTree, Route, RouteCondition, Support, SupportKind, TreeDerivation, TreeObj, VerifierId,
+    ROUTES,
 };
 
 const ALL_AUTHORITIES: [Authority; 5] = [
@@ -58,14 +59,27 @@ fn verified_decomposition(tag: &str) -> Decomposition {
     Decomposition::replay_verified(vec![g], vec![x0, x1]).expect("well-formed chain")
 }
 
+/// A `StructureVerified` single-leaf tree derivation — the typing lane's
+/// verified form (ADR-0017).
+fn verified_tree(tag: &str) -> TreeDerivation {
+    let g = GeneratorId::named(&format!("fence.{tag}.tree-g@1"));
+    let x0 = ConfigId::from_canon(format!("fence.{tag}.tree-x0").as_bytes());
+    let x1 = ConfigId::from_canon(format!("fence.{tag}.tree-x1").as_bytes());
+    TreeDerivation::structure_verified(RealizesTree::Leaf {
+        generator: g,
+        src: TreeObj::Atom(x0),
+        dst: TreeObj::Atom(x1),
+    })
+}
+
 /// Build the support a given legal route demands, so the "every route
 /// succeeds" and "byte-identity" tests can drive `ROUTES` generically instead
 /// of hand-listing each row twice.
 fn support_for_route<'a>(
     route: &Route,
-    proposition: PropositionId,
     recorded: &'a Decomposition,
     verified: &'a Decomposition,
+    tree: &'a TreeDerivation,
     verifier: VerifierId,
     certificate: CertificateId,
     body: Digest,
@@ -89,12 +103,15 @@ fn support_for_route<'a>(
             // The AnyResolver/Unknown row has no condition: either form
             // satisfies it, so pick one arbitrarily.
             RouteCondition::None => Support::Settlement(recorded),
+            RouteCondition::Tree(_) => {
+                panic!("no Settlement route carries a Tree condition")
+            }
         },
         SupportKind::Ground => Support::Ground { body },
         SupportKind::Measurement => Support::Measurement { body },
         SupportKind::ExternalResult => Support::ExternalResult { body },
         SupportKind::Suggestion => Support::Suggestion { body },
-        SupportKind::TreeRealization => Support::tree_realization(proposition),
+        SupportKind::Tree => Support::Tree(tree),
     }
 }
 
@@ -105,6 +122,7 @@ fn illegal_authority_outcome_pairs_fail_for_every_support_kind() {
     let ctx = context();
     let prop = proposition("sweep");
     let recorded = recorded_decomposition("sweep");
+    let tree = verified_tree("sweep");
     let verifier = VerifierId::named("sweep-verifier@1");
     let certificate = CertificateId::from_canon(b"sweep-certificate");
     let body = Digest::of(brix_canon::Domain::Value, b"sweep-body");
@@ -125,7 +143,7 @@ fn illegal_authority_outcome_pairs_fail_for_every_support_kind() {
         Support::Measurement { body },
         Support::ExternalResult { body },
         Support::Suggestion { body },
-        Support::tree_realization(prop),
+        Support::Tree(&tree),
     ];
     assert_eq!(
         supports.len(),
@@ -393,11 +411,12 @@ fn every_legal_route_actually_succeeds() {
         let prop = proposition(&tag);
         let recorded = recorded_decomposition(&tag);
         let verified = verified_decomposition(&tag);
+        let tree = verified_tree(&tag);
         let support = support_for_route(
             route,
-            prop,
             &recorded,
             &verified,
+            &tree,
             verifier,
             certificate,
             body,
@@ -440,11 +459,12 @@ fn every_legal_route_yields_a_judgement_id_byte_identical_to_recompute() {
         let prop = proposition(&tag);
         let recorded = recorded_decomposition(&tag);
         let verified = verified_decomposition(&tag);
+        let tree = verified_tree(&tag);
         let support = support_for_route(
             route,
-            prop,
             &recorded,
             &verified,
+            &tree,
             verifier,
             certificate,
             body,

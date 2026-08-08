@@ -17,7 +17,7 @@
 use brix_kernel::{ExplicitTerm, ObjectTerm, Prop, TermKind, Var};
 use brix_semantic::{
     AuditedSource, Authority, Decomposition, Dependency, EdgeKind, Judgement, Outcome,
-    PropositionId, PublicationError, Support,
+    PropositionId, PublicationError, Support, TreeDerivation,
 };
 
 /// Result of attempting to elaborate and publish a proof term.
@@ -178,125 +178,69 @@ pub fn elaborate_decomposition(
     elaborate_and_publish(&source, &implication_prop, &term, budget)
 }
 
-/// Content-addressed object structure for realization trees.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum TreeObj {
-    Atom(brix_semantic::ConfigId),
-    Prod(Box<TreeObj>, Box<TreeObj>),
-}
+// `RealizesTree`/`TreeObj` now live in `brix-semantic` (ADR-0017 §5 D1): the
+// `TreeDerivation` artifact built over them is evidence, and evidence belongs
+// inside the TCB closures where `Decomposition` already is. `brix-semantic`
+// may depend on `brix-canon` only, so the *kernel projections* stay here —
+// they are what needs `brix-kernel`. Re-exported so no caller's import path
+// changes.
+pub use brix_semantic::{RealizesTree, TreeObj};
 
-impl TreeObj {
-    pub fn to_object_term(&self) -> brix_kernel::ObjectTerm {
-        match self {
-            TreeObj::Atom(c) => ObjectTerm::Const(PropositionId(c.digest())),
-            TreeObj::Prod(a, b) => {
-                ObjectTerm::Tensor(Box::new(a.to_object_term()), Box::new(b.to_object_term()))
-            }
-        }
+/// The kernel object term a [`TreeObj`] denotes.
+pub fn tree_obj_to_object_term(obj: &TreeObj) -> ObjectTerm {
+    match obj {
+        TreeObj::Atom(c) => ObjectTerm::Const(PropositionId(c.digest())),
+        TreeObj::Prod(a, b) => ObjectTerm::Tensor(
+            Box::new(tree_obj_to_object_term(a)),
+            Box::new(tree_obj_to_object_term(b)),
+        ),
     }
 }
 
-/// Tree-structured realization derivation (ADR-0007).
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum RealizesTree {
-    Leaf {
-        generator: brix_semantic::GeneratorId,
-        src: TreeObj,
-        dst: TreeObj,
-    },
-    Seq {
-        left: Box<RealizesTree>,
-        right: Box<RealizesTree>,
-    },
-    Tensor {
-        left: Box<RealizesTree>,
-        right: Box<RealizesTree>,
-    },
-}
-
-impl RealizesTree {
-    pub fn src(&self) -> TreeObj {
-        match self {
-            RealizesTree::Leaf { src, .. } => src.clone(),
-            RealizesTree::Seq { left, .. } => left.src(),
-            RealizesTree::Tensor { left, right } => {
-                TreeObj::Prod(Box::new(left.src()), Box::new(right.src()))
-            }
+/// The composite witness [`ObjectTerm`] a derivation realizes.
+///
+/// [`RealizesTree::witness_id`] is the `brix-semantic`-native digest of this
+/// same term and **must** agree with `witness_object(tree).witness_digest()` —
+/// every typing `PropositionId` is built from one or the other. Pinned by
+/// `witness_id_matches_the_object_term_path` in `tests/tree_witness_identity.rs`.
+pub fn witness_object(tree: &RealizesTree) -> ObjectTerm {
+    match tree {
+        RealizesTree::Leaf { generator, .. } => {
+            ObjectTerm::Const(PropositionId(generator.digest()))
         }
-    }
-
-    pub fn dst(&self) -> TreeObj {
-        match self {
-            RealizesTree::Leaf { dst, .. } => dst.clone(),
-            RealizesTree::Seq { right, .. } => right.dst(),
-            RealizesTree::Tensor { left, right } => {
-                TreeObj::Prod(Box::new(left.dst()), Box::new(right.dst()))
-            }
-        }
-    }
-
-    pub fn witness_object(&self) -> brix_kernel::ObjectTerm {
-        match self {
-            RealizesTree::Leaf { generator, .. } => {
-                ObjectTerm::Const(PropositionId(generator.digest()))
-            }
-            RealizesTree::Seq { left, right } => ObjectTerm::Compose(
-                Box::new(right.witness_object()),
-                Box::new(left.witness_object()),
-            ),
-            RealizesTree::Tensor { left, right } => ObjectTerm::Tensor(
-                Box::new(left.witness_object()),
-                Box::new(right.witness_object()),
-            ),
-        }
-    }
-
-    fn collect_leaves<'a>(&'a self, out: &mut Vec<&'a RealizesTree>) {
-        match self {
-            RealizesTree::Leaf { .. } => out.push(self),
-            RealizesTree::Seq { left, right } | RealizesTree::Tensor { left, right } => {
-                left.collect_leaves(out);
-                right.collect_leaves(out);
-            }
-        }
-    }
-
-    pub fn leaves(&self) -> Vec<&RealizesTree> {
-        let mut out = Vec::new();
-        self.collect_leaves(&mut out);
-        out
-    }
-
-    pub fn well_formed(&self) -> bool {
-        match self {
-            RealizesTree::Leaf { .. } => true,
-            RealizesTree::Seq { left, right } => {
-                left.well_formed() && right.well_formed() && left.dst() == right.src()
-            }
-            RealizesTree::Tensor { left, right } => left.well_formed() && right.well_formed(),
-        }
+        RealizesTree::Seq { left, right } => ObjectTerm::Compose(
+            Box::new(witness_object(right)),
+            Box::new(witness_object(left)),
+        ),
+        RealizesTree::Tensor { left, right } => ObjectTerm::Tensor(
+            Box::new(witness_object(left)),
+            Box::new(witness_object(right)),
+        ),
     }
 }
 
 /// Elaborate a tree-structured typing derivation into a kernel proof term (ADR-0007).
 ///
-/// The source is validated as an [`AuditedSource`] on the **provisional**
-/// tree-realization route (ADR-0016 §7,
-/// `spec/errata/0004-tree-realization-audited-support.md`): the source's own
-/// evidence id must bind to the support presented here, but that support is
-/// today a digest of the proposition being claimed rather than a
-/// replay-verified chain. The binding check is real; what it binds to is the
-/// reported hole.
+/// Takes the checked [`TreeDerivation`] artifact rather than a bare
+/// [`RealizesTree`] (ADR-0017 §5): the source judgement's evidence id must be
+/// the id of *this* artifact, and the artifact must carry
+/// [`TreeVerification::StructureVerified`] — a tag only the tree-audit checker
+/// can produce. A derivation the inference pass merely built is refused here,
+/// before the kernel is reached.
+///
+/// This replaces the provisional binding ADR-0016 §7 reported, where the
+/// support was a digest of the proposition being claimed and so bound to
+/// nothing.
 pub fn elaborate_tree(
     source: &Judgement,
-    tree: &RealizesTree,
+    derivation: &TreeDerivation,
     budget: brix_kernel::Budget,
 ) -> ElaborationResult {
-    let source = match AuditedSource::verify(source, Support::tree_realization(source.proposition))
-    {
+    let source = match AuditedSource::verify(source, Support::Tree(derivation)) {
         Ok(verified) => verified,
         Err(err) => return ElaborationResult::Refused(err),
     };
+    let tree = derivation.tree();
 
     if !tree.well_formed() {
         return ElaborationResult::NotElaborated(brix_kernel::Verdict::Rejected(
@@ -321,8 +265,8 @@ pub fn elaborate_tree(
                 dst,
             } => {
                 let g_term = ObjectTerm::Const(PropositionId(generator.digest()));
-                let src_term = src.to_object_term();
-                let dst_term = dst.to_object_term();
+                let src_term = tree_obj_to_object_term(src);
+                let dst_term = tree_obj_to_object_term(dst);
                 h_props.push(Prop::Realizes(g_term, src_term, dst_term));
             }
             _ => {
@@ -334,9 +278,9 @@ pub fn elaborate_tree(
     }
 
     let goal_prop = Prop::Realizes(
-        tree.witness_object(),
-        tree.src().to_object_term(),
-        tree.dst().to_object_term(),
+        witness_object(tree),
+        tree_obj_to_object_term(&tree.src()),
+        tree_obj_to_object_term(&tree.dst()),
     );
 
     let mut implication_prop = goal_prop;
@@ -387,14 +331,6 @@ mod tree_tests {
     fn test_malformed_seq_rejected() {
         let context = ContextId::root();
         let proposition = PropositionId::from_canon(b"src");
-        let source = Judgement::publish(
-            Authority::AuditChecker,
-            context,
-            proposition,
-            Outcome::Audited,
-            Support::tree_realization(proposition),
-        )
-        .expect("AuditChecker/Audited/TreeRealization is a legal (provisional) route");
 
         let g1 = GeneratorId::named("g1");
         let g2 = GeneratorId::named("g2");
@@ -424,7 +360,20 @@ mod tree_tests {
 
         assert!(!tree.well_formed());
 
-        let res = elaborate_tree(&source, &tree, Budget::new(1000, 1000));
+        // The artifact carries `StructureVerified` (a checker's tag), but the
+        // tree it wraps is malformed — `elaborate_tree` must catch this with
+        // its own `well_formed` check, independent of the artifact's tag.
+        let derivation = TreeDerivation::structure_verified(tree);
+        let source = Judgement::publish(
+            Authority::AuditChecker,
+            context,
+            proposition,
+            Outcome::Audited,
+            Support::Tree(&derivation),
+        )
+        .expect("AuditChecker/Audited/Tree(StructureVerified) is a legal route");
+
+        let res = elaborate_tree(&source, &derivation, Budget::new(1000, 1000));
         match res {
             ElaborationResult::NotElaborated(Verdict::Rejected(RejectionReason::Custom(msg))) => {
                 assert_eq!(msg, "malformed Seq middle");
@@ -437,14 +386,6 @@ mod tree_tests {
     fn test_3_leaf_tree_well_formed_and_misbuilt() {
         let context = ContextId::root();
         let proposition = PropositionId::from_canon(b"src");
-        let source = Judgement::publish(
-            Authority::AuditChecker,
-            context,
-            proposition,
-            Outcome::Audited,
-            Support::tree_realization(proposition),
-        )
-        .expect("AuditChecker/Audited/TreeRealization is a legal (provisional) route");
 
         let ga = GeneratorId::named("ga");
         let gb = GeneratorId::named("gb");
@@ -497,7 +438,17 @@ mod tree_tests {
 
         assert!(well_formed_tree.well_formed());
 
-        let res = elaborate_tree(&source, &well_formed_tree, Budget::new(1000, 1000));
+        let derivation = TreeDerivation::structure_verified(well_formed_tree);
+        let source = Judgement::publish(
+            Authority::AuditChecker,
+            context,
+            proposition,
+            Outcome::Audited,
+            Support::Tree(&derivation),
+        )
+        .expect("AuditChecker/Audited/Tree(StructureVerified) is a legal route");
+
+        let res = elaborate_tree(&source, &derivation, Budget::new(1000, 1000));
         assert!(matches!(res, ElaborationResult::Proven { .. }));
 
         // Mis-built tree (mismatched middle)
@@ -519,53 +470,26 @@ mod tree_tests {
         };
 
         assert!(!misbuilt_tree.well_formed());
-        let res_misbuilt = elaborate_tree(&source, &misbuilt_tree, Budget::new(1000, 1000));
-        assert!(matches!(res_misbuilt, ElaborationResult::NotElaborated(_)));
-    }
 
-    #[test]
-    fn test_witness_object_digest() {
-        let ga = GeneratorId::named("ga");
-        let gb = GeneratorId::named("gb");
-        let gc = GeneratorId::named("gc");
-        let c1 = ConfigId::from_canon(b"c1");
-        let c2 = ConfigId::from_canon(b"c2");
-        let c3 = ConfigId::from_canon(b"c3");
+        // A distinct source, bound to the misbuilt derivation itself
+        // (`AuditedSource::verify`'s binding requires the presented artifact
+        // to be exactly the one the source's evidence names) — this isolates
+        // `elaborate_tree`'s own `well_formed` check from the binding check.
+        let misbuilt_derivation = TreeDerivation::structure_verified(misbuilt_tree);
+        let source_misbuilt = Judgement::publish(
+            Authority::AuditChecker,
+            context,
+            proposition,
+            Outcome::Audited,
+            Support::Tree(&misbuilt_derivation),
+        )
+        .expect("AuditChecker/Audited/Tree(StructureVerified) is a legal route");
 
-        let leaf_a = RealizesTree::Leaf {
-            generator: ga,
-            src: TreeObj::Atom(c1),
-            dst: TreeObj::Atom(c2),
-        };
-        let leaf_b = RealizesTree::Leaf {
-            generator: gb,
-            src: TreeObj::Atom(c2),
-            dst: TreeObj::Atom(c3),
-        };
-        let leaf_c = RealizesTree::Leaf {
-            generator: gc,
-            src: TreeObj::Atom(c2),
-            dst: TreeObj::Atom(c3),
-        };
-
-        let tree = RealizesTree::Seq {
-            left: Box::new(leaf_a),
-            right: Box::new(RealizesTree::Tensor {
-                left: Box::new(leaf_b),
-                right: Box::new(leaf_c),
-            }),
-        };
-
-        let w_a = ObjectTerm::Const(PropositionId(ga.digest()));
-        let w_b = ObjectTerm::Const(PropositionId(gb.digest()));
-        let w_c = ObjectTerm::Const(PropositionId(gc.digest()));
-        let w_bc = ObjectTerm::Tensor(Box::new(w_b), Box::new(w_c));
-        let expected_witness = ObjectTerm::Compose(Box::new(w_bc), Box::new(w_a));
-
-        assert_eq!(tree.witness_object(), expected_witness);
-        assert_eq!(
-            tree.witness_object().witness_digest(),
-            expected_witness.witness_digest()
+        let res_misbuilt = elaborate_tree(
+            &source_misbuilt,
+            &misbuilt_derivation,
+            Budget::new(1000, 1000),
         );
+        assert!(matches!(res_misbuilt, ElaborationResult::NotElaborated(_)));
     }
 }

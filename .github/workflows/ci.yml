@@ -33,7 +33,9 @@ jobs:
           python3 scripts/check_tcb_dependencies.py --check
           scripts/test_tcb_dependency_gate.sh
       - name: SOC semantic-law traceability
-        run: python3 scripts/check_soc_law_map.py
+        run: |
+          python3 scripts/check_soc_law_map.py
+          scripts/test_law_map_provisional_gate.sh
       - name: Canon vector cross-check (independent from-spec implementation)
         run: python3 scripts/canon_crosscheck.py
       - name: Clippy (warnings are errors)

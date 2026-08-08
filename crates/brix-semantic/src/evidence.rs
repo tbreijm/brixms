@@ -84,6 +84,15 @@ pub enum Evidence {
     Suggestion { body: Digest },
     /// A result certified by a named external system, envelope-wrapped.
     CertifiedExternalResult { body: Digest },
+    /// A checked tree-structured realization derivation — the body is a
+    /// [`crate::TreeDerivationId`] (ADR-0007, ADR-0017 §5 D4).
+    ///
+    /// Appended rather than reusing [`Evidence::SettlementReplay`]: a typing
+    /// derivation is not a settlement replay, and calling it one is exactly
+    /// what let the ADR-0017 §1 defect hide — the substrate saw a
+    /// `SettlementReplay` digest and could not tell that nothing stood behind
+    /// it. Ordinal 7; ordinals 0–6 are untouched.
+    TreeDerivation { body: Digest },
 }
 
 impl Evidence {
@@ -98,7 +107,8 @@ impl Evidence {
             | Evidence::SettlementReplay { .. }
             | Evidence::Measurement { .. }
             | Evidence::Suggestion { .. }
-            | Evidence::CertifiedExternalResult { .. } => Durability::RevisionScoped,
+            | Evidence::CertifiedExternalResult { .. }
+            | Evidence::TreeDerivation { .. } => Durability::RevisionScoped,
         }
     }
 
@@ -117,6 +127,7 @@ impl Evidence {
             Evidence::Measurement { .. } => 4,
             Evidence::Suggestion { .. } => 5,
             Evidence::CertifiedExternalResult { .. } => 6,
+            Evidence::TreeDerivation { .. } => 7,
         }
     }
 }
@@ -139,7 +150,8 @@ impl Canonical for Evidence {
             | Evidence::SettlementReplay { body }
             | Evidence::Measurement { body }
             | Evidence::Suggestion { body }
-            | Evidence::CertifiedExternalResult { body } => {
+            | Evidence::CertifiedExternalResult { body }
+            | Evidence::TreeDerivation { body } => {
                 w.write_bytes(body.as_bytes());
             }
         });

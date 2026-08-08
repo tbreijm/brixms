@@ -36,6 +36,7 @@
 pub mod coverage;
 pub mod literal;
 pub mod native;
+pub mod tree_audit;
 pub mod type_realization;
 
 pub use literal::{LiteralEqualityRegime, LiteralEqualitySemantics};

@@ -276,6 +276,14 @@ Resolving it means giving tree realization a real replay-verified support artifa
 `soc-regimes` Track 2 / ADR-0007 territory and requires coordination that #228 explicitly excludes.
 Tracked by `spec/errata/0004-tree-realization-audited-support.md` and issue #259.
 
+**Resolved by [ADR-0017](./ADR-0017_Tree_Realization_Support.md).** The ruling is reading 2:
+the outcome was right and the support was not. The `Provisional` row is retired and replaced
+by a `Settled` route conditioned on a checked `TreeDerivation` artifact, so **no
+`RouteStatus::Provisional` route remains in `ROUTES`**. The status is kept in the type for
+the next such hole, and `scripts/check_soc_law_map.py` now couples its presence to
+SOC-LAW-05 staying `partial` (ADR-0017 §8) — which is the answer to the "loud placeholder"
+question this section raised.
+
 ### 7.1 A second residual, stated rather than overclaimed
 
 `Decomposition::replay_verified` does not replay anything. It stamps the `ReplayVerified` tag on

@@ -10,8 +10,10 @@ use brix_canon::{CanonWriter, Canonical};
 use brix_elaborate::{RealizesTree, TreeObj};
 use brix_semantic::{
     compose_chain, Authority, ConfigId, ContextId, Decomposition, GeneratorId, Judgement, Outcome,
-    Realizes, Support, WitnessId,
+    Realizes, Support, TreeDerivation, WitnessId,
 };
+
+use crate::tree_audit::audit_tree;
 
 /// Native representation of types in the type-realization regime (ADR-0005).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -1902,7 +1904,7 @@ pub fn audited_type_check_tree(
     expr: &Expr,
     ctx: &TyCtx,
     context: ContextId,
-) -> Result<(Judgement, RealizesTree), TypeError> {
+) -> Result<(Judgement, TreeDerivation), TypeError> {
     let (ty, ty_tree, st) = infer_tree(expr, ctx, Infer::new())?;
     let tree = materialize(&ty_tree, &st.subst);
     let final_ty = zonk(&ty, &st.subst);
@@ -1912,22 +1914,27 @@ pub fn audited_type_check_tree(
     {
         return Err(TypeError::IllFormedDerivation);
     }
-    let witness_id = tree.witness_object().witness_digest();
+    let witness_id = tree.witness_id();
     let prop = Realizes::new(witness_id, expr.config_id(), final_ty.config_id()).proposition_id();
-    // PROVISIONAL route (ADR-0016 §7,
-    // `spec/errata/0004-tree-realization-audited-support.md`): the support
-    // body is a digest of `prop` itself, so this evidence is computable from
-    // the claim and distinguishes nothing. Behaviour here is unchanged — the
-    // migration is mechanical, and the erratum is the report, not a fix.
+
+    // The audit that earns the evidence (ADR-0017 §5 D3). It re-checks
+    // well-formedness and endpoints — the conditions above already established
+    // them, and a checker that took the caller's word for its own inputs would
+    // be checking nothing — and adds the leaf-generator membership check the
+    // tree lane was missing (§4 row c). It does **not** check any leaf's ρ_g;
+    // see `tree_audit`'s module doc.
+    let derivation = audit_tree(&tree, expr.config_id(), final_ty.config_id())
+        .map_err(|_| TypeError::IllFormedDerivation)?;
+
     let audited = Judgement::publish(
         Authority::AuditChecker,
         context,
         prop,
         Outcome::Audited,
-        Support::tree_realization(prop),
+        Support::Tree(&derivation),
     )
     .map_err(|_| TypeError::IllFormedDerivation)?;
-    Ok((audited, tree))
+    Ok((audited, derivation))
 }
 
 #[cfg(test)]
@@ -2301,7 +2308,7 @@ mod tests {
         assert_eq!(aud.outcome, Outcome::Audited);
 
         // Inspect tree: g_app2 leaf src config equals Prod(Atom(Fn(Int,Bool).config_id()), Atom(Int.config_id()))
-        if let RealizesTree::Seq { right, .. } = &tree {
+        if let RealizesTree::Seq { right, .. } = tree.tree() {
             if let RealizesTree::Seq {
                 right: app_leaf, ..
             } = right.as_ref()
@@ -2370,7 +2377,7 @@ mod tests {
         }
 
         let expected_prop = Realizes::new(
-            tree.witness_object().witness_digest(),
+            brix_elaborate::witness_object(tree.tree()).witness_digest(),
             expr.config_id(),
             Ty::Con("Int").config_id(),
         )
@@ -2421,7 +2428,7 @@ mod tests {
         let ctx = TyCtx::new();
         let (aud, tree) = audited_type_check_tree(&expr, &ctx, ContextId::root()).unwrap();
         assert_eq!(aud.outcome, Outcome::Audited);
-        assert!(tree.well_formed());
+        assert!(tree.tree().well_formed());
     }
 
     #[test]
@@ -2451,7 +2458,7 @@ mod tests {
 
         let (aud, tree) = audited_type_check_tree(&expr, &ctx, context).expect("audited record");
         assert_eq!(aud.outcome, Outcome::Audited);
-        assert!(tree.well_formed());
+        assert!(tree.tree().well_formed());
 
         let res = brix_elaborate::elaborate_tree(&aud, &tree, Budget::new(2000, 2000));
         match res {
@@ -2468,7 +2475,7 @@ mod tests {
         let expr1 = Expr::Record(vec![("a".to_string(), Expr::Lit(42))]);
         let ctx = TyCtx::new();
         let (aud1, tree1) = audited_type_check_tree(&expr1, &ctx, ContextId::root()).unwrap();
-        assert!(tree1.well_formed());
+        assert!(tree1.tree().well_formed());
         assert!(matches!(
             brix_elaborate::elaborate_tree(&aud1, &tree1, Budget::new(1000, 1000)),
             ElaborationResult::Proven { .. }
@@ -2480,7 +2487,7 @@ mod tests {
             Expr::Record(vec![("val".to_string(), Expr::Lit(7))]),
         )]);
         let (aud2, tree2) = audited_type_check_tree(&expr_nested, &ctx, ContextId::root()).unwrap();
-        assert!(tree2.well_formed());
+        assert!(tree2.tree().well_formed());
         let res2 = brix_elaborate::elaborate_tree(&aud2, &tree2, Budget::new(2000, 2000));
         assert!(matches!(res2, ElaborationResult::Proven { .. }));
     }
@@ -2501,7 +2508,7 @@ mod tests {
         assert_eq!(final_ty, Ty::Con("Int"));
 
         let (aud, tree) = audited_type_check_tree(&expr, &ctx, context).expect("audited field");
-        assert!(tree.well_formed());
+        assert!(tree.tree().well_formed());
 
         let res = brix_elaborate::elaborate_tree(&aud, &tree, Budget::new(1000, 1000));
         match res {
@@ -2664,7 +2671,7 @@ mod tests {
         let (_, lit_tree) =
             audited_type_check_tree(&Expr::Lit(42), &TyCtx::new(), ContextId::root()).unwrap();
         assert_eq!(
-            honest_result_outcome(Outcome::Proven, &lit_tree),
+            honest_result_outcome(Outcome::Proven, lit_tree.tree()),
             Outcome::Proven,
             "a discharged literal should earn Proven"
         );
@@ -2681,7 +2688,7 @@ mod tests {
         let (_, app_tree) =
             audited_type_check_tree(&app, &TyCtx::new(), ContextId::root()).unwrap();
         assert_eq!(
-            honest_result_outcome(Outcome::Proven, &app_tree),
+            honest_result_outcome(Outcome::Proven, app_tree.tree()),
             Outcome::Proven,
             "the discharged λ-calculus core should earn Proven"
         );
@@ -2692,7 +2699,7 @@ mod tests {
         let (_, arith_tree) =
             audited_type_check_tree(&arith, &TyCtx::new(), ContextId::root()).unwrap();
         assert_eq!(
-            honest_result_outcome(Outcome::Proven, &arith_tree),
+            honest_result_outcome(Outcome::Proven, arith_tree.tree()),
             Outcome::Audited,
             "an undischarged operation generator (g_arith) must cap at Audited"
         );
@@ -2870,9 +2877,9 @@ mod tests {
         let empty_record = Expr::Record(vec![]);
         let (_, empty_tree) =
             audited_type_check_tree(&empty_record, &TyCtx::new(), ctx).expect("empty record");
-        assert!(has_leaf(&empty_tree, &g_record_empty()));
+        assert!(has_leaf(empty_tree.tree(), &g_record_empty()));
         assert_eq!(
-            honest_result_outcome(Outcome::Proven, &empty_tree),
+            honest_result_outcome(Outcome::Proven, empty_tree.tree()),
             Outcome::Audited
         );
 
@@ -2883,9 +2890,9 @@ mod tests {
         let nullary_ctor = Expr::Ctor(bool_ty, "True".into(), vec![]);
         let (_, nullary_tree) =
             audited_type_check_tree(&nullary_ctor, &TyCtx::new(), ctx).expect("nullary ctor");
-        assert!(has_leaf(&nullary_tree, &g_ctor_nullary()));
+        assert!(has_leaf(nullary_tree.tree(), &g_ctor_nullary()));
         assert_eq!(
-            honest_result_outcome(Outcome::Proven, &nullary_tree),
+            honest_result_outcome(Outcome::Proven, nullary_tree.tree()),
             Outcome::Audited
         );
     }
@@ -2902,8 +2909,16 @@ mod tests {
             let expected_dst = TreeObj::Atom(zonk(&ty, &state.subst).config_id());
             let (_audited, tree) =
                 audited_type_check_tree(&expr, &ctx, ContextId::root()).expect("audited");
-            assert_eq!(tree.src(), expected_src, "wrong tree source for {expr:?}");
-            assert_eq!(tree.dst(), expected_dst, "wrong tree target for {expr:?}");
+            assert_eq!(
+                tree.tree().src(),
+                expected_src,
+                "wrong tree source for {expr:?}"
+            );
+            assert_eq!(
+                tree.tree().dst(),
+                expected_dst,
+                "wrong tree target for {expr:?}"
+            );
         };
 
         assert_endpoints(Expr::Record(vec![("x".into(), Expr::Lit(1))]), TyCtx::new());
@@ -2986,11 +3001,11 @@ mod tests {
             audited_type_check_tree(&expr, &ctx, context).expect("audited ctor nullary");
         assert_eq!(aud.outcome, Outcome::Audited);
         assert_eq!(
-            honest_result_outcome(Outcome::Proven, &tree),
+            honest_result_outcome(Outcome::Proven, tree.tree()),
             Outcome::Audited,
             "nullary constructor lacks a kernel zero/unit introduction rule"
         );
-        assert!(tree.well_formed());
+        assert!(tree.tree().well_formed());
 
         let res = brix_elaborate::elaborate_tree(&aud, &tree, Budget::new(1000, 1000));
         match res {
@@ -3020,7 +3035,7 @@ mod tests {
 
         let (aud, tree) = audited_type_check_tree(&expr, &ctx, context).expect("audited ctor opt");
         assert_eq!(aud.outcome, Outcome::Audited);
-        assert!(tree.well_formed());
+        assert!(tree.tree().well_formed());
 
         let res = brix_elaborate::elaborate_tree(&aud, &tree, Budget::new(1000, 1000));
         match res {
@@ -3051,7 +3066,7 @@ mod tests {
 
         let (aud, tree) = audited_type_check_tree(&expr, &ctx, context).expect("audited ctor pair");
         assert_eq!(aud.outcome, Outcome::Audited);
-        assert!(tree.well_formed());
+        assert!(tree.tree().well_formed());
 
         let res = brix_elaborate::elaborate_tree(&aud, &tree, Budget::new(1000, 1000));
         match res {
@@ -3206,7 +3221,7 @@ mod tests {
         let (aud, real_tree) =
             audited_type_check_tree(&expr, &ctx, context).expect("audited match opt");
         assert_eq!(aud.outcome, Outcome::Audited);
-        assert!(real_tree.well_formed());
+        assert!(real_tree.tree().well_formed());
 
         let res = brix_elaborate::elaborate_tree(&aud, &real_tree, Budget::new(2000, 2000));
         match res {
@@ -3241,11 +3256,11 @@ mod tests {
             audited_type_check_tree(&expr, &ctx, context).expect("audited match wildcard");
         assert_eq!(aud.outcome, Outcome::Audited);
         assert_eq!(
-            honest_result_outcome(Outcome::Proven, &real_tree),
+            honest_result_outcome(Outcome::Proven, real_tree.tree()),
             Outcome::Audited,
             "a catch-all arm is not yet represented as explicit Case premises"
         );
-        assert!(real_tree.well_formed());
+        assert!(real_tree.tree().well_formed());
 
         let res = brix_elaborate::elaborate_tree(&aud, &real_tree, Budget::new(2000, 2000));
         match res {
