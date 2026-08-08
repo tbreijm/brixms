@@ -405,10 +405,12 @@ The current executable path makes the distinction visible:
 1. `brix-syntax` parses untrusted surface syntax; `brix-lower` resolves `id`
    and lowers both bindings into `type_realization::Expr`. Unsupported or
    ill-typed input stops with a diagnostic under SOC-LAW-11.
-2. The linear `type_check` route can record the inferred realization as a
-   `Derived` judgement with a recorded decomposition. The CLI uses the tree
-   route directly; this bypass is the authority-boundary debt A-3 recorded by
-   #63/#178, not evidence that `Derived` and `Audited` are interchangeable.
+2. There is no longer a linear route. `type_check`/`audited_type_check` were
+   retired by ADR-0018 (#262): they padded their configuration chain to
+   `[src, dst, dst, …]`, so the decomposition they recorded misstated its own
+   intermediate configurations, and nothing called them. The A-3 bypass this
+   step used to describe is thereby closed — the tree route below is the only
+   typing publisher.
 3. `audited_type_check_tree` validates a well-formed realization tree and
    publishes an `Audited` source judgement. The settlement reference slice
    separately demonstrates the authority-correct `commit_tick` (`Derived`) →

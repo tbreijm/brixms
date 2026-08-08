@@ -168,7 +168,9 @@ Stated explicitly so nothing over-reads it.
    `test_multi_step_elaboration_tree_vs_linear_tension` already demonstrates that this
    padded chain fails `soc_core::audit_step` under sound generator semantics. Filed
    separately as `spec/errata/0005-flat-path-padded-decomposition.md`; **not fixed here**,
-   per #259's own instruction not to expand scope quietly.
+   per #259's own instruction not to expand scope quietly. **Subsequently ruled by
+   [ADR-0018](./ADR-0018_Retire_The_Flat_Typing_Lane.md) (#262): the flat lane is retired
+   rather than repaired — it had no caller, and the padding survives a downgrade.**
 3. **`Decomposition::replay_verified` remains an unchecked stamp** (ADR-0016 §7.1). This ADR
    does not narrow it; that is audit finding A-3 / #178 territory.
 
