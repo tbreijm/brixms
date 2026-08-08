@@ -5,10 +5,19 @@
 //!
 //! Soundness invariant: ONLY kernel acceptance (`brix_kernel::acceptance` returning
 //! `Verdict::Accepted`) mints a `Proven` judgement. No other code path exists.
+//!
+//! **The boundary validates its source (ADR-0016 §6, audit finding A-2).**
+//! ADR-0002 §5 ¶2: "only `Audited`-supported settlement evidence may enter an
+//! `elaboration-boundary` edge — an unaudited commit is not even a certified
+//! rule-match chain, let alone a theorem." [`elaborate_and_publish`] takes a
+//! [`AuditedSource`], so that check cannot be skipped; the artifact-level
+//! entry points ([`elaborate_decomposition`], [`elaborate_tree`]) perform it
+//! and return [`ElaborationResult::Refused`] when it fails.
 
 use brix_kernel::{ExplicitTerm, ObjectTerm, Prop, TermKind, Var};
 use brix_semantic::{
-    Decomposition, Dependency, EdgeKind, Evidence, Judgement, Outcome, PropositionId,
+    AuditedSource, Authority, Decomposition, Dependency, EdgeKind, Judgement, Outcome,
+    PropositionId, PublicationError, Support,
 };
 
 /// Result of attempting to elaborate and publish a proof term.
@@ -21,40 +30,59 @@ pub enum ElaborationResult {
     },
     /// any non-Accepted verdict: NO Proven produced (carry the verdict for diagnosis).
     NotElaborated(brix_kernel::Verdict),
+    /// The caller never had standing to ask: the source is not a valid
+    /// [`AuditedSource`], or the kernel's own certificate did not open the
+    /// `Proven` route (ADR-0016 §6). Kept distinct from `NotElaborated` on
+    /// purpose — a kernel that rejects a term and a caller that may not cross
+    /// the boundary are different facts, and collapsing them would lose
+    /// exactly the signal this fence exists to produce.
+    Refused(PublicationError),
 }
 
 /// Elaborate a candidate proof term against a proposition via `brix_kernel::acceptance`
 /// and, upon acceptance, publish a [`Outcome::Proven`] judgement linked to `source` via an
 /// [`EdgeKind::ElaborationBoundary`] dependency edge.
 ///
+/// The `source` is an [`AuditedSource`] rather than a bare [`Judgement`]: the
+/// audited-source boundary is in the signature, so there is no way to call
+/// this with an unvalidated support chain (ADR-0016 §6).
+///
 /// Soundness-critical semantics:
-/// 1. Calls `brix_kernel::acceptance(&source.context, proposition, term, budget)`.
-/// 2. ONLY if it returns `Verdict::Accepted(certificate)`: construct a NEW Judgement with
-///    the SAME context as `source`, the proved `proposition`, `Outcome::Proven`, and Evidence =
-///    `Evidence::KernelCertificate` wrapping that certificate. Also construct a `Dependency`
+/// 1. Calls `brix_kernel::acceptance(&source.judgement().context, proposition, term, budget)`.
+/// 2. ONLY if it returns `Verdict::Accepted(certificate)`: publish a NEW Judgement with
+///    the SAME context as `source`, the proved `proposition`, `Outcome::Proven`, and support =
+///    `Support::KernelCertificate` wrapping that certificate — through
+///    [`Judgement::publish`], so the `(ProofKernel, Proven, KernelCertificate)` route is
+///    consulted rather than assumed. Also construct a `Dependency`
 ///    with `EdgeKind::ElaborationBoundary` FROM the new Proven judgement's id TO the source
 ///    judgement's id.
 /// 3. For EVERY other verdict: return `ElaborationResult::NotElaborated(verdict)`.
 pub fn elaborate_and_publish(
-    source: &Judgement,
+    source: &AuditedSource,
     proposition: &brix_kernel::Prop,
     term: &brix_kernel::ExplicitTerm,
     budget: brix_kernel::Budget,
 ) -> ElaborationResult {
+    let source = source.judgement();
     match brix_kernel::acceptance(&source.context, proposition, term, budget) {
         brix_kernel::Verdict::Accepted(certificate) => {
-            let evidence = Evidence::KernelCertificate {
+            let support = Support::KernelCertificate {
                 verifier: certificate.verifier,
                 certificate: certificate.certificate_id,
             };
-            let judgement = Judgement::new(
+            match Judgement::publish(
+                Authority::ProofKernel,
                 source.context,
                 proposition.proposition_id(),
                 Outcome::Proven,
-                evidence.id(),
-            );
-            let edge = Dependency::new(EdgeKind::ElaborationBoundary, source.id().digest());
-            ElaborationResult::Proven { judgement, edge }
+                support,
+            ) {
+                Ok(judgement) => {
+                    let edge = Dependency::new(EdgeKind::ElaborationBoundary, source.id().digest());
+                    ElaborationResult::Proven { judgement, edge }
+                }
+                Err(err) => ElaborationResult::Refused(err),
+            }
         }
         verdict => ElaborationResult::NotElaborated(verdict),
     }
@@ -74,11 +102,21 @@ pub fn elaborate_and_publish(
 /// 4. Build the proof term: n nested Lams binding h_1..h_n (Hyp de Bruijn index for h_i is n - i),
 ///    whose body is the left-nested RealizesComp fold over hypotheses h_1..h_n.
 /// 5. Delegate to [`elaborate_and_publish`].
+///
+/// Step 0, before any of that: verify that `source` is genuinely `Audited` on
+/// *this* decomposition — replay-verified, and named by the source's own
+/// evidence id (ADR-0016 §6). A source that fails the check yields
+/// [`ElaborationResult::Refused`]; the kernel is never invoked.
 pub fn elaborate_decomposition(
     source: &Judgement,
     decomposition: &Decomposition,
     budget: brix_kernel::Budget,
 ) -> ElaborationResult {
+    let source = match AuditedSource::verify(source, Support::Settlement(decomposition)) {
+        Ok(verified) => verified,
+        Err(err) => return ElaborationResult::Refused(err),
+    };
+
     let n = decomposition.generators.len();
     if n == 0 {
         return ElaborationResult::NotElaborated(brix_kernel::Verdict::Rejected(
@@ -134,10 +172,10 @@ pub fn elaborate_decomposition(
         };
     }
 
-    let term = ExplicitTerm::new(source.context, kind);
+    let term = ExplicitTerm::new(source.judgement().context, kind);
 
     // 5. Call existing elaborate_and_publish
-    elaborate_and_publish(source, &implication_prop, &term, budget)
+    elaborate_and_publish(&source, &implication_prop, &term, budget)
 }
 
 /// Content-addressed object structure for realization trees.
@@ -241,11 +279,25 @@ impl RealizesTree {
 }
 
 /// Elaborate a tree-structured typing derivation into a kernel proof term (ADR-0007).
+///
+/// The source is validated as an [`AuditedSource`] on the **provisional**
+/// tree-realization route (ADR-0016 §7,
+/// `spec/errata/0004-tree-realization-audited-support.md`): the source's own
+/// evidence id must bind to the support presented here, but that support is
+/// today a digest of the proposition being claimed rather than a
+/// replay-verified chain. The binding check is real; what it binds to is the
+/// reported hole.
 pub fn elaborate_tree(
     source: &Judgement,
     tree: &RealizesTree,
     budget: brix_kernel::Budget,
 ) -> ElaborationResult {
+    let source = match AuditedSource::verify(source, Support::tree_realization(source.proposition))
+    {
+        Ok(verified) => verified,
+        Err(err) => return ElaborationResult::Refused(err),
+    };
+
     if !tree.well_formed() {
         return ElaborationResult::NotElaborated(brix_kernel::Verdict::Rejected(
             brix_kernel::RejectionReason::Custom("malformed Seq middle".into()),
@@ -321,8 +373,8 @@ pub fn elaborate_tree(
         };
     }
 
-    let term = ExplicitTerm::new(source.context, kind);
-    elaborate_and_publish(source, &implication_prop, &term, budget)
+    let term = ExplicitTerm::new(source.judgement().context, kind);
+    elaborate_and_publish(&source, &implication_prop, &term, budget)
 }
 
 #[cfg(test)]
@@ -334,12 +386,15 @@ mod tree_tests {
     #[test]
     fn test_malformed_seq_rejected() {
         let context = ContextId::root();
-        let source = Judgement::new(
+        let proposition = PropositionId::from_canon(b"src");
+        let source = Judgement::publish(
+            Authority::AuditChecker,
             context,
-            PropositionId::from_canon(b"src"),
+            proposition,
             Outcome::Audited,
-            brix_semantic::EvidenceId::from_canon(b"ev"),
-        );
+            Support::tree_realization(proposition),
+        )
+        .expect("AuditChecker/Audited/TreeRealization is a legal (provisional) route");
 
         let g1 = GeneratorId::named("g1");
         let g2 = GeneratorId::named("g2");
@@ -381,12 +436,15 @@ mod tree_tests {
     #[test]
     fn test_3_leaf_tree_well_formed_and_misbuilt() {
         let context = ContextId::root();
-        let source = Judgement::new(
+        let proposition = PropositionId::from_canon(b"src");
+        let source = Judgement::publish(
+            Authority::AuditChecker,
             context,
-            PropositionId::from_canon(b"src"),
+            proposition,
             Outcome::Audited,
-            brix_semantic::EvidenceId::from_canon(b"ev"),
-        );
+            Support::tree_realization(proposition),
+        )
+        .expect("AuditChecker/Audited/TreeRealization is a legal (provisional) route");
 
         let ga = GeneratorId::named("ga");
         let gb = GeneratorId::named("gb");

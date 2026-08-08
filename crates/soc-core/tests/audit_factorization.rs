@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 use brix_canon::{Digest, Domain};
 use brix_semantic::{
     Authority, ConfigId, ContextId, Decomposition, Evidence, GeneratorId, GeneratorRegistry,
-    Judgement, Outcome, Realizes,
+    JudgementId, Outcome, Realizes,
 };
 use soc_core::adm::AdmAll;
 use soc_core::audit::{audit_step, AuditResult, GeneratorSemantics};
@@ -155,13 +155,13 @@ fn committed_fixture_step() -> (CommittedStep, ContextId) {
 /// Independently rebuild the `Derived` judgement id for `step` — used both
 /// to sanity-check the fixture and, in test (d), to prove the audit never
 /// mutates it.
-fn rebuild_derived_id(step: &CommittedStep, context: ContextId) -> brix_semantic::JudgementId {
+fn rebuild_derived_id(step: &CommittedStep, context: ContextId) -> JudgementId {
     let proposition = Realizes::new(step.witness, step.src, step.dst).proposition_id();
     let derived_evidence = Evidence::SettlementReplay {
         body: step.decomposition.id().digest(),
     }
     .id();
-    Judgement::new(context, proposition, Outcome::Derived, derived_evidence).id()
+    JudgementId::recompute(context, proposition, Outcome::Derived, derived_evidence)
 }
 
 // --- (a) Good decomposition upgrades to `Audited` with correct authority ---
@@ -215,7 +215,7 @@ fn corrupted_intermediate_configuration_yields_unknown_never_a_pass() {
     }
     .id();
     let tampered_derived_id =
-        Judgement::new(context, proposition, Outcome::Derived, tampered_evidence).id();
+        JudgementId::recompute(context, proposition, Outcome::Derived, tampered_evidence);
 
     let tampered_step = CommittedStep {
         key: step.key,

@@ -94,7 +94,7 @@
         }
       ],
       "failure_mode": "Return AuditResult::Unknown for every incomplete or inconsistent replay; never publish a partial pass.",
-      "open_issues": [228]
+      "open_issues": [259]
     },
     {
       "id": "SOC-LAW-04",
@@ -110,7 +110,8 @@
         "crates/brix-semantic/src/outcome.rs",
         "crates/brix-elaborate/src/lib.rs",
         "crates/soc-regimes/src/type_realization.rs",
-        "crates/soc-regimes/src/coverage.rs"
+        "crates/soc-regimes/src/coverage.rs",
+        "crates/brix-semantic/src/publication.rs"
       ],
       "executable_gates": [
         {
@@ -127,7 +128,7 @@
         }
       ],
       "failure_mode": "Preserve rejected, unsupported, context-mismatch, and exhausted states; Unknown never becomes truth or falsity.",
-      "open_issues": [178, 228]
+      "open_issues": [178, 259]
     },
     {
       "id": "SOC-LAW-05",
@@ -136,12 +137,16 @@
       "authority": ["settlement kernel", "audit checker", "proof kernel", "named external drivers"],
       "normative_anchors": [
         "spec/adr/ADR-0002_SOC_Constitution.md",
+        "spec/adr/ADR-0016_Authority_Publication_Fence.md",
+        "spec/errata/0004-tree-realization-audited-support.md",
         "docs/audit/issue-63/README.md"
       ],
       "implementation_anchors": [
         "scripts/check_tcb_dependencies.py",
         "scripts/test_tcb_dependency_gate.sh",
-        "crates/brix-semantic/src/judgement.rs"
+        "crates/brix-semantic/src/judgement.rs",
+        "crates/brix-semantic/src/publication.rs",
+        "crates/brix-elaborate/src/lib.rs"
       ],
       "executable_gates": [
         {
@@ -149,12 +154,24 @@
           "tests": ["every_outcome_has_exactly_one_authority"]
         },
         {
+          "path": "crates/brix-semantic/src/publication.rs",
+          "tests": ["every_route_agrees_with_the_frozen_authority_table", "every_outcome_has_at_least_one_route", "only_the_tree_realization_route_is_provisional", "decomposition_condition_is_checked_in_both_directions"]
+        },
+        {
+          "path": "crates/brix-semantic/tests/publication_fence.rs",
+          "tests": ["illegal_authority_outcome_pairs_fail_for_every_support_kind", "wrong_claimed_authority_is_rejected_with_the_right_sole_field", "proven_on_settlement_replay_is_unsupported_evidence", "audited_from_recorded_chain_is_decomposition_verification_mismatch", "derived_from_replay_verified_chain_is_decomposition_verification_mismatch", "every_legal_route_yields_a_judgement_id_byte_identical_to_recompute"]
+        },
+        {
+          "path": "crates/brix-elaborate/tests/elaboration_fence.rs",
+          "tests": ["derived_source_is_refused_before_the_kernel_is_ever_reached", "audited_source_presented_with_a_recorded_chain_is_refused_never_proven", "audited_source_whose_evidence_names_a_different_decomposition_is_refused", "honest_audited_source_still_reaches_proven"]
+        },
+        {
           "path": "crates/brix-semantic/tests/judgment_core.rs",
           "tests": ["only_elaboration_boundary_edges_report_as_the_boundary"]
         }
       ],
       "failure_mode": "Reject unrecognized publishers and mismatched outcome/evidence authority without constructing a judgement.",
-      "open_issues": [228]
+      "open_issues": [259]
     },
     {
       "id": "SOC-LAW-06",

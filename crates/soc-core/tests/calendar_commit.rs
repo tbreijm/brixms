@@ -17,7 +17,7 @@
 
 use brix_canon::{CanonWriter, Digest, Domain};
 use brix_semantic::{
-    ConfigId, ContextId, Decomposition, Evidence, GeneratorId, Judgement, Outcome, Realizes,
+    ConfigId, ContextId, Decomposition, Evidence, GeneratorId, JudgementId, Outcome, Realizes,
 };
 use soc_core::adm::{AdmAll, AdmNone};
 use soc_core::calendar::{Frontier, Key};
@@ -262,7 +262,7 @@ fn committed_observation_judgement_digest_matches_independent_reconstruction() {
         body: decomposition.id().digest(),
     }
     .id();
-    let judgement_id = Judgement::new(context, proposition, Outcome::Derived, evidence).id();
+    let judgement_id = JudgementId::recompute(context, proposition, Outcome::Derived, evidence);
 
     assert_eq!(observation.outcome_class, Outcome::Derived);
     assert_eq!(

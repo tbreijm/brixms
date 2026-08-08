@@ -40,9 +40,21 @@
 //!   set and admissibility policy, so the `F_O` `1` summand can carry an
 //!   epistemic grade like any other proposition (ADR-0014 §6.4, ⟨D-QP⟩).
 //!
-//! Next slices add `DiscoveryRun`, the observational cost records (§5.7), the
-//! `Proven`-provenance validator (the elaboration-boundary rule), and the
-//! retraction-closure fixtures (§7).
+//! - **The authority publication fence (ADR-0016).** [`ROUTES`] is the single
+//!   authoritative enumeration of legal (authority, outcome, evidence-kind)
+//!   publication routes — ADR-0002 §4.1's frozen table with the evidence-kind
+//!   column it never had, as data the code consults rather than a comment.
+//!   [`Judgement::publish`] is the sole door outside this crate that yields a
+//!   judgement value; it takes the supporting artifact ([`Support`], not an
+//!   [`EvidenceId`]) and fails closed with a typed [`PublicationError`] on any
+//!   mismatched outcome/evidence pairing. [`AuditedSource`] is the
+//!   elaboration-boundary witness: `Audited` outcome, route-legal support, and
+//!   an evidence id that actually binds to the presented artifact.
+//!   [`JudgementId::recompute`] is the deliberately separate identity-only
+//!   door for checkers re-deriving a claim they do not publish.
+//!
+//! Next slices add `DiscoveryRun`, the observational cost records (§5.7), and
+//! the retraction-closure fixtures (§7).
 
 mod config;
 mod context;
@@ -54,6 +66,7 @@ mod id;
 mod judgement;
 mod outcome;
 mod proposition;
+mod publication;
 mod quiescent;
 mod realizes;
 mod regime;
@@ -68,6 +81,10 @@ pub use generator::{GeneratorId, GeneratorRegistry, GeneratorRegistryId};
 pub use judgement::{Judgement, JudgementId};
 pub use outcome::{Authority, Outcome};
 pub use proposition::PropositionId;
+pub use publication::{
+    route_for, AuditedSource, PublicationError, Route, RouteCondition, RouteStatus, Support,
+    SupportKind, ROUTES,
+};
 pub use quiescent::Quiescent;
 pub use realizes::Realizes;
 pub use regime::RegimeId;

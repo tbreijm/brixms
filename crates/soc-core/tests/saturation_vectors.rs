@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use brix_canon::{CanonWriter, Digest, Domain};
 use brix_semantic::{
-    ConfigId, ContextId, Decomposition, Evidence, GeneratorId, Judgement, Outcome, Quiescent,
+    ConfigId, ContextId, Decomposition, Evidence, GeneratorId, JudgementId, Outcome, Quiescent,
 };
 use soc_core::adm::AdmAll;
 use soc_core::calendar::Key;
@@ -395,9 +395,7 @@ fn independent_quiescence_judgement(cert: &QuiescenceCertificateV1) -> Digest {
         body: cert.prefix_chain,
     }
     .id();
-    Judgement::new(cert.context, proposition, Outcome::Derived, evidence)
-        .id()
-        .digest()
+    JudgementId::recompute(cert.context, proposition, Outcome::Derived, evidence).digest()
 }
 
 // ---------------------------------------------------------------------------

@@ -212,5 +212,8 @@ fn test_b3_end_to_end_audited_decomposition_to_proven() {
         ElaborationResult::NotElaborated(verdict) => {
             panic!("Expected Proven, got NotElaborated({verdict:?})");
         }
+        ElaborationResult::Refused(err) => {
+            panic!("Expected Proven, got Refused({err:?})");
+        }
     }
 }

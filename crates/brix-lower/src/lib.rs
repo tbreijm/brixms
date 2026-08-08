@@ -84,6 +84,14 @@ pub enum LowerError {
     /// from an outright rejection — **this is the absence of a proof, never
     /// evidence that the proposition is false** (ADR-0002 §5.3).
     ElaborationFailed(Verdict),
+    /// `brix_elaborate::elaborate_tree` returned `Refused`: the source judgement
+    /// this lowering pass built failed the ADR-0016 §6 authority-publication
+    /// fence at the elaboration boundary — a caller-standing failure, not a
+    /// kernel rejection (ADR-0016 §6, brix-elaborate's `ElaborationResult`
+    /// doc). Not expected to occur on the settled path (`audited_type_check_tree`
+    /// always publishes a self-consistent source), but the boundary must stay
+    /// total rather than panic.
+    ElaborationRefused(brix_semantic::PublicationError),
     /// A declared record field is missing from a record literal.
     MissingField { config: String, field: String },
     /// A record literal field is not present in the declared record config.
@@ -109,8 +117,14 @@ impl From<TypeError> for LowerError {
 pub enum ProofGap {
     /// The checker found a positive obstruction — a type mismatch, an
     /// unbound/unresolved reference, a missing/unknown record field, an
-    /// asserted-grade erasure, a non-exhaustive match. Still not a kernel
-    /// refutation: no `Refuted` outcome exists for any of these today.
+    /// asserted-grade erasure, a non-exhaustive match, or a source refused at
+    /// the ADR-0016 §6 elaboration boundary. Still not a kernel refutation: no
+    /// `Refuted` outcome exists for any of these today.
+    ///
+    /// A refused publication belongs here rather than under
+    /// [`ProofGap::AbsenceOfProof`] because it is an *identified* obstruction —
+    /// the `PublicationError` names exactly which check failed — not the
+    /// result of a search that found nothing.
     Conflict(String),
     /// The construct lies outside the current lowering/execution fragment.
     /// This says nothing about the program's truth.
@@ -146,6 +160,9 @@ pub fn diagnose_gap(err: &LowerError) -> ProofGap {
             ProofGap::ExhaustedSearch(format!("{reason:?}"))
         }
         LowerError::ElaborationFailed(verdict) => ProofGap::AbsenceOfProof(format!("{verdict:?}")),
+        LowerError::ElaborationRefused(err) => ProofGap::Conflict(format!(
+            "elaboration boundary refused the source judgement: {err:?}"
+        )),
     }
 }
 
@@ -562,6 +579,7 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                     ElaborationResult::NotElaborated(verdict) => {
                         Err(LowerError::ElaborationFailed(verdict))
                     }
+                    ElaborationResult::Refused(err) => Err(LowerError::ElaborationRefused(err)),
                 }
             })();
 
