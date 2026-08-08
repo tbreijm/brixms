@@ -368,7 +368,9 @@ pub struct CheckResult {
     /// The tree-structured realization derivation (ADR-0007) whose leaves are
     /// the primitive typing-rule generators — provenance, not proof. `brix
     /// why` walks this to name which leaf(s), if any, capped the result below
-    /// `Proven` (`soc_regimes::type_realization::generator_is_tight`).
+    /// `Proven` (`soc_regimes::type_realization::generator_is_tight`, queried
+    /// against `ClaimKind::Typing` — this is a typing derivation, ADR-0015
+    /// ⟨D-JUDGE⟩).
     pub derivation: RealizesTree,
 }
 
