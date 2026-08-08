@@ -294,7 +294,10 @@ whatever generators and configurations it is given. The `Audited` fence therefor
   step, log-integrity comparison against the recorded `Observation`, and a
   `GeneratorSemantics::realizes` call for every link in the chain — before it stamps;
 - `soc-regimes::audited_type_check`, which performs none of it and stamps a type-inference derivation
-  directly.
+  directly. **Removed by [ADR-0018](./ADR-0018_Retire_The_Flat_Typing_Lane.md) (#262)**, so
+  `audit_step` is now the *only* caller — which is what this residual assumed all along. The
+  residual itself stands: the constructor is still unchecked, and a future caller could stamp an
+  unearned tag.
 
 This ADR does not narrow that constructor. Doing so is audit finding A-3, which #228 routes to #178 /
 Track 2 coordination. The fence as built guarantees that an `Audited` judgement is *accompanied by a

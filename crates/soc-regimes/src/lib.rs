@@ -40,6 +40,4 @@ pub mod tree_audit;
 pub mod type_realization;
 
 pub use literal::{LiteralEqualityRegime, LiteralEqualitySemantics};
-pub use type_realization::{
-    audited_type_check, g_lit, g_var, type_check, Expr, Ty, TyCtx, TypeError,
-};
+pub use type_realization::{g_lit, g_var, Expr, Ty, TyCtx, TypeError};
