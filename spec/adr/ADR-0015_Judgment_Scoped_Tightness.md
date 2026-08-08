@@ -1,6 +1,6 @@
 # ADR-0015 — Judgment-Scoped Tightness, Kernel-Checked Primitive Realizations, and the Arithmetic Typing Rule
 
-Status: **Proposed** (2026-08-07; ⟨D-PRIM⟩'s constructor and registry-location decisions pinned 2026-08-08 after an external kernel-design consult). Pins what a tight-generator discharge *means*, replaces the informal correspondence argument with a kernel-checked mechanism, and rules on `g_arith`, `g_arith_split`, and the numeric promotion edges.
+Status: **Accepted** (2026-08-08; Proposed 2026-08-07 — ⟨D-PRIM⟩'s constructor and registry-location decisions pinned after an external kernel-design consult, and the envelope-version question resolved against ADR-0013). Pins what a tight-generator discharge *means*, replaces the informal correspondence argument with a kernel-checked mechanism, and rules on `g_arith`, `g_arith_split`, and the numeric promotion edges.
 
 Date: 2026-08-07; revised 2026-08-08.
 
@@ -235,7 +235,9 @@ Per ⟨D-OPGRAN⟩ the rollout is operation-specific: checked `Nat`/`Int` additi
 - **Old certificates whose leaves are `Hyp` remain assumption-dependent and remain capped.** Shipping the registry upgrades nothing retroactively.
 - Relation identities are immutable; a row change allocates a new id, never an in-place edit.
 - Widening the registry beyond typing — to any value or evaluation relation — requires a new ADR, because it changes what a kernel `Accepted` verdict means.
-- **Envelope version:** on the premise that ADR-0013 v1 defines `TermKind` as append-only extensible, the envelope stays v1 — existing encodings do not change and the new ordinal is an extension newer kernels understand. **That extensibility must be normative in the v1 spec, not merely a Rust enum convention.** If v1 instead freezes a closed constructor set, the new term requires a proof-format version bump even though the outer envelope framing is unchanged. Confirm which before Stage B.
+- **Envelope version: stays v1. Resolved 2026-08-08 against ADR-0013.** §7 freezes "the v1 field list, their order, the marker bytes, the version number, and the profile string," and requires a new format version for "any change to *what a certificate is bound to*." A new `TermKind` ordinal changes neither: the envelope's field list is untouched, and a certificate still binds the same context, proposition, and term. What may appear *inside* a term is governed by the ordinal discipline in `term.rs`, which ADR-0013 §2 already describes as "frozen, **append-only** enum ordinals." The v1 vectors continue to reproduce byte-for-byte because their terms do not use the new ordinal.
+
+  Recorded for the next reader: this follows from ADR-0013's append-only characterisation of `TermKind`, not from §7 directly — §7 speaks to the envelope's field list rather than to constructor-set closure. If a future reader reads §7 as freezing a closed constructor set, the correction belongs in an erratum on ADR-0013, not a change here.
 
 ## 8. Hard boundaries — what this mechanism must never be widened to do
 
@@ -254,6 +256,4 @@ Per ⟨D-OPGRAN⟩ the rollout is operation-specific: checked `Nat`/`Int` additi
 
 - **Whether the claim-kind index should be a closed enum or an open identifier** — closed is safer now (an unknown kind cannot silently default to "discharged"), open is cheaper when settlement and coverage judgments join. Recommend closed; revisit if a third kind arrives.
 - **Whether the four exact promotion edges warrant one relation each or one parameterized relation.** Per-relation is more auditable; parameterized is smaller. Not load-bearing for correctness.
-- **Whether ADR-0013 v1 normatively defines `TermKind` as append-only extensible** (§7's last bullet). This decides envelope-version-bump or not, and is a documentation question about the existing freeze rather than a new design choice.
-
-⟨D-PRIM⟩'s constructor shape — the previously-open blocker — is now **pinned** above.
+Both previously-blocking items are now closed: ⟨D-PRIM⟩'s constructor shape is pinned in §2, and the envelope-version question is resolved in §7. Neither remaining item gates implementation.
