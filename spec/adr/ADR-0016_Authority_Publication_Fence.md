@@ -305,6 +305,21 @@ chain someone tagged verified and bound to its evidence id* — not that the tag
 is a strictly stronger guarantee than exists today and a strictly weaker one than the prose implies,
 and the difference is worth writing down rather than smoothing over.
 
+**Ruled by [ADR-0019](./ADR-0019_Verification_Tags_Are_Earned.md).** Two corrections to this
+section as written. First, the residual is not only that the constructor is unchecked: every
+`Decomposition` field is `pub`, so the tag can be selected by direct assignment without calling
+any constructor at all — sealing the constructor alone would not have closed it. Second,
+ADR-0017 reproduced the pattern for `TreeDerivation::structure_verified` rather than narrowing
+it, so by the time this section was written there were two unchecked verified-tag constructors,
+not one.
+
+ADR-0019 rules that a verified tag is an **output of a checked transition, never a constructor
+input**: both raw verified constructors are removed in favour of `Decomposition::verify_replay`
+and `TreeDerivation::verify_structure`, which perform their defining checks in the crate that
+owns the artifact. The tag-minting residual is thereby closed. What remains open is narrower and
+is restated in ADR-0019 §6: a caller still supplies the `GeneratorSemantics`, and the verified
+id does not name the semantics or registry it was verified against.
+
 ## 8. Non-goals
 
 - **The frozen ABI is untouched.** `Committed`, `Observation`, `CommittedStep`/`Journal` encoding,
