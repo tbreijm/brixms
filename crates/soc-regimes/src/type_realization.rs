@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use brix_canon::{CanonWriter, Canonical};
 use brix_elaborate::{RealizesTree, TreeObj};
 use brix_semantic::{
-    compose_chain, ConfigId, ContextId, Decomposition, Evidence, GeneratorId, Judgement, Outcome,
-    Realizes, WitnessId,
+    compose_chain, Authority, ConfigId, ContextId, Decomposition, GeneratorId, Judgement, Outcome,
+    Realizes, Support, WitnessId,
 };
 
 /// Native representation of types in the type-realization regime (ADR-0005).
@@ -1327,12 +1327,15 @@ pub fn type_check(expr: &Expr, ctx: &TyCtx, context: ContextId) -> Result<Judgem
 
     let decomp = Decomposition::recorded(derivation, configs)
         .expect("multi-step derivation decomposition is valid");
-    let evidence = Evidence::SettlementReplay {
-        body: decomp.id().digest(),
-    }
-    .id();
 
-    Ok(Judgement::new(context, prop, Outcome::Derived, evidence))
+    Judgement::publish(
+        Authority::SettlementKernel,
+        context,
+        prop,
+        Outcome::Derived,
+        Support::Settlement(&decomp),
+    )
+    .map_err(|_| TypeError::IllFormedDerivation)
 }
 
 /// Upgrades a native `type_check` derivation to an `Audited` `Judgement` and
@@ -1362,12 +1365,15 @@ pub fn audited_type_check(
 
     let verified_decomp =
         Decomposition::replay_verified(derivation, configs).expect("replay verified decomposition");
-    let evidence = Evidence::SettlementReplay {
-        body: verified_decomp.id().digest(),
-    }
-    .id();
 
-    let audited = Judgement::new(context, prop, Outcome::Audited, evidence);
+    let audited = Judgement::publish(
+        Authority::AuditChecker,
+        context,
+        prop,
+        Outcome::Audited,
+        Support::Settlement(&verified_decomp),
+    )
+    .map_err(|_| TypeError::IllFormedDerivation)?;
     Ok((audited, verified_decomp))
 }
 
@@ -1908,11 +1914,19 @@ pub fn audited_type_check_tree(
     }
     let witness_id = tree.witness_object().witness_digest();
     let prop = Realizes::new(witness_id, expr.config_id(), final_ty.config_id()).proposition_id();
-    let evidence = Evidence::SettlementReplay {
-        body: brix_canon::Digest::of(brix_canon::Domain::Value, prop.digest().as_bytes()),
-    }
-    .id();
-    let audited = Judgement::new(context, prop, Outcome::Audited, evidence);
+    // PROVISIONAL route (ADR-0016 §7,
+    // `spec/errata/0004-tree-realization-audited-support.md`): the support
+    // body is a digest of `prop` itself, so this evidence is computable from
+    // the claim and distinguishes nothing. Behaviour here is unchanged — the
+    // migration is mechanical, and the erratum is the report, not a fix.
+    let audited = Judgement::publish(
+        Authority::AuditChecker,
+        context,
+        prop,
+        Outcome::Audited,
+        Support::tree_realization(prop),
+    )
+    .map_err(|_| TypeError::IllFormedDerivation)?;
     Ok((audited, tree))
 }
 
@@ -1921,7 +1935,7 @@ mod tests {
     use super::*;
     use brix_elaborate::{elaborate_decomposition, ElaborationResult};
     use brix_kernel::Budget;
-    use brix_semantic::{Authority, EdgeKind, GeneratorRegistry};
+    use brix_semantic::{Authority, EdgeKind, Evidence, GeneratorRegistry, JudgementId};
 
     #[test]
     fn generator_name_finds_tight_and_untight_generators() {
@@ -2190,6 +2204,9 @@ mod tests {
             ElaborationResult::NotElaborated(verdict) => {
                 panic!("Expected Proven, got NotElaborated({verdict:?})");
             }
+            ElaborationResult::Refused(err) => {
+                panic!("Expected Proven, got Refused({err:?})");
+            }
         }
     }
 
@@ -2241,13 +2258,12 @@ mod tests {
             body: unverified_decomp.id().digest(),
         }
         .id();
-        let derived_id = Judgement::new(
+        let derived_id = JudgementId::recompute(
             context,
             audited_judgement.proposition,
             Outcome::Derived,
             derived_evidence,
-        )
-        .id();
+        );
 
         let step = soc_core::CommittedStep {
             key: soc_core::Key::new(

@@ -42,7 +42,7 @@
 
 use brix_canon::{CanonError, CanonReader, CanonWriter, Canonical, Digest, Domain};
 use brix_semantic::{
-    ConfigId, ContextId, Evidence, Judgement, JudgementId, Outcome, PropositionId, Quiescent,
+    ConfigId, ContextId, Evidence, JudgementId, Outcome, PropositionId, Quiescent,
 };
 
 use crate::exec::ExecConfig;
@@ -791,6 +791,14 @@ pub fn quiescence_judgement(cert: &QuiescenceCertificateV1) -> JudgementId {
 
 /// The same judgement identity, from the parts — so a certificate can be built
 /// with its judgement already correct rather than patched in afterwards.
+///
+/// Identity only, never publication (ADR-0016 §3). This function is called on
+/// both sides of the certificate contract — once to state the claim, once by
+/// `check_quiescence_certificate` to re-derive it from the presentation and
+/// compare — and its support is the hidden prefix's chain digest, not a
+/// `Decomposition`. The authority for a quiescence claim is the certificate
+/// check (ADR-0014 §6.3), not the possession of a judgement value; no
+/// `Judgement` is minted here.
 pub(crate) fn quiescence_judgement_of(
     context: ContextId,
     terminal_world: ConfigId,
@@ -802,7 +810,7 @@ pub(crate) fn quiescence_judgement_of(
     let proposition: PropositionId =
         Quiescent::new(terminal_world, policy, regime_set, adm_id).proposition_id();
     let evidence = Evidence::SettlementReplay { body: prefix_chain }.id();
-    Judgement::new(context, proposition, Outcome::Derived, evidence).id()
+    JudgementId::recompute(context, proposition, Outcome::Derived, evidence)
 }
 
 /// Re-derive a quiescence certificate's claim from the presentation and the

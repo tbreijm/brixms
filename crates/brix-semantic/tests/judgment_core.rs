@@ -4,8 +4,8 @@
 
 use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_semantic::{
-    CertificateId, ContextId, Dependency, Durability, EdgeKind, Evidence, Judgement, Outcome,
-    PropositionId, VerifierId,
+    Authority, CertificateId, ContextId, Decomposition, Dependency, Durability, EdgeKind, Evidence,
+    GeneratorId, Judgement, JudgementId, Outcome, PropositionId, Support, VerifierId,
 };
 
 fn digest(tag: &[u8]) -> Digest {
@@ -17,11 +17,22 @@ fn digest(tag: &[u8]) -> Digest {
 fn has_type_specimen() -> Judgement {
     let context = ContextId::root();
     let proposition = PropositionId::from_canon(b"HasType(subject=x, ty=Int)");
-    let evidence = Evidence::SettlementReplay {
-        body: digest(b"TypeOfRoleBinding step"),
-    }
-    .id();
-    Judgement::new(context, proposition, Outcome::Derived, evidence)
+    let decomposition = Decomposition::recorded(
+        vec![GeneratorId::named("g1@1")],
+        vec![
+            brix_semantic::ConfigId::from_canon(b"x0"),
+            brix_semantic::ConfigId::from_canon(b"x1"),
+        ],
+    )
+    .expect("well-formed chain");
+    Judgement::publish(
+        Authority::SettlementKernel,
+        context,
+        proposition,
+        Outcome::Derived,
+        Support::Settlement(&decomposition),
+    )
+    .expect("SettlementKernel/Derived/Settlement(Recorded) is a legal route")
 }
 
 #[test]
@@ -31,30 +42,33 @@ fn judgement_id_is_deterministic() {
 
 #[test]
 fn judgement_id_depends_on_exactly_its_four_fields() {
+    // Uses JudgementId::recompute — the identity-only door (ADR-0016 §3) — to
+    // probe the digest formula over field-tuples that need not be legal
+    // publications; this test is about the four-tuple identity, not authority.
     let base = has_type_specimen();
     let base_id = base.id();
 
     // Changing the outcome (Derived -> Proven) is a different judgement.
-    let promoted = Judgement::new(
+    let promoted_id = JudgementId::recompute(
         base.context,
         base.proposition,
         Outcome::Proven,
         base.evidence,
     );
-    assert_ne!(promoted.id(), base_id);
+    assert_ne!(promoted_id, base_id);
 
     // Changing the proposition is a different judgement.
-    let other_prop = Judgement::new(
+    let other_prop_id = JudgementId::recompute(
         base.context,
         PropositionId::from_canon(b"HasType(subject=x, ty=Bool)"),
         base.outcome,
         base.evidence,
     );
-    assert_ne!(other_prop.id(), base_id);
+    assert_ne!(other_prop_id, base_id);
 
     // Changing the evidence is a different judgement (same conclusion, other
     // support) — evidence is part of identity; only *search* is excluded.
-    let other_ev = Judgement::new(
+    let other_ev_id = JudgementId::recompute(
         base.context,
         base.proposition,
         base.outcome,
@@ -63,16 +77,16 @@ fn judgement_id_depends_on_exactly_its_four_fields() {
         }
         .id(),
     );
-    assert_ne!(other_ev.id(), base_id);
+    assert_ne!(other_ev_id, base_id);
 
     // Changing the context is a different judgement.
-    let other_ctx = Judgement::new(
+    let other_ctx_id = JudgementId::recompute(
         ContextId::from_canon(b"a scoped assumption world"),
         base.proposition,
         base.outcome,
         base.evidence,
     );
-    assert_ne!(other_ctx.id(), base_id);
+    assert_ne!(other_ctx_id, base_id);
 }
 
 #[test]

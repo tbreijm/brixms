@@ -26,7 +26,9 @@
 //! call site differs, for the reason above.
 
 use brix_canon::{CanonWriter, Canonical, Digest};
-use brix_semantic::{ConfigId, ContextId, Decomposition, Evidence, Judgement, Outcome, Realizes};
+use brix_semantic::{
+    Authority, ConfigId, ContextId, Decomposition, Judgement, Outcome, Realizes, Support,
+};
 
 use crate::adm::Adm;
 use crate::calendar::{Frontier, Key};
@@ -144,9 +146,11 @@ pub trait SettlementRegime: Regime {
 ///    `interner` to digests, obtain the regime's recorded (unverified)
 ///    [`Decomposition`], set `witness` to the canonical composition of its
 ///    generators ([`brix_semantic::compose_chain`]), build
-///    `Realizes(witness, src, dst)`'s `PropositionId`, wrap the decomposition as
-///    `Evidence::SettlementReplay`, and build the committed
-///    `Judgement::new(context, proposition, Outcome::Derived, evidence)`.
+///    `Realizes(witness, src, dst)`'s `PropositionId`, and publish the
+///    committed `Derived` judgement through the ADR-0016 §4 fence —
+///    `Judgement::publish(Authority::SettlementKernel, …, Support::Settlement(&decomposition))`,
+///    whose route additionally requires the chain to be in the `Recorded`
+///    form and derives the `Evidence::SettlementReplay` id from it.
 ///    The [`Observation`] is `{ outcome_class: Derived, judgement_digest }`.
 ///    The successor `ExecConfig` is produced by [`crate::oracle::apply`] —
 ///    reused verbatim so the committed successor's history component folds
@@ -300,6 +304,19 @@ pub enum CommitError {
     /// `generators` length disagreement): the chain composes structurally
     /// fine, it just cites the wrong generator(s).
     GeneratorMismatch,
+    /// The `Derived` publication was refused by the ADR-0016 §4 authority
+    /// fence — in practice, a decomposition reaching the commit boundary in
+    /// the `ReplayVerified` rather than the `Recorded` form, which would be
+    /// the hot loop asserting a verification it never performed. Unreachable
+    /// on the settled path (`try_decompose` builds a recorded chain); carried
+    /// so the boundary stays total and fails closed instead of panicking.
+    Publication(brix_semantic::PublicationError),
+}
+
+impl From<brix_semantic::PublicationError> for CommitError {
+    fn from(e: brix_semantic::PublicationError) -> Self {
+        CommitError::Publication(e)
+    }
 }
 
 impl From<brix_semantic::DecompositionError> for CommitError {
@@ -370,11 +387,19 @@ pub fn try_commit_selected(
         .ok_or(CommitError::EmptyDecomposition)?;
 
     let proposition = Realizes::new(witness, src, dst).proposition_id();
-    let evidence = Evidence::SettlementReplay {
-        body: decomposition.id().digest(),
-    }
+    // The settlement kernel's own publication, through the ADR-0016 §4 fence:
+    // the `(SettlementKernel, Derived, Settlement)` route additionally demands
+    // that the chain be `Recorded` — the hot loop records, it never asserts
+    // verification (ADR-0002 §4.1/§5.1).
+    let judgement_id = Judgement::publish(
+        Authority::SettlementKernel,
+        context,
+        proposition,
+        Outcome::Derived,
+        Support::Settlement(&decomposition),
+    )
+    .map_err(CommitError::from)?
     .id();
-    let judgement_id = Judgement::new(context, proposition, Outcome::Derived, evidence).id();
 
     let observation = Observation {
         outcome_class: Outcome::Derived,
@@ -526,7 +551,7 @@ mod tests {
     use crate::history::History;
     use crate::intern::Handle;
     use brix_canon::Domain;
-    use brix_semantic::GeneratorId;
+    use brix_semantic::{Evidence, GeneratorId};
 
     /// A single-candidate fixture regime whose `decompose` always returns
     /// the same fixed, valid recorded `Decomposition` — deterministic and
@@ -671,7 +696,8 @@ mod tests {
             body: decomposition.id().digest(),
         }
         .id();
-        let judgement_id = Judgement::new(context, proposition, Outcome::Derived, evidence).id();
+        let judgement_id =
+            brix_semantic::JudgementId::recompute(context, proposition, Outcome::Derived, evidence);
 
         assert_eq!(observation.outcome_class, Outcome::Derived);
         assert_eq!(observation.judgement_digest, judgement_id.digest());
@@ -878,8 +904,12 @@ mod tests {
             body: step.decomposition.id().digest(),
         }
         .id();
-        let expected_judgement_id =
-            Judgement::new(context, expected_proposition, Outcome::Derived, evidence).id();
+        let expected_judgement_id = brix_semantic::JudgementId::recompute(
+            context,
+            expected_proposition,
+            Outcome::Derived,
+            evidence,
+        );
 
         assert_eq!(observation.judgement_digest, expected_judgement_id.digest());
     }

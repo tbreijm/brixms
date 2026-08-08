@@ -29,8 +29,9 @@
 //! that publishes `Derived` or `Proven`.
 
 use brix_semantic::{
-    ConfigId, ContextId, DecompVerification, Decomposition, DecompositionError, Dependency,
-    EdgeKind, Evidence, GeneratorId, GeneratorRegistry, Judgement, JudgementId, Outcome, Realizes,
+    Authority, ConfigId, ContextId, DecompVerification, Decomposition, DecompositionError,
+    Dependency, EdgeKind, Evidence, GeneratorId, GeneratorRegistry, Judgement, JudgementId,
+    Outcome, Realizes, Support,
 };
 
 use crate::journal::{CommittedStep, Journal};
@@ -119,10 +120,7 @@ pub fn audit_step(
     // AuditChecker may publish Audited. Asserted here as a standing
     // consistency check on the routing table itself, not on any runtime
     // value.
-    debug_assert_eq!(
-        Outcome::Audited.authority(),
-        brix_semantic::Authority::AuditChecker
-    );
+    debug_assert_eq!(Outcome::Audited.authority(), Authority::AuditChecker);
 
     // Step 1: reconstruct + cross-check the Derived judgement against the log.
     if step.decomposition.verification != DecompVerification::Recorded {
@@ -134,7 +132,11 @@ pub fn audit_step(
         body: step.decomposition.id().digest(),
     }
     .id();
-    let derived_id = Judgement::new(context, proposition, Outcome::Derived, derived_evidence).id();
+    // Identity only, never publication (ADR-0016 §3): this checker is
+    // *auditing* the settlement kernel's `Derived` judgement, not minting it,
+    // and has no standing to claim `Authority::SettlementKernel`.
+    let derived_id =
+        JudgementId::recompute(context, proposition, Outcome::Derived, derived_evidence);
 
     if step.observation.outcome_class != Outcome::Derived
         || step.observation.judgement_digest != derived_id.digest()
@@ -186,11 +188,25 @@ pub fn audit_step(
             return AuditResult::Unknown("decomposition chain length invalid on replay");
         }
     };
-    let audited_evidence = Evidence::SettlementReplay {
-        body: verified.id().digest(),
-    }
-    .id();
-    let audited = Judgement::new(context, proposition, Outcome::Audited, audited_evidence);
+    // This module's one and only publication, through the ADR-0016 §4 fence.
+    // The `(AuditChecker, Audited, Settlement)` route demands a
+    // `ReplayVerified` chain — which is precisely what steps 1–3 above earned
+    // and what `replay_verified` just stamped.
+    let audited = match Judgement::publish(
+        Authority::AuditChecker,
+        context,
+        proposition,
+        Outcome::Audited,
+        Support::Settlement(&verified),
+    ) {
+        Ok(j) => j,
+        Err(_) => {
+            // Unreachable on the settled route; never turn a refused
+            // publication into a silent pass (ADR-0002 §4: fail closed to
+            // Unknown, never to Audited).
+            return AuditResult::Unknown("audited publication refused by the authority fence");
+        }
+    };
     let audited_id = audited.id();
     let link = Dependency::new(EdgeKind::Premise, derived_id.digest());
 

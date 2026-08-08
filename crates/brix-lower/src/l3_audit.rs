@@ -133,7 +133,7 @@ mod tests {
 
     use brix_canon::{Digest, Domain};
     use brix_semantic::{
-        Decomposition, EdgeKind, Evidence, Judgement, Outcome, Realizes, WitnessId,
+        Decomposition, EdgeKind, Evidence, JudgementId, Outcome, Realizes, WitnessId,
     };
     use soc_core::calendar::Key;
     use soc_core::commit::Observation;
@@ -221,7 +221,9 @@ mod tests {
             body: decomposition.id().digest(),
         }
         .id();
-        let derived_id = Judgement::new(context, proposition, Outcome::Derived, evidence).id();
+        // Identity only — this helper reproduces the observation a committed
+        // step would carry; it publishes nothing (ADR-0016 §3).
+        let derived_id = JudgementId::recompute(context, proposition, Outcome::Derived, evidence);
         Observation {
             outcome_class: Outcome::Derived,
             judgement_digest: derived_id.digest(),

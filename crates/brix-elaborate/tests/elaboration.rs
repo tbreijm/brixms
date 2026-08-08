@@ -1,8 +1,8 @@
 use brix_elaborate::{elaborate_and_publish, elaborate_decomposition, ElaborationResult};
 use brix_kernel::{Budget, ExplicitTerm, ObjectTerm, Prop, TermKind, Var, Verdict};
 use brix_semantic::{
-    Authority, CertificateId, ConfigId, ContextId, Decomposition, EdgeKind, Evidence, GeneratorId,
-    Judgement, Outcome, PropositionId, VerifierId,
+    AuditedSource, Authority, ConfigId, ContextId, Decomposition, EdgeKind, Evidence, GeneratorId,
+    Judgement, Outcome, PropositionId, Support,
 };
 
 #[test]
@@ -12,18 +12,20 @@ fn positive_elaboration_produces_proven_judgement() {
     let prop_atom = Prop::Atom(prop_atom_id);
     let kernel_prop = Prop::Impl(Box::new(prop_atom.clone()), Box::new(prop_atom.clone()));
 
-    // Source judgement (e.g. Audited settlement judgement)
+    // Source judgement (e.g. Audited settlement judgement), published via the
+    // provisional tree-realization route (ADR-0016 §7) and bound to its own
+    // proposition, since this test exercises `elaborate_and_publish` directly.
     let source_prop_id = PropositionId::from_canon(b"P_implies_P");
-    let source_evidence = Evidence::KernelCertificate {
-        verifier: VerifierId::named("audit_verifier"),
-        certificate: CertificateId::from_canon(b"source_audited_evidence"),
-    };
-    let source = Judgement::new(
+    let source = Judgement::publish(
+        Authority::AuditChecker,
         context,
         source_prop_id,
         Outcome::Audited,
-        source_evidence.id(),
-    );
+        Support::tree_realization(source_prop_id),
+    )
+    .expect("AuditChecker/Audited/TreeRealization is a legal (provisional) route");
+    let audited_source = AuditedSource::verify(&source, Support::tree_realization(source_prop_id))
+        .expect("source binds to its own tree-realization support");
 
     // Explicit term: \x. x (identity term proving P -> P)
     let term_kind = TermKind::Lam {
@@ -33,7 +35,7 @@ fn positive_elaboration_produces_proven_judgement() {
     let term = ExplicitTerm::new(context, term_kind);
     let budget = Budget::new(100, 100);
 
-    let result = elaborate_and_publish(&source, &kernel_prop, &term, budget);
+    let result = elaborate_and_publish(&audited_source, &kernel_prop, &term, budget);
 
     match result {
         ElaborationResult::Proven { judgement, edge } => {
@@ -62,6 +64,9 @@ fn positive_elaboration_produces_proven_judgement() {
         ElaborationResult::NotElaborated(verdict) => {
             panic!("Expected ElaborationResult::Proven, got NotElaborated({verdict:?})");
         }
+        ElaborationResult::Refused(err) => {
+            panic!("Expected ElaborationResult::Proven, got Refused({err:?})");
+        }
     }
 }
 
@@ -74,11 +79,16 @@ fn negative_well_formed_but_wrong_term_yields_not_elaborated() {
     // Proposition P -> Q
     let kernel_prop = Prop::Impl(Box::new(Prop::Atom(p_id)), Box::new(Prop::Atom(q_id)));
 
-    let source_evidence = Evidence::KernelCertificate {
-        verifier: VerifierId::named("audit_verifier"),
-        certificate: CertificateId::from_canon(b"source_evidence"),
-    };
-    let source = Judgement::new(context, p_id, Outcome::Audited, source_evidence.id());
+    let source = Judgement::publish(
+        Authority::AuditChecker,
+        context,
+        p_id,
+        Outcome::Audited,
+        Support::tree_realization(p_id),
+    )
+    .expect("AuditChecker/Audited/TreeRealization is a legal (provisional) route");
+    let audited_source = AuditedSource::verify(&source, Support::tree_realization(p_id))
+        .expect("source binds to its own tree-realization support");
 
     // Wrong term: identity term \x. x has type P -> P, not P -> Q
     let term_kind = TermKind::Lam {
@@ -88,7 +98,7 @@ fn negative_well_formed_but_wrong_term_yields_not_elaborated() {
     let term = ExplicitTerm::new(context, term_kind);
     let budget = Budget::new(100, 100);
 
-    let result = elaborate_and_publish(&source, &kernel_prop, &term, budget);
+    let result = elaborate_and_publish(&audited_source, &kernel_prop, &term, budget);
 
     match result {
         ElaborationResult::NotElaborated(verdict) => {
@@ -100,6 +110,9 @@ fn negative_well_formed_but_wrong_term_yields_not_elaborated() {
         ElaborationResult::Proven { .. } => {
             panic!("Resolver term was wrong, but elaborate_and_publish yielded Proven!");
         }
+        ElaborationResult::Refused(err) => {
+            panic!("Resolver term was wrong, but elaborate_and_publish yielded Refused({err:?})!");
+        }
     }
 }
 
@@ -110,16 +123,16 @@ fn budget_exhaustion_yields_not_elaborated_resource_exhausted() {
     let prop_atom = Prop::Atom(prop_atom_id);
     let kernel_prop = Prop::Impl(Box::new(prop_atom.clone()), Box::new(prop_atom.clone()));
 
-    let source_evidence = Evidence::KernelCertificate {
-        verifier: VerifierId::named("audit_verifier"),
-        certificate: CertificateId::from_canon(b"source_evidence"),
-    };
-    let source = Judgement::new(
+    let source = Judgement::publish(
+        Authority::AuditChecker,
         context,
         prop_atom_id,
         Outcome::Audited,
-        source_evidence.id(),
-    );
+        Support::tree_realization(prop_atom_id),
+    )
+    .expect("AuditChecker/Audited/TreeRealization is a legal (provisional) route");
+    let audited_source = AuditedSource::verify(&source, Support::tree_realization(prop_atom_id))
+        .expect("source binds to its own tree-realization support");
 
     let term_kind = TermKind::Lam {
         var_name: Some("x".to_string()),
@@ -130,7 +143,7 @@ fn budget_exhaustion_yields_not_elaborated_resource_exhausted() {
     // Zero step budget => ResourceExhausted
     let budget = Budget::new(0, 100);
 
-    let result = elaborate_and_publish(&source, &kernel_prop, &term, budget);
+    let result = elaborate_and_publish(&audited_source, &kernel_prop, &term, budget);
 
     match result {
         ElaborationResult::NotElaborated(verdict) => {
@@ -142,6 +155,9 @@ fn budget_exhaustion_yields_not_elaborated_resource_exhausted() {
         ElaborationResult::Proven { .. } => {
             panic!("Budget was zero, but elaborate_and_publish yielded Proven!");
         }
+        ElaborationResult::Refused(err) => {
+            panic!("Budget was zero, but elaborate_and_publish yielded Refused({err:?})!");
+        }
     }
 }
 
@@ -149,16 +165,6 @@ fn budget_exhaustion_yields_not_elaborated_resource_exhausted() {
 fn decomposition_n2_well_formed_produces_proven() {
     let context = ContextId::root();
     let source_prop_id = PropositionId::from_canon(b"audited_decomp_prop");
-    let source_evidence = Evidence::KernelCertificate {
-        verifier: VerifierId::named("audit_verifier"),
-        certificate: CertificateId::from_canon(b"source_cert"),
-    };
-    let source = Judgement::new(
-        context,
-        source_prop_id,
-        Outcome::Audited,
-        source_evidence.id(),
-    );
 
     let g1 = GeneratorId::named("g1@1");
     let g2 = GeneratorId::named("g2@1");
@@ -168,6 +174,18 @@ fn decomposition_n2_well_formed_produces_proven() {
 
     let decomp =
         Decomposition::replay_verified(vec![g1, g2], vec![x0, x1, x2]).expect("valid decomp");
+
+    // The source must be Audited from *this* decomp: `elaborate_decomposition`
+    // binds the source's evidence to the decomp presented alongside it
+    // (ADR-0016 §6).
+    let source = Judgement::publish(
+        Authority::AuditChecker,
+        context,
+        source_prop_id,
+        Outcome::Audited,
+        Support::Settlement(&decomp),
+    )
+    .expect("AuditChecker/Audited/Settlement(ReplayVerified) is a legal route");
 
     let budget = Budget::new(100, 100);
     let result = elaborate_decomposition(&source, &decomp, budget);
@@ -183,6 +201,9 @@ fn decomposition_n2_well_formed_produces_proven() {
         ElaborationResult::NotElaborated(verdict) => {
             panic!("Expected Proven, got NotElaborated({verdict:?})");
         }
+        ElaborationResult::Refused(err) => {
+            panic!("Expected Proven, got Refused({err:?})");
+        }
     }
 }
 
@@ -190,16 +211,6 @@ fn decomposition_n2_well_formed_produces_proven() {
 fn decomposition_n3_well_formed_produces_proven() {
     let context = ContextId::root();
     let source_prop_id = PropositionId::from_canon(b"audited_decomp_prop_n3");
-    let source_evidence = Evidence::KernelCertificate {
-        verifier: VerifierId::named("audit_verifier"),
-        certificate: CertificateId::from_canon(b"source_cert_n3"),
-    };
-    let source = Judgement::new(
-        context,
-        source_prop_id,
-        Outcome::Audited,
-        source_evidence.id(),
-    );
 
     let g1 = GeneratorId::named("g1@1");
     let g2 = GeneratorId::named("g2@1");
@@ -212,6 +223,15 @@ fn decomposition_n3_well_formed_produces_proven() {
     let decomp = Decomposition::replay_verified(vec![g1, g2, g3], vec![x0, x1, x2, x3])
         .expect("valid decomp");
 
+    let source = Judgement::publish(
+        Authority::AuditChecker,
+        context,
+        source_prop_id,
+        Outcome::Audited,
+        Support::Settlement(&decomp),
+    )
+    .expect("AuditChecker/Audited/Settlement(ReplayVerified) is a legal route");
+
     let budget = Budget::new(100, 100);
     let result = elaborate_decomposition(&source, &decomp, budget);
 
@@ -225,6 +245,9 @@ fn decomposition_n3_well_formed_produces_proven() {
         }
         ElaborationResult::NotElaborated(verdict) => {
             panic!("Expected Proven, got NotElaborated({verdict:?})");
+        }
+        ElaborationResult::Refused(err) => {
+            panic!("Expected Proven, got Refused({err:?})");
         }
     }
 }
@@ -233,22 +256,21 @@ fn decomposition_n3_well_formed_produces_proven() {
 fn decomposition_n1_single_generator_produces_proven() {
     let context = ContextId::root();
     let source_prop_id = PropositionId::from_canon(b"audited_decomp_prop_n1");
-    let source_evidence = Evidence::KernelCertificate {
-        verifier: VerifierId::named("audit_verifier"),
-        certificate: CertificateId::from_canon(b"source_cert_n1"),
-    };
-    let source = Judgement::new(
-        context,
-        source_prop_id,
-        Outcome::Audited,
-        source_evidence.id(),
-    );
 
     let g1 = GeneratorId::named("g1@1");
     let x0 = ConfigId::from_canon(b"x0");
     let x1 = ConfigId::from_canon(b"x1");
 
     let decomp = Decomposition::replay_verified(vec![g1], vec![x0, x1]).expect("valid decomp");
+
+    let source = Judgement::publish(
+        Authority::AuditChecker,
+        context,
+        source_prop_id,
+        Outcome::Audited,
+        Support::Settlement(&decomp),
+    )
+    .expect("AuditChecker/Audited/Settlement(ReplayVerified) is a legal route");
 
     let budget = Budget::new(100, 100);
     let result = elaborate_decomposition(&source, &decomp, budget);
@@ -264,6 +286,9 @@ fn decomposition_n1_single_generator_produces_proven() {
         ElaborationResult::NotElaborated(verdict) => {
             panic!("Expected Proven, got NotElaborated({verdict:?})");
         }
+        ElaborationResult::Refused(err) => {
+            panic!("Expected Proven, got Refused({err:?})");
+        }
     }
 }
 
@@ -271,16 +296,16 @@ fn decomposition_n1_single_generator_produces_proven() {
 fn broken_chain_steps_do_not_connect_yields_not_elaborated() {
     let context = ContextId::root();
     let source_prop_id = PropositionId::from_canon(b"audited_decomp_prop_broken");
-    let source_evidence = Evidence::KernelCertificate {
-        verifier: VerifierId::named("audit_verifier"),
-        certificate: CertificateId::from_canon(b"source_cert_broken"),
-    };
-    let source = Judgement::new(
+    let source = Judgement::publish(
+        Authority::AuditChecker,
         context,
         source_prop_id,
         Outcome::Audited,
-        source_evidence.id(),
-    );
+        Support::tree_realization(source_prop_id),
+    )
+    .expect("AuditChecker/Audited/TreeRealization is a legal (provisional) route");
+    let audited_source = AuditedSource::verify(&source, Support::tree_realization(source_prop_id))
+        .expect("source binds to its own tree-realization support");
 
     let g1 = ObjectTerm::Const(PropositionId(GeneratorId::named("g1@1").digest()));
     let g2 = ObjectTerm::Const(PropositionId(GeneratorId::named("g2@1").digest()));
@@ -317,7 +342,7 @@ fn broken_chain_steps_do_not_connect_yields_not_elaborated() {
     let term = ExplicitTerm::new(context, term_kind);
 
     let budget = Budget::new(100, 100);
-    let result = elaborate_and_publish(&source, &implication_prop, &term, budget);
+    let result = elaborate_and_publish(&audited_source, &implication_prop, &term, budget);
 
     match result {
         ElaborationResult::NotElaborated(verdict) => {
@@ -328,6 +353,9 @@ fn broken_chain_steps_do_not_connect_yields_not_elaborated() {
         }
         ElaborationResult::Proven { .. } => {
             panic!("Broken chain steps do not connect, but yielded Proven!");
+        }
+        ElaborationResult::Refused(err) => {
+            panic!("Broken chain steps do not connect, but yielded Refused({err:?})!");
         }
     }
 }
