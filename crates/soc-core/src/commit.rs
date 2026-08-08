@@ -31,7 +31,7 @@ use brix_semantic::{
 };
 
 use crate::adm::Adm;
-use crate::calendar::{Frontier, Key};
+use crate::calendar::{Frontier, Key, KeyConflict};
 use crate::cost::CostRecord;
 use crate::delta::Delta;
 use crate::exec::ExecConfig;
@@ -173,6 +173,81 @@ pub fn commit_tick<F>(
 where
     F: FnMut(&Candidate, u64) -> Key,
 {
+    match try_commit_tick(regimes, adm, interner, e, context, phase, keyer) {
+        Ok(committed) => committed,
+        // The reference driver's contract is unchanged (ADR-0012 §2.5): it
+        // commits a valid selected candidate under a keyer whose tie-break is
+        // unique, so neither condition can arise here, and either one is an
+        // internal-consistency bug rather than a state a caller should handle.
+        // The messages are the ones this function raised before the fallible
+        // sibling was factored out.
+        Err(CommitTickError::KeyConflict(conflict)) => panic!(
+            "B^uk unique-key discipline violated at {:?}: two candidates with \
+             different observed successors were assigned the same calendar key \
+             (existing={:?}, attempted={:?}) — the keyer's tie-break is not \
+             actually unique for these candidates",
+            conflict.key, conflict.existing, conflict.attempted
+        ),
+        Err(CommitTickError::Commit(error)) => {
+            panic!("commit_tick: reference driver committing a valid selected candidate: {error:?}")
+        }
+    }
+}
+
+/// Why a [`try_commit_tick`] tick could not complete (ADR-0012 §4.3 step 5,
+/// §6.3; issue #254).
+///
+/// Both conditions were previously panics inside [`commit_tick`], and both are
+/// already named in the saturation stop vocabulary —
+/// [`crate::saturate::SaturationUnknown::KeyConflict`] and
+/// [`crate::saturate::SaturationUnknown::CommitFailed`]. This type is what
+/// makes those two variants reachable from a run instead of merely declared.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum CommitTickError {
+    /// Two admissible candidates with different observed successors were
+    /// assigned the same calendar key: the `B^uk` unique-key discipline
+    /// (ADR-0002 §1/§8.1) was violated by the keyer.
+    ///
+    /// The frontier is left exactly as it was ([`Frontier::insert`]), so no
+    /// partially-built tick escapes.
+    KeyConflict(KeyConflict<(Candidate, usize)>),
+    /// The commit boundary rejected the selected candidate — an unresolved
+    /// handle, a malformed or endpoint-mismatched decomposition, or any other
+    /// [`CommitError`] from [`try_commit_selected`].
+    Commit(CommitError),
+}
+
+impl From<CommitError> for CommitTickError {
+    fn from(e: CommitError) -> Self {
+        CommitTickError::Commit(e)
+    }
+}
+
+/// The fallible sibling of [`commit_tick`]: one tick of `γ = select_K ∘ δ`
+/// that **returns** the two conditions the reference driver panics on
+/// (ADR-0012 §4.3 step 5 / §6.3, issue #254).
+///
+/// Same enumeration, same `select_K`, same commit boundary, same costs —
+/// `commit_tick` is now a thin wrapper that unwraps this and panics, so the
+/// two drivers cannot drift. A saturated run drives *this* one, which is what
+/// lets `SaturationUnknown::{KeyConflict, CommitFailed}` be reached by a run
+/// rather than only by calling the primitives directly.
+///
+/// Fails closed: on either error no `Committed` value, no `CommittedStep`, and
+/// no successor is produced. Neither condition is ever `Refuted`; the caller
+/// grades both as `Unknown` (ADR-0014 §5.1).
+pub fn try_commit_tick<F>(
+    regimes: &[&dyn SettlementRegime],
+    adm: &dyn Adm,
+    interner: &Interner,
+    e: &ExecConfig,
+    context: ContextId,
+    phase: u64,
+    keyer: &mut F,
+) -> Result<(Committed, Option<CommittedStep>, CostRecord), CommitTickError>
+where
+    F: FnMut(&Candidate, u64) -> Key,
+{
     // δ: oracle-shared enumeration (see module docs for why this mirrors
     // cand_instrumented inline rather than calling it).
     let mut frontier: Frontier<(Candidate, usize)> = Frontier::new();
@@ -187,15 +262,9 @@ where
             work += 1;
             if adm.admits(e, &c) {
                 let key = keyer(&c, phase);
-                frontier.insert(key, (c, idx)).unwrap_or_else(|conflict| {
-                    panic!(
-                        "B^uk unique-key discipline violated at {:?}: two candidates with \
-                         different observed successors were assigned the same calendar key \
-                         (existing={:?}, attempted={:?}) — the keyer's tie-break is not \
-                         actually unique for these candidates",
-                        conflict.key, conflict.existing, conflict.attempted
-                    )
-                });
+                frontier
+                    .insert(key, (c, idx))
+                    .map_err(CommitTickError::KeyConflict)?;
             }
         }
     }
@@ -204,7 +273,7 @@ where
 
     // select_K.
     let Some((key, (candidate, regime_idx))) = frontier.select_least() else {
-        return (Committed::Quiescent, None, cost);
+        return Ok((Committed::Quiescent, None, cost));
     };
 
     // Commit boundary: handles → digests (ADR-0002 §9.2), never earlier.
@@ -213,10 +282,9 @@ where
     // conditions cannot arise — an error here is an internal-consistency bug,
     // exactly like the previous `interner.resolve` / `compose_chain` panics.
     let regime = regimes[regime_idx];
-    let (committed, step) = try_commit_selected(key, &candidate, regime, interner, e, context)
-        .expect("commit_tick: reference driver committing a valid selected candidate");
+    let (committed, step) = try_commit_selected(key, &candidate, regime, interner, e, context)?;
 
-    (committed, Some(step), cost)
+    Ok((committed, Some(step), cost))
 }
 
 /// A recoverable failure at the fallible commit boundary (ADR-0012 §6). These
