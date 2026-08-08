@@ -84,7 +84,9 @@ use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_semantic::{ConfigId, ContextId, GeneratorId, Outcome};
 
 use crate::adm::Adm;
-use crate::commit::{commit_tick, CommitError, Committed, Observation, SettlementRegime};
+use crate::commit::{
+    try_commit_tick, CommitError, CommitTickError, Committed, Observation, SettlementRegime,
+};
 use crate::cost::CostRecord;
 use crate::exec::ExecConfig;
 use crate::intern::{Handle, Interner};
@@ -541,9 +543,12 @@ pub enum SaturationUnknown {
     },
     /// The commit boundary failed, so no trustworthy successor exists.
     ///
-    /// Not reachable from [`sat_step`], which drives the reference
-    /// [`commit_tick`]; it is declared for the fallible driver arriving with
-    /// Stage C.
+    /// Reached from [`sat_step`], which drives the fallible
+    /// [`crate::commit::try_commit_tick`] (#254): any [`CommitError`] the
+    /// commit boundary raises — an unresolved handle, an empty or
+    /// endpoint-mismatched decomposition, a Stage B candidate/witness/generator
+    /// mismatch — stops the run here with the underlying error preserved. No
+    /// step is committed and no certificate is produced.
     CommitFailed {
         /// Index into the returned step vector.
         at_step: u64,
@@ -561,10 +566,15 @@ pub enum SaturationUnknown {
         /// Index into the returned step vector.
         at_step: u64,
     },
-    /// The `B^uk` unique-key discipline was violated during saturation.
+    /// The `B^uk` unique-key discipline was violated during saturation: two
+    /// admissible candidates with different observed successors were assigned
+    /// the same calendar key.
     ///
-    /// Not reachable from [`sat_step`] — the reference `commit_tick` panics on
-    /// a key conflict. Declared for the fallible driver (Stage C).
+    /// Reached from [`sat_step`] via [`crate::commit::try_commit_tick`]
+    /// (#254). The reference [`crate::commit::commit_tick`] still panics on this — there it
+    /// is an internal-consistency bug — but a run driven by a
+    /// source-derived keyer stops closed instead. The frontier is left exactly
+    /// as it was, so no partially-built tick escapes.
     KeyConflict {
         /// Index into the returned step vector.
         at_step: u64,
@@ -625,7 +635,11 @@ where
 
     loop {
         let tick_phase = phase.saturating_add(consumed.len() as u64);
-        let (committed, step, cost) = commit_tick(
+        // The fallible driver (#254): a key conflict or a rejected commit
+        // boundary is a stop, not a panic. Both land on already-declared
+        // `SaturationUnknown` variants whose `at_step` is the index into the
+        // steps consumed so far — the step that would have been next.
+        let (committed, step, cost) = match try_commit_tick(
             pres.regimes,
             pres.adm,
             pres.interner,
@@ -633,7 +647,25 @@ where
             pres.context,
             tick_phase,
             keyer,
-        );
+        ) {
+            Ok(tick) => tick,
+            Err(CommitTickError::KeyConflict(_)) => {
+                let at_step = consumed.len() as u64;
+                return (
+                    SaturatedStep::Unknown(SaturationUnknown::KeyConflict { at_step }),
+                    consumed,
+                    finish_cost(work),
+                );
+            }
+            Err(CommitTickError::Commit(error)) => {
+                let at_step = consumed.len() as u64;
+                return (
+                    SaturatedStep::Unknown(SaturationUnknown::CommitFailed { at_step, error }),
+                    consumed,
+                    finish_cost(work),
+                );
+            }
+        };
         work = fold_cost(work, &cost);
 
         match committed {
