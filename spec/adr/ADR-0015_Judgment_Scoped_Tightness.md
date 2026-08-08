@@ -1,8 +1,8 @@
 # ADR-0015 — Judgment-Scoped Tightness, Kernel-Checked Primitive Realizations, and the Arithmetic Typing Rule
 
-Status: **Proposed** (2026-08-07). Pins what a tight-generator discharge *means*, replaces the informal correspondence argument with a kernel-checked mechanism, and rules on `g_arith`, `g_arith_split`, and the numeric promotion edges.
+Status: **Proposed** (2026-08-07; ⟨D-PRIM⟩'s constructor and registry-location decisions pinned 2026-08-08 after an external kernel-design consult). Pins what a tight-generator discharge *means*, replaces the informal correspondence argument with a kernel-checked mechanism, and rules on `g_arith`, `g_arith_split`, and the numeric promotion edges.
 
-Date: 2026-08-07.
+Date: 2026-08-07; revised 2026-08-08.
 
 Foundation: [ADR-0002](./ADR-0002_SOC_Constitution.md) §4.1 (authority table), §5.3 (fail closed), §10 PD-1 (the tight generated subcategory); [ADR-0003](./ADR-0003_Proof_Kernel_Profile.md) and [ADR-0013](./ADR-0013_Canonical_Certificate_Envelope.md) (kernel profile and frozen certificate envelope); `crates/soc-regimes/src/type_realization.rs` (`generator_is_tight`, `honest_result_outcome`); `crates/brix-elaborate/src/lib.rs` (`elaborate_tree`). Governs issue #53.
 
@@ -55,16 +55,40 @@ This is why `g_float_lit` is honestly tight: it discharges `HasType(3.14, Float)
 
 ### ⟨D-PRIM⟩ Primitive realizations become kernel-checked facts, not prose
 
-> The kernel SHALL own a frozen, finite **primitive-realization table** and a proof-term constructor that discharges a `Prop::Realizes(g, src, dst)` leaf **iff** that exact triple is in the table. A generator is tight for a judgment when its every emitted leaf is discharged by that constructor.
+> The kernel SHALL own a **compiled-in, immutable, judgment-scoped primitive-relation registry** and a dedicated zero-premise introduction term
+>
+> ```text
+> PrimRealizes { relation: PrimitiveRelationId, src: ObjectTerm, dst: ObjectTerm }
+> ```
+>
+> which synthesizes `Prop::Realizes(g, src, dst)` **iff** the registry resolves `relation` and `(src, dst)` is an exact member of its frozen rows.
 
 This replaces the doc-comment correspondence argument with a mechanism a checker executes. It generalises past arithmetic: it is the general discharge route for PD-1's tight generated subcategory, which ADR-0002 §10 currently discharges only *operationally* per committed witness.
 
-Constraints:
+**The relation identity fixes the generator; the caller does not supply it.** Each `PrimitiveRelationId` resolves to an immutable descriptor:
 
-- The table is **kernel-owned**. A host-side computation followed by a generic kernel rule that trusts the computed result is **not** sufficient — that would move the trust boundary back out of the TCB.
-- Every material field must be bound into what the kernel checks: for arithmetic, the operator, both operand types, the result type, and every promotion edge.
-- Adding a `TermKind` constructor uses an **append-only ordinal** (the existing discipline: "append-only ordinals AFTER Sum=3"). Existing frozen certificate vectors are unaffected because their terms do not use the new ordinal; ADR-0013's v1 envelope does not move.
-- Expanding the kernel expands the TCB. That is the cost, and it is why this is an ADR rather than a code change.
+```text
+PrimitiveRelation { judgment_kind, generator, source_schema, destination_schema, rows }
+```
+
+so a typing relation is *structurally incapable* of synthesizing an evaluation generator's `Realizes`. This is the mechanical enforcement of ⟨D-JUDGE⟩ — the scoping lives in the relation identity, never in a comment or naming convention.
+
+The synthesis rule is closed and consults no hypothesis context. Given `K[ρ] = (J, g, S, D, R)`, `src` canonical under `S`, `dst` canonical under `D`, and `(src, dst) ∈ R`, it yields exactly `Realizes(g, src, dst)`. Checking against an expected proposition uses the normal synthesize-then-compare path under existing canonical structural equality; there is no expected-mode shortcut that reconstructs fields from the caller's goal.
+
+**`Prop::Applied` is rejected as the carrier.** It has no checking rule today — one occurrence in the entire checker, inside a free-variable scan — so it would need a new introduction rule *and* a bridge to `Realizes` *and* rules preventing that bridge from firing for the wrong predicate. The bridge would be the real primitive rule; `Applied` would add indirection and a larger generic-axiom surface while reducing nothing. It stays inert until it has independently justified semantics.
+
+**The registry lives in the TCB.** A new primitive relation is a kernel release. That is the correct cost: a generator whose realization is not derivable from existing kernel rules *is* a new trusted axiom, and no honest mechanism adds one without increasing trusted semantic content somewhere. The executable logic need not grow much — one small exact-membership rule — while the trusted *data* grows declaratively.
+
+- **Caller-supplied tables are rejected as circular.** "The caller says this realization is valid; the kernel checks the caller included it in the caller's table" does not move authority into the kernel, it serializes the original assertion. Schema validation and canonical encoding show a table is well-formed, not that its contents are authorized.
+- **A digest-pinned hybrid is sound but not selected.** With kernel-allowlisted digests covering relation identity, judgment kind, generator, schema versions and every canonical row, plus kernel-owned parsing and fail-closed behaviour, the digest is a compact trusted commitment and semantic trust stays in the kernel. It is rejected on cost, not soundness: another parser and canonicalization path, a collision-resistance assumption, more loading/DoS surface — and no added flexibility, since each new digest still requires a kernel release.
+- **No signing key.** A key that could authorize new tables without a kernel release would be a delegated semantic authority inside the TCB, able to widen what counts as `Proven` without changing the kernel. That would need its own constitutional ADR.
+
+Other constraints:
+
+- Adding a `TermKind` constructor uses the **next unused append-only ordinal**; no existing ordinal is renumbered or reused, including `Unsupported`. Existing certificate bytes and frozen vectors are unchanged; new vectors are added.
+- **Relation identities are immutable.** Adding, removing or changing a row does not update `TypingArithV1` — it allocates `TypingArithV2`. Otherwise identical certificate bytes would mean different things under different kernel releases.
+- The minimum semantic partition is one relation per **judgment kind × generator × schema version**. One physical registry artifact is fine as packaging; one undifferentiated global set of `Realizes` triples is not.
+- **No implicit promotion closure.** If a two-edge promotion path is admissible, either that exact path appears in the row or another explicit kernel rule validates it. The host cannot assert transitivity and have it trusted.
 
 ### ⟨D-ARITH⟩ `g_arith` is dischargeable for typing, and only for typing
 
@@ -133,9 +157,32 @@ Make `generator_is_tight` take the judgment kind it is being asked about, so a f
 
 Gate: `honest_result_outcome` consults the typing index only; a second, empty claim kind exists and returns "not discharged" for every generator; a test asserts a generator tight for typing is **not** tight for the empty kind.
 
-### Stage B — the kernel primitive-realization table ⟨D-PRIM⟩
+### Stage B0 — re-schema the `g_arith` source object ⟨D-PRIM⟩ **(blocking prerequisite)**
 
-Add the frozen table and the term constructor. Populate it with the arithmetic typing relation: the finite matrix over `{Add, Sub, Mul, Div}` × supported numeric operand types, with result types and admissible promotion edges.
+**The registry cannot be populated from the current emission.** `g_arith`'s leaf is:
+
+```rust
+src: Prod(Atom(Type(result_ty)), Atom(Type(result_ty))),
+dst: Atom(Type(result_ty)),
+```
+
+It encodes **neither the operator, nor the original operand types, nor the promotion paths** — both operands appear already coerced to the result type, and the promotions are spliced in as separate coercion leaves.
+
+That is not a cosmetic gap. `Div` has a *different* result-type rule from the other three (`field_of`: `Int/Int → Float`, `Nat/Nat → Float`), so `1.0 + 2.0` and `7 / 2` currently emit the **identical** leaf `Prod(Type(Float), Type(Float)) → Type(Float)`. A table keyed on `(operator, lhs, rhs, promotions) → result` cannot be reached from that source object, and a table keyed on what the source object *does* carry could not distinguish addition from division.
+
+This is harmless today — the leaf is a hypothesis and the grade is capped — and it is precisely why the discharge is unavailable. So: **if the source representation does not encode every field that affects admissibility, the primitive MUST NOT be discharged.** Version the source-object schema first:
+
+```text
+ArithTypingInputV1(operator, lhs_type, rhs_type, lhs_promotion_path, rhs_promotion_path)
+```
+
+where a promotion path is an ordered sequence of exact promotion-edge ids and the empty path is identity; `dst` is the exact result type.
+
+Gate: the emitted `g_arith` leaf round-trips every material field; a fixture proves `1.0 + 2.0` and `7 / 2` now emit **distinguishable** leaves; existing typing results and grades are unchanged (this stage moves no grade).
+
+### Stage B — the kernel primitive-relation registry ⟨D-PRIM⟩
+
+Add the registry and the `PrimRealizes` constructor. Populate `TypingArithV1` — `judgment_kind = Typing`, `generator = g_arith`, schemas `ArithTypingInputV1`/`NumericResultTypeV1` — with the finite matrix over `{Add, Sub, Mul, Div}` × supported operand types, with result types and admissible promotion paths. Rows must satisfy a build-time functionality invariant: one canonical `src` never maps to two result types.
 
 Gates:
 
@@ -150,7 +197,21 @@ Gate: `arithmetic_split_rule_is_a_kernel_primitive` — splitting yields exactly
 
 ### Stage D — discharge `g_arith` for typing, and pin the rendering ⟨D-JUDGE⟩
 
-Add `g_arith` to the typing tightness index. Gates:
+**A boolean whitelist flip is the wrong mechanism, and MUST NOT be used.** After ⟨D-PRIM⟩,
+
+```text
+generator_is_tight(g_arith) == true
+```
+
+is too coarse to be authoritative: it would regrade certificates whose leaves are still `Hyp`. **Merely shipping the registry must not retroactively upgrade an old proof.**
+
+Normatively:
+
+> The evidence-bearing identity is the exact primitive relation **and the actual kernel-accepted proof term**. A leaf is closed only when the certificate contains the `PrimRealizes` term for that leaf and the kernel Accepted the resulting closed proof. `generator_is_tight` survives at most as a **non-authoritative capability hint** — "this generator *can* be discharged" — never as the evidence itself.
+
+So `honest_result_outcome` must stop asking "is this generator in a set?" and start asking "was this leaf actually closed by an accepted primitive instance?"
+
+Gates:
 
 1. `let x = 1 + 2` reaches `HasType(x, Int) @Proven`, and the kernel certificate names that exact proposition and context.
 2. `arithmetic_typing_proof_does_not_publish_evaluation` — no `EvaluatesTo` judgement is produced or implied. **This is a constitutional test, not a UI preference.**
@@ -169,12 +230,30 @@ Per ⟨D-OPGRAN⟩ the rollout is operation-specific: checked `Nat`/`Int` additi
 
 ## 7. Compatibility and evolution
 
-- New `TermKind` ordinals are append-only; ADR-0013's v1 certificate envelope does not move, and existing frozen vectors must not be re-blessed.
-- The primitive-realization table is a frozen artifact once populated: an entry may not change in place without a new table version.
-- Widening the table beyond typing — to any value or evaluation relation — requires a new ADR, because it changes what a kernel `Accepted` verdict means.
+- New `TermKind` ordinals are append-only; no existing ordinal is renumbered or reused, including `Unsupported`. Existing certificate bytes and frozen vectors are unchanged; new vectors are added for the new constructor.
+- **Forward/backward behaviour:** new kernels continue to parse and check all old certificates. Old kernels encountering the new ordinal reject it as unknown — they MUST NOT reinterpret an unknown ordinal as another constructor. An unknown relation id under a known `PrimRealizes` constructor also fails closed.
+- **Old certificates whose leaves are `Hyp` remain assumption-dependent and remain capped.** Shipping the registry upgrades nothing retroactively.
+- Relation identities are immutable; a row change allocates a new id, never an in-place edit.
+- Widening the registry beyond typing — to any value or evaluation relation — requires a new ADR, because it changes what a kernel `Accepted` verdict means.
+- **Envelope version:** on the premise that ADR-0013 v1 defines `TermKind` as append-only extensible, the envelope stays v1 — existing encodings do not change and the new ordinal is an extension newer kernels understand. **That extensibility must be normative in the v1 spec, not merely a Rust enum convention.** If v1 instead freezes a closed constructor set, the new term requires a proof-format version bump even though the outer envelope framing is unchanged. Confirm which before Stage B.
 
-## 8. Open decisions
+## 8. Hard boundaries — what this mechanism must never be widened to do
 
-- **⟨D-PRIM⟩'s exact term-constructor shape** is not pinned here. Whether the kernel gains a dedicated `TermKind::Prim(GeneratorId, src, dst)` or reuses `Prop::Applied` with a frozen predicate id is an encoder-review question for the `brix-kernel` lane, and the choice is ABI-visible. Pin it before Stage B is implemented.
-- **Whether `generator_is_tight`'s claim-kind index should be a closed enum or an open identifier** — closed is safer now (an unknown kind cannot silently default to "discharged"), open is cheaper when settlement and coverage judgments join. Recommend closed; revisit if a third kind arrives.
-- **Whether the four exact promotion edges warrant one table entry each or a single parameterized entry.** Per-entry is more auditable; parameterized is smaller. Not load-bearing for correctness either way.
+1. **No generic arbitrary-proposition primitive.** Never `PrimProp(Prop)`, never a registry holding arbitrary `Prop` values. The constructor introduces only `Prop::Realizes`.
+2. **No `Applied` laundering.** A primitive `Applied` fact must not be bridgeable into `Realizes`, `Eq`, or `Preserves` without a separately reviewed kernel rule.
+3. **No caller-authorized facts.** Request data may select a kernel-owned relation and propose `src`/`dst`; it may never supply or amend the trusted relation.
+4. **No mutable relation identities.** Semantic expansion requires a new id and a kernel release.
+5. **No host-side semantic normalization.** Joins, coercion paths, result types, wildcard matching, transitive closure, and schema interpretation are not trusted because the host computed them.
+6. **No cross-judgment reuse.** A typing relation cannot license evaluation, equality, preservation, totality, canonical value identity, or numeric correctness.
+7. **No generator-only grade upgrade.** A generator's presence in a registry does not make every occurrence `Proven`; only an exact accepted primitive instance closes a leaf.
+8. **No `Refuted` from absence.** "Not in the registry" means the kernel has not introduced the fact — never that its negation holds.
+9. **No wildcard or pattern rows.** This authorizes finite exact relations only. An algorithmic predicate, range rule, or decision procedure is another kernel primitive needing separate review.
+10. **No claim of implementation verification.** The rule proves the submitted instance belongs to the kernel's normative realization relation. It does not prove the Rust generator is complete, deterministic, total, or incapable of producing rejected outputs.
+
+## 9. Open decisions
+
+- **Whether the claim-kind index should be a closed enum or an open identifier** — closed is safer now (an unknown kind cannot silently default to "discharged"), open is cheaper when settlement and coverage judgments join. Recommend closed; revisit if a third kind arrives.
+- **Whether the four exact promotion edges warrant one relation each or one parameterized relation.** Per-relation is more auditable; parameterized is smaller. Not load-bearing for correctness.
+- **Whether ADR-0013 v1 normatively defines `TermKind` as append-only extensible** (§7's last bullet). This decides envelope-version-bump or not, and is a documentation question about the existing freeze rather than a new design choice.
+
+⟨D-PRIM⟩'s constructor shape — the previously-open blocker — is now **pinned** above.
