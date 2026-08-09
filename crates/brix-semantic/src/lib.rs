@@ -62,6 +62,7 @@ mod decomposition;
 mod dependency;
 mod evidence;
 mod generator;
+mod generator_semantics;
 mod id;
 mod judgement;
 mod outcome;
@@ -80,7 +81,11 @@ pub use decomposition::{
 };
 pub use dependency::{Dependency, DependencyId, EdgeKind};
 pub use evidence::{CertificateId, Durability, Evidence, EvidenceId, VerifierId};
-pub use generator::{GeneratorId, GeneratorRegistry, GeneratorRegistryId, GeneratorSemantics};
+pub use generator::{GeneratorId, GeneratorRegistry, GeneratorRegistryId};
+pub use generator_semantics::{
+    GeneratorSemanticsIdV1, GeneratorSemanticsV1, SemanticsError, SettlementRelationV1,
+    GENERATOR_SEMANTICS_MARKER_V1, GENERATOR_SEMANTICS_VERSION_V1,
+};
 pub use judgement::{Judgement, JudgementId};
 pub use outcome::{Authority, Outcome};
 pub use proposition::PropositionId;

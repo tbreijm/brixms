@@ -82,6 +82,7 @@
       "normative_anchors": [
         "spec/adr/ADR-0002_SOC_Constitution.md",
         "spec/adr/ADR-0019_Verification_Tags_Are_Earned.md",
+        "spec/adr/ADR-0020_Oracle_Bound_Audit_Receipts.md",
         "docs/audit/issue-63/tcb-audit.md"
       ],
       "implementation_anchors": [
@@ -94,8 +95,12 @@
           "tests": ["good_decomposition_upgrades_to_audited_with_correct_authority", "corrupted_intermediate_configuration_yields_unknown_never_a_pass", "generator_outside_registry_yields_unknown_never_a_pass", "derived_judgement_is_never_mutated_upgrade_is_a_new_judgement_and_edge", "log_integrity_mismatch_yields_unknown", "non_recorded_decomposition_is_rejected"]
         },
         {
+          "path": "crates/brix-semantic/src/generator_semantics.rs",
+          "tests": ["an_undeclared_generator_fails_closed_rather_than_returning_false", "registry_agreement_requires_exact_equality_not_containment", "distinct_declarations_have_distinct_ids"]
+        },
+        {
           "path": "crates/brix-semantic/src/decomposition.rs",
-          "tests": ["verify_replay_walks_every_link_exactly_once_in_order", "a_padded_chain_cannot_earn_the_tag", "a_generator_outside_the_registry_is_refused_before_the_relation_is_asked"]
+          "tests": ["verify_replay_accepts_exactly_the_declared_chain", "a_padded_chain_cannot_earn_the_tag", "a_generator_outside_the_registry_is_refused_before_the_relation_is_asked", "a_permissive_declaration_is_detectable_by_its_distinct_id"]
         }
       ],
       "failure_mode": "Return AuditResult::Unknown for every incomplete or inconsistent replay; never publish a partial pass.",

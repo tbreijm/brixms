@@ -132,7 +132,7 @@ pub mod saturate;
 pub mod store;
 
 pub use adm::{Adm, AdmAll, AdmNone, AdmRegimeAllowlist, AdmSuccessorFilter, AndAdm};
-pub use audit::{audit_journal, audit_step, AuditResult, AuditedStep, GeneratorSemantics};
+pub use audit::{audit_journal, audit_step, AuditResult, AuditedStep, GeneratorSemanticsV1};
 pub use calendar::{Frontier, FrontierDeltaError, Key, KeyConflict};
 pub use commit::{
     commit_tick, prospective_successor, run, run_reason, step_world_delta, try_commit_selected,

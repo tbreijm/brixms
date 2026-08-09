@@ -35,20 +35,16 @@ use brix_semantic::{
 
 use crate::journal::{CommittedStep, Journal};
 
-/// The relation `ρ_g` of each generator `g ∈ 𝒢`, as the checker replays it.
+/// The declared settlement relations `ρ_g`, re-exported here so the audit
+/// checker's callers need not reach past it (ADR-0020 D2).
 ///
-/// **Moved to `brix-semantic` by ADR-0019 D3** and re-exported here so no
-/// implementation path changed. It now lives beside [`Decomposition`], because
-/// the code that *sets* the `ReplayVerified` tag must be the code that
-/// *performs* the check — see [`Decomposition::verify_replay`], which walks the
-/// EXACT relational composition `ρ_k = ρ_gn ∘ … ∘ ρ_g1` one generator at a time
-/// (ADR-0002 §6, `Build_Plan_v3_SOC.md` Step 4 gate).
-///
-/// Moving the relation interface did **not** move this checker: `audit_step`
-/// still owns settlement replay in journal context (steps 1 and 2 below),
-/// which needs `CommittedStep` and the journal — types `brix-semantic` does
-/// not have and must not grow.
-pub use brix_semantic::GeneratorSemantics;
+/// This was an open trait until ADR-0020. It is now **canonical data**: a
+/// caller can no longer supply an executable predicate that decides primitive
+/// relations however it likes, so the audit's oracle is identifiable rather
+/// than merely executed. `audit_step` still owns settlement replay *in journal
+/// context* — the log-integrity and committed-step endpoint checks, which need
+/// types `brix-semantic` does not have and must not grow.
+pub use brix_semantic::GeneratorSemanticsV1;
 
 /// The result of auditing one [`CommittedStep`]. `Unknown` carries a reason
 /// and is **never** a pass (ADR-0002 §4: "fail closed to `Unknown`, never a
@@ -117,7 +113,7 @@ pub fn audit_step(
     step: &CommittedStep,
     context: ContextId,
     registry: &GeneratorRegistry,
-    semantics: &dyn GeneratorSemantics,
+    semantics: &GeneratorSemanticsV1,
 ) -> AuditResult {
     // This module's one and only outcome route (ADR-0002 §4.1): it never
     // publishes Derived/Proven, only ever Audited — and only Authority::
@@ -193,6 +189,11 @@ pub fn audit_step(
             // form. Never turn an internal impossibility into a silent pass.
             return AuditResult::Unknown("decomposition is not in recorded form");
         }
+        Err(ReplayVerificationError::Semantics { .. }) => {
+            // The declared semantics has no relation for a cited generator
+            // (ADR-0020 D2). A refusal, never a checked negative.
+            return AuditResult::Unknown("declared semantics does not cover a cited generator");
+        }
     };
     // This module's one and only publication, through the ADR-0016 §4 fence.
     // The `(AuditChecker, Audited, Settlement)` route demands a
@@ -230,7 +231,7 @@ pub fn audit_journal(
     journal: &Journal,
     context: ContextId,
     registry: &GeneratorRegistry,
-    semantics: &dyn GeneratorSemantics,
+    semantics: &GeneratorSemanticsV1,
 ) -> Vec<AuditResult> {
     journal
         .steps()

@@ -4,8 +4,7 @@ use brix_elaborate::{
 use brix_kernel::{Budget, ExplicitTerm, ObjectTerm, Prop, TermKind, Var, Verdict};
 use brix_semantic::{
     AuditedSource, Authority, ConfigId, ContextId, Decomposition, EdgeKind, Evidence, GeneratorId,
-    GeneratorRegistry, GeneratorSemantics, Judgement, Outcome, PropositionId, Support,
-    TreeDerivation,
+    GeneratorRegistry, Judgement, Outcome, PropositionId, Support, TreeDerivation,
 };
 
 /// A `StructureVerified` single-leaf tree derivation — the typing lane's
@@ -391,30 +390,15 @@ fn broken_chain_steps_do_not_connect_yields_not_elaborated() {
 /// corrupted intermediate config, an unregistered generator) live beside
 /// `verify_replay` itself in `brix-semantic`.
 fn verified_chain(generators: Vec<GeneratorId>, configs: Vec<ConfigId>) -> Decomposition {
-    struct ExactChain {
-        links: Vec<(GeneratorId, ConfigId, ConfigId)>,
-    }
-    impl GeneratorSemantics for ExactChain {
-        fn realizes(&self, g: &GeneratorId, src: &ConfigId, dst: &ConfigId) -> bool {
-            self.links
-                .iter()
-                .any(|(a, b, c)| a == g && b == src && c == dst)
-        }
-    }
-
     let mut registry = GeneratorRegistry::new();
     for g in &generators {
         registry.insert(*g);
     }
-    let links = generators
-        .iter()
-        .enumerate()
-        .map(|(i, g)| (*g, configs[i], configs[i + 1]))
-        .collect();
+    let semantics = chain_semantics(&generators, &configs);
 
     Decomposition::recorded(generators, configs)
         .expect("well-formed fixture chain")
-        .verify_replay(&registry, &ExactChain { links })
+        .verify_replay(&registry, &semantics)
         .expect("an honest fixture chain earns the tag")
 }
 
@@ -437,4 +421,18 @@ fn verified_tree_derivation(tree: RealizesTree) -> TreeDerivation {
     TreeDerivation::recorded(tree.clone())
         .verify_structure(&tree.src(), &tree.dst(), &registry)
         .expect("a well-formed fixture tree over its own generators earns the tag")
+}
+
+/// The honest declaration for a chain (ADR-0020 D2/D7): `gi ↦ ExactRows{(xi, xi+1)}`.
+/// Fixtures declare finite rows instead of implementing a predicate, so what a
+/// test assumes about the oracle is inspectable data with its own id.
+fn chain_semantics(
+    generators: &[GeneratorId],
+    configs: &[ConfigId],
+) -> brix_semantic::GeneratorSemanticsV1 {
+    let mut m = brix_semantic::GeneratorSemanticsV1::new();
+    for (i, g) in generators.iter().enumerate() {
+        m.declare_rows(*g, [(configs[i], configs[i + 1])]);
+    }
+    m
 }
