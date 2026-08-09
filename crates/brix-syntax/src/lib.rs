@@ -13,7 +13,9 @@
 
 pub mod ast;
 pub mod lexer;
+pub mod limits;
 pub mod parser;
 
 pub use ast::Module;
-pub use parser::{parse, ParseError};
+pub use limits::{LimitExceeded, ParseLimits};
+pub use parser::{parse, parse_bounded, ParseError};
