@@ -476,7 +476,7 @@ pub enum ClaimKind {
 /// parameter exists and why the enum is closed.
 ///
 /// For [`ClaimKind::Empty`] this always returns `false`, unconditionally, for
-/// every generator — including the sixteen discharged below.
+/// every generator — including the seventeen discharged below.
 ///
 /// For [`ClaimKind::Typing`], discharged:
 ///
@@ -509,6 +509,30 @@ pub enum ClaimKind {
 ///    Top-level wildcard/variable catch-all matches are excluded: they emit the
 ///    distinct, undischarged `g_match_catchall` until their repeated branch
 ///    premises are represented explicitly.
+/// 4. **`g_arith_split`** — on the same structural grounds as the `*_split`
+///    leaves above, and **independently of `g_arith`** (ADR-0015 ⟨D-SPLIT⟩,
+///    Stage C). Its claim is that an arithmetic node contains this operator and
+///    these two ordered subexpressions, and that typing it yields those two
+///    child obligations in the same context. The operator is bound because the
+///    leaf's `src` is the whole node's configuration; the children are bound
+///    because they are its `dst`, in source order. It asserts nothing about
+///    what arithmetic *means*.
+///
+///    **The discharge is conditional and the condition is executable.** It
+///    holds only while the split stays purely structural: ⟨D-SPLIT⟩ states
+///    that if `g_arith_split` "ever selects a promotion, synthesises a result
+///    type, or filters operations by unchecked host logic, those parts inherit
+///    `g_arith`'s evidence burden and the discharge lapses."
+///    `arithmetic_split_rule_is_a_kernel_primitive` pins exactly that — most
+///    directly by deriving the *same* expression under two contexts that force
+///    different promotions and asserting the split leaf is byte-identical
+///    across them. Stage B0 deliberately routed the promotion selection
+///    through the separate `g_arith_input` bridge rather than the split, which
+///    is what keeps this condition true.
+///
+///    Discharging the split while `g_arith` remains capped is safe: the
+///    least-discharged leaf still caps the derivation, so `1 + 2` does not
+///    move.
 ///
 /// Deliberately **NOT** discharged: `g_arith` (a primitive operation is
 /// type-preserving at the operand types), `g_arith_input` (the operator and
@@ -551,6 +575,7 @@ pub fn generator_is_tight(kind: ClaimKind, g: &GeneratorId) -> bool {
                 || *g == g_ctor()
                 || *g == g_match_split()
                 || *g == g_match()
+                || *g == g_arith_split()
         }
     }
 }
@@ -2938,6 +2963,201 @@ mod tests {
     }
 
     #[test]
+    fn arithmetic_split_rule_is_a_kernel_primitive() {
+        // ADR-0015 Stage C / ⟨D-SPLIT⟩ — the soundness evidence for
+        // discharging `g_arith_split`. Four obligations, in the ADR's own
+        // order: exactly two ordered child obligations; context and operator
+        // preserved; no promotion chosen and no result type synthesised; a
+        // malformed arity or forged child rejected.
+        use brix_kernel::{ExplicitTerm, Prop, TermKind, Var, Verdict};
+        use brix_semantic::PropositionId;
+
+        let ctx_id = ContextId::root();
+
+        // (i) Exactly two ordered child obligations, and the packaging is the
+        //     kernel's own binary product introduction — the same rule the
+        //     other `*_split` leaves rest on (`g_record_split` /
+        //     `g_field_split` / `g_ctor_split` / `g_match_split`), which is
+        //     precisely the "same structural grounds" ⟨D-SPLIT⟩ appeals to.
+        let atom = |name| Prop::Atom(PropositionId::from_canon(name));
+        let (lhs, rhs) = (atom(b"lhs obligation"), atom(b"rhs obligation"));
+        let pair_formation = Prop::Impl(
+            Box::new(lhs.clone()),
+            Box::new(Prop::Impl(
+                Box::new(rhs.clone()),
+                Box::new(Prop::Prod(Box::new(lhs), Box::new(rhs))),
+            )),
+        );
+        assert!(
+            matches!(
+                brix_kernel::acceptance(
+                    &ctx_id,
+                    &pair_formation,
+                    &ExplicitTerm::new(
+                        ctx_id,
+                        TermKind::Lam {
+                            var_name: Some("l".into()),
+                            body: Box::new(TermKind::Lam {
+                                var_name: Some("r".into()),
+                                body: Box::new(TermKind::Pair {
+                                    fst: Box::new(TermKind::Hyp(Var::Named("l".into()))),
+                                    snd: Box::new(TermKind::Hyp(Var::Named("r".into()))),
+                                }),
+                            }),
+                        },
+                    ),
+                    Budget::new(1_000, 1_000),
+                ),
+                Verdict::Accepted(_)
+            ),
+            "the split's packaging must be the kernel's product introduction"
+        );
+
+        let split_of = |expr: &Expr, ctx: &TyCtx| {
+            let (_, tree, _) = infer_tree(expr, ctx, Infer::new()).expect("infers");
+            leaf_endpoints(&tree, &g_arith_split())
+        };
+
+        let one_plus_two =
+            Expr::Arith(ArithOp::Add, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2)));
+        let (src, dst) = split_of(&one_plus_two, &TyCtx::new());
+        assert_eq!(src, TyObj::Atom(CfgAtom::Expr(one_plus_two.clone())));
+        assert_eq!(
+            dst,
+            TyObj::Prod(
+                Box::new(TyObj::Atom(CfgAtom::Expr(Expr::Lit(1)))),
+                Box::new(TyObj::Atom(CfgAtom::Expr(Expr::Lit(2)))),
+            ),
+            "exactly two children, in source order"
+        );
+
+        // (ii) The operator is preserved — it is bound because `src` is the
+        //      whole node, so two nodes differing only in operator have
+        //      different splits. And operand order is preserved likewise.
+        let one_minus_two =
+            Expr::Arith(ArithOp::Sub, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2)));
+        let two_minus_one =
+            Expr::Arith(ArithOp::Sub, Box::new(Expr::Lit(2)), Box::new(Expr::Lit(1)));
+        assert_ne!(
+            split_of(&one_plus_two, &TyCtx::new()).0,
+            split_of(&one_minus_two, &TyCtx::new()).0,
+            "a different operator must be a different split source"
+        );
+        assert_ne!(
+            split_of(&one_minus_two, &TyCtx::new()).1,
+            split_of(&two_minus_one, &TyCtx::new()).1,
+            "swapped operands must be a different split target"
+        );
+
+        // (iii) No promotion is chosen and no result type is synthesised.
+        //
+        //       The direct demonstration: one expression, two contexts that
+        //       force *different* promotions and different result types, and a
+        //       byte-identical split leaf. `x + y` types as `Int` under the
+        //       first (no promotion) and `Rat` under the second (splicing
+        //       Int↪Rat). If the split had any promotion or result-type
+        //       content, these could not agree — and ⟨D-SPLIT⟩'s conditional
+        //       would have lapsed.
+        let x_plus_y = Expr::Arith(
+            ArithOp::Add,
+            Box::new(Expr::Var("x".to_string())),
+            Box::new(Expr::Var("y".to_string())),
+        );
+        let int_ctx = TyCtx::new()
+            .extend("x", Ty::Con("Int"))
+            .extend("y", Ty::Con("Int"));
+        let rat_ctx = TyCtx::new()
+            .extend("x", Ty::Con("Rat"))
+            .extend("y", Ty::Con("Int"));
+        assert_eq!(
+            infer_tree(&x_plus_y, &int_ctx, Infer::new()).unwrap().0,
+            Ty::Con("Int")
+        );
+        assert_eq!(
+            infer_tree(&x_plus_y, &rat_ctx, Infer::new()).unwrap().0,
+            Ty::Con("Rat"),
+            "the second context must genuinely force a different result"
+        );
+        assert_eq!(
+            split_of(&x_plus_y, &int_ctx),
+            split_of(&x_plus_y, &rat_ctx),
+            "the split must not vary with the promotion or the result type"
+        );
+
+        // Structurally: neither endpoint mentions a type or an arithmetic
+        // input at all. A `Type` or `ArithInput` atom anywhere in the split
+        // would be a representation claim it is not entitled to make.
+        fn only_expressions(obj: &TyObj) -> bool {
+            match obj {
+                TyObj::Atom(CfgAtom::Expr(_)) => true,
+                TyObj::Atom(CfgAtom::Type(_)) | TyObj::Atom(CfgAtom::ArithInput(_)) => false,
+                TyObj::Prod(l, r) => only_expressions(l) && only_expressions(r),
+            }
+        }
+        let (src, dst) = split_of(&x_plus_y, &rat_ctx);
+        assert!(only_expressions(&src) && only_expressions(&dst));
+
+        // (iv) A forged child is rejected. Substituting a different
+        //      subexpression into the split's target breaks the `Seq` middle
+        //      against the operand tensor, and the audit refuses to produce an
+        //      artifact rather than downgrading one.
+        let (_, real_tree) =
+            audited_type_check_tree(&one_plus_two, &TyCtx::new(), ctx_id).expect("audited");
+        let forged = forge_split_child(real_tree.tree(), &Expr::Lit(99).config_id());
+        match audit_tree(
+            &forged,
+            one_plus_two.config_id(),
+            Ty::Con("Int").config_id(),
+        ) {
+            Err(crate::tree_audit::TreeAuditError::MalformedTree) => {}
+            other => panic!("a forged split child must never audit clean, got {other:?}"),
+        }
+
+        // And the discharge moves no grade: `1 + 2` still rests on the
+        // undischarged `g_arith`/`g_arith_input`, so it stays capped.
+        assert!(generator_is_tight(ClaimKind::Typing, &g_arith_split()));
+        assert!(!generator_is_tight(ClaimKind::Empty, &g_arith_split()));
+        assert_eq!(
+            honest_result_outcome(Outcome::Proven, real_tree.tree()),
+            Outcome::Audited,
+            "discharging the split alone must not lift the arithmetic cap"
+        );
+    }
+
+    /// Replace the right child of the `g_arith_split` leaf's target with
+    /// `impostor`, leaving everything else intact.
+    fn forge_split_child(tree: &RealizesTree, impostor: &ConfigId) -> RealizesTree {
+        match tree {
+            RealizesTree::Leaf {
+                generator,
+                src,
+                dst,
+            } if *generator == g_arith_split() => {
+                let forged_dst = match dst {
+                    TreeObj::Prod(left, _) => {
+                        TreeObj::Prod(left.clone(), Box::new(TreeObj::Atom(*impostor)))
+                    }
+                    other => other.clone(),
+                };
+                RealizesTree::Leaf {
+                    generator: *generator,
+                    src: src.clone(),
+                    dst: forged_dst,
+                }
+            }
+            RealizesTree::Leaf { .. } => tree.clone(),
+            RealizesTree::Seq { left, right } => RealizesTree::Seq {
+                left: Box::new(forge_split_child(left, impostor)),
+                right: Box::new(forge_split_child(right, impostor)),
+            },
+            RealizesTree::Tensor { left, right } => RealizesTree::Tensor {
+                left: Box::new(forge_split_child(left, impostor)),
+                right: Box::new(forge_split_child(right, impostor)),
+            },
+        }
+    }
+
+    #[test]
     fn structural_tree_endpoints_match_the_checked_expression() {
         // The tree handed to elaboration must prove exactly the same source and
         // target as the audited typing claim. In particular, field projection
@@ -3197,11 +3417,15 @@ mod tests {
             g_ctor(),
             g_match_split(),
             g_match(),
+            // ADR-0015 Stage C ⟨D-SPLIT⟩ — discharged on the same structural
+            // grounds as the `*_split` leaves above, independently of
+            // `g_arith`.
+            g_arith_split(),
         ];
         assert_eq!(
             tight_for_typing.len(),
-            16,
-            "this test must cover exactly the sixteen typing-tight generators"
+            17,
+            "this test must cover exactly the seventeen typing-tight generators"
         );
         for generator in tight_for_typing {
             assert!(
