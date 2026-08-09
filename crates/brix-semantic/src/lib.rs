@@ -91,7 +91,10 @@ pub use publication::{
 pub use quiescent::Quiescent;
 pub use realizes::Realizes;
 pub use regime::RegimeId;
-pub use tree::{RealizesTree, TreeDerivation, TreeDerivationId, TreeObj, TreeVerification};
+pub use tree::{
+    RealizesTree, TreeDerivation, TreeDerivationId, TreeObj, TreeVerification,
+    TreeVerificationError,
+};
 pub use witness::{
     compose, compose_chain, tensor, tensor_chain, Witness, WitnessId, WITNESS_COMPOSE_TAG,
     WITNESS_TENSOR_TAG,

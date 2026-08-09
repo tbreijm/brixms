@@ -600,7 +600,14 @@ mod tests {
         // settlement replay.
         let verified = decomposition(DecompVerification::ReplayVerified);
         let settlement = Support::Settlement(&verified);
-        let derivation = TreeDerivation::structure_verified(tree_leaf("g_a@1"));
+        let derivation = {
+            let tree = tree_leaf("g_a@1");
+            let mut registry = crate::GeneratorRegistry::new();
+            registry.insert(GeneratorId::named("g_a@1"));
+            TreeDerivation::recorded(tree.clone())
+                .verify_structure(&tree.src(), &tree.dst(), &registry)
+                .expect("a well-formed fixture tree earns the tag")
+        };
         let tree = Support::Tree(&derivation);
 
         assert!(matches!(

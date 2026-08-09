@@ -17,7 +17,7 @@ fn tree_derivation(tag: &str) -> TreeDerivation {
     let g = GeneratorId::named(&format!("elaboration.{tag}.g@1"));
     let x0 = ConfigId::from_canon(format!("elaboration.{tag}.x0").as_bytes());
     let x1 = ConfigId::from_canon(format!("elaboration.{tag}.x1").as_bytes());
-    TreeDerivation::structure_verified(RealizesTree::Leaf {
+    verified_tree_derivation(RealizesTree::Leaf {
         generator: g,
         src: TreeObj::Atom(x0),
         dst: TreeObj::Atom(x1),
@@ -416,4 +416,25 @@ fn verified_chain(generators: Vec<GeneratorId>, configs: Vec<ConfigId>) -> Decom
         .expect("well-formed fixture chain")
         .verify_replay(&registry, &ExactChain { links })
         .expect("an honest fixture chain earns the tag")
+}
+
+/// Earn a `StructureVerified` derivation the honest way (ADR-0019 D5/D7):
+/// build the registry from the generators the tree actually cites, then run
+/// the real `verify_structure` transition against the tree's own endpoints.
+///
+/// A *checker* must never build its registry this way — that reduces
+/// membership to "every cited generator is among the cited generators". Here
+/// the job is to produce a legitimately verified fixture so the downstream
+/// fence can be exercised; the real membership negative lives in
+/// `soc-regimes`' `tree_audit`, against the regime's declared registry.
+fn verified_tree_derivation(tree: RealizesTree) -> TreeDerivation {
+    let mut registry = GeneratorRegistry::new();
+    for leaf in tree.leaves() {
+        if let RealizesTree::Leaf { generator, .. } = leaf {
+            registry.insert(*generator);
+        }
+    }
+    TreeDerivation::recorded(tree.clone())
+        .verify_structure(&tree.src(), &tree.dst(), &registry)
+        .expect("a well-formed fixture tree over its own generators earns the tag")
 }

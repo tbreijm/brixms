@@ -41,8 +41,8 @@ fixture.
 | SOC-LAW-01 | Canonical identity | Partial | `brix-canon` plus semantic canonical implementations | #56 |
 | SOC-LAW-02 | Realization compositionality | Partial | `brix-kernel` for proof claims; regime owners for primitive relations | #53, #178 |
 | SOC-LAW-03 | Audit honesty | Enforced | `soc-core::audit` in the current journal profile | #228 for publication hardening |
-| SOC-LAW-04 | Epistemic non-escalation | Partial | outcome lattice, audit, elaboration, and result-grade cap | #228, #178 |
-| SOC-LAW-05 | Authority non-escalation | Partial | the two kernels and named external drivers | #228 |
+| SOC-LAW-04 | Epistemic non-escalation | Enforced | outcome lattice, audit, elaboration, and result-grade cap | — |
+| SOC-LAW-05 | Authority non-escalation | Enforced | the two kernels and named external drivers | — |
 | SOC-LAW-06 | Context confinement | Open | future context validator and transport checker | #59 |
 | SOC-LAW-07 | Governance monotonicity | Enforced | `Adm` conformance over the current candidate interface | #52 |
 | SOC-LAW-08 | Incremental agreement and cost honesty | Enforced | reference oracle, incremental engine, deterministic cost gate | #52, #178 for future regimes |

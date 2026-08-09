@@ -23,9 +23,11 @@
 //! is produced. There is no path here that returns a weaker artifact instead
 //! of an error.
 
-use brix_semantic::{ConfigId, GeneratorId, RealizesTree, TreeDerivation, TreeObj};
+use brix_semantic::{
+    ConfigId, GeneratorId, RealizesTree, TreeDerivation, TreeObj, TreeVerificationError,
+};
 
-use crate::type_realization::generator_name;
+use crate::type_realization::{generator_name, typing_registry};
 
 /// Why a tree derivation failed audit. Never a downgraded artifact — a
 /// rejected derivation yields no [`TreeDerivation`] at all.
@@ -69,30 +71,28 @@ pub fn audit_tree(
     expr_config: ConfigId,
     ty_config: ConfigId,
 ) -> Result<TreeDerivation, TreeAuditError> {
-    // (e) + (b): structural well-formedness, then the endpoints of the whole
-    // derivation against the claim's own configurations.
-    if !tree.well_formed() {
-        return Err(TreeAuditError::MalformedTree);
-    }
-    if tree.src() != TreeObj::Atom(expr_config) || tree.dst() != TreeObj::Atom(ty_config) {
-        return Err(TreeAuditError::EndpointMismatch);
-    }
-
-    // (c): every leaf must cite a generator this regime mints.
-    for leaf in tree.leaves() {
-        match leaf {
-            RealizesTree::Leaf { generator, .. } => {
-                if !is_minted_generator(generator) {
-                    return Err(TreeAuditError::UnmintedGenerator(*generator));
-                }
+    // ADR-0019 D5: this checker no longer performs the checks and then stamps
+    // the tag with a separate unchecked constructor. It supplies the regime's
+    // own registry and the claim's endpoints to the transition that *issues*
+    // the tag, so the code that sets `StructureVerified` is the code that
+    // checks (e), (b) and (c). What stays here is what only this crate knows:
+    // which generators this regime mints, and the public error vocabulary.
+    TreeDerivation::recorded(tree.clone())
+        .verify_structure(
+            &TreeObj::Atom(expr_config),
+            &TreeObj::Atom(ty_config),
+            &typing_registry(),
+        )
+        .map_err(|e| match e {
+            TreeVerificationError::MalformedTree => TreeAuditError::MalformedTree,
+            TreeVerificationError::EndpointMismatch => TreeAuditError::EndpointMismatch,
+            TreeVerificationError::GeneratorNotInRegistry(g) => {
+                TreeAuditError::UnmintedGenerator(g)
             }
-            // `leaves()` yields only `Leaf` nodes; treat anything else as a
-            // failed audit rather than trusting the invariant silently.
-            _ => return Err(TreeAuditError::MalformedTree),
-        }
-    }
-
-    Ok(TreeDerivation::structure_verified(tree.clone()))
+            // Unreachable: `recorded` above is always in `Recorded` form.
+            // Never turn an internal impossibility into a silent pass.
+            TreeVerificationError::NotRecorded { .. } => TreeAuditError::MalformedTree,
+        })
 }
 
 #[cfg(test)]
