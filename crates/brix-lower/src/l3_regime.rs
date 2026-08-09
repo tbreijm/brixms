@@ -236,12 +236,29 @@ impl L3TransitionTable {
 /// `N` head candidate triples (ADR-0012 §3.3). Bounded `O(N)` setup: every
 /// world/candidate is built exactly once, in module order, from the plan's
 /// already-validated, already-normalized rules — no rescanning, no re-hashing
-/// per call once built. `program` MUST be [`crate::l3_canon::program_id`] of
-/// `plan` (this function does not recompute it, so an inconsistent caller
-/// would silently mint a table for the wrong revision — deliberately not this
-/// function's job to detect, since `program_id` is itself a pure function of
-/// `plan`).
-pub fn build_l3_transition_table(
+/// per call once built.
+///
+/// **The program id is computed here, not supplied** (ADR-0020 D8). This
+/// function used to take a `ProgramIdV1` alongside the plan and document that
+/// an inconsistent caller "would silently mint a table for the wrong
+/// revision", on the reasoning that `program_id` is a pure function of `plan`
+/// so detecting the mismatch was not its job.
+///
+/// That was harmless while the table only drove execution. It stopped being
+/// harmless once the table became the source of a *declared oracle identity*
+/// (`l3_generator_semantics`): a `GeneratorSemanticsIdV1` derived from a table
+/// built against the wrong program id would authenticate an audit environment
+/// that never corresponded to the plan. The unchecked pairing is removed
+/// rather than checked, because a seam that cannot be reached cannot be
+/// reached inconsistently.
+pub fn build_l3_transition_table(interner: &mut Interner, plan: &L3PlanV1) -> L3TransitionTable {
+    let program = crate::l3_canon::program_id(plan);
+    build_l3_transition_table_with_program(interner, program, plan)
+}
+
+/// The former public seam, now private: reached only after
+/// [`build_l3_transition_table`] has established `program == program_id(plan)`.
+fn build_l3_transition_table_with_program(
     interner: &mut Interner,
     program: ProgramIdV1,
     plan: &L3PlanV1,
@@ -571,7 +588,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("lowering failed: {e:?}"));
         let program = program_id(&plan);
         let mut interner = Interner::new();
-        let table = build_l3_transition_table(&mut interner, program, &plan);
+        let table = build_l3_transition_table(&mut interner, &plan);
         (plan, program, interner, table)
     }
 
@@ -1081,14 +1098,13 @@ mod tests {
         let src = "rule a() = 1\nrule b() = 2\n";
         let module = brix_syntax::parse(src).unwrap();
         let plan = lower_l3_plan(&module, L3_PROFILE_MARKER_V1, &PlanLimitsV1::generous()).unwrap();
-        let program = program_id(&plan);
 
         let mut i1 = Interner::new();
-        let table1 = build_l3_transition_table(&mut i1, program, &plan);
+        let table1 = build_l3_transition_table(&mut i1, &plan);
 
         let mut i2 = Interner::new();
         i2.intern(Digest::of(Domain::Value, b"noise-1"));
-        let table2 = build_l3_transition_table(&mut i2, program, &plan);
+        let table2 = build_l3_transition_table(&mut i2, &plan);
         i2.intern(Digest::of(Domain::Value, b"noise-2"));
 
         let p1 = build_l3_observation_profile(&table1);

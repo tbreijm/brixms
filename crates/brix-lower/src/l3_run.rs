@@ -728,7 +728,7 @@ pub fn run_l3_plan_with_interner(
     budget: SaturationBudget,
 ) -> L3RunReport {
     let program = program_id(plan);
-    let table = Rc::new(build_l3_transition_table(interner, program, plan));
+    let table = Rc::new(build_l3_transition_table(interner, plan));
 
     let compiled_policy = l3_policy(program, &table);
     let compiled_adm = l3_adm(&table);
@@ -907,7 +907,7 @@ mod tests {
         let p = plan(src);
         let mut interner = Interner::new();
         let program = program_id(&p);
-        let table = Rc::new(build_l3_transition_table(&mut interner, program, &p));
+        let table = Rc::new(build_l3_transition_table(&mut interner, &p));
         let (adm, adm_id) = if deny {
             (
                 AdmChoiceOwned::DenyAll,
