@@ -600,16 +600,23 @@ fn run_reason_distinguishes_an_empty_frontier_from_an_exhausted_tick_budget() {
 // ⟨D-TAU⟩'s load-bearing claim, made executable.
 // ---------------------------------------------------------------------------
 
-/// Every semantics this fixture needs: an edge's generator realizes exactly
-/// that edge's endpoints.
-struct EdgeSemantics {
-    edges: BTreeSet<(GeneratorId, ConfigId, ConfigId)>,
-}
-
-impl soc_core::audit::GeneratorSemantics for EdgeSemantics {
-    fn realizes(&self, g: &GeneratorId, src: &ConfigId, dst: &ConfigId) -> bool {
-        self.edges.contains(&(*g, *src, *dst))
+/// Every semantics this fixture needs, as a declaration (ADR-0020 D2): an
+/// edge's generator realizes exactly that edge's endpoints, and nothing else.
+fn edge_semantics(
+    edges: &BTreeSet<(GeneratorId, ConfigId, ConfigId)>,
+) -> brix_semantic::GeneratorSemanticsV1 {
+    let mut m = brix_semantic::GeneratorSemanticsV1::new();
+    for (g, src, dst) in edges {
+        let mut rows: Vec<(ConfigId, ConfigId)> = match m.relation(g) {
+            Some(brix_semantic::SettlementRelationV1::ExactRows(existing)) => {
+                existing.iter().copied().collect()
+            }
+            _ => Vec::new(),
+        };
+        rows.push((*src, *dst));
+        m.declare_rows(*g, rows);
     }
+    m
 }
 
 /// **The claim ⟨D-TAU⟩ rests on**: an administrative step is committed,
@@ -664,8 +671,8 @@ fn administrative_steps_audit_exactly_like_realizing_ones() {
     for g in [gen_tau_a(), gen_tau_b(), gen_realizing()] {
         registry.insert(g);
     }
-    let semantics = EdgeSemantics {
-        edges: consumed
+    let semantics = edge_semantics(
+        &consumed
             .iter()
             .flat_map(|s| {
                 s.decomposition
@@ -675,7 +682,7 @@ fn administrative_steps_audit_exactly_like_realizing_ones() {
                     .collect::<Vec<_>>()
             })
             .collect(),
-    };
+    );
 
     let results =
         soc_core::audit::audit_journal(&journal, ContextId::root(), &registry, &semantics);

@@ -519,16 +519,15 @@ mod tests {
             // one-link chain over a registry holding its own generator, with a
             // semantics that realizes exactly that link.
             DecompVerification::ReplayVerified => {
-                struct OneLink;
-                impl crate::GeneratorSemantics for OneLink {
-                    fn realizes(&self, _: &GeneratorId, _: &ConfigId, _: &ConfigId) -> bool {
-                        true
-                    }
-                }
                 let mut registry = crate::GeneratorRegistry::new();
                 registry.insert(GeneratorId::named("g0@1"));
+                let mut semantics = crate::GeneratorSemanticsV1::new();
+                semantics.declare_rows(
+                    GeneratorId::named("g0@1"),
+                    [(ConfigId::from_canon(b"x0"), ConfigId::from_canon(b"x1"))],
+                );
                 recorded
-                    .verify_replay(&registry, &OneLink)
+                    .verify_replay(&registry, &semantics)
                     .expect("the fixture chain earns the tag")
             }
         }

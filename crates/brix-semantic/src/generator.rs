@@ -79,6 +79,14 @@ impl GeneratorRegistry {
         self.0.is_empty()
     }
 
+    /// The members of `𝒢`, in canonical (sorted) order. Needed to compare a
+    /// registry against a declared semantics manifest for *exact* agreement
+    /// (ADR-0020 D2) — containment is not enough, so both directions of the
+    /// difference must be computable.
+    pub fn iter(&self) -> impl Iterator<Item = &GeneratorId> {
+        self.0.iter()
+    }
+
     /// The content-addressed id of the whole registry — order-independent
     /// (canonical `Set` encoding, sorted + deduplicated), so two registries
     /// built by inserting the same generators in different orders are the
@@ -92,41 +100,6 @@ impl Canonical for GeneratorRegistry {
     fn canon_write(&self, w: &mut CanonWriter) {
         w.write_set(self.0.iter().map(|g| g.canon_bytes()));
     }
-}
-
-/// The relation `ρ_g` of each generator `g ∈ 𝒢`, as a checker replays it.
-/// `realizes(g, src, dst)` is true iff the primitive logged witness `g`
-/// relates configuration `src` to `dst` under `ρ_g`.
-///
-/// **Why this lives here** (ADR-0019 D3). It used to live in
-/// `soc_core::audit`, beside the checker that calls it. But the artifact whose
-/// verification tag depends on this relation — [`crate::Decomposition`] — lives
-/// in this crate, and ADR-0019 rules that the code which *sets* a verified tag
-/// must be the code that *performs* the check. The trait mentions only
-/// [`GeneratorId`] and [`crate::ConfigId`], both already owned here, so this is
-/// a relocation **along** the existing dependency direction (`soc-core →
-/// brix-semantic`), not an inversion: no `Cargo.toml` edge changes.
-///
-/// The split of responsibility this leaves is deliberate:
-///
-/// - `GeneratorSemantics` states the primitive relation over canonical
-///   semantic identities — that is this crate's business;
-/// - `soc_core::audit` owns settlement replay *in journal context* — the
-///   log-integrity and committed-step endpoint checks, which need types this
-///   crate does not have and must not grow.
-///
-/// Moving the relation interface did not move the settlement checker.
-///
-/// ⚠ **This trait is supplied by the caller, and this crate cannot
-/// authenticate it** (ADR-0019 §6 residual 1). An implementation returning
-/// `true` for everything makes any chain pass relative to that implementation.
-/// [`crate::Decomposition::verify_replay`] guarantees the predicate was
-/// *executed* over every link, not that the oracle was independently
-/// authenticated, and a verified artifact's id does not name the semantics it
-/// was verified against.
-pub trait GeneratorSemantics {
-    /// Whether `g` relates `src` to `dst` under `ρ_g`.
-    fn realizes(&self, g: &GeneratorId, src: &crate::ConfigId, dst: &crate::ConfigId) -> bool;
 }
 
 digest_id!(

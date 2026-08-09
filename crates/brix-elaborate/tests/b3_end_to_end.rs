@@ -7,7 +7,7 @@ use brix_semantic::{
 };
 use soc_core::{
     audit_step, commit_tick, AdmAll, AuditResult, AuditedStep, Candidate, CommitError, ExecConfig,
-    GeneratorSemantics, Handle, History, Interner, Key, Regime, SettlementRegime,
+    Handle, History, Interner, Key, Regime, SettlementRegime,
 };
 
 /// A multi-generator (n=2) settlement regime fixture.
@@ -35,15 +35,6 @@ impl SettlementRegime for MultiGenFixtureRegime {
             Decomposition::recorded(self.generators.clone(), self.configs.clone())
                 .expect("valid recorded decomposition"),
         )
-    }
-}
-
-/// A generator semantics fixture that accepts any step transition.
-struct AlwaysRealizesSemantics;
-
-impl GeneratorSemantics for AlwaysRealizesSemantics {
-    fn realizes(&self, _g: &GeneratorId, _src: &ConfigId, _dst: &ConfigId) -> bool {
-        true
     }
 }
 
@@ -104,12 +95,17 @@ fn test_b3_end_to_end_audited_decomposition_to_proven() {
     registry.insert(g2);
 
     // Audit the committed step to get Audited judgement + replay-verified Decomposition
-    let audit_res = audit_step(
-        &committed_step,
-        context,
-        &registry,
-        &AlwaysRealizesSemantics,
-    );
+    // ADR-0020 D2/D8: the oracle is declared data, derived here from the
+    // committed chain the settlement engine actually produced — not an
+    // accept-everything predicate.
+    let mut semantics = brix_semantic::GeneratorSemanticsV1::new();
+    {
+        let d = &committed_step.decomposition;
+        for (i, g) in d.generators().iter().enumerate() {
+            semantics.declare_rows(*g, [(d.configs()[i], d.configs()[i + 1])]);
+        }
+    }
+    let audit_res = audit_step(&committed_step, context, &registry, &semantics);
     let AuditedStep {
         audited: audited_judgement,
         verified: decomposition,

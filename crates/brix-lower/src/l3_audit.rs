@@ -39,45 +39,51 @@
 
 use std::rc::Rc;
 
-use brix_semantic::{ConfigId, ContextId, GeneratorId, GeneratorRegistry};
+use brix_semantic::{ContextId, GeneratorRegistry};
 
-use soc_core::audit::{audit_journal, AuditResult, GeneratorSemantics};
+use soc_core::audit::{audit_journal, AuditResult, GeneratorSemanticsV1};
 use soc_core::journal::Journal;
 
 use crate::l3_regime::L3TransitionTable;
 use crate::l3_run::L3RunReport;
 
-/// The plan-specific `ρ_g` relation ADR-0012 §2 item 7 requires:
-/// `realizes(g, src, dst)` holds iff `g` is one of *this plan's* `N`
-/// generators and `src`/`dst` are **exactly** the pre/post canonical world
-/// identities [`L3TransitionTable`] associates with `g`'s rule (§3.3's
-/// unique transition `World(program, Cons(r, tail), h, n) --g(program, r)-->
-/// World(program, tail, Append(h, Fact(r, value(r))), n + 1)`).
+/// The plan-specific `ρ_g` relation ADR-0012 §2 item 7 requires, **as declared
+/// data** (ADR-0020 D8).
 ///
-/// Holds an `Rc<L3TransitionTable>` (not a borrow) so a semantics instance
-/// can outlive the [`L3RunReport`] it was built from and be reused across
-/// several `audit_journal` calls without re-deriving the table.
-pub struct L3GeneratorSemantics {
-    table: Rc<L3TransitionTable>,
-}
-
-impl L3GeneratorSemantics {
-    /// Build the semantics for `table`.
-    pub fn new(table: Rc<L3TransitionTable>) -> Self {
-        L3GeneratorSemantics { table }
+/// This was an executable `GeneratorSemantics` implementation until ADR-0020.
+/// Its answer was always a lookup — `table.expected_endpoints(g) == Some((src,
+/// dst))` — so it loses nothing by becoming the rows it was looking up: one
+/// `ExactRows` entry per generator, holding exactly the pre/post canonical
+/// world identities [`L3TransitionTable`] associates with that generator's
+/// rule (§3.3's unique transition `World(program, Cons(r, tail), h, n)
+/// --g(program, r)--> World(program, tail, Append(h, Fact(r, value(r))), n + 1)`).
+///
+/// What it *gains* is an identity. The manifest is a deterministic function of
+/// the immutable transition table, so
+/// [`GeneratorSemanticsIdV1`](brix_semantic::GeneratorSemanticsIdV1) names the
+/// exact oracle an audit ran under, and two audits over the same chain under
+/// different plans are distinguishable (ADR-0020 §4).
+///
+/// The re-derivation discipline is unchanged and still load-bearing: the rows
+/// come from the plan's own table, never from the journal being audited. A
+/// fabricated fact yields a different world digest, so a forged destination can
+/// never coincide with the one this plan's rule actually produces.
+///
+/// ⚠ **The expected manifest must be derived from the validated plan**, not
+/// read out of a receipt being checked (ADR-0020 §2). That is what makes this
+/// lane's anchor independent.
+pub fn l3_generator_semantics(table: &L3TransitionTable) -> GeneratorSemanticsV1 {
+    let mut manifest = GeneratorSemanticsV1::new();
+    for g in table.generators() {
+        // Total by construction: `generators()` yields exactly the keys
+        // `expected_endpoints` resolves. A `None` here would be an internal
+        // inconsistency, so declare no row rather than inventing one — the
+        // audit then fails closed on an undeclared generator.
+        if let Some((src, dst)) = table.expected_endpoints(g) {
+            manifest.declare_rows(g, [(src, dst)]);
+        }
     }
-}
-
-impl GeneratorSemantics for L3GeneratorSemantics {
-    /// Re-derive `g`'s expected endpoints from the plan's own transition
-    /// table and compare — never trust `src`/`dst` as supplied. Ties
-    /// `Ord`/`Eq` on `ConfigId` (content-addressed) do the exact-identity
-    /// check the ADR text calls for: a fabricated fact yields a different
-    /// world digest, so a forged destination world can never coincide with
-    /// the one this plan's rule actually produces.
-    fn realizes(&self, g: &GeneratorId, src: &ConfigId, dst: &ConfigId) -> bool {
-        self.table.expected_endpoints(*g) == Some((*src, *dst))
-    }
+    manifest
 }
 
 /// Build the `GeneratorRegistry` 𝒢 for `table`: exactly the plan's `N`
@@ -108,7 +114,7 @@ pub fn audit_l3_journal(
     table: &Rc<L3TransitionTable>,
 ) -> Vec<AuditResult> {
     let registry = l3_generator_registry(table);
-    let semantics = L3GeneratorSemantics::new(Rc::clone(table));
+    let semantics = l3_generator_semantics(table);
     audit_journal(journal, context, &registry, &semantics)
 }
 
@@ -130,6 +136,7 @@ pub fn audit_l3_run(report: &L3RunReport) -> Vec<AuditResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use brix_semantic::{ConfigId, GeneratorId};
 
     use brix_canon::{Digest, Domain};
     use brix_semantic::{
@@ -392,22 +399,13 @@ mod tests {
         // The chain itself is honest — the tampering under test is that it is
         // presented to the auditor in the verified form when a *recorded* one
         // is required, not that its links are false.
-        struct ThisLink;
-        impl GeneratorSemantics for ThisLink {
-            fn realizes(
-                &self,
-                _: &brix_semantic::GeneratorId,
-                _: &brix_semantic::ConfigId,
-                _: &brix_semantic::ConfigId,
-            ) -> bool {
-                true
-            }
-        }
         let mut registry = brix_semantic::GeneratorRegistry::new();
         registry.insert(f.gen_a);
+        let mut semantics = soc_core::audit::GeneratorSemanticsV1::new();
+        semantics.declare_rows(f.gen_a, [(f.w0, f.w1)]);
         let bad_decomposition = Decomposition::recorded(vec![f.gen_a], vec![f.w0, f.w1])
             .unwrap()
-            .verify_replay(&registry, &ThisLink)
+            .verify_replay(&registry, &semantics)
             .expect("the fixture chain earns the tag");
         let step = make_step(f.report.context, witness, f.w0, f.w1, bad_decomposition);
         let results = audit_l3_journal(&one_step_journal(step), f.report.context, &f.report.table);

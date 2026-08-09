@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 
 use brix_semantic::{ConfigId, Decomposition, GeneratorId, RegimeId, Witness};
 
-use soc_core::audit::GeneratorSemantics;
+use soc_core::audit::GeneratorSemanticsV1;
 use soc_core::commit::{CommitError, SettlementRegime};
 use soc_core::delta::{CandidateDelta, Delta, Footprint};
 use soc_core::engine::IncrementalRegime;
@@ -209,18 +209,31 @@ impl SettlementRegime for LiteralEqualityRegime {
     }
 }
 
-/// The generator semantics for [`LiteralEqualityRegime::GENERATOR_NAME`]: the
-/// diagonal relation `ρ_{literal.refl} = {(x, x)}`. `realizes(g, src, dst)`
-/// is true iff `g` names this regime's reflexive generator **and** `src ==
-/// dst` — genuinely checking the equality semantics the regime's name
-/// promises, not a hardcoded pass.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct LiteralEqualitySemantics;
-
-impl GeneratorSemantics for LiteralEqualitySemantics {
-    fn realizes(&self, g: &GeneratorId, src: &ConfigId, dst: &ConfigId) -> bool {
-        *g == GeneratorId::named(LiteralEqualityRegime::GENERATOR_NAME) && src == dst
-    }
+/// The declared settlement semantics for
+/// [`LiteralEqualityRegime::GENERATOR_NAME`]: the diagonal relation
+/// `ρ_{literal.refl} = {(x, x)}` (ADR-0020 D8).
+///
+/// This was an executable `GeneratorSemantics` implementation until ADR-0020.
+/// It is now **data** — the complete manifest for this regime is one entry:
+///
+/// ```text
+/// literal-equality.refl@1 ↦ Diagonal
+/// ```
+///
+/// so its [`GeneratorSemanticsIdV1`](brix_semantic::GeneratorSemanticsIdV1) is
+/// a fixed consequence of the generator name and the frozen v1 encoding. That
+/// id is the *independent anchor* a receipt for this lane is checked against
+/// (ADR-0020 §2): it is a production constant, not something read out of the
+/// receipt being validated.
+///
+/// `Diagonal` is a closed form rather than enumerated rows on purpose. The
+/// reflexive relation over every configuration is not finitely presentable,
+/// and declaring some finite subset of it would misstate what this regime
+/// actually realizes.
+pub fn literal_equality_semantics() -> GeneratorSemanticsV1 {
+    let mut m = GeneratorSemanticsV1::new();
+    m.declare_diagonal(GeneratorId::named(LiteralEqualityRegime::GENERATOR_NAME));
+    m
 }
 
 #[cfg(test)]
@@ -365,20 +378,25 @@ mod tests {
 
     #[test]
     fn semantics_realizes_the_diagonal_only() {
-        let sem = LiteralEqualitySemantics;
+        let sem = literal_equality_semantics();
         let g = GeneratorId::named(LiteralEqualityRegime::GENERATOR_NAME);
         let x = ConfigId::from_canon(b"x");
         let y = ConfigId::from_canon(b"y");
 
-        assert!(sem.realizes(&g, &x, &x), "x realizes x under the diagonal");
-        assert!(
-            !sem.realizes(&g, &x, &y),
+        assert_eq!(sem.realizes(&g, &x, &x), Ok(true), "x realizes x");
+        assert_eq!(
+            sem.realizes(&g, &x, &y),
+            Ok(false),
             "x must not realize a distinct y under the diagonal"
         );
+        // A generator this manifest does not declare fails CLOSED (ADR-0020
+        // D2) rather than returning a checked `false` — the manifest has no
+        // opinion about it, and saying "does not hold" would be a stronger
+        // claim than it can make.
         let other_g = GeneratorId::named("some-other-generator@1");
         assert!(
-            !sem.realizes(&other_g, &x, &x),
-            "a different generator name must not be realized by this semantics"
+            sem.realizes(&other_g, &x, &x).is_err(),
+            "an undeclared generator must be refused, not answered"
         );
     }
 }
