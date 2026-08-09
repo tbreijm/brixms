@@ -60,6 +60,22 @@ pub struct Token {
 
 /// Lex a `.brix` source string into a vector of tokens.
 pub fn lex(source: &str) -> Result<Vec<Token>, ParseError> {
+    lex_bounded(source, crate::ParseLimits::generous())
+}
+
+/// Tokenize under explicit resource bounds (ADR-0022 D6).
+///
+/// The token bound is charged **as tokens are produced**, not by measuring a
+/// finished vector: a limit that inspects a structure already built has not
+/// prevented the allocation it was meant to prevent.
+pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token>, ParseError> {
+    // Checked before UTF-8 handling and before any per-token allocation.
+    if source.len() > limits.max_source_bytes {
+        return Err(ParseError::limit(crate::LimitExceeded::SourceBytes {
+            limit: limits.max_source_bytes,
+            found: source.len(),
+        }));
+    }
     let mut tokens = Vec::new();
     let chars: Vec<char> = source.chars().collect();
     let len = chars.len();
@@ -114,6 +130,7 @@ pub fn lex(source: &str) -> Result<Vec<Token>, ParseError> {
                     col += 1;
                 }
             }
+            charge_token(&tokens, limits)?;
             tokens.push(Token {
                 kind: TokenKind::Num(num_str),
                 line: start_line,
@@ -178,6 +195,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>, ParseError> {
                 ));
             }
 
+            charge_token(&tokens, limits)?;
+
             tokens.push(Token {
                 kind: TokenKind::Str(str_val),
                 line: start_line,
@@ -219,6 +238,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>, ParseError> {
                     _ => TokenKind::Ident(ident),
                 }
             };
+
+            charge_token(&tokens, limits)?;
 
             tokens.push(Token {
                 kind,
@@ -315,12 +336,16 @@ pub fn lex(source: &str) -> Result<Vec<Token>, ParseError> {
             }
         };
 
+        charge_token(&tokens, limits)?;
+
         tokens.push(Token {
             kind,
             line: start_line,
             col: start_col,
         });
     }
+
+    charge_token(&tokens, limits)?;
 
     tokens.push(Token {
         kind: TokenKind::Eof,
@@ -329,4 +354,14 @@ pub fn lex(source: &str) -> Result<Vec<Token>, ParseError> {
     });
 
     Ok(tokens)
+}
+
+/// Refuse before the push that would exceed the bound.
+fn charge_token(tokens: &[Token], limits: crate::ParseLimits) -> Result<(), ParseError> {
+    if tokens.len() >= limits.max_tokens {
+        return Err(ParseError::limit(crate::LimitExceeded::Tokens {
+            limit: limits.max_tokens,
+        }));
+    }
+    Ok(())
 }

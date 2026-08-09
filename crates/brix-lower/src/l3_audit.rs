@@ -40,6 +40,9 @@
 use std::rc::Rc;
 
 use brix_semantic::{ContextId, GeneratorRegistry};
+use soc_core::audit_receipt::ReceiptError;
+
+use crate::l3_canon::ProgramIdV1;
 
 use soc_core::audit::{audit_journal, AuditResult, GeneratorSemanticsV1};
 use soc_core::journal::Journal;
@@ -500,4 +503,104 @@ mod tests {
         assert!(registry.contains(&f.gen_b));
         assert!(!registry.contains(&GeneratorId::named("not-in-this-plan@1")));
     }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0022 — source re-derivation.
+// ---------------------------------------------------------------------------
+
+/// Why a source-derived receipt check was refused (ADR-0022 D8).
+///
+/// Every variant is a refusal that produces no `Audited`, no receipt, and
+/// never `Refuted`. The distinctions exist because they are different facts a
+/// verifier operator needs to act on: bad bytes, a declined workload, a
+/// program that is not the one expected, and a receipt that does not validate
+/// are four different problems.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum SourceReceiptError {
+    /// The supplied bytes are not UTF-8.
+    InvalidUtf8,
+    /// Parsing refused — malformed source, or a `ParseLimits` bound exceeded.
+    Parse(String),
+    /// Lowering to the L3 fragment refused.
+    Lower(String),
+    /// The source lowers to a valid plan, but **not the expected one**
+    /// (ADR-0022 D5). This is frontend drift or a substituted program being
+    /// detected, and it must never fall back to the receipt's own manifest.
+    ProgramMismatch {
+        expected: ProgramIdV1,
+        derived: ProgramIdV1,
+    },
+    /// The receipt did not validate against the locally derived environment
+    /// (ADR-0020 D7).
+    Receipt(ReceiptError),
+}
+
+/// **Re-derive the expected audit environment from source and check a receipt
+/// against it** (ADR-0022 D1–D4) — the non-cryptographic answer to "which
+/// oracle was authorized".
+///
+/// The verifier is given the `.brix` source and an **independently expected**
+/// [`ProgramIdV1`]. It parses and lowers under its own resource policy,
+/// refuses if the result is not the expected program, builds the transition
+/// table, derives the registry and semantics manifest itself, and only then
+/// hands them to [`check_audit_receipt_v1`].
+///
+/// **It deliberately takes no expected registry or semantics parameter.** Both
+/// are derived internally. A caller that could supply them would reintroduce
+/// exactly the hole ADR-0020 §2 describes — a consumer that adopts the
+/// receipt's own expectation has authenticated nothing.
+///
+/// This is stronger than a signed authorization (ADR-0021): it checks that the
+/// rows *follow from* the source under the local implementation, rather than
+/// trusting an authorized signer not to lie (ADR-0022 D9). It closes ADR-0020
+/// residuals 2 and 3 **for this path** — not for generic
+/// `GeneratorSemanticsV1` callers, another regime, a deployment that withholds
+/// source, or target selection when no expected program id is held.
+///
+/// Fails closed at every stage; no failure yields a weaker pass.
+#[allow(clippy::too_many_arguments)]
+pub fn check_l3_audit_receipt_from_source_v1(
+    source: &[u8],
+    expected_program: ProgramIdV1,
+    parse_limits: brix_syntax::ParseLimits,
+    plan_limits: &crate::l3::PlanLimitsV1,
+    receipt: &soc_core::audit_receipt::SettlementAuditReceiptV1,
+    step: &soc_core::journal::CommittedStep,
+    context: ContextId,
+) -> Result<soc_core::audit_receipt::SettlementAuditReceiptIdV1, SourceReceiptError> {
+    // 1. Bytes → text, bounded before anything is decoded or allocated.
+    let text = std::str::from_utf8(source).map_err(|_| SourceReceiptError::InvalidUtf8)?;
+
+    // 2. Parse under this verifier's own resource policy. A refusal here is
+    //    local policy, not a claim about the program (ADR-0022 D6).
+    let module = brix_syntax::parse_bounded(text, parse_limits)
+        .map_err(|e| SourceReceiptError::Parse(e.to_string()))?;
+
+    // 3. Lower to the L3 fragment.
+    let plan = crate::l3::lower_l3_plan(&module, crate::l3::L3_PROFILE_MARKER_V1, plan_limits)
+        .map_err(|e| SourceReceiptError::Lower(format!("{e:?}")))?;
+
+    // 4. Target selection: the program must be the one independently expected.
+    //    Drift is detected here and never normalized away (ADR-0022 D5).
+    let derived_program = crate::l3_canon::program_id(&plan);
+    if derived_program != expected_program {
+        return Err(SourceReceiptError::ProgramMismatch {
+            expected: expected_program,
+            derived: derived_program,
+        });
+    }
+
+    // 5. Derive the audit environment locally. `build_l3_transition_table`
+    //    computes the program id itself (ADR-0020 D8), so the table is
+    //    plan-bound by construction.
+    let mut interner = soc_core::intern::Interner::new();
+    let table = crate::l3_regime::build_l3_transition_table(&mut interner, &plan);
+    let registry = l3_generator_registry(&table);
+    let semantics = l3_generator_semantics(&table);
+
+    // 6. Hand the *derived* environment to the ADR-0020 checker, which
+    //    replays rather than reads.
+    soc_core::audit_receipt::check_audit_receipt_v1(receipt, step, context, &registry, &semantics)
+        .map_err(SourceReceiptError::Receipt)
 }

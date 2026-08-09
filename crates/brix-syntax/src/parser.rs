@@ -39,23 +39,73 @@ impl std::fmt::Display for ParseError {
     }
 }
 
+impl ParseError {
+    /// A resource refusal (ADR-0022 D6/D8). Distinguished in the message so a
+    /// caller can tell "this source is malformed" from "this verifier declined
+    /// to spend the resources", which are different facts.
+    pub fn limit(exceeded: crate::LimitExceeded) -> Self {
+        ParseError::new(format!("resource limit exceeded: {exceeded}"))
+    }
+}
+
 impl std::error::Error for ParseError {}
 
 /// Parse a `.brix` source string into a [`Module`].
+///
+/// Unbounded, for ordinary in-process callers that already control their own
+/// input. A verifier re-deriving a manifest from *supplied* source must use
+/// [`parse_bounded`] instead (ADR-0022 D6) — there the source is
+/// attacker-controlled and the frontend is inside the trusted closure.
 pub fn parse(source: &str) -> Result<Module, ParseError> {
-    let tokens = lexer::lex(source)?;
-    let mut parser = Parser::new(tokens);
+    parse_bounded(source, crate::ParseLimits::generous())
+}
+
+/// Parse under explicit resource bounds (ADR-0022 D6).
+///
+/// Every bound is enforced *before* the work it governs: source length before
+/// tokenization, token count as tokens are produced, and nesting depth before
+/// each recursive descent. A refusal is a typed error and never a partial
+/// module; there is no permissive retry.
+pub fn parse_bounded(source: &str, limits: crate::ParseLimits) -> Result<Module, ParseError> {
+    let tokens = lexer::lex_bounded(source, limits)?;
+    let mut parser = Parser::new(tokens, limits);
     parser.parse_module()
 }
 
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    limits: crate::ParseLimits,
+    /// Current recursive-descent depth. Incremented on entry to each
+    /// recursive expression rule and decremented on exit, so the bound tracks
+    /// live stack rather than total rule applications.
+    depth: usize,
 }
 
 impl Parser {
-    fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+    fn new(tokens: Vec<Token>, limits: crate::ParseLimits) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            limits,
+            depth: 0,
+        }
+    }
+
+    /// Charge one level of nesting, refusing **before** the recursive call so
+    /// a deep input is rejected rather than overflowing the stack.
+    fn enter(&mut self) -> Result<(), ParseError> {
+        if self.depth >= self.limits.max_nesting_depth {
+            return Err(ParseError::limit(crate::LimitExceeded::NestingDepth {
+                limit: self.limits.max_nesting_depth,
+            }));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
     }
 
     fn current(&self) -> &Token {
@@ -342,6 +392,13 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+        self.enter()?;
+        let out = self.parse_expr_inner();
+        self.leave();
+        out
+    }
+
+    fn parse_expr_inner(&mut self) -> Result<Expr, ParseError> {
         self.parse_expr_bin1()
     }
 
