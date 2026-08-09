@@ -1,0 +1,43 @@
+{
+  "format": "brix.kernel.ArithTypingInputV1",
+  "version": 1,
+  "adr": "ADR-0015",
+  "cases": [
+    {
+      "name": "add_int_int",
+      "description": "`1 + 2` — the identity case: no promotion on either side",
+      "canon_hex": "011e627269782e6b65726e656c2e61726974682d747970696e672d696e707574010100010101010000",
+      "config_id": "f70f9ffe5b3fffdc0c208a8d827e426ca25a8fde4437271345d001ae81e53a12"
+    },
+    {
+      "name": "sub_nat_int",
+      "description": "Sub with a one-edge exact promotion on the left only",
+      "canon_hex": "011e627269782e6b65726e656c2e61726974682d747970696e672d696e70757401010101000101010101230120f1f3c69bdcac27d188e80f1cca833f8adf67244c7c6672b4bf566e73ac72760d0000",
+      "config_id": "2c4938fbb63e5ff59918bdc41a3bc5967df5f1436244ffeca720348c05d363f2"
+    },
+    {
+      "name": "mul_rat_real",
+      "description": "Mul with the exact Rat↪Real edge on the left",
+      "canon_hex": "011e627269782e6b65726e656c2e61726974682d747970696e672d696e7075740101010201020103010101230120c452cc3056b5705b54a41d0a170c2289aca522e5060348898b61085d18fc69440000",
+      "config_id": "8effea6fd0e82fec80539d4a2e19ef35e7a40e839902e981870fe5bea01509d2"
+    },
+    {
+      "name": "div_int_int_lossy",
+      "description": "`7 / 2` — Div through the LOSSY Int↪Float edge on both operands (ADR-0015 ⟨D-PROMOTE⟩: never an embedding)",
+      "canon_hex": "011e627269782e6b65726e656c2e61726974682d747970696e672d696e70757401010103010101010101012401206ee44303383573a4f901b37f6262cd2272b540ce5d46b656b677e4633b868f0301010101012401206ee44303383573a4f901b37f6262cd2272b540ce5d46b656b677e4633b868f030101",
+      "config_id": "0c0110840727d1e19ffc2878de1a9bbf98ca417b62fdc06ffdeb37286db0e204"
+    },
+    {
+      "name": "add_float_float",
+      "description": "`1.0 + 2.0` — results in Float like div_int_int_lossy, and must NOT share its bytes (the collision Stage B0 removed)",
+      "canon_hex": "011e627269782e6b65726e656c2e61726974682d747970696e672d696e707574010100010501050000",
+      "config_id": "9f7a273c6487f010ad8cc42abaf9ee19b6f6bf3891bd9c4cc228904acc2bd3b6"
+    },
+    {
+      "name": "add_nat_complex_four_edges",
+      "description": "the full exact tower as one ordered four-edge path — pins list framing and path order",
+      "canon_hex": "011e627269782e6b65726e656c2e61726974682d747970696e672d696e707574010100000104010401230120f1f3c69bdcac27d188e80f1cca833f8adf67244c7c6672b4bf566e73ac72760d0001230120a15ffccab27fed01389823475f8cf264e62c55e3140e78a05327bc4a88997a480001230120c452cc3056b5705b54a41d0a170c2289aca522e5060348898b61085d18fc69440001230120810f6be33ae8341b064c33d06218b405edc943abc6a95dae95a68cee7e9062270000",
+      "config_id": "21105dd37d3907281222043a59be1b0efbff249395b17448be3bb0b09da9fbfd"
+    }
+  ]
+}
