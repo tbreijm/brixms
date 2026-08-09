@@ -234,6 +234,23 @@ No dependency edge changes. `scripts/check_tcb_dependencies.py --write` is there
 
 These are real limits. This ADR closes “the tag can simply be assigned or requested,” not “every verifier input is itself certified.”
 
+**Residuals 1–3 are ruled by [ADR-0020](./ADR-0020_Oracle_Bound_Audit_Receipts.md).** The
+open `GeneratorSemantics` trait leaves the production and verification boundary and becomes
+canonical declared data (`GeneratorSemanticsV1`, with a content identity), and a
+`SettlementAuditReceiptV1` binds the context, the committed step, the earned
+`DecompositionId`, the registry id and the semantics id — checked by replay, never trusted
+as a record. That is viable because both production oracles were already data-shaped: L3 is
+a lookup in an immutable transition table, and literal equality is the diagonal.
+
+Two consequences worth reading here rather than only there. **§6 residual 1 is narrowed, not
+eliminated** — content addressing makes a substituted oracle *detectable*, not the declared
+rows *correct*; a consumer must independently know which semantics id to expect, and one
+that adopts the id shipped alongside the receipt has authenticated nothing. And the test
+above, `an_always_true_semantics_still_passes_a_fabricated_chain`, is **consciously
+superseded**: ADR-0020 D9 replaces it with two negatives — arbitrary code can no longer
+implement an executable oracle at all, and a fabricated manifest earns a *different*
+semantics id that fails against the expected one.
+
 ## 7. Non-goals
 
 - **No canonical encoding or vector change.** No ordinal, field order, `DecompositionId`, `TreeDerivationId`, or file in `vectors/` changes.
