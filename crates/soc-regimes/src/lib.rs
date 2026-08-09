@@ -39,5 +39,5 @@ pub mod native;
 pub mod tree_audit;
 pub mod type_realization;
 
-pub use literal::{LiteralEqualityRegime, LiteralEqualitySemantics};
+pub use literal::{literal_equality_semantics, LiteralEqualityRegime};
 pub use type_realization::{g_lit, g_var, Expr, Ty, TyCtx, TypeError};

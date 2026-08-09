@@ -20,7 +20,7 @@ use soc_core::{
     audit_step, intern_context, run, AdmAll, AuditResult, Candidate, ExecConfig, History, Interner,
     Key,
 };
-use soc_regimes::{LiteralEqualityRegime, LiteralEqualitySemantics};
+use soc_regimes::{literal_equality_semantics, LiteralEqualityRegime};
 
 /// Mirrors `soc-core`'s own `commit.rs` test helper `tiebreak_of`: a
 /// canonical digest derived from the candidate's own handles, stable within
@@ -73,7 +73,7 @@ fn literal_equality_derives_then_audits_the_reflexive_witness() {
     // to Audited. ---
     let mut registry = GeneratorRegistry::new();
     registry.insert(GeneratorId::named(LiteralEqualityRegime::GENERATOR_NAME));
-    let semantics = LiteralEqualitySemantics;
+    let semantics = literal_equality_semantics();
 
     let result = audit_step(step, context, &registry, &semantics);
     match result {

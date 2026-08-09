@@ -81,7 +81,7 @@ pub enum DecompositionError {
 /// Every variant means *no artifact was produced*. There is deliberately no
 /// variant that yields a downgraded or partially-verified decomposition —
 /// ADR-0002 §4's fail-closed discipline: never a downgrade-hiding pass.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ReplayVerificationError {
     /// The receiver was not in [`DecompVerification::Recorded`] form. This
     /// transition upgrades a record; it does not re-verify an already-verified
@@ -105,6 +105,14 @@ pub enum ReplayVerificationError {
         generator: GeneratorId,
         src: ConfigId,
         dst: ConfigId,
+    },
+    /// The declared semantics could not answer for `generators[index]` — it
+    /// declares no relation for that generator (ADR-0020 D2). Distinct from
+    /// `RelationNotRealized`: nothing was checked, so this is a refusal, not a
+    /// checked negative.
+    Semantics {
+        index: usize,
+        error: crate::SemanticsError,
     },
 }
 
@@ -228,7 +236,7 @@ impl Decomposition {
     pub fn verify_replay(
         self,
         registry: &crate::GeneratorRegistry,
-        semantics: &dyn crate::GeneratorSemantics,
+        semantics: &crate::GeneratorSemanticsV1,
     ) -> Result<Self, ReplayVerificationError> {
         if self.verification != DecompVerification::Recorded {
             return Err(ReplayVerificationError::NotRecorded {
@@ -246,13 +254,17 @@ impl Decomposition {
             // The chain-length invariant guarantees both indices exist.
             let src = &self.configs[index];
             let dst = &self.configs[index + 1];
-            if !semantics.realizes(g, src, dst) {
-                return Err(ReplayVerificationError::RelationNotRealized {
-                    index,
-                    generator: *g,
-                    src: *src,
-                    dst: *dst,
-                });
+            match semantics.realizes(g, src, dst) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(ReplayVerificationError::RelationNotRealized {
+                        index,
+                        generator: *g,
+                        src: *src,
+                        dst: *dst,
+                    })
+                }
+                Err(e) => return Err(ReplayVerificationError::Semantics { index, error: e }),
             }
         }
 
@@ -314,7 +326,7 @@ digest_id!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GeneratorRegistry, GeneratorSemantics};
+    use crate::{GeneratorRegistry, GeneratorSemanticsV1};
 
     fn gens(n: usize) -> Vec<GeneratorId> {
         (0..n)
@@ -362,47 +374,35 @@ mod tests {
         r
     }
 
-    /// A semantics that accepts exactly the honest chain `xi → xi+1` for
-    /// `gi`, and records every call it was asked to make.
-    #[derive(Default)]
-    struct RecordingSemantics {
-        calls: std::cell::RefCell<Vec<(GeneratorId, ConfigId, ConfigId)>>,
+    /// The honest declaration for an `n`-link chain: `gi ↦ ExactRows{(xi, xi+1)}`.
+    /// ADR-0020 D2 — a fixture declares finite rows instead of implementing a
+    /// predicate, so what it asserts is inspectable data rather than code.
+    fn honest_semantics(n: usize) -> GeneratorSemanticsV1 {
+        let mut m = GeneratorSemanticsV1::new();
+        for (i, g) in gens(n).into_iter().enumerate() {
+            m.declare_rows(g, [(configs(n + 1)[i], configs(n + 1)[i + 1])]);
+        }
+        m
     }
 
-    impl GeneratorSemantics for RecordingSemantics {
-        fn realizes(&self, g: &GeneratorId, src: &ConfigId, dst: &ConfigId) -> bool {
-            self.calls.borrow_mut().push((*g, *src, *dst));
-            // Honest relation: gi realizes xi → xi+1 and nothing else.
-            gens(8)
-                .iter()
-                .position(|c| c == g)
-                .is_some_and(|i| *src == configs(9)[i] && *dst == configs(9)[i + 1])
+    /// A declaration whose rows accept everything the chain could ask — the
+    /// ADR-0019 §6 residual, now expressible only as *visible data* carrying
+    /// its own distinct id (ADR-0020 D9).
+    fn permissive_semantics(n: usize, chain: &[ConfigId]) -> GeneratorSemanticsV1 {
+        let mut m = GeneratorSemanticsV1::new();
+        for (i, g) in gens(n).into_iter().enumerate() {
+            m.declare_rows(g, [(chain[i], chain[i + 1])]);
         }
-    }
-
-    /// A semantics that accepts everything — the §6 residual made concrete.
-    struct AlwaysTrue;
-    impl GeneratorSemantics for AlwaysTrue {
-        fn realizes(&self, _: &GeneratorId, _: &ConfigId, _: &ConfigId) -> bool {
-            true
-        }
+        m
     }
 
     #[test]
-    fn verify_replay_walks_every_link_exactly_once_in_order() {
+    fn verify_replay_accepts_exactly_the_declared_chain() {
         let d = Decomposition::recorded(gens(3), configs(4)).unwrap();
-        let sem = RecordingSemantics::default();
         let verified = d
-            .verify_replay(&registry_for(3), &sem)
+            .verify_replay(&registry_for(3), &honest_semantics(3))
             .expect("honest chain verifies");
-
         assert!(verified.is_replay_verified());
-        // Exactly one call per link, in chain order, over the adjacent pairs.
-        let calls = sem.calls.borrow();
-        let expected: Vec<_> = (0..3)
-            .map(|i| (gens(3)[i], configs(4)[i], configs(4)[i + 1]))
-            .collect();
-        assert_eq!(*calls, expected, "every link is checked once, in order");
     }
 
     #[test]
@@ -411,7 +411,7 @@ mod tests {
         // one the old stamp produced, so no DecompositionId moves.
         let earned = Decomposition::recorded(gens(2), configs(3))
             .unwrap()
-            .verify_replay(&registry_for(2), &RecordingSemantics::default())
+            .verify_replay(&registry_for(2), &honest_semantics(2))
             .expect("honest chain verifies");
         // The frozen expectation, rebuilt independently of any constructor:
         // the canonical encoding is generators, configs, then the tag ordinal
@@ -436,7 +436,7 @@ mod tests {
         padded.resize(3, configs(9)[8]);
         let d = Decomposition::recorded(gens(2), padded).unwrap();
 
-        match d.verify_replay(&registry_for(2), &RecordingSemantics::default()) {
+        match d.verify_replay(&registry_for(2), &honest_semantics(2)) {
             Err(ReplayVerificationError::RelationNotRealized { index, .. }) => {
                 assert_eq!(index, 0, "the first fabricated link is where it fails");
             }
@@ -450,7 +450,7 @@ mod tests {
         chain[1] = ConfigId::from_canon(b"corrupted");
         let d = Decomposition::recorded(gens(2), chain).unwrap();
 
-        let result = d.verify_replay(&registry_for(2), &RecordingSemantics::default());
+        let result = d.verify_replay(&registry_for(2), &honest_semantics(2));
         assert!(
             matches!(
                 result,
@@ -464,25 +464,22 @@ mod tests {
     fn a_generator_outside_the_registry_is_refused_before_the_relation_is_asked() {
         let d = Decomposition::recorded(gens(2), configs(3)).unwrap();
         // Registry holds only g0, so g1 is outside 𝒢.
-        let sem = RecordingSemantics::default();
-        match d.verify_replay(&registry_for(1), &sem) {
+        match d.verify_replay(&registry_for(1), &honest_semantics(2)) {
             Err(ReplayVerificationError::GeneratorNotInRegistry { index, generator }) => {
                 assert_eq!(index, 1);
                 assert_eq!(generator, gens(2)[1]);
             }
             other => panic!("an unregistered generator must be refused, got {other:?}"),
         }
-        // Membership is checked before the relation for that link.
-        assert_eq!(sem.calls.borrow().len(), 1, "only link 0 was ever asked");
     }
 
     #[test]
     fn an_already_verified_chain_cannot_be_re_verified() {
         let verified = Decomposition::recorded(gens(1), configs(2))
             .unwrap()
-            .verify_replay(&registry_for(1), &RecordingSemantics::default())
+            .verify_replay(&registry_for(1), &honest_semantics(1))
             .unwrap();
-        match verified.verify_replay(&registry_for(1), &RecordingSemantics::default()) {
+        match verified.verify_replay(&registry_for(1), &honest_semantics(1)) {
             Err(ReplayVerificationError::NotRecorded { found }) => {
                 assert_eq!(found, DecompVerification::ReplayVerified);
             }
@@ -490,19 +487,28 @@ mod tests {
         }
     }
 
-    /// ADR-0019 §6 residual 1, stated as a test rather than left to prose:
-    /// the transition guarantees the predicate was **executed**, not that the
-    /// oracle was authenticated. A caller supplying an always-true semantics
-    /// still gets a verified artifact. This test exists so the limit is
-    /// visible in the suite and cannot be quietly forgotten.
+    /// **Supersedes ADR-0019's `an_always_true_semantics_still_passes_a_fabricated_chain`**
+    /// (ADR-0020 D9). A permissive oracle can no longer be *code*; it can only
+    /// be declared rows. It still verifies the chain it declares — content
+    /// addressing does not make declared rows correct (ADR-0020 §5 residual 2)
+    /// — but it is now **visible and content-addressed**, so it carries a
+    /// different `GeneratorSemanticsIdV1` than the honest declaration and a
+    /// consumer holding the expected id rejects it.
     #[test]
-    fn an_always_true_semantics_still_passes_a_fabricated_chain() {
+    fn a_permissive_declaration_is_detectable_by_its_distinct_id() {
         let mut padded = vec![configs(9)[0]];
         padded.resize(3, configs(9)[8]);
-        let d = Decomposition::recorded(gens(2), padded).unwrap();
+        let d = Decomposition::recorded(gens(2), padded.clone()).unwrap();
+
+        let permissive = permissive_semantics(2, &padded);
         assert!(
-            d.verify_replay(&registry_for(2), &AlwaysTrue).is_ok(),
-            "ADR-0019 §6 residual 1: the supplied semantics is not authenticated"
+            d.verify_replay(&registry_for(2), &permissive).is_ok(),
+            "declared rows still verify the chain they declare"
+        );
+        assert_ne!(
+            permissive.id(),
+            honest_semantics(2).id(),
+            "ADR-0020: the substituted oracle must be DETECTABLE by its id"
         );
     }
 
@@ -511,7 +517,7 @@ mod tests {
         let recorded = Decomposition::recorded(gens(2), configs(3)).unwrap();
         let verified = Decomposition::recorded(gens(2), configs(3))
             .unwrap()
-            .verify_replay(&registry_for(2), &RecordingSemantics::default())
+            .verify_replay(&registry_for(2), &honest_semantics(2))
             .unwrap();
         assert_ne!(
             recorded.id(),
@@ -563,7 +569,7 @@ mod tests {
     fn golden_vector_replay_verified_decomposition() {
         let d = Decomposition::recorded(gens(1), configs(2))
             .unwrap()
-            .verify_replay(&registry_for(1), &RecordingSemantics::default())
+            .verify_replay(&registry_for(1), &honest_semantics(1))
             .unwrap();
 
         let mut got = CanonWriter::new();

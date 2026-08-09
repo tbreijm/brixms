@@ -16,15 +16,13 @@
 //!     judgement plus a `Dependency` edge, and the `Audited`/`Derived`
 //!     evidence differ.
 
-use std::collections::BTreeSet;
-
 use brix_canon::{Digest, Domain};
 use brix_semantic::{
     Authority, ConfigId, ContextId, Decomposition, Evidence, GeneratorId, GeneratorRegistry,
     JudgementId, Outcome, Realizes,
 };
 use soc_core::adm::AdmAll;
-use soc_core::audit::{audit_step, AuditResult, GeneratorSemantics};
+use soc_core::audit::{audit_step, AuditResult, GeneratorSemanticsV1};
 use soc_core::calendar::Key;
 use soc_core::commit::{run, CommitError, SettlementRegime};
 use soc_core::exec::ExecConfig;
@@ -110,23 +108,18 @@ fn setup() -> (Interner, FixtureRegime, ExecConfig) {
     )
 }
 
-/// A deterministic, map-backed [`GeneratorSemantics`]: a `BTreeSet` of
-/// realized `(generator, src, dst)` triples — never a `HashSet` (workspace
-/// determinism policy).
-struct FixtureSemantics(BTreeSet<(GeneratorId, ConfigId, ConfigId)>);
+/// The honest declaration for this fixture's two-link chain (ADR-0020 D2):
+/// `gen1: x0 → x1`, `gen2: x1 → x2`, and nothing else. Declared rows rather
+/// than an executable predicate, so what the audit is checking against is
+/// inspectable data carrying its own `GeneratorSemanticsIdV1`.
+struct FixtureSemantics;
 
 impl FixtureSemantics {
-    fn correct() -> Self {
-        let mut set = BTreeSet::new();
-        set.insert((gen1(), cfg_x0(), cfg_x1()));
-        set.insert((gen2(), cfg_x1(), cfg_x2()));
-        FixtureSemantics(set)
-    }
-}
-
-impl GeneratorSemantics for FixtureSemantics {
-    fn realizes(&self, g: &GeneratorId, src: &ConfigId, dst: &ConfigId) -> bool {
-        self.0.contains(&(*g, *src, *dst))
+    fn correct() -> GeneratorSemanticsV1 {
+        let mut m = GeneratorSemanticsV1::new();
+        m.declare_rows(gen1(), [(cfg_x0(), cfg_x1())]);
+        m.declare_rows(gen2(), [(cfg_x1(), cfg_x2())]);
+        m
     }
 }
 
@@ -341,29 +334,28 @@ fn non_recorded_decomposition_is_rejected() {
 /// corrupted intermediate config, an unregistered generator) live beside
 /// `verify_replay` itself in `brix-semantic`.
 fn verified_chain(generators: Vec<GeneratorId>, configs: Vec<ConfigId>) -> Decomposition {
-    struct ExactChain {
-        links: Vec<(GeneratorId, ConfigId, ConfigId)>,
-    }
-    impl GeneratorSemantics for ExactChain {
-        fn realizes(&self, g: &GeneratorId, src: &ConfigId, dst: &ConfigId) -> bool {
-            self.links
-                .iter()
-                .any(|(a, b, c)| a == g && b == src && c == dst)
-        }
-    }
-
     let mut registry = GeneratorRegistry::new();
     for g in &generators {
         registry.insert(*g);
     }
-    let links = generators
-        .iter()
-        .enumerate()
-        .map(|(i, g)| (*g, configs[i], configs[i + 1]))
-        .collect();
+    let semantics = chain_semantics(&generators, &configs);
 
     Decomposition::recorded(generators, configs)
         .expect("well-formed fixture chain")
-        .verify_replay(&registry, &ExactChain { links })
+        .verify_replay(&registry, &semantics)
         .expect("an honest fixture chain earns the tag")
+}
+
+/// The honest declaration for a chain (ADR-0020 D2/D7): `gi ↦ ExactRows{(xi, xi+1)}`.
+/// Fixtures declare finite rows instead of implementing a predicate, so what a
+/// test assumes about the oracle is inspectable data with its own id.
+fn chain_semantics(
+    generators: &[GeneratorId],
+    configs: &[ConfigId],
+) -> brix_semantic::GeneratorSemanticsV1 {
+    let mut m = brix_semantic::GeneratorSemanticsV1::new();
+    for (i, g) in generators.iter().enumerate() {
+        m.declare_rows(*g, [(configs[i], configs[i + 1])]);
+    }
+    m
 }
