@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 use brix_canon::{CanonWriter, Canonical};
 use brix_elaborate::{RealizesTree, TreeObj};
 use brix_semantic::{
-    Authority, ConfigId, ContextId, GeneratorId, Judgement, Outcome, Realizes, Support,
-    TreeDerivation,
+    Authority, ConfigId, ContextId, GeneratorId, GeneratorRegistry, Judgement, Outcome, Realizes,
+    Support, TreeDerivation,
 };
 
 use crate::tree_audit::audit_tree;
@@ -533,6 +533,22 @@ pub fn honest_result_outcome(composition: Outcome, tree: &RealizesTree) -> Outco
 /// `GRADE` coercion edges. Returns `None` for a generator this module did not
 /// mint (a caller should fall back to the raw digest).
 pub fn generator_name(g: &GeneratorId) -> Option<String> {
+    minted_generators()
+        .into_iter()
+        .find(|(_, id)| id == g)
+        .map(|(name, _)| name)
+}
+
+/// The **single closed enumeration** of every generator this regime mints:
+/// the named typing rules plus the open-ended `NUMERIC`/`GRADE` promotion
+/// edges (ADR-0019 D5).
+///
+/// One list, two consumers — [`generator_name`]'s reverse lookup and
+/// [`typing_registry`]'s membership set. They were separate before, which is
+/// how the two could have drifted: a rule reachable by inference but absent
+/// from the registry would fail audit, and one present in the registry but
+/// never minted would widen `𝒢` silently.
+fn minted_generators() -> Vec<(String, GeneratorId)> {
     let named: &[(&str, GeneratorId)] = &[
         ("g_lit", g_lit()),
         ("g_str_lit", g_str_lit()),
@@ -559,20 +575,40 @@ pub fn generator_name(g: &GeneratorId) -> Option<String> {
         ("g_arith_split", g_arith_split()),
         ("g_unify", g_unify()),
     ];
-    if let Some((name, _)) = named.iter().find(|(_, id)| id == g) {
-        return Some((*name).to_string());
-    }
+
+    let mut out: Vec<(String, GeneratorId)> = named
+        .iter()
+        .map(|(n, id)| ((*n).to_string(), *id))
+        .collect();
     for (from, to) in NUMERIC.edges.iter().copied() {
-        if NUMERIC.promote_generator(from, to) == *g {
-            return Some(format!("promote({from}->{to})"));
-        }
+        out.push((
+            format!("promote({from}->{to})"),
+            NUMERIC.promote_generator(from, to),
+        ));
     }
     for (from, to) in GRADE.edges.iter().copied() {
-        if GRADE.promote_generator(from, to) == *g {
-            return Some(format!("weaken({from}->{to})"));
-        }
+        out.push((
+            format!("weaken({from}->{to})"),
+            GRADE.promote_generator(from, to),
+        ));
     }
-    None
+    out
+}
+
+/// The registry `𝒢` of typing-rule generators this regime mints — the
+/// membership set `TreeDerivation::verify_structure` checks each leaf
+/// against (ADR-0019 D5).
+///
+/// Built from [`minted_generators`], the regime's own declared enumeration.
+/// It is **never** assembled from the leaves of the tree being audited: that
+/// would reduce membership to "every cited generator is among the cited
+/// generators", which checks nothing.
+pub fn typing_registry() -> GeneratorRegistry {
+    let mut r = GeneratorRegistry::new();
+    for (_, id) in minted_generators() {
+        r.insert(id);
+    }
+    r
 }
 
 // ---------------------------------------------------------------------------

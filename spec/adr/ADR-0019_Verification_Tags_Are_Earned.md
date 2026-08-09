@@ -1,6 +1,6 @@
 # ADR-0019 — Verification Tags Are Earned, Not Stamped
 
-Status: **Proposed** (2026-08-09) (rules on the ADR-0016 §7.1 residual / audit finding A-3 / the verification-tag slice of #178; follows [ADR-0017](./ADR-0017_Tree_Realization_Support.md) and [ADR-0018](./ADR-0018_Retire_The_Flat_Typing_Lane.md)).
+Status: **Accepted** (2026-08-09) (rules on the ADR-0016 §7.1 residual / audit finding A-3 / the verification-tag slice of #178; follows [ADR-0017](./ADR-0017_Tree_Realization_Support.md) and [ADR-0018](./ADR-0018_Retire_The_Flat_Typing_Lane.md)).
 
 Date: 2026-08-09.
 

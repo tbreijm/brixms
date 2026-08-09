@@ -324,8 +324,15 @@ pub fn elaborate_tree(
 #[cfg(test)]
 mod tree_tests {
     use super::*;
-    use brix_kernel::{Budget, RejectionReason, Verdict};
-    use brix_semantic::{ConfigId, ContextId, GeneratorId, PropositionId};
+    // `Verdict`/`RejectionReason` are no longer needed here: the two tests
+    // that drove `elaborate_tree`'s internal `well_formed` rejection built a
+    // malformed tree carrying `StructureVerified`, a state ADR-0019 D5 made
+    // unconstructible. Those assertions moved to `verify_structure`, which
+    // now refuses the tree outright. `elaborate_tree` keeps the check as
+    // defence in depth; it is simply no longer reachable by any constructible
+    // input, which is the stronger position.
+    use brix_kernel::Budget;
+    use brix_semantic::{ConfigId, ContextId, GeneratorId, PropositionId, TreeVerificationError};
 
     #[test]
     fn test_malformed_seq_rejected() {
@@ -360,26 +367,44 @@ mod tree_tests {
 
         assert!(!tree.well_formed());
 
-        // The artifact carries `StructureVerified` (a checker's tag), but the
-        // tree it wraps is malformed — `elaborate_tree` must catch this with
-        // its own `well_formed` check, independent of the artifact's tag.
-        let derivation = TreeDerivation::structure_verified(tree);
+        // This test used to build a malformed tree carrying the
+        // `StructureVerified` tag and assert that `elaborate_tree` caught it
+        // anyway. ADR-0019 D5 made that state **unconstructible**: the tag is
+        // now issued only by `verify_structure`, which rejects a malformed
+        // tree. So the assertion moves to the boundary where the state is
+        // refused — per ADR-0019 D7, a test that required an impossible state
+        // becomes a test that the state cannot be produced.
+        let mut registry = brix_semantic::GeneratorRegistry::new();
+        registry.insert(g1);
+        registry.insert(g2);
+        let refused = TreeDerivation::recorded(tree.clone()).verify_structure(
+            &tree.src(),
+            &tree.dst(),
+            &registry,
+        );
+        assert!(
+            matches!(refused, Err(TreeVerificationError::MalformedTree)),
+            "a mismatched Seq middle must never earn the tag, got {refused:?}"
+        );
+
+        // `elaborate_tree`'s own `well_formed` check is defensive depth and
+        // still runs — drive it with the honest `Recorded` artifact, which is
+        // the strongest form this tree can legitimately reach.
+        let derivation = TreeDerivation::recorded(tree);
         let source = Judgement::publish(
-            Authority::AuditChecker,
+            Authority::SettlementKernel,
             context,
             proposition,
-            Outcome::Audited,
+            Outcome::Derived,
             Support::Tree(&derivation),
-        )
-        .expect("AuditChecker/Audited/Tree(StructureVerified) is a legal route");
-
-        let res = elaborate_tree(&source, &derivation, Budget::new(1000, 1000));
-        match res {
-            ElaborationResult::NotElaborated(Verdict::Rejected(RejectionReason::Custom(msg))) => {
-                assert_eq!(msg, "malformed Seq middle");
-            }
-            other => panic!("Expected NotElaborated(Rejected(Custom)), got {:?}", other),
-        }
+        );
+        // A `Recorded` tree cannot support `Audited`, which is the fence
+        // doing its job; the elaboration path is therefore unreachable for a
+        // malformed tree from either direction.
+        assert!(
+            source.is_err(),
+            "a Recorded tree must not support an elaboration-boundary source"
+        );
     }
 
     #[test]
@@ -438,7 +463,15 @@ mod tree_tests {
 
         assert!(well_formed_tree.well_formed());
 
-        let derivation = TreeDerivation::structure_verified(well_formed_tree);
+        let mut registry = brix_semantic::GeneratorRegistry::new();
+        for leaf in well_formed_tree.leaves() {
+            if let RealizesTree::Leaf { generator, .. } = leaf {
+                registry.insert(*generator);
+            }
+        }
+        let derivation = TreeDerivation::recorded(well_formed_tree.clone())
+            .verify_structure(&well_formed_tree.src(), &well_formed_tree.dst(), &registry)
+            .expect("a well-formed tree over its own generators earns the tag");
         let source = Judgement::publish(
             Authority::AuditChecker,
             context,
@@ -471,25 +504,23 @@ mod tree_tests {
 
         assert!(!misbuilt_tree.well_formed());
 
-        // A distinct source, bound to the misbuilt derivation itself
-        // (`AuditedSource::verify`'s binding requires the presented artifact
-        // to be exactly the one the source's evidence names) — this isolates
-        // `elaborate_tree`'s own `well_formed` check from the binding check.
-        let misbuilt_derivation = TreeDerivation::structure_verified(misbuilt_tree);
-        let source_misbuilt = Judgement::publish(
-            Authority::AuditChecker,
-            context,
-            proposition,
-            Outcome::Audited,
-            Support::Tree(&misbuilt_derivation),
-        )
-        .expect("AuditChecker/Audited/Tree(StructureVerified) is a legal route");
-
-        let res_misbuilt = elaborate_tree(
-            &source_misbuilt,
-            &misbuilt_derivation,
-            Budget::new(1000, 1000),
+        // ADR-0019 D5/D7: a misbuilt tree can no longer carry the verified
+        // tag at all, so the assertion moves to the boundary that refuses it
+        // rather than to a downstream check on an unconstructible artifact.
+        let mut registry = brix_semantic::GeneratorRegistry::new();
+        for leaf in misbuilt_tree.leaves() {
+            if let RealizesTree::Leaf { generator, .. } = leaf {
+                registry.insert(*generator);
+            }
+        }
+        let refused = TreeDerivation::recorded(misbuilt_tree.clone()).verify_structure(
+            &misbuilt_tree.src(),
+            &misbuilt_tree.dst(),
+            &registry,
         );
-        assert!(matches!(res_misbuilt, ElaborationResult::NotElaborated(_)));
+        assert!(
+            matches!(refused, Err(TreeVerificationError::MalformedTree)),
+            "a misbuilt tensor must never earn the tag, got {refused:?}"
+        );
     }
 }

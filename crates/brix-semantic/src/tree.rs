@@ -239,10 +239,61 @@ impl Canonical for TreeVerification {
 /// A realization derivation together with its verification status — the
 /// evidence artifact behind an `Audited` typing judgement (ADR-0017 §5 D1).
 ///
+/// Why [`TreeDerivation::verify_structure`] refused to issue the
+/// `StructureVerified` tag (ADR-0019 D5).
+///
+/// Rust-side validation only: never canonically encoded or hashed, because a
+/// derivation that fails the check never becomes a verified artifact. Every
+/// variant means *no artifact was produced* — there is deliberately no
+/// downgraded-artifact variant (ADR-0002 §4's fail-closed discipline).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TreeVerificationError {
+    /// The receiver was not in [`TreeVerification::Recorded`] form. This
+    /// transition upgrades a record; it never re-tags a verified one.
+    NotRecorded { found: TreeVerification },
+    /// A `Seq` node's middle does not match (`left.dst() != right.src()`), so
+    /// the tree does not compose (ADR-0007 §6).
+    MalformedTree,
+    /// The derivation's endpoints are not the ones the claim is about — the
+    /// tree proves something, but not this.
+    EndpointMismatch,
+    /// A leaf cites a generator outside the supplied registry. Without this
+    /// check an arbitrary digest could pose as a typing rule.
+    GeneratorNotInRegistry(GeneratorId),
+}
+
 /// Fields are private: the verification tag is the whole point, and a caller
 /// able to set it would be able to mint the claim this artifact exists to
 /// support. Construct through [`TreeDerivation::recorded`] or, for the
-/// verified form, through the checker that earns it.
+/// verified form, through [`TreeDerivation::verify_structure`], which earns
+/// it (ADR-0019 D5).
+///
+/// The two doors that used to be open, as executable gates. **The removed
+/// stamp constructor:**
+///
+/// ```compile_fail
+/// use brix_semantic::{ConfigId, GeneratorId, RealizesTree, TreeDerivation, TreeObj};
+/// let tree = RealizesTree::Leaf {
+///     generator: GeneratorId::named("g@1"),
+///     src: TreeObj::Atom(ConfigId::from_canon(b"x0")),
+///     dst: TreeObj::Atom(ConfigId::from_canon(b"x1")),
+/// };
+/// let d = TreeDerivation::structure_verified(tree);
+/// ```
+///
+/// **Struct-literal construction**, which would bypass it anyway:
+///
+/// ```compile_fail
+/// use brix_semantic::{ConfigId, GeneratorId, RealizesTree, TreeDerivation, TreeObj, TreeVerification};
+/// let d = TreeDerivation {
+///     tree: RealizesTree::Leaf {
+///         generator: GeneratorId::named("g@1"),
+///         src: TreeObj::Atom(ConfigId::from_canon(b"x0")),
+///         dst: TreeObj::Atom(ConfigId::from_canon(b"x1")),
+///     },
+///     verification: TreeVerification::StructureVerified,
+/// };
+/// ```
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TreeDerivation {
     tree: RealizesTree,
@@ -259,18 +310,73 @@ impl TreeDerivation {
         }
     }
 
-    /// A derivation the tree-audit checker has verified.
+    /// **Earn** the `StructureVerified` tag by checking this derivation
+    /// (ADR-0019 D5).
     ///
-    /// Call this **only** from a checker that has actually performed the
-    /// ADR-0017 §4 (b)/(c)/(e) checks. It is the tree analogue of
-    /// [`crate::Decomposition::replay_verified`] and carries the same caveat
-    /// ADR-0016 §7.1 records about that one: this crate owns the artifact and
-    /// its identity, and cannot itself verify anything.
-    pub fn structure_verified(tree: RealizesTree) -> Self {
-        TreeDerivation {
-            tree,
-            verification: TreeVerification::StructureVerified,
+    /// This replaces the old `structure_verified` stamp, which set the tag on
+    /// whatever tree it was handed and delegated honesty to its caller — the
+    /// tree-lane instance of the defect ADR-0016 §7.1 recorded for
+    /// `Decomposition`. It performs ADR-0017 §4's rows itself:
+    ///
+    /// - **(e)** structural well-formedness — every `Seq` middle matches, so
+    ///   the tree composes;
+    /// - **(b)** the derivation's endpoints equal the **independently
+    ///   supplied** `expected_src`/`expected_dst`;
+    /// - **(c)** every leaf cites a generator in `registry`.
+    ///
+    /// The endpoints and registry are parameters rather than values read off
+    /// the tree on purpose: a checker that took the derivation's word for its
+    /// own endpoints, or built its registry from the leaves it is checking,
+    /// would be checking nothing — "every cited generator is among the cited
+    /// generators" is not a membership test.
+    ///
+    /// **Scope of the resulting tag** (ADR-0017 §4 row d). `StructureVerified`
+    /// still does **not** attest that any leaf relation `ρ_g` holds — that is
+    /// ADR-0007 §7's deferred tight direction and ADR-0015 ⟨D-PRIM⟩'s
+    /// mechanism, and it is why this tag is not called `ReplayVerified`.
+    ///
+    /// Fails closed: every rejection is a typed [`TreeVerificationError`] and
+    /// **no artifact is produced**.
+    pub fn verify_structure(
+        self,
+        expected_src: &TreeObj,
+        expected_dst: &TreeObj,
+        registry: &crate::GeneratorRegistry,
+    ) -> Result<Self, TreeVerificationError> {
+        if self.verification != TreeVerification::Recorded {
+            return Err(TreeVerificationError::NotRecorded {
+                found: self.verification,
+            });
         }
+
+        // (e) structural well-formedness.
+        if !self.tree.well_formed() {
+            return Err(TreeVerificationError::MalformedTree);
+        }
+
+        // (b) endpoints against the independently supplied claim.
+        if self.tree.src() != *expected_src || self.tree.dst() != *expected_dst {
+            return Err(TreeVerificationError::EndpointMismatch);
+        }
+
+        // (c) every leaf cites a generator the registry mints.
+        for leaf in self.tree.leaves() {
+            match leaf {
+                RealizesTree::Leaf { generator, .. } => {
+                    if !registry.contains(generator) {
+                        return Err(TreeVerificationError::GeneratorNotInRegistry(*generator));
+                    }
+                }
+                // `leaves()` yields only `Leaf` nodes; treat anything else as
+                // a failed check rather than trusting the invariant silently.
+                _ => return Err(TreeVerificationError::MalformedTree),
+            }
+        }
+
+        Ok(TreeDerivation {
+            tree: self.tree,
+            verification: TreeVerification::StructureVerified,
+        })
     }
 
     /// The derivation.
@@ -315,6 +421,21 @@ digest_id!(
 
 #[cfg(test)]
 mod tests {
+
+    /// Earn the verified form the honest way (ADR-0019 D5): registry from the
+    /// tree's own generators, real transition, tree's own endpoints. A
+    /// fixture, not a membership test — see `verify_structure`'s doc.
+    fn verified(tree: RealizesTree) -> TreeDerivation {
+        let mut registry = crate::GeneratorRegistry::new();
+        for leaf in tree.leaves() {
+            if let RealizesTree::Leaf { generator, .. } = leaf {
+                registry.insert(*generator);
+            }
+        }
+        TreeDerivation::recorded(tree.clone())
+            .verify_structure(&tree.src(), &tree.dst(), &registry)
+            .expect("a well-formed fixture tree earns the tag")
+    }
     use super::*;
 
     fn cfg(tag: &str) -> ConfigId {
@@ -352,7 +473,7 @@ mod tests {
     #[test]
     fn recorded_and_structure_verified_over_identical_data_have_distinct_ids() {
         let recorded = TreeDerivation::recorded(mixed_tree());
-        let verified = TreeDerivation::structure_verified(mixed_tree());
+        let verified = verified(mixed_tree());
         assert_ne!(
             recorded.id(),
             verified.id(),
@@ -366,8 +487,8 @@ mod tests {
     fn distinct_trees_have_distinct_ids() {
         // The property the old proposition-derived evidence could not have:
         // two different derivations are two different artifacts.
-        let a = TreeDerivation::structure_verified(leaf("g_a@1", "x0", "x1"));
-        let b = TreeDerivation::structure_verified(leaf("g_b@1", "x0", "x1"));
+        let a = verified(leaf("g_a@1", "x0", "x1"));
+        let b = verified(leaf("g_b@1", "x0", "x1"));
         assert_ne!(
             a.id(),
             b.id(),
@@ -423,7 +544,7 @@ mod tests {
     #[test]
     fn golden_vector_structure_verified_leaf() {
         let g = GeneratorId::named("g_a@1");
-        let d = TreeDerivation::structure_verified(RealizesTree::Leaf {
+        let d = verified(RealizesTree::Leaf {
             generator: g,
             src: TreeObj::Atom(cfg("x0")),
             dst: TreeObj::Atom(cfg("x1")),

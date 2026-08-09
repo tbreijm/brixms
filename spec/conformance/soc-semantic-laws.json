@@ -81,6 +81,7 @@
       "authority": ["soc-core::audit"],
       "normative_anchors": [
         "spec/adr/ADR-0002_SOC_Constitution.md",
+        "spec/adr/ADR-0019_Verification_Tags_Are_Earned.md",
         "docs/audit/issue-63/tcb-audit.md"
       ],
       "implementation_anchors": [
@@ -91,19 +92,24 @@
         {
           "path": "crates/soc-core/tests/audit_factorization.rs",
           "tests": ["good_decomposition_upgrades_to_audited_with_correct_authority", "corrupted_intermediate_configuration_yields_unknown_never_a_pass", "generator_outside_registry_yields_unknown_never_a_pass", "derived_judgement_is_never_mutated_upgrade_is_a_new_judgement_and_edge", "log_integrity_mismatch_yields_unknown", "non_recorded_decomposition_is_rejected"]
+        },
+        {
+          "path": "crates/brix-semantic/src/decomposition.rs",
+          "tests": ["verify_replay_walks_every_link_exactly_once_in_order", "a_padded_chain_cannot_earn_the_tag", "a_generator_outside_the_registry_is_refused_before_the_relation_is_asked"]
         }
       ],
       "failure_mode": "Return AuditResult::Unknown for every incomplete or inconsistent replay; never publish a partial pass.",
-      "open_issues": [178]
+      "open_issues": []
     },
     {
       "id": "SOC-LAW-04",
       "title": "Epistemic non-escalation",
-      "status": "partial",
+      "status": "enforced",
       "authority": ["brix-semantic outcome lattice", "audit and proof validators"],
       "normative_anchors": [
         "spec/adr/ADR-0002_SOC_Constitution.md",
         "spec/adr/ADR-0011_Match_And_Certified_Exhaustiveness.md",
+        "spec/adr/ADR-0019_Verification_Tags_Are_Earned.md",
         "docs/audit/issue-63/README.md"
       ],
       "implementation_anchors": [
@@ -125,10 +131,14 @@
         {
           "path": "crates/brix-lower/tests/lower_proven.rs",
           "tests": ["test_let_lit_earns_proven", "test_id_fixture_proven", "proving_exhaustive_match_gets_kernel_certified_coverage", "proving_exhaustive_with_wildcard_is_not_certified_but_still_checks"]
+        },
+        {
+          "path": "crates/brix-semantic/src/decomposition.rs",
+          "tests": ["an_already_verified_chain_cannot_be_re_verified", "a_corrupted_intermediate_config_is_refused_and_yields_no_artifact"]
         }
       ],
       "failure_mode": "Preserve rejected, unsupported, context-mismatch, and exhausted states; Unknown never becomes truth or falsity.",
-      "open_issues": [178]
+      "open_issues": []
     },
     {
       "id": "SOC-LAW-05",
@@ -140,6 +150,7 @@
         "spec/adr/ADR-0016_Authority_Publication_Fence.md",
         "spec/adr/ADR-0017_Tree_Realization_Support.md",
         "spec/adr/ADR-0018_Retire_The_Flat_Typing_Lane.md",
+        "spec/adr/ADR-0019_Verification_Tags_Are_Earned.md",
         "spec/errata/0004-tree-realization-audited-support.md",
         "spec/errata/0005-flat-path-padded-decomposition.md",
         "docs/audit/issue-63/README.md"
@@ -185,7 +196,7 @@
         }
       ],
       "failure_mode": "Reject unrecognized publishers and mismatched outcome/evidence authority without constructing a judgement.",
-      "open_issues": [178]
+      "open_issues": []
     },
     {
       "id": "SOC-LAW-06",

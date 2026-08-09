@@ -313,8 +313,8 @@ ADR-0017 reproduced the pattern for `TreeDerivation::structure_verified` rather 
 it, so by the time this section was written there were two unchecked verified-tag constructors,
 not one.
 
-ADR-0019 rules that a verified tag is an **output of a checked transition, never a constructor
-input**: both raw verified constructors are removed in favour of `Decomposition::verify_replay`
+**Discharged.** ADR-0019 rules that a verified tag is an **output of a checked transition, never a
+constructor input**: both raw verified constructors are removed in favour of `Decomposition::verify_replay`
 and `TreeDerivation::verify_structure`, which perform their defining checks in the crate that
 owns the artifact. The tag-minting residual is thereby closed. What remains open is narrower and
 is restated in ADR-0019 §6: a caller still supplies the `GeneratorSemantics`, and the verified

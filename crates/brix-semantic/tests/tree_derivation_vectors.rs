@@ -26,7 +26,8 @@ use std::path::{Path, PathBuf};
 
 use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_semantic::{
-    ConfigId, GeneratorId, RealizesTree, TreeDerivation, TreeObj, TreeVerification,
+    ConfigId, GeneratorId, GeneratorRegistry, RealizesTree, TreeDerivation, TreeObj,
+    TreeVerification,
 };
 
 struct Fixture {
@@ -150,9 +151,31 @@ fn independent_derivation(tree: &RealizesTree, verification: TreeVerification) -
 }
 
 fn derivation(tree: &RealizesTree, verification: TreeVerification) -> TreeDerivation {
+    let recorded = TreeDerivation::recorded(tree.clone());
     match verification {
-        TreeVerification::Recorded => TreeDerivation::recorded(tree.clone()),
-        TreeVerification::StructureVerified => TreeDerivation::structure_verified(tree.clone()),
+        TreeVerification::Recorded => recorded,
+        // ADR-0019 D5/D7: the verified form is earned here too — the frozen
+        // bytes are the same, but they are now reached through the real
+        // transition rather than a stamp.
+        //
+        // This fixture registry is built from the vector tree's own leaves.
+        // That would be circular in a *checker* and is exactly what
+        // `verify_structure`'s doc forbids there — but this is a vector
+        // fixture whose job is to produce a known-good artifact and freeze
+        // its encoding, not to test membership. The real membership negative
+        // lives in `soc-regimes`' `tree_audit`, against the regime's declared
+        // registry.
+        TreeVerification::StructureVerified => {
+            let mut registry = GeneratorRegistry::new();
+            for leaf in tree.leaves() {
+                if let RealizesTree::Leaf { generator, .. } = leaf {
+                    registry.insert(*generator);
+                }
+            }
+            recorded
+                .verify_structure(&tree.src(), &tree.dst(), &registry)
+                .expect("the frozen vector trees are well-formed by construction")
+        }
     }
 }
 

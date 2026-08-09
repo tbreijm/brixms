@@ -18,7 +18,8 @@
 use brix_canon::Canonical;
 use brix_elaborate::witness_object;
 use brix_semantic::{
-    ConfigId, GeneratorId, RealizesTree, Support, TreeDerivation, TreeObj, WitnessId,
+    ConfigId, GeneratorId, GeneratorRegistry, RealizesTree, Support, TreeDerivation, TreeObj,
+    WitnessId,
 };
 
 fn cfg(tag: &str) -> ConfigId {
@@ -138,11 +139,11 @@ fn distinct_derivations_yield_distinct_evidence() {
     // *every* derivation of a proposition produced the same evidence id and the
     // support distinguished nothing. Now the evidence is the artifact's own
     // identity.
-    let one = TreeDerivation::structure_verified(RealizesTree::Seq {
+    let one = verified_tree_derivation(RealizesTree::Seq {
         left: Box::new(leaf("g_a@1", atom("x0"), atom("x1"))),
         right: Box::new(leaf("g_b@1", atom("x1"), atom("x2"))),
     });
-    let other = TreeDerivation::structure_verified(RealizesTree::Seq {
+    let other = verified_tree_derivation(RealizesTree::Seq {
         left: Box::new(leaf("g_c@1", atom("x0"), atom("x1"))),
         right: Box::new(leaf("g_b@1", atom("x1"), atom("x2"))),
     });
@@ -172,12 +173,28 @@ fn evidence_survives_a_tampering_test() {
         right: Box::new(leaf("g_b@1", atom("x1"), atom("x2_tampered"))),
     };
 
-    let a = TreeDerivation::structure_verified(honest);
-    let b = TreeDerivation::structure_verified(tampered);
+    let a = verified_tree_derivation(honest);
+    let b = verified_tree_derivation(tampered);
     assert_ne!(a.id(), b.id(), "a tampered middle must change the evidence");
     assert_ne!(
         a.canon_bytes(),
         b.canon_bytes(),
         "the canonical encoding must carry the whole derivation, not a summary"
     );
+}
+
+/// Earn a `StructureVerified` derivation the honest way (ADR-0019 D5/D7):
+/// registry from the tree's own generators, real transition, tree's own
+/// endpoints. A fixture, not a membership test — the real membership
+/// negative lives in `soc-regimes`' `tree_audit`.
+fn verified_tree_derivation(tree: RealizesTree) -> TreeDerivation {
+    let mut registry = GeneratorRegistry::new();
+    for leaf in tree.leaves() {
+        if let RealizesTree::Leaf { generator, .. } = leaf {
+            registry.insert(*generator);
+        }
+    }
+    TreeDerivation::recorded(tree.clone())
+        .verify_structure(&tree.src(), &tree.dst(), &registry)
+        .expect("a well-formed fixture tree earns the tag")
 }
