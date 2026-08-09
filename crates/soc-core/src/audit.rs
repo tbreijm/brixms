@@ -80,6 +80,16 @@ pub struct AuditedStep {
     pub link: Dependency,
     /// The `ReplayVerified` form of the step's decomposition.
     pub verified: Decomposition,
+    /// The receipt identifying the exact audit environment this replay ran
+    /// under (ADR-0020 D5) — context, committed step, verified decomposition,
+    /// registry, and **which oracle**.
+    ///
+    /// Additive: the `audited` judgement above and its `JudgementId` are
+    /// byte-identical with or without this field, because the receipt is not
+    /// evidence (ADR-0020 D1). A consumer wanting oracle-bound provenance must
+    /// keep and validate it; one that discards it retains exactly ADR-0019's
+    /// guarantee.
+    pub receipt: crate::audit_receipt::SettlementAuditReceiptV1,
 }
 
 /// Audit one committed step: replay its recorded [`Decomposition`] against
@@ -217,12 +227,19 @@ pub fn audit_step(
     let audited_id = audited.id();
     let link = Dependency::new(EdgeKind::Premise, derived_id.digest());
 
+    // Step 5: mint the receipt. It records what this replay ran under; it
+    // does not alter what was published (ADR-0020 D1) — `audited` and its
+    // `JudgementId` above are byte-identical with or without it.
+    let receipt =
+        crate::audit_receipt::issue_receipt(step, context, registry, semantics, verified.id());
+
     AuditResult::Audited(Box::new(AuditedStep {
         audited,
         audited_id,
         derived_id,
         link,
         verified,
+        receipt,
     }))
 }
 

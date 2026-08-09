@@ -117,6 +117,7 @@
 
 pub mod adm;
 pub mod audit;
+pub mod audit_receipt;
 pub mod calendar;
 pub mod commit;
 pub mod cost;

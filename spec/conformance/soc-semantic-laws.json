@@ -99,6 +99,10 @@
           "tests": ["an_undeclared_generator_fails_closed_rather_than_returning_false", "registry_agreement_requires_exact_equality_not_containment", "distinct_declarations_have_distinct_ids"]
         },
         {
+          "path": "crates/soc-core/tests/audit_receipt_vectors.rs",
+          "tests": ["a_receipt_from_a_substituted_oracle_is_refused_against_the_expected_one", "a_receipt_does_not_validate_against_another_committed_step", "a_receipt_does_not_validate_under_another_context", "an_honest_receipt_validates_by_replay", "the_receipt_does_not_change_the_published_judgement"]
+        },
+        {
           "path": "crates/brix-semantic/src/decomposition.rs",
           "tests": ["verify_replay_accepts_exactly_the_declared_chain", "a_padded_chain_cannot_earn_the_tag", "a_generator_outside_the_registry_is_refused_before_the_relation_is_asked", "a_permissive_declaration_is_detectable_by_its_distinct_id"]
         }

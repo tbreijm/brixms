@@ -1,0 +1,14 @@
+{
+  "format": "brix.soc.SettlementAuditReceiptV1",
+  "version": 1,
+  "adr": "ADR-0020",
+  "cases": [
+    {
+      "name": "two_link_fixture_chain",
+      "description": "a real commit_tick -> audit_step run over gen1;gen2",
+      "committed_step_digest": "9a93813e4e0a9a18db13f0466dcdc5a22c7cf939d225737f4cbe67f69895ea07",
+      "canon_hex": "0116627269782e736f632e61756469742d726563656970740101011e627269782e736f632e61756469742d666163746f72697a6174696f6e40310120a7d1f9a56c727ac00ad5dd6dd97d4af1e943df9f605efcc265248c2c7b355c5c01209a93813e4e0a9a18db13f0466dcdc5a22c7cf939d225737f4cbe67f69895ea07012047488b09306df0f8d53e39eca707a110b677230bd398706363397cf27be9668c012082c78e2ae2a255fd4b966dcbb166ba81757a64afcb0cdc801dc118872a2898830120c27b94b1fda149b7ee38159e609a9502d1eedd20aa8729b535ada88e72329bb5",
+      "receipt_id": "544b5ba8eb2a745d03904bdb922b7325c0e9617aa29b866f7c3c929c6be3cb63"
+    }
+  ]
+}
