@@ -4,7 +4,8 @@ use brix_elaborate::{
 use brix_kernel::{Budget, ExplicitTerm, ObjectTerm, Prop, TermKind, Var, Verdict};
 use brix_semantic::{
     AuditedSource, Authority, ConfigId, ContextId, Decomposition, EdgeKind, Evidence, GeneratorId,
-    Judgement, Outcome, PropositionId, Support, TreeDerivation,
+    GeneratorRegistry, GeneratorSemantics, Judgement, Outcome, PropositionId, Support,
+    TreeDerivation,
 };
 
 /// A `StructureVerified` single-leaf tree derivation — the typing lane's
@@ -193,8 +194,7 @@ fn decomposition_n2_well_formed_produces_proven() {
     let x1 = ConfigId::from_canon(b"x1");
     let x2 = ConfigId::from_canon(b"x2");
 
-    let decomp =
-        Decomposition::replay_verified(vec![g1, g2], vec![x0, x1, x2]).expect("valid decomp");
+    let decomp = verified_chain(vec![g1, g2], vec![x0, x1, x2]);
 
     // The source must be Audited from *this* decomp: `elaborate_decomposition`
     // binds the source's evidence to the decomp presented alongside it
@@ -241,8 +241,7 @@ fn decomposition_n3_well_formed_produces_proven() {
     let x2 = ConfigId::from_canon(b"x2");
     let x3 = ConfigId::from_canon(b"x3");
 
-    let decomp = Decomposition::replay_verified(vec![g1, g2, g3], vec![x0, x1, x2, x3])
-        .expect("valid decomp");
+    let decomp = verified_chain(vec![g1, g2, g3], vec![x0, x1, x2, x3]);
 
     let source = Judgement::publish(
         Authority::AuditChecker,
@@ -282,7 +281,7 @@ fn decomposition_n1_single_generator_produces_proven() {
     let x0 = ConfigId::from_canon(b"x0");
     let x1 = ConfigId::from_canon(b"x1");
 
-    let decomp = Decomposition::replay_verified(vec![g1], vec![x0, x1]).expect("valid decomp");
+    let decomp = verified_chain(vec![g1], vec![x0, x1]);
 
     let source = Judgement::publish(
         Authority::AuditChecker,
@@ -380,4 +379,41 @@ fn broken_chain_steps_do_not_connect_yields_not_elaborated() {
             panic!("Broken chain steps do not connect, but yielded Refused({err:?})!");
         }
     }
+}
+
+/// Earn a `ReplayVerified` chain the honest way (ADR-0019 D7): build the
+/// registry, supply a semantics that realizes exactly this chain's links, and
+/// run the **real** checked transition. No test constructs a verified
+/// artifact by assertion any more — the stamp constructor is gone.
+///
+/// This fixture semantics accepts precisely the chain it is handed, which is
+/// what a fixture should do: the independent negatives (a padded chain, a
+/// corrupted intermediate config, an unregistered generator) live beside
+/// `verify_replay` itself in `brix-semantic`.
+fn verified_chain(generators: Vec<GeneratorId>, configs: Vec<ConfigId>) -> Decomposition {
+    struct ExactChain {
+        links: Vec<(GeneratorId, ConfigId, ConfigId)>,
+    }
+    impl GeneratorSemantics for ExactChain {
+        fn realizes(&self, g: &GeneratorId, src: &ConfigId, dst: &ConfigId) -> bool {
+            self.links
+                .iter()
+                .any(|(a, b, c)| a == g && b == src && c == dst)
+        }
+    }
+
+    let mut registry = GeneratorRegistry::new();
+    for g in &generators {
+        registry.insert(*g);
+    }
+    let links = generators
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (*g, configs[i], configs[i + 1]))
+        .collect();
+
+    Decomposition::recorded(generators, configs)
+        .expect("well-formed fixture chain")
+        .verify_replay(&registry, &ExactChain { links })
+        .expect("an honest fixture chain earns the tag")
 }

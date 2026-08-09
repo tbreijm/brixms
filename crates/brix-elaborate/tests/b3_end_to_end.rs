@@ -131,7 +131,7 @@ fn test_b3_end_to_end_audited_decomposition_to_proven() {
     // - Outcome::Proven.authority() == Authority::ProofKernel
     // - evidence is a KernelCertificate
     // - edge is EdgeKind::ElaborationBoundary FROM Proven judgement TO audited judgement's id
-    // - committed witness in the audited proposition == compose_chain(&decomposition.generators).unwrap()
+    // - committed witness in the audited proposition == compose_chain(decomposition.generators()).unwrap()
     match elaboration_res {
         ElaborationResult::Proven { judgement, edge } => {
             assert_eq!(judgement.outcome, Outcome::Proven);
@@ -143,9 +143,9 @@ fn test_b3_end_to_end_audited_decomposition_to_proven() {
             let expected_verifier = brix_kernel::native_verifier();
             // Check that judgement.evidence matches a KernelCertificate by building expected evidence
             // Or verifying that it matches Evidence::KernelCertificate with expected_verifier
-            let witness_chain = compose_chain(&decomposition.generators).unwrap();
+            let witness_chain = compose_chain(decomposition.generators()).unwrap();
 
-            // Assert committed witness in the audited proposition == compose_chain(&decomposition.generators).unwrap()
+            // Assert committed witness in the audited proposition == compose_chain(decomposition.generators()).unwrap()
             let expected_audited_prop = Realizes::new(witness_chain, x0, x2).proposition_id();
             assert_eq!(audited_judgement.proposition, expected_audited_prop);
             assert_eq!(committed_step.witness, witness_chain);

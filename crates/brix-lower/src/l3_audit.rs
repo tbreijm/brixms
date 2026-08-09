@@ -388,8 +388,27 @@ mod tests {
         // the fail-closed discipline this fixture is checking.
         let f = two_rule_fixture();
         let witness = l3_witness_id(f.gen_a);
-        let bad_decomposition =
-            Decomposition::replay_verified(vec![f.gen_a], vec![f.w0, f.w1]).unwrap();
+        // ADR-0019 D7: the verified form is earned, not stamped, even here.
+        // The chain itself is honest — the tampering under test is that it is
+        // presented to the auditor in the verified form when a *recorded* one
+        // is required, not that its links are false.
+        struct ThisLink;
+        impl GeneratorSemantics for ThisLink {
+            fn realizes(
+                &self,
+                _: &brix_semantic::GeneratorId,
+                _: &brix_semantic::ConfigId,
+                _: &brix_semantic::ConfigId,
+            ) -> bool {
+                true
+            }
+        }
+        let mut registry = brix_semantic::GeneratorRegistry::new();
+        registry.insert(f.gen_a);
+        let bad_decomposition = Decomposition::recorded(vec![f.gen_a], vec![f.w0, f.w1])
+            .unwrap()
+            .verify_replay(&registry, &ThisLink)
+            .expect("the fixture chain earns the tag");
         let step = make_step(f.report.context, witness, f.w0, f.w1, bad_decomposition);
         let results = audit_l3_journal(&one_step_journal(step), f.report.context, &f.report.table);
         assert_eq!(results.len(), 1);

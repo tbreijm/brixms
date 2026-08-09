@@ -489,12 +489,12 @@ fn check_l3_decomposition(
     if candidate.witness != expected_witness_handle {
         return Err(CommitError::WitnessMismatch);
     }
-    // Condition 3: decomposition.generators == [expected_generator].
-    if decomposition.generators != [expected_generator] {
+    // Condition 3: decomposition.generators() == [expected_generator].
+    if decomposition.generators() != [expected_generator] {
         return Err(CommitError::GeneratorMismatch);
     }
-    // Condition 4: decomposition.configs == [expected_src, expected_dst].
-    if decomposition.configs != [expected_src, expected_dst] {
+    // Condition 4: decomposition.configs() == [expected_src, expected_dst].
+    if decomposition.configs() != [expected_src, expected_dst] {
         return Err(CommitError::EndpointMismatch);
     }
     Ok(())
@@ -631,11 +631,11 @@ mod tests {
         let step0 = step0.expect("Committed::Step carries a CommittedStep");
         assert_eq!(step0.src, regime.table().world_configs()[0]);
         assert_eq!(step0.dst, regime.table().world_configs()[1]);
-        assert_eq!(step0.decomposition.generators.len(), 1);
+        assert_eq!(step0.decomposition.generators().len(), 1);
         assert!(regime
             .table()
             .generators()
-            .contains(&step0.decomposition.generators[0]));
+            .contains(&step0.decomposition.generators()[0]));
 
         // World 1: committing must now decompose exactly W1 -> W2 — "alpha"'s
         // pair, which only becomes eligible once "zeta" has already committed.
@@ -1097,12 +1097,12 @@ mod tests {
     }
 
     /// A `CommittedStep` sufficient for exercising `ObservationProfile::label`,
-    /// which reads only `decomposition.generators` — every other field is a
+    /// which reads only `decomposition.generators()` — every other field is a
     /// harmless placeholder.
     fn fake_step(decomposition: Decomposition) -> CommittedStep {
-        let src = decomposition.configs[0];
-        let dst = *decomposition.configs.last().unwrap();
-        let witness = brix_semantic::compose_chain(&decomposition.generators).unwrap();
+        let src = decomposition.configs()[0];
+        let dst = *decomposition.configs().last().unwrap();
+        let witness = brix_semantic::compose_chain(decomposition.generators()).unwrap();
         CommittedStep {
             key: Key::new(0, 0, Digest::of(Domain::Value, b"k")),
             observation: Observation {

@@ -669,7 +669,7 @@ fn administrative_steps_audit_exactly_like_realizing_ones() {
             .iter()
             .flat_map(|s| {
                 s.decomposition
-                    .generators
+                    .generators()
                     .iter()
                     .map(|g| (*g, s.src, s.dst))
                     .collect::<Vec<_>>()

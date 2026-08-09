@@ -297,7 +297,7 @@ impl ObservationProfile for GeneratorPartitionProfile {
     }
 
     fn label(&self, step: &CommittedStep) -> Result<StepLabel, ProfileError> {
-        let generators = &step.decomposition.generators;
+        let generators = step.decomposition.generators();
         if generators.is_empty() {
             return Err(ProfileError::EmptyDecomposition);
         }

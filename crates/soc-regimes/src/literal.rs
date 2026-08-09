@@ -303,13 +303,13 @@ mod tests {
         let cs = regime.candidates(&e);
 
         let decomposition = regime.try_decompose(&e, &cs[0]).unwrap();
-        assert_eq!(decomposition.generators.len(), 1);
+        assert_eq!(decomposition.generators().len(), 1);
         assert_eq!(
-            decomposition.generators[0],
+            decomposition.generators()[0],
             GeneratorId::named(LiteralEqualityRegime::GENERATOR_NAME)
         );
-        assert_eq!(decomposition.configs.len(), 2);
-        assert_eq!(decomposition.configs[0], decomposition.configs[1]);
+        assert_eq!(decomposition.configs().len(), 2);
+        assert_eq!(decomposition.configs()[0], decomposition.configs()[1]);
     }
 
     #[test]
