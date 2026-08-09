@@ -75,10 +75,12 @@ mod witness;
 
 pub use config::ConfigId;
 pub use context::ContextId;
-pub use decomposition::{DecompVerification, Decomposition, DecompositionError, DecompositionId};
+pub use decomposition::{
+    DecompVerification, Decomposition, DecompositionError, DecompositionId, ReplayVerificationError,
+};
 pub use dependency::{Dependency, DependencyId, EdgeKind};
 pub use evidence::{CertificateId, Durability, Evidence, EvidenceId, VerifierId};
-pub use generator::{GeneratorId, GeneratorRegistry, GeneratorRegistryId};
+pub use generator::{GeneratorId, GeneratorRegistry, GeneratorRegistryId, GeneratorSemantics};
 pub use judgement::{Judgement, JudgementId};
 pub use outcome::{Authority, Outcome};
 pub use proposition::PropositionId;

@@ -29,22 +29,26 @@
 //! that publishes `Derived` or `Proven`.
 
 use brix_semantic::{
-    Authority, ConfigId, ContextId, DecompVerification, Decomposition, DecompositionError,
-    Dependency, EdgeKind, Evidence, GeneratorId, GeneratorRegistry, Judgement, JudgementId,
-    Outcome, Realizes, Support,
+    Authority, ContextId, DecompVerification, Decomposition, Dependency, EdgeKind, Evidence,
+    GeneratorRegistry, Judgement, JudgementId, Outcome, Realizes, ReplayVerificationError, Support,
 };
 
 use crate::journal::{CommittedStep, Journal};
 
 /// The relation `ρ_g` of each generator `g ∈ 𝒢`, as the checker replays it.
-/// `realizes(g, src, dst)` is true iff the primitive logged witness `g`
-/// relates configuration `src` to `dst` under `ρ_g`. The checker verifies the
-/// EXACT relational composition `ρ_k = ρ_gn ∘ … ∘ ρ_g1` by walking the
-/// decomposition's intermediate-configuration chain one generator at a time
+///
+/// **Moved to `brix-semantic` by ADR-0019 D3** and re-exported here so no
+/// implementation path changed. It now lives beside [`Decomposition`], because
+/// the code that *sets* the `ReplayVerified` tag must be the code that
+/// *performs* the check — see [`Decomposition::verify_replay`], which walks the
+/// EXACT relational composition `ρ_k = ρ_gn ∘ … ∘ ρ_g1` one generator at a time
 /// (ADR-0002 §6, `Build_Plan_v3_SOC.md` Step 4 gate).
-pub trait GeneratorSemantics {
-    fn realizes(&self, g: &GeneratorId, src: &ConfigId, dst: &ConfigId) -> bool;
-}
+///
+/// Moving the relation interface did **not** move this checker: `audit_step`
+/// still owns settlement replay in journal context (steps 1 and 2 below),
+/// which needs `CommittedStep` and the journal — types `brix-semantic` does
+/// not have and must not grow.
+pub use brix_semantic::GeneratorSemantics;
 
 /// The result of auditing one [`CommittedStep`]. `Unknown` carries a reason
 /// and is **never** a pass (ADR-0002 §4: "fail closed to `Unknown`, never a
@@ -161,31 +165,33 @@ pub fn audit_step(
         "Decomposition's own constructor guarantees this chain-length invariant"
     );
 
-    // Step 3: exact relational composition ρ_k = ρ_gn ∘ … ∘ ρ_g1, walked
-    // stepwise along x_0, …, x_n.
-    for (i, g) in step.decomposition.generators.iter().enumerate() {
-        if !registry.contains(g) {
+    // Steps 3 + 4a: exact relational composition ρ_k = ρ_gn ∘ … ∘ ρ_g1, walked
+    // stepwise along x_0, …, x_n — and the tag that records it.
+    //
+    // ADR-0019 D4: this is deliberately NOT "check here, then call an
+    // unchecked constructor over there". `verify_replay` walks every link and
+    // sets `ReplayVerified` itself, so the code that earns the tag is the code
+    // that issues it. Stages 1 and 2 above stay here: they are contextual —
+    // they interpret a `CommittedStep` and the journal, which the artifact
+    // does not encode and its tag does not attest to (ADR-0019 §2).
+    let verified = match step
+        .decomposition
+        .clone()
+        .verify_replay(registry, semantics)
+    {
+        Ok(v) => v,
+        Err(ReplayVerificationError::GeneratorNotInRegistry { .. }) => {
             return AuditResult::Unknown("decomposition cites a generator outside 𝒢");
         }
-        let src = &step.decomposition.configs[i];
-        let dst = &step.decomposition.configs[i + 1];
-        if !semantics.realizes(g, src, dst) {
+        Err(ReplayVerificationError::RelationNotRealized { .. }) => {
             return AuditResult::Unknown(
                 "relational composition failed: an intermediate configuration is not realized by its generator",
             );
         }
-    }
-
-    // Step 4: publish Audited.
-    let verified = match Decomposition::replay_verified(
-        step.decomposition.generators.clone(),
-        step.decomposition.configs.clone(),
-    ) {
-        Ok(v) => v,
-        Err(DecompositionError::ChainLengthMismatch { .. }) => {
-            // Unreachable given the constructor invariant re-asserted above,
-            // but never turn an internal impossibility into a silent pass.
-            return AuditResult::Unknown("decomposition chain length invalid on replay");
+        Err(ReplayVerificationError::NotRecorded { .. }) => {
+            // Unreachable: step 1 already rejected anything not in `Recorded`
+            // form. Never turn an internal impossibility into a silent pass.
+            return AuditResult::Unknown("decomposition is not in recorded form");
         }
     };
     // This module's one and only publication, through the ADR-0016 §4 fence.
