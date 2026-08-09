@@ -343,7 +343,7 @@ pub enum CommitError {
         configs: usize,
     },
     /// The decomposition's endpoints do not match what the candidate/plan
-    /// requires — e.g. (ADR-0012 §6.3) `decomposition.configs` is not exactly
+    /// requires — e.g. (ADR-0012 §6.3) `decomposition.configs()` is not exactly
     /// `[expected_src, expected_dst]` for the candidate being committed.
     EndpointMismatch,
     /// The candidate a regime was asked to decompose is not the one its own
@@ -364,7 +364,7 @@ pub enum CommitError {
     WitnessMismatch,
     /// The decomposition's generator chain is not exactly the one this
     /// regime expected for the transition being committed (ADR-0012 §6.3
-    /// condition 3: `decomposition.generators != [expected_generator]`). The
+    /// condition 3: `decomposition.generators() != [expected_generator]`). The
     /// chain is non-empty and correctly shaped — this is deliberately
     /// distinct from both [`EmptyDecomposition`](Self::EmptyDecomposition)
     /// (no generators at all) and
@@ -451,7 +451,7 @@ pub fn try_commit_selected(
     // Committed witness identity IS the canonical composition of its generators;
     // `candidate.witness` is the regime's proposal, the COMMITTED identity is
     // derived from the factorization.
-    let witness = brix_semantic::compose_chain(&decomposition.generators)
+    let witness = brix_semantic::compose_chain(decomposition.generators())
         .ok_or(CommitError::EmptyDecomposition)?;
 
     let proposition = Realizes::new(witness, src, dst).proposition_id();
@@ -758,7 +758,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let witness = brix_semantic::compose_chain(&decomposition.generators).unwrap();
+        let witness = brix_semantic::compose_chain(decomposition.generators()).unwrap();
         let proposition = Realizes::new(witness, src, dst).proposition_id();
         let evidence = Evidence::SettlementReplay {
             body: decomposition.id().digest(),

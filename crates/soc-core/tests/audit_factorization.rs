@@ -323,12 +323,47 @@ fn non_recorded_decomposition_is_rejected() {
     let registry = registry_with(&[gen1(), gen2()]);
     let semantics = FixtureSemantics::correct();
 
-    let already_verified =
-        Decomposition::replay_verified(vec![gen1(), gen2()], vec![cfg_x0(), cfg_x1(), cfg_x2()])
-            .unwrap();
+    let already_verified = verified_chain(vec![gen1(), gen2()], vec![cfg_x0(), cfg_x1(), cfg_x2()]);
     let mut corrupted = step.clone();
     corrupted.decomposition = already_verified;
 
     let result = audit_step(&corrupted, context, &registry, &semantics);
     assert!(matches!(result, AuditResult::Unknown(_)));
+}
+
+/// Earn a `ReplayVerified` chain the honest way (ADR-0019 D7): build the
+/// registry, supply a semantics that realizes exactly this chain's links, and
+/// run the **real** checked transition. No test constructs a verified
+/// artifact by assertion any more — the stamp constructor is gone.
+///
+/// This fixture semantics accepts precisely the chain it is handed, which is
+/// what a fixture should do: the independent negatives (a padded chain, a
+/// corrupted intermediate config, an unregistered generator) live beside
+/// `verify_replay` itself in `brix-semantic`.
+fn verified_chain(generators: Vec<GeneratorId>, configs: Vec<ConfigId>) -> Decomposition {
+    struct ExactChain {
+        links: Vec<(GeneratorId, ConfigId, ConfigId)>,
+    }
+    impl GeneratorSemantics for ExactChain {
+        fn realizes(&self, g: &GeneratorId, src: &ConfigId, dst: &ConfigId) -> bool {
+            self.links
+                .iter()
+                .any(|(a, b, c)| a == g && b == src && c == dst)
+        }
+    }
+
+    let mut registry = GeneratorRegistry::new();
+    for g in &generators {
+        registry.insert(*g);
+    }
+    let links = generators
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (*g, configs[i], configs[i + 1]))
+        .collect();
+
+    Decomposition::recorded(generators, configs)
+        .expect("well-formed fixture chain")
+        .verify_replay(&registry, &ExactChain { links })
+        .expect("an honest fixture chain earns the tag")
 }

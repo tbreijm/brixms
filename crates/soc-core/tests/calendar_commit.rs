@@ -256,7 +256,7 @@ fn committed_observation_judgement_digest_matches_independent_reconstruction() {
     let src = ConfigId(i.resolve(e.world));
     let dst = ConfigId(i.resolve(regime.successor));
     let decomposition = fixture_decomposition();
-    let witness = brix_semantic::compose_chain(&decomposition.generators).unwrap();
+    let witness = brix_semantic::compose_chain(decomposition.generators()).unwrap();
     let proposition = Realizes::new(witness, src, dst).proposition_id();
     let evidence = Evidence::SettlementReplay {
         body: decomposition.id().digest(),

@@ -401,13 +401,13 @@ pub(crate) fn check_route(
     match (route.condition, support) {
         (RouteCondition::None, _) => Ok(route),
         (RouteCondition::Decomposition(expected), Support::Settlement(decomposition)) => {
-            if decomposition.verification == expected {
+            if decomposition.verification() == expected {
                 Ok(route)
             } else {
                 Err(PublicationError::DecompositionVerificationMismatch {
                     outcome,
                     expected,
-                    found: decomposition.verification,
+                    found: decomposition.verification(),
                 })
             }
         }
@@ -512,13 +512,26 @@ mod tests {
     fn decomposition(verification: DecompVerification) -> Decomposition {
         let generators = vec![GeneratorId::named("g0@1")];
         let configs = vec![ConfigId::from_canon(b"x0"), ConfigId::from_canon(b"x1")];
+        let recorded = Decomposition::recorded(generators, configs).expect("well-formed chain");
         match verification {
-            DecompVerification::Recorded => Decomposition::recorded(generators, configs),
+            DecompVerification::Recorded => recorded,
+            // ADR-0019 D2/D7: even a route-table fixture earns the tag. A
+            // one-link chain over a registry holding its own generator, with a
+            // semantics that realizes exactly that link.
             DecompVerification::ReplayVerified => {
-                Decomposition::replay_verified(generators, configs)
+                struct OneLink;
+                impl crate::GeneratorSemantics for OneLink {
+                    fn realizes(&self, _: &GeneratorId, _: &ConfigId, _: &ConfigId) -> bool {
+                        true
+                    }
+                }
+                let mut registry = crate::GeneratorRegistry::new();
+                registry.insert(GeneratorId::named("g0@1"));
+                recorded
+                    .verify_replay(&registry, &OneLink)
+                    .expect("the fixture chain earns the tag")
             }
         }
-        .expect("well-formed chain")
     }
 
     #[test]

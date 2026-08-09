@@ -115,11 +115,53 @@ pub enum ReplayVerificationError {
 /// `configs.len() == generators.len() + 1` is enforced at construction (see
 /// [`DecompositionError`]) — there is no way to build a `Decomposition` with
 /// a mismatched chain.
+///
+/// **Fields are private** (ADR-0019 D2). The verification tag contributes to
+/// this artifact's identity, so a caller able to set it would be able to mint
+/// the claim the artifact exists to support — and while the fields were `pub`,
+/// that did not even require a constructor.
+///
+/// The three doors ADR-0019 closes, as executable gates. **Direct assignment**
+/// — the one ADR-0016 §7.1 missed, since sealing the constructor alone would
+/// not have stopped it:
+///
+/// ```compile_fail
+/// use brix_semantic::{ConfigId, DecompVerification, Decomposition, GeneratorId};
+/// let g = GeneratorId::named("g@1");
+/// let (x0, x1) = (ConfigId::from_canon(b"x0"), ConfigId::from_canon(b"x1"));
+/// let mut d = Decomposition::recorded(vec![g], vec![x0, x1]).unwrap();
+/// d.verification = DecompVerification::ReplayVerified;
+/// ```
+///
+/// **Struct-literal construction**, which bypasses every constructor:
+///
+/// ```compile_fail
+/// use brix_semantic::{ConfigId, DecompVerification, Decomposition, GeneratorId};
+/// let d = Decomposition {
+///     generators: vec![GeneratorId::named("g@1")],
+///     configs: vec![ConfigId::from_canon(b"x0"), ConfigId::from_canon(b"x1")],
+///     verification: DecompVerification::ReplayVerified,
+/// };
+/// ```
+///
+/// **The removed stamp constructor:**
+///
+/// ```compile_fail
+/// use brix_semantic::{ConfigId, Decomposition, GeneratorId};
+/// let g = GeneratorId::named("g@1");
+/// let (x0, x1) = (ConfigId::from_canon(b"x0"), ConfigId::from_canon(b"x1"));
+/// let d = Decomposition::replay_verified(vec![g], vec![x0, x1]);
+/// ```
+///
+/// Reads are unaffected: use [`Decomposition::generators`],
+/// [`Decomposition::configs`] and [`Decomposition::verification`]. The
+/// verified form is reachable only through [`Decomposition::verify_replay`],
+/// which earns it.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Decomposition {
-    pub generators: Vec<GeneratorId>,
-    pub configs: Vec<ConfigId>,
-    pub verification: DecompVerification,
+    generators: Vec<GeneratorId>,
+    configs: Vec<ConfigId>,
+    verification: DecompVerification,
 }
 
 impl Decomposition {
@@ -149,31 +191,6 @@ impl Decomposition {
         configs: Vec<ConfigId>,
     ) -> Result<Self, DecompositionError> {
         Self::build(generators, configs, DecompVerification::Recorded)
-    }
-
-    /// Construct a **replay-verified** decomposition — the audit-factorization
-    /// checker's result after replaying a recorded chain and verifying exact
-    /// relational composition (ADR-0002 §4.1). Supports `Audited` and may
-    /// cross an `elaboration-boundary`.
-    ///
-    /// ⚠ **Deprecated by ADR-0019: this stamps, it does not verify.** It sets
-    /// `ReplayVerified` on whatever chain it is handed, so the tag bottoms out
-    /// at caller discipline. Use [`Decomposition::verify_replay`], which
-    /// performs the check that the tag denotes. Retained only until the
-    /// remaining callers migrate (ADR-0019 implementation steps 3–5); it is
-    /// **removed** when they do, together with the `pub` fields that let the
-    /// tag be set by direct assignment without any constructor at all.
-    ///
-    /// **No production code calls this** as of ADR-0019 step 2 — the
-    /// settlement checker goes through `verify_replay`. The remaining callers
-    /// are tests, which migrate in the sealing step. It carries no
-    /// `#[deprecated]` attribute yet only because that would fail the
-    /// `-D warnings` lint gate before those tests move.
-    pub fn replay_verified(
-        generators: Vec<GeneratorId>,
-        configs: Vec<ConfigId>,
-    ) -> Result<Self, DecompositionError> {
-        Self::build(generators, configs, DecompVerification::ReplayVerified)
     }
 
     /// **Earn** the `ReplayVerified` tag by replaying this chain (ADR-0019 D2).
@@ -246,6 +263,22 @@ impl Decomposition {
         })
     }
 
+    /// The generator chain `g_1, …, g_n`.
+    pub fn generators(&self) -> &[GeneratorId] {
+        &self.generators
+    }
+
+    /// The intermediate-configuration chain `x_0, …, x_n`. Always exactly one
+    /// longer than [`Decomposition::generators`].
+    pub fn configs(&self) -> &[ConfigId] {
+        &self.configs
+    }
+
+    /// This decomposition's verification status.
+    pub const fn verification(&self) -> DecompVerification {
+        self.verification
+    }
+
     /// Whether this decomposition has been replayed and verified — the only
     /// form that supports `Audited` / may cross an `elaboration-boundary`.
     pub const fn is_replay_verified(&self) -> bool {
@@ -298,7 +331,8 @@ mod tests {
     #[test]
     fn valid_chain_constructs() {
         assert!(Decomposition::recorded(gens(2), configs(3)).is_ok());
-        assert!(Decomposition::replay_verified(gens(2), configs(3)).is_ok());
+        // The verified form has no direct constructor (ADR-0019 D2); it is
+        // reachable only through `verify_replay`, exercised below.
         // Zero generators: a single identity-ish configuration, no arrows.
         assert!(Decomposition::recorded(gens(0), configs(1)).is_ok());
     }
@@ -315,7 +349,6 @@ mod tests {
         );
         assert!(Decomposition::recorded(gens(0), configs(0)).is_err());
         assert!(Decomposition::recorded(gens(3), configs(5)).is_err());
-        assert!(Decomposition::replay_verified(gens(1), configs(1)).is_err());
     }
 
     // ---- ADR-0019: the tag is earned, not stamped -----------------------
@@ -380,9 +413,18 @@ mod tests {
             .unwrap()
             .verify_replay(&registry_for(2), &RecordingSemantics::default())
             .expect("honest chain verifies");
-        let stamped = Decomposition::replay_verified(gens(2), configs(3)).unwrap();
-        assert_eq!(earned, stamped);
-        assert_eq!(earned.id(), stamped.id());
+        // The frozen expectation, rebuilt independently of any constructor:
+        // the canonical encoding is generators, configs, then the tag ordinal
+        // 1 — exactly what the removed stamp used to produce.
+        let mut expected = CanonWriter::new();
+        expected.write_list(gens(2).iter().map(|g| g.canon_bytes()));
+        expected.write_list(configs(3).iter().map(|c| c.canon_bytes()));
+        DecompVerification::ReplayVerified.canon_write(&mut expected);
+
+        let mut got = CanonWriter::new();
+        earned.canon_write(&mut got);
+        assert_eq!(got.finish(), expected.finish());
+        assert_eq!(earned.verification(), DecompVerification::ReplayVerified);
     }
 
     #[test]
@@ -467,7 +509,10 @@ mod tests {
     #[test]
     fn recorded_and_replay_verified_over_identical_data_have_distinct_ids() {
         let recorded = Decomposition::recorded(gens(2), configs(3)).unwrap();
-        let verified = Decomposition::replay_verified(gens(2), configs(3)).unwrap();
+        let verified = Decomposition::recorded(gens(2), configs(3))
+            .unwrap()
+            .verify_replay(&registry_for(2), &RecordingSemantics::default())
+            .unwrap();
         assert_ne!(
             recorded.id(),
             verified.id(),
@@ -516,7 +561,10 @@ mod tests {
     /// differs, and that is exactly what must change the id.
     #[test]
     fn golden_vector_replay_verified_decomposition() {
-        let d = Decomposition::replay_verified(gens(1), configs(2)).unwrap();
+        let d = Decomposition::recorded(gens(1), configs(2))
+            .unwrap()
+            .verify_replay(&registry_for(1), &RecordingSemantics::default())
+            .unwrap();
 
         let mut got = CanonWriter::new();
         d.canon_write(&mut got);

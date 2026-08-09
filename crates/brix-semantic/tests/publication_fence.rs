@@ -13,9 +13,9 @@
 use brix_canon::Digest;
 use brix_semantic::{
     AuditedSource, Authority, CertificateId, ConfigId, ContextId, DecompVerification,
-    Decomposition, GeneratorId, Judgement, JudgementId, Outcome, PropositionId, PublicationError,
-    RealizesTree, Route, RouteCondition, Support, SupportKind, TreeDerivation, TreeObj, VerifierId,
-    ROUTES,
+    Decomposition, GeneratorId, GeneratorRegistry, GeneratorSemantics, Judgement, JudgementId,
+    Outcome, PropositionId, PublicationError, RealizesTree, Route, RouteCondition, Support,
+    SupportKind, TreeDerivation, TreeObj, VerifierId, ROUTES,
 };
 
 const ALL_AUTHORITIES: [Authority; 5] = [
@@ -56,7 +56,7 @@ fn verified_decomposition(tag: &str) -> Decomposition {
     let g = GeneratorId::named(&format!("fence.{tag}.g@1"));
     let x0 = ConfigId::from_canon(format!("fence.{tag}.x0").as_bytes());
     let x1 = ConfigId::from_canon(format!("fence.{tag}.x1").as_bytes());
-    Decomposition::replay_verified(vec![g], vec![x0, x1]).expect("well-formed chain")
+    verified_chain(vec![g], vec![x0, x1])
 }
 
 /// A `StructureVerified` single-leaf tree derivation — the typing lane's
@@ -588,4 +588,41 @@ fn audited_source_honest_case_succeeds_and_returns_the_same_judgement() {
         "the honest case — Audited outcome, replay-verified chain, bound evidence — must verify",
     );
     assert_eq!(*source.judgement(), audited);
+}
+
+/// Earn a `ReplayVerified` chain the honest way (ADR-0019 D7): build the
+/// registry, supply a semantics that realizes exactly this chain's links, and
+/// run the **real** checked transition. No test constructs a verified
+/// artifact by assertion any more — the stamp constructor is gone.
+///
+/// This fixture semantics accepts precisely the chain it is handed, which is
+/// what a fixture should do: the independent negatives (a padded chain, a
+/// corrupted intermediate config, an unregistered generator) live beside
+/// `verify_replay` itself in `brix-semantic`.
+fn verified_chain(generators: Vec<GeneratorId>, configs: Vec<ConfigId>) -> Decomposition {
+    struct ExactChain {
+        links: Vec<(GeneratorId, ConfigId, ConfigId)>,
+    }
+    impl GeneratorSemantics for ExactChain {
+        fn realizes(&self, g: &GeneratorId, src: &ConfigId, dst: &ConfigId) -> bool {
+            self.links
+                .iter()
+                .any(|(a, b, c)| a == g && b == src && c == dst)
+        }
+    }
+
+    let mut registry = GeneratorRegistry::new();
+    for g in &generators {
+        registry.insert(*g);
+    }
+    let links = generators
+        .iter()
+        .enumerate()
+        .map(|(i, g)| (*g, configs[i], configs[i + 1]))
+        .collect();
+
+    Decomposition::recorded(generators, configs)
+        .expect("well-formed fixture chain")
+        .verify_replay(&registry, &ExactChain { links })
+        .expect("an honest fixture chain earns the tag")
 }

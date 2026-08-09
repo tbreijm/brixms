@@ -117,15 +117,15 @@ pub fn elaborate_decomposition(
         Err(err) => return ElaborationResult::Refused(err),
     };
 
-    let n = decomposition.generators.len();
+    let n = decomposition.generators().len();
     if n == 0 {
         return ElaborationResult::NotElaborated(brix_kernel::Verdict::Rejected(
             brix_kernel::RejectionReason::Custom("Empty decomposition".into()),
         ));
     }
 
-    let generators = &decomposition.generators;
-    let configs = &decomposition.configs;
+    let generators = decomposition.generators();
+    let configs = decomposition.configs();
 
     // 1. Build per-step antecedent propositions H_i = Realizes(Const(g_i), Const(x_{i-1}), Const(x_i))
     let mut h_props = Vec::with_capacity(n);

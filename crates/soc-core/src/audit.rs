@@ -103,7 +103,7 @@ pub struct AuditedStep {
 ///    derived_id.digest()`. Also require the input decomposition is in
 ///    `Recorded` form (this checker upgrades a recorded record; it does not
 ///    re-audit an already-verified one).
-/// 2. **Endpoint match** — `decomposition.configs` starts at `step.src` and
+/// 2. **Endpoint match** — `decomposition.configs()` starts at `step.src` and
 ///    ends at `step.dst` (the chain-length invariant is already enforced by
 ///    `Decomposition`'s constructor; asserted again here defensively).
 /// 3. **Exact relational composition** — for every `i`, `generators[i] ∈ 𝒢`
@@ -127,7 +127,7 @@ pub fn audit_step(
     debug_assert_eq!(Outcome::Audited.authority(), Authority::AuditChecker);
 
     // Step 1: reconstruct + cross-check the Derived judgement against the log.
-    if step.decomposition.verification != DecompVerification::Recorded {
+    if step.decomposition.verification() != DecompVerification::Recorded {
         return AuditResult::Unknown("decomposition is not in recorded form");
     }
 
@@ -151,8 +151,8 @@ pub fn audit_step(
     }
 
     // Step 2: endpoint match.
-    if step.decomposition.configs.first() != Some(&step.src)
-        || step.decomposition.configs.last() != Some(&step.dst)
+    if step.decomposition.configs().first() != Some(&step.src)
+        || step.decomposition.configs().last() != Some(&step.dst)
     {
         return AuditResult::Unknown("decomposition endpoints do not match the committed step");
     }
@@ -160,8 +160,8 @@ pub fn audit_step(
     // already guaranteed by Decomposition's constructor; assert it again
     // defensively since this checker must never trust an invariant silently.
     debug_assert_eq!(
-        step.decomposition.configs.len(),
-        step.decomposition.generators.len() + 1,
+        step.decomposition.configs().len(),
+        step.decomposition.generators().len() + 1,
         "Decomposition's own constructor guarantees this chain-length invariant"
     );
 
