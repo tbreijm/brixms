@@ -62,8 +62,10 @@
 //! derived, not a certificate that a checker accepted it (that is `prove`'s
 //! job), so the distinction is structural rather than a disclaimer. For `let
 //! x = 1 + 2`, `why` names exactly which leaf(s) capped the result below
-//! `@Proven` — `g_arith`/`g_arith_split`, the undischarged arithmetic
-//! generators.
+//! `@Proven` — `g_arith` and `g_arith_input`, the undischarged arithmetic
+//! generators. (`g_arith_split` was one of them until ADR-0015 Stage C
+//! discharged it on purely structural grounds; the list is computed from
+//! `generator_is_tight`, never hard-coded, so it tracks each discharge.)
 //!
 //! `brix whynot <file.brix>`: reports, per binding, why it has not reached a
 //! decided positive outcome — a **conflict** (a positive obstruction: type

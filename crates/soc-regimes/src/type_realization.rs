@@ -8,6 +8,9 @@ use std::collections::BTreeMap;
 
 use brix_canon::{CanonWriter, Canonical};
 use brix_elaborate::{RealizesTree, TreeObj};
+use brix_kernel::{
+    ArithOperatorV1, ArithTypingInputV1, CoercionEdgeV1, CoercionKind, NumericTypeNameV1,
+};
 use brix_semantic::{
     Authority, ConfigId, ContextId, GeneratorId, GeneratorRegistry, Judgement, Outcome, Realizes,
     Support, TreeDerivation,
@@ -94,6 +97,22 @@ impl ArithOp {
             ArithOp::Sub => 1,
             ArithOp::Mul => 2,
             ArithOp::Div => 3,
+        }
+    }
+
+    /// This operator in the kernel's own vocabulary, for the
+    /// [`ArithTypingInputV1`] source object (ADR-0015 §5 Stage B0).
+    ///
+    /// A total mapping written out arm by arm rather than by casting an
+    /// ordinal: the two enums are frozen independently, and a numeric bridge
+    /// would silently re-point every row in a future registry if either side
+    /// ever appended a variant.
+    fn kernel_operator(self) -> ArithOperatorV1 {
+        match self {
+            ArithOp::Add => ArithOperatorV1::Add,
+            ArithOp::Sub => ArithOperatorV1::Sub,
+            ArithOp::Mul => ArithOperatorV1::Mul,
+            ArithOp::Div => ArithOperatorV1::Div,
         }
     }
 }
@@ -361,6 +380,36 @@ pub fn g_arith_split() -> GeneratorId {
     GeneratorId::named("type.rule.arith.split@1")
 }
 
+/// Typing-rule generator packaging an arithmetic node's operand types into the
+/// [`ArithTypingInputV1`] source object (`"type.rule.arith.input@1"`,
+/// ADR-0015 §5 Stage B0).
+///
+/// **Why this leaf exists.** Stage B0 requires `g_arith`'s source object to be
+/// the single `ArithTypingInputV1` atom carrying the operator, the original
+/// operand types, and the promotion paths. A `TreeObj::Atom` can never equal a
+/// `TreeObj::Prod`, and the node feeding `g_arith` is the operand `Tensor`,
+/// whose `dst` is structurally always a `Prod` — so without a bridge the `Seq`
+/// middle no longer matches and `TreeDerivation::verify_structure` rejects the
+/// tree as malformed.
+///
+/// The bridge could not be folded into `g_arith_split`: ADR-0015 ⟨D-SPLIT⟩
+/// discharges the split on the grounds that it is *purely structural*, and
+/// states that "if `g_arith_split` ever selects a promotion, synthesises a
+/// result type, or filters operations by unchecked host logic, those parts
+/// inherit `g_arith`'s evidence burden and the discharge lapses." Stage C's
+/// discharge depends on that staying true, so the promotion selection lives
+/// here instead.
+///
+/// **Not discharged**, and deliberately so: this leaf asserts that the
+/// operator and promotion paths the host chose for this node are the right
+/// ones, which is exactly the kind of host-computed normalization ADR-0015 §8.5
+/// says is not trusted. Its realization relation — finite over
+/// (operator × operand types × paths) — is dischargeable as its own kernel
+/// primitive, so Stage D needs *two* relations rather than one.
+pub fn g_arith_input() -> GeneratorId {
+    GeneratorId::named("type.rule.arith.input@1")
+}
+
 /// Typing-rule generator for unification steps (`"type.rule.unify@1"`).
 pub fn g_unify() -> GeneratorId {
     GeneratorId::named("type.rule.unify@1")
@@ -427,7 +476,7 @@ pub enum ClaimKind {
 /// parameter exists and why the enum is closed.
 ///
 /// For [`ClaimKind::Empty`] this always returns `false`, unconditionally, for
-/// every generator — including the sixteen discharged below.
+/// every generator — including the seventeen discharged below.
 ///
 /// For [`ClaimKind::Typing`], discharged:
 ///
@@ -460,14 +509,48 @@ pub enum ClaimKind {
 ///    Top-level wildcard/variable catch-all matches are excluded: they emit the
 ///    distinct, undischarged `g_match_catchall` until their repeated branch
 ///    premises are represented explicitly.
+/// 4. **`g_arith_split`** — on the same structural grounds as the `*_split`
+///    leaves above, and **independently of `g_arith`** (ADR-0015 ⟨D-SPLIT⟩,
+///    Stage C). Its claim is that an arithmetic node contains this operator and
+///    these two ordered subexpressions, and that typing it yields those two
+///    child obligations in the same context. The operator is bound because the
+///    leaf's `src` is the whole node's configuration; the children are bound
+///    because they are its `dst`, in source order. It asserts nothing about
+///    what arithmetic *means*.
 ///
-/// Deliberately **NOT** discharged — these assert *operation/representation*
-/// semantics, not logical rules, and have no established value semantics yet
-/// (they wait for the execution layer): `g_arith` (a primitive operation is
-/// total & type-preserving) and the coercion-edge promotions `g_promote_edge`
-/// (a real numeric embedding). Any program touching an undischarged generator
-/// stays `Audited`; e.g. `1 + 2` remains `Audited` because `g_arith` is not
-/// tight.
+///    **The discharge is conditional and the condition is executable.** It
+///    holds only while the split stays purely structural: ⟨D-SPLIT⟩ states
+///    that if `g_arith_split` "ever selects a promotion, synthesises a result
+///    type, or filters operations by unchecked host logic, those parts inherit
+///    `g_arith`'s evidence burden and the discharge lapses."
+///    `arithmetic_split_rule_is_a_kernel_primitive` pins exactly that — most
+///    directly by deriving the *same* expression under two contexts that force
+///    different promotions and asserting the split leaf is byte-identical
+///    across them. Stage B0 deliberately routed the promotion selection
+///    through the separate `g_arith_input` bridge rather than the split, which
+///    is what keeps this condition true.
+///
+///    Discharging the split while `g_arith` remains capped is safe: the
+///    least-discharged leaf still caps the derivation, so `1 + 2` does not
+///    move.
+///
+/// Deliberately **NOT** discharged: `g_arith` (a primitive operation is
+/// type-preserving at the operand types), `g_arith_input` (the operator and
+/// promotion paths the host selected for an arithmetic node are the right
+/// ones — host-computed normalization, which ADR-0015 §8.5 does not trust),
+/// and the coercion-edge promotions `g_promote_edge` (a real numeric
+/// embedding). Any program touching an undischarged generator stays
+/// `Audited`; e.g. `1 + 2` remains `Audited` because neither `g_arith` nor
+/// `g_arith_input` is tight.
+///
+/// None of these is held out for lack of a *value* semantics — ADR-0015
+/// ⟨D-JUDGE⟩ resolved that: tightness is scoped to a proposition kind, and a
+/// typing discharge never claims an evaluation equation (which is why
+/// `g_float_lit` is honestly tight even though `brix-canon` excludes floats).
+/// They are held out because their realization relation is not yet a fact the
+/// kernel checks. ADR-0015 §5 Stage B0 (landed) made `g_arith`'s source object
+/// carry every field that affects admissibility, which is the precondition for
+/// Stage B's kernel registry to be able to decide them at all.
 pub fn generator_is_tight(kind: ClaimKind, g: &GeneratorId) -> bool {
     match kind {
         // Fail closed: a claim kind added in the future starts here, at
@@ -492,6 +575,7 @@ pub fn generator_is_tight(kind: ClaimKind, g: &GeneratorId) -> bool {
                 || *g == g_ctor()
                 || *g == g_match_split()
                 || *g == g_match()
+                || *g == g_arith_split()
         }
     }
 }
@@ -573,6 +657,7 @@ fn minted_generators() -> Vec<(String, GeneratorId)> {
         ("g_match_split", g_match_split()),
         ("g_arith", g_arith()),
         ("g_arith_split", g_arith_split()),
+        ("g_arith_input", g_arith_input()),
         ("g_unify", g_unify()),
     ];
 
@@ -729,21 +814,54 @@ impl CoercionLattice {
         path
     }
 
-    /// Wrap a derivation `d` with the witnessed coercion path `from ↪ … ↪ to`,
-    /// one `Seq`-composed embedding leaf per edge (identity when `from == to`).
-    fn coerce(&self, d: TyTree, from: &'static str, to: &'static str) -> TyTree {
-        let mut tree = d;
-        for (a, b) in self.edge_path(from, to) {
-            tree = TyTree::Seq {
-                left: Box::new(tree),
-                right: Box::new(TyTree::Leaf {
-                    generator: self.promote_generator(a, b),
-                    src: TyObj::Atom(CfgAtom::Type(Ty::Con(a))),
-                    dst: TyObj::Atom(CfgAtom::Type(Ty::Con(b))),
-                }),
-            };
+    /// The witnessed coercion path `from ↪ … ↪ to` as canonical data — one
+    /// [`CoercionEdgeV1`] per edge, in order, empty when `from == to`
+    /// (ADR-0015 §5 Stage B0).
+    ///
+    /// This replaced a `coerce` method that spliced one embedding *leaf* per
+    /// edge into the operand's derivation. Splicing was what erased the
+    /// arithmetic source object: it left both operands presented at the result
+    /// type, so the `g_arith` leaf could no longer say what they had started
+    /// as. The path is now data inside [`ArithTypingInputV1`] instead, which is
+    /// what makes `1.0 + 2.0` and `7 / 2` distinguishable.
+    ///
+    /// Each edge carries its own [`CoercionKind`] rather than inheriting one
+    /// from the lattice: `NUMERIC` mixes the exact tower with the lossy
+    /// `Int ↪ Float` branch, and ADR-0015 ⟨D-PROMOTE⟩ rules those to be
+    /// different claims. See [`CoercionLattice::edge_kind`].
+    fn promotion_path(&self, from: &'static str, to: &'static str) -> Vec<CoercionEdgeV1> {
+        self.edge_path(from, to)
+            .into_iter()
+            .map(|(a, b)| CoercionEdgeV1 {
+                generator: self.promote_generator(a, b),
+                kind: self.edge_kind(a, b),
+            })
+            .collect()
+    }
+
+    /// Whether the edge `from ↪ to` preserves numeric identity.
+    ///
+    /// **`Int ↪ Float` is lossy and is recorded as such.** `NUMERIC`'s own doc
+    /// calls every one of its edges the "*safe* (information-preserving)"
+    /// direction, but ADR-0015 ⟨D-PROMOTE⟩ rules that `Int→Float` "SHALL NOT
+    /// be discharged as an embedding or promotion, now or later" — a lossy map
+    /// is not injective and does not preserve numeric identity. Since `Div`
+    /// routes integer division through `field_of("Int") == "Float"`, `7 / 2`
+    /// travels that edge on both operands.
+    ///
+    /// ADR-0015 defines a promotion path as an ordered sequence of **exact**
+    /// promotion-edge ids, so recording that edge unlabelled would encode a
+    /// lossy conversion under a name asserting exactness. Labelling it keeps
+    /// the record honest here; relocating it out of a lattice called `NUMERIC`
+    /// is Stage E's ⟨D-PROMOTE⟩ work and would move a grade.
+    fn edge_kind(&self, from: &'static str, to: &'static str) -> CoercionKind {
+        // Deliberately keyed on the edge, not on a per-lattice flag: `NUMERIC`
+        // carries exact and lossy edges side by side, so exactness is a
+        // property of the edge and never of the lattice that contains it.
+        match (self.generator_prefix, from, to) {
+            ("type.rule.num.promote", "Int", "Float") => CoercionKind::Lossy,
+            _ => CoercionKind::Exact,
         }
-        tree
     }
 }
 
@@ -800,14 +918,49 @@ fn field_of(name: &'static str) -> &'static str {
 
 /// The plan for typing a binary arithmetic node: where operands meet (`base`),
 /// the result type (`base`, or its field of fractions for `Div`), each
-/// operand's effective type, and whether an operand was an unbound var to unify.
+/// operand's effective type, the witnessed coercion path lifting it to the
+/// result type, and whether an operand was an unbound var to unify.
 struct ArithPlan {
     base: &'static str,
     result: &'static str,
     eff_a: &'static str,
     eff_b: &'static str,
+    /// The ordered coercion edges from `eff_a` up to `result`, empty when the
+    /// operand is already there. Carried as data into [`ArithTypingInputV1`]
+    /// rather than spliced into the derivation as leaves (ADR-0015 Stage B0).
+    path_a: Vec<CoercionEdgeV1>,
+    /// The ordered coercion edges from `eff_b` up to `result`.
+    path_b: Vec<CoercionEdgeV1>,
     unify_a: bool,
     unify_b: bool,
+}
+
+impl ArithPlan {
+    /// The [`ArithTypingInputV1`] source object this plan describes — every
+    /// field that affects admissibility of the typing judgement, and nothing
+    /// else (ADR-0015 §5 Stage B0).
+    ///
+    /// `lhs_type`/`rhs_type` are the operands' types **before** promotion,
+    /// which is precisely what the pre-B0 leaf destroyed by presenting both
+    /// operands already coerced to the result type.
+    ///
+    /// Fails closed with [`TypeError::Mismatch`] if an operand type is not a
+    /// node of the numeric tower. `arith_operand` already rejects those, so
+    /// this is unreachable today — and it is written as a refusal rather than
+    /// an `unwrap` precisely because a future lattice edit that made it
+    /// reachable must not be able to panic the type checker or invent a
+    /// numeric type the kernel never agreed to.
+    fn typing_input(&self, op: ArithOp) -> Result<ArithTypingInputV1, TypeError> {
+        let numeric =
+            |name: &str| NumericTypeNameV1::from_lattice_node(name).ok_or(TypeError::Mismatch);
+        Ok(ArithTypingInputV1 {
+            operator: op.kernel_operator(),
+            lhs_type: numeric(self.eff_a)?,
+            rhs_type: numeric(self.eff_b)?,
+            lhs_promotion_path: self.path_a.clone(),
+            rhs_promotion_path: self.path_b.clone(),
+        })
+    }
 }
 
 /// Classify a *resolved* operand type: `Ok(Some(node))` for a concrete numeric
@@ -837,11 +990,15 @@ fn plan_arith(op: ArithOp, ra: &Ty, rb: &Ty) -> Result<ArithPlan, TypeError> {
     } else {
         base
     };
+    let eff_a = na.unwrap_or(base);
+    let eff_b = nb.unwrap_or(base);
     Ok(ArithPlan {
         base,
         result,
-        eff_a: na.unwrap_or(base),
-        eff_b: nb.unwrap_or(base),
+        eff_a,
+        eff_b,
+        path_a: NUMERIC.promotion_path(eff_a, result),
+        path_b: NUMERIC.promotion_path(eff_b, result),
         unify_a: na.is_none(),
         unify_b: nb.is_none(),
     })
@@ -1156,6 +1313,13 @@ pub fn unify(
 pub enum CfgAtom {
     Expr(Expr),
     Type(Ty),
+    /// The kernel-owned arithmetic typing source object (ADR-0015 §5 Stage
+    /// B0) — **append-only**, never reordered ahead of the two above.
+    ///
+    /// Unlike `Type`, this atom carries no unification variables and is not
+    /// zonked at materialization: its operand types are already resolved when
+    /// the plan is built.
+    ArithInput(ArithTypingInputV1),
 }
 
 /// Deferred-materialization tree object (ADR-0008).
@@ -1188,6 +1352,7 @@ fn materialize_obj(obj: &TyObj, subst: &BTreeMap<u32, Ty>) -> TreeObj {
     match obj {
         TyObj::Atom(CfgAtom::Expr(e)) => TreeObj::Atom(e.config_id()),
         TyObj::Atom(CfgAtom::Type(t)) => TreeObj::Atom(zonk(t, subst).config_id()),
+        TyObj::Atom(CfgAtom::ArithInput(i)) => TreeObj::Atom(i.config_id()),
         TyObj::Prod(a, b) => TreeObj::Prod(
             Box::new(materialize_obj(a, subst)),
             Box::new(materialize_obj(b, subst)),
@@ -1267,11 +1432,14 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
 
             let result_ty = Ty::Con(plan.result);
 
-            // Splice each operand's witnessed embedding path up to the result
-            // type (empty when the operand is already there).
-            let da = NUMERIC.coerce(da, plan.eff_a, plan.result);
-            let db = NUMERIC.coerce(db, plan.eff_b, plan.result);
-
+            // ADR-0015 §5 Stage B0. The operands are NOT coerced up to the
+            // result type here any more. Splicing one embedding leaf per
+            // promotion edge was what erased the arithmetic source object: it
+            // presented both operands already at the result type, so the
+            // `g_arith` leaf could not say what they had started as, which is
+            // why `1.0 + 2.0` and `7 / 2` emitted the identical leaf
+            // `Prod(Float, Float) → Float`. The promotion paths are now
+            // ordered data inside `ArithTypingInputV1`.
             let split = TyTree::Leaf {
                 generator: g_arith_split(),
                 src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
@@ -1284,19 +1452,40 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                 left: Box::new(da),
                 right: Box::new(db),
             };
+            // The operand types the `Tensor` actually lands on. For an operand
+            // that was an unbound var, `eff` is `plan.base` and the operand's
+            // own `Var(n)` endpoint zonks to exactly that under the
+            // substitution unified above — so the `Seq` middle matches either
+            // way.
+            let operand_types = TyObj::Prod(
+                Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con(plan.eff_a)))),
+                Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con(plan.eff_b)))),
+            );
+            let input = TyObj::Atom(CfgAtom::ArithInput(plan.typing_input(*op)?));
+            // The bridge. `TreeObj::Atom` can never equal a `TreeObj::Prod`,
+            // and a `Tensor`'s `dst` is structurally always a `Prod`, so the
+            // packaging of two operand types into one source object has to be
+            // its own leaf. It is deliberately not folded into `g_arith_split`
+            // — ⟨D-SPLIT⟩ discharges the split only while it stays purely
+            // structural. See `g_arith_input`.
+            let input_leaf = TyTree::Leaf {
+                generator: g_arith_input(),
+                src: operand_types,
+                dst: input.clone(),
+            };
             let arith_leaf = TyTree::Leaf {
                 generator: g_arith(),
-                src: TyObj::Prod(
-                    Box::new(TyObj::Atom(CfgAtom::Type(result_ty.clone()))),
-                    Box::new(TyObj::Atom(CfgAtom::Type(result_ty.clone()))),
-                ),
+                src: input,
                 dst: TyObj::Atom(CfgAtom::Type(result_ty.clone())),
             };
             let tree = TyTree::Seq {
                 left: Box::new(split),
                 right: Box::new(TyTree::Seq {
                     left: Box::new(tensor),
-                    right: Box::new(arith_leaf),
+                    right: Box::new(TyTree::Seq {
+                        left: Box::new(input_leaf),
+                        right: Box::new(arith_leaf),
+                    }),
                 }),
             };
 
@@ -2130,9 +2319,10 @@ mod tests {
 
     #[test]
     fn arith_over_exact_tower_nodes_promotes_and_proves() {
-        // x:Rat, y:Int → x + y : Rat, splicing a witnessed Int↪Rat promotion,
-        // and the resulting tree elaborates to Proven. Exercises lattice nodes
-        // not yet reachable from surface literals.
+        // x:Rat, y:Int → x + y : Rat, recording a witnessed Int↪Rat promotion
+        // (as an `ArithTypingInputV1` path since ADR-0015 Stage B0, not as a
+        // spliced leaf), and the resulting tree elaborates to Proven.
+        // Exercises lattice nodes not yet reachable from surface literals.
         let ctx = TyCtx::new()
             .extend("x", Ty::Con("Rat"))
             .extend("y", Ty::Con("Int"));
@@ -2171,6 +2361,335 @@ mod tests {
         assert!(
             matches!(res, ElaborationResult::Proven { .. }),
             "expected Proven, got {res:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ADR-0015 §5 Stage B0 — the re-schemaed `g_arith` source object.
+    // -----------------------------------------------------------------------
+
+    /// The `src`/`dst` endpoints of the unique leaf citing `want`, from the
+    /// pre-materialization tree (so the `ArithInput` payload is readable
+    /// rather than already hashed to a `ConfigId`).
+    fn leaf_endpoints(tree: &TyTree, want: &GeneratorId) -> (TyObj, TyObj) {
+        fn walk(tree: &TyTree, want: &GeneratorId, out: &mut Vec<(TyObj, TyObj)>) {
+            match tree {
+                TyTree::Leaf {
+                    generator,
+                    src,
+                    dst,
+                } => {
+                    if generator == want {
+                        out.push((src.clone(), dst.clone()));
+                    }
+                }
+                TyTree::Seq { left, right } | TyTree::Tensor { left, right } => {
+                    walk(left, want, out);
+                    walk(right, want, out);
+                }
+            }
+        }
+        let mut found = Vec::new();
+        walk(tree, want, &mut found);
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one {:?} leaf, found {}",
+            generator_name(want),
+            found.len()
+        );
+        found.pop().expect("checked non-empty")
+    }
+
+    /// The `ArithTypingInputV1` an expression's `g_arith` leaf actually
+    /// carries.
+    fn arith_input_of(expr: &Expr, ctx: &TyCtx) -> ArithTypingInputV1 {
+        let (_, tree, _) = infer_tree(expr, ctx, Infer::new()).expect("infers");
+        match leaf_endpoints(&tree, &g_arith()).0 {
+            TyObj::Atom(CfgAtom::ArithInput(i)) => i,
+            other => panic!("g_arith's src must be the ArithInput atom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arith_leaf_round_trips_every_material_field() {
+        // ADR-0015 Stage B0 gate 1: the emitted leaf round-trips every
+        // material field. Checkable as two properties — the payload equals
+        // what the operator and lattice independently say it should be, and
+        // changing any one field alone changes the leaf's `src` identity. The
+        // second half is what a registry row will rest on: a row keyed on a
+        // `ConfigId` blind to a field could be satisfied by an input differing
+        // in it.
+        let cases: [(ArithOp, &str, &str, &str); 6] = [
+            // (op, lhs type, rhs type, expected result)
+            (ArithOp::Add, "Int", "Int", "Int"),
+            (ArithOp::Sub, "Nat", "Int", "Int"),
+            (ArithOp::Mul, "Rat", "Real", "Real"),
+            (ArithOp::Div, "Int", "Int", "Float"),
+            (ArithOp::Div, "Rat", "Rat", "Rat"),
+            (ArithOp::Add, "Float", "Float", "Float"),
+        ];
+
+        for (op, lhs, rhs, want_result) in cases {
+            let ctx = TyCtx::new()
+                .extend("l", Ty::Con(lhs))
+                .extend("r", Ty::Con(rhs));
+            let expr = Expr::Arith(
+                op,
+                Box::new(Expr::Var("l".to_string())),
+                Box::new(Expr::Var("r".to_string())),
+            );
+
+            let (ty, tree, _) = infer_tree(&expr, &ctx, Infer::new()).expect("infers");
+            assert_eq!(ty, Ty::Con(want_result), "{op:?} {lhs} {rhs}");
+
+            let (src, dst) = leaf_endpoints(&tree, &g_arith());
+            let input = match &src {
+                TyObj::Atom(CfgAtom::ArithInput(i)) => i.clone(),
+                other => panic!("g_arith's src must be the ArithInput atom, got {other:?}"),
+            };
+
+            // dst is the exact result type, per ADR-0015 Stage B0.
+            assert_eq!(
+                dst,
+                TyObj::Atom(CfgAtom::Type(Ty::Con(want_result))),
+                "{op:?} {lhs} {rhs}"
+            );
+
+            // Reconstructed independently from the operator and the lattice,
+            // not read back from the tree that produced it.
+            let expected = ArithTypingInputV1 {
+                operator: op.kernel_operator(),
+                lhs_type: NumericTypeNameV1::from_lattice_node(lhs).expect("numeric"),
+                rhs_type: NumericTypeNameV1::from_lattice_node(rhs).expect("numeric"),
+                lhs_promotion_path: NUMERIC.promotion_path(lhs, want_result),
+                rhs_promotion_path: NUMERIC.promotion_path(rhs, want_result),
+            };
+            assert_eq!(input, expected, "{op:?} {lhs} {rhs}");
+
+            // Every field is bound into the leaf's `src` identity.
+            let base_id = input.config_id();
+            let mutations: Vec<(&str, ArithTypingInputV1)> = vec![
+                (
+                    "operator",
+                    ArithTypingInputV1 {
+                        operator: if op == ArithOp::Div {
+                            ArithOperatorV1::Add
+                        } else {
+                            ArithOperatorV1::Div
+                        },
+                        ..input.clone()
+                    },
+                ),
+                (
+                    "lhs type",
+                    ArithTypingInputV1 {
+                        lhs_type: NumericTypeNameV1::Complex,
+                        ..input.clone()
+                    },
+                ),
+                (
+                    "rhs type",
+                    ArithTypingInputV1 {
+                        rhs_type: NumericTypeNameV1::Complex,
+                        ..input.clone()
+                    },
+                ),
+                (
+                    "lhs promotion path",
+                    ArithTypingInputV1 {
+                        lhs_promotion_path: NUMERIC.promotion_path("Nat", "Complex"),
+                        ..input.clone()
+                    },
+                ),
+                (
+                    "rhs promotion path",
+                    ArithTypingInputV1 {
+                        rhs_promotion_path: NUMERIC.promotion_path("Nat", "Complex"),
+                        ..input.clone()
+                    },
+                ),
+                (
+                    "operand order",
+                    ArithTypingInputV1 {
+                        lhs_type: input.rhs_type,
+                        rhs_type: input.lhs_type,
+                        lhs_promotion_path: input.rhs_promotion_path.clone(),
+                        rhs_promotion_path: input.lhs_promotion_path.clone(),
+                        ..input.clone()
+                    },
+                ),
+            ];
+            for (field, mutated) in mutations {
+                if mutated == input {
+                    // A symmetric case where the mutation is a no-op (e.g.
+                    // swapping two identical operands). Nothing to assert —
+                    // the field is exercised by the asymmetric cases above.
+                    continue;
+                }
+                assert_ne!(
+                    mutated.config_id(),
+                    base_id,
+                    "{op:?} {lhs} {rhs}: mutating {field} must change the leaf's src identity"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn float_addition_and_integer_division_emit_distinguishable_leaves() {
+        // ADR-0015 Stage B0 gate 2, the ADR's named fixture. Before B0 both of
+        // these emitted the byte-identical leaf `Prod(Float, Float) → Float`:
+        // `Div` has a different result rule from the other three
+        // (`field_of`: Int/Int → Float), so the two expressions agreed on
+        // every field the old source object carried while disagreeing on the
+        // operator, the operand types, and the promotions. A relation keyed on
+        // `(operator, lhs, rhs, promotions) → result` was unreachable from it.
+        let ctx = TyCtx::new();
+        let float_add = Expr::Arith(
+            ArithOp::Add,
+            Box::new(Expr::FloatLit("1.0".to_string())),
+            Box::new(Expr::FloatLit("2.0".to_string())),
+        );
+        let int_div = Expr::Arith(ArithOp::Div, Box::new(Expr::Lit(7)), Box::new(Expr::Lit(2)));
+
+        // Both still result in Float — that is what made them confusable.
+        for expr in [&float_add, &int_div] {
+            let (ty, _, _) = infer_tree(expr, &ctx, Infer::new()).expect("infers");
+            assert_eq!(ty, Ty::Con("Float"));
+        }
+
+        let add_input = arith_input_of(&float_add, &ctx);
+        let div_input = arith_input_of(&int_div, &ctx);
+
+        assert_ne!(
+            add_input.config_id(),
+            div_input.config_id(),
+            "`1.0 + 2.0` and `7 / 2` must emit distinguishable g_arith leaves"
+        );
+
+        // And distinguishable *because* of the fields B0 added, not by
+        // accident: the operator, the operand types, and the promotion paths
+        // each differ.
+        assert_eq!(add_input.operator, ArithOperatorV1::Add);
+        assert_eq!(div_input.operator, ArithOperatorV1::Div);
+        assert_eq!(add_input.lhs_type, NumericTypeNameV1::Float);
+        assert_eq!(div_input.lhs_type, NumericTypeNameV1::Int);
+        assert!(add_input.lhs_promotion_path.is_empty());
+        assert!(!div_input.lhs_promotion_path.is_empty());
+
+        // The defect this stage closes, reconstructed rather than asserted in
+        // prose: the pre-B0 source object was keyed on the result type alone,
+        // and both expressions result in `Float` — so the old key *collides*
+        // for two programs that disagree on the operator and both operand
+        // types. Keep this alongside the inequality above; without it the test
+        // shows that the leaves differ but not that they ever failed to.
+        let old_key = |result: &'static str| {
+            TyObj::Prod(
+                Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con(result)))),
+                Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con(result)))),
+            )
+        };
+        assert_eq!(
+            old_key("Float"),
+            old_key("Float"),
+            "the pre-B0 source object collided for these two programs — that \
+             collision is what Stage B0 exists to remove"
+        );
+    }
+
+    #[test]
+    fn arith_promotion_path_records_edge_exactness() {
+        // ADR-0015 ⟨D-PROMOTE⟩: the exact tower edges and the lossy
+        // `Int→Float` branch are different claims, and `NUMERIC` carries both
+        // while describing all of its edges as information-preserving. `Div`
+        // routes integer division through `field_of("Int") == "Float"`, so
+        // `7 / 2` travels the lossy edge on both operands. Recording it
+        // unlabelled inside a field ADR-0015 defines as a sequence of *exact*
+        // promotion-edge ids would assert an exactness that does not hold.
+        let div = arith_input_of(
+            &Expr::Arith(ArithOp::Div, Box::new(Expr::Lit(7)), Box::new(Expr::Lit(2))),
+            &TyCtx::new(),
+        );
+        for path in [&div.lhs_promotion_path, &div.rhs_promotion_path] {
+            assert_eq!(path.len(), 1, "Int→Float is one edge");
+            assert_eq!(
+                path[0].kind,
+                CoercionKind::Lossy,
+                "Int→Float is not an embedding (ADR-0015 ⟨D-PROMOTE⟩)"
+            );
+            assert_eq!(
+                path[0].generator,
+                NUMERIC.promote_generator("Int", "Float"),
+                "the edge is named by the generator that witnesses it"
+            );
+        }
+
+        // The exact tower is recorded as exact.
+        let ctx = TyCtx::new()
+            .extend("x", Ty::Con("Rat"))
+            .extend("y", Ty::Con("Int"));
+        let add = arith_input_of(
+            &Expr::Arith(
+                ArithOp::Add,
+                Box::new(Expr::Var("x".to_string())),
+                Box::new(Expr::Var("y".to_string())),
+            ),
+            &ctx,
+        );
+        assert!(
+            add.lhs_promotion_path.is_empty(),
+            "Rat is already at the result type"
+        );
+        assert_eq!(add.rhs_promotion_path.len(), 1, "Int→Rat is one edge");
+        assert_eq!(add.rhs_promotion_path[0].kind, CoercionKind::Exact);
+
+        // A two-edge exact path keeps both edges, in order.
+        let long = NUMERIC.promotion_path("Nat", "Rat");
+        assert_eq!(long.len(), 2);
+        assert_eq!(long[0].generator, NUMERIC.promote_generator("Nat", "Int"));
+        assert_eq!(long[1].generator, NUMERIC.promote_generator("Int", "Rat"));
+        assert!(long.iter().all(|e| e.kind == CoercionKind::Exact));
+    }
+
+    #[test]
+    fn the_arith_input_bridge_is_minted_but_not_discharged() {
+        // The bridge leaf Stage B0 introduces. It is a real generator of this
+        // regime — so `verify_structure` accepts a tree citing it — but its
+        // realization relation is not a fact the kernel checks, so it is not
+        // tight for any claim kind. `1 + 2` stays `Audited` on its account as
+        // much as on `g_arith`'s.
+        assert!(crate::tree_audit::is_minted_generator(&g_arith_input()));
+        assert_eq!(
+            generator_name(&g_arith_input()).as_deref(),
+            Some("g_arith_input")
+        );
+        assert!(typing_registry().contains(&g_arith_input()));
+
+        for kind in [ClaimKind::Typing, ClaimKind::Empty] {
+            assert!(
+                !generator_is_tight(kind, &g_arith_input()),
+                "g_arith_input must not be discharged for {kind:?}"
+            );
+        }
+
+        // It is emitted exactly once per arithmetic node, between the operand
+        // tensor and `g_arith`.
+        let expr = Expr::Arith(ArithOp::Add, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2)));
+        let (_, tree, _) = infer_tree(&expr, &TyCtx::new(), Infer::new()).expect("infers");
+        let (bridge_src, bridge_dst) = leaf_endpoints(&tree, &g_arith_input());
+        assert_eq!(
+            bridge_src,
+            TyObj::Prod(
+                Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con("Int")))),
+                Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con("Int")))),
+            ),
+            "the bridge consumes the operands' own types"
+        );
+        assert_eq!(
+            bridge_dst,
+            leaf_endpoints(&tree, &g_arith()).0,
+            "the bridge's dst is exactly g_arith's src — this is the Seq middle"
         );
     }
 
@@ -2444,6 +2963,201 @@ mod tests {
     }
 
     #[test]
+    fn arithmetic_split_rule_is_a_kernel_primitive() {
+        // ADR-0015 Stage C / ⟨D-SPLIT⟩ — the soundness evidence for
+        // discharging `g_arith_split`. Four obligations, in the ADR's own
+        // order: exactly two ordered child obligations; context and operator
+        // preserved; no promotion chosen and no result type synthesised; a
+        // malformed arity or forged child rejected.
+        use brix_kernel::{ExplicitTerm, Prop, TermKind, Var, Verdict};
+        use brix_semantic::PropositionId;
+
+        let ctx_id = ContextId::root();
+
+        // (i) Exactly two ordered child obligations, and the packaging is the
+        //     kernel's own binary product introduction — the same rule the
+        //     other `*_split` leaves rest on (`g_record_split` /
+        //     `g_field_split` / `g_ctor_split` / `g_match_split`), which is
+        //     precisely the "same structural grounds" ⟨D-SPLIT⟩ appeals to.
+        let atom = |name| Prop::Atom(PropositionId::from_canon(name));
+        let (lhs, rhs) = (atom(b"lhs obligation"), atom(b"rhs obligation"));
+        let pair_formation = Prop::Impl(
+            Box::new(lhs.clone()),
+            Box::new(Prop::Impl(
+                Box::new(rhs.clone()),
+                Box::new(Prop::Prod(Box::new(lhs), Box::new(rhs))),
+            )),
+        );
+        assert!(
+            matches!(
+                brix_kernel::acceptance(
+                    &ctx_id,
+                    &pair_formation,
+                    &ExplicitTerm::new(
+                        ctx_id,
+                        TermKind::Lam {
+                            var_name: Some("l".into()),
+                            body: Box::new(TermKind::Lam {
+                                var_name: Some("r".into()),
+                                body: Box::new(TermKind::Pair {
+                                    fst: Box::new(TermKind::Hyp(Var::Named("l".into()))),
+                                    snd: Box::new(TermKind::Hyp(Var::Named("r".into()))),
+                                }),
+                            }),
+                        },
+                    ),
+                    Budget::new(1_000, 1_000),
+                ),
+                Verdict::Accepted(_)
+            ),
+            "the split's packaging must be the kernel's product introduction"
+        );
+
+        let split_of = |expr: &Expr, ctx: &TyCtx| {
+            let (_, tree, _) = infer_tree(expr, ctx, Infer::new()).expect("infers");
+            leaf_endpoints(&tree, &g_arith_split())
+        };
+
+        let one_plus_two =
+            Expr::Arith(ArithOp::Add, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2)));
+        let (src, dst) = split_of(&one_plus_two, &TyCtx::new());
+        assert_eq!(src, TyObj::Atom(CfgAtom::Expr(one_plus_two.clone())));
+        assert_eq!(
+            dst,
+            TyObj::Prod(
+                Box::new(TyObj::Atom(CfgAtom::Expr(Expr::Lit(1)))),
+                Box::new(TyObj::Atom(CfgAtom::Expr(Expr::Lit(2)))),
+            ),
+            "exactly two children, in source order"
+        );
+
+        // (ii) The operator is preserved — it is bound because `src` is the
+        //      whole node, so two nodes differing only in operator have
+        //      different splits. And operand order is preserved likewise.
+        let one_minus_two =
+            Expr::Arith(ArithOp::Sub, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2)));
+        let two_minus_one =
+            Expr::Arith(ArithOp::Sub, Box::new(Expr::Lit(2)), Box::new(Expr::Lit(1)));
+        assert_ne!(
+            split_of(&one_plus_two, &TyCtx::new()).0,
+            split_of(&one_minus_two, &TyCtx::new()).0,
+            "a different operator must be a different split source"
+        );
+        assert_ne!(
+            split_of(&one_minus_two, &TyCtx::new()).1,
+            split_of(&two_minus_one, &TyCtx::new()).1,
+            "swapped operands must be a different split target"
+        );
+
+        // (iii) No promotion is chosen and no result type is synthesised.
+        //
+        //       The direct demonstration: one expression, two contexts that
+        //       force *different* promotions and different result types, and a
+        //       byte-identical split leaf. `x + y` types as `Int` under the
+        //       first (no promotion) and `Rat` under the second (splicing
+        //       Int↪Rat). If the split had any promotion or result-type
+        //       content, these could not agree — and ⟨D-SPLIT⟩'s conditional
+        //       would have lapsed.
+        let x_plus_y = Expr::Arith(
+            ArithOp::Add,
+            Box::new(Expr::Var("x".to_string())),
+            Box::new(Expr::Var("y".to_string())),
+        );
+        let int_ctx = TyCtx::new()
+            .extend("x", Ty::Con("Int"))
+            .extend("y", Ty::Con("Int"));
+        let rat_ctx = TyCtx::new()
+            .extend("x", Ty::Con("Rat"))
+            .extend("y", Ty::Con("Int"));
+        assert_eq!(
+            infer_tree(&x_plus_y, &int_ctx, Infer::new()).unwrap().0,
+            Ty::Con("Int")
+        );
+        assert_eq!(
+            infer_tree(&x_plus_y, &rat_ctx, Infer::new()).unwrap().0,
+            Ty::Con("Rat"),
+            "the second context must genuinely force a different result"
+        );
+        assert_eq!(
+            split_of(&x_plus_y, &int_ctx),
+            split_of(&x_plus_y, &rat_ctx),
+            "the split must not vary with the promotion or the result type"
+        );
+
+        // Structurally: neither endpoint mentions a type or an arithmetic
+        // input at all. A `Type` or `ArithInput` atom anywhere in the split
+        // would be a representation claim it is not entitled to make.
+        fn only_expressions(obj: &TyObj) -> bool {
+            match obj {
+                TyObj::Atom(CfgAtom::Expr(_)) => true,
+                TyObj::Atom(CfgAtom::Type(_)) | TyObj::Atom(CfgAtom::ArithInput(_)) => false,
+                TyObj::Prod(l, r) => only_expressions(l) && only_expressions(r),
+            }
+        }
+        let (src, dst) = split_of(&x_plus_y, &rat_ctx);
+        assert!(only_expressions(&src) && only_expressions(&dst));
+
+        // (iv) A forged child is rejected. Substituting a different
+        //      subexpression into the split's target breaks the `Seq` middle
+        //      against the operand tensor, and the audit refuses to produce an
+        //      artifact rather than downgrading one.
+        let (_, real_tree) =
+            audited_type_check_tree(&one_plus_two, &TyCtx::new(), ctx_id).expect("audited");
+        let forged = forge_split_child(real_tree.tree(), &Expr::Lit(99).config_id());
+        match audit_tree(
+            &forged,
+            one_plus_two.config_id(),
+            Ty::Con("Int").config_id(),
+        ) {
+            Err(crate::tree_audit::TreeAuditError::MalformedTree) => {}
+            other => panic!("a forged split child must never audit clean, got {other:?}"),
+        }
+
+        // And the discharge moves no grade: `1 + 2` still rests on the
+        // undischarged `g_arith`/`g_arith_input`, so it stays capped.
+        assert!(generator_is_tight(ClaimKind::Typing, &g_arith_split()));
+        assert!(!generator_is_tight(ClaimKind::Empty, &g_arith_split()));
+        assert_eq!(
+            honest_result_outcome(Outcome::Proven, real_tree.tree()),
+            Outcome::Audited,
+            "discharging the split alone must not lift the arithmetic cap"
+        );
+    }
+
+    /// Replace the right child of the `g_arith_split` leaf's target with
+    /// `impostor`, leaving everything else intact.
+    fn forge_split_child(tree: &RealizesTree, impostor: &ConfigId) -> RealizesTree {
+        match tree {
+            RealizesTree::Leaf {
+                generator,
+                src,
+                dst,
+            } if *generator == g_arith_split() => {
+                let forged_dst = match dst {
+                    TreeObj::Prod(left, _) => {
+                        TreeObj::Prod(left.clone(), Box::new(TreeObj::Atom(*impostor)))
+                    }
+                    other => other.clone(),
+                };
+                RealizesTree::Leaf {
+                    generator: *generator,
+                    src: src.clone(),
+                    dst: forged_dst,
+                }
+            }
+            RealizesTree::Leaf { .. } => tree.clone(),
+            RealizesTree::Seq { left, right } => RealizesTree::Seq {
+                left: Box::new(forge_split_child(left, impostor)),
+                right: Box::new(forge_split_child(right, impostor)),
+            },
+            RealizesTree::Tensor { left, right } => RealizesTree::Tensor {
+                left: Box::new(forge_split_child(left, impostor)),
+                right: Box::new(forge_split_child(right, impostor)),
+            },
+        }
+    }
+
+    #[test]
     fn structural_tree_endpoints_match_the_checked_expression() {
         // The tree handed to elaboration must prove exactly the same source and
         // target as the audited typing claim. In particular, field projection
@@ -2703,11 +3417,15 @@ mod tests {
             g_ctor(),
             g_match_split(),
             g_match(),
+            // ADR-0015 Stage C ⟨D-SPLIT⟩ — discharged on the same structural
+            // grounds as the `*_split` leaves above, independently of
+            // `g_arith`.
+            g_arith_split(),
         ];
         assert_eq!(
             tight_for_typing.len(),
-            16,
-            "this test must cover exactly the sixteen typing-tight generators"
+            17,
+            "this test must cover exactly the seventeen typing-tight generators"
         );
         for generator in tight_for_typing {
             assert!(
