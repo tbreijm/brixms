@@ -21,9 +21,10 @@
 
 use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_kernel::{
-    acceptance, resolve_primitive_relation, typing_arith_v1, ArithOperatorV1, ArithTypingInputV1,
-    Budget, CoercionEdgeV1, CoercionKind, ExplicitTerm, NumericResultTypeV1, NumericTypeNameV1,
-    ObjectTerm, PrimitiveRelationId, Prop, RejectionReason, TermKind, Var, Verdict,
+    acceptance, resolve_primitive_relation, typing_arith_v1, typing_arith_v2, ArithOperatorV1,
+    ArithTypingInputV1, Budget, CoercionEdgeV1, CoercionKind, ExplicitTerm, NumericResultTypeV1,
+    NumericTypeNameV1, ObjectTerm, PrimitiveRelationId, Prop, RejectionReason, TermKind, Var,
+    Verdict,
 };
 use brix_semantic::{ContextId, GeneratorId, PropositionId};
 
@@ -74,8 +75,11 @@ fn expected_realizes(src: ObjectTerm, dst: ObjectTerm) -> Prop {
 }
 
 fn prim(src: ObjectTerm, dst: ObjectTerm) -> TermKind {
+    // The *current* relation (ADR-0015 Stage E). `TypingArithV1` is superseded
+    // but still resolvable; `the_superseded_relation_is_still_resolvable_and_distinct`
+    // covers it.
     TermKind::PrimRealizes {
-        relation: typing_arith_v1(),
+        relation: typing_arith_v2(),
         src,
         dst,
     }
@@ -421,7 +425,7 @@ fn arithmetic_rule_has_no_unchecked_join() {
 fn the_new_term_ordinal_is_appended_at_seventeen() {
     let src = src_of(&add_int_int());
     let dst = dst_of(&result(NumericTypeNameV1::Int));
-    let relation = typing_arith_v1();
+    let relation = typing_arith_v2();
 
     let mut expected = CanonWriter::new();
     expected.write_enum(17, |w| {
@@ -470,4 +474,144 @@ fn the_relation_id_is_bound_into_the_term() {
         dst,
     };
     assert_ne!(real.canon_bytes(), other.canon_bytes());
+}
+
+/// ADR-0015 §7 in practice: the superseded relation is still resolvable, is a
+/// *different* relation, and the two disagree on exactly the rows Stage E moved.
+///
+/// The rows that did not move are accepted under both ids — which is the point
+/// of a content-derived identity. Naming V1 does not silently get you V2's
+/// semantics, and naming either one gets you exactly the row set that existed
+/// when that id was minted.
+#[test]
+fn the_superseded_relation_is_still_resolvable_and_distinct() {
+    assert_ne!(typing_arith_v1(), typing_arith_v2());
+
+    let v1 = resolve_primitive_relation(&typing_arith_v1()).expect("V1 still resolves");
+    let v2 = resolve_primitive_relation(&typing_arith_v2()).expect("V2 resolves");
+    assert_eq!(v1.rows.len(), v2.rows.len());
+
+    // A row with no promotion at all (`1 + 2`) is in both, and is accepted
+    // under either id.
+    let src = src_of(&add_int_int());
+    let dst = dst_of(&result(NumericTypeNameV1::Int));
+    for relation in [typing_arith_v1(), typing_arith_v2()] {
+        let verdict = acceptance(
+            &ctx(),
+            &expected_realizes(src.clone(), dst.clone()),
+            &ExplicitTerm::new(
+                ctx(),
+                TermKind::PrimRealizes {
+                    relation,
+                    src: src.clone(),
+                    dst: dst.clone(),
+                },
+            ),
+            budget(),
+        );
+        assert!(
+            matches!(verdict, Verdict::Accepted(_)),
+            "an unmoved row must be accepted under both relation ids, got {verdict:?}"
+        );
+    }
+}
+
+/// A row whose path crosses the relocated edge is accepted **only** under the
+/// relation whose naming produced it. This is the immutability discipline doing
+/// real work: the same `7 / 2` source object under the two namings is two
+/// different configurations, and neither relation launders the other's.
+#[test]
+fn a_relocated_row_is_accepted_only_under_its_own_relation() {
+    let lossy_edge = |prefix: &str| CoercionEdgeV1 {
+        generator: GeneratorId::named(&format!("{prefix}.Int_Float@1")),
+        kind: CoercionKind::Lossy,
+    };
+    // `7 / 2` — Div on two Ints, both operands crossing Int -> Float.
+    let div = |prefix: &str| ArithTypingInputV1 {
+        operator: ArithOperatorV1::Div,
+        lhs_type: NumericTypeNameV1::Int,
+        rhs_type: NumericTypeNameV1::Int,
+        lhs_promotion_path: vec![lossy_edge(prefix)],
+        rhs_promotion_path: vec![lossy_edge(prefix)],
+    };
+
+    let legacy = div("type.rule.num.promote");
+    let current = div("type.rule.num.convert.lossy");
+    assert_ne!(legacy.config_id(), current.config_id());
+
+    let dst = dst_of(&result(NumericTypeNameV1::Float));
+    let cases = [
+        ("legacy under V1", &legacy, typing_arith_v1(), true),
+        ("legacy under V2", &legacy, typing_arith_v2(), false),
+        ("current under V1", &current, typing_arith_v1(), false),
+        ("current under V2", &current, typing_arith_v2(), true),
+    ];
+
+    for (label, input, relation, want_accepted) in cases {
+        let src = src_of(input);
+        let verdict = acceptance(
+            &ctx(),
+            &expected_realizes(src.clone(), dst.clone()),
+            &ExplicitTerm::new(
+                ctx(),
+                TermKind::PrimRealizes {
+                    relation,
+                    src,
+                    dst: dst.clone(),
+                },
+            ),
+            budget(),
+        );
+        assert_eq!(
+            matches!(verdict, Verdict::Accepted(_)),
+            want_accepted,
+            "{label}: got {verdict:?}"
+        );
+    }
+}
+
+/// ⟨D-PROMOTE⟩ read literally against the current relation: no accepted
+/// arithmetic typing proof names `Int -> Float` under the promotion family.
+///
+/// Asserted on the generator *id*, not on the `CoercionKind` tag. The tag was
+/// already correct before Stage E; the id was the part that claimed an
+/// embedding for a map that is not injective.
+#[test]
+fn the_current_relation_never_names_the_lossy_edge_as_a_promotion() {
+    let relation = resolve_primitive_relation(&typing_arith_v2()).expect("V2 resolves");
+
+    for operator in [
+        ArithOperatorV1::Add,
+        ArithOperatorV1::Sub,
+        ArithOperatorV1::Mul,
+        ArithOperatorV1::Div,
+    ] {
+        for (lhs, rhs) in [
+            (NumericTypeNameV1::Int, NumericTypeNameV1::Float),
+            (NumericTypeNameV1::Float, NumericTypeNameV1::Int),
+            (NumericTypeNameV1::Nat, NumericTypeNameV1::Float),
+            (NumericTypeNameV1::Int, NumericTypeNameV1::Int),
+        ] {
+            // Spell the path with the *promotion* family, as V1 would have.
+            let promoted = ArithTypingInputV1 {
+                operator,
+                lhs_type: lhs,
+                rhs_type: rhs,
+                lhs_promotion_path: vec![CoercionEdgeV1 {
+                    generator: GeneratorId::named("type.rule.num.promote.Int_Float@1"),
+                    kind: CoercionKind::Lossy,
+                }],
+                rhs_promotion_path: Vec::new(),
+            };
+            let src = PropositionId(promoted.config_id().digest());
+            for name in [NumericTypeNameV1::Float, NumericTypeNameV1::Int] {
+                let dst = PropositionId(result(name).config_id().digest());
+                assert!(
+                    !relation.admits(&src, &dst),
+                    "{operator:?} {lhs:?} {rhs:?}: V2 must admit no row naming the \
+                     lossy edge as a promotion"
+                );
+            }
+        }
+    }
 }
