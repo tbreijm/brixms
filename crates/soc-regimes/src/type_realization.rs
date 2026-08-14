@@ -723,13 +723,17 @@ fn minted_generators() -> Vec<(String, GeneratorId)> {
         .iter()
         .map(|(n, id)| ((*n).to_string(), *id))
         .collect();
-    for (from, to) in NUMERIC.edges.iter().copied() {
-        out.push((
-            format!("promote({from}->{to})"),
-            NUMERIC.promote_generator(from, to),
-        ));
+    // The display name follows the edge's family, not a fixed word: after
+    // ADR-0015 Stage E the lossy edge is not a promotion, and `brix why` should
+    // not call it one.
+    for (from, to, kind) in NUMERIC.edges.iter().copied() {
+        let label = match kind {
+            CoercionKind::Exact => format!("promote({from}->{to})"),
+            CoercionKind::Lossy => format!("convert_lossy({from}->{to})"),
+        };
+        out.push((label, NUMERIC.promote_generator(from, to)));
     }
-    for (from, to) in GRADE.edges.iter().copied() {
+    for (from, to, _) in GRADE.edges.iter().copied() {
         out.push((
             format!("weaken({from}->{to})"),
             GRADE.promote_generator(from, to),
@@ -774,22 +778,37 @@ pub fn typing_registry() -> GeneratorRegistry {
 
 /// A declared category of witnessed coercions over one sort of type name.
 pub struct CoercionLattice {
-    /// Hasse edges `(from, to)` in the *safe* coercion direction; each names a
-    /// promotion generator via `generator_prefix`.
-    edges: &'static [(&'static str, &'static str)],
-    /// Prefix for per-edge generator ids, e.g. `"type.rule.num.promote"`.
-    generator_prefix: &'static str,
+    /// Hasse edges `(from, to, kind)` in the *safe* coercion direction. The
+    /// kind selects which **generator family** names the edge, so an edge's
+    /// exactness is lattice data rather than a special case inside a method.
+    ///
+    /// ADR-0015 Stage E ⟨D-PROMOTE⟩ is what forced the third component. Before
+    /// it, exactness was decided by a hardcoded `match` on
+    /// `("type.rule.num.promote", "Int", "Float")` — a lossy edge that had to be
+    /// recognised by name *after* it had already been given a promotion
+    /// generator id. Now the data says which family it belongs to and the id
+    /// follows from that, so the two cannot disagree.
+    edges: &'static [(&'static str, &'static str, CoercionKind)],
+    /// Prefix for per-edge generator ids of **exact** edges, e.g.
+    /// `"type.rule.num.promote"`.
+    exact_prefix: &'static str,
+    /// Prefix for per-edge generator ids of **lossy** edges. Distinct from
+    /// [`Self::exact_prefix`] so that a generator id never asserts a promotion
+    /// for a map that does not preserve numeric identity (ADR-0015
+    /// ⟨D-PROMOTE⟩). `None` for a lattice with no lossy edges, where using one
+    /// would be a bug rather than a policy choice.
+    lossy_prefix: Option<&'static str>,
 }
 
 impl CoercionLattice {
     /// Whether `name` is a node of this lattice.
     fn contains(&self, name: &str) -> bool {
-        self.edges.iter().any(|(a, b)| *a == name || *b == name)
+        self.edges.iter().any(|(a, b, _)| *a == name || *b == name)
     }
 
     /// The canonical `&'static str` node for `name`, if present.
     fn node(&self, name: &str) -> Option<&'static str> {
-        self.edges.iter().find_map(|(a, b)| {
+        self.edges.iter().find_map(|(a, b, _)| {
             if *a == name {
                 Some(*a)
             } else if *b == name {
@@ -801,8 +820,27 @@ impl CoercionLattice {
     }
 
     /// The witnessed-coercion generator for the edge `from ↪ to`.
+    ///
+    /// **The family follows the edge's kind** (ADR-0015 Stage E ⟨D-PROMOTE⟩).
+    /// An exact edge is named under the promotion family; a lossy one is named
+    /// under an explicitly-labelled conversion family, because "`Int→Float`
+    /// SHALL NOT be discharged as an embedding or promotion, now or later" and
+    /// an id reading `…num.promote.Int_Float…` asserts exactly that.
+    ///
+    /// An unknown pair falls back to the exact prefix. It is unreachable —
+    /// every caller iterates real edges — and it is a fallback rather than a
+    /// panic so that a future lattice edit cannot take down the type checker;
+    /// but it deliberately does **not** invent a lossy id, since claiming
+    /// lossiness for an edge the lattice does not declare would be its own
+    /// false record.
     pub fn promote_generator(&self, from: &str, to: &str) -> GeneratorId {
-        GeneratorId::named(&format!("{}.{from}_{to}@1", self.generator_prefix))
+        let prefix = match self.edge_kind(from, to) {
+            CoercionKind::Lossy => self
+                .lossy_prefix
+                .expect("a lattice with a lossy edge must declare a lossy family"),
+            CoercionKind::Exact => self.exact_prefix,
+        };
+        GeneratorId::named(&format!("{prefix}.{from}_{to}@1"))
     }
 
     /// Reflexive–transitive upward closure of `name` (includes `name`).
@@ -811,7 +849,7 @@ impl CoercionLattice {
         let mut i = 0;
         while i < out.len() {
             let cur = out[i];
-            for (a, b) in self.edges {
+            for (a, b, _) in self.edges {
                 if *a == cur && !out.contains(b) {
                     out.push(*b);
                 }
@@ -850,7 +888,7 @@ impl CoercionLattice {
         while i < queue.len() {
             let cur = queue[i];
             i += 1;
-            for (a, b) in self.edges {
+            for (a, b, _) in self.edges {
                 if *a == cur && *b != from && !reached_via.contains_key(b) {
                     reached_via.insert(*b, (*a, *b));
                     if *b == to {
@@ -886,7 +924,9 @@ impl CoercionLattice {
     /// Each edge carries its own [`CoercionKind`] rather than inheriting one
     /// from the lattice: `NUMERIC` mixes the exact tower with the lossy
     /// `Int ↪ Float` branch, and ADR-0015 ⟨D-PROMOTE⟩ rules those to be
-    /// different claims. See [`CoercionLattice::edge_kind`].
+    /// different claims. Since Stage E the kind also selects the edge's
+    /// generator *family*, so the id and the tag can no longer disagree.
+    /// See [`CoercionLattice::edge_kind`].
     fn promotion_path(&self, from: &'static str, to: &'static str) -> Vec<CoercionEdgeV1> {
         self.edge_path(from, to)
             .into_iter()
@@ -909,32 +949,56 @@ impl CoercionLattice {
     ///
     /// ADR-0015 defines a promotion path as an ordered sequence of **exact**
     /// promotion-edge ids, so recording that edge unlabelled would encode a
-    /// lossy conversion under a name asserting exactness. Labelling it keeps
-    /// the record honest here; relocating it out of a lattice called `NUMERIC`
-    /// is Stage E's ⟨D-PROMOTE⟩ work and would move a grade.
-    fn edge_kind(&self, from: &'static str, to: &'static str) -> CoercionKind {
+    /// lossy conversion under a name asserting exactness.
+    ///
+    /// **Stage E finished the job B0 started.** B0 labelled the edge but left
+    /// it named `type.rule.num.promote.Int_Float@1` — the tag said "lossy"
+    /// while the id said "promote". This now reads the kind straight off the
+    /// lattice edge, and [`Self::promote_generator`] derives the family from
+    /// it, so the two are one fact rather than two that could drift. An edge
+    /// the lattice does not declare is `Exact` by default; that is unreachable
+    /// (every caller iterates real edges) and it fails toward the *weaker*
+    /// claim, since inventing lossiness for an undeclared edge would be its own
+    /// false record.
+    fn edge_kind(&self, from: &str, to: &str) -> CoercionKind {
         // Deliberately keyed on the edge, not on a per-lattice flag: `NUMERIC`
         // carries exact and lossy edges side by side, so exactness is a
         // property of the edge and never of the lattice that contains it.
-        match (self.generator_prefix, from, to) {
-            ("type.rule.num.promote", "Int", "Float") => CoercionKind::Lossy,
-            _ => CoercionKind::Exact,
-        }
+        self.edges
+            .iter()
+            .find(|(a, b, _)| *a == from && *b == to)
+            .map(|(_, _, kind)| *kind)
+            .unwrap_or(CoercionKind::Exact)
     }
 }
 
 /// The numeric coercion tower ℕ⊂ℤ⊂ℚ⊂ℝ⊂ℂ (safe = widening) plus the pragmatic
 /// lossy `Int ↪ Float` branch — `Float` is incomparable to the exact ℚ/ℝ/ℂ
 /// nodes, so `join(Float, Rat)` is `None` (mixing them is a type error).
+///
+/// **`Int ↪ Float` is declared under a different generator family** (ADR-0015
+/// Stage E ⟨D-PROMOTE⟩: "`Int→Float` should move to an explicitly-labelled
+/// lossy-conversion family rather than sitting in a lattice called `NUMERIC`'s
+/// promotion edges"). The edge stays in the *coercion graph* — removing it
+/// would change what typechecks, since `join(Int, Float)` and `Div`'s
+/// `field_of` both depend on it — but it is no longer a member of the
+/// promotion family, so no generator id asserts an embedding for it.
+///
+/// That reading is the one that moves no grade and no type. The stronger
+/// reading — remove the edge from `NUMERIC` outright — would stop `1 + 1.0`
+/// typing and leave integer `Div` with no result type, which is a language
+/// change ⟨D-PROMOTE⟩ does not ask for and §5 Stage E does not scope. Both
+/// readings, and why the narrow one was taken, are recorded in ADR-0024 §2.
 pub static NUMERIC: CoercionLattice = CoercionLattice {
     edges: &[
-        ("Nat", "Int"),
-        ("Int", "Rat"),
-        ("Rat", "Real"),
-        ("Real", "Complex"),
-        ("Int", "Float"),
+        ("Nat", "Int", CoercionKind::Exact),
+        ("Int", "Rat", CoercionKind::Exact),
+        ("Rat", "Real", CoercionKind::Exact),
+        ("Real", "Complex", CoercionKind::Exact),
+        ("Int", "Float", CoercionKind::Lossy),
     ],
-    generator_prefix: "type.rule.num.promote",
+    exact_prefix: "type.rule.num.promote",
+    lossy_prefix: Some("type.rule.num.convert.lossy"),
 };
 
 /// The epistemic-grade modality as a coercion lattice. The *safe* direction is
@@ -942,9 +1006,18 @@ pub static NUMERIC: CoercionLattice = CoercionLattice {
 /// always be forgotten). The forbidden strengthening (`Derived → Proven`
 /// without evidence) has no up-path, so `join`/`le` reject it: that is exactly
 /// **epistemic erasure**, caught by the same code as a numeric mismatch.
+/// Every grade edge is `Exact`: forgetting a stronger guarantee loses
+/// information about the *evidence*, but the weakening itself is exact — a
+/// `Proven` result genuinely is `Audited`. `lossy_prefix` is `None` because a
+/// lossy grade edge would not be a weakening at all, and minting an id for one
+/// should be a panic rather than a silently-named generator.
 pub static GRADE: CoercionLattice = CoercionLattice {
-    edges: &[("Proven", "Audited"), ("Audited", "Derived")],
-    generator_prefix: "epistemic.grade.weaken",
+    edges: &[
+        ("Proven", "Audited", CoercionKind::Exact),
+        ("Audited", "Derived", CoercionKind::Exact),
+    ],
+    exact_prefix: "epistemic.grade.weaken",
+    lossy_prefix: None,
 };
 
 /// Whether an *actual* epistemic grade satisfies an *asserted* one (both as
@@ -2008,9 +2081,15 @@ mod tests {
             generator_name(&g_match_catchall()).as_deref(),
             Some("g_match_catchall")
         );
+        // Stage E ⟨D-PROMOTE⟩: the lossy edge is not a promotion, and `brix why`
+        // must not call it one. An exact edge still is.
         assert_eq!(
             generator_name(&NUMERIC.promote_generator("Int", "Float")).as_deref(),
-            Some("promote(Int->Float)")
+            Some("convert_lossy(Int->Float)")
+        );
+        assert_eq!(
+            generator_name(&NUMERIC.promote_generator("Nat", "Int")).as_deref(),
+            Some("promote(Nat->Int)")
         );
     }
 
@@ -2896,12 +2975,18 @@ mod tests {
     #[test]
     fn arithmetic_rule_is_a_kernel_primitive() {
         use brix_kernel::{
-            acceptance, resolve_primitive_relation, typing_arith_v1, Budget, ExplicitTerm,
-            NumericResultTypeV1, ObjectTerm, Prop, TermKind, Verdict,
+            acceptance, resolve_primitive_relation, typing_arith_v1, typing_arith_v2, Budget,
+            ExplicitTerm, NumericResultTypeV1, ObjectTerm, Prop, TermKind, Verdict,
         };
         use brix_semantic::PropositionId;
 
-        let relation = resolve_primitive_relation(&typing_arith_v1()).expect("TypingArithV1");
+        // Stage E: the emission now names the lossy edge under the conversion
+        // family, so the live relation is V2. V1 is still resolvable (§7) and
+        // is checked below to *reject* the relocated rows — which is the
+        // immutability discipline visibly working rather than merely asserted.
+        let relation = resolve_primitive_relation(&typing_arith_v2()).expect("TypingArithV2");
+        let superseded = resolve_primitive_relation(&typing_arith_v1()).expect("TypingArithV1");
+        let mut relocated = 0;
         let ctx_id = ContextId::root();
         let ops = [ArithOp::Add, ArithOp::Sub, ArithOp::Mul, ArithOp::Div];
 
@@ -2943,7 +3028,7 @@ mod tests {
                 let term = ExplicitTerm::new(
                     ctx_id,
                     TermKind::PrimRealizes {
-                        relation: typing_arith_v1(),
+                        relation: typing_arith_v2(),
                         src: ObjectTerm::Const(src),
                         dst: ObjectTerm::Const(dst),
                     },
@@ -2987,9 +3072,33 @@ mod tests {
                     "{op:?} {lhs} {rhs}: the relation must admit exactly one result type"
                 );
 
+                // The superseded relation admits this row only when the path
+                // does not cross the relocated edge.
+                let crosses_lossy = match &src_obj {
+                    TyObj::Atom(CfgAtom::ArithInput(i)) => i
+                        .lhs_promotion_path
+                        .iter()
+                        .chain(i.rhs_promotion_path.iter())
+                        .any(|e| e.kind == CoercionKind::Lossy),
+                    _ => unreachable!("checked above"),
+                };
+                assert_eq!(
+                    superseded.admits(&src, &dst),
+                    !crosses_lossy,
+                    "{op:?} {lhs} {rhs}: V1 must admit exactly the rows Stage E did not move"
+                );
+                if crosses_lossy {
+                    relocated += 1;
+                }
+
                 checked += 1;
             }
         }
+
+        assert_eq!(
+            relocated, 20,
+            "Stage E relocates exactly the rows whose path crosses Int -> Float"
+        );
 
         assert_eq!(
             checked,

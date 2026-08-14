@@ -1,0 +1,1215 @@
+{
+  "format": "brix.kernel.PrimitiveRelation",
+  "version": 1,
+  "adr": "ADR-0015",
+  "relation": "TypingArithV2",
+  "judgment_kind": "Typing",
+  "generator": "type.rule.arith@1",
+  "source_schema": "ed988be560c55bc866c2f0b354b34dccd68cf76b107f907ea488b5abe3927f2a",
+  "destination_schema": "ce314545efe0691c783ca41f898e5c10cb6ae78105645294c1934b37b12a5460",
+  "relation_id": "8e69515f0bf64ead9312afe48de0d778ca710224a680a5d86cdb586da6a77eea",
+  "edge_families": { "exact": "type.rule.num.promote", "lossy": "type.rule.num.convert.lossy" },
+  "row_count": 120,
+  "rows": [
+    {
+      "operator": "Add",
+      "lhs": "Nat",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Nat",
+      "src": "380183ecbf24b073b4e4624beabfc86e730359e15cf034f2399a5453a6a93c4f",
+      "dst": "fa5f273b6f4d1bae64658dddc49877908bbf8f941de6a6bb7ecb09f13c63c799"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Nat",
+      "rhs": "Int",
+      "lhs_path": ["Nat->Int:exact"],
+      "rhs_path": [],
+      "result": "Int",
+      "src": "dccd9bab43d75788eab4942a5479ed2e77347eba98868f97f8cf4f379ab2dfad",
+      "dst": "b9a5955e59dee2a0390af15d676349af199bf6e6a66608a589ea6409514e2974"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Nat",
+      "rhs": "Rat",
+      "lhs_path": ["Nat->Int:exact", "Int->Rat:exact"],
+      "rhs_path": [],
+      "result": "Rat",
+      "src": "b2f2bee02315e1e0a2061626bd5fd22eb402d003aa0b57c20d84583a878e732e",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Nat",
+      "rhs": "Real",
+      "lhs_path": ["Nat->Int:exact", "Int->Rat:exact", "Rat->Real:exact"],
+      "rhs_path": [],
+      "result": "Real",
+      "src": "682d48d9e3ea5483a7f261e5e6ceae698c286b45742f4ed71a2e62c1bbe12762",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Nat",
+      "rhs": "Complex",
+      "lhs_path": ["Nat->Int:exact", "Int->Rat:exact", "Rat->Real:exact", "Real->Complex:exact"],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "21105dd37d3907281222043a59be1b0efbff249395b17448be3bb0b09da9fbfd",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Int",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact"],
+      "result": "Int",
+      "src": "7947c967fbbcfdd2807a3e9be84f508ca493d2607951af0f6a3c01927cd3b51f",
+      "dst": "b9a5955e59dee2a0390af15d676349af199bf6e6a66608a589ea6409514e2974"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Int",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Int",
+      "src": "f70f9ffe5b3fffdc0c208a8d827e426ca25a8fde4437271345d001ae81e53a12",
+      "dst": "b9a5955e59dee2a0390af15d676349af199bf6e6a66608a589ea6409514e2974"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Int",
+      "rhs": "Rat",
+      "lhs_path": ["Int->Rat:exact"],
+      "rhs_path": [],
+      "result": "Rat",
+      "src": "07948a33ba14edc822694954270df1b8eecbd7451f2d6dcafc465444c3aa40de",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Int",
+      "rhs": "Real",
+      "lhs_path": ["Int->Rat:exact", "Rat->Real:exact"],
+      "rhs_path": [],
+      "result": "Real",
+      "src": "9663ce547758622fb32302e6708c1589dcb66459d1ebc90834522db169caf14a",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Int",
+      "rhs": "Complex",
+      "lhs_path": ["Int->Rat:exact", "Rat->Real:exact", "Real->Complex:exact"],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "a69853d956f99f10838f4d65df3e6fa4ebb30fc15683f2e789abb34f78744dcf",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Rat",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact", "Int->Rat:exact"],
+      "result": "Rat",
+      "src": "7c75c85418bbce760e6925b1d2bb013b839ac86302ffea3f9da1f396124a839b",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Rat",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": ["Int->Rat:exact"],
+      "result": "Rat",
+      "src": "e7d62acd7fa99e442e5fe94f584e18680fb4e543bbfb7bc92a9d80d4719317c3",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Rat",
+      "rhs": "Rat",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Rat",
+      "src": "3b9f3b7847a8f7385e3aef66db5ef8d472ce565725509e128b4ecc4d9dad6515",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Rat",
+      "rhs": "Real",
+      "lhs_path": ["Rat->Real:exact"],
+      "rhs_path": [],
+      "result": "Real",
+      "src": "dd0158a084540d665d21ea8371c7d620ae590edb2f8770246e575f6aea377059",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Rat",
+      "rhs": "Complex",
+      "lhs_path": ["Rat->Real:exact", "Real->Complex:exact"],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "f04593449a9b4f26b2e9392facbb048c7a561d78f7a858e54e2f8f66e707f4d1",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Real",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact", "Int->Rat:exact", "Rat->Real:exact"],
+      "result": "Real",
+      "src": "7a7480f39f92c14d3f691d17d7a445413e31834f31587bd52d597ec20a078141",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Real",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": ["Int->Rat:exact", "Rat->Real:exact"],
+      "result": "Real",
+      "src": "ea57f12858eb74d49daa5206c0528c714f241f088aa2351f7fba1c370336b16a",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Real",
+      "rhs": "Rat",
+      "lhs_path": [],
+      "rhs_path": ["Rat->Real:exact"],
+      "result": "Real",
+      "src": "4d19e9532e61c0bbade9787fb6d57a5ad5b953c4dc894cb9456e08b6d1c5576f",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Real",
+      "rhs": "Real",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Real",
+      "src": "13af7c1069868e0138ffc8fbb1812d1041e45c13a5184b963cf0680dfb1d402b",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Real",
+      "rhs": "Complex",
+      "lhs_path": ["Real->Complex:exact"],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "77df7336b4b446dd80ac3eeac792daa3f47a231e1261c3cbbbe283564b7f592e",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Complex",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact", "Int->Rat:exact", "Rat->Real:exact", "Real->Complex:exact"],
+      "result": "Complex",
+      "src": "a9ca29dddca74e36030b503d47d8180b5404893ec3bc12e4a9e8461e1041bb10",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Complex",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": ["Int->Rat:exact", "Rat->Real:exact", "Real->Complex:exact"],
+      "result": "Complex",
+      "src": "c9f72922db86c8e7ea9cb3c04e3f72c5b7185bf7c4b150bc796dd50089121539",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Complex",
+      "rhs": "Rat",
+      "lhs_path": [],
+      "rhs_path": ["Rat->Real:exact", "Real->Complex:exact"],
+      "result": "Complex",
+      "src": "342a0b9858bfcf89cc933d9b5d001bdbfacb1f0ec0da74d523620434ec9af025",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Complex",
+      "rhs": "Real",
+      "lhs_path": [],
+      "rhs_path": ["Real->Complex:exact"],
+      "result": "Complex",
+      "src": "43df85e260e68a6137a079b42e016023fc0603ee9d2becf3317e2d65fa70d2cd",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Complex",
+      "rhs": "Complex",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "ab31df3f3eb964f729cf472a0f7df9fd9343524164ea61f5692a71e330e2f334",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Nat",
+      "rhs": "Float",
+      "lhs_path": ["Nat->Int:exact", "Int->Float:lossy"],
+      "rhs_path": [],
+      "result": "Float",
+      "src": "ae36119e5b4f23413f7d4a7875e28d7d60024ccc054de2bd21dc9354ae07e3f3",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Int",
+      "rhs": "Float",
+      "lhs_path": ["Int->Float:lossy"],
+      "rhs_path": [],
+      "result": "Float",
+      "src": "2b5286c3b2b13576e826b23292891eb1e5ba4f0c9d7d2b97298543dc5ba48ff5",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Float",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact", "Int->Float:lossy"],
+      "result": "Float",
+      "src": "f1e343bb696a2bf2d222617268b3d6b9692928d9fa584f06cb65c4412d04e417",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Float",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": ["Int->Float:lossy"],
+      "result": "Float",
+      "src": "33e6b15176f5e9332e42e443b50afbdd95627256479c0906fa1b85aac11e29d9",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Add",
+      "lhs": "Float",
+      "rhs": "Float",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Float",
+      "src": "9f7a273c6487f010ad8cc42abaf9ee19b6f6bf3891bd9c4cc228904acc2bd3b6",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Nat",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Nat",
+      "src": "47036bb509c43834154bceb13d7c80bf0cef4b0972385a8765bec571f5d5d33c",
+      "dst": "fa5f273b6f4d1bae64658dddc49877908bbf8f941de6a6bb7ecb09f13c63c799"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Nat",
+      "rhs": "Int",
+      "lhs_path": ["Nat->Int:exact"],
+      "rhs_path": [],
+      "result": "Int",
+      "src": "2c4938fbb63e5ff59918bdc41a3bc5967df5f1436244ffeca720348c05d363f2",
+      "dst": "b9a5955e59dee2a0390af15d676349af199bf6e6a66608a589ea6409514e2974"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Nat",
+      "rhs": "Rat",
+      "lhs_path": ["Nat->Int:exact", "Int->Rat:exact"],
+      "rhs_path": [],
+      "result": "Rat",
+      "src": "365e3c46e80f7e46ce3f05130c64e7e6b7a1470e3dc7407ee6a4ba46e39d902f",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Nat",
+      "rhs": "Real",
+      "lhs_path": ["Nat->Int:exact", "Int->Rat:exact", "Rat->Real:exact"],
+      "rhs_path": [],
+      "result": "Real",
+      "src": "64e242849755be743a936cacc25554ff85d6c5aafda982bfdfd95b604c9073d2",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Nat",
+      "rhs": "Complex",
+      "lhs_path": ["Nat->Int:exact", "Int->Rat:exact", "Rat->Real:exact", "Real->Complex:exact"],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "cbce2afccf33f8d268631d084b9c4c1802797e3b78fe48dc3131198dda69e865",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Int",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact"],
+      "result": "Int",
+      "src": "dadbd40613407233cf7d08d6ccecc1d395a76f1ea29110546b810e8f2df20be4",
+      "dst": "b9a5955e59dee2a0390af15d676349af199bf6e6a66608a589ea6409514e2974"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Int",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Int",
+      "src": "30cd3c29d382e97f004a8a61b56aeed8b5cf0953602a660bd4cf044707567b37",
+      "dst": "b9a5955e59dee2a0390af15d676349af199bf6e6a66608a589ea6409514e2974"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Int",
+      "rhs": "Rat",
+      "lhs_path": ["Int->Rat:exact"],
+      "rhs_path": [],
+      "result": "Rat",
+      "src": "fd99b71628aa561f4b149cdb4ae337dc1ec63c13d16f72776e6cadfb5cd424ad",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Int",
+      "rhs": "Real",
+      "lhs_path": ["Int->Rat:exact", "Rat->Real:exact"],
+      "rhs_path": [],
+      "result": "Real",
+      "src": "95def1681c0486b548e4fd3f7f6e5b06d03d3de183bab178c685ca649905005a",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Int",
+      "rhs": "Complex",
+      "lhs_path": ["Int->Rat:exact", "Rat->Real:exact", "Real->Complex:exact"],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "69fc2537fcdf9a04fbe895bfcb5323d42e4ba653ea9992973dce8d490850f7da",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Rat",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact", "Int->Rat:exact"],
+      "result": "Rat",
+      "src": "f2ec3285920cc267bec128973cef8d78bc0e9f8cfdff7415ddf6ea22504d1fcc",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Rat",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": ["Int->Rat:exact"],
+      "result": "Rat",
+      "src": "78927845af45930062c52ec9afde9eeecb6faf7daa2ce0fb9a40d196996c533c",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Rat",
+      "rhs": "Rat",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Rat",
+      "src": "1a810207f1b09dd370dab8c836995a7399e4eed305570173f3b70fab050d01c1",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Rat",
+      "rhs": "Real",
+      "lhs_path": ["Rat->Real:exact"],
+      "rhs_path": [],
+      "result": "Real",
+      "src": "8b8853a272f710608e06e3dabe3d78e8480c0557d04928607af45433f7dc71fb",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Rat",
+      "rhs": "Complex",
+      "lhs_path": ["Rat->Real:exact", "Real->Complex:exact"],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "8badc920a428fd4760b2397416c5f4aad66cc6b559eb18cc8b8ac2c67a18f96a",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Real",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact", "Int->Rat:exact", "Rat->Real:exact"],
+      "result": "Real",
+      "src": "f07e3467154ffb291aa2ef345db58f3affcb5507067c377f672dad0d26c9eb92",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Real",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": ["Int->Rat:exact", "Rat->Real:exact"],
+      "result": "Real",
+      "src": "f9a076f7350d003db6836efac332f9d7f223c6f8ac3ca254b2ed53339ab2208d",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Real",
+      "rhs": "Rat",
+      "lhs_path": [],
+      "rhs_path": ["Rat->Real:exact"],
+      "result": "Real",
+      "src": "280cd3fc78ff0f1b31580439a512d5f1f7f585c5f541917d9627516021664ec1",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Real",
+      "rhs": "Real",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Real",
+      "src": "d085f75fef3f70f26ab0f21107f7f2dac3593b50e7be6f4d7d5ec12f9946e8bf",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Real",
+      "rhs": "Complex",
+      "lhs_path": ["Real->Complex:exact"],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "fdf3c1cc70e696fd625a5fb97fcd60ea8d794f6ef5ff42b719fd0d9f606eb258",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Complex",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact", "Int->Rat:exact", "Rat->Real:exact", "Real->Complex:exact"],
+      "result": "Complex",
+      "src": "fb13bfb3ef7189d0f73992fd849fa1db7a8987ede09d138c8802315e6e67c078",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Complex",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": ["Int->Rat:exact", "Rat->Real:exact", "Real->Complex:exact"],
+      "result": "Complex",
+      "src": "b5953bce00ccb15b354584cfa4ecb8711ea7446c181e0fde0622809c091d16eb",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Complex",
+      "rhs": "Rat",
+      "lhs_path": [],
+      "rhs_path": ["Rat->Real:exact", "Real->Complex:exact"],
+      "result": "Complex",
+      "src": "1441e43b9084d255a1021db051f11c5622da4ddeec27898ca38bbc8c70a375f1",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Complex",
+      "rhs": "Real",
+      "lhs_path": [],
+      "rhs_path": ["Real->Complex:exact"],
+      "result": "Complex",
+      "src": "64ac2b93590f2720efd008f6a9629652e52340083e411e158e23eeceb2c051c7",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Complex",
+      "rhs": "Complex",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "67addd87cc80b062bde208cbdcb97fbff782c56c45695c9e3430022705f38cda",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Nat",
+      "rhs": "Float",
+      "lhs_path": ["Nat->Int:exact", "Int->Float:lossy"],
+      "rhs_path": [],
+      "result": "Float",
+      "src": "383155d9c105297bc5645a24dbe7f688781ffad8b2ced4ddc85fef59967bf319",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Int",
+      "rhs": "Float",
+      "lhs_path": ["Int->Float:lossy"],
+      "rhs_path": [],
+      "result": "Float",
+      "src": "7d41c47b24458c42341c2822cdaf95bd54ceeb7c897bf96eaa6b153ddd489067",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Float",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact", "Int->Float:lossy"],
+      "result": "Float",
+      "src": "cabc4ae20d5520cff1819d9d87a4676889935d6f6466d568f4664be45d102a9d",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Float",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": ["Int->Float:lossy"],
+      "result": "Float",
+      "src": "61f890bcd88428783afc7c7809cec1b2fc9b102213af6f71352e7a91b8bd6668",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Sub",
+      "lhs": "Float",
+      "rhs": "Float",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Float",
+      "src": "482286421ca96372de8959ba61a77791ad4b5f3207675ca3b28c1827b82140bb",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Nat",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Nat",
+      "src": "ac9fff3b514bc981e9ee3c2a84485d073519d45a3421a27c6e0f9224dfd53abf",
+      "dst": "fa5f273b6f4d1bae64658dddc49877908bbf8f941de6a6bb7ecb09f13c63c799"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Nat",
+      "rhs": "Int",
+      "lhs_path": ["Nat->Int:exact"],
+      "rhs_path": [],
+      "result": "Int",
+      "src": "30a55d5b2a25fe56cf1e72fac79e1a8ae1ef843a0033dc5bbe93461d04baee5b",
+      "dst": "b9a5955e59dee2a0390af15d676349af199bf6e6a66608a589ea6409514e2974"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Nat",
+      "rhs": "Rat",
+      "lhs_path": ["Nat->Int:exact", "Int->Rat:exact"],
+      "rhs_path": [],
+      "result": "Rat",
+      "src": "788d8b507d3b8bec827e05e4be8938e1fdbd1f63002780e238a6e4049d7bbf25",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Nat",
+      "rhs": "Real",
+      "lhs_path": ["Nat->Int:exact", "Int->Rat:exact", "Rat->Real:exact"],
+      "rhs_path": [],
+      "result": "Real",
+      "src": "bd662308669fba8b106da88ce20dc17d504df4053567e0c98406dd5d449da663",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Nat",
+      "rhs": "Complex",
+      "lhs_path": ["Nat->Int:exact", "Int->Rat:exact", "Rat->Real:exact", "Real->Complex:exact"],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "ae4ede692ffa44c45c34000502cbece90ca412079cd7b6534bb77d9745c05405",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Int",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact"],
+      "result": "Int",
+      "src": "dd1494f357a6c7eaff143e886f0f3c4dd5801c49ed9b470df3c5952118152570",
+      "dst": "b9a5955e59dee2a0390af15d676349af199bf6e6a66608a589ea6409514e2974"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Int",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Int",
+      "src": "8c92dc9ac07faa8f2cc4e1bf57ccf79e2dc76c248eae2c74d0b3586dbacd986d",
+      "dst": "b9a5955e59dee2a0390af15d676349af199bf6e6a66608a589ea6409514e2974"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Int",
+      "rhs": "Rat",
+      "lhs_path": ["Int->Rat:exact"],
+      "rhs_path": [],
+      "result": "Rat",
+      "src": "bec6097733bda48b4d03d59c429465376582e0e905a8a62e23511d9db6590357",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Int",
+      "rhs": "Real",
+      "lhs_path": ["Int->Rat:exact", "Rat->Real:exact"],
+      "rhs_path": [],
+      "result": "Real",
+      "src": "97619e8a23df6d47be6a5ee2a376b3d1443a578958326ecfe3262309fcd5db79",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Int",
+      "rhs": "Complex",
+      "lhs_path": ["Int->Rat:exact", "Rat->Real:exact", "Real->Complex:exact"],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "bfcac57215d23da8d1c2c25feff4844a346b8489568c6c30ed0d9dff71f1157f",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Rat",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact", "Int->Rat:exact"],
+      "result": "Rat",
+      "src": "c31c273c1bb11094b11d7b85629978b982a47e768b6d7e34daf4e9f9c5e719cc",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Rat",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": ["Int->Rat:exact"],
+      "result": "Rat",
+      "src": "80b91976ede229149ade57d1020f91f28b673328622ad30f6a43d0564f9df2f4",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Rat",
+      "rhs": "Rat",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Rat",
+      "src": "5912b5b8986c98f4d0692c6b8b4cbe9e29b994fb537b2465cd6f6101afbbfb3c",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Rat",
+      "rhs": "Real",
+      "lhs_path": ["Rat->Real:exact"],
+      "rhs_path": [],
+      "result": "Real",
+      "src": "8effea6fd0e82fec80539d4a2e19ef35e7a40e839902e981870fe5bea01509d2",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Rat",
+      "rhs": "Complex",
+      "lhs_path": ["Rat->Real:exact", "Real->Complex:exact"],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "f9287692ae780b22b001ab8ac811465575400bc83b6796a999bd3a9a12f867c9",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Real",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact", "Int->Rat:exact", "Rat->Real:exact"],
+      "result": "Real",
+      "src": "c4bc98e4674a4095030dd35af5e98709a8097d59aa2aeb9b1daf57e73b998f78",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Real",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": ["Int->Rat:exact", "Rat->Real:exact"],
+      "result": "Real",
+      "src": "0f9e821daa86ddf2ad06aee340b4af860a4dfbf29eb67847acd84684122ae897",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Real",
+      "rhs": "Rat",
+      "lhs_path": [],
+      "rhs_path": ["Rat->Real:exact"],
+      "result": "Real",
+      "src": "ffd5df1bd6959d16a609e7d488ffb9b71eb794713f65ac0a1e3fbdecb64dd51a",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Real",
+      "rhs": "Real",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Real",
+      "src": "ae4d7b8482f91947a4b0b9a7b6b7b3d5dc4b8591118c67f2dba9b9f51ae98d79",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Real",
+      "rhs": "Complex",
+      "lhs_path": ["Real->Complex:exact"],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "9e91fc8d8f778795d8b9b4a32f01cf6f73203ffb737d4bf453a021070fd8f590",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Complex",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact", "Int->Rat:exact", "Rat->Real:exact", "Real->Complex:exact"],
+      "result": "Complex",
+      "src": "4d4e9083e8b54ee7aa04747f80452e97dbb8dac43678be860a7c8ed1ae88ae7d",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Complex",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": ["Int->Rat:exact", "Rat->Real:exact", "Real->Complex:exact"],
+      "result": "Complex",
+      "src": "d08103f19d404a0cb8bd60b1014a4f46a1271e18bf7949d09d26e54b7ae70668",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Complex",
+      "rhs": "Rat",
+      "lhs_path": [],
+      "rhs_path": ["Rat->Real:exact", "Real->Complex:exact"],
+      "result": "Complex",
+      "src": "d17ef310bb776c8efbf9c104c6bacbb4ec3baaef80153e0568bec3018b71fbe5",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Complex",
+      "rhs": "Real",
+      "lhs_path": [],
+      "rhs_path": ["Real->Complex:exact"],
+      "result": "Complex",
+      "src": "316e83dda16418989b31e4a30f6fd0b53372deedcdcd4b3466e6c8f1ddae8ee8",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Complex",
+      "rhs": "Complex",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "fbcc1644d67a49043f83a2b6a8ec3c4ecbf27163fd42801ebbb14153ee04a184",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Nat",
+      "rhs": "Float",
+      "lhs_path": ["Nat->Int:exact", "Int->Float:lossy"],
+      "rhs_path": [],
+      "result": "Float",
+      "src": "c73a7815496b64fa340dd870f864fdabd64854ae9d92ff302785a4c2a5ab701f",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Int",
+      "rhs": "Float",
+      "lhs_path": ["Int->Float:lossy"],
+      "rhs_path": [],
+      "result": "Float",
+      "src": "fed8c1383e8cf1bca3eae1279a21513f9d864226c7b5f0a4dbc0ded502a847c6",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Float",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact", "Int->Float:lossy"],
+      "result": "Float",
+      "src": "7957f988eafce18d7a579b0c131f85b43d56ebc3931a6e831b153acccc387db3",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Float",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": ["Int->Float:lossy"],
+      "result": "Float",
+      "src": "2ec50bdbce95ee84f770819db660dc365326192530720333b2e93c64964b55b1",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Mul",
+      "lhs": "Float",
+      "rhs": "Float",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Float",
+      "src": "40e1d22d41bf49ae3ca35f4d74a4fa9f2bc78e0ea517587451d330fe06dda46b",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Nat",
+      "rhs": "Nat",
+      "lhs_path": ["Nat->Int:exact", "Int->Float:lossy"],
+      "rhs_path": ["Nat->Int:exact", "Int->Float:lossy"],
+      "result": "Float",
+      "src": "6cfaa105aeddf7fa910a9348f27760d489e0d67d918244eca1d425f7e2e6caf7",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Nat",
+      "rhs": "Int",
+      "lhs_path": ["Nat->Int:exact", "Int->Float:lossy"],
+      "rhs_path": ["Int->Float:lossy"],
+      "result": "Float",
+      "src": "9a82d8326ae0f94ed7c56f2b657d634c381e10506dc4b75f94d620938de8128f",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Nat",
+      "rhs": "Rat",
+      "lhs_path": ["Nat->Int:exact", "Int->Rat:exact"],
+      "rhs_path": [],
+      "result": "Rat",
+      "src": "34dc821d614e3c48c762f31615115aaecc2db4240417a7b7ad718f9821ca97ae",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Nat",
+      "rhs": "Real",
+      "lhs_path": ["Nat->Int:exact", "Int->Rat:exact", "Rat->Real:exact"],
+      "rhs_path": [],
+      "result": "Real",
+      "src": "29a67b2501063d8eff686937461eade5b4069d50d28eedde46b044b651de1646",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Nat",
+      "rhs": "Complex",
+      "lhs_path": ["Nat->Int:exact", "Int->Rat:exact", "Rat->Real:exact", "Real->Complex:exact"],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "bf00d5bbb389beb7e0f5b73a85810509d768decdb1f0e97e30143edc7b259aee",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Int",
+      "rhs": "Nat",
+      "lhs_path": ["Int->Float:lossy"],
+      "rhs_path": ["Nat->Int:exact", "Int->Float:lossy"],
+      "result": "Float",
+      "src": "ed75c575d8aad440a473247e4fd013883f64c7395130c9901ba9424cdea50caf",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Int",
+      "rhs": "Int",
+      "lhs_path": ["Int->Float:lossy"],
+      "rhs_path": ["Int->Float:lossy"],
+      "result": "Float",
+      "src": "b73b6dbaf36a4560e4e025c3e1d50282d3fdb630328cc5686ecb7a6e84fdedb0",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Int",
+      "rhs": "Rat",
+      "lhs_path": ["Int->Rat:exact"],
+      "rhs_path": [],
+      "result": "Rat",
+      "src": "b56aa267a7135cb4cb84e565ddb5e62ec70e0b8d675f42f06c1712af96a3f32c",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Int",
+      "rhs": "Real",
+      "lhs_path": ["Int->Rat:exact", "Rat->Real:exact"],
+      "rhs_path": [],
+      "result": "Real",
+      "src": "456c3257616c03a7716f8a6a5e5e18da3d490b583089a510593083c451d1dfbb",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Int",
+      "rhs": "Complex",
+      "lhs_path": ["Int->Rat:exact", "Rat->Real:exact", "Real->Complex:exact"],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "5469fbfe4cb6c4d38cfe20ecae980b999062ccc2afb5f55d4e909c5c8870febd",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Rat",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact", "Int->Rat:exact"],
+      "result": "Rat",
+      "src": "fa8e05c058a11c7d3833e6a8a4bd9acb302d0dc9405ca08768d26acbf0b5edd7",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Rat",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": ["Int->Rat:exact"],
+      "result": "Rat",
+      "src": "635bf7493fec556b706fbb017b197e3c804a697f415e347dfd461beab6214665",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Rat",
+      "rhs": "Rat",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Rat",
+      "src": "b54c7378119b8b37aaa05862ed9f4ef83cac6da0506df54cac3a90e6ff557f85",
+      "dst": "e31c7b7432a9782e910161cc5d2d45cd160b3205685f139c5c20e8e0970c7818"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Rat",
+      "rhs": "Real",
+      "lhs_path": ["Rat->Real:exact"],
+      "rhs_path": [],
+      "result": "Real",
+      "src": "107cc5a2ddb8ec64a4e1ca62c9e80caaafbbd226342ee49397b5080055cc0d35",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Rat",
+      "rhs": "Complex",
+      "lhs_path": ["Rat->Real:exact", "Real->Complex:exact"],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "34c6662e9ba058784697197ea94feed658e4173a0c3ae6bac0edb1965124c209",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Real",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact", "Int->Rat:exact", "Rat->Real:exact"],
+      "result": "Real",
+      "src": "4a3e41077b874eb98d119f8c060b693ca7cc25f061368926b4ac198bcd4f17ba",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Real",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": ["Int->Rat:exact", "Rat->Real:exact"],
+      "result": "Real",
+      "src": "83918cfb4fde271dfe2190bca78f7df339f06736d78d7c1f44ef8dc4d228fb34",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Real",
+      "rhs": "Rat",
+      "lhs_path": [],
+      "rhs_path": ["Rat->Real:exact"],
+      "result": "Real",
+      "src": "a74f22ddc9140ed4b6e1f07a3012df0cbaabdc0352bad2dfd42ba25dee320eb4",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Real",
+      "rhs": "Real",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Real",
+      "src": "d703f483e617c098344c03e16cc9b239ea3f3ab53d4576212478e6e3c4e88b3e",
+      "dst": "8c63f28c126cd602d7ecd1fcb50a392a77c61d19924175c4a2e5423b6f97524f"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Real",
+      "rhs": "Complex",
+      "lhs_path": ["Real->Complex:exact"],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "82b324bf9ebaeef31f63c458cb2731c1e6bc24c76d79cb88bd0d91b2add3f7e4",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Complex",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact", "Int->Rat:exact", "Rat->Real:exact", "Real->Complex:exact"],
+      "result": "Complex",
+      "src": "e9c70803e1a7bfb5acc9c96306392c56fde3cd66c0e1fef9a2d0e7d1dfc3b9c0",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Complex",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": ["Int->Rat:exact", "Rat->Real:exact", "Real->Complex:exact"],
+      "result": "Complex",
+      "src": "c6530cec8bfef0e8f41c0813f4d5f3151c6f62b2f4ba10bb6ad9e0d31338896e",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Complex",
+      "rhs": "Rat",
+      "lhs_path": [],
+      "rhs_path": ["Rat->Real:exact", "Real->Complex:exact"],
+      "result": "Complex",
+      "src": "25f5946d644f970b65b850f3e0149532ed48c4aaf0f7b1a74764eb1ad98b6dda",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Complex",
+      "rhs": "Real",
+      "lhs_path": [],
+      "rhs_path": ["Real->Complex:exact"],
+      "result": "Complex",
+      "src": "c2423df890089bb5f15db98617ea6837d90beff4776669bc457bb9c0938a0251",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Complex",
+      "rhs": "Complex",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Complex",
+      "src": "45d35f5b6d4385f5b2e12fb20ca44041dad36f4aa7c6b9a34ee7d348a83b4c04",
+      "dst": "7317db398b4274487ac733fba45ce4ab43c28deb3ee05dbac1529959327be1c9"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Nat",
+      "rhs": "Float",
+      "lhs_path": ["Nat->Int:exact", "Int->Float:lossy"],
+      "rhs_path": [],
+      "result": "Float",
+      "src": "e7d1ae8602b9e939febfe5dec267468d527a7a1cdc35faa333c547671e6b766e",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Int",
+      "rhs": "Float",
+      "lhs_path": ["Int->Float:lossy"],
+      "rhs_path": [],
+      "result": "Float",
+      "src": "e6a697b67578b93f1e577a2854ac6bc8682cd5b56781cf9a57f2b10992ba95b3",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Float",
+      "rhs": "Nat",
+      "lhs_path": [],
+      "rhs_path": ["Nat->Int:exact", "Int->Float:lossy"],
+      "result": "Float",
+      "src": "e024af03ea553c682e79ad561acdcc74d349a68c979ff8723ed60391970a7005",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Float",
+      "rhs": "Int",
+      "lhs_path": [],
+      "rhs_path": ["Int->Float:lossy"],
+      "result": "Float",
+      "src": "0cbc040f006743cb5e4e404396c011e5ab5a5697dc3d0fa0d297583b212bca7f",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    },
+    {
+      "operator": "Div",
+      "lhs": "Float",
+      "rhs": "Float",
+      "lhs_path": [],
+      "rhs_path": [],
+      "result": "Float",
+      "src": "cfcf79b58911006ea15f929fb42212100a5e057c29ca27e16936e9dcd409b6ef",
+      "dst": "84ea58b21d9d5a24327821a853ab2220661317693e9ec1e840d2414ac456a529"
+    }
+  ]
+}

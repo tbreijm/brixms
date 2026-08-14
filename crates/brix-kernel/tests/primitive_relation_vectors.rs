@@ -36,7 +36,7 @@
 use std::path::{Path, PathBuf};
 
 use brix_canon::{CanonWriter, Digest, Domain};
-use brix_kernel::{resolve_primitive_relation, typing_arith_v1, Row};
+use brix_kernel::{resolve_primitive_relation, typing_arith_v1, typing_arith_v2, Row};
 use brix_semantic::{GeneratorId, PropositionId};
 
 /// The four operators and their frozen ordinals.
@@ -137,6 +137,31 @@ fn declared_field_of(base: &str) -> &str {
     }
 }
 
+/// Which generator family names a coercion edge, per relation version.
+///
+/// Declared here as literal prefix strings rather than imported, so consumer 2
+/// stays independent of the kernel's own naming function.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Naming {
+    /// `TypingArithV1` — every edge under the promotion family, including the
+    /// lossy one. Superseded; retained because ADR-0015 §7 makes relation
+    /// identities immutable.
+    LegacyAllPromote,
+    /// `TypingArithV2` — ADR-0015 Stage E <D-PROMOTE>: exact edges keep the
+    /// promotion family, the lossy edge moves to an explicitly-labelled
+    /// conversion family.
+    FamilyByExactness,
+}
+
+impl Naming {
+    fn prefix(self, kind: u64) -> &'static str {
+        match (self, kind) {
+            (Naming::FamilyByExactness, 1) => "type.rule.num.convert.lossy",
+            _ => "type.rule.num.promote",
+        }
+    }
+}
+
 /// One row in readable form, independent of the kernel's types.
 struct DeclaredRow {
     operator: &'static str,
@@ -185,14 +210,15 @@ fn declared_rows() -> Vec<DeclaredRow> {
 // `PrimitiveRelation`, nor calls any of their `canon_write` impls.
 // ---------------------------------------------------------------------------
 
-fn independent_src(row: &DeclaredRow) -> Digest {
+fn independent_src(row: &DeclaredRow, naming: Naming) -> Digest {
     let path_bytes = |steps: &[(&'static str, &'static str, u64)]| -> Vec<Vec<u8>> {
         steps
             .iter()
             .map(|(from, to, kind)| {
+                let prefix = naming.prefix(*kind);
                 let mut e = CanonWriter::new();
                 e.write_bytes(
-                    GeneratorId::named(&format!("type.rule.num.promote.{from}_{to}@1"))
+                    GeneratorId::named(&format!("{prefix}.{from}_{to}@1"))
                         .digest()
                         .as_bytes(),
                 );
@@ -228,7 +254,7 @@ fn independent_schema_id(marker: &[u8], version: u64) -> Digest {
     Digest::of(Domain::Value, &w.finish())
 }
 
-fn independent_relation_id(rows: &[DeclaredRow]) -> Digest {
+fn independent_relation_id(rows: &[DeclaredRow], naming: Naming) -> Digest {
     let mut w = CanonWriter::new();
     w.write_bytes(b"brix.kernel.primitive-relation");
     w.write_uint(1);
@@ -238,7 +264,7 @@ fn independent_relation_id(rows: &[DeclaredRow]) -> Digest {
     w.write_bytes(independent_schema_id(b"brix.kernel.numeric-result-type", 1).as_bytes());
     w.write_set(rows.iter().map(|row| {
         let mut e = CanonWriter::new();
-        e.write_bytes(independent_src(row).as_bytes());
+        e.write_bytes(independent_src(row, naming).as_bytes());
         e.write_bytes(independent_dst(row).as_bytes());
         e.finish()
     }));
@@ -249,11 +275,21 @@ fn independent_relation_id(rows: &[DeclaredRow]) -> Digest {
 // Manifest
 // ---------------------------------------------------------------------------
 
-fn manifest_path() -> PathBuf {
+fn manifest_path(version: u32) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("vectors")
-        .join("primitive_relation_typing_arith_v1.json")
+        .join(format!("primitive_relation_typing_arith_v{version}.json"))
+}
+
+/// The two arithmetic relations this kernel compiles in. V1 is superseded and
+/// retained only because ADR-0015 §7 makes relation identities immutable; V2 is
+/// what the regime emits after Stage E.
+fn versions() -> Vec<(u32, Naming, brix_kernel::PrimitiveRelationId)> {
+    vec![
+        (1, Naming::LegacyAllPromote, typing_arith_v1()),
+        (2, Naming::FamilyByExactness, typing_arith_v2()),
+    ]
 }
 
 fn render_path(steps: &[(&'static str, &'static str, u64)]) -> String {
@@ -267,16 +303,16 @@ fn render_path(steps: &[(&'static str, &'static str, u64)]) -> String {
     format!("[{}]", rendered.join(", "))
 }
 
-fn build_manifest() -> String {
+fn build_manifest(version: u32, naming: Naming, id: brix_kernel::PrimitiveRelationId) -> String {
     let rows = declared_rows();
-    let relation = resolve_primitive_relation(&typing_arith_v1()).expect("TypingArithV1 resolves");
+    let relation = resolve_primitive_relation(&id).expect("the relation resolves");
 
     let mut out = String::new();
     out.push_str("{\n");
     out.push_str("  \"format\": \"brix.kernel.PrimitiveRelation\",\n");
     out.push_str("  \"version\": 1,\n");
     out.push_str("  \"adr\": \"ADR-0015\",\n");
-    out.push_str("  \"relation\": \"TypingArithV1\",\n");
+    out.push_str(&format!("  \"relation\": \"TypingArithV{version}\",\n"));
     out.push_str("  \"judgment_kind\": \"Typing\",\n");
     out.push_str("  \"generator\": \"type.rule.arith@1\",\n");
     out.push_str(&format!(
@@ -287,10 +323,18 @@ fn build_manifest() -> String {
         "  \"destination_schema\": \"{}\",\n",
         brix_kernel::numeric_result_type_schema_id().to_hex()
     ));
-    out.push_str(&format!(
-        "  \"relation_id\": \"{}\",\n",
-        typing_arith_v1().to_hex()
-    ));
+    out.push_str(&format!("  \"relation_id\": \"{}\",\n", id.to_hex()));
+    // The one thing that distinguishes V2 from V1, said in the manifest rather
+    // than left to be inferred from 20 differing digests. V1 does not carry
+    // this field: it is frozen, and adding a line to it would be a vector edit
+    // for a purely cosmetic gain (ADR-0013 §7).
+    if version >= 2 {
+        out.push_str(
+            "  \"edge_families\": { \"exact\": \"type.rule.num.promote\", \
+             \"lossy\": \"type.rule.num.convert.lossy\" },\n",
+        );
+    }
+
     out.push_str(&format!("  \"row_count\": {},\n", relation.rows.len()));
     out.push_str("  \"rows\": [\n");
 
@@ -311,7 +355,7 @@ fn build_manifest() -> String {
         out.push_str(&format!("      \"result\": \"{}\",\n", row.result));
         out.push_str(&format!(
             "      \"src\": \"{}\",\n",
-            independent_src(row).to_hex()
+            independent_src(row, naming).to_hex()
         ));
         out.push_str(&format!(
             "      \"dst\": \"{}\"\n",
@@ -328,84 +372,167 @@ fn build_manifest() -> String {
 
 #[test]
 fn typing_arith_vectors_are_frozen() {
-    let generated = build_manifest();
-    let path = manifest_path();
-    let committed = std::fs::read_to_string(&path).unwrap_or_default();
+    for (version, naming, id) in versions() {
+        let generated = build_manifest(version, naming, id);
+        let path = manifest_path(version);
+        let committed = std::fs::read_to_string(&path).unwrap_or_default();
 
-    if generated == committed {
-        return;
+        if generated == committed {
+            continue;
+        }
+
+        if std::env::var_os("BLESS_VECTORS").is_some() {
+            std::fs::write(&path, &generated).expect("vector manifest is writable");
+            continue;
+        }
+
+        // Deliberately do NOT write on the failing path: the CI determinism job
+        // re-runs the suite and requires a clean working tree.
+        panic!(
+            "TypingArithV{version} vectors drifted from {}.\n\
+             This relation is what a kernel `Accepted` verdict means for \
+             `g_arith`. Adding, removing, or changing a row does not update an \
+             existing relation — it allocates the next one (ADR-0015 §7), \
+             because otherwise identical certificate bytes would mean different \
+             things under different kernel releases. Regenerate with \
+             BLESS_VECTORS=1 only if you intend exactly that.",
+            path.display()
+        );
     }
-
-    if std::env::var_os("BLESS_VECTORS").is_some() {
-        std::fs::write(&path, &generated).expect("vector manifest is writable");
-        return;
-    }
-
-    // Deliberately do NOT write on the failing path: the CI determinism job
-    // re-runs the suite and requires a clean working tree.
-    panic!(
-        "TypingArithV1 vectors drifted from {}.\n\
-         This relation is what a kernel `Accepted` verdict means for `g_arith`. \
-         Adding, removing, or changing a row does not update `TypingArithV1` — \
-         it allocates `TypingArithV2` (ADR-0015 §7), because otherwise \
-         identical certificate bytes would mean different things under \
-         different kernel releases. Regenerate with BLESS_VECTORS=1 only if \
-         you intend exactly that.",
-        path.display()
-    );
 }
 
 /// Consumer 2. Every endpoint digest and the relation id itself, rebuilt from
-/// raw ordinals and literal markers.
+/// raw ordinals and literal markers, for both relations.
 #[test]
 fn typing_arith_vectors_reproduced_by_primitive_canon_writes() {
-    let relation = resolve_primitive_relation(&typing_arith_v1()).expect("TypingArithV1 resolves");
     let rows = declared_rows();
 
-    for row in &rows {
-        let src = PropositionId(independent_src(row));
-        let dst = PropositionId(independent_dst(row));
-        assert!(
-            relation.rows.contains(&(src, dst)),
-            "row {} {} {} -> {} must be reproducible without the schemas' own canon_write",
-            row.operator,
-            row.lhs,
-            row.rhs,
-            row.result
+    for (version, naming, id) in versions() {
+        let relation = resolve_primitive_relation(&id).expect("the relation resolves");
+
+        for row in &rows {
+            let src = PropositionId(independent_src(row, naming));
+            let dst = PropositionId(independent_dst(row));
+            assert!(
+                relation.rows.contains(&(src, dst)),
+                "V{version} row {} {} {} -> {} must be reproducible without the \
+                 schemas' own canon_write",
+                row.operator,
+                row.lhs,
+                row.rhs,
+                row.result
+            );
+        }
+
+        assert_eq!(
+            id.digest(),
+            independent_relation_id(&rows, naming),
+            "the V{version} relation id must be reproducible from literals alone"
         );
     }
-
-    assert_eq!(
-        typing_arith_v1().digest(),
-        independent_relation_id(&rows),
-        "the relation id must be reproducible from literals alone"
-    );
 }
 
-/// Consumer 3. The literal matrix declared in this file is *exactly* the
-/// registry's row set — no extra rows the table forgot, no missing rows the
-/// kernel dropped.
+/// Consumer 3. The literal matrix declared in this file is *exactly* each
+/// registry relation's row set — no extra rows the table forgot, no missing
+/// rows the kernel dropped.
 #[test]
 fn the_declared_matrix_is_exactly_the_registrys_rows() {
-    let relation = resolve_primitive_relation(&typing_arith_v1()).expect("TypingArithV1 resolves");
+    let rows = declared_rows();
 
-    let declared: std::collections::BTreeSet<Row> = declared_rows()
+    for (version, naming, id) in versions() {
+        let relation = resolve_primitive_relation(&id).expect("the relation resolves");
+
+        let declared: std::collections::BTreeSet<Row> = rows
+            .iter()
+            .map(|row| {
+                (
+                    PropositionId(independent_src(row, naming)),
+                    PropositionId(independent_dst(row)),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            declared.len(),
+            JOINABLE.len() * OPERATORS.len(),
+            "the declared V{version} table must not contain duplicates"
+        );
+        assert_eq!(declared, relation.rows);
+        assert_eq!(relation.rows.len(), 120);
+    }
+}
+
+/// ADR-0015 Stage E <D-PROMOTE>, stated as a property of the two frozen row
+/// sets: the relocation touches exactly the rows whose promotion path crosses
+/// the lossy `Int -> Float` edge, and nothing else. 100 rows are byte-identical
+/// across V1 and V2; 20 move.
+///
+/// This is what bounds the change. A relocation that altered an exact path, a
+/// result type, or the operand matrix would show up here as a different count,
+/// not as a subtle behavioural difference discovered later.
+#[test]
+fn stage_e_relocates_exactly_the_lossy_paths() {
+    let rows = declared_rows();
+
+    let v1: std::collections::BTreeSet<Row> = rows
         .iter()
-        .map(|row| {
+        .map(|r| {
             (
-                PropositionId(independent_src(row)),
-                PropositionId(independent_dst(row)),
+                PropositionId(independent_src(r, Naming::LegacyAllPromote)),
+                PropositionId(independent_dst(r)),
+            )
+        })
+        .collect();
+    let v2: std::collections::BTreeSet<Row> = rows
+        .iter()
+        .map(|r| {
+            (
+                PropositionId(independent_src(r, Naming::FamilyByExactness)),
+                PropositionId(independent_dst(r)),
             )
         })
         .collect();
 
-    assert_eq!(
-        declared.len(),
-        JOINABLE.len() * OPERATORS.len(),
-        "the declared table must not contain duplicates"
-    );
-    assert_eq!(declared, relation.rows);
-    assert_eq!(relation.rows.len(), 120);
+    let crosses_lossy = |r: &DeclaredRow| {
+        r.lhs_path
+            .iter()
+            .chain(r.rhs_path.iter())
+            .any(|(_, _, kind)| *kind == 1)
+    };
+    let expected_moved = rows.iter().filter(|r| crosses_lossy(r)).count();
+
+    assert_eq!(expected_moved, 20);
+    assert_eq!(v1.intersection(&v2).count(), 120 - expected_moved);
+    assert_ne!(typing_arith_v1(), typing_arith_v2());
+}
+
+/// No id in the current relation asserts a promotion for the lossy edge -- the
+/// literal point of <D-PROMOTE>. Checked on the *generator ids themselves*,
+/// not on the `CoercionKind` tag, because the tag was already right before
+/// Stage E and the id was the thing that lied.
+#[test]
+fn no_current_row_names_the_lossy_edge_as_a_promotion() {
+    let promoted = GeneratorId::named("type.rule.num.promote.Int_Float@1");
+    let relocated = GeneratorId::named("type.rule.num.convert.lossy.Int_Float@1");
+    assert_ne!(promoted, relocated);
+
+    for row in declared_rows().iter().filter(|r| {
+        r.lhs_path
+            .iter()
+            .chain(r.rhs_path.iter())
+            .any(|(_, _, kind)| *kind == 1)
+    }) {
+        // Rebuilding this row under the *legacy* naming must not reproduce its
+        // V2 digest: the lossy edge genuinely carries a different id now.
+        assert_ne!(
+            independent_src(row, Naming::LegacyAllPromote),
+            independent_src(row, Naming::FamilyByExactness),
+            "{} {} {} still names the lossy edge as a promotion",
+            row.operator,
+            row.lhs,
+            row.rhs
+        );
+    }
 }
 
 /// The pairs deliberately absent from `JOINABLE` stay absent. Stated as its own
