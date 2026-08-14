@@ -3,6 +3,8 @@
 use brix_canon::{CanonWriter, Canonical};
 use brix_semantic::{compose, tensor, ContextId, PropositionId, WitnessId};
 
+use crate::prim_registry::PrimitiveRelationId;
+
 /// Object terms (ADR-0003 §5).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum ObjectTerm {
@@ -163,6 +165,35 @@ pub enum TermKind {
     RealizesTensor {
         left: Box<TermKind>,
         right: Box<TermKind>,
+    },
+
+    // ADR-0015 ⟨D-PRIM⟩ addition (append-only ordinal AFTER RealizesTensor=16)
+    /// Primitive realization introduction: a **zero-premise** rule that
+    /// synthesizes `Prop::Realizes(g, src, dst)` iff the kernel's compiled-in
+    /// registry resolves `relation` and `(src, dst)` is an exact member of its
+    /// frozen rows (ADR-0015 §2 ⟨D-PRIM⟩).
+    ///
+    /// **The caller does not supply the generator.** It comes from the resolved
+    /// relation's immutable descriptor, so a typing relation is structurally
+    /// incapable of synthesizing an evaluation generator's `Realizes` — that is
+    /// how ⟨D-JUDGE⟩'s judgment scoping is mechanically enforced rather than
+    /// left to a naming convention (§8.6).
+    ///
+    /// The rule consults no hypothesis context. Checking it against an expected
+    /// proposition goes through the ordinary synthesize-then-compare path under
+    /// canonical structural equality; there is deliberately **no** expected-mode
+    /// shortcut that would let the caller's goal supply any field.
+    PrimRealizes {
+        /// Selects a kernel-owned relation. Request data may *select* a
+        /// relation and propose endpoints; it may never supply or amend the
+        /// trusted relation itself (§8.3).
+        relation: PrimitiveRelationId,
+        /// The proposed source endpoint, canonical under the relation's source
+        /// schema.
+        src: ObjectTerm,
+        /// The proposed destination endpoint, canonical under the relation's
+        /// destination schema.
+        dst: ObjectTerm,
     },
 }
 
@@ -409,6 +440,11 @@ impl Canonical for TermKind {
             TermKind::RealizesTensor { left, right } => w.write_enum(16, |w| {
                 left.canon_write(w);
                 right.canon_write(w);
+            }),
+            TermKind::PrimRealizes { relation, src, dst } => w.write_enum(17, |w| {
+                relation.canon_write(w);
+                src.canon_write(w);
+                dst.canon_write(w);
             }),
         }
     }

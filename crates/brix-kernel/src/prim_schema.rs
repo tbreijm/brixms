@@ -38,8 +38,51 @@
 //! equation. Nothing here claims `1 + 2 ⇓ 3`, totality, progress, or
 //! termination.
 
-use brix_canon::{CanonWriter, Canonical};
+use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_semantic::{ConfigId, GeneratorId};
+
+/// The identity of a source or destination **schema** — half of a primitive
+/// relation's identity (ADR-0015 §7: "relation identities are immutable", and a
+/// source schema is half of one).
+///
+/// Derived from the schema's already-frozen marker and version rather than from
+/// a fresh name, so no new frozen string is minted and a schema's id cannot
+/// drift from the bytes it actually writes. A v2 of any schema necessarily
+/// yields a different `SchemaId`, which in turn yields a different
+/// [`crate::PrimitiveRelationId`] — the immutability discipline becomes
+/// structural instead of a rule a reviewer has to remember.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct SchemaId(pub Digest);
+
+impl SchemaId {
+    /// The id of the schema whose preimages open with `marker` and `version`.
+    ///
+    /// The preimage is exactly `write_bytes(marker) ++ write_uint(version)` —
+    /// the same two writes every schema in this module makes first, so the id
+    /// is derived from the schema's own frozen header and nothing else.
+    pub fn of_schema(marker: &[u8], version: u64) -> Self {
+        let mut w = CanonWriter::new();
+        w.write_bytes(marker);
+        w.write_uint(version);
+        SchemaId(Digest::of(Domain::Value, &w.finish()))
+    }
+
+    /// The underlying digest.
+    pub fn digest(&self) -> Digest {
+        self.0
+    }
+
+    /// Lowercase-hex rendering (diagnostics, vectors).
+    pub fn to_hex(&self) -> String {
+        self.0.to_hex()
+    }
+}
+
+impl Canonical for SchemaId {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        w.write_bytes(self.0.as_bytes());
+    }
+}
 
 /// The fixed marker opening an [`ArithTypingInputV1`] preimage. Frozen v1 ABI.
 ///
@@ -134,6 +177,27 @@ impl NumericTypeNameV1 {
             NumericTypeNameV1::Real => 3,
             NumericTypeNameV1::Complex => 4,
             NumericTypeNameV1::Float => 5,
+        }
+    }
+
+    /// The coercion-lattice node name for this type — the inverse of
+    /// [`Self::from_lattice_node`].
+    ///
+    /// The kernel needs this to spell out the per-edge promotion generator ids
+    /// that may appear in a relation row's promotion path
+    /// (`type.rule.num.promote.{from}_{to}@1`). Those ids are the one
+    /// identifier the kernel and the regime already agree on (see
+    /// [`CoercionEdgeV1`]), so the kernel writes them itself rather than
+    /// importing the regime's lattice — §8.5 does not trust a host-computed
+    /// coercion path, and that includes the names of its edges.
+    pub const fn lattice_name(self) -> &'static str {
+        match self {
+            NumericTypeNameV1::Nat => "Nat",
+            NumericTypeNameV1::Int => "Int",
+            NumericTypeNameV1::Rat => "Rat",
+            NumericTypeNameV1::Real => "Real",
+            NumericTypeNameV1::Complex => "Complex",
+            NumericTypeNameV1::Float => "Float",
         }
     }
 
@@ -298,6 +362,80 @@ impl Canonical for ArithTypingInputV1 {
     }
 }
 
+/// The fixed marker opening a [`NumericResultTypeV1`] preimage. Frozen v1 ABI.
+///
+/// Domain-separated from [`ARITH_TYPING_INPUT_MARKER_V1`] for the same reason
+/// that one exists: every `ConfigId` is a `Domain::Value` digest, so without
+/// distinct markers a source object and a destination object could in principle
+/// canon-encode to the same bytes — and a relation matched by exact membership
+/// must never confuse its two endpoints.
+pub const NUMERIC_RESULT_TYPE_MARKER_V1: &[u8] = b"brix.kernel.numeric-result-type";
+
+/// The format version written into every [`NumericResultTypeV1`] preimage.
+/// A new field, or a new meaning for an existing one, requires **v2**.
+pub const NUMERIC_RESULT_TYPE_VERSION_V1: u64 = 1;
+
+/// The `g_arith` destination object: the exact result type of a binary
+/// arithmetic *typing* judgement (ADR-0015 §5 Stage B, `NumericResultTypeV1`).
+///
+/// **Why the result type needs a kernel-owned schema at all.** A registry row is
+/// matched by canonical bytes, so the kernel must be able to author *both*
+/// endpoints of the row. Stage B0 gave it the source endpoint
+/// ([`ArithTypingInputV1`]). The destination was still
+/// `soc_regimes::CfgAtom::Type(Ty::Con(result))`, whose encoding the kernel may
+/// not reproduce — that would be a second semantic encoder for a type the TCB
+/// does not own (ADR-0015 §8.5; `DEPS.md`, "never a second semantic encoder").
+/// So the arithmetic leaf's `dst` becomes this schema, and the regime bridges
+/// back to its own `Ty` vocabulary in a separate, explicitly undischarged leaf.
+///
+/// **What that bridge costs, stated plainly.** The bridge is not kernel-checkable
+/// either, for the mirror-image reason. So Stage B does not lift the arithmetic
+/// cap: it converts the *semantic* claim (`Div`'s result rule differs from the
+/// other three) into a kernel-checked fact, and leaves two purely
+/// vocabulary-renaming leaves as the residue. Closing those is a question about
+/// who owns the canonical encoding of a realization endpoint, not a question
+/// about arithmetic.
+///
+/// Deliberately a one-field struct rather than a bare [`NumericTypeNameV1`]:
+/// the marker and version are what domain-separate a result object from an
+/// operand type name that happens to share an ordinal.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct NumericResultTypeV1 {
+    /// The exact result type the arithmetic typing rule concludes.
+    pub name: NumericTypeNameV1,
+}
+
+impl NumericResultTypeV1 {
+    /// This destination object's content-addressed configuration identity —
+    /// what a tree leaf's `dst` endpoint carries.
+    pub fn config_id(&self) -> ConfigId {
+        ConfigId::of(self)
+    }
+}
+
+impl Canonical for NumericResultTypeV1 {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        // Frozen v1 preimage: marker, version, name. Field order is ABI.
+        w.write_bytes(NUMERIC_RESULT_TYPE_MARKER_V1);
+        w.write_uint(NUMERIC_RESULT_TYPE_VERSION_V1);
+        self.name.canon_write(w);
+    }
+}
+
+/// The [`SchemaId`] of [`ArithTypingInputV1`] — `TypingArithV1`'s source schema.
+pub fn arith_typing_input_schema_id() -> SchemaId {
+    SchemaId::of_schema(ARITH_TYPING_INPUT_MARKER_V1, ARITH_TYPING_INPUT_VERSION_V1)
+}
+
+/// The [`SchemaId`] of [`NumericResultTypeV1`] — `TypingArithV1`'s destination
+/// schema.
+pub fn numeric_result_type_schema_id() -> SchemaId {
+    SchemaId::of_schema(
+        NUMERIC_RESULT_TYPE_MARKER_V1,
+        NUMERIC_RESULT_TYPE_VERSION_V1,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,5 +593,96 @@ mod tests {
         w.write_list(Vec::new());
 
         assert_eq!(value.canon_bytes(), w.finish());
+    }
+
+    /// The frozen v1 preimage of the destination object, re-spelled with
+    /// primitive `CanonWriter` calls and literal constants for the same reason
+    /// as the source object's.
+    #[test]
+    fn the_result_v1_preimage_is_marker_version_name() {
+        let value = NumericResultTypeV1 {
+            name: NumericTypeNameV1::Float,
+        };
+
+        let mut w = CanonWriter::new();
+        w.write_bytes(b"brix.kernel.numeric-result-type");
+        w.write_uint(1);
+        w.write_enum(5, |_| {}); // NumericTypeNameV1::Float
+
+        assert_eq!(value.canon_bytes(), w.finish());
+    }
+
+    /// A source object and a destination object must never collide, even when
+    /// both are "about" the same numeric type. This is what the distinct
+    /// markers buy: a relation matched by exact byte membership would otherwise
+    /// be able to confuse its two endpoints.
+    #[test]
+    fn source_and_destination_objects_are_domain_separated() {
+        let result = NumericResultTypeV1 {
+            name: NumericTypeNameV1::Int,
+        };
+        let input = ArithTypingInputV1 {
+            operator: ArithOperatorV1::Add,
+            lhs_type: NumericTypeNameV1::Int,
+            rhs_type: NumericTypeNameV1::Int,
+            lhs_promotion_path: Vec::new(),
+            rhs_promotion_path: Vec::new(),
+        };
+        assert_ne!(result.canon_bytes(), input.canon_bytes());
+        assert_ne!(result.config_id(), input.config_id());
+
+        // …and the bare operand-type name is not a result object either.
+        assert_ne!(result.canon_bytes(), NumericTypeNameV1::Int.canon_bytes());
+    }
+
+    /// Every result type in the tower is a distinct destination object, so a
+    /// row concluding `Int` can never be satisfied by a `Float` conclusion.
+    #[test]
+    fn every_result_type_is_a_distinct_destination_object() {
+        let all = [
+            NumericTypeNameV1::Nat,
+            NumericTypeNameV1::Int,
+            NumericTypeNameV1::Rat,
+            NumericTypeNameV1::Real,
+            NumericTypeNameV1::Complex,
+            NumericTypeNameV1::Float,
+        ];
+        let mut ids: Vec<_> = all
+            .iter()
+            .map(|name| NumericResultTypeV1 { name: *name }.config_id())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), all.len());
+    }
+
+    /// A `SchemaId` is derived from the schema's own frozen header, so the two
+    /// schemas have distinct ids and neither can be reproduced from the other's
+    /// constants.
+    #[test]
+    fn schema_ids_are_the_frozen_header_digest() {
+        assert_ne!(
+            arith_typing_input_schema_id(),
+            numeric_result_type_schema_id()
+        );
+
+        // Independent reproduction: the two writes spelled out with literals
+        // rather than the exported constants.
+        let mut w = CanonWriter::new();
+        w.write_bytes(b"brix.kernel.numeric-result-type");
+        w.write_uint(1);
+        let independent = Digest::of(Domain::Value, &w.finish());
+        assert_eq!(numeric_result_type_schema_id().digest(), independent);
+    }
+
+    /// A version bump moves the schema id. This is the mechanism that makes
+    /// ADR-0015 §7's "relation identities are immutable" structural rather than
+    /// a discipline: a v2 source schema cannot leave `TypingArithV1`'s id alone.
+    #[test]
+    fn a_schema_version_bump_moves_the_schema_id() {
+        assert_ne!(
+            SchemaId::of_schema(ARITH_TYPING_INPUT_MARKER_V1, 1),
+            SchemaId::of_schema(ARITH_TYPING_INPUT_MARKER_V1, 2)
+        );
     }
 }

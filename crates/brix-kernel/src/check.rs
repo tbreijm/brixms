@@ -3,6 +3,7 @@
 use brix_semantic::{ContextId, PropositionId};
 
 use crate::certificate::{certificate_id_v1, native_verifier, CertificateMaterialV1};
+use crate::prim_registry;
 use crate::term::{instantiate, ExplicitTerm, ObjectTerm, Prop, TermKind, Var};
 use crate::verdict::{
     Certificate, RejectionReason, ResourceBudgetReason, UnsupportedConstruct, Verdict,
@@ -670,6 +671,58 @@ fn infer_type(
                 ObjectTerm::Tensor(Box::new(w1), Box::new(w2)),
                 ObjectTerm::Tensor(Box::new(x1), Box::new(x2)),
                 ObjectTerm::Tensor(Box::new(y1), Box::new(y2)),
+            ))
+        }
+
+        // (PrimRealizes) Primitive realization introduction (ADR-0015 ⟨D-PRIM⟩).
+        //
+        // Zero premises, and closed: it consults no hypothesis context, so
+        // nothing the caller put in Γ can influence the result. Given
+        // K[ρ] = (J, g, S, D, R), `src` canonical under S, `dst` canonical
+        // under D, and (src, dst) ∈ R, it yields exactly Realizes(g, src, dst).
+        //
+        // The generator comes from the resolved relation, never from the
+        // caller. Checking against an expected proposition goes through the
+        // ordinary synthesize-then-compare fallback above — there is no
+        // expected-mode arm here, deliberately, because one would let the
+        // caller's goal reconstruct a field the registry is supposed to decide.
+        TermKind::PrimRealizes {
+            relation,
+            src,
+            dst,
+        } => {
+            let Some(resolved) = prim_registry::resolve(relation) else {
+                // Absence, not refutation (§8.8): the kernel has not introduced
+                // the fact, which says nothing about its negation.
+                return Err(Verdict::Rejected(RejectionReason::UnknownPrimitiveRelation(
+                    relation.to_hex(),
+                )));
+            };
+
+            // Endpoints must be object constants. A composition, tensor, or
+            // bound variable in an endpoint position is not a canonical value
+            // under either schema, so it cannot be a row member; refusing it
+            // here keeps the failure legible rather than reporting a missing
+            // row for a term that could never have been one.
+            let (ObjectTerm::Const(src_id), ObjectTerm::Const(dst_id)) = (src, dst) else {
+                return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                    expected: "PrimRealizes endpoints as object constants".into(),
+                    found: format!("({src:?}, {dst:?})"),
+                }));
+            };
+
+            if !resolved.admits(src_id, dst_id) {
+                return Err(Verdict::Rejected(RejectionReason::PrimitiveRowNotFound {
+                    relation: relation.to_hex(),
+                    src: src_id.to_hex(),
+                    dst: dst_id.to_hex(),
+                }));
+            }
+
+            Ok(Prop::Realizes(
+                ObjectTerm::Const(PropositionId(resolved.generator.digest())),
+                src.clone(),
+                dst.clone(),
             ))
         }
 
