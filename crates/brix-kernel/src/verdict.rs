@@ -25,6 +25,28 @@ pub enum RejectionReason {
     ProofGoalNotReached,
     /// Custom rejection detail.
     Custom(String),
+
+    // ADR-0015 ⟨D-PRIM⟩ additions. Appended, not interleaved: `RejectionReason`
+    // is diagnostic and carries no `Canonical` impl, so this is not an ABI
+    // change — but keeping the order stable keeps `Debug` output diffable.
+    /// A `PrimRealizes` term named a relation the compiled-in registry does not
+    /// resolve. **Absence, never refutation** (ADR-0015 §8.8): the kernel has
+    /// not introduced the fact, which says nothing about its negation. An old
+    /// kernel meeting a relation minted by a newer release lands here, which is
+    /// the required fail-closed behaviour (§7).
+    UnknownPrimitiveRelation(String),
+
+    /// A `PrimRealizes` term proposed an endpoint pair that is not an exact
+    /// member of the resolved relation's frozen rows. Also absence, not
+    /// refutation.
+    PrimitiveRowNotFound {
+        /// Hex of the relation id that was resolved.
+        relation: String,
+        /// Hex of the proposed source endpoint.
+        src: String,
+        /// Hex of the proposed destination endpoint.
+        dst: String,
+    },
 }
 
 /// Logical construct or feature outside Profile 1 declared calculus subset.

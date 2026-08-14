@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 use brix_canon::{CanonWriter, Canonical};
 use brix_elaborate::{RealizesTree, TreeObj};
 use brix_kernel::{
-    ArithOperatorV1, ArithTypingInputV1, CoercionEdgeV1, CoercionKind, NumericTypeNameV1,
+    ArithOperatorV1, ArithTypingInputV1, CoercionEdgeV1, CoercionKind, NumericResultTypeV1,
+    NumericTypeNameV1,
 };
 use brix_semantic::{
     Authority, ConfigId, ContextId, GeneratorId, GeneratorRegistry, Judgement, Outcome, Realizes,
@@ -403,11 +404,53 @@ pub fn g_arith_split() -> GeneratorId {
 /// **Not discharged**, and deliberately so: this leaf asserts that the
 /// operator and promotion paths the host chose for this node are the right
 /// ones, which is exactly the kind of host-computed normalization ADR-0015 §8.5
-/// says is not trusted. Its realization relation — finite over
-/// (operator × operand types × paths) — is dischargeable as its own kernel
-/// primitive, so Stage D needs *two* relations rather than one.
+/// says is not trusted.
+///
+/// **Nor is it dischargeable by Stage B's mechanism, and that is the finding
+/// Stage B surfaced.** Its `src` is `Prod(Atom(Type(a)), Atom(Type(b)))` — a
+/// product of *this crate's* `Ty` atoms. A registry row is matched by canonical
+/// bytes, so authoring a row for it would require the kernel to reproduce `Ty`'s
+/// encoding: a second semantic encoder for a type the TCB does not own. So the
+/// earlier note here — that this is "dischargeable as its own kernel primitive,
+/// so Stage D needs two relations rather than one" — was too optimistic. A
+/// second relation is necessary but not sufficient; what is actually needed is
+/// a ruling on **who owns the canonical encoding of a realization endpoint that
+/// both the TCB and a regime must name**. See [`g_arith_result`], which is the
+/// mirror-image bridge on the way out, and which has the same obstruction.
 pub fn g_arith_input() -> GeneratorId {
     GeneratorId::named("type.rule.arith.input@1")
+}
+
+/// Typing-rule generator bridging the kernel's arithmetic result object back to
+/// this crate's own type vocabulary (`"type.rule.arith.result@1"`,
+/// ADR-0015 §5 Stage B).
+///
+/// **Why this leaf exists.** Stage B makes `g_arith` a kernel-checked primitive,
+/// which requires the kernel to author both endpoints of every registry row.
+/// It can only do that for schemas it owns, so `g_arith`'s `dst` became
+/// [`NumericResultTypeV1`]. But the enclosing derivation — a `let` binding, a
+/// function body, an annotation check — speaks in `Ty`, so something must carry
+/// `NumericResultTypeV1(Int)` back to `Ty::Con("Int")`. That is this leaf.
+///
+/// **Not discharged.** The rename is faithful, but "the host renamed it
+/// faithfully" is precisely the kind of claim §8.5 declines to trust, and the
+/// kernel cannot check it for the mirror of [`g_arith_input`]'s reason: the
+/// `dst` is a `Ty` atom this crate encodes.
+///
+/// **What that means for the arithmetic cap, stated without spin.** Before
+/// Stage B, `1 + 2` was capped by two undischarged leaves (`g_arith_input`,
+/// `g_arith`). After it, it is capped by two undischarged leaves
+/// (`g_arith_input`, `g_arith_result`). No grade moves. What changed is
+/// *which* claims are outstanding: the semantic one — that `Div`'s result rule
+/// differs from the other three operators' — is now a fact the kernel decides
+/// by exact membership, and the residue is two vocabulary renamings that assert
+/// nothing about arithmetic. ADR-0015 §5 Stage D's headline gate
+/// (`let x = 1 + 2` reaching `@Proven`) is therefore **not reachable by
+/// discharging `g_arith` alone**, and that is a gap in the ADR rather than in
+/// this implementation: the ADR was written before Stage B0 introduced the
+/// first of these bridges. Reported in full, with options, in ADR-0023 §4.
+pub fn g_arith_result() -> GeneratorId {
+    GeneratorId::named("type.rule.arith.result@1")
 }
 
 /// Typing-rule generator for unification steps (`"type.rule.unify@1"`).
@@ -534,23 +577,37 @@ pub enum ClaimKind {
 ///    least-discharged leaf still caps the derivation, so `1 + 2` does not
 ///    move.
 ///
-/// Deliberately **NOT** discharged: `g_arith` (a primitive operation is
-/// type-preserving at the operand types), `g_arith_input` (the operator and
-/// promotion paths the host selected for an arithmetic node are the right
-/// ones — host-computed normalization, which ADR-0015 §8.5 does not trust),
-/// and the coercion-edge promotions `g_promote_edge` (a real numeric
-/// embedding). Any program touching an undischarged generator stays
-/// `Audited`; e.g. `1 + 2` remains `Audited` because neither `g_arith` nor
-/// `g_arith_input` is tight.
+/// Deliberately **NOT** discharged: `g_arith`, `g_arith_input`,
+/// `g_arith_result`, and the coercion-edge promotions `g_promote_edge` (a real
+/// numeric embedding). Any program touching an undischarged generator stays
+/// `Audited`; e.g. `1 + 2` remains `Audited`.
 ///
 /// None of these is held out for lack of a *value* semantics — ADR-0015
 /// ⟨D-JUDGE⟩ resolved that: tightness is scoped to a proposition kind, and a
 /// typing discharge never claims an evaluation equation (which is why
 /// `g_float_lit` is honestly tight even though `brix-canon` excludes floats).
 /// They are held out because their realization relation is not yet a fact the
-/// kernel checks. ADR-0015 §5 Stage B0 (landed) made `g_arith`'s source object
-/// carry every field that affects admissibility, which is the precondition for
-/// Stage B's kernel registry to be able to decide them at all.
+/// kernel checks.
+///
+/// **Where Stage B leaves the arithmetic holdouts.** ADR-0015 §5 Stage B0
+/// (landed) made `g_arith`'s source object carry every field that affects
+/// admissibility; Stage B (landed) added the kernel's primitive-relation
+/// registry, so `TypingArithV1` now decides `g_arith`'s realization by exact
+/// membership over the finite `{Add,Sub,Mul,Div} × operand-types` matrix. But
+/// **`generator_is_tight` is not the mechanism that consumes it** — ADR-0015 §5
+/// Stage D is explicit that a boolean flip here would be too coarse to be
+/// authoritative, because it would regrade certificates whose leaves are still
+/// `Hyp`. A leaf is closed only when the certificate actually contains the
+/// `PrimRealizes` term and the kernel accepted the resulting proof, which is
+/// Stage D's work.
+///
+/// **And Stage D needs more than that.** `g_arith_input` and `g_arith_result`
+/// are the regime↔kernel vocabulary bridges on either side of the kernel-checked
+/// leaf. Neither is discharegable by Stage B's mechanism, because each has one
+/// endpoint that is a `Ty` atom this crate encodes and the kernel may not
+/// reproduce (ADR-0015 §8.5; `DEPS.md`). So `let x = 1 + 2` reaching `@Proven`
+/// — Stage D's headline gate — is blocked on a ruling about endpoint-vocabulary
+/// ownership, not on arithmetic. See [`g_arith_result`] for the full statement.
 pub fn generator_is_tight(kind: ClaimKind, g: &GeneratorId) -> bool {
     match kind {
         // Fail closed: a claim kind added in the future starts here, at
@@ -658,6 +715,7 @@ fn minted_generators() -> Vec<(String, GeneratorId)> {
         ("g_arith", g_arith()),
         ("g_arith_split", g_arith_split()),
         ("g_arith_input", g_arith_input()),
+        ("g_arith_result", g_arith_result()),
         ("g_unify", g_unify()),
     ];
 
@@ -1320,6 +1378,20 @@ pub enum CfgAtom {
     /// zonked at materialization: its operand types are already resolved when
     /// the plan is built.
     ArithInput(ArithTypingInputV1),
+    /// The kernel-owned arithmetic typing *destination* object (ADR-0015 §5
+    /// Stage B) — **append-only**, never reordered ahead of the three above.
+    ///
+    /// A registry row is matched by canonical bytes, so the kernel must be able
+    /// to author *both* endpoints of a row. Stage B0 gave it the source
+    /// ([`ArithTypingInputV1`]); this gives it the destination. Leaving the
+    /// destination as `Type(Ty::Con(result))` would have required the kernel to
+    /// reproduce this crate's `Ty` encoding — a second semantic encoder for a
+    /// type the TCB does not own, which ADR-0015 §8.5 refuses to trust and
+    /// `DEPS.md` forbids.
+    ///
+    /// Like `ArithInput`, not zonked: the result type is already resolved when
+    /// the plan is built.
+    ArithResult(NumericResultTypeV1),
 }
 
 /// Deferred-materialization tree object (ADR-0008).
@@ -1353,6 +1425,7 @@ fn materialize_obj(obj: &TyObj, subst: &BTreeMap<u32, Ty>) -> TreeObj {
         TyObj::Atom(CfgAtom::Expr(e)) => TreeObj::Atom(e.config_id()),
         TyObj::Atom(CfgAtom::Type(t)) => TreeObj::Atom(zonk(t, subst).config_id()),
         TyObj::Atom(CfgAtom::ArithInput(i)) => TreeObj::Atom(i.config_id()),
+        TyObj::Atom(CfgAtom::ArithResult(r)) => TreeObj::Atom(r.config_id()),
         TyObj::Prod(a, b) => TreeObj::Prod(
             Box::new(materialize_obj(a, subst)),
             Box::new(materialize_obj(b, subst)),
@@ -1473,9 +1546,25 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                 src: operand_types,
                 dst: input.clone(),
             };
+            // ADR-0015 §5 Stage B. `g_arith`'s `dst` is the kernel's own
+            // `NumericResultTypeV1`, not a `Ty` atom: a registry row is matched
+            // by canonical bytes, and the kernel may not reproduce this crate's
+            // `Ty` encoding to author one (§8.5; DEPS.md, "never a second
+            // semantic encoder"). The rename back into `Ty` is the separate,
+            // explicitly undischarged `g_arith_result` bridge below.
+            let arith_result = NumericResultTypeV1 {
+                name: NumericTypeNameV1::from_lattice_node(plan.result)
+                    .ok_or(TypeError::Mismatch)?,
+            };
+            let result_obj = TyObj::Atom(CfgAtom::ArithResult(arith_result));
             let arith_leaf = TyTree::Leaf {
                 generator: g_arith(),
                 src: input,
+                dst: result_obj.clone(),
+            };
+            let result_leaf = TyTree::Leaf {
+                generator: g_arith_result(),
+                src: result_obj,
                 dst: TyObj::Atom(CfgAtom::Type(result_ty.clone())),
             };
             let tree = TyTree::Seq {
@@ -1484,7 +1573,10 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                     left: Box::new(tensor),
                     right: Box::new(TyTree::Seq {
                         left: Box::new(input_leaf),
-                        right: Box::new(arith_leaf),
+                        right: Box::new(TyTree::Seq {
+                            left: Box::new(arith_leaf),
+                            right: Box::new(result_leaf),
+                        }),
                     }),
                 }),
             };
@@ -2449,9 +2541,26 @@ mod tests {
                 other => panic!("g_arith's src must be the ArithInput atom, got {other:?}"),
             };
 
-            // dst is the exact result type, per ADR-0015 Stage B0.
+            // dst is the exact result type, per ADR-0015 Stage B0 — now spelled
+            // in the kernel's own destination schema (Stage B), because the
+            // kernel must be able to author both endpoints of a registry row
+            // and may not reproduce this crate's `Ty` encoding to do it.
+            let want_result_name =
+                NumericTypeNameV1::from_lattice_node(want_result).expect("numeric");
             assert_eq!(
                 dst,
+                TyObj::Atom(CfgAtom::ArithResult(NumericResultTypeV1 {
+                    name: want_result_name,
+                })),
+                "{op:?} {lhs} {rhs}"
+            );
+
+            // …and the bridge back into this crate's `Ty` vocabulary lands on
+            // exactly that type, so the chain is still pinned end to end.
+            let (bridge_src, bridge_dst) = leaf_endpoints(&tree, &g_arith_result());
+            assert_eq!(bridge_src, dst, "the bridge starts where g_arith ends");
+            assert_eq!(
+                bridge_dst,
                 TyObj::Atom(CfgAtom::Type(Ty::Con(want_result))),
                 "{op:?} {lhs} {rhs}"
             );
@@ -2691,6 +2800,269 @@ mod tests {
             leaf_endpoints(&tree, &g_arith()).0,
             "the bridge's dst is exactly g_arith's src — this is the Seq middle"
         );
+    }
+
+    #[test]
+    fn the_arith_result_bridge_is_minted_but_not_discharged() {
+        // Stage B's mirror of the input bridge. `g_arith`'s `dst` is now the
+        // kernel's own `NumericResultTypeV1`, so something has to carry it back
+        // into this crate's `Ty` vocabulary for the enclosing derivation. That
+        // rename is faithful, but "the host renamed it faithfully" is a
+        // host-computed claim (ADR-0015 §8.5), and the kernel cannot check it:
+        // the `dst` is a `Ty` atom this crate encodes, and reproducing that
+        // encoding in the TCB would be a second semantic encoder.
+        assert!(crate::tree_audit::is_minted_generator(&g_arith_result()));
+        assert_eq!(
+            generator_name(&g_arith_result()).as_deref(),
+            Some("g_arith_result")
+        );
+        assert!(typing_registry().contains(&g_arith_result()));
+
+        for kind in [ClaimKind::Typing, ClaimKind::Empty] {
+            assert!(
+                !generator_is_tight(kind, &g_arith_result()),
+                "g_arith_result must not be discharged for {kind:?}"
+            );
+        }
+
+        let expr = Expr::Arith(ArithOp::Div, Box::new(Expr::Lit(7)), Box::new(Expr::Lit(2)));
+        let (ty, tree, _) = infer_tree(&expr, &TyCtx::new(), Infer::new()).expect("infers");
+        assert_eq!(ty, Ty::Con("Float"));
+
+        let (bridge_src, bridge_dst) = leaf_endpoints(&tree, &g_arith_result());
+        assert_eq!(
+            bridge_src,
+            leaf_endpoints(&tree, &g_arith()).1,
+            "the bridge's src is exactly g_arith's dst — this is the Seq middle"
+        );
+        assert_eq!(
+            bridge_dst,
+            TyObj::Atom(CfgAtom::Type(Ty::Con("Float"))),
+            "the bridge lands on this crate's own type vocabulary"
+        );
+    }
+
+    /// The 30 operand pairs that have a join, with the type the operation is
+    /// performed at — spelled out rather than computed from `NUMERIC`, so the
+    /// gate below is an independent statement of the matrix rather than a
+    /// restatement of the code it exercises.
+    const JOINABLE: &[(&str, &str, &str)] = &[
+        ("Nat", "Nat", "Nat"),
+        ("Nat", "Int", "Int"),
+        ("Nat", "Rat", "Rat"),
+        ("Nat", "Real", "Real"),
+        ("Nat", "Complex", "Complex"),
+        ("Int", "Nat", "Int"),
+        ("Int", "Int", "Int"),
+        ("Int", "Rat", "Rat"),
+        ("Int", "Real", "Real"),
+        ("Int", "Complex", "Complex"),
+        ("Rat", "Nat", "Rat"),
+        ("Rat", "Int", "Rat"),
+        ("Rat", "Rat", "Rat"),
+        ("Rat", "Real", "Real"),
+        ("Rat", "Complex", "Complex"),
+        ("Real", "Nat", "Real"),
+        ("Real", "Int", "Real"),
+        ("Real", "Rat", "Real"),
+        ("Real", "Real", "Real"),
+        ("Real", "Complex", "Complex"),
+        ("Complex", "Nat", "Complex"),
+        ("Complex", "Int", "Complex"),
+        ("Complex", "Rat", "Complex"),
+        ("Complex", "Real", "Complex"),
+        ("Complex", "Complex", "Complex"),
+        ("Nat", "Float", "Float"),
+        ("Int", "Float", "Float"),
+        ("Float", "Nat", "Float"),
+        ("Float", "Int", "Float"),
+        ("Float", "Float", "Float"),
+    ];
+
+    /// ADR-0015 §5 Stage B gate 1 — `arithmetic_rule_is_a_kernel_primitive`.
+    ///
+    /// For the **exhaustive** finite matrix, not a sample: invoke the real
+    /// generator, take its real `g_arith` leaf, build the real `PrimRealizes`
+    /// proof term, submit it to the real kernel, and assert `Accepted` for the
+    /// precise realization proposition. The result type is compared against the
+    /// kernel relation — by asking the relation which result it admits — rather
+    /// than against a snapshot string.
+    ///
+    /// This is the moment the discharge stops being prose. Before it, "`g_arith`
+    /// is sound" was a doc comment; after it, it is a membership decision a
+    /// checker executes over kernel-owned data.
+    ///
+    /// It still moves no grade — see `stage_b_moves_no_grade` below.
+    #[test]
+    fn arithmetic_rule_is_a_kernel_primitive() {
+        use brix_kernel::{
+            acceptance, resolve_primitive_relation, typing_arith_v1, Budget, ExplicitTerm,
+            NumericResultTypeV1, ObjectTerm, Prop, TermKind, Verdict,
+        };
+        use brix_semantic::PropositionId;
+
+        let relation = resolve_primitive_relation(&typing_arith_v1()).expect("TypingArithV1");
+        let ctx_id = ContextId::root();
+        let ops = [ArithOp::Add, ArithOp::Sub, ArithOp::Mul, ArithOp::Div];
+
+        let mut checked = 0;
+        for op in ops {
+            for (lhs, rhs, base) in JOINABLE {
+                let ctx = TyCtx::new()
+                    .extend("l", Ty::Con(lhs))
+                    .extend("r", Ty::Con(rhs));
+                let expr = Expr::Arith(
+                    op,
+                    Box::new(Expr::Var("l".to_string())),
+                    Box::new(Expr::Var("r".to_string())),
+                );
+
+                let (inferred, tree, _) =
+                    infer_tree(&expr, &ctx, Infer::new()).expect("a joinable pair infers");
+
+                // The real leaf, straight out of the real generator.
+                let (src_obj, dst_obj) = leaf_endpoints(&tree, &g_arith());
+                let src_cfg = match &src_obj {
+                    TyObj::Atom(CfgAtom::ArithInput(i)) => i.config_id(),
+                    other => panic!("g_arith's src must be an ArithInput atom, got {other:?}"),
+                };
+                let dst_cfg = match &dst_obj {
+                    TyObj::Atom(CfgAtom::ArithResult(r)) => r.config_id(),
+                    other => panic!("g_arith's dst must be an ArithResult atom, got {other:?}"),
+                };
+                let src = PropositionId(src_cfg.digest());
+                let dst = PropositionId(dst_cfg.digest());
+
+                // The precise conclusion: the generator comes from the relation,
+                // the endpoints from the leaf.
+                let goal = Prop::Realizes(
+                    ObjectTerm::Const(PropositionId(relation.generator.digest())),
+                    ObjectTerm::Const(src),
+                    ObjectTerm::Const(dst),
+                );
+                let term = ExplicitTerm::new(
+                    ctx_id,
+                    TermKind::PrimRealizes {
+                        relation: typing_arith_v1(),
+                        src: ObjectTerm::Const(src),
+                        dst: ObjectTerm::Const(dst),
+                    },
+                );
+
+                let verdict = acceptance(&ctx_id, &goal, &term, Budget::new(10_000, 256));
+                assert!(
+                    matches!(verdict, Verdict::Accepted(_)),
+                    "{op:?} {lhs} {rhs}: the real leaf must be a kernel primitive, got {verdict:?}"
+                );
+
+                // The relation's generator is `g_arith`'s — the relation
+                // identity fixes it, and the emission agrees.
+                assert_eq!(relation.generator, g_arith());
+
+                // Compare the *result type* against the kernel relation rather
+                // than a snapshot: exactly one result type is admitted for this
+                // source object, and it is the one inference produced.
+                let want = if op == ArithOp::Div {
+                    match *base {
+                        "Nat" | "Int" => "Float",
+                        other => other,
+                    }
+                } else {
+                    base
+                };
+                assert_eq!(inferred, Ty::Con(want), "{op:?} {lhs} {rhs}");
+
+                let admitted: Vec<&str> = ["Nat", "Int", "Rat", "Real", "Complex", "Float"]
+                    .into_iter()
+                    .filter(|name| {
+                        let candidate = NumericResultTypeV1 {
+                            name: NumericTypeNameV1::from_lattice_node(name).expect("numeric"),
+                        };
+                        relation.admits(&src, &PropositionId(candidate.config_id().digest()))
+                    })
+                    .collect();
+                assert_eq!(
+                    admitted,
+                    vec![want],
+                    "{op:?} {lhs} {rhs}: the relation must admit exactly one result type"
+                );
+
+                checked += 1;
+            }
+        }
+
+        assert_eq!(
+            checked,
+            JOINABLE.len() * ops.len(),
+            "the matrix must be exhaustive, not sampled"
+        );
+        assert_eq!(checked, relation.rows.len());
+    }
+
+    /// The pairs with no join produce no derivation at all, so no leaf exists to
+    /// submit. Gate 3's companion on the emission side: the absent rows are
+    /// unreachable rather than merely unmatched.
+    #[test]
+    fn arithmetic_on_an_unjoinable_pair_never_reaches_a_leaf() {
+        for (lhs, rhs) in [
+            ("Float", "Rat"),
+            ("Rat", "Float"),
+            ("Float", "Real"),
+            ("Complex", "Float"),
+        ] {
+            for op in [ArithOp::Add, ArithOp::Sub, ArithOp::Mul, ArithOp::Div] {
+                let ctx = TyCtx::new()
+                    .extend("l", Ty::Con(lhs))
+                    .extend("r", Ty::Con(rhs));
+                let expr = Expr::Arith(
+                    op,
+                    Box::new(Expr::Var("l".to_string())),
+                    Box::new(Expr::Var("r".to_string())),
+                );
+                assert_eq!(
+                    infer_tree(&expr, &ctx, Infer::new()).err(),
+                    Some(TypeError::Mismatch),
+                    "{op:?} {lhs} {rhs} has no join and must not type"
+                );
+            }
+        }
+    }
+
+    /// **Stage B moves no grade.** ADR-0015 §5 Stage D is explicit that a
+    /// boolean flip in `generator_is_tight` is the wrong mechanism, and §7 that
+    /// "shipping the registry upgrades nothing retroactively": a leaf is closed
+    /// only when a certificate actually contains the `PrimRealizes` term and the
+    /// kernel accepted the resulting proof. `elaborate_tree` still emits every
+    /// leaf as a `Hyp`, so nothing here regrades.
+    ///
+    /// Two further reasons `1 + 2` is still capped, and they are the finding
+    /// Stage B surfaced: `g_arith_input` and `g_arith_result` are the
+    /// regime↔kernel vocabulary bridges either side of the kernel-checked leaf,
+    /// and neither is dischargeable by this mechanism.
+    #[test]
+    fn stage_b_moves_no_grade() {
+        let expr = Expr::Arith(ArithOp::Add, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2)));
+        let (_, tree, st) = infer_tree(&expr, &TyCtx::new(), Infer::new()).expect("infers");
+        let realizes = materialize(&tree, &st.subst);
+
+        assert_eq!(
+            honest_result_outcome(Outcome::Proven, &realizes),
+            Outcome::Audited,
+            "shipping the registry must not lift the arithmetic cap"
+        );
+
+        for g in [g_arith(), g_arith_input(), g_arith_result()] {
+            assert!(
+                !generator_is_tight(ClaimKind::Typing, &g),
+                "{:?} must still not be tight for typing",
+                generator_name(&g)
+            );
+        }
+
+        // …and the split, discharged in Stage C, is unaffected in the other
+        // direction: a landed discharge does not lapse because a neighbour
+        // changed.
+        assert!(generator_is_tight(ClaimKind::Typing, &g_arith_split()));
     }
 
     #[test]
@@ -3090,7 +3462,9 @@ mod tests {
         fn only_expressions(obj: &TyObj) -> bool {
             match obj {
                 TyObj::Atom(CfgAtom::Expr(_)) => true,
-                TyObj::Atom(CfgAtom::Type(_)) | TyObj::Atom(CfgAtom::ArithInput(_)) => false,
+                TyObj::Atom(CfgAtom::Type(_))
+                | TyObj::Atom(CfgAtom::ArithInput(_))
+                | TyObj::Atom(CfgAtom::ArithResult(_)) => false,
                 TyObj::Prod(l, r) => only_expressions(l) && only_expressions(r),
             }
         }
