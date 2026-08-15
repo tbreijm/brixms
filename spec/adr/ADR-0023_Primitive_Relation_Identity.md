@@ -163,7 +163,26 @@ The recommendation was adopted in both halves, with option (2) rejected for the 
 
 **Immediate — option (3), done.** ADR-0015 §5 Stage D gate 1 is re-scoped in place, with the superseded text and the reason quoted beside it. It now targets a kernel-checked `g_arith` leaf inside an honestly-`@Audited` result; the `@Proven` goal moves out to its own work item under the endpoint-vocabulary line. Gates 2–4 stand, save one clause in gate 4 — "`1 + 2` is no longer capped" — which the erratum there corrects, since the cap moves to the two bridge leaves rather than lifting.
 
-**Direction — option (1), pinned by its own ADR.** ADR-0025 will rule on endpoint-vocabulary ownership: moving `Ty`'s canonical encoding into `brix-semantic` so kernel and regime encode through one encoder, **and** carrying the operator forward through the split in kernel-owned vocabulary (`ArithOperatorV1` is already a `brix-kernel` type), which is what makes `g_arith_input`'s relation functional and finite. The load-bearing claim is that ⟨D-SPLIT⟩'s discharge survives that projection — ADR-0015 §5 Stage C's own gate already requires the split to "preserve context and operator", and the operator is a field of the expression the split destructures. **That claim is under adversarial review and is not settled here.** If projecting the operator into kernel vocabulary is itself an undischarged translation, option (1) relocates the bridge instead of removing it, and the direction needs rethinking rather than implementing. No work builds on this line until the review reports.
+**Direction — the review reported, and it changed the answer. Option (1) is rejected.** The paragraph that stood here proposed option (1) plus carrying the operator forward as `ArithOperatorV1`, and flagged the ⟨D-SPLIT⟩ survival claim as under adversarial review. The review came back against it on both counts, and §4.5 records the premise error that made a better option available. Superseded text preserved above the line; the ruling is now:
+
+- **Option (1) is rejected**, reversing this ADR's own recommendation. Rust's orphan rules mean `Ty`'s `Canonical` impl cannot move without `Ty` itself, so "move only the encoding" was never available. `Ty` is not an endpoint atom — it declares an open constructor namespace, function types, inference variables, records and sums, and bakes regime-specific normalization (record field sorting, duplicate elimination) into its encoding, so moving it would freeze a regime's type language into substrate ABI and make every new type constructor a Ring-0 release. And it would not dissolve `g_arith_result` regardless: `NumericResultTypeV1(Int)` and `Ty::Con("Int")` do not become one object because two crates can name a shared enum.
+- **The operator projection as stated is withdrawn.** `ArithOp → ArithOperatorV1` is a hand-written host correspondence table (`crates/soc-regimes/src/type_realization.rs:104-118`). Rust proves that match *exhaustive*; it does not prove `ArithOp::Add ↦ ArithOperatorV1::Add` is the correct correspondence. That is the same epistemic class as `g_arith_result`, so emitting it would have lapsed ⟨D-SPLIT⟩ exactly as ADR-0015 warns — the fix would have relocated the bridge rather than removed it. The answer is to project the regime's **own** `ArithOp` value unchanged, with no conversion, and let a kernel-owned relation pin its four opaque identities.
+- **Direction — [ADR-0025](./ADR-0025_Pinned_Endpoint_Identities.md), a fourth option.** ⟨D-PINNED⟩ (the kernel compiles in foreign endpoint *identities*, never their encodings), ⟨D-REDERIVE⟩ (each pinned identity carries a readable frozen manifest entry and a re-derivation test in the crate that owns the encoder), ⟨D-OPPROJECT⟩, ⟨D-PRODENDPOINT⟩. No Ring-0 ABI moves.
+
+### 4.5 Correction: the stated cause of the obstruction is wrong
+
+§4.1 says the kernel "must be able to author **both** endpoints of every row" and that authoring a `Ty` endpoint would require "reproducing `soc_regimes::Ty`'s encoding inside `brix-kernel`". **The obstruction is real; this explanation of it is not.** The registry never sees an encoding.
+
+A row is a pair of `PropositionId`s (`crates/brix-kernel/src/prim_registry.rs:148`), and `PrimRealizes` decides membership by exact id comparison — `resolved.admits(src_id, dst_id)` (`crates/brix-kernel/src/check.rs:707`) — without decoding either endpoint. The kernel does not need `Ty`'s **encoder**. It needs `Ty`'s **digest**. The first would be a second semantic encoder in the TCB and is correctly forbidden by ADR-0015 §8.5; the second is a 32-byte constant. That distinction is what makes ADR-0025 ⟨D-PINNED⟩ available and the Ring-0 move unnecessary.
+
+Two clarifications found while establishing this, recorded so nobody builds on the stronger reading:
+
+- **The `source_schema`/`destination_schema` fields are identity components, not checked preconditions.** ⟨D-PRIM⟩'s synthesis rule reads as though the kernel verifies "`src` canonical under `S`"; it does not, and cannot, from a digest. This is **not a soundness gap** — membership in a row set authored from values canonical under `S` implies canonicality under `S` by collision resistance, so the property holds by construction at authoring time rather than by check at verification time. An erratum on ADR-0015 ⟨D-PRIM⟩ should say so.
+- **`PrimRealizes` admits only `Const` endpoints today** (`crates/brix-kernel/src/check.rs:706-712`), so a product-source relation — which is what `g_arith_input` structurally needs, sitting below a `Tensor` — is not expressible at all until ADR-0025 ⟨D-PRODENDPOINT⟩ lands.
+
+### 4.6 A supporting test in Stage C reasons incorrectly
+
+Found while verifying §4.4. `type_realization.rs:3515` argues the operator is bound because distinct operators yield distinct split *sources*. The obligation runs through the *destination*, and `Add(a, b)` and `Sub(a, b)` have distinct sources and the **same** destination. The assertion is true and does not establish what it is cited for. Stage C's gate is still met and `g_arith_split`'s discharge stands; the test's stated reasoning is what needs correcting, and ADR-0025 ⟨D-OPPROJECT⟩ carries the obligation explicitly instead.
 
 ---
 
@@ -179,7 +198,7 @@ The recommendation was adopted in both halves, with option (2) rejected for the 
 Both of this ADR's original open decisions are settled by the 2026-08-15 ruling.
 
 - **Settlement-lane alignment — settled.** The settlement lane adopts ⟨D-RELID⟩'s preimage shape for ADR-0019 §6's receipt identity, under ⟨D-DISJOINT⟩: shared discipline, disjoint marker bytes, no conversion function either way. The non-collision test lands with the settlement side, that lane being second.
-- **Endpoint-vocabulary ownership — settled in direction, deferred in execution.** §4.4 records it: option (3) now, option (1) via ADR-0025.
+- **Endpoint-vocabulary ownership — settled in direction, deferred in execution.** §4.4 records it: option (3) now; option (1) rejected on review; the direction is [ADR-0025](./ADR-0025_Pinned_Endpoint_Identities.md)'s ⟨D-PINNED⟩, which §4.5's correction made available. Execution is ADR-0025 §6's six stages, and none of them moves a grade on its own.
 
 What remains is not a decision of this ADR's:
 
