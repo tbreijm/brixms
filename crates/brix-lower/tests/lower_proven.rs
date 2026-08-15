@@ -602,3 +602,102 @@ fn test_named_field_variant_field_errors() {
         assert_eq!(*err, expected, "for: {src}");
     }
 }
+
+/// A declared type is a contract, not decoration.
+///
+/// Every case below previously checked clean — most of them as `@Proven`,
+/// which is the part that mattered: a program that looked like it declared a
+/// contract collected the strongest grade with the contract unchecked.
+#[test]
+fn test_declared_types_are_checked() {
+    // A `let` annotation must match the inferred type.
+    let module = parse("let x: Str = 42").expect("parse");
+    let results = check_module(&module);
+    let (_, err) = results[0].as_ref().expect_err("Str vs Int must be refused");
+    assert_eq!(
+        *err,
+        LowerError::TypeAnnotationMismatch {
+            declared: "Str".to_string(),
+            inferred: "Int".to_string(),
+        }
+    );
+
+    // A declared type must name something real, in an annotation or in a
+    // config declaration.
+    for src in [
+        "let y: Nonexistent = 42",
+        "config Item = { base: Nonexistent }\nlet z = Item { base: 10 }",
+    ] {
+        let module = parse(src).expect("parse");
+        let results = check_module(&module);
+        let (_, err) = results[0]
+            .as_ref()
+            .expect_err("an undeclared type must be refused");
+        assert_eq!(
+            *err,
+            LowerError::UnknownDeclaredType("Nonexistent".to_string()),
+            "for: {src}"
+        );
+    }
+
+    // A record literal's field values must match the declared field types.
+    let module =
+        parse("config Item = { name: Str, base: Int }\nlet bad = Item { name: 1, base: \"oops\" }")
+            .expect("parse");
+    let results = check_module(&module);
+    let (_, err) = results[0]
+        .as_ref()
+        .expect_err("swapped field types must be refused");
+    assert_eq!(
+        *err,
+        LowerError::RecordFieldTypeMismatch {
+            config: "Item".to_string(),
+            field: "name".to_string(),
+            declared: "Str".to_string(),
+            inferred: "Int".to_string(),
+        }
+    );
+}
+
+/// Correct programs still check, including where a declared type is a config
+/// and where it is nested inside a named-field variant.
+#[test]
+fn test_declared_types_accept_agreeing_programs() {
+    let src = r#"
+        config Frame = Normal | Effect
+        config Stats = { atk: Int, def: Int }
+        config Card = MonsterCard { frame: Frame, stats: Stats }
+
+        let s: Stats = Stats { atk: 1500, def: 1400 }
+        let m: Card = MonsterCard { frame: Effect, stats: s }
+        let n: Int = 42
+    "#;
+    let module = parse(src).expect("parse");
+    for r in check_module(&module) {
+        r.unwrap_or_else(|(n, e)| panic!("binding '{n}' should check, got {e:?}"));
+    }
+}
+
+/// A named-field variant's payload is checked with the same rule as a record
+/// config's — the desugaring must not create a hole.
+#[test]
+fn test_named_variant_field_types_are_checked() {
+    let src = r#"
+        config Card = MonsterCard { atk: Int }
+        let bad = MonsterCard { atk: "not a number" }
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    let (_, err) = results[0]
+        .as_ref()
+        .expect_err("a variant payload field must be checked");
+    assert_eq!(
+        *err,
+        LowerError::RecordFieldTypeMismatch {
+            config: "MonsterCard".to_string(),
+            field: "atk".to_string(),
+            declared: "Int".to_string(),
+            inferred: "Str".to_string(),
+        }
+    );
+}
