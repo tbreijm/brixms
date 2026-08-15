@@ -304,9 +304,35 @@ pub fn g_record() -> GeneratorId {
 
 /// Typing-rule generator for zero-field record literals (`"type.rule.record.empty@1"`).
 ///
-/// This remains undischarged: the current kernel profile has binary products but
-/// no terminal/unit proposition, so `{}` is not an instance of product
-/// introduction yet.
+/// **Discharged tight for typing** on literal-introduction grounds — the same
+/// family as [`g_lit`], not the structural product family.
+///
+/// This doc previously held it out because "the current kernel profile has
+/// binary products but no terminal/unit proposition, so `{}` is not an instance
+/// of product introduction yet." That is true and it was the wrong test. It
+/// looks for a *kernel correspondence*, which is what discharges `g_record` and
+/// `g_field` (product introduction and projection, pinned by
+/// `structural_generators_are_faithful_kernel_rules`). The literal introduction
+/// rules are discharged on a different ground and need no kernel rule:
+/// `g_lit` is tight because "an introduction rule *is* the definition of its
+/// type", and the kernel has no Int-introduction rule either — `Ty::Con("Int")`
+/// is an opaque atom to it.
+///
+/// `{}` is that same shape, and more sharply so:
+///
+/// - **Zero premises.** There are no field derivations to compose, so there is
+///   nothing for a composition rule to check. This is why it is not product
+///   introduction: not because the kernel is missing a unit rule, but because
+///   the judgement has no premises to introduce from.
+/// - **Exactly one instance.** `src` is always `Atom(Expr(Record([])))` and
+///   `dst` always `Atom(Type(Record([])))`. The relation is a single pair, and
+///   `zero_arity_intro_generators_are_faithful` pins it.
+/// - **Definitional.** `{} : {}` is what the empty record type *means*. There
+///   is no host computation, no lookup, and no choice to distrust under
+///   ADR-0015 §8.5.
+///
+/// Not discharged for any other judgment kind (⟨D-JUDGE⟩): this says nothing
+/// about a value, and `brix-canon` is not asked for one.
 pub fn g_record_empty() -> GeneratorId {
     GeneratorId::named("type.rule.record.empty@1")
 }
@@ -333,8 +359,28 @@ pub fn g_ctor() -> GeneratorId {
 
 /// Typing-rule generator for nullary sum constructors (`"type.rule.ctor.nullary@1"`).
 ///
-/// This remains undischarged: there is no payload proof to inject, and the
-/// kernel profile has no nullary/zero coproduct introduction rule.
+/// **Discharged tight for typing** on literal-introduction grounds, for the
+/// reason set out on [`g_record_empty`] — the old holdout ("there is no payload
+/// proof to inject, and the kernel profile has no nullary/zero coproduct
+/// introduction rule") asked for a kernel correspondence, which is the test the
+/// *structural* family has to pass, not this one. Having no payload to inject
+/// is exactly what makes it a zero-premise introduction rather than a defective
+/// coproduct introduction.
+///
+/// It differs from [`g_record_empty`] in one way that matters, and the gate
+/// covers it. `{}` has a single instance; this generator ranges over every
+/// user-declared sum type, and its leaf asserts something the host looked up —
+/// that `variant` is declared by `sum_ty` with zero fields. **That lookup is
+/// decidable from the leaf's own `src`**, because `Expr::Ctor` carries the sum
+/// type inline, complete with its variant list. So the claim is self-contained:
+/// a checker reading only `src` and `dst` can confirm it without trusting the
+/// host, which is what ADR-0015 §8.5 asks for.
+///
+/// The precondition is enforced before emission — an unknown variant or a
+/// nonzero arity is a `TypeError` and no leaf is produced —
+/// and `zero_arity_intro_generators_are_faithful` pins both the positive shape
+/// (`dst` is always exactly the `sum_ty` named in `src`) and the negative
+/// (a bogus variant yields no derivation at all).
 pub fn g_ctor_nullary() -> GeneratorId {
     GeneratorId::named("type.rule.ctor.nullary@1")
 }
@@ -542,7 +588,7 @@ pub enum ClaimKind {
 /// parameter exists and why the enum is closed.
 ///
 /// For [`ClaimKind::Empty`] this always returns `false`, unconditionally, for
-/// every generator — including the seventeen discharged below.
+/// every generator — including the nineteen discharged below.
 ///
 /// For [`ClaimKind::Typing`], discharged:
 ///
@@ -599,6 +645,21 @@ pub enum ClaimKind {
 ///    Discharging the split while `g_arith` remains capped is safe: the
 ///    least-discharged leaf still caps the derivation, so `1 + 2` does not
 ///    move.
+///
+/// 5. The **zero-premise introductions** `g_record_empty` (`{} : {}`) and
+///    `g_ctor_nullary` (`None : Opt`). Discharged on family 1's ground, not
+///    family 3's: an introduction rule is the definition of its type, and with
+///    no premises there is no composition for a kernel rule to check. Their
+///    previous holdout reason — that Profile 1.2 has no terminal/unit or
+///    nullary-coproduct rule — asked for the *correspondence* test that
+///    `g_record`/`g_ctor` must pass, and having nothing to inject is precisely
+///    what makes these introductions rather than defective eliminations. The
+///    kernel has no Int-introduction rule either, and `g_lit` is tight.
+///    Pinned by `zero_arity_intro_generators_are_faithful`, which checks that
+///    each derives as a single leaf, that `g_record_empty`'s endpoints are
+///    fixed, that `g_ctor_nullary`'s `dst` is always exactly the sum type
+///    named inside its `src`, and that an undeclared variant or a wrong arity
+///    produces no derivation at all.
 ///
 /// Deliberately **NOT** discharged: `g_arith`, `g_arith_input`,
 /// `g_arith_result`, and the coercion-edge promotions `g_promote_edge` (a real
@@ -666,6 +727,8 @@ pub fn generator_is_tight(kind: ClaimKind, g: &GeneratorId) -> bool {
                 || *g == g_match_split()
                 || *g == g_match()
                 || *g == g_arith_split()
+                || *g == g_record_empty()
+                || *g == g_ctor_nullary()
         }
     }
 }
@@ -3442,6 +3505,125 @@ mod tests {
         );
     }
 
+    /// The soundness evidence for discharging `g_record_empty` and
+    /// `g_ctor_nullary` — the zero-premise introduction family.
+    ///
+    /// These are discharged on `g_lit`'s ground, not on a kernel
+    /// correspondence: an introduction rule *is* the definition of its type,
+    /// and with no premises there is no composition for a kernel rule to
+    /// check. What has to be pinned instead is that the emission stays faithful
+    /// to that story, so this test carries the four obligations the story
+    /// implies.
+    #[test]
+    fn zero_arity_intro_generators_are_faithful() {
+        let ctx_id = ContextId::root();
+
+        // (1) Zero premises: each derives as a single leaf, with no
+        //     subderivation and no split. If either ever composes something,
+        //     the "nothing to check" argument lapses and so does the discharge.
+        let (_, empty) = audited_type_check_tree(&Expr::Record(vec![]), &TyCtx::new(), ctx_id)
+            .expect("empty record");
+        assert_eq!(empty.tree().leaves().len(), 1);
+
+        let opt = Ty::Sum(
+            "Opt".into(),
+            vec![
+                ("None".into(), vec![]),
+                ("Some".into(), vec![Ty::Con("Int")]),
+            ],
+        );
+        let (_, none) = audited_type_check_tree(
+            &Expr::Ctor(opt.clone(), "None".into(), vec![]),
+            &TyCtx::new(),
+            ctx_id,
+        )
+        .expect("nullary ctor");
+        assert_eq!(none.tree().leaves().len(), 1);
+
+        // (2) `g_record_empty` has exactly one instance: a fixed endpoint pair,
+        //     the same pin `literal_intro_generators_are_faithful` applies to
+        //     the literal rules.
+        match empty.tree() {
+            RealizesTree::Leaf {
+                generator,
+                src,
+                dst,
+            } => {
+                assert_eq!(*generator, g_record_empty());
+                assert_eq!(*src, TreeObj::Atom(Expr::Record(vec![]).config_id()));
+                assert_eq!(*dst, TreeObj::Atom(Ty::Record(vec![]).config_id()));
+            }
+            other => panic!("expected a single leaf, got {other:?}"),
+        }
+
+        // (3) `g_ctor_nullary` ranges over sum types, so instead of a fixed
+        //     endpoint the invariant is that `dst` is *always exactly* the sum
+        //     type named inside `src`. Checked across several distinct sums so
+        //     a hardcoded result type would fail.
+        for (sum, variant) in [
+            (opt.clone(), "None"),
+            (
+                Ty::Sum(
+                    "Bool".into(),
+                    vec![("True".into(), vec![]), ("False".into(), vec![])],
+                ),
+                "False",
+            ),
+            (
+                Ty::Sum("Unit".into(), vec![("Only".into(), vec![])]),
+                "Only",
+            ),
+        ] {
+            let expr = Expr::Ctor(sum.clone(), variant.into(), vec![]);
+            let (_, derivation) =
+                audited_type_check_tree(&expr, &TyCtx::new(), ctx_id).expect("types");
+            match derivation.tree() {
+                RealizesTree::Leaf {
+                    generator,
+                    src,
+                    dst,
+                } => {
+                    assert_eq!(*generator, g_ctor_nullary());
+                    assert_eq!(*src, TreeObj::Atom(expr.config_id()));
+                    assert_eq!(
+                        *dst,
+                        TreeObj::Atom(sum.config_id()),
+                        "dst must be exactly the sum type named in src"
+                    );
+                }
+                other => panic!("expected a single leaf, got {other:?}"),
+            }
+        }
+
+        // (4) The precondition is enforced *before* emission, so a leaf never
+        //     occurs for a variant the sum does not declare or for one whose
+        //     arity disagrees. This is what makes the claim self-contained:
+        //     every leaf that exists is one whose story `src` already tells.
+        for (label, expr) in [
+            (
+                "undeclared variant",
+                Expr::Ctor(opt.clone(), "Nope".into(), vec![]),
+            ),
+            (
+                "nullary spelling of a payload variant",
+                Expr::Ctor(opt.clone(), "Some".into(), vec![]),
+            ),
+        ] {
+            assert_eq!(
+                audited_type_check_tree(&expr, &TyCtx::new(), ctx_id).map(|_| ()),
+                Err(TypeError::Mismatch),
+                "{label} must not derive at all"
+            );
+        }
+
+        // (5) Both are tight for typing only — the discharge does not travel to
+        //     another judgment kind (⟨D-JUDGE⟩).
+        for g in [g_record_empty(), g_ctor_nullary()] {
+            assert!(generator_is_tight(ClaimKind::Typing, &g));
+            assert!(!generator_is_tight(ClaimKind::Empty, &g));
+        }
+    }
+
     #[test]
     fn application_rule_is_a_kernel_theorem() {
         // Soundness evidence for discharging g_app2: its realization is modus
@@ -3600,8 +3782,14 @@ mod tests {
             },
         ));
 
-        // The empty record and a nullary constructor are intentionally NOT
-        // smuggled into those binary rules: Profile 1.2 lacks unit/zero rules.
+        // The empty record and a nullary constructor are still NOT smuggled into
+        // those binary rules — Profile 1.2 lacks unit/zero rules, and that has
+        // not changed. What changed is that they no longer need one: both are
+        // discharged as zero-premise *introductions* (see their docs and
+        // `zero_arity_intro_generators_are_faithful`), which is the ground
+        // `g_lit` stands on, not a kernel correspondence. The assertions below
+        // pin that they reach `Proven` **without** appearing in any of the four
+        // structural rules above.
         fn has_leaf(tree: &RealizesTree, want: &GeneratorId) -> bool {
             match tree {
                 RealizesTree::Leaf { generator, .. } => generator == want,
@@ -3615,9 +3803,14 @@ mod tests {
         let (_, empty_tree) =
             audited_type_check_tree(&empty_record, &TyCtx::new(), ctx).expect("empty record");
         assert!(has_leaf(empty_tree.tree(), &g_record_empty()));
+        assert!(
+            !has_leaf(empty_tree.tree(), &g_record())
+                && !has_leaf(empty_tree.tree(), &g_record_split()),
+            "the empty record must not borrow the binary product rules"
+        );
         assert_eq!(
             honest_result_outcome(Outcome::Proven, empty_tree.tree()),
-            Outcome::Audited
+            Outcome::Proven
         );
 
         let bool_ty = Ty::Sum(
@@ -3628,9 +3821,14 @@ mod tests {
         let (_, nullary_tree) =
             audited_type_check_tree(&nullary_ctor, &TyCtx::new(), ctx).expect("nullary ctor");
         assert!(has_leaf(nullary_tree.tree(), &g_ctor_nullary()));
+        assert!(
+            !has_leaf(nullary_tree.tree(), &g_ctor())
+                && !has_leaf(nullary_tree.tree(), &g_ctor_split()),
+            "a nullary constructor must not borrow the binary coproduct rules"
+        );
         assert_eq!(
             honest_result_outcome(Outcome::Proven, nullary_tree.tree()),
-            Outcome::Audited
+            Outcome::Proven
         );
     }
 
@@ -3917,8 +4115,13 @@ mod tests {
         );
     }
 
+    /// Renamed from `test_ctor_nullary_bool_stays_audited`: the composition
+    /// outcome is now `Proven`, because `g_ctor_nullary` is discharged as a
+    /// zero-premise introduction. The *audited* judgement stays `Audited` —
+    /// that is `audited_type_check_tree`'s own level and is unrelated to the
+    /// cap.
     #[test]
-    fn test_ctor_nullary_bool_stays_audited() {
+    fn test_ctor_nullary_bool_reaches_proven() {
         let bool_ty = Ty::Sum(
             "Bool".into(),
             vec![("True".into(), vec![]), ("False".into(), vec![])],
@@ -3936,8 +4139,9 @@ mod tests {
         assert_eq!(aud.outcome, Outcome::Audited);
         assert_eq!(
             honest_result_outcome(Outcome::Proven, tree.tree()),
-            Outcome::Audited,
-            "nullary constructor lacks a kernel zero/unit introduction rule"
+            Outcome::Proven,
+            "a nullary constructor is a zero-premise introduction, discharged on \
+             the same ground as a literal rather than as coproduct introduction"
         );
         assert!(tree.tree().well_formed());
 
@@ -4060,12 +4264,21 @@ mod tests {
                 "{generator:?} should be discharged"
             );
         }
-        for generator in [g_record_empty(), g_ctor_nullary(), g_match_catchall()] {
+        // The two zero-arity introductions are discharged, but on
+        // literal-introduction grounds rather than as part of this structural
+        // family — see their docs and
+        // `zero_arity_intro_generators_are_faithful`.
+        for generator in [g_record_empty(), g_ctor_nullary()] {
             assert!(
-                !generator_is_tight(ClaimKind::Typing, &generator),
-                "{generator:?} must remain undischarged"
+                generator_is_tight(ClaimKind::Typing, &generator),
+                "{generator:?} is discharged as a zero-premise introduction"
             );
         }
+        assert!(
+            !generator_is_tight(ClaimKind::Typing, &g_match_catchall()),
+            "g_match_catchall must remain undischarged: ADR-0015 §4 lists it as \
+             a non-goal until repeated branch premises are represented"
+        );
     }
 
     #[test]
@@ -4095,11 +4308,15 @@ mod tests {
             // grounds as the `*_split` leaves above, independently of
             // `g_arith`.
             g_arith_split(),
+            // Zero-premise introductions, discharged on `g_lit`'s ground
+            // rather than as product/coproduct introduction.
+            g_record_empty(),
+            g_ctor_nullary(),
         ];
         assert_eq!(
             tight_for_typing.len(),
-            17,
-            "this test must cover exactly the seventeen typing-tight generators"
+            19,
+            "this test must cover exactly the nineteen typing-tight generators"
         );
         for generator in tight_for_typing {
             assert!(
