@@ -269,15 +269,13 @@ pub fn g_var() -> GeneratorId {
     GeneratorId::named("type.rule.var@1")
 }
 
-/// Typing-rule generator for function application (`"type.rule.app@1"`).
-pub fn g_app() -> GeneratorId {
-    GeneratorId::named("type.rule.app@1")
-}
-
-/// Typing-rule generator for lambda abstraction (`"type.rule.lam@1"`).
-pub fn g_lam() -> GeneratorId {
-    GeneratorId::named("type.rule.lam@1")
-}
+// `g_app` ("type.rule.app@1") and `g_lam` ("type.rule.lam@1") were removed
+// here. Neither was ever emitted as a leaf — the application and abstraction
+// rules emit `g_app2`, `g_lam_intro` and `g_lam_body` — so both existed only in
+// `minted_generators()`, and therefore only in `typing_registry()`, declaring
+// generators inference could not produce. See `unify` for the same drift and
+// the reason it is worth removing rather than explaining: a declared `𝒢` wider
+// than what inference can emit is a fence around nothing.
 
 /// Typing-rule generator for lambda abstraction introduction (`"type.rule.lam.intro@1"`).
 pub fn g_lam_intro() -> GeneratorId {
@@ -481,11 +479,6 @@ pub fn g_arith_input() -> GeneratorId {
 /// first of these bridges. Reported in full, with options, in ADR-0023 §4.
 pub fn g_arith_result() -> GeneratorId {
     GeneratorId::named("type.rule.arith.result@1")
-}
-
-/// Typing-rule generator for unification steps (`"type.rule.unify@1"`).
-pub fn g_unify() -> GeneratorId {
-    GeneratorId::named("type.rule.unify@1")
 }
 
 // ---------------------------------------------------------------------------
@@ -735,8 +728,6 @@ fn minted_generators() -> Vec<(String, GeneratorId)> {
         ("g_str_lit", g_str_lit()),
         ("g_float_lit", g_float_lit()),
         ("g_var", g_var()),
-        ("g_app", g_app()),
-        ("g_lam", g_lam()),
         ("g_lam_intro", g_lam_intro()),
         ("g_lam_close", g_lam_close()),
         ("g_split", g_split()),
@@ -756,7 +747,6 @@ fn minted_generators() -> Vec<(String, GeneratorId)> {
         ("g_arith_split", g_arith_split()),
         ("g_arith_input", g_arith_input()),
         ("g_arith_result", g_arith_result()),
-        ("g_unify", g_unify()),
     ];
 
     let mut out: Vec<(String, GeneratorId)> = named
@@ -1369,27 +1359,37 @@ pub fn occurs(v: u32, ty: &Ty, subst: &BTreeMap<u32, Ty>) -> bool {
     }
 }
 
-/// Declarative unification as SOC context narrowing over explicit immutable substitution `subst`.
+/// Declarative unification as SOC context narrowing over explicit immutable
+/// substitution `subst`.
 ///
-/// Returns the updated substitution and recorded `g_unify()` generator steps.
-/// Does NOT mutate state or perform hashing inside the unification loop.
-pub fn unify(
-    t1: &Ty,
-    t2: &Ty,
-    subst: &BTreeMap<u32, Ty>,
-) -> Result<(BTreeMap<u32, Ty>, Vec<GeneratorId>), TypeError> {
+/// Returns the updated substitution. Does NOT mutate state or perform hashing
+/// inside the unification loop.
+///
+/// **It used to also return a `Vec<GeneratorId>` of `g_unify()` steps, and every
+/// caller discarded it** (`let (s, _) = unify(...)`). Nothing ever built a leaf
+/// from those steps, so `g_unify` sat in `minted_generators()` — and therefore
+/// in [`typing_registry`] — declaring a generator inference could not emit. A
+/// declared `𝒢` wider than what inference can produce is a fence around
+/// nothing, and it is the drift the single-source enumeration exists to
+/// prevent, so the dead return value went and `g_unify` went with it.
+///
+/// If unification ever does need to appear in a derivation, it needs a real
+/// leaf with real endpoints, not a resurrected step list: a bare sequence of
+/// generator ids carries no `src`/`dst` and so cannot be audited by
+/// `verify_structure` or discharged by ADR-0015 ⟨D-PRIM⟩'s mechanism.
+pub fn unify(t1: &Ty, t2: &Ty, subst: &BTreeMap<u32, Ty>) -> Result<BTreeMap<u32, Ty>, TypeError> {
     let r1 = resolve(t1, subst);
     let r2 = resolve(t2, subst);
 
     match (r1, r2) {
-        (Ty::Var(v1), Ty::Var(v2)) if v1 == v2 => Ok((subst.clone(), vec![g_unify()])),
+        (Ty::Var(v1), Ty::Var(v2)) if v1 == v2 => Ok(subst.clone()),
         (Ty::Var(v1), t) => {
             if occurs(*v1, t, subst) {
                 Err(TypeError::InfiniteType)
             } else {
                 let mut next_subst = subst.clone();
                 next_subst.insert(*v1, t.clone());
-                Ok((next_subst, vec![g_unify()]))
+                Ok(next_subst)
             }
         }
         (t, Ty::Var(v2)) => {
@@ -1398,23 +1398,19 @@ pub fn unify(
             } else {
                 let mut next_subst = subst.clone();
                 next_subst.insert(*v2, t.clone());
-                Ok((next_subst, vec![g_unify()]))
+                Ok(next_subst)
             }
         }
         (Ty::Con(a), Ty::Con(b)) => {
             if a == b {
-                Ok((subst.clone(), vec![g_unify()]))
+                Ok(subst.clone())
             } else {
                 Err(TypeError::Mismatch)
             }
         }
         (Ty::Fn(a1, b1), Ty::Fn(a2, b2)) => {
-            let (s1, mut steps1) = unify(a1, a2, subst)?;
-            let (s2, steps2) = unify(b1, b2, &s1)?;
-            let mut steps = vec![g_unify()];
-            steps.append(&mut steps1);
-            steps.extend(steps2);
-            Ok((s2, steps))
+            let s1 = unify(a1, a2, subst)?;
+            unify(b1, b2, &s1)
         }
         (Ty::Record(f1), Ty::Record(f2)) => {
             let mut s1_fields = f1.clone();
@@ -1434,13 +1430,10 @@ pub fn unify(
                 }
             }
             let mut curr_subst = subst.clone();
-            let mut all_steps = vec![g_unify()];
             for (a, b) in s1_fields.iter().zip(s2_fields.iter()) {
-                let (next_subst, steps) = unify(&a.1, &b.1, &curr_subst)?;
-                curr_subst = next_subst;
-                all_steps.extend(steps);
+                curr_subst = unify(&a.1, &b.1, &curr_subst)?;
             }
-            Ok((curr_subst, all_steps))
+            Ok(curr_subst)
         }
         (Ty::Sum(n1, vs1), Ty::Sum(n2, vs2)) => {
             if n1 != n2 || vs1.len() != vs2.len() {
@@ -1452,15 +1445,12 @@ pub fn unify(
                 }
             }
             let mut curr_subst = subst.clone();
-            let mut all_steps = vec![g_unify()];
             for ((_, v1_fields), (_, v2_fields)) in vs1.iter().zip(vs2.iter()) {
                 for (f1, f2) in v1_fields.iter().zip(v2_fields.iter()) {
-                    let (next_subst, steps) = unify(f1, f2, &curr_subst)?;
-                    curr_subst = next_subst;
-                    all_steps.extend(steps);
+                    curr_subst = unify(f1, f2, &curr_subst)?;
                 }
             }
-            Ok((curr_subst, all_steps))
+            Ok(curr_subst)
         }
         _ => Err(TypeError::Mismatch),
     }
@@ -1608,11 +1598,11 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
 
             let mut subst = s2.subst.clone();
             if plan.unify_a {
-                let (s, _) = unify(&ra, &Ty::Con(plan.base), &subst)?;
+                let s = unify(&ra, &Ty::Con(plan.base), &subst)?;
                 subst = s;
             }
             if plan.unify_b {
-                let (s, _) = unify(&rb, &Ty::Con(plan.base), &subst)?;
+                let s = unify(&rb, &Ty::Con(plan.base), &subst)?;
                 subst = s;
             }
 
@@ -1754,7 +1744,7 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                 Box::new(Ty::Var(beta)),
             );
 
-            let (s3, _) = unify(resolve(&tf, &s_beta.subst), &target, &s_beta.subst)?;
+            let s3 = unify(resolve(&tf, &s_beta.subst), &target, &s_beta.subst)?;
 
             let a = zonk(&tx, &s3);
             let b = zonk(&Ty::Var(beta), &s3);
@@ -1931,7 +1921,7 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
 
                 for (arg_expr, declared_field_ty) in args.iter().zip(declared_fields.iter()) {
                     let (t_i, d_i, next_st) = infer_tree(arg_expr, ctx, curr_st)?;
-                    let (next_subst, _) = unify(&t_i, declared_field_ty, &next_st.subst)?;
+                    let next_subst = unify(&t_i, declared_field_ty, &next_st.subst)?;
                     expr_atoms.push(TyObj::Atom(CfgAtom::Expr(arg_expr.clone())));
                     let zonked_field = zonk(declared_field_ty, &next_subst);
                     type_atoms.push(TyObj::Atom(CfgAtom::Type(zonked_field)));
@@ -1987,7 +1977,7 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                 parts_exprs.push(TyObj::Atom(CfgAtom::Expr(body.clone())));
                 parts_derivs.push(d_i);
                 if let Some(ref r_ty) = res_ty {
-                    let (next_subst, _) = unify(r_ty, &t_i, &next_st.subst)?;
+                    let next_subst = unify(r_ty, &t_i, &next_st.subst)?;
                     curr_st = Infer {
                         subst: next_subst,
                         next_var: next_st.next_var,
@@ -2139,6 +2129,37 @@ mod tests {
             generator_name(&GeneratorId::named("not-a-real-generator@1")),
             None
         );
+    }
+
+    /// The declared generator set must not be wider than what inference can
+    /// emit, and these three are the drift that was.
+    ///
+    /// `type.rule.app@1`, `type.rule.lam@1` and `type.rule.unify@1` were in
+    /// `minted_generators()` — and so in [`typing_registry`] — while no code
+    /// path produced a leaf for any of them: application and abstraction emit
+    /// `g_app2`/`g_lam_intro`/`g_lam_body`, and `unify`'s `g_unify` step vector
+    /// was discarded by every caller. Nothing was unsound, because nothing
+    /// emitted them, but a declared `𝒢` wider than the emittable set is a fence
+    /// around nothing, and the single-source enumeration exists to prevent
+    /// exactly this.
+    ///
+    /// Ids spelled as literals on purpose: the constructors are gone, so a
+    /// re-addition is what this test has to catch, and it can only do that by
+    /// naming the strings.
+    #[test]
+    fn the_retired_generators_are_not_declared() {
+        for name in ["type.rule.app@1", "type.rule.lam@1", "type.rule.unify@1"] {
+            let g = GeneratorId::named(name);
+            assert!(
+                !typing_registry().contains(&g),
+                "{name} was retired and must not be declared again without a producer"
+            );
+            assert_eq!(
+                generator_name(&g),
+                None,
+                "{name} must not be nameable either"
+            );
+        }
     }
 
     /// The counterexample ADR-0018 §4 preserves.
@@ -3997,7 +4018,7 @@ mod tests {
             g_match_catchall(),
             g_arith(),
             g_arith_split(),
-            g_unify(),
+            g_arith_input(),
         ] {
             assert!(
                 !generator_is_tight(ClaimKind::Empty, &generator),
