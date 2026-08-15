@@ -422,13 +422,14 @@ impl Canonical for NumericResultTypeV1 {
     }
 }
 
-/// The [`SchemaId`] of [`ArithTypingInputV1`] — `TypingArithV1`'s source schema.
+/// The [`SchemaId`] of [`ArithTypingInputV1`] — the arithmetic typing
+/// relation's source schema.
 pub fn arith_typing_input_schema_id() -> SchemaId {
     SchemaId::of_schema(ARITH_TYPING_INPUT_MARKER_V1, ARITH_TYPING_INPUT_VERSION_V1)
 }
 
-/// The [`SchemaId`] of [`NumericResultTypeV1`] — `TypingArithV1`'s destination
-/// schema.
+/// The [`SchemaId`] of [`NumericResultTypeV1`] — the arithmetic typing
+/// relation's destination schema.
 pub fn numeric_result_type_schema_id() -> SchemaId {
     SchemaId::of_schema(
         NUMERIC_RESULT_TYPE_MARKER_V1,
@@ -677,7 +678,7 @@ mod tests {
 
     /// A version bump moves the schema id. This is the mechanism that makes
     /// ADR-0015 §7's "relation identities are immutable" structural rather than
-    /// a discipline: a v2 source schema cannot leave `TypingArithV1`'s id alone.
+    /// a discipline: a v2 source schema cannot leave a relation's id alone.
     #[test]
     fn a_schema_version_bump_moves_the_schema_id() {
         assert_ne!(

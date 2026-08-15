@@ -413,8 +413,29 @@ pub fn g_arith_split() -> GeneratorId {
 /// so Stage D needs two relations rather than one" — was too optimistic. A
 /// second relation is necessary but not sufficient; what is actually needed is
 /// a ruling on **who owns the canonical encoding of a realization endpoint that
-/// both the TCB and a regime must name**. See [`g_arith_result`], which is the
-/// mirror-image bridge on the way out, and which has the same obstruction.
+/// both the TCB and a regime must name**. See [`g_arith_result`], the bridge on
+/// the way out, which shares that obstruction and nothing else.
+///
+/// **And a shared encoder would still not be enough here — this leaf carries a
+/// second obstruction that [`g_arith_result`] does not.** `g_arith_result` is a
+/// total injective renaming; give both sides one encoder and it dissolves. This
+/// leaf is not a renaming. It also selects the promotion paths and asserts the
+/// operator — and *nothing kernel-binds the operator to the expression being
+/// typed*. [`g_arith_split`]'s `src` is `Atom(Expr(e))`, with the operator right
+/// there inside the expression, but its `dst` is `Prod(Atom(Expr a),
+/// Atom(Expr b))` and the operator is gone. This leaf's `src` then carries two
+/// types and no operator, while its `dst` carries `op`. The `Seq` chain matches
+/// on endpoints, so the operator enters the derivation only *here*, through an
+/// undischarged leaf.
+///
+/// The consequence is concrete: a relation keyed on this `src` would be
+/// **non-functional in the operator** — one canonical `src`, four distinct
+/// `dst`s — which violates the build-time invariant ADR-0015 §5 Stage B requires
+/// of every relation. The kernel could check the promotion paths are right for
+/// *some* operator; it could never check the operator is the right one for this
+/// node. Carrying the operator forward through the split in kernel-owned
+/// vocabulary is what ADR-0025 must settle alongside the encoder; ADR-0023 §4.4
+/// records the ruling and why no work builds on that line yet.
 pub fn g_arith_input() -> GeneratorId {
     GeneratorId::named("type.rule.arith.input@1")
 }
@@ -432,8 +453,17 @@ pub fn g_arith_input() -> GeneratorId {
 ///
 /// **Not discharged.** The rename is faithful, but "the host renamed it
 /// faithfully" is precisely the kind of claim §8.5 declines to trust, and the
-/// kernel cannot check it for the mirror of [`g_arith_input`]'s reason: the
-/// `dst` is a `Ty` atom this crate encodes.
+/// kernel cannot check it for the same reason as [`g_arith_input`]: one endpoint
+/// — here the `dst` — is a `Ty` atom this crate encodes.
+///
+/// That shared encoding obstruction is *all* the two bridges have in common,
+/// and an earlier version of this doc's "mirror image" framing overstated it.
+/// This leaf is a total injective renaming over a closed finite vocabulary, so
+/// a single shared encoder dissolves it outright — the relation's destination
+/// would simply *be* the `Ty` atom and this leaf would stop existing. Nothing
+/// else is wrong with it. [`g_arith_input`] additionally selects the promotion
+/// paths and asserts an operator the derivation never bound, so the same
+/// encoder is necessary and not sufficient there. See its doc, and ADR-0023 §4.
 ///
 /// **What that means for the arithmetic cap, stated without spin.** Before
 /// Stage B, `1 + 2` was capped by two undischarged leaves (`g_arith_input`,
@@ -585,7 +615,7 @@ pub enum ClaimKind {
 /// **Where Stage B leaves the arithmetic holdouts.** ADR-0015 §5 Stage B0
 /// (landed) made `g_arith`'s source object carry every field that affects
 /// admissibility; Stage B (landed) added the kernel's primitive-relation
-/// registry, so `TypingArithV1` now decides `g_arith`'s realization by exact
+/// registry, so `TypingArithV2` now decides `g_arith`'s realization by exact
 /// membership over the finite `{Add,Sub,Mul,Div} × operand-types` matrix. But
 /// **`generator_is_tight` is not the mechanism that consumes it** — ADR-0015 §5
 /// Stage D is explicit that a boolean flip here would be too coarse to be
@@ -596,11 +626,21 @@ pub enum ClaimKind {
 ///
 /// **And Stage D needs more than that.** `g_arith_input` and `g_arith_result`
 /// are the regime↔kernel vocabulary bridges on either side of the kernel-checked
-/// leaf. Neither is discharegable by Stage B's mechanism, because each has one
+/// leaf. Neither is dischargeable by Stage B's mechanism, because each has one
 /// endpoint that is a `Ty` atom this crate encodes and the kernel may not
-/// reproduce (ADR-0015 §8.5; `DEPS.md`). So `let x = 1 + 2` reaching `@Proven`
-/// — Stage D's headline gate — is blocked on a ruling about endpoint-vocabulary
-/// ownership, not on arithmetic. See [`g_arith_result`] for the full statement.
+/// reproduce (ADR-0015 §8.5; `DEPS.md`), and `g_arith_input` carries a second
+/// obstruction besides — see its doc. So `let x = 1 + 2` reaching `@Proven` was
+/// **never reachable by discharging `g_arith`**, however completely Stage B
+/// succeeded.
+///
+/// That is now ruled on rather than merely reported. ADR-0015 §5 Stage D gate 1
+/// is re-scoped in place to what the discharge actually buys — a kernel-checked
+/// `g_arith` leaf inside an honestly-`@Audited` result — and the `@Proven` goal
+/// moved out to its own work item under the endpoint-vocabulary line, which
+/// ADR-0025 will pin. **So this list is expected to keep both bridges after
+/// Stage D lands, and `1 + 2` is expected to stay `@Audited`.** A change that
+/// makes it `@Proven` without removing those two leaves is a bug, not progress.
+/// ADR-0023 §4 carries the finding and §4.4 the ruling.
 pub fn generator_is_tight(kind: ClaimKind, g: &GeneratorId) -> bool {
     match kind {
         // Fail closed: a claim kind added in the future starts here, at
@@ -2996,17 +3036,18 @@ mod tests {
     #[test]
     fn arithmetic_rule_is_a_kernel_primitive() {
         use brix_kernel::{
-            acceptance, resolve_primitive_relation, typing_arith_v1, typing_arith_v2, Budget,
+            acceptance, resolve_primitive_relation, typing_arith_v2, Budget, CoercionEdgeV1,
             ExplicitTerm, NumericResultTypeV1, ObjectTerm, Prop, TermKind, Verdict,
         };
         use brix_semantic::PropositionId;
 
-        // Stage E: the emission now names the lossy edge under the conversion
-        // family, so the live relation is V2. V1 is still resolvable (§7) and
-        // is checked below to *reject* the relocated rows — which is the
-        // immutability discipline visibly working rather than merely asserted.
+        // Stage E: the emission names the lossy edge under the conversion
+        // family, so the live relation is V2. The superseded V1 was retired
+        // (ADR-0024 §3), so instead of resolving it, each relocated row is
+        // re-spelled below under the *legacy* naming and the current relation
+        // is required to reject it — the immutability discipline visibly
+        // working rather than merely asserted, and without a second row table.
         let relation = resolve_primitive_relation(&typing_arith_v2()).expect("TypingArithV2");
-        let superseded = resolve_primitive_relation(&typing_arith_v1()).expect("TypingArithV1");
         let mut relocated = 0;
         let ctx_id = ContextId::root();
         let ops = [ArithOp::Add, ArithOp::Sub, ArithOp::Mul, ArithOp::Div];
@@ -3093,22 +3134,48 @@ mod tests {
                     "{op:?} {lhs} {rhs}: the relation must admit exactly one result type"
                 );
 
-                // The superseded relation admits this row only when the path
-                // does not cross the relocated edge.
-                let crosses_lossy = match &src_obj {
-                    TyObj::Atom(CfgAtom::ArithInput(i)) => i
-                        .lhs_promotion_path
-                        .iter()
-                        .chain(i.rhs_promotion_path.iter())
-                        .any(|e| e.kind == CoercionKind::Lossy),
+                // Re-spell this row's paths the way the retired V1 did, with
+                // every edge in the promotion family. If the path crosses the
+                // relocated edge that is a different source object, and the
+                // current relation must not admit it.
+                let input = match &src_obj {
+                    TyObj::Atom(CfgAtom::ArithInput(i)) => i.clone(),
                     _ => unreachable!("checked above"),
                 };
+                let as_legacy = |path: &[CoercionEdgeV1]| -> Vec<CoercionEdgeV1> {
+                    path.iter()
+                        .map(|e| CoercionEdgeV1 {
+                            generator: match e.kind {
+                                CoercionKind::Exact => e.generator,
+                                CoercionKind::Lossy => {
+                                    GeneratorId::named("type.rule.num.promote.Int_Float@1")
+                                }
+                            },
+                            kind: e.kind,
+                        })
+                        .collect()
+                };
+                let crosses_lossy = input
+                    .lhs_promotion_path
+                    .iter()
+                    .chain(input.rhs_promotion_path.iter())
+                    .any(|e| e.kind == CoercionKind::Lossy);
+                let legacy = ArithTypingInputV1 {
+                    lhs_promotion_path: as_legacy(&input.lhs_promotion_path),
+                    rhs_promotion_path: as_legacy(&input.rhs_promotion_path),
+                    ..input.clone()
+                };
+                let legacy_src = PropositionId(legacy.config_id().digest());
                 assert_eq!(
-                    superseded.admits(&src, &dst),
+                    legacy_src == src,
                     !crosses_lossy,
-                    "{op:?} {lhs} {rhs}: V1 must admit exactly the rows Stage E did not move"
+                    "{op:?} {lhs} {rhs}: only a lossy-crossing path is re-spelled"
                 );
                 if crosses_lossy {
+                    assert!(
+                        !relation.admits(&legacy_src, &dst),
+                        "{op:?} {lhs} {rhs}: the legacy spelling must not be admitted"
+                    );
                     relocated += 1;
                 }
 
