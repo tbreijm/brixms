@@ -23,6 +23,8 @@ pub enum TokenKind {
     Derived,
     Audited,
     Proven,
+    True,
+    False,
 
     // Identifiers & Literals
     Ident(String),
@@ -45,6 +47,12 @@ pub enum TokenKind {
     Minus,      // -
     Star,       // *
     Slash,      // /
+    Lt,         // <
+    Le,         // <=
+    Gt,         // >
+    Ge,         // >=
+    EqEq,       // ==
+    Ne,         // !=
     Underscore, // _
 
     Eof,
@@ -226,6 +234,8 @@ pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token
                     "let" => TokenKind::Let,
                     "show" => TokenKind::Show,
                     "witness" => TokenKind::Witness,
+                    "true" => TokenKind::True,
+                    "false" => TokenKind::False,
                     "match" => TokenKind::Match,
                     "prove" => TokenKind::Prove,
                     "why" => TokenKind::Why,
@@ -281,6 +291,10 @@ pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token
                     i += 2;
                     col += 2;
                     TokenKind::FatArrow
+                } else if i + 1 < len && chars[i + 1] == '=' {
+                    i += 2;
+                    col += 2;
+                    TokenKind::EqEq
                 } else {
                     i += 1;
                     col += 1;
@@ -306,6 +320,43 @@ pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token
                 i += 1;
                 col += 1;
                 TokenKind::At
+            }
+            '<' => {
+                i += 1;
+                col += 1;
+                if chars.get(i) == Some(&'=') {
+                    i += 1;
+                    col += 1;
+                    TokenKind::Le
+                } else {
+                    TokenKind::Lt
+                }
+            }
+            '>' => {
+                i += 1;
+                col += 1;
+                if chars.get(i) == Some(&'=') {
+                    i += 1;
+                    col += 1;
+                    TokenKind::Ge
+                } else {
+                    TokenKind::Gt
+                }
+            }
+            '!' => {
+                i += 1;
+                col += 1;
+                if chars.get(i) == Some(&'=') {
+                    i += 1;
+                    col += 1;
+                    TokenKind::Ne
+                } else {
+                    return Err(ParseError::at(
+                        "Unexpected character '!' (did you mean '!=' ?)".to_string(),
+                        start_line,
+                        start_col,
+                    ));
+                }
             }
             '+' => {
                 i += 1;

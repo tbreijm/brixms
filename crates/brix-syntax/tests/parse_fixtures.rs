@@ -436,3 +436,49 @@ fn positional_variants_are_unchanged() {
     );
     assert!(variants[1].params.is_empty());
 }
+
+#[test]
+fn comparison_binds_tighter_than_composition_and_looser_than_arithmetic() {
+    // `a + 1 > b * 2` must group as `(a + 1) > (b * 2)`.
+    let module = parse("let x = a + 1 > b * 2").expect("parse");
+    let Item::Let(LetDecl { value, .. }) = &module.items[0] else {
+        panic!("expected a let");
+    };
+    match value {
+        Expr::Bin { op, lhs, rhs } => {
+            assert_eq!(*op, BinOp::Gt);
+            assert!(
+                matches!(**lhs, Expr::Bin { op: BinOp::Add, .. }),
+                "lhs should be the addition, got {lhs:?}"
+            );
+            assert!(
+                matches!(**rhs, Expr::Bin { op: BinOp::Mul, .. }),
+                "rhs should be the multiplication, got {rhs:?}"
+            );
+        }
+        other => panic!("expected a comparison at the root, got {other:?}"),
+    }
+}
+
+#[test]
+fn comparison_operators_do_not_chain() {
+    // Refused by name rather than read as `(a < b) < c`. Refusing keeps the
+    // door open to defining chained comparison later without breaking any
+    // program that exists today.
+    let err = parse("let x = 1 < 2 < 3").expect_err("chained comparison must be refused");
+    assert!(
+        err.to_string().contains("do not chain"),
+        "expected a chaining diagnostic, got: {err}"
+    );
+}
+
+#[test]
+fn boolean_literals_parse() {
+    for (src, expected) in [("let t = true", true), ("let f = false", false)] {
+        let module = parse(src).expect("parse");
+        let Item::Let(LetDecl { value, .. }) = &module.items[0] else {
+            panic!("expected a let");
+        };
+        assert_eq!(*value, Expr::Bool(expected));
+    }
+}

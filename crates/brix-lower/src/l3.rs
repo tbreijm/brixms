@@ -287,6 +287,13 @@ pub enum L3LowerError {
     MatchNotAllowed,
     /// Arithmetic (`+ - * /`) in a rule/let body (ADR-0012 §3.2).
     ArithmeticNotAllowed,
+    /// A comparison (`< <= > >= == !=`) in a rule/let body. Not in the v1
+    /// executable fragment, for the same reason arithmetic is not: the profile
+    /// assigns no evaluation semantics to rule bodies (ADR-0012 §3.2).
+    ComparisonNotAllowed,
+    /// A boolean literal in a rule/let body. v1's value grammar is
+    /// `Int`/`Str`/nullary-constructor/record only (ADR-0012 §3.2).
+    BooleanLiteralNotAllowed,
     /// Witness composition (`then`/`and`) in a rule/let body (ADR-0012 §1.4).
     WitnessCompositionNotAllowed,
     /// `prove` in a rule/let body (ADR-0012 §1.4).
@@ -778,7 +785,14 @@ fn normalize_static_value(expr: &ast::Expr, env: &NormEnv) -> Result<L3ValueV1, 
                 Err(L3LowerError::ArithmeticNotAllowed)
             }
             ast::BinOp::Then | ast::BinOp::And => Err(L3LowerError::WitnessCompositionNotAllowed),
+            ast::BinOp::Lt
+            | ast::BinOp::Le
+            | ast::BinOp::Gt
+            | ast::BinOp::Ge
+            | ast::BinOp::Eq
+            | ast::BinOp::Ne => Err(L3LowerError::ComparisonNotAllowed),
         },
+        ast::Expr::Bool(_) => Err(L3LowerError::BooleanLiteralNotAllowed),
         ast::Expr::Match { .. } => Err(L3LowerError::MatchNotAllowed),
         ast::Expr::Prove(_) => Err(L3LowerError::ProveNotAllowed),
         ast::Expr::Why(_) => Err(L3LowerError::WhyNotAllowed),

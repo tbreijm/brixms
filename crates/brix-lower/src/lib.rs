@@ -59,7 +59,7 @@ use soc_regimes::coverage::certify_exhaustive;
 pub use soc_regimes::coverage::CoverageOutcome;
 use soc_regimes::type_realization::{
     audited_type_check_tree, grade_assertion_satisfied, honest_result_outcome, infer_tree, zonk,
-    ArithOp, Expr as TrExpr, Infer, Pattern as TrPattern, Ty as TrTy, TyCtx, TypeError,
+    ArithOp, CmpOp, Expr as TrExpr, Infer, Pattern as TrPattern, Ty as TrTy, TyCtx, TypeError,
 };
 
 /// Lowering context holding top-level functions, config declarations, and constructors.
@@ -502,6 +502,29 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
             Box::new(lower_expr(base, ctx)?),
             name.clone(),
         )),
+        ast::Expr::Bin { op, lhs, rhs } if op.is_comparison() => {
+            let cmp_op = match op {
+                ast::BinOp::Lt => CmpOp::Lt,
+                ast::BinOp::Le => CmpOp::Le,
+                ast::BinOp::Gt => CmpOp::Gt,
+                ast::BinOp::Ge => CmpOp::Ge,
+                ast::BinOp::Eq => CmpOp::Eq,
+                ast::BinOp::Ne => CmpOp::Ne,
+                // Unreachable under the guard; kept total rather than
+                // panicking on a future BinOp.
+                other => {
+                    return Err(LowerError::Unsupported(format!(
+                        "'{other:?}' is not a comparison"
+                    )))
+                }
+            };
+            Ok(TrExpr::Cmp(
+                cmp_op,
+                Box::new(lower_expr(lhs, ctx)?),
+                Box::new(lower_expr(rhs, ctx)?),
+            ))
+        }
+        ast::Expr::Bool(b) => Ok(TrExpr::BoolLit(*b)),
         ast::Expr::Bin { op, lhs, rhs } => {
             let arith_op = match op {
                 ast::BinOp::Add => ArithOp::Add,
@@ -514,6 +537,12 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
                     return Err(LowerError::Unsupported(
                         "witness composition ('then'/'and') not in L2-first fragment".to_string(),
                     ))
+                }
+                // Handled by the guarded arm above.
+                other => {
+                    return Err(LowerError::Unsupported(format!(
+                        "unexpected comparison operator '{other:?}' in arithmetic position"
+                    )))
                 }
             };
             Ok(TrExpr::Arith(
@@ -773,7 +802,7 @@ fn check_declared_field_types(
         ast::Expr::Prove(inner) | ast::Expr::Why(inner) | ast::Expr::Audit(inner) => {
             check_declared_field_types(inner, ctx, ty_ctx)
         }
-        ast::Expr::Num(_) | ast::Expr::Str(_) | ast::Expr::Var(_) => Ok(()),
+        ast::Expr::Num(_) | ast::Expr::Str(_) | ast::Expr::Bool(_) | ast::Expr::Var(_) => Ok(()),
     }
 }
 
