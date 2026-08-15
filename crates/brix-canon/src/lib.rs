@@ -559,8 +559,17 @@ impl<'a> CanonReader<'a> {
     }
 
     /// Read a length-prefixed byte string.
+    ///
+    /// The declared length is converted with a **checked** `u64 → usize`
+    /// rather than `as`. On a 64-bit target the cast is lossless and the
+    /// difference is invisible; on a 32-bit one it is not — a declared length
+    /// of `2^32 + 5` would truncate to `5`, and the reader would silently
+    /// accept a frame far shorter than the one the bytes claim. This is a
+    /// hostile-input boundary (the kernel and saturation certificate decoders
+    /// both read bytes of unknown provenance through it), so it fails closed
+    /// on the overlong length instead.
     pub fn read_bytes(&mut self) -> Result<&'a [u8], CanonError> {
-        let len = self.read_uint()? as usize;
+        let len = usize::try_from(self.read_uint()?).map_err(|_| CanonError::BadLength)?;
         let end = self.pos.checked_add(len).ok_or(CanonError::BadLength)?;
         let slice = self.buf.get(self.pos..end).ok_or(CanonError::BadLength)?;
         self.pos = end;
@@ -583,6 +592,29 @@ mod tests {
     #[test]
     fn version_tag_is_stable() {
         assert_eq!(CANON_VERSION, "canon/1");
+    }
+
+    /// A declared byte-string length far larger than the buffer fails closed
+    /// rather than truncating or panicking.
+    ///
+    /// **Honest scope:** on a 64-bit target `u64 -> usize` is lossless, so
+    /// this passed before the conversion was made checked — the overlong
+    /// length was caught one step later by `checked_add`/`get`. The checked
+    /// conversion is what makes the refusal hold on a 32-bit target, where
+    /// `2^32 + 5` would otherwise truncate to `5` and the reader would accept
+    /// a frame far shorter than the bytes declare. The test pins the intent
+    /// and the boundary; it cannot exhibit the truncation on this host.
+    #[test]
+    fn an_overlong_declared_length_is_refused() {
+        let mut w = CanonWriter::new();
+        w.write_uint(u64::MAX);
+        let bytes = w.finish();
+
+        let mut r = CanonReader::new(&bytes);
+        assert!(
+            matches!(r.read_bytes(), Err(CanonError::BadLength)),
+            "an overlong declared length must fail closed"
+        );
     }
 
     #[test]
