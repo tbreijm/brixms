@@ -50,7 +50,7 @@
 //! and it is — membership is a `BTreeSet` lookup with no predicate, range rule,
 //! or decision procedure at check time. The expansion below runs once, at
 //! registry construction, and its complete output is frozen in
-//! `vectors/primitive_relation_typing_arith_v{1,2}.json` so every row is
+//! `vectors/primitive_relation_typing_arith_v2.json` so every row is
 //! auditable byte-for-byte and a change to the expansion fails a gate rather
 //! than a review.
 //!
@@ -118,8 +118,8 @@ impl Canonical for JudgmentKind {
 ///
 /// The trade-off is that the id is not human-legible and the row set is only
 /// auditable through a frozen vector. Those vectors exist
-/// (`vectors/primitive_relation_typing_arith_v{1,2}.json`), and each lists
-/// every row in readable form beside its digests.
+/// (`vectors/primitive_relation_typing_arith_v2.json`), which lists every row
+/// in readable form beside its digests.
 ///
 /// Stage E is the first exercise of this: relocating one coercion edge changed
 /// 20 rows and therefore produced a genuinely different id, with no separate
@@ -611,10 +611,7 @@ mod tests {
             }
         }
         assert_eq!(expected, 30, "joinable operand pairs");
-        assert_eq!(
-            arith_rows().len(),
-            30 * OPERATORS.len()
-        );
+        assert_eq!(arith_rows().len(), 30 * OPERATORS.len());
     }
 
     /// `Div` is the operator the whole Stage B0 re-schema existed for: it has a
@@ -797,7 +794,10 @@ mod tests {
         // the 4 mixed Float pairs under `Div`, and the same 4 under each of
         // Add/Sub/Mul. `Float op Float` never crosses — both paths are empty.
         let shared = legacy.rows.intersection(&current.rows).count();
-        assert_eq!(shared, 100, "rows not crossing the lossy edge are unchanged");
+        assert_eq!(
+            shared, 100,
+            "rows not crossing the lossy edge are unchanged"
+        );
         assert_eq!(
             legacy.rows.len() - shared,
             20,

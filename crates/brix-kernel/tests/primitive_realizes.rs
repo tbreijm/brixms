@@ -21,10 +21,9 @@
 
 use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_kernel::{
-    acceptance, resolve_primitive_relation, typing_arith_v2, ArithOperatorV1,
-    ArithTypingInputV1, Budget, CoercionEdgeV1, CoercionKind, ExplicitTerm, NumericResultTypeV1,
-    NumericTypeNameV1, ObjectTerm, PrimitiveRelationId, Prop, RejectionReason, TermKind, Var,
-    Verdict,
+    acceptance, resolve_primitive_relation, typing_arith_v2, ArithOperatorV1, ArithTypingInputV1,
+    Budget, CoercionEdgeV1, CoercionKind, ExplicitTerm, NumericResultTypeV1, NumericTypeNameV1,
+    ObjectTerm, PrimitiveRelationId, Prop, RejectionReason, TermKind, Var, Verdict,
 };
 use brix_semantic::{ContextId, GeneratorId, PropositionId};
 
@@ -502,7 +501,11 @@ fn the_retired_relation_does_not_resolve() {
     }
     let retired = PrimitiveRelationId(Digest::from_bytes(bytes));
 
-    assert_ne!(retired, typing_arith_v2(), "V2 did not inherit V1's identity");
+    assert_ne!(
+        retired,
+        typing_arith_v2(),
+        "V2 did not inherit V1's identity"
+    );
     assert!(
         resolve_primitive_relation(&retired).is_none(),
         "the retired relation must not resolve"
