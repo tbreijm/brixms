@@ -518,6 +518,20 @@ mod tests {
 /// are four different problems.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum SourceReceiptError {
+    /// The source exceeds `ParseLimits::max_source_bytes`, refused **before**
+    /// UTF-8 validation rather than after it.
+    ///
+    /// Distinct from [`SourceReceiptError::Parse`], which also carries limit
+    /// refusals: this one is reachable only on the byte-slice boundary, where
+    /// the bound must fire before the O(n) validation work it exists to
+    /// prevent. A caller seeing this learns the same thing either way — the
+    /// input was refused by local policy, not judged (ADR-0022 D6).
+    SourceTooLarge {
+        /// The configured `max_source_bytes`.
+        limit: usize,
+        /// The rejected input's length in bytes.
+        found: usize,
+    },
     /// The supplied bytes are not UTF-8.
     InvalidUtf8,
     /// Parsing refused — malformed source, or a `ParseLimits` bound exceeded.
@@ -569,7 +583,22 @@ pub fn check_l3_audit_receipt_from_source_v1(
     step: &soc_core::journal::CommittedStep,
     context: ContextId,
 ) -> Result<soc_core::audit_receipt::SettlementAuditReceiptIdV1, SourceReceiptError> {
-    // 1. Bytes → text, bounded before anything is decoded or allocated.
+    // 1. Size first — before UTF-8 validation, which is O(n) work over the
+    //    whole slice and was previously reached before any bound applied.
+    //    `ParseLimits::max_source_bytes` documents itself as "checked before
+    //    UTF-8 conversion or tokenization" (`brix_syntax::ParseLimits`), and
+    //    `parse_bounded` does enforce it — but only once it already holds a
+    //    validated `&str`, so a byte-slice caller that validates first has
+    //    already done the work the bound exists to refuse. Bytes rather than
+    //    chars because it is the only measure available before decoding.
+    if source.len() > parse_limits.max_source_bytes {
+        return Err(SourceReceiptError::SourceTooLarge {
+            limit: parse_limits.max_source_bytes,
+            found: source.len(),
+        });
+    }
+
+    // 2. Bytes → text, now bounded before anything is decoded or allocated.
     let text = std::str::from_utf8(source).map_err(|_| SourceReceiptError::InvalidUtf8)?;
 
     // 2. Parse under this verifier's own resource policy. A refusal here is
