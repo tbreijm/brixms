@@ -159,6 +159,12 @@ fn deeply_nested_source_is_refused_rather_than_overflowing_the_stack() {
 }
 
 /// **D6.** An oversized source is refused before it is even decoded.
+///
+/// This previously asserted `SourceReceiptError::Parse`, which is produced
+/// *after* `from_utf8` has already validated the whole slice — so the test
+/// could not show the property its name and doc claimed. It now asserts the
+/// refusal that fires first; `oversized_source_is_refused_before_utf8_validation`
+/// below pins the ordering itself.
 #[test]
 fn oversized_source_is_refused_before_tokenization() {
     let (step, context, receipt, program) = fixture();
@@ -176,8 +182,49 @@ fn oversized_source_is_refused_before_tokenization() {
         &step,
         context,
     ) {
-        Err(SourceReceiptError::Parse(msg)) => {
-            assert!(msg.contains("source is"), "got {msg}");
+        Err(SourceReceiptError::SourceTooLarge { limit, found }) => {
+            assert_eq!(limit, 16);
+            assert_eq!(found, SRC.len());
+        }
+        other => panic!("oversized source must be refused, got {other:?}"),
+    }
+}
+
+/// **D6, the ordering itself.** `ParseLimits::max_source_bytes` documents
+/// itself as "checked before UTF-8 conversion or tokenization". Asserting a
+/// refusal on oversized input does not show that — a bound applied *after*
+/// `from_utf8` refuses the same input, having already done the O(n) work the
+/// bound exists to prevent.
+///
+/// So this feeds input that is **both** oversized and invalid UTF-8. The two
+/// checks disagree about which error to produce, and only the one that runs
+/// first can produce its own. `SourceTooLarge` is therefore the discriminating
+/// observation, and `InvalidUtf8` here would mean the ordering had regressed.
+#[test]
+fn oversized_source_is_refused_before_utf8_validation() {
+    let (step, context, receipt, program) = fixture();
+    let limits = ParseLimits {
+        max_source_bytes: 16,
+        ..ParseLimits::strict()
+    };
+    // Invalid UTF-8, and longer than the 16-byte bound.
+    let hostile = vec![0xffu8; 64];
+
+    match check_l3_audit_receipt_from_source_v1(
+        &hostile,
+        program,
+        limits,
+        &PlanLimitsV1::generous(),
+        &receipt,
+        &step,
+        context,
+    ) {
+        Err(SourceReceiptError::SourceTooLarge { limit, found }) => {
+            assert_eq!(limit, 16);
+            assert_eq!(found, 64);
+        }
+        Err(SourceReceiptError::InvalidUtf8) => {
+            panic!("the size bound must fire before UTF-8 validation, not after it")
         }
         other => panic!("oversized source must be refused, got {other:?}"),
     }
