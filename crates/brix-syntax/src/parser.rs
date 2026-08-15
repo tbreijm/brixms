@@ -297,6 +297,14 @@ impl Parser {
             let params = self.parse_comma_separated(TokenKind::CloseParen, |p| p.parse_ty())?;
             self.consume(TokenKind::CloseParen, "variant closing ')'")?;
             params
+        } else if self.check(&TokenKind::OpenBrace) {
+            // A named-field variant. Desugared to one positional parameter of
+            // anonymous record type — see `ast::Variant`.
+            self.advance();
+            let fields =
+                self.parse_comma_separated(TokenKind::CloseBrace, |p| p.parse_field_decl())?;
+            self.consume(TokenKind::CloseBrace, "variant closing '}'")?;
+            vec![Ty::Record(fields)]
         } else {
             Vec::new()
         };
