@@ -117,8 +117,68 @@ Lineage (honest): Datalog / Datomic (facts + rules + settlement) × dependent ty
 
 Each stage gets its own ADR/slice; L0 (this decision) is the blocker for all of it.
 
+## 7a. ⟨D-OPARROW⟩ An operation is a witness, not a configuration
+
+> **Ruled 2026-08-16.** An operator — comparison, arithmetic, field projection —
+> SHALL be modelled as a **generator realizing a transition between
+> configurations**, never as a configuration in its own right. Its *result* is a
+> configuration; the operation itself is the arrow. A surface operator therefore
+> needs no proposition-valued twin: the evidence for why it holds is carried by
+> the judgement, not by the result's type.
+
+This settles the first bullet of §8, and it settles it against an instinct
+imported from conventional languages.
+
+**The instinct, and why it is wrong here.** When `a.atk > b.atk` types to
+`Bool`, it looks like *boolean blindness*: hold `true` and you have forgotten
+why. In a conventional language that is a real loss, which is why dependently
+typed languages replace decidable comparison with a proposition carrying a
+proof. The reflex is to conclude that Brix needs the same — a second,
+proposition-valued comparison beside the `Bool`-valued one.
+
+**It does not, because nothing was thrown away.** In SOC a binding is not a
+value; it is a judgement `(context, proposition, outcome, evidence)`. The
+witness rides *alongside* the value rather than inside its type, so it survives
+a `Bool` result untouched. Demonstrated rather than asserted — `brix why` over
+`let wins = a.atk > 1500`:
+
+```text
+wins : Bool @Audited
+  derivation (provenance, not proof):
+    [tight] g_cmp_split
+    [tight] g_field_split
+    [tight] g_var
+    [tight] g_field
+    [tight] g_lit
+    [undischarged] g_cmp
+  capped at @Audited because these leaf generator(s) are not tight: g_cmp
+```
+
+The arrow is recorded, its discharge status is recorded, and the reason the
+grade is capped is recorded. A proposition-valued twin would duplicate all of
+that inside the type system and buy nothing.
+
+**Three consequences worth stating, because they are easy to get wrong later:**
+
+1. **A grade on an operation grades its *typing*, not its truth.** `@Audited`
+   above says the typing derivation rests on an undischarged leaf. It does not
+   say `1800 > 1500` is "probably true". Any surface rendering that blurs those
+   is an over-claim (ADR-0015 ⟨D-JUDGE⟩ obligation 2).
+2. **Discharging an operation is a claim about the arrow.** `g_cmp` is
+   undischarged because it asserts an operation semantics the kernel does not
+   own. Its eventual discharge route is therefore a kernel primitive relation
+   over `(operator, operand types) → result` — ⟨D-PRIM⟩'s mechanism, exactly as
+   `g_arith` is receiving on #53 — and **not** a new configuration family.
+3. **Do not add operations to the configuration vocabulary.** A new operator
+   adds a generator and, if it needs one, a kernel relation. It does not add a
+   config kind.
+
 ## 8. Open questions
-- **The arrow-kind in the surface.** Witnesses are morphisms, not objects; the kernel has `Realizes`/`ObjectTerm`, the surface has no notion of "arrow / correspondence" yet. Making it ergonomic is the crux.
+- ~~**The arrow-kind in the surface.**~~ **Settled** by §7a ⟨D-OPARROW⟩: an
+  operation is a generator, not an object, and the surface needs no arrow-typed
+  value because the judgement already carries the witness. What remains open is
+  narrower — the *ergonomics* of naming and composing witnesses explicitly, which
+  is the next bullet.
 - **Witness ergonomics.** Invisible-by-default yet one-keyword-away. Inference + handles is the plan; the exact affordances are unsolved.
 - **Regime-polymorphism.** Can code be generic over regimes (a proof reusable for typing *and* cost)? Powerful, unexplored.
 - **Dimensions.** Real dimensional analysis with *witnessed unit conversions* (post-parity backlog) — a good first "regime beyond typing."

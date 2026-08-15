@@ -449,6 +449,15 @@ pub fn g_cmp_split() -> GeneratorId {
 /// declines to trust because the host computed it. A comparison therefore
 /// types at `@Audited`, and discharging it would need the same ⟨D-PRIM⟩
 /// kernel-relation treatment `g_arith` is receiving.
+///
+/// **The result being a plain `Bool` loses nothing** (ADR-0010 ⟨D-OPARROW⟩).
+/// An operation is an *arrow*, not a configuration: `Bool` is the endpoint,
+/// and the reason it holds is carried by the judgement rather than by the
+/// result's type — `brix why` renders this leaf and its undischarged status.
+/// There is deliberately no proposition-valued twin of this generator.
+///
+/// Note also what the grade means here: `@Audited` grades the **typing**
+/// derivation, never the truth of the comparison.
 pub fn g_cmp() -> GeneratorId {
     GeneratorId::named("type.rule.cmp@1")
 }
