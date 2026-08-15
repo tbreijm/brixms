@@ -2,9 +2,10 @@
 //! registry (ADR-0015 ⟨D-PRIM⟩, §5 Stage B).
 //!
 //! The identity scheme this module mints — [`PrimitiveRelationId`],
-//! [`crate::SchemaId`] — is proposed in ADR-0023 ⟨D-RELID⟩/⟨D-SCHEMAID⟩, which
-//! also records the lossy-row decision (⟨D-LOSSYROW⟩) and the endpoint-vocabulary
-//! finding that blocks ADR-0015 Stage D.
+//! [`crate::SchemaId`] — is pinned by ADR-0023 ⟨D-RELID⟩/⟨D-SCHEMAID⟩ (Accepted),
+//! which also carries the lossy-row decision (⟨D-LOSSYROW⟩, confirmed), the
+//! sibling-domain constraint on the settlement lane (⟨D-DISJOINT⟩), and the
+//! endpoint-vocabulary finding that re-scoped ADR-0015 Stage D's gate 1.
 //!
 //! **What problem this solves.** `elaborate_tree` turns every derivation leaf
 //! into a *hypothesis*, so the kernel proves `leaves ⇒ conclusion` and never

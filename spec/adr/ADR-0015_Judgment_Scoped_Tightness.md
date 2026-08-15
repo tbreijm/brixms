@@ -2,7 +2,7 @@
 
 Status: **Accepted** (2026-08-08; Proposed 2026-08-07 — ⟨D-PRIM⟩'s constructor and registry-location decisions pinned after an external kernel-design consult, and the envelope-version question resolved against ADR-0013). Pins what a tight-generator discharge *means*, replaces the informal correspondence argument with a kernel-checked mechanism, and rules on `g_arith`, `g_arith_split`, and the numeric promotion edges.
 
-Date: 2026-08-07; revised 2026-08-08.
+Date: 2026-08-07; revised 2026-08-08; §5 errata and Stage D gate 1 re-scope 2026-08-15, per the maintainer ruling on #53 (R2, R3) after Stages B0/B/C/E landed. The errata are inline and additive: no decision is rewritten, and every corrected sentence is left in place beside its correction.
 
 Foundation: [ADR-0002](./ADR-0002_SOC_Constitution.md) §4.1 (authority table), §5.3 (fail closed), §10 PD-1 (the tight generated subcategory); [ADR-0003](./ADR-0003_Proof_Kernel_Profile.md) and [ADR-0013](./ADR-0013_Canonical_Certificate_Envelope.md) (kernel profile and frozen certificate envelope); `crates/soc-regimes/src/type_realization.rs` (`generator_is_tight`, `honest_result_outcome`); `crates/brix-elaborate/src/lib.rs` (`elaborate_tree`). Governs issue #53.
 
@@ -178,6 +178,10 @@ ArithTypingInputV1(operator, lhs_type, rhs_type, lhs_promotion_path, rhs_promoti
 
 where a promotion path is an ordered sequence of exact promotion-edge ids and the empty path is identity; `dst` is the exact result type.
 
+> **Erratum (2026-08-15).** "an ordered sequence of **exact** promotion-edge ids" is inaccurate and should be read as **"an ordered sequence of coercion-edge ids, each carrying its declared exactness."** The paths this schema carries were never restricted to exact edges — `Div` routes integer division through `field_of(Int) == Float`, so `7 / 2`'s path crosses `Int ↪ Float`, which this same stage tags `CoercionKind::Lossy`. Since Stage E ([ADR-0024](./ADR-0024_Lossy_Coercion_Family.md) ⟨D-LOSSYFAMILY⟩) relocated that edge out of the promotion family, they are not sequences of *promotion*-edge ids either.
+>
+> The wording had a live consequence: read strictly, it excluded integer division from `TypingArithV1`, and §7 makes a row set immutable, so exclusion would have left a whole operator undischargeable at the typing level without allocating a further version. [ADR-0023](./ADR-0023_Primitive_Relation_Identity.md) ⟨D-LOSSYROW⟩ recorded the ambiguity rather than resolving it silently; the maintainer ruling on #53 confirmed inclusion, on ⟨D-JUDGE⟩'s grounds that a typing relation claims typing and asserts nothing about exactness, value, or evaluation. The rows stay, and this reading is no longer available to re-litigate.
+
 Gate: the emitted `g_arith` leaf round-trips every material field; a fixture proves `1.0 + 2.0` and `7 / 2` now emit **distinguishable** leaves; existing typing results and grades are unchanged (this stage moves no grade).
 
 ### Stage B — the kernel primitive-relation registry ⟨D-PRIM⟩
@@ -211,16 +215,28 @@ Normatively:
 
 So `honest_result_outcome` must stop asking "is this generator in a set?" and start asking "was this leaf actually closed by an accepted primitive instance?"
 
+> **Amendment (2026-08-15) — gate 1 re-scoped, and why.** Gate 1 previously read: "`let x = 1 + 2` reaches `HasType(x, Int) @Proven`, and the kernel certificate names that exact proposition and context." That gate is **not reachable by discharging `g_arith`**, however completely Stage B succeeds, and it was unmeetable at the moment it was written down.
+>
+> This ADR predates Stage B0. A registry row is matched by canonical bytes, so the kernel must author *both* endpoints of every row, so both must be schemas it owns — which means the arithmetic sub-derivation now enters kernel vocabulary through `g_arith_input` and leaves it through `g_arith_result`, and each of those has one endpoint that is a `Ty` atom `soc-regimes` encodes. Reproducing that encoding in the TCB is the second semantic encoder §8.5 refuses to trust and `DEPS.md` forbids. So `1 + 2` was capped by two undischarged leaves before Stage B and is capped by two after it; only the *character* of the residue changed, from semantic claims to vocabulary renamings. [ADR-0023](./ADR-0023_Primitive_Relation_Identity.md) §4 reports the finding in full.
+>
+> Gate 1 is therefore re-scoped to what discharging `g_arith` actually buys, and the `@Proven` goal moves out to its own work item under the endpoint-vocabulary ruling (ADR-0023 §4.3 option 1, which ADR-0025 will pin). **Gates 2–4 stand: none of them depended on the cap moving** — except for one clause in gate 4, corrected inline below. This is a narrowing of what Stage D claims, not a weakening of what it must check: nothing here relaxes ⟨D-JUDGE⟩, and a leaf is still closed only by an accepted `PrimRealizes` term.
+
 Gates:
 
-1. `let x = 1 + 2` reaches `HasType(x, Int) @Proven`, and the kernel certificate names that exact proposition and context.
+1. `arithmetic_leaf_is_closed_by_an_accepted_primitive_instance` — for `let x = 1 + 2`, the certificate contains the `PrimRealizes` term closing the `g_arith` leaf, the kernel Accepted the resulting proof, and `honest_result_outcome` reports the leaf as closed. The result stays honestly `@Audited`, because the two vocabulary-bridge leaves either side of it are still `Hyp`, and a test asserts exactly that rather than tolerating it.
 2. `arithmetic_typing_proof_does_not_publish_evaluation` — no `EvaluatesTo` judgement is produced or implied. **This is a constitutional test, not a UI preference.**
 3. The CLI renders the proposition, never a bare expression-plus-grade. `brix why` continues to distinguish provenance from proof.
 4. `brix prove`'s composition-versus-result explanation is updated: with `g_arith` discharged, `1 + 2` is no longer capped, so the existing wording naming `g_arith` as a holdout must go — and must not be replaced by wording implying the *value* is proven.
 
+   > **Erratum (2026-08-15).** "`1 + 2` is no longer capped" is wrong, for the reason the gate-1 amendment above gives: the cap moves to `g_arith_input` and `g_arith_result`. The rest of the gate survives unchanged and is if anything sharper — `g_arith` genuinely stops being a holdout, so wording that names it as one must still go, it must still not be replaced by wording implying the value is proven, **and** the explanation must now name the two bridge leaves as what actually caps the result. A rendering that dropped `g_arith` without naming its replacements would leave the user unable to tell a capped result from an uncapped one.
+
 ### Stage E — exact promotion edges ⟨D-PROMOTE⟩
 
 Per-edge typing discharge for the four exact edges; relocate `Int→Float` to an explicitly lossy family. A value-level exact-edge discharge additionally requires totality, denotation preservation, injectivity, canonicality, path coherence, and kernel ownership — deferred until those value domains exist canonically.
+
+> **Erratum (2026-08-15).** The relocation half landed (#283). The **per-edge typing discharge half has no subject**, and requiring it here was an error introduced by this ADR's own Stage B0. Stage B0 replaced promotion *splicing* — one coercion leaf per edge — with promotion *data* carried inside `ArithTypingInputV1`, after which no coercion generator reaches a tree leaf anywhere in the workspace. `generator_is_tight` is therefore never consulted for a coercion edge, and a per-edge discharge would cap nothing while adding trusted TCB data with no consumer — the mechanism Stage D itself rejects. ⟨D-PROMOTE⟩'s shared-tightness-bit hazard cannot arise either: there is no bit to share.
+>
+> [ADR-0024](./ADR-0024_Lossy_Coercion_Family.md) ⟨D-EXACTCOVERED⟩ carries the ruling — the exact edges are already kernel-checked *as part of* the arithmetic relation, which keys on the whole `(operator, operand types, promotion paths) → result` tuple with each edge's generator id and declared exactness bound into the source bytes. This is a narrowing, not a repeal: if a future feature emits standalone coercion leaves, that feature brings the per-edge relation with it and ⟨D-PROMOTE⟩'s original shape applies unchanged.
 
 ## 6. What a future arithmetic *value* layer must supply
 
