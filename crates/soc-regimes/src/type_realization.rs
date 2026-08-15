@@ -3015,17 +3015,18 @@ mod tests {
     #[test]
     fn arithmetic_rule_is_a_kernel_primitive() {
         use brix_kernel::{
-            acceptance, resolve_primitive_relation, typing_arith_v1, typing_arith_v2, Budget,
+            acceptance, resolve_primitive_relation, typing_arith_v2, Budget, CoercionEdgeV1,
             ExplicitTerm, NumericResultTypeV1, ObjectTerm, Prop, TermKind, Verdict,
         };
         use brix_semantic::PropositionId;
 
-        // Stage E: the emission now names the lossy edge under the conversion
-        // family, so the live relation is V2. V1 is still resolvable (§7) and
-        // is checked below to *reject* the relocated rows — which is the
-        // immutability discipline visibly working rather than merely asserted.
+        // Stage E: the emission names the lossy edge under the conversion
+        // family, so the live relation is V2. The superseded V1 was retired
+        // (ADR-0024 §3), so instead of resolving it, each relocated row is
+        // re-spelled below under the *legacy* naming and the current relation
+        // is required to reject it — the immutability discipline visibly
+        // working rather than merely asserted, and without a second row table.
         let relation = resolve_primitive_relation(&typing_arith_v2()).expect("TypingArithV2");
-        let superseded = resolve_primitive_relation(&typing_arith_v1()).expect("TypingArithV1");
         let mut relocated = 0;
         let ctx_id = ContextId::root();
         let ops = [ArithOp::Add, ArithOp::Sub, ArithOp::Mul, ArithOp::Div];
@@ -3112,22 +3113,48 @@ mod tests {
                     "{op:?} {lhs} {rhs}: the relation must admit exactly one result type"
                 );
 
-                // The superseded relation admits this row only when the path
-                // does not cross the relocated edge.
-                let crosses_lossy = match &src_obj {
-                    TyObj::Atom(CfgAtom::ArithInput(i)) => i
-                        .lhs_promotion_path
-                        .iter()
-                        .chain(i.rhs_promotion_path.iter())
-                        .any(|e| e.kind == CoercionKind::Lossy),
+                // Re-spell this row's paths the way the retired V1 did, with
+                // every edge in the promotion family. If the path crosses the
+                // relocated edge that is a different source object, and the
+                // current relation must not admit it.
+                let input = match &src_obj {
+                    TyObj::Atom(CfgAtom::ArithInput(i)) => i.clone(),
                     _ => unreachable!("checked above"),
                 };
+                let as_legacy = |path: &[CoercionEdgeV1]| -> Vec<CoercionEdgeV1> {
+                    path.iter()
+                        .map(|e| CoercionEdgeV1 {
+                            generator: match e.kind {
+                                CoercionKind::Exact => e.generator,
+                                CoercionKind::Lossy => {
+                                    GeneratorId::named("type.rule.num.promote.Int_Float@1")
+                                }
+                            },
+                            kind: e.kind,
+                        })
+                        .collect()
+                };
+                let crosses_lossy = input
+                    .lhs_promotion_path
+                    .iter()
+                    .chain(input.rhs_promotion_path.iter())
+                    .any(|e| e.kind == CoercionKind::Lossy);
+                let legacy = ArithTypingInputV1 {
+                    lhs_promotion_path: as_legacy(&input.lhs_promotion_path),
+                    rhs_promotion_path: as_legacy(&input.rhs_promotion_path),
+                    ..input.clone()
+                };
+                let legacy_src = PropositionId(legacy.config_id().digest());
                 assert_eq!(
-                    superseded.admits(&src, &dst),
+                    legacy_src == src,
                     !crosses_lossy,
-                    "{op:?} {lhs} {rhs}: V1 must admit exactly the rows Stage E did not move"
+                    "{op:?} {lhs} {rhs}: only a lossy-crossing path is re-spelled"
                 );
                 if crosses_lossy {
+                    assert!(
+                        !relation.admits(&legacy_src, &dst),
+                        "{op:?} {lhs} {rhs}: the legacy spelling must not be admitted"
+                    );
                     relocated += 1;
                 }
 

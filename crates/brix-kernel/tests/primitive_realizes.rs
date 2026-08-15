@@ -21,7 +21,7 @@
 
 use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_kernel::{
-    acceptance, resolve_primitive_relation, typing_arith_v1, typing_arith_v2, ArithOperatorV1,
+    acceptance, resolve_primitive_relation, typing_arith_v2, ArithOperatorV1,
     ArithTypingInputV1, Budget, CoercionEdgeV1, CoercionKind, ExplicitTerm, NumericResultTypeV1,
     NumericTypeNameV1, ObjectTerm, PrimitiveRelationId, Prop, RejectionReason, TermKind, Var,
     Verdict,
@@ -75,9 +75,9 @@ fn expected_realizes(src: ObjectTerm, dst: ObjectTerm) -> Prop {
 }
 
 fn prim(src: ObjectTerm, dst: ObjectTerm) -> TermKind {
-    // The *current* relation (ADR-0015 Stage E). `TypingArithV1` is superseded
-    // but still resolvable; `the_superseded_relation_is_still_resolvable_and_distinct`
-    // covers it.
+    // The *current* relation (ADR-0015 Stage E), and the only one compiled in:
+    // `TypingArithV1` was retired (ADR-0024 §3), which
+    // `the_retired_relation_does_not_resolve` covers.
     TermKind::PrimRealizes {
         relation: typing_arith_v2(),
         src,
@@ -376,7 +376,7 @@ fn every_material_field_is_bound_into_the_decision() {
 /// closure (§8.5).
 #[test]
 fn arithmetic_rule_has_no_unchecked_join() {
-    let relation = resolve_primitive_relation(&typing_arith_v1()).expect("resolves");
+    let relation = resolve_primitive_relation(&typing_arith_v2()).expect("resolves");
 
     for (lhs, rhs) in [
         (NumericTypeNameV1::Float, NumericTypeNameV1::Rat),
@@ -476,52 +476,72 @@ fn the_relation_id_is_bound_into_the_term() {
     assert_ne!(real.canon_bytes(), other.canon_bytes());
 }
 
-/// ADR-0015 §7 in practice: the superseded relation is still resolvable, is a
-/// *different* relation, and the two disagree on exactly the rows Stage E moved.
+/// The retired `TypingArithV1` is gone from the registry, and its absence fails
+/// closed (ADR-0024 §3, per the maintainer ruling on #53).
 ///
-/// The rows that did not move are accepted under both ids — which is the point
-/// of a content-derived identity. Naming V1 does not silently get you V2's
-/// semantics, and naming either one gets you exactly the row set that existed
-/// when that id was minted.
+/// The id is spelled as a literal rather than computed, because that is the
+/// whole property under test: this exact digest was a real relation identity in
+/// #282, and after retirement the kernel must resolve it to `None`. Per
+/// ADR-0015 §7 that means the kernel has not introduced the fact — never that
+/// its negation holds, and never that the id has been reinterpreted as some
+/// other row set.
+///
+/// Retiring rather than retaining follows ⟨D-EXACTCOVERED⟩'s own reasoning: no
+/// certificate naming V1 exists or can exist yet, since `elaborate_tree` still
+/// emits every leaf as a `Hyp`, so retaining it would be trusted TCB data with
+/// nothing consulting it — and its rows spelled a generator family the lattice
+/// no longer declares.
+const RETIRED_TYPING_ARITH_V1: &str =
+    "f285a12c39abc6a493938646ac06d063bbc8ed88df60c015805d5be2516db338";
+
 #[test]
-fn the_superseded_relation_is_still_resolvable_and_distinct() {
-    assert_ne!(typing_arith_v1(), typing_arith_v2());
+fn the_retired_relation_does_not_resolve() {
+    let mut bytes = [0u8; 32];
+    for (i, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&RETIRED_TYPING_ARITH_V1[i * 2..i * 2 + 2], 16).expect("hex");
+    }
+    let retired = PrimitiveRelationId(Digest::from_bytes(bytes));
 
-    let v1 = resolve_primitive_relation(&typing_arith_v1()).expect("V1 still resolves");
-    let v2 = resolve_primitive_relation(&typing_arith_v2()).expect("V2 resolves");
-    assert_eq!(v1.rows.len(), v2.rows.len());
+    assert_ne!(retired, typing_arith_v2(), "V2 did not inherit V1's identity");
+    assert!(
+        resolve_primitive_relation(&retired).is_none(),
+        "the retired relation must not resolve"
+    );
 
-    // A row with no promotion at all (`1 + 2`) is in both, and is accepted
-    // under either id.
+    // And a term naming it is rejected rather than silently checked against the
+    // surviving relation. `1 + 2` is a row both versions shared, so if the
+    // kernel were falling back to V2 this would be Accepted.
     let src = src_of(&add_int_int());
     let dst = dst_of(&result(NumericTypeNameV1::Int));
-    for relation in [typing_arith_v1(), typing_arith_v2()] {
-        let verdict = acceptance(
-            &ctx(),
-            &expected_realizes(src.clone(), dst.clone()),
-            &ExplicitTerm::new(
-                ctx(),
-                TermKind::PrimRealizes {
-                    relation,
-                    src: src.clone(),
-                    dst: dst.clone(),
-                },
-            ),
-            budget(),
-        );
-        assert!(
-            matches!(verdict, Verdict::Accepted(_)),
-            "an unmoved row must be accepted under both relation ids, got {verdict:?}"
-        );
-    }
+    let verdict = acceptance(
+        &ctx(),
+        &expected_realizes(src.clone(), dst.clone()),
+        &ExplicitTerm::new(
+            ctx(),
+            TermKind::PrimRealizes {
+                relation: retired,
+                src,
+                dst,
+            },
+        ),
+        budget(),
+    );
+    assert!(
+        matches!(
+            verdict,
+            Verdict::Rejected(RejectionReason::UnknownPrimitiveRelation(_))
+        ),
+        "an unmoved row must not be laundered through the retired id, got {verdict:?}"
+    );
 }
 
-/// A row whose path crosses the relocated edge is accepted **only** under the
-/// relation whose naming produced it. This is the immutability discipline doing
-/// real work: the same `7 / 2` source object under the two namings is two
-/// different configurations, and neither relation launders the other's.
+/// A row whose path crosses the relocated edge is accepted **only** when it
+/// names the edge the way the surviving relation does. The same `7 / 2` source
+/// object under the two namings is two different configurations, and retiring
+/// V1 removed the one that admitted the legacy spelling — so the legacy row is
+/// now simply not a row anywhere.
 #[test]
-fn a_relocated_row_is_accepted_only_under_its_own_relation() {
+fn a_legacy_named_row_is_not_admitted_by_the_current_relation() {
     let lossy_edge = |prefix: &str| CoercionEdgeV1 {
         generator: GeneratorId::named(&format!("{prefix}.Int_Float@1")),
         kind: CoercionKind::Lossy,
@@ -540,14 +560,10 @@ fn a_relocated_row_is_accepted_only_under_its_own_relation() {
     assert_ne!(legacy.config_id(), current.config_id());
 
     let dst = dst_of(&result(NumericTypeNameV1::Float));
-    let cases = [
-        ("legacy under V1", &legacy, typing_arith_v1(), true),
-        ("legacy under V2", &legacy, typing_arith_v2(), false),
-        ("current under V1", &current, typing_arith_v1(), false),
-        ("current under V2", &current, typing_arith_v2(), true),
-    ];
-
-    for (label, input, relation, want_accepted) in cases {
+    for (label, input, want_accepted) in [
+        ("legacy naming", &legacy, false),
+        ("current naming", &current, true),
+    ] {
         let src = src_of(input);
         let verdict = acceptance(
             &ctx(),
@@ -555,7 +571,7 @@ fn a_relocated_row_is_accepted_only_under_its_own_relation() {
             &ExplicitTerm::new(
                 ctx(),
                 TermKind::PrimRealizes {
-                    relation,
+                    relation: typing_arith_v2(),
                     src,
                     dst: dst.clone(),
                 },
