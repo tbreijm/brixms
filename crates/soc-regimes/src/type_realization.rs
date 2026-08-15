@@ -1796,20 +1796,29 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             sorted_fields.dedup_by(|a, b| a.0 == b.0);
 
             if sorted_fields.is_empty() {
+                // No split leaf: `{}` has no subexpressions, so there is
+                // nothing to decompose. This branch used to emit
+                // `Seq(g_record_split{Expr({}) -> Expr({})}, g_record_empty)`,
+                // and that first leaf was a padded step — `src == dst`, the
+                // faked intermediate config ADR-0007 §1 calls unsound and its
+                // §5 criterion 2 forbids ("no endpoint equals its neighbor by
+                // padding"), and the shape ADR-0018 §4 retired the flat lane
+                // over. It passed `elaborate_tree`'s `Seq` middle-match for
+                // exactly the reason ADR-0007 §1 gives: a padded middle
+                // `dst ≡ dst` always matches syntactically.
+                //
+                // It was also emitted under `g_record_split`, which *is*
+                // discharged tight — but on ⟨D-SPLIT⟩'s ground that a split
+                // "yields exactly two ordered child obligations", which at
+                // zero arity it does not. Nothing was over-graded, because
+                // `g_record_empty` capped the result at `@Audited`; the hazard
+                // was that discharging `g_record_empty` would have published
+                // `@Proven` over the padded step.
                 let rec_ty = Ty::Record(vec![]);
-                let split = TyTree::Leaf {
-                    generator: g_record_split(),
-                    src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
-                    dst: TyObj::Atom(CfgAtom::Expr(expr.clone())),
-                };
-                let record_leaf = TyTree::Leaf {
+                let tree = TyTree::Leaf {
                     generator: g_record_empty(),
                     src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
                     dst: TyObj::Atom(CfgAtom::Type(rec_ty.clone())),
-                };
-                let tree = TyTree::Seq {
-                    left: Box::new(split),
-                    right: Box::new(record_leaf),
                 };
                 return Ok((rec_ty, tree, st));
             }
@@ -1897,19 +1906,16 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                 }
                 let declared_fields = declared_fields.clone();
                 if args.is_empty() {
-                    let split = TyTree::Leaf {
-                        generator: g_ctor_split(),
-                        src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
-                        dst: TyObj::Atom(CfgAtom::Expr(expr.clone())),
-                    };
-                    let ctor_leaf = TyTree::Leaf {
+                    // No split leaf: a nullary constructor has no argument
+                    // subexpressions, so there is nothing to decompose. See
+                    // the empty-record branch above for the full reasoning —
+                    // this branch carried the identical padded step under
+                    // `g_ctor_split`, which is likewise discharged tight on a
+                    // ⟨D-SPLIT⟩ ground that does not hold at zero arity.
+                    let tree = TyTree::Leaf {
                         generator: g_ctor_nullary(),
                         src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
                         dst: TyObj::Atom(CfgAtom::Type(sum_ty.clone())),
-                    };
-                    let tree = TyTree::Seq {
-                        left: Box::new(split),
-                        right: Box::new(ctor_leaf),
                     };
                     return Ok((sum_ty.clone(), tree, st));
                 }
@@ -2162,7 +2168,8 @@ mod tests {
         }
     }
 
-    /// The counterexample ADR-0018 §4 preserves.
+    /// The counterexample ADR-0018 §4 preserves, over a corpus rather than one
+    /// expression.
     ///
     /// The retired flat lane padded its configuration chain to
     /// `[src, dst, dst, …, dst]`, which passes syntactic `RealizesComp`
@@ -2170,38 +2177,134 @@ mod tests {
     /// because no generator realizes `(dst, dst)`. The deleted
     /// `test_multi_step_elaboration_tree_vs_linear_tension` demonstrated
     /// exactly that, using a `NonPaddedSemantics` whose whole content was
-    /// `src != dst`.
+    /// `src != dst`. ADR-0007 §1 states it directly — "faking intermediate
+    /// configs is unsound" — and its §5 criterion 2 requires that no endpoint
+    /// equal its neighbour by padding.
     ///
-    /// Stated positively on the surviving path: the tree derivation carries
-    /// no degenerate step, so it would satisfy that same predicate. If
-    /// inference ever starts padding tree endpoints, this fires.
+    /// **This test used to run over `(\x. x) 42` alone, and its claim that it
+    /// would fire "if inference ever starts padding tree endpoints" was
+    /// therefore false.** Inference *was* padding, in the two zero-arity
+    /// branches: `{}` emitted `g_record_split{Expr({}) -> Expr({})}` and a
+    /// nullary constructor emitted the matching `g_ctor_split` step, both under
+    /// generators discharged tight. Neither was over-graded, because the
+    /// sibling leaf capped the result — but that made the defect invisible
+    /// exactly until someone discharged the sibling. The corpus below is what
+    /// makes the claim true; extend it whenever a branch of `infer_tree` gains
+    /// a new derivation shape.
     #[test]
     fn tree_derivation_carries_no_padded_step() {
-        // The same expression the retired test used: (\x. x) 42.
-        let expr = Expr::App(
-            Box::new(Expr::Lam(
-                "x".to_string(),
-                Box::new(Expr::Var("x".to_string())),
-            )),
-            Box::new(Expr::Lit(42)),
+        let opt = Ty::Sum(
+            "Opt".into(),
+            vec![
+                ("None".into(), vec![]),
+                ("Some".into(), vec![Ty::Con("Int")]),
+            ],
         );
-        let (_, derivation) =
-            audited_type_check_tree(&expr, &TyCtx::new(), ContextId::root()).expect("audits");
 
-        for leaf in derivation.tree().leaves() {
-            match leaf {
-                RealizesTree::Leaf {
-                    generator,
-                    src,
-                    dst,
-                } => assert_ne!(
-                    src,
-                    dst,
-                    "leaf {:?} is a degenerate src == dst step — the padding ADR-0007 §1 \
-                     removed and ADR-0018 retired the flat lane over",
-                    generator_name(generator).unwrap_or_else(|| generator.to_hex())
+        let corpus: Vec<(&str, Expr, TyCtx)> = vec![
+            // The expression the retired test used.
+            (
+                "application of a lambda",
+                Expr::App(
+                    Box::new(Expr::Lam(
+                        "x".to_string(),
+                        Box::new(Expr::Var("x".to_string())),
+                    )),
+                    Box::new(Expr::Lit(42)),
                 ),
-                other => panic!("leaves() must yield only Leaf nodes, got {other:?}"),
+                TyCtx::new(),
+            ),
+            ("literal", Expr::Lit(1), TyCtx::new()),
+            // The two zero-arity branches this test previously never reached.
+            ("empty record", Expr::Record(vec![]), TyCtx::new()),
+            (
+                "nullary constructor",
+                Expr::Ctor(opt.clone(), "None".into(), vec![]),
+                TyCtx::new(),
+            ),
+            // Their non-empty counterparts, so a regression that padded the
+            // general path instead would also be caught.
+            (
+                "record with fields",
+                Expr::Record(vec![("a".into(), Expr::Lit(1))]),
+                TyCtx::new(),
+            ),
+            (
+                "constructor with a payload",
+                Expr::Ctor(opt.clone(), "Some".into(), vec![Expr::Lit(1)]),
+                TyCtx::new(),
+            ),
+            (
+                "field access",
+                Expr::Field(
+                    Box::new(Expr::Record(vec![("a".into(), Expr::Lit(1))])),
+                    "a".into(),
+                ),
+                TyCtx::new(),
+            ),
+            (
+                "arithmetic",
+                Expr::Arith(ArithOp::Add, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2))),
+                TyCtx::new(),
+            ),
+        ];
+
+        for (label, expr, ctx) in corpus {
+            let (_, derivation) = audited_type_check_tree(&expr, &ctx, ContextId::root())
+                .unwrap_or_else(|e| panic!("{label} must type: {e:?}"));
+
+            for leaf in derivation.tree().leaves() {
+                match leaf {
+                    RealizesTree::Leaf {
+                        generator,
+                        src,
+                        dst,
+                    } => assert_ne!(
+                        src,
+                        dst,
+                        "{label}: leaf {:?} is a degenerate src == dst step — the padding \
+                         ADR-0007 §1 removed and ADR-0018 retired the flat lane over",
+                        generator_name(generator).unwrap_or_else(|| generator.to_hex())
+                    ),
+                    other => panic!("leaves() must yield only Leaf nodes, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// The two zero-arity branches derive as a single leaf, with no split.
+    ///
+    /// Stated separately from the padding test because it pins the *shape*, not
+    /// just the absence of a degenerate step: there are no subexpressions to
+    /// decompose, so emitting a split at all was the error. If either branch
+    /// regains one, this fires even if that split were somehow non-degenerate.
+    #[test]
+    fn the_zero_arity_branches_emit_no_split() {
+        let opt = Ty::Sum(
+            "Opt".into(),
+            vec![
+                ("None".into(), vec![]),
+                ("Some".into(), vec![Ty::Con("Int")]),
+            ],
+        );
+
+        for (label, expr, want) in [
+            ("empty record", Expr::Record(vec![]), g_record_empty()),
+            (
+                "nullary constructor",
+                Expr::Ctor(opt, "None".into(), vec![]),
+                g_ctor_nullary(),
+            ),
+        ] {
+            let (_, derivation) =
+                audited_type_check_tree(&expr, &TyCtx::new(), ContextId::root()).expect("types");
+            let leaves = derivation.tree().leaves();
+            assert_eq!(leaves.len(), 1, "{label}: expected a single leaf");
+            match leaves[0] {
+                RealizesTree::Leaf { generator, .. } => {
+                    assert_eq!(generator, &want, "{label}: wrong generator");
+                }
+                other => panic!("{label}: expected a Leaf, got {other:?}"),
             }
         }
     }
