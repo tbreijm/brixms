@@ -158,6 +158,23 @@ The arrow is recorded, its discharge status is recorded, and the reason the
 grade is capped is recorded. A proposition-valued twin would duplicate all of
 that inside the type system and buy nothing.
 
+**Chained operators are composition, not conjunction.** If an operation is an
+arrow then `a < b` is `a → b`, `b < c` is `b → c`, they share the object `b`,
+and transitivity *is* composition — the existing `then` (∘, `RealizesComp`),
+never the parallel `and` (⊗). "The chain holds" reduces to "the composite
+exists", because composing requires possessing both links; no conjunction
+operator is needed and none should be added for this purpose. The same reading
+applies to `a + b + c` as composition of endomorphisms.
+
+This is **not yet available**, and the obstruction is worth naming precisely so
+it is not mistaken for a missing operator: the comparison shipped in L2 is an
+arrow in the *typing* regime, `Prod(Type, Type) → Type(Bool)`, and two of those
+do not compose. Chaining needs the **order arrow between the compared values**,
+`Expr(a) → Expr(b)` — a value-level ordering regime. `CfgAtom::Expr` already
+makes expressions configurations, so the encoding is expressible today; what is
+missing is the regime, which is the "first regime beyond typing" §8 has been
+pointing at.
+
 **Three consequences worth stating, because they are easy to get wrong later:**
 
 1. **A grade on an operation grades its *typing*, not its truth.** `@Audited`

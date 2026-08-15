@@ -448,12 +448,22 @@ impl Parser {
         let rhs = self.parse_expr_bin2()?;
         if self.peek_cmp() {
             // Deliberately refused rather than read as `(a < b) < c`, which is
-            // a mistake wherever it type-checks. Refusing now also keeps the
-            // door open: chained comparison can be *defined* later without
-            // breaking any program that exists today, whereas shipping the
-            // left-associative reading and changing it would be silent
-            // breakage. Chaining needs a boolean conjunction, and `and` is
-            // already parallel witness composition.
+            // a mistake wherever it type-checks, and refused *now* so that
+            // chaining can be defined later without breaking a program that
+            // exists today.
+            //
+            // What it will mean is already settled, and it is not conjunction:
+            // under ADR-0010 ⟨D-OPARROW⟩ an operation is an arrow, so `a < b`
+            // and `b < c` share the object `b` and chaining is exactly their
+            // **composition** — the existing `then` (∘, `RealizesComp`), not
+            // the parallel `and` (⊗). "The chain holds" is then just "the
+            // composite exists", since composing requires both links.
+            //
+            // It is not available yet because this comparison is an arrow in
+            // the *typing* regime (`Prod(Type, Type) -> Type(Bool)`), and two
+            // of those do not compose. Chaining needs the order arrow between
+            // the compared values (`Expr(a) -> Expr(b)`), which is a
+            // value-level regime this fragment does not have.
             return Err(self.error("comparison operators do not chain; parenthesise instead"));
         }
         Ok(Expr::Bin {
