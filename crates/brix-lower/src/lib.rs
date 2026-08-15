@@ -68,6 +68,10 @@ pub struct LowerCtx<'a> {
     pub fns: &'a BTreeMap<String, &'a ast::Callable>,
     pub configs: &'a BTreeMap<String, &'a ast::ConfigBody>,
     pub ctors: &'a BTreeMap<String, (TrTy, String, Vec<TrTy>)>,
+    /// Why a constructor is absent from `ctors`, when its declaring `config`
+    /// was rejected. Consulted before reporting `Unresolved`, so the
+    /// diagnostic names the broken declaration rather than the correct use.
+    pub ctor_faults: &'a BTreeMap<String, LowerError>,
 }
 
 /// Errors surfaced while lowering a surface construct not yet supported by the
@@ -103,6 +107,25 @@ pub enum LowerError {
     /// earned — an over-claim (epistemic erasure). `actual` may only weaken to
     /// `asserted`, never strengthen.
     GradeErasure { asserted: String, actual: String },
+    /// A sum variant's parameter names a type that is neither a builtin nor a
+    /// declared `config`.
+    ///
+    /// Reported against the **declaration**, not against a later use of the
+    /// constructor. Before this existed, an unresolvable parameter silently
+    /// dropped the whole sum, and the only symptom was `Unresolved` on every
+    /// one of its constructors — an error pointing at correct code.
+    UnknownVariantType {
+        config: String,
+        variant: String,
+        ty: String,
+    },
+    /// A `config` refers to itself, directly or through other configs.
+    ///
+    /// Not yet supported: the native type has no by-name constructor, so a
+    /// referenced config is expanded in place and a cyclic one would not
+    /// terminate (see `resolve_config_ty`). Refused by name rather than
+    /// approximated. `cycle` closes on its first element.
+    RecursiveConfig { config: String, cycle: Vec<String> },
 }
 
 impl From<TypeError> for LowerError {
@@ -166,21 +189,97 @@ pub fn diagnose_gap(err: &LowerError) -> ProofGap {
         LowerError::ElaborationRefused(err) => ProofGap::Conflict(format!(
             "elaboration boundary refused the source judgement: {err:?}"
         )),
+        // A positive obstruction: the declaration names a type that does not
+        // exist, which no amount of further search would resolve.
+        LowerError::UnknownVariantType {
+            config,
+            variant,
+            ty,
+        } => ProofGap::Conflict(format!(
+            "config '{config}' variant '{variant}' takes '{ty}', which is not a builtin \
+             (Int/Str/Float) or a declared config"
+        )),
+        // Not an obstruction in the program — a fragment the language does not
+        // cover yet. The distinction matters: `whynot` must not tell a user
+        // their correct program is wrong.
+        LowerError::RecursiveConfig { config, cycle } => ProofGap::UnsupportedFragment(format!(
+            "config '{config}' is recursive ({}), which L2 does not support yet",
+            cycle.join(" -> ")
+        )),
     }
 }
 
-fn lower_prim_ty(t: &ast::Ty) -> Result<TrTy, LowerError> {
+/// Resolve a `config`-declared type name to its native [`TrTy`], inlining
+/// referenced configs so a sum variant can carry another config as a parameter.
+///
+/// **Why inlining rather than a reference.** `soc_regimes::type_realization::Ty`
+/// has no by-name constructor — a sum is `Sum(name, variants)` with its
+/// variants inline — so a referenced config must be expanded in place. That is
+/// sound because the expansion carries the referent's own name, keeping the
+/// type nominal rather than structural; `Sum("Attribute", …)` is still
+/// `Attribute` wherever it appears. It is also why a *recursive* config cannot
+/// be expanded: the expansion would not terminate. That case is refused by
+/// name below rather than approximated.
+///
+/// `stack` carries the configs currently being expanded, so a cycle is detected
+/// at the point it closes rather than by depth-limiting.
+fn resolve_config_ty(
+    t: &ast::Ty,
+    configs: &BTreeMap<String, &ast::ConfigBody>,
+    stack: &mut Vec<String>,
+) -> Result<TrTy, ConfigTyError> {
     match t {
-        ast::Ty::Graded(inner, _) => lower_prim_ty(inner),
-        ast::Ty::Named(n) => match n.as_str() {
-            "Int" => Ok(TrTy::Con("Int")),
-            "Str" => Ok(TrTy::Con("Str")),
-            "Float" => Ok(TrTy::Con("Float")),
-            other => Err(LowerError::Unsupported(format!(
-                "sum field type '{other}' not supported yet (only Int/Str/Float; recursive/custom sum fields are a follow-up)"
-            ))),
-        },
+        ast::Ty::Graded(inner, _) => resolve_config_ty(inner, configs, stack),
+        ast::Ty::Named(n) => {
+            match n.as_str() {
+                "Int" => return Ok(TrTy::Con("Int")),
+                "Str" => return Ok(TrTy::Con("Str")),
+                "Float" => return Ok(TrTy::Con("Float")),
+                _ => {}
+            }
+            let Some(body) = configs.get(n) else {
+                return Err(ConfigTyError::Unknown(n.clone()));
+            };
+            if stack.iter().any(|c| c == n) {
+                let mut cycle = stack.clone();
+                cycle.push(n.clone());
+                return Err(ConfigTyError::Recursive(cycle));
+            }
+            stack.push(n.clone());
+            let resolved = match body {
+                ast::ConfigBody::Sum(variants) => {
+                    let mut out = Vec::new();
+                    for v in variants {
+                        let mut tys = Vec::new();
+                        for p in &v.params {
+                            tys.push(resolve_config_ty(p, configs, stack)?);
+                        }
+                        out.push((v.name.clone(), tys));
+                    }
+                    TrTy::Sum(n.clone(), out)
+                }
+                ast::ConfigBody::Record(decls) => {
+                    let mut out = Vec::new();
+                    for d in decls {
+                        out.push((d.name.clone(), resolve_config_ty(&d.ty, configs, stack)?));
+                    }
+                    TrTy::Record(out)
+                }
+            };
+            stack.pop();
+            Ok(resolved)
+        }
     }
+}
+
+/// Why a variant parameter type could not be resolved. Internal to the sum
+/// pass; converted to a [`LowerError`] that names the *declaration* at fault.
+enum ConfigTyError {
+    /// The name is neither a builtin nor a declared config.
+    Unknown(String),
+    /// The config refers to itself, directly or through other configs. Carries
+    /// the chain, closing on its first element.
+    Recursive(Vec<String>),
 }
 
 fn lower_pattern(p: &ast::Pattern) -> Result<TrPattern, LowerError> {
@@ -218,6 +317,14 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
                     return Ok(TrExpr::Ctor(sum_ty.clone(), variant.clone(), vec![]));
                 }
             }
+            // A nullary constructor whose `config` was rejected would otherwise
+            // fall through to `Var` and surface as `Unbound` — an error about
+            // the use rather than the declaration. `ctor_faults` only ever
+            // holds names declared as variants, so this cannot capture an
+            // ordinary variable.
+            if let Some(fault) = ctx.ctor_faults.get(name) {
+                return Err(fault.clone());
+            }
             Ok(TrExpr::Var(name.clone()))
         }
         ast::Expr::Call { func, args } => {
@@ -248,6 +355,8 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
                     .map(|arg| lower_expr(arg, ctx))
                     .collect::<Result<Vec<_>, LowerError>>()?;
                 Ok(TrExpr::Ctor(sum_ty.clone(), variant.clone(), lowered_args))
+            } else if let Some(fault) = ctx.ctor_faults.get(func) {
+                Err(fault.clone())
             } else {
                 Err(LowerError::Unresolved(func.clone()))
             }
@@ -469,30 +578,55 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
     let mut ctors = BTreeMap::new();
     let mut ambiguous_ctors = BTreeSet::new();
 
+    // Why a sum was dropped, keyed by each of its constructor names, so a later
+    // use reports the declaration's real fault instead of `Unresolved`.
+    let mut ctor_faults: BTreeMap<String, LowerError> = BTreeMap::new();
+
     for item in &m.items {
         if let Item::Config(c) = item {
             if let ast::ConfigBody::Sum(variants) = &c.body {
                 let mut variant_tys = Vec::new();
-                let mut valid = true;
+                let mut fault = None;
                 for v in variants {
                     let mut field_tys = Vec::new();
                     for param in &v.params {
-                        match lower_prim_ty(param) {
+                        let mut stack = vec![c.name.clone()];
+                        match resolve_config_ty(param, &configs, &mut stack) {
                             Ok(ty) => field_tys.push(ty),
-                            Err(_) => {
-                                valid = false;
+                            Err(ConfigTyError::Unknown(ty)) => {
+                                fault = Some(LowerError::UnknownVariantType {
+                                    config: c.name.clone(),
+                                    variant: v.name.clone(),
+                                    ty,
+                                });
+                                break;
+                            }
+                            Err(ConfigTyError::Recursive(cycle)) => {
+                                fault = Some(LowerError::RecursiveConfig {
+                                    config: c.name.clone(),
+                                    cycle,
+                                });
                                 break;
                             }
                         }
                     }
-                    if !valid {
+                    if fault.is_some() {
                         break;
                     }
                     variant_tys.push((v.name.clone(), field_tys));
                 }
-                if valid {
-                    let sum_ty = TrTy::Sum(c.name.clone(), variant_tys);
-                    sums.insert(c.name.clone(), sum_ty);
+                match fault {
+                    None => {
+                        let sum_ty = TrTy::Sum(c.name.clone(), variant_tys);
+                        sums.insert(c.name.clone(), sum_ty);
+                    }
+                    Some(err) => {
+                        // The sum is unusable, but every constructor it declared
+                        // now carries the reason rather than going silent.
+                        for v in variants {
+                            ctor_faults.entry(v.name.clone()).or_insert(err.clone());
+                        }
+                    }
                 }
             }
         }
@@ -521,6 +655,7 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
         fns: &fns,
         configs: &configs,
         ctors: &ctors,
+        ctor_faults: &ctor_faults,
     };
 
     let mut ty_ctx = TyCtx::new();

@@ -406,8 +406,16 @@ fn test_sum_match_non_exhaustive() {
     );
 }
 
+/// A recursive `config` is still refused — but by name, against the
+/// declaration.
+///
+/// This previously asserted `Unresolved("Succ")`, which was the *symptom* of
+/// the sum being silently dropped from the constructor table: an error naming
+/// a correct use rather than the unsupported declaration. The refusal itself
+/// is unchanged — recursion is still not supported, and nothing that was
+/// rejected before is accepted now.
 #[test]
-fn test_recursive_sum_unregistered() {
+fn test_recursive_sum_refused_by_name() {
     let src = r#"
         config Nat = Zero | Succ(Nat)
         let x = Succ(1)
@@ -418,7 +426,119 @@ fn test_recursive_sum_unregistered() {
 
     let (name, err) = results[0]
         .as_ref()
-        .expect_err("recursive sum should leave constructors unregistered");
+        .expect_err("a recursive config is not supported yet");
     assert_eq!(name, "x");
-    assert_eq!(*err, LowerError::Unresolved("Succ".to_string()));
+    assert_eq!(
+        *err,
+        LowerError::RecursiveConfig {
+            config: "Nat".to_string(),
+            cycle: vec!["Nat".to_string(), "Nat".to_string()],
+        }
+    );
+}
+
+/// The nullary constructor of a refused `config` reports the same fault.
+///
+/// Without this it falls through to the variable path and surfaces as
+/// `Unbound("Zero")` — a second error about correct code, and a different one
+/// from its sibling constructor, for the same single cause.
+#[test]
+fn test_nullary_ctor_of_refused_config_reports_the_declaration() {
+    let src = r#"
+        config Nat = Zero | Succ(Nat)
+        let x = Zero
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+
+    let (name, err) = results[0].as_ref().expect_err("Nat is still refused");
+    assert_eq!(name, "x");
+    assert!(
+        matches!(err, LowerError::RecursiveConfig { config, .. } if config == "Nat"),
+        "expected the declaration's fault, got {err:?}"
+    );
+}
+
+/// Indirect recursion is caught at the point the cycle closes, and the chain
+/// is reported rather than just the entry point.
+#[test]
+fn test_mutually_recursive_configs_report_the_cycle() {
+    let src = r#"
+        config A = MkA(B)
+        config B = MkB(A)
+        let x = MkA(1)
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+
+    let (_, err) = results[0]
+        .as_ref()
+        .expect_err("mutual recursion is refused");
+    match err {
+        LowerError::RecursiveConfig { cycle, .. } => {
+            assert!(
+                cycle.len() >= 2 && cycle.first() == cycle.last(),
+                "the cycle must close on itself, got {cycle:?}"
+            );
+        }
+        other => panic!("expected RecursiveConfig, got {other:?}"),
+    }
+}
+
+/// A sum variant may carry another `config` — the composition that makes a
+/// data model out of data models.
+#[test]
+fn test_sum_variant_takes_another_config() {
+    let src = r#"
+        config Attribute = Dark | Earth
+        config Stats = { atk: Int }
+        config Card = MonsterCard(Attribute, Stats) | SpellCard(Int)
+
+        let s = Stats { atk: 1500 }
+        let m = MonsterCard(Earth, s)
+        let p = SpellCard(3)
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    assert_eq!(results.len(), 3);
+
+    for (i, expected) in [("s", None), ("m", Some("Card")), ("p", Some("Card"))]
+        .iter()
+        .enumerate()
+    {
+        let r = results[i]
+            .as_ref()
+            .unwrap_or_else(|(n, e)| panic!("binding '{n}' should check, got {e:?}"));
+        assert_eq!(&r.name, expected.0);
+        if let Some(ty) = expected.1 {
+            assert!(
+                format!("{:?}", r.ty).contains(ty),
+                "binding '{}' should have type {ty}, got {:?}",
+                r.name,
+                r.ty
+            );
+        }
+    }
+}
+
+/// A variant parameter naming a type that does not exist is reported against
+/// the declaration, naming both the variant and the offending type.
+#[test]
+fn test_unknown_variant_type_names_the_declaration() {
+    let src = r#"
+        config Card = MonsterCard(Nonexistent)
+        let m = MonsterCard(1)
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+
+    let (_, err) = results[0].as_ref().expect_err("Nonexistent is not a type");
+    assert_eq!(
+        *err,
+        LowerError::UnknownVariantType {
+            config: "Card".to_string(),
+            variant: "MonsterCard".to_string(),
+            ty: "Nonexistent".to_string(),
+        }
+    );
 }
