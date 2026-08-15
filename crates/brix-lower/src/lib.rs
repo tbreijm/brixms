@@ -119,6 +119,30 @@ pub enum LowerError {
         variant: String,
         ty: String,
     },
+    /// A binding's declared type disagrees with the type it was inferred to
+    /// have.
+    ///
+    /// Before this existed, `let x: Str = 42` reported `x : Int @Proven`: the
+    /// annotation was carried, rendered, and never checked. A declared type
+    /// that is not a contract is worse than no declaration, and awarding
+    /// `@Proven` over one is worse still.
+    TypeAnnotationMismatch { declared: String, inferred: String },
+    /// A declared type names something that is neither a builtin nor a
+    /// declared `config` — a typo, or a type that was never written.
+    UnknownDeclaredType(String),
+    /// A record literal's field value does not have the type the `config`
+    /// declares for that field.
+    ///
+    /// Applies equally to a named-field sum variant, whose payload is a record
+    /// by desugaring. Before this existed, `Item { name: 1, base: "oops" }`
+    /// against `{ name: Str, base: Int }` checked as `@Proven` with the two
+    /// field types silently swapped.
+    RecordFieldTypeMismatch {
+        config: String,
+        field: String,
+        declared: String,
+        inferred: String,
+    },
     /// A `config` refers to itself, directly or through other configs.
     ///
     /// Not yet supported: the native type has no by-name constructor, so a
@@ -198,6 +222,20 @@ pub fn diagnose_gap(err: &LowerError) -> ProofGap {
         } => ProofGap::Conflict(format!(
             "config '{config}' variant '{variant}' takes '{ty}', which is not a builtin \
              (Int/Str/Float) or a declared config"
+        )),
+        LowerError::TypeAnnotationMismatch { declared, inferred } => ProofGap::Conflict(format!(
+            "declared type '{declared}' does not match the inferred type '{inferred}'"
+        )),
+        LowerError::RecordFieldTypeMismatch {
+            config,
+            field,
+            declared,
+            inferred,
+        } => ProofGap::Conflict(format!(
+            "field '{field}' of '{config}' is declared '{declared}' but its value is '{inferred}'"
+        )),
+        LowerError::UnknownDeclaredType(ty) => ProofGap::Conflict(format!(
+            "declared type '{ty}' is not a builtin (Int/Str/Float) or a declared config"
         )),
         // Not an obstruction in the program — a fragment the language does not
         // cover yet. The distinction matters: `whynot` must not tell a user
@@ -416,6 +454,25 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
                         )));
                     }
                     ast::ConfigBody::Record(decls) => {
+                        // The declared field types must at least name something
+                        // real. `config Item = { base: Money }` previously
+                        // accepted an undeclared `Money` and inferred the field
+                        // from the value instead.
+                        for decl in decls {
+                            let mut stack = vec![config.clone()];
+                            match resolve_config_ty(&decl.ty, ctx.configs, &mut stack) {
+                                Ok(_) => {}
+                                Err(ConfigTyError::Unknown(name)) => {
+                                    return Err(LowerError::UnknownDeclaredType(name));
+                                }
+                                Err(ConfigTyError::Recursive(cycle)) => {
+                                    return Err(LowerError::RecursiveConfig {
+                                        config: config.clone(),
+                                        cycle,
+                                    });
+                                }
+                            }
+                        }
                         for decl in decls {
                             if !fields.iter().any(|(name, _)| name == &decl.name) {
                                 return Err(LowerError::MissingField {
@@ -579,6 +636,147 @@ fn coverage_for(value: &ast::Expr, tr_expr: &TrExpr, ctx: LowerCtx) -> Option<Co
     })
 }
 
+/// Whether an inferred type satisfies a declared one.
+///
+/// **Deliberately permissive about unresolved variables.** An inferred type
+/// still containing a `Ty::Var` has not been pinned down by inference, so
+/// nothing has been established to contradict; reporting a mismatch there
+/// would reject correct polymorphic code. Every *concrete* disagreement is
+/// reported.
+///
+/// Records compare by field **name**, not position: the inferred record type
+/// arrives in canonical (sorted) order while a declaration is written in
+/// whatever order reads best, and those are the same type.
+fn types_agree(declared: &TrTy, inferred: &TrTy) -> bool {
+    match (declared, inferred) {
+        // Not yet determined — no contradiction to report.
+        (TrTy::Var(_), _) | (_, TrTy::Var(_)) => true,
+        (TrTy::Con(a), TrTy::Con(b)) => a == b,
+        (TrTy::Fn(a1, r1), TrTy::Fn(a2, r2)) => types_agree(a1, a2) && types_agree(r1, r2),
+        (TrTy::Record(d), TrTy::Record(i)) => {
+            d.len() == i.len()
+                && d.iter().all(|(name, dty)| {
+                    i.iter()
+                        .find(|(n, _)| n == name)
+                        .is_some_and(|(_, ity)| types_agree(dty, ity))
+                })
+        }
+        // Sums are nominal: the name is the identity, and two sums sharing a
+        // name share their variants by construction.
+        (TrTy::Sum(a, _), TrTy::Sum(b, _)) => a == b,
+        _ => false,
+    }
+}
+
+/// Render a type for a diagnostic. `Debug` leaks the internal representation
+/// into user-facing output, so the surface spelling is reconstructed here.
+fn render_ty(t: &TrTy) -> String {
+    match t {
+        TrTy::Con(c) => (*c).to_string(),
+        TrTy::Var(v) => format!("?{v}"),
+        TrTy::Fn(a, r) => format!("{} -> {}", render_ty(a), render_ty(r)),
+        TrTy::Sum(name, _) => name.clone(),
+        TrTy::Record(fields) => {
+            let inner: Vec<String> = fields
+                .iter()
+                .map(|(n, t)| format!("{n}: {}", render_ty(t)))
+                .collect();
+            format!("{{{}}}", inner.join(", "))
+        }
+    }
+}
+
+/// Check every record literal in `e` against the field types its `config`
+/// declares.
+///
+/// Surface-directed rather than folded into inference: a record literal lowers
+/// to a structural `TrExpr::Record` that no longer knows which `config` it was
+/// written against, so the declared type has to be consulted while the surface
+/// form is still in hand. Each field value is inferred in isolation under the
+/// bindings in scope, which is exact for the field's own type.
+///
+/// Named-field sum variants are covered too — their payload is a record by
+/// desugaring, so the same declaration is checked through `ctors`.
+fn check_declared_field_types(
+    e: &ast::Expr,
+    ctx: LowerCtx,
+    ty_ctx: &TyCtx,
+) -> Result<(), LowerError> {
+    match e {
+        ast::Expr::Record { config, fields } => {
+            for (_, value) in fields {
+                check_declared_field_types(value, ctx, ty_ctx)?;
+            }
+
+            // The declared field types, from either a record config or the
+            // record payload of a named-field variant.
+            let declared: Vec<(String, TrTy)> =
+                if let Some(ast::ConfigBody::Record(decls)) = ctx.configs.get(config).copied() {
+                    let mut out = Vec::new();
+                    for d in decls {
+                        let mut stack = vec![config.clone()];
+                        match resolve_config_ty(&d.ty, ctx.configs, &mut stack) {
+                            Ok(ty) => out.push((d.name.clone(), ty)),
+                            // Unresolvable declarations are reported by the paths
+                            // that own them; nothing to compare against here.
+                            Err(_) => return Ok(()),
+                        }
+                    }
+                    out
+                } else if let Some((_, _, field_tys)) = ctx.ctors.get(config) {
+                    match field_tys.as_slice() {
+                        [TrTy::Record(decls)] => decls.clone(),
+                        _ => return Ok(()),
+                    }
+                } else {
+                    return Ok(());
+                };
+
+            for (name, declared_ty) in &declared {
+                let Some((_, value)) = fields.iter().find(|(f, _)| f == name) else {
+                    continue; // a missing field is `MissingField`, not this.
+                };
+                let tr = lower_expr(value, ctx)?;
+                let (ty, _tree, st) = infer_tree(&tr, ty_ctx, Infer::new())?;
+                let inferred = zonk(&ty, &st.subst);
+                if !types_agree(declared_ty, &inferred) {
+                    return Err(LowerError::RecordFieldTypeMismatch {
+                        config: config.clone(),
+                        field: name.clone(),
+                        declared: render_ty(declared_ty),
+                        inferred: render_ty(&inferred),
+                    });
+                }
+            }
+            Ok(())
+        }
+        ast::Expr::Call { args, .. } => {
+            for a in args {
+                check_declared_field_types(a, ctx, ty_ctx)?;
+            }
+            Ok(())
+        }
+        ast::Expr::Field(base, _) => check_declared_field_types(base, ctx, ty_ctx),
+        ast::Expr::Bin { lhs, rhs, .. } => {
+            check_declared_field_types(lhs, ctx, ty_ctx)?;
+            check_declared_field_types(rhs, ctx, ty_ctx)
+        }
+        ast::Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            check_declared_field_types(scrutinee, ctx, ty_ctx)?;
+            for arm in arms {
+                check_declared_field_types(&arm.body, ctx, ty_ctx)?;
+            }
+            Ok(())
+        }
+        ast::Expr::Prove(inner) | ast::Expr::Why(inner) | ast::Expr::Audit(inner) => {
+            check_declared_field_types(inner, ctx, ty_ctx)
+        }
+        ast::Expr::Num(_) | ast::Expr::Str(_) | ast::Expr::Var(_) => Ok(()),
+    }
+}
+
 /// The grade a `let` annotation asserts (the outer grade of a `Graded` type),
 /// as a GRADE-lattice node name, or `None` if the binding is unannotated /
 /// annotated without a grade.
@@ -709,9 +907,37 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
     for item in &m.items {
         if let Item::Let(let_decl) = item {
             let res = (|| {
+                check_declared_field_types(&let_decl.value, ctx, &ty_ctx)?;
                 let tr_expr = lower_expr(&let_decl.value, ctx)?;
                 let (ty, _ty_tree, st) = infer_tree(&tr_expr, &ty_ctx, Infer::new())?;
                 let inferred_ty = zonk(&ty, &st.subst);
+
+                // A declared type is a contract. Previously only the *grade*
+                // half of an annotation was discharged, so `let x: Str = 42`
+                // reported `x : Int @Proven` — the annotation carried,
+                // rendered, and never checked.
+                if let Some(declared) = &let_decl.ty {
+                    let mut stack = Vec::new();
+                    match resolve_config_ty(declared, ctx.configs, &mut stack) {
+                        Ok(declared_ty) => {
+                            if !types_agree(&declared_ty, &inferred_ty) {
+                                return Err(LowerError::TypeAnnotationMismatch {
+                                    declared: render_ty(&declared_ty),
+                                    inferred: render_ty(&inferred_ty),
+                                });
+                            }
+                        }
+                        Err(ConfigTyError::Unknown(name)) => {
+                            return Err(LowerError::UnknownDeclaredType(name));
+                        }
+                        Err(ConfigTyError::Recursive(cycle)) => {
+                            return Err(LowerError::RecursiveConfig {
+                                config: cycle.first().cloned().unwrap_or_default(),
+                                cycle,
+                            });
+                        }
+                    }
+                }
 
                 // `match … proving exhaustive` on a top-level value: request a
                 // kernel-certified coverage certificate. The typing result's grade

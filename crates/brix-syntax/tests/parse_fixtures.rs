@@ -8,7 +8,7 @@ fn test_parse_pricing_fixture() {
 
     assert_eq!(module.items.len(), 5);
 
-    // 1. config Item = { name: Str, base: Money }
+    // 1. config Item = { name: Str, base: Int }
     match &module.items[0] {
         Item::Config(ConfigDecl { name, body }) => {
             assert_eq!(name, "Item");
@@ -18,7 +18,7 @@ fn test_parse_pricing_fixture() {
                     assert_eq!(fields[0].name, "name");
                     assert_eq!(fields[0].ty, Ty::Named("Str".into()));
                     assert_eq!(fields[1].name, "base");
-                    assert_eq!(fields[1].ty, Ty::Named("Money".into()));
+                    assert_eq!(fields[1].ty, Ty::Named("Int".into()));
                 }
                 _ => panic!("Expected Record body for Item"),
             }
@@ -26,7 +26,7 @@ fn test_parse_pricing_fixture() {
         _ => panic!("Expected Item::Config for pricing.brix item 0"),
     }
 
-    // 2. regime pricing { gen taxed(m: Money) = m * 1.2 }
+    // 2. regime pricing { gen taxed(m: Int) = m * 1.2 }
     match &module.items[1] {
         Item::Regime(RegimeDecl { name, gens }) => {
             assert_eq!(name, "pricing");
@@ -35,7 +35,7 @@ fn test_parse_pricing_fixture() {
             assert_eq!(gen_taxed.name, "taxed");
             assert_eq!(gen_taxed.params.len(), 1);
             assert_eq!(gen_taxed.params[0].name, "m");
-            assert_eq!(gen_taxed.params[0].ty, Some(Ty::Named("Money".into())));
+            assert_eq!(gen_taxed.params[0].ty, Some(Ty::Named("Int".into())));
             assert_eq!(gen_taxed.ret, None);
             assert_eq!(
                 gen_taxed.body,
@@ -223,14 +223,14 @@ fn test_parse_power_fixture() {
 
     // Items 0..4 match pricing.brix
 
-    // Item 4: let quote: Money @Audited = cost(widget)
+    // Item 4: let quote: Int @Audited = cost(widget)
     match &module.items[4] {
         Item::Let(LetDecl { name, ty, value }) => {
             assert_eq!(name, "quote");
             assert_eq!(
                 *ty,
                 Some(Ty::Graded(
-                    Box::new(Ty::Named("Money".into())),
+                    Box::new(Ty::Named("Int".into())),
                     Grade::Audited
                 ))
             );

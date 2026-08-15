@@ -1,17 +1,17 @@
 // Power-user .brix — the SAME domain as pricing.brix, but opting into the
 // machinery that is always running underneath: grades, prove, witnesses, audit.
 
-config Item = { name: Str, base: Money }
+config Item = { name: Str, base: Int }
 
 regime pricing {
-  gen taxed(m: Money) = m * 1.2
+  gen taxed(m: Int) = m * 1.2
 }
 
 rule cost(i: Item) = taxed(i.base)
 
 let widget = Item { name: "widget", base: 10 }
 
-let quote: Money @Audited = cost(widget)
+let quote: Int @Audited = cost(widget)
 let ok = prove within_budget(quote)
 witness w = why(ok)
 witness w2 = why(quote)
