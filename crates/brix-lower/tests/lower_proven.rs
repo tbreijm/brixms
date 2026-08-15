@@ -542,3 +542,63 @@ fn test_unknown_variant_type_names_the_declaration() {
         }
     );
 }
+
+/// A named-field sum variant checks, and its constructor is applied with the
+/// same named syntax it was declared with.
+#[test]
+fn test_named_field_variant_constructs_and_checks() {
+    let src = r#"
+        config Frame = Normal | Effect
+        config Stats = { atk: Int, def: Int }
+        config Card =
+            MonsterCard { frame: Frame, stats: Stats }
+          | SpellCard { subtype: Int }
+
+        let m = MonsterCard { frame: Effect, stats: Stats { atk: 1500, def: 1400 } }
+        let s = SpellCard { subtype: 2 }
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    assert_eq!(results.len(), 2);
+
+    for r in &results {
+        let cr = r
+            .as_ref()
+            .unwrap_or_else(|(n, e)| panic!("binding '{n}' should check, got {e:?}"));
+        assert!(
+            format!("{:?}", cr.ty).contains("Card"),
+            "'{}' should be a Card, got {:?}",
+            cr.name,
+            cr.ty
+        );
+    }
+}
+
+/// The field checks that apply to a record config apply to a named-field
+/// variant too — the desugaring must not lose them.
+#[test]
+fn test_named_field_variant_field_errors() {
+    for (src, expected) in [
+        (
+            "config C = M { a: Int, b: Int }\nlet x = M { a: 1 }",
+            LowerError::MissingField {
+                config: "M".to_string(),
+                field: "b".to_string(),
+            },
+        ),
+        (
+            "config C = M { a: Int }\nlet x = M { a: 1, zz: 2 }",
+            LowerError::UnknownField {
+                config: "M".to_string(),
+                field: "zz".to_string(),
+            },
+        ),
+    ] {
+        let module = parse(src).expect("parse");
+        let results = check_module(&module);
+        let (_, err) = results[0]
+            .as_ref()
+            .expect_err("field mismatch must be refused");
+        assert_eq!(*err, expected, "for: {src}");
+    }
+}

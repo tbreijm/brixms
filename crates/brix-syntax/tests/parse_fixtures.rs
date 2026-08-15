@@ -388,3 +388,51 @@ fn test_proving_identifier_regression() {
         other => panic!("Expected Item::Show, got {:?}", other),
     }
 }
+
+#[test]
+fn named_field_variant_desugars_to_one_record_parameter() {
+    // A named-field variant and a positional one carrying the same anonymous
+    // record are the same declaration; only the spelling differs.
+    let source = "config C = M { frame: Int, atk: Int } | N";
+    let module = parse(source).expect("named-field variants should parse");
+
+    let Item::Config(ConfigDecl {
+        body: ConfigBody::Sum(variants),
+        ..
+    }) = &module.items[0]
+    else {
+        panic!("expected a sum config, got {:?}", module.items[0]);
+    };
+    assert_eq!(variants.len(), 2);
+
+    assert_eq!(variants[0].name, "M");
+    match variants[0].params.as_slice() {
+        [Ty::Record(fields)] => {
+            let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+            assert_eq!(names, ["frame", "atk"], "declaration order is preserved");
+        }
+        other => panic!("expected one record parameter, got {other:?}"),
+    }
+
+    // A nullary variant is unaffected.
+    assert_eq!(variants[1].name, "N");
+    assert!(variants[1].params.is_empty());
+}
+
+#[test]
+fn positional_variants_are_unchanged() {
+    let source = "config C = M(Int, Str) | N";
+    let module = parse(source).expect("positional variants should still parse");
+    let Item::Config(ConfigDecl {
+        body: ConfigBody::Sum(variants),
+        ..
+    }) = &module.items[0]
+    else {
+        panic!("expected a sum config");
+    };
+    assert_eq!(
+        variants[0].params,
+        vec![Ty::Named("Int".into()), Ty::Named("Str".into())]
+    );
+    assert!(variants[1].params.is_empty());
+}

@@ -230,6 +230,16 @@ fn resolve_config_ty(
 ) -> Result<TrTy, ConfigTyError> {
     match t {
         ast::Ty::Graded(inner, _) => resolve_config_ty(inner, configs, stack),
+        // Anonymous, so there is no name to cycle through; its fields are
+        // resolved under the same stack so a record reaching back into an
+        // enclosing config is still caught.
+        ast::Ty::Record(decls) => {
+            let mut out = Vec::new();
+            for d in decls {
+                out.push((d.name.clone(), resolve_config_ty(&d.ty, configs, stack)?));
+            }
+            Ok(TrTy::Record(out))
+        }
         ast::Ty::Named(n) => {
             match n.as_str() {
                 "Int" => return Ok(TrTy::Con("Int")),
@@ -363,6 +373,41 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
         }
         ast::Expr::Str(s) => Ok(TrExpr::StrLit(s.clone())),
         ast::Expr::Record { config, fields } => {
+            // `MonsterData { frame: Effect }` — a named-field variant, whose
+            // declaration desugared to one record-typed parameter. Construction
+            // has to desugar the same way or the two halves disagree.
+            if let Some((sum_ty, variant, field_tys)) = ctx.ctors.get(config) {
+                if let [TrTy::Record(decls)] = field_tys.as_slice() {
+                    for (name, _) in decls {
+                        if !fields.iter().any(|(f, _)| f == name) {
+                            return Err(LowerError::MissingField {
+                                config: config.clone(),
+                                field: name.clone(),
+                            });
+                        }
+                    }
+                    for (name, _) in fields {
+                        if !decls.iter().any(|(d, _)| d == name) {
+                            return Err(LowerError::UnknownField {
+                                config: config.clone(),
+                                field: name.clone(),
+                            });
+                        }
+                    }
+                    let payload = fields
+                        .iter()
+                        .map(|(name, e)| Ok((name.clone(), lower_expr(e, ctx)?)))
+                        .collect::<Result<Vec<_>, LowerError>>()?;
+                    return Ok(TrExpr::Ctor(
+                        sum_ty.clone(),
+                        variant.clone(),
+                        vec![TrExpr::Record(payload)],
+                    ));
+                }
+            }
+            if let Some(fault) = ctx.ctor_faults.get(config) {
+                return Err(fault.clone());
+            }
             if let Some(body) = ctx.configs.get(config) {
                 match body {
                     ast::ConfigBody::Sum(_) => {

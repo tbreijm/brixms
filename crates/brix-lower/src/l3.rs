@@ -221,6 +221,10 @@ pub enum L3LowerError {
     /// A recognized but non-`Int`/`Str` primitive type name (e.g. `Float`)
     /// was used where only `Int`/`Str` are legal payload types.
     UnsupportedPrimitiveType(String),
+    /// An anonymous record type (`{ a: Int }`), which reaches this profile only
+    /// as the desugaring of a named-field sum variant. Not part of the v1
+    /// executable fragment.
+    AnonymousRecordTypeNotAllowed,
     /// A `config`, direct or indirect, cyclically references itself through
     /// nominal field/variant-parameter types (ADR-0012 §3.1: "direct or
     /// mutually recursive nominal configs are rejected in v1"). `cycle` lists
@@ -593,6 +597,11 @@ fn resolve_ty(ty: &ast::Ty, config_names: &BTreeSet<String>) -> Result<L3TypeRef
         ast::Ty::Graded(inner, _) => Err(L3LowerError::GradeAssertionUnsupported(format!(
             "{inner:?}"
         ))),
+        // An anonymous record type — the desugaring of a named-field sum
+        // variant. The v1 profile has no anonymous payload type, and its
+        // constructors are nullary anyway (`PayloadBearingConstructor`), so it
+        // is refused here by name rather than approximated by a nominal one.
+        ast::Ty::Record(_) => Err(L3LowerError::AnonymousRecordTypeNotAllowed),
         ast::Ty::Named(n) => match n.as_str() {
             "Int" => Ok(L3TypeRef::Int),
             "Str" => Ok(L3TypeRef::Str),

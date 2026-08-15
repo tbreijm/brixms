@@ -61,6 +61,12 @@ pub enum ConfigBody {
 }
 
 /// One variant of a sum config, e.g. `Succ(Nat)` or `Zero` (empty params).
+///
+/// A **named-field** variant — `MonsterData { frame: MonsterFrame, atk: Int }` —
+/// is desugared here into a single positional parameter whose type is
+/// [`Ty::Record`]. The two spellings mean the same thing, so keeping one
+/// representation avoids a second source of truth about a variant's payload;
+/// the surface distinction survives only in how it is written and constructed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Variant {
     pub name: String,
@@ -117,6 +123,11 @@ pub enum Ty {
     /// A grade-annotated type: `Ty @Grade`. Only the outermost annotation is
     /// meaningful at the surface; the graded modality wraps the payload type.
     Graded(Box<Ty>, Grade),
+    /// An anonymous record type, `{ name: Str, atk: Int }`.
+    ///
+    /// Written directly in a type position, and also the desugaring target for
+    /// a named-field sum variant (see [`Variant`]).
+    Record(Vec<FieldDecl>),
 }
 
 /// An epistemic grade on the outcome lattice (`Derived → Audited → Proven`).
