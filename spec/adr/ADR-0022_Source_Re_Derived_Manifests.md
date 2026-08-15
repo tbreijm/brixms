@@ -1,6 +1,6 @@
 # ADR-0022 — Source-Re-Derived L3 Settlement Manifests
 
-Status: **Proposed** (2026-08-09) (rules on [ADR-0020](./ADR-0020_Oracle_Bound_Audit_Receipts.md) §5 residuals 1–3 and [ADR-0021](./ADR-0021_Settlement_Semantics_Attestations.md) §6 residual 7; follows [ADR-0012](./ADR-0012_L3_Executable_Settlement.md), [ADR-0013](./ADR-0013_Canonical_Certificate_Envelope.md), [ADR-0016](./ADR-0016_Authority_Publication_Fence.md), [ADR-0019](./ADR-0019_Verification_Tags_Are_Earned.md), and ADR-0020).
+Status: **Accepted** (2026-08-16; Proposed 2026-08-09) (rules on [ADR-0020](./ADR-0020_Oracle_Bound_Audit_Receipts.md) §5 residuals 1–3 and [ADR-0021](./ADR-0021_Settlement_Semantics_Attestations.md) §6 residual 7; follows [ADR-0012](./ADR-0012_L3_Executable_Settlement.md), [ADR-0013](./ADR-0013_Canonical_Certificate_Envelope.md), [ADR-0016](./ADR-0016_Authority_Publication_Fence.md), [ADR-0019](./ADR-0019_Verification_Tags_Are_Earned.md), and ADR-0020).
 
 Date: 2026-08-09.
 

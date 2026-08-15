@@ -1,6 +1,6 @@
 # ADR-0020 — Oracle-Bound Settlement Audit Receipts
 
-Status: **Proposed** (2026-08-09) (rules on ADR-0019 §6 residuals 1–3; follows [ADR-0013](./ADR-0013_Canonical_Certificate_Envelope.md), [ADR-0015](./ADR-0015_Judgment_Scoped_Tightness.md), and [ADR-0019](./ADR-0019_Verification_Tags_Are_Earned.md)).
+Status: **Accepted** (2026-08-16; Proposed 2026-08-09) (rules on ADR-0019 §6 residuals 1–3; follows [ADR-0013](./ADR-0013_Canonical_Certificate_Envelope.md), [ADR-0015](./ADR-0015_Judgment_Scoped_Tightness.md), and [ADR-0019](./ADR-0019_Verification_Tags_Are_Earned.md)).
 
 Date: 2026-08-09.
 
