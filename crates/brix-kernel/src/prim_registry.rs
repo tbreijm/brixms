@@ -50,15 +50,14 @@
 //! and it is — membership is a `BTreeSet` lookup with no predicate, range rule,
 //! or decision procedure at check time. The expansion below runs once, at
 //! registry construction, and its complete output is frozen in
-//! `vectors/primitive_relation_typing_arith_v{1,2}.json` so every row is
+//! `vectors/primitive_relation_typing_arith_v2.json` so every row is
 //! auditable byte-for-byte and a change to the expansion fails a gate rather
 //! than a review.
 //!
-//! **Two arithmetic relations, and why.** `TypingArithV2` (Stage E ⟨D-PROMOTE⟩,
-//! ADR-0024) is the current one; `TypingArithV1` is retained unchanged because
-//! §7 makes relation identities immutable. They differ in exactly one thing —
-//! which generator family names the lossy `Int ↪ Float` edge. See
-//! [`EdgeNaming`], and ADR-0024 §3 for why V1 is retained rather than retired.
+//! **One arithmetic relation.** `TypingArithV2` (Stage E ⟨D-PROMOTE⟩, ADR-0024)
+//! is it. The superseded `TypingArithV1` was retired rather than retained — see
+//! [`compiled_in_relations`] for the ruling and ADR-0024 §3 for the argument.
+//! Its id resolves to `None`, which fails closed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -119,8 +118,8 @@ impl Canonical for JudgmentKind {
 ///
 /// The trade-off is that the id is not human-legible and the row set is only
 /// auditable through a frozen vector. Those vectors exist
-/// (`vectors/primitive_relation_typing_arith_v{1,2}.json`), and each lists
-/// every row in readable form beside its digests.
+/// (`vectors/primitive_relation_typing_arith_v2.json`), which lists every row
+/// in readable form beside its digests.
 ///
 /// Stage E is the first exercise of this: relocating one coercion edge changed
 /// 20 rows and therefore produced a genuinely different id, with no separate
@@ -365,56 +364,34 @@ fn edge_path(
     Some(path)
 }
 
-/// Which generator-family naming a relation's rows use for their coercion
-/// edges.
+/// The generator id naming one coercion edge.
 ///
-/// **This exists only because relation identities are immutable** (ADR-0015 §7).
-/// Stage E relocated the lossy `Int ↪ Float` edge out of the promotion family,
-/// which changes the edge's generator id, which changes the canonical bytes of
-/// every source object whose path crosses it, which changes 20 of the 120 rows
-/// and therefore the relation's content-derived identity. §7 is explicit that
-/// this "does not update `TypingArithV1` — it allocates `TypingArithV2`", so
-/// both namings are retained and each is reachable only through its own
-/// relation id.
+/// **The family follows from the declared exactness, and only from it**
+/// (ADR-0024 ⟨D-LOSSYFAMILY⟩). An exact edge is named under the promotion
+/// family; a lossy edge under `type.rule.num.convert.lossy`, so no id in any
+/// relation asserts an embedding for a map that does not preserve numeric
+/// identity (⟨D-PROMOTE⟩). Deriving the family here rather than tabulating it
+/// means an id and its [`CoercionKind`] tag cannot disagree — before Stage E
+/// they did, with `Int ↪ Float` tagged lossy and named as a promotion.
 ///
-/// The alternative — retiring `TypingArithV1` — is defensible and is **not**
-/// taken here. An absent relation id fails closed rather than being
-/// reinterpreted (§7), so retiring would be safe, and no certificate naming V1
-/// exists: Stage D has not landed, `elaborate_tree` still emits every leaf as a
-/// `Hyp`, and nothing closes a leaf with a `PrimRealizes` term yet. Retention is
-/// the conservative reading of §7 and costs one small naming function rather
-/// than a second row table. Flagged for a maintainer ruling rather than settled
-/// unilaterally.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum EdgeNaming {
-    /// Pre-Stage-E: every edge, exact or lossy, named under
-    /// `type.rule.num.promote`. Retained for `TypingArithV1` only.
-    LegacyAllPromote,
-    /// Stage E: exact edges keep the promotion family; the lossy edge is named
-    /// under `type.rule.num.convert.lossy`, so no id asserts an embedding for a
-    /// map that does not preserve numeric identity (⟨D-PROMOTE⟩).
-    FamilyByExactness,
-}
-
-impl EdgeNaming {
-    /// The generator id for one coercion edge under this naming.
-    fn generator(
-        self,
-        from: NumericTypeNameV1,
-        to: NumericTypeNameV1,
-        kind: CoercionKind,
-    ) -> GeneratorId {
-        let prefix = match (self, kind) {
-            (EdgeNaming::LegacyAllPromote, _)
-            | (EdgeNaming::FamilyByExactness, CoercionKind::Exact) => "type.rule.num.promote",
-            (EdgeNaming::FamilyByExactness, CoercionKind::Lossy) => "type.rule.num.convert.lossy",
-        };
-        GeneratorId::named(&format!(
-            "{prefix}.{}_{}@1",
-            from.lattice_name(),
-            to.lattice_name()
-        ))
-    }
+/// The pre-Stage-E naming, in which every edge sat in the promotion family,
+/// was carried by an `EdgeNaming::LegacyAllPromote` variant for as long as
+/// `TypingArithV1` was compiled in. Retiring that relation retired the variant
+/// with it: the naming is now one fact, not a choice.
+fn edge_generator(
+    from: NumericTypeNameV1,
+    to: NumericTypeNameV1,
+    kind: CoercionKind,
+) -> GeneratorId {
+    let prefix = match kind {
+        CoercionKind::Exact => "type.rule.num.promote",
+        CoercionKind::Lossy => "type.rule.num.convert.lossy",
+    };
+    GeneratorId::named(&format!(
+        "{prefix}.{}_{}@1",
+        from.lattice_name(),
+        to.lattice_name()
+    ))
 }
 
 /// The witnessed promotion path `from ↪ … ↪ to` as the canonical data a source
@@ -423,16 +400,12 @@ impl EdgeNaming {
 /// The per-edge generator id is spelled here rather than imported: it is the
 /// one identifier the kernel and the regime agree on, and §8.5 does not trust
 /// the host to name the edges of a path the kernel is about to authorize.
-fn promotion_path(
-    from: NumericTypeNameV1,
-    to: NumericTypeNameV1,
-    naming: EdgeNaming,
-) -> Option<Vec<CoercionEdgeV1>> {
+fn promotion_path(from: NumericTypeNameV1, to: NumericTypeNameV1) -> Option<Vec<CoercionEdgeV1>> {
     Some(
         edge_path(from, to)?
             .into_iter()
             .map(|(a, b, kind)| CoercionEdgeV1 {
-                generator: naming.generator(a, b, kind),
+                generator: edge_generator(a, b, kind),
                 kind,
             })
             .collect(),
@@ -453,13 +426,13 @@ fn promotion_path(
 /// promotion family. Exactness is bound into the row's `src` bytes, so the
 /// relation can never accept a lossy path where an exact one was claimed.
 ///
-/// The counter-reading is recorded rather than buried: ADR-0015 §5 Stage B0
-/// defines a promotion path as "an ordered sequence of **exact** promotion-edge
-/// ids". Read strictly, that excludes these rows. Stage E weakens that argument
-/// considerably — under `FamilyByExactness` the path is no longer a sequence of
-/// *promotion*-edge ids at all, so the phrase no longer describes what these
-/// rows contain.
-fn arith_rows(naming: EdgeNaming) -> BTreeSet<Row> {
+/// The counter-reading — ADR-0015 §5 Stage B0's "an ordered sequence of
+/// **exact** promotion-edge ids", which read strictly would exclude these rows
+/// — was confirmed against on ⟨D-JUDGE⟩'s grounds and is closed. The phrase
+/// carries an inline erratum in ADR-0015 §5 Stage B0 restating it as "coercion
+/// -edge ids, each carrying its declared exactness", and after Stage E these
+/// paths are not sequences of *promotion*-edge ids at all.
+fn arith_rows() -> BTreeSet<Row> {
     let mut rows = BTreeSet::new();
     for op in OPERATORS {
         for lhs in NODES {
@@ -478,10 +451,9 @@ fn arith_rows(naming: EdgeNaming) -> BTreeSet<Row> {
                 // Both operands must reach the type the operation is performed
                 // at. `Div` on `Real` stays at `Real`; `Div` on `Nat` lands at
                 // `Float`, which `Nat` reaches via `Nat ↪ Int ↪ Float`.
-                let (Some(lhs_path), Some(rhs_path)) = (
-                    promotion_path(*lhs, result, naming),
-                    promotion_path(*rhs, result, naming),
-                ) else {
+                let (Some(lhs_path), Some(rhs_path)) =
+                    (promotion_path(*lhs, result), promotion_path(*rhs, result))
+                else {
                     continue;
                 };
                 let src = ArithTypingInputV1 {
@@ -509,8 +481,8 @@ fn arith_rows(naming: EdgeNaming) -> BTreeSet<Row> {
 /// at construction, rather than only in a test — a registry that violated it
 /// would let one source object be realized to two different result types, and
 /// the kernel would accept both.
-fn build_arith_relation(naming: EdgeNaming) -> PrimitiveRelation {
-    let rows = arith_rows(naming);
+fn build_arith_relation() -> PrimitiveRelation {
+    let rows = arith_rows();
 
     let mut seen: BTreeMap<PropositionId, PropositionId> = BTreeMap::new();
     for (src, dst) in &rows {
@@ -532,27 +504,21 @@ fn build_arith_relation(naming: EdgeNaming) -> PrimitiveRelation {
     }
 }
 
-/// `TypingArithV1` — the pre-Stage-E relation, retained unchanged.
+/// `TypingArithV2` — the Stage E relation ⟨D-PROMOTE⟩, and the only arithmetic
+/// typing relation this kernel carries.
 ///
-/// Its rows name the lossy `Int ↪ Float` edge under the promotion family. That
-/// naming is the thing Stage E corrected, and it is preserved here **only**
-/// because ADR-0015 §7 makes relation identities immutable. Nothing emits it;
-/// see [`EdgeNaming`] for why it is retained rather than retired, and for the
-/// case that could be made the other way.
-fn build_typing_arith_v1() -> PrimitiveRelation {
-    build_arith_relation(EdgeNaming::LegacyAllPromote)
-}
-
-/// `TypingArithV2` — the Stage E relation ⟨D-PROMOTE⟩.
-///
-/// Identical to V1 in judgment kind, generator, schemas, operand matrix, and
-/// every result type. The **only** difference is that paths crossing
-/// `Int ↪ Float` name that edge under `type.rule.num.convert.lossy` rather than
-/// under the promotion family — 20 of the 120 rows. No grade and no inferred
-/// type changes; what changes is that no id in the relation asserts an
+/// It differed from the retired `TypingArithV1` in exactly one thing: paths
+/// crossing `Int ↪ Float` name that edge under `type.rule.num.convert.lossy`
+/// rather than under the promotion family — 20 of the 120 rows. No grade and no
+/// inferred type changed; what changed is that no id in the relation asserts an
 /// embedding for a map that does not preserve numeric identity.
+///
+/// **It keeps the name `V2` now that `V1` is gone**, and renaming it would be
+/// the exact reinterpretation ADR-0015 §7 forbids: `V1`'s identity existed, so
+/// reusing its name for a different row set would make one name mean two things
+/// across two kernel releases. Version names here are historical, not slots.
 fn build_typing_arith_v2() -> PrimitiveRelation {
-    build_arith_relation(EdgeNaming::FamilyByExactness)
+    build_arith_relation()
 }
 
 /// The compiled-in registry, built once.
@@ -574,22 +540,18 @@ fn registry() -> &'static BTreeMap<PrimitiveRelationId, PrimitiveRelation> {
 /// Every relation compiled into this kernel release. Adding one is a kernel
 /// release, which is the correct cost: a generator whose realization is not
 /// derivable from existing kernel rules *is* a new trusted axiom (⟨D-PRIM⟩).
+/// **`TypingArithV1` is deliberately absent** (ADR-0024 §3). It was retained
+/// briefly on §7's plain reading that identities persist, and retired on the
+/// maintainer ruling that §7 promises this to certificates that *exist*: none
+/// naming V1 ever did, because Stage D has not landed and `elaborate_tree`
+/// still emits every leaf as a `Hyp`. Keeping it would have been trusted TCB
+/// data with nothing consulting it — the same thing ⟨D-EXACTCOVERED⟩ refused a
+/// per-edge coercion relation for — and worse, its rows spelled
+/// `type.rule.num.promote.Int_Float@1`, a generator family the lattice no
+/// longer declares. Its id now resolves to `None`, which per §7 means the
+/// kernel has not introduced the fact, never that its negation holds.
 fn compiled_in_relations() -> Vec<PrimitiveRelation> {
-    vec![build_typing_arith_v1(), build_typing_arith_v2()]
-}
-
-/// The identity of the **superseded** pre-Stage-E arithmetic typing relation
-/// (ADR-0015 §5 Stage B).
-///
-/// Retained and still resolvable because §7 makes relation identities
-/// immutable. Prefer [`typing_arith_v2`] for anything new: V1's rows name the
-/// lossy `Int ↪ Float` edge under the promotion family, which ⟨D-PROMOTE⟩ rules
-/// against. Pinned by `vectors/primitive_relation_typing_arith_v1.json`.
-///
-/// A name for a derived digest, not an authority of its own: the value is
-/// whatever the relation's contents hash to.
-pub fn typing_arith_v1() -> PrimitiveRelationId {
-    build_typing_arith_v1().id()
+    vec![build_typing_arith_v2()]
 }
 
 /// The identity of the current arithmetic **typing** relation (ADR-0015 §5
@@ -649,10 +611,7 @@ mod tests {
             }
         }
         assert_eq!(expected, 30, "joinable operand pairs");
-        assert_eq!(
-            arith_rows(EdgeNaming::FamilyByExactness).len(),
-            30 * OPERATORS.len()
-        );
+        assert_eq!(arith_rows().len(), 30 * OPERATORS.len());
     }
 
     /// `Div` is the operator the whole Stage B0 re-schema existed for: it has a
@@ -671,7 +630,7 @@ mod tests {
             lhs_promotion_path: Vec::new(),
             rhs_promotion_path: Vec::new(),
         };
-        let relation = build_typing_arith_v1();
+        let relation = build_typing_arith_v2();
         let int = NumericResultTypeV1 {
             name: NumericTypeNameV1::Int,
         };
@@ -694,12 +653,7 @@ mod tests {
     /// source object, so the row is keyed on it.
     #[test]
     fn division_on_nat_carries_a_two_edge_path_ending_lossy() {
-        let path = promotion_path(
-            NumericTypeNameV1::Nat,
-            NumericTypeNameV1::Float,
-            EdgeNaming::FamilyByExactness,
-        )
-        .unwrap();
+        let path = promotion_path(NumericTypeNameV1::Nat, NumericTypeNameV1::Float).unwrap();
         assert_eq!(path.len(), 2);
         assert_eq!(path[0].kind, CoercionKind::Exact);
         assert_eq!(path[1].kind, CoercionKind::Lossy);
@@ -717,81 +671,169 @@ mod tests {
         );
     }
 
-    /// The two namings differ on exactly the lossy edge and nowhere else. This
-    /// is what bounds Stage E's blast radius: exact paths are byte-identical
-    /// across V1 and V2, so only rows crossing `Int ↪ Float` move.
-    #[test]
-    fn the_namings_differ_only_on_the_lossy_edge() {
-        for (from, to) in [
-            (NumericTypeNameV1::Nat, NumericTypeNameV1::Int),
-            (NumericTypeNameV1::Int, NumericTypeNameV1::Rat),
-            (NumericTypeNameV1::Rat, NumericTypeNameV1::Real),
-            (NumericTypeNameV1::Real, NumericTypeNameV1::Complex),
-            (NumericTypeNameV1::Nat, NumericTypeNameV1::Complex),
-        ] {
-            assert_eq!(
-                promotion_path(from, to, EdgeNaming::LegacyAllPromote),
-                promotion_path(from, to, EdgeNaming::FamilyByExactness),
-                "an exact path must be identical under both namings ({from:?} -> {to:?})"
-            );
+    /// The retired `TypingArithV1`, rebuilt **here in the test** rather than
+    /// compiled into the kernel.
+    ///
+    /// This is the whole point of the retirement: the legacy row set is history
+    /// worth auditing, but it is not trusted data, so it lives in a test where
+    /// nothing can resolve it. Its one difference from the current relation is
+    /// that every edge, exact or lossy, sat in the promotion family.
+    ///
+    /// The expansion is duplicated rather than shared with [`arith_rows`], and
+    /// deliberately: a retired relation is frozen by definition, so there is no
+    /// future edit for the two copies to drift across, and sharing the code
+    /// would mean the kernel still carried the legacy naming.
+    fn legacy_relation() -> PrimitiveRelation {
+        fn legacy_path(
+            from: NumericTypeNameV1,
+            to: NumericTypeNameV1,
+        ) -> Option<Vec<CoercionEdgeV1>> {
+            Some(
+                edge_path(from, to)?
+                    .into_iter()
+                    .map(|(a, b, kind)| CoercionEdgeV1 {
+                        generator: GeneratorId::named(&format!(
+                            "type.rule.num.promote.{}_{}@1",
+                            a.lattice_name(),
+                            b.lattice_name()
+                        )),
+                        kind,
+                    })
+                    .collect(),
+            )
         }
 
-        assert_ne!(
-            promotion_path(
-                NumericTypeNameV1::Int,
-                NumericTypeNameV1::Float,
-                EdgeNaming::LegacyAllPromote
-            ),
-            promotion_path(
-                NumericTypeNameV1::Int,
-                NumericTypeNameV1::Float,
-                EdgeNaming::FamilyByExactness
-            ),
-        );
+        let mut rows = BTreeSet::new();
+        for op in OPERATORS {
+            for lhs in NODES {
+                for rhs in NODES {
+                    let Some(base) = join(*lhs, *rhs) else {
+                        continue;
+                    };
+                    let result = if *op == ArithOperatorV1::Div {
+                        field_of(base)
+                    } else {
+                        base
+                    };
+                    let (Some(lhs_path), Some(rhs_path)) =
+                        (legacy_path(*lhs, result), legacy_path(*rhs, result))
+                    else {
+                        continue;
+                    };
+                    let src = ArithTypingInputV1 {
+                        operator: *op,
+                        lhs_type: *lhs,
+                        rhs_type: *rhs,
+                        lhs_promotion_path: lhs_path,
+                        rhs_promotion_path: rhs_path,
+                    };
+                    let dst = NumericResultTypeV1 { name: result };
+                    rows.insert((
+                        PropositionId(src.config_id().digest()),
+                        PropositionId(dst.config_id().digest()),
+                    ));
+                }
+            }
+        }
+        PrimitiveRelation {
+            judgment_kind: JudgmentKind::Typing,
+            generator: GeneratorId::named("type.rule.arith@1"),
+            source_schema: arith_typing_input_schema_id(),
+            destination_schema: numeric_result_type_schema_id(),
+            rows,
+        }
     }
 
-    /// V1 and V2 are the same matrix with one edge renamed: same generator,
-    /// same schemas, same judgment kind, same row count, 96 rows shared and 24
+    /// An edge's generator family follows its declared exactness and nothing
+    /// else, so an id and its [`CoercionKind`] tag cannot disagree — which they
+    /// did before Stage E, with `Int ↪ Float` tagged lossy and named as a
+    /// promotion (ADR-0024 ⟨D-LOSSYFAMILY⟩).
+    #[test]
+    fn the_edge_family_follows_declared_exactness() {
+        for (from, to, kind) in TOWER {
+            // Both families spelled literally, so the test does not re-derive
+            // the rule it is checking.
+            let suffix = format!("{}_{}@1", from.lattice_name(), to.lattice_name());
+            let as_promotion = GeneratorId::named(&format!("type.rule.num.promote.{suffix}"));
+            let as_lossy = GeneratorId::named(&format!("type.rule.num.convert.lossy.{suffix}"));
+            let actual = edge_generator(*from, *to, *kind);
+
+            match kind {
+                CoercionKind::Exact => {
+                    assert_eq!(actual, as_promotion, "an exact edge stays a promotion");
+                }
+                CoercionKind::Lossy => {
+                    assert_eq!(actual, as_lossy);
+                    assert_ne!(
+                        actual, as_promotion,
+                        "no lossy edge may be named as a promotion"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Stage E's blast radius, still audited after the retirement: the current
+    /// relation is the legacy matrix with exactly one edge renamed — same
+    /// generator, schemas, judgment kind and row count, 100 rows shared and 20
     /// moved. A different count would mean the relocation had silently changed
     /// what typechecks.
     #[test]
-    fn v2_is_v1_with_only_the_lossy_edge_renamed() {
-        let v1 = build_typing_arith_v1();
-        let v2 = build_typing_arith_v2();
+    fn the_current_relation_is_the_legacy_matrix_with_one_edge_renamed() {
+        let legacy = legacy_relation();
+        let current = build_typing_arith_v2();
 
-        assert_eq!(v1.judgment_kind, v2.judgment_kind);
-        assert_eq!(v1.generator, v2.generator);
-        assert_eq!(v1.source_schema, v2.source_schema);
-        assert_eq!(v1.destination_schema, v2.destination_schema);
-        assert_eq!(v1.rows.len(), v2.rows.len());
+        assert_eq!(legacy.judgment_kind, current.judgment_kind);
+        assert_eq!(legacy.generator, current.generator);
+        assert_eq!(legacy.source_schema, current.source_schema);
+        assert_eq!(legacy.destination_schema, current.destination_schema);
+        assert_eq!(legacy.rows.len(), current.rows.len());
 
         // 20 of the 120 rows have a path crossing `Int ↪ Float`: the 4 `Div`
         // rows whose operands are both Nat/Int (each crossing on *both* sides),
         // the 4 mixed Float pairs under `Div`, and the same 4 under each of
         // Add/Sub/Mul. `Float op Float` never crosses — both paths are empty.
-        let shared = v1.rows.intersection(&v2.rows).count();
+        let shared = legacy.rows.intersection(&current.rows).count();
         assert_eq!(
             shared, 100,
             "rows not crossing the lossy edge are unchanged"
         );
-        assert_eq!(v1.rows.len() - shared, 20, "rows crossing it are relocated");
+        assert_eq!(
+            legacy.rows.len() - shared,
+            20,
+            "rows crossing it are relocated"
+        );
 
-        // Distinct relations, so a certificate cannot silently mean the other.
-        assert_ne!(v1.id(), v2.id());
+        assert_ne!(legacy.id(), current.id());
     }
 
-    /// Both relations resolve. §7 keeps V1 reachable; nothing emits it.
+    /// The retired relation is genuinely gone, and its absence fails closed.
+    ///
+    /// This is stronger than "some unknown digest does not resolve": the id
+    /// asked for is the *real* pre-Stage-E identity, rebuilt from the legacy row
+    /// set. Per ADR-0015 §7 a `None` here means the kernel has not introduced
+    /// the fact — never that its negation holds.
     #[test]
-    fn both_arithmetic_relations_are_compiled_in() {
-        assert!(resolve(&typing_arith_v1()).is_some());
+    fn the_retired_relation_is_absent_and_fails_closed() {
+        let retired = legacy_relation().id();
+        assert_ne!(retired, typing_arith_v2());
+        assert!(
+            resolve(&retired).is_none(),
+            "TypingArithV1 must not resolve after retirement"
+        );
         assert!(resolve(&typing_arith_v2()).is_some());
+        assert_eq!(
+            compiled_in_relations().len(),
+            1,
+            "one arithmetic relation is compiled in"
+        );
     }
 
     /// The functionality invariant holds: one canonical `src`, one result type.
     #[test]
     fn one_source_object_never_maps_to_two_result_types() {
-        // `build_typing_arith_v1` asserts this; calling it is the test.
-        let relation = build_typing_arith_v1();
+        // `build_arith_relation` asserts this; calling it is the test.
+        let relation = build_typing_arith_v2();
         let mut sources: Vec<PropositionId> = relation.rows.iter().map(|(s, _)| *s).collect();
         let total = sources.len();
         sources.sort();
@@ -803,7 +845,7 @@ mod tests {
     /// id moves — which is what makes ADR-0015 §7's immutability structural.
     #[test]
     fn the_relation_identity_binds_every_field() {
-        let base = build_typing_arith_v1();
+        let base = build_typing_arith_v2();
         let base_id = base.id();
 
         let mut other_generator = base.clone();
@@ -832,8 +874,8 @@ mod tests {
     /// anything else. "Not in the registry" is absence, never refutation.
     #[test]
     fn resolution_fails_closed_on_an_unknown_id() {
-        let id = typing_arith_v1();
-        let relation = resolve(&id).expect("TypingArithV1 resolves");
+        let id = typing_arith_v2();
+        let relation = resolve(&id).expect("TypingArithV2 resolves");
         assert_eq!(relation.judgment_kind, JudgmentKind::Typing);
         assert_eq!(
             relation.generator,
@@ -851,7 +893,7 @@ mod tests {
     /// identity, never in a comment or a naming convention.
     #[test]
     fn judgment_kind_is_part_of_the_relation_identity() {
-        let typing = build_typing_arith_v1();
+        let typing = build_typing_arith_v2();
         let mut preimage = typing.canon_bytes();
         // The judgment-kind ordinal is written third, right after the marker
         // and version. Rather than patch bytes, rebuild the preimage by hand
@@ -882,19 +924,11 @@ mod tests {
     fn float_mixed_with_the_exact_branch_has_no_row() {
         assert_eq!(join(NumericTypeNameV1::Float, NumericTypeNameV1::Rat), None);
         assert_eq!(
-            promotion_path(
-                NumericTypeNameV1::Rat,
-                NumericTypeNameV1::Float,
-                EdgeNaming::FamilyByExactness
-            ),
+            promotion_path(NumericTypeNameV1::Rat, NumericTypeNameV1::Float),
             None
         );
         assert_eq!(
-            promotion_path(
-                NumericTypeNameV1::Float,
-                NumericTypeNameV1::Rat,
-                EdgeNaming::FamilyByExactness
-            ),
+            promotion_path(NumericTypeNameV1::Float, NumericTypeNameV1::Rat),
             None
         );
     }

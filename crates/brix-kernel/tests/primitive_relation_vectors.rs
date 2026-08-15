@@ -1,5 +1,10 @@
-//! Frozen `TypingArithV1` primitive-relation vectors (ADR-0015 §5 Stage B,
+//! Frozen arithmetic primitive-relation vectors (ADR-0015 §5 Stage B,
 //! ADR-0013 §7).
+//!
+//! One relation is frozen here: `TypingArithV2`. The superseded `TypingArithV1`
+//! was retired (ADR-0024 §3) and its vector deleted with it; the legacy row set
+//! survives only as this file's `Naming::LegacyAllPromote` baseline, which
+//! bounds what Stage E changed without any of it being resolvable.
 //!
 //! **Why this artifact is frozen.** From Stage B onward the registry decides
 //! `g_arith`'s realization by exact membership over these rows. Three things are
@@ -36,7 +41,7 @@
 use std::path::{Path, PathBuf};
 
 use brix_canon::{CanonWriter, Digest, Domain};
-use brix_kernel::{resolve_primitive_relation, typing_arith_v1, typing_arith_v2, Row};
+use brix_kernel::{resolve_primitive_relation, typing_arith_v2, Row};
 use brix_semantic::{GeneratorId, PropositionId};
 
 /// The four operators and their frozen ordinals.
@@ -144,8 +149,9 @@ fn declared_field_of(base: &str) -> &str {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Naming {
     /// `TypingArithV1` — every edge under the promotion family, including the
-    /// lossy one. Superseded; retained because ADR-0015 §7 makes relation
-    /// identities immutable.
+    /// lossy one. **Retired** from the kernel (ADR-0024 §3); kept here as the
+    /// historical baseline that bounds what Stage E changed. Nothing in the
+    /// registry resolves to it, and this file no longer freezes a vector for it.
     LegacyAllPromote,
     /// `TypingArithV2` — ADR-0015 Stage E <D-PROMOTE>: exact edges keep the
     /// promotion family, the lossy edge moves to an explicitly-labelled
@@ -282,14 +288,12 @@ fn manifest_path(version: u32) -> PathBuf {
         .join(format!("primitive_relation_typing_arith_v{version}.json"))
 }
 
-/// The two arithmetic relations this kernel compiles in. V1 is superseded and
-/// retained only because ADR-0015 §7 makes relation identities immutable; V2 is
-/// what the regime emits after Stage E.
+/// Every arithmetic relation this kernel compiles in — one, after `TypingArithV1`
+/// was retired (ADR-0024 §3). The shape stays a list because the discipline is
+/// per-relation and the next relation added should inherit all three consumers
+/// without restructuring this file.
 fn versions() -> Vec<(u32, Naming, brix_kernel::PrimitiveRelationId)> {
-    vec![
-        (1, Naming::LegacyAllPromote, typing_arith_v1()),
-        (2, Naming::FamilyByExactness, typing_arith_v2()),
-    ]
+    vec![(2, Naming::FamilyByExactness, typing_arith_v2())]
 }
 
 fn render_path(steps: &[(&'static str, &'static str, u64)]) -> String {
@@ -324,10 +328,11 @@ fn build_manifest(version: u32, naming: Naming, id: brix_kernel::PrimitiveRelati
         brix_kernel::numeric_result_type_schema_id().to_hex()
     ));
     out.push_str(&format!("  \"relation_id\": \"{}\",\n", id.to_hex()));
-    // The one thing that distinguishes V2 from V1, said in the manifest rather
-    // than left to be inferred from 20 differing digests. V1 does not carry
-    // this field: it is frozen, and adding a line to it would be a vector edit
-    // for a purely cosmetic gain (ADR-0013 §7).
+    // The one thing that distinguished V2 from the retired V1, said in the
+    // manifest rather than left to be inferred from 20 differing digests. The
+    // version gate is kept rather than inlined: this file freezes whatever
+    // relations exist, and a future relation predating this field must still
+    // reproduce its own frozen bytes (ADR-0013 §7).
     if version >= 2 {
         out.push_str(
             "  \"edge_families\": { \"exact\": \"type.rule.num.promote\", \
@@ -503,7 +508,19 @@ fn stage_e_relocates_exactly_the_lossy_paths() {
 
     assert_eq!(expected_moved, 20);
     assert_eq!(v1.intersection(&v2).count(), 120 - expected_moved);
-    assert_ne!(typing_arith_v1(), typing_arith_v2());
+
+    // The relocation produced a genuinely different identity. Both sides are
+    // reconstructed here rather than asked of the kernel, which no longer knows
+    // the legacy id at all -- that is what retiring it means.
+    assert_ne!(
+        independent_relation_id(&rows, Naming::LegacyAllPromote),
+        independent_relation_id(&rows, Naming::FamilyByExactness)
+    );
+    assert_eq!(
+        independent_relation_id(&rows, Naming::FamilyByExactness),
+        typing_arith_v2().digest(),
+        "the surviving relation is the one the kernel resolves"
+    );
 }
 
 /// No id in the current relation asserts a promotion for the lossy edge -- the
