@@ -90,7 +90,19 @@ use brix_lower::{
     L3_PROFILE_MARKER_V1,
 };
 use brix_lower::{check_module, diagnose_gap, CoverageOutcome, LowerError, ProofGap};
-use brix_syntax::parse;
+use brix_syntax::{parse_bounded, ParseLimits};
+
+/// The CLI reads files, so it is a hostile-input boundary like any other.
+///
+/// `parse` applies `ParseLimits::generous()` (every bound `usize::MAX`), which
+/// is right for an in-process caller and wrong here: a deeply nested literal
+/// then overflows the stack during parsing or lowering instead of being
+/// refused. `strict()` bounds source bytes, tokens and nesting depth, and the
+/// depth bound is charged *before* the recursive call, so deep input is
+/// refused rather than aborting the process.
+fn parse(source: &str) -> Result<brix_syntax::ast::Module, brix_syntax::ParseError> {
+    parse_bounded(source, ParseLimits::strict())
+}
 use soc_core::{
     check_quiescence_certificate, Adm, AuditResult, DeclaredAssumptions, Interner, PresentationV1,
     QuiescenceCertificateId, SaturationBudget, SettlementRegime,
