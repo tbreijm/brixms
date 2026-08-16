@@ -221,12 +221,33 @@ the faithfulness gates]**
 decompose, the derivation SHALL be the single leaf carrying the claim, with no
 split. **[Pinned: `the_zero_arity_branches_emit_no_split`]**
 
-**4.6 Endpoints.** A derivation's endpoints SHALL be the configurations the
+**4.6 Node data binding.** Where a node carries data beyond its subexpressions
+— an arithmetic operator, a field name, a constructor tag — a derivation SHALL
+bind that data to the node it came from. Binding runs through a leaf's `dst`: a
+`src` distinguishes two derivations from each other but carries nothing forward,
+so data present only in a split's source is unbound from that point on.
+**[Specified]** — no split emitted by this module satisfies this.
+
+> Pinned in the negative by `the_operator_is_not_bound_by_the_derivation`, which
+> asserts this clause's failure and must be inverted when ADR-0025 ⟨D-OPPROJECT⟩
+> lands. `Add(a, b)` and `Sub(a, b)` have byte-identical split destinations, so
+> the operator can be transplanted between derivations while the tree still
+> audits clean. `g_field_split` and `g_ctor_split` drop the field name and the
+> variant tag the same way.
+>
+> This is not 4.3 and not row (d). Making every generator a kernel-checked
+> relation (⟨D-PRIM⟩) closes row (d) *per leaf* — it would reject a forged
+> `g_lit` leaf, because `(cfg(1), cfg(Str))` is not a row — and still leaves
+> this open, because the break is *between* leaves. A clause was needed for it
+> because no existing one covers it: 4.2 checks that adjacent endpoints agree,
+> not that they carry what they should.
+
+**4.7 Endpoints.** A derivation's endpoints SHALL be the configurations the
 claim is about, supplied by the caller rather than read off the tree. A checker
 that took the derivation's word for its own endpoints would check nothing.
 Mismatch is `TreeAuditError::EndpointMismatch`. **[Pinned: `audit_tree`]**
 
-**4.7 Final proposition.** `HasType(e, T)` is represented as
+**4.8 Final proposition.** `HasType(e, T)` is represented as
 `Realizes(w, cfg(e), cfg(T))` where `w` is the tree's composite witness. That
 proposition's identity is the published judgement's identity. **[Pinned:
 `audited_type_check_tree`]**

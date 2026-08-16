@@ -859,12 +859,29 @@ pub enum ClaimKind {
 ///    premises are represented explicitly.
 /// 4. **`g_arith_split`** — on the same structural grounds as the `*_split`
 ///    leaves above, and **independently of `g_arith`** (ADR-0015 ⟨D-SPLIT⟩,
-///    Stage C). Its claim is that an arithmetic node contains this operator and
-///    these two ordered subexpressions, and that typing it yields those two
-///    child obligations in the same context. The operator is bound because the
-///    leaf's `src` is the whole node's configuration; the children are bound
-///    because they are its `dst`, in source order. It asserts nothing about
-///    what arithmetic *means*.
+///    Stage C). Its claim is that an arithmetic node contains these two ordered
+///    subexpressions, and that typing it yields those two child obligations in
+///    the same context. The children are bound because they are its `dst`, in
+///    source order. It asserts nothing about what arithmetic *means*.
+///
+///    **The operator is not bound by this leaf** (ADR-0025 §3 erratum). An
+///    earlier revision of this doc claimed it was, on the grounds that the
+///    leaf's `src` is the whole node's configuration. That is true and it is
+///    not sufficient: binding runs through the `dst`, and the `dst` drops the
+///    operator. `Add(a, b)` and `Sub(a, b)` have distinct sources and a
+///    **byte-identical destination**, so from the split's target onward the
+///    operator's provenance is gone and the one `g_arith_input` re-injects is
+///    a host choice. `the_operator_is_not_bound_by_the_derivation` pins this
+///    as a fact rather than leaving it as prose. ⟨D-OPPROJECT⟩ is the fix;
+///    see that test for why it cannot be implemented in today's tree language.
+///
+///    This does not lapse the discharge. ⟨D-SPLIT⟩'s condition is that the
+///    split stay *structural* — that it select no promotion, synthesise no
+///    result type, and filter no operation by host logic. Dropping the
+///    operator is a failure to carry information, not a claim about it, so
+///    the split still asserts nothing it cannot support. What the gap blocks
+///    is Stage D, which needs the operator bound to the expression before
+///    `g_arith_input` can be discharged at all.
 ///
 ///    **The discharge is conditional and the condition is executable.** It
 ///    holds only while the split stays purely structural: ⟨D-SPLIT⟩ states
@@ -4312,9 +4329,17 @@ mod tests {
             "exactly two children, in source order"
         );
 
-        // (ii) The operator is preserved — it is bound because `src` is the
-        //      whole node, so two nodes differing only in operator have
-        //      different splits. And operand order is preserved likewise.
+        // (ii) Operand order is preserved, and the node's own identity is
+        //      distinguished.
+        //
+        //      **Restated per ADR-0025 §3's erratum.** This block previously
+        //      claimed the operator was *bound*, reasoning that two nodes
+        //      differing only in operator have different split sources. The
+        //      assertion below is true, but it does not establish that: an
+        //      obligation flows through a leaf's `dst`, and `Add(a, b)` and
+        //      `Sub(a, b)` share one. The operator-binding obligation is
+        //      carried by `the_operator_is_not_bound_by_the_derivation`, which
+        //      records it as open rather than asserting it met here.
         let one_minus_two =
             Expr::Arith(ArithOp::Sub, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2)));
         let two_minus_one =
@@ -4322,7 +4347,9 @@ mod tests {
         assert_ne!(
             split_of(&one_plus_two, &TyCtx::new()).0,
             split_of(&one_minus_two, &TyCtx::new()).0,
-            "a different operator must be a different split source"
+            "the split's source is the whole node, so a different operator is a \
+             different source — this distinguishes the two derivations, and does \
+             not by itself bind the operator to anything downstream"
         );
         assert_ne!(
             split_of(&one_minus_two, &TyCtx::new()).1,
@@ -4404,6 +4431,158 @@ mod tests {
             honest_result_outcome(Outcome::Proven, real_tree.tree()),
             Outcome::Audited,
             "discharging the split alone must not lift the arithmetic cap"
+        );
+    }
+
+    /// The operator is **not** bound to the expression by any derivation this
+    /// module emits, and this test records that as a fact rather than prose.
+    ///
+    /// ADR-0025 ⟨D-OPPROJECT⟩ exists to close this. Until it lands, the gap is
+    /// real, and a test that quietly asserted the opposite — which is what
+    /// `arithmetic_split_rule_is_a_kernel_primitive`'s obligation (ii) read as
+    /// before ADR-0025 §3's erratum — is worse than no test at all.
+    ///
+    /// **What is demonstrated.** Two facts, in order:
+    ///
+    /// 1. `Add(a, b)` and `Sub(a, b)` produce a byte-identical split
+    ///    *destination*. Their sources differ, but a source distinguishes two
+    ///    derivations from each other; it does not carry anything forward.
+    ///    Everything downstream of the split sees only the destination.
+    /// 2. Consequently the operator inside the `ArithTypingInputV1` can be
+    ///    swapped for a different one and the tree still composes: the `Seq`
+    ///    middles match, `well_formed` holds, and `audit_tree` issues
+    ///    `StructureVerified` for a derivation whose subject is `1 + 2` and
+    ///    whose arithmetic input says `Sub`.
+    ///
+    /// **What is *not* claimed.** This is not a live unsoundness and not a new
+    /// one. Fact 2 is an instance of row (d) of `tree_audit`'s own table — no
+    /// leaf's `ρ_g` is checked there — which that module documents as open. The
+    /// same forgery works on `g_lit`: a leaf claiming `1 : Str` audits clean
+    /// too. And no production path reaches it, because `audit_tree` has exactly
+    /// one caller, which builds the tree from `infer_tree` immediately before,
+    /// and `RealizesTree` has no deserialization path. A forged tree can only
+    /// be constructed in-process, as here.
+    ///
+    /// **Why it is nonetheless a distinct finding.** The plan of record closes
+    /// row (d) per-leaf, by making each generator a kernel-checked primitive
+    /// relation (⟨D-PRIM⟩, ADR-0015 §5 Stage B/D). That would reject the forged
+    /// `g_lit` leaf outright, because `(cfg(1), cfg(Str))` is not a row. **It
+    /// would not reject this one.** A relation for `g_arith_input` keyed on
+    /// `(op, type_a, type_b) → ArithTypingInputV1` checks that the input object
+    /// is internally consistent with the operator supplied *at that leaf* —
+    /// and that operator is still a host choice, because the chain from the
+    /// expression to the input object was severed one step earlier at the
+    /// split. No per-leaf relation repairs a break *between* leaves. That is
+    /// precisely why ⟨D-OPPROJECT⟩ routes the operator through the split's
+    /// destination, and it is why Stage D is blocked on Stage B rather than
+    /// merely sequenced after it.
+    ///
+    /// **When ⟨D-OPPROJECT⟩ lands, this test must be inverted, not deleted** —
+    /// assertion 1 becomes `assert_ne!` and assertion 2 must stop auditing
+    /// clean. Its failure is the Stage B gate firing.
+    #[test]
+    fn the_operator_is_not_bound_by_the_derivation() {
+        let operands = || (Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2)));
+        let (a1, b1) = operands();
+        let (a2, b2) = operands();
+        let add = Expr::Arith(ArithOp::Add, a1, b1);
+        let sub = Expr::Arith(ArithOp::Sub, a2, b2);
+
+        let split_dst = |e: &Expr| {
+            let (_, tree, _) = infer_tree(e, &TyCtx::new(), Infer::new()).expect("infers");
+            leaf_endpoints(&tree, &g_arith_split()).1
+        };
+
+        // 1. The destination drops the operator.
+        assert_eq!(
+            split_dst(&add),
+            split_dst(&sub),
+            "if this now differs, ⟨D-OPPROJECT⟩ has landed: invert this test"
+        );
+
+        // 2. So the operator downstream is unconstrained by the subject.
+        let (_, add_tree, st) = infer_tree(&add, &TyCtx::new(), Infer::new()).expect("infers");
+        let (_, sub_tree, _) = infer_tree(&sub, &TyCtx::new(), Infer::new()).expect("infers");
+
+        fn arith_input_of(tree: &TyTree) -> TyObj {
+            fn walk(tree: &TyTree) -> Option<TyObj> {
+                match tree {
+                    TyTree::Leaf { generator, dst, .. } if *generator == g_arith_input() => {
+                        Some(dst.clone())
+                    }
+                    TyTree::Leaf { .. } => None,
+                    TyTree::Seq { left, right } | TyTree::Tensor { left, right } => {
+                        walk(left).or_else(|| walk(right))
+                    }
+                }
+            }
+            walk(tree).expect("every arithmetic tree has a g_arith_input leaf")
+        }
+
+        /// Substitute `foreign` for the arithmetic input object on both sides
+        /// of the bridge, so the `Seq` middle still matches.
+        fn transplant(tree: &TyTree, foreign: &TyObj) -> TyTree {
+            match tree {
+                TyTree::Leaf {
+                    generator,
+                    src,
+                    dst,
+                } if *generator == g_arith_input() => TyTree::Leaf {
+                    generator: *generator,
+                    src: src.clone(),
+                    dst: foreign.clone(),
+                },
+                TyTree::Leaf {
+                    generator,
+                    src,
+                    dst,
+                } if *generator == g_arith() => TyTree::Leaf {
+                    generator: *generator,
+                    src: foreign.clone(),
+                    dst: dst.clone(),
+                },
+                TyTree::Leaf { .. } => tree.clone(),
+                TyTree::Seq { left, right } => TyTree::Seq {
+                    left: Box::new(transplant(left, foreign)),
+                    right: Box::new(transplant(right, foreign)),
+                },
+                TyTree::Tensor { left, right } => TyTree::Tensor {
+                    left: Box::new(transplant(left, foreign)),
+                    right: Box::new(transplant(right, foreign)),
+                },
+            }
+        }
+
+        let foreign_input = arith_input_of(&sub_tree);
+        assert_ne!(
+            foreign_input,
+            arith_input_of(&add_tree),
+            "the two operators must genuinely give different input objects, or \
+             this test proves nothing"
+        );
+
+        let forged = materialize(&transplant(&add_tree, &foreign_input), &st.subst);
+        assert!(
+            forged.well_formed(),
+            "the transplant must leave the Seq middles matching — otherwise the \
+             tree language already binds the operator and there is no gap"
+        );
+
+        // The subject is `1 + 2`; the arithmetic input says `Sub`; the audit
+        // is clean. Both operators give `Int`, so the endpoints are honest and
+        // it is only the operator that is forged.
+        let derivation = audit_tree(&forged, add.config_id(), Ty::Con("Int").config_id())
+            .expect("today this audits clean — when it stops, Stage B has landed");
+        assert!(derivation.is_structure_verified());
+
+        // And the cap is what keeps this from being a live over-grade: the
+        // arithmetic bridges are undischarged, so no forged operator can reach
+        // `Proven` by this route today.
+        assert_eq!(
+            honest_result_outcome(Outcome::Proven, derivation.tree()),
+            Outcome::Audited,
+            "if a forged operator ever reaches Proven, this is no longer a \
+             staged gap — stop and report it"
         );
     }
 

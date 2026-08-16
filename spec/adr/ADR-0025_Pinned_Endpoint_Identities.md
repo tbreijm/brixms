@@ -147,6 +147,64 @@ row maps the regime's opaque `ArithOp` identity to the `ArithTypingInputV1` that
 `ArithOperatorV1`, so `kernel_operator`'s faithfulness is decided by row membership instead of
 asserted by the host.
 
+### Erratum — ⟨D-OPPROJECT⟩ is necessary, and not implementable in today's tree language
+
+> Recorded while implementing Stage B (2026-08-16). Both halves are established by test rather
+> than argument; the first strengthens this decision, the second blocks it.
+>
+> **The obligation is real, and sharper than §3 states.** The gap is now pinned by
+> `the_operator_is_not_bound_by_the_derivation`: `Add(a, b)` and `Sub(a, b)` produce a
+> byte-identical split *destination*, and consequently the `ArithTypingInputV1`'s operator can be
+> transplanted between two derivations while every `Seq` middle still matches and `audit_tree`
+> issues `StructureVerified` for a derivation whose subject is `1 + 2` and whose arithmetic input
+> says `Sub`.
+>
+> This is **not** a live unsoundness and not a new one. It is an instance of row (d) of
+> `tree_audit`'s own table — no leaf's `ρ_g` is checked — which that module documents as open. The
+> same forgery works on `g_lit` (`1 : Str` audits clean), and no production path reaches it:
+> `audit_tree` has one caller, which builds the tree from `infer_tree` on the line above, and
+> `RealizesTree` has no deserialization path.
+>
+> What makes it a distinct finding is that **closing row (d) per-leaf would not close this.**
+> ⟨D-PRIM⟩'s programme rejects the forged `g_lit` leaf outright, because `(cfg(1), cfg(Str))` is
+> not a row. It does not reject the forged operator: a Stage D relation keyed on
+> `(op, type_a, type_b) → ArithTypingInputV1` validates the input object against the operator
+> supplied *at that leaf*, and that operator is still a host choice, because the chain from the
+> expression was severed one step earlier at the split. No per-leaf relation repairs a break
+> *between* leaves. Stage D is therefore blocked on Stage B, not merely sequenced after it.
+>
+> **And the decision as written cannot be implemented.** Suppose `g_arith_split`'s destination
+> gains an operator component. By `RealizesTree::well_formed`, a `Seq`'s right subtree must have
+> `src == left.dst()`, and a `Tensor`'s `src` is `Prod(left.src(), right.src())` — so that
+> component must be the source of some subtree, and every subtree bottoms out in a leaf whose
+> source is the operator atom. That leaf's destination is either:
+>
+> - **the same atom** — a degenerate `src == dst` step. ADR-0007 §1 calls faking intermediate
+>   configurations unsound, ADR-0018 §4 retired the flat lane over exactly this, and
+>   `tree_derivation_carries_no_padded_step` fails on it across its whole corpus; or
+> - **a different atom** — a host-chosen re-expression of the operator, which is the translation
+>   this decision forbids by name, merely relocated out of `plan.typing_input` into a leaf of its
+>   own. It is also strictly worse for §3's purpose: the Stage D row would then key on a
+>   *translated* identity, so `kernel_operator`'s faithfulness would remain host-asserted one
+>   level down, which is the outcome ⟨D-OPPROJECT⟩ exists to prevent.
+>
+> There is no third option: `Tensor` is the only way to consume a `Prod`, and both its branches
+> are trees.
+>
+> **Proposed resolution — the tree language is a monoidal category missing its identity.**
+> ADR-0004 gives `Seq` for `∘` and Profile 1.2 gives `Tensor` for `⊗`, but there is no `id`. A
+> component that must cross a composition step unchanged has nothing to cross it *with*, and the
+> only way to simulate one is a padded generator leaf — which is precisely what ADR-0007 §1
+> forbids, and correctly, because such a leaf *asserts* that a generator realizes `(x, x)`. An
+> identity node carries no generator and asserts nothing: `id` is part of the categorical
+> structure, not a claim within it. Adding it would satisfy ⟨D-OPPROJECT⟩ without weakening §4.3
+> of the type-realization contract, whose stated ground is that "no generator realizes `(x, x)`".
+>
+> This touches `brix-semantic/tree.rs`, `elaborate_tree`, and the kernel's `Realizes` rules — all
+> outside this issue's lane — so it is recorded as a proposal for the owner of those crates, not
+> implemented here. Stage B's second half (restating Stage C's test) is delivered; its first half
+> is blocked on this ruling.
+
 ### Erratum to ADR-0015 Stage C's record
 
 Stage C's gate is met and `g_arith_split`'s discharge stands. But its supporting test reasons
@@ -194,6 +252,11 @@ Each stage is separately mergeable and moves no grade until the last.
 - **Stage B — project the operator.** `g_arith_split` emits the regime's own `ArithOp`, unchanged;
   Stage C's test restated per §3. *Gate:* `g_arith_split` remains discharged, and a fixture shows
   `Add` and `Sub` nodes now differ in the split's **destination**.
+  **Partially delivered, and blocked.** Stage C's test is restated and the operator-binding gap is
+  now pinned by `the_operator_is_not_bound_by_the_derivation`, which asserts the gate's *negation*
+  and must be inverted when the projection lands. The projection itself cannot be built in the
+  current tree language — see §3's implementability erratum, which proposes the identity morphism
+  it needs. Stage D is blocked on this, not merely ordered after it.
 - **Stage C — exact product endpoints.** ⟨D-PRODENDPOINT⟩ in the checker, with new vectors.
   *Gate:* a product endpoint whose digest is not a row member is rejected as
   `PrimitiveRowNotFound`, not as a type mismatch; compositions and bound variables still fail as
