@@ -77,6 +77,70 @@ pub enum Ty {
     Var(u32),
     Record(Vec<(String, Ty)>),
     Sum(String, Vec<(String, Vec<Ty>)>),
+    /// A recursive type, `μX. body` (append-only ordinal 5). The `String` names
+    /// the bound variable; occurrences of it inside `body` are [`Ty::RecVar`].
+    ///
+    /// **Equi-recursive, and self-contained on purpose.** The definition
+    /// travels *inside* the type rather than in an environment, so `unfold`
+    /// needs no declaration map and nothing has to thread one through
+    /// `unify`/`check_coverage`. That is what makes `config List = Nil |
+    /// Cons(Int, List)` expressible without changing every signature that
+    /// touches a type.
+    Rec(String, Box<Ty>),
+    /// A bound occurrence of the enclosing [`Ty::Rec`]'s variable
+    /// (append-only ordinal 6).
+    RecVar(String),
+}
+
+impl Ty {
+    /// One step of μ-unfolding: `μX. body` becomes `body[X := μX. body]`.
+    /// Any other type is returned unchanged, so this is safe to call before
+    /// inspecting a type's structure.
+    ///
+    /// Callers that read a type's *shape* — coverage, pattern binding, field
+    /// projection — must unfold first, or a recursive type looks like a
+    /// `Rec` with no variants and the check passes vacuously.
+    pub fn unfold(&self) -> Ty {
+        match self {
+            Ty::Rec(var, body) => body.subst_rec(var, self),
+            other => other.clone(),
+        }
+    }
+
+    /// Replace every free `RecVar(var)` in `self` with `replacement`.
+    /// Shadowing is respected: an inner `Rec` binding the same name stops the
+    /// substitution, so nested recursive types cannot capture each other.
+    fn subst_rec(&self, var: &str, replacement: &Ty) -> Ty {
+        match self {
+            Ty::RecVar(v) if v == var => replacement.clone(),
+            Ty::RecVar(_) | Ty::Con(_) | Ty::Var(_) => self.clone(),
+            Ty::Fn(a, b) => Ty::Fn(
+                Box::new(a.subst_rec(var, replacement)),
+                Box::new(b.subst_rec(var, replacement)),
+            ),
+            Ty::Record(fields) => Ty::Record(
+                fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), t.subst_rec(var, replacement)))
+                    .collect(),
+            ),
+            Ty::Sum(name, variants) => Ty::Sum(
+                name.clone(),
+                variants
+                    .iter()
+                    .map(|(n, fs)| {
+                        (
+                            n.clone(),
+                            fs.iter().map(|f| f.subst_rec(var, replacement)).collect(),
+                        )
+                    })
+                    .collect(),
+            ),
+            // Shadowed: an inner binder of the same name captures it.
+            Ty::Rec(v, _) if v == var => self.clone(),
+            Ty::Rec(v, body) => Ty::Rec(v.clone(), Box::new(body.subst_rec(var, replacement))),
+        }
+    }
 }
 
 impl Canonical for Ty {
@@ -105,6 +169,15 @@ impl Canonical for Ty {
                         ty.canon_write(w);
                     }
                 });
+            }
+            Ty::Rec(var, body) => {
+                w.write_enum(5, |w| {
+                    w.write_str(var);
+                    body.canon_write(w);
+                });
+            }
+            Ty::RecVar(var) => {
+                w.write_enum(6, |w| w.write_str(var));
             }
             Ty::Sum(sum_name, variants) => {
                 w.write_enum(4, |w| {
@@ -1416,8 +1489,10 @@ pub fn bind_pattern(
         Pattern::Wildcard => Ok(vec![]),
         Pattern::Var(x) => Ok(vec![(x.clone(), scrutinee_ty.clone())]),
         Pattern::Ctor(vname, subpats) => {
-            let resolved = resolve(scrutinee_ty, subst);
-            if let Ty::Sum(_sum_name, variants) = resolved {
+            // Unfolded so a recursive type's variants are visible; binding a
+            // sub-pattern of `Cons(h, t)` is how `t` gets its type at all.
+            let resolved = resolve(scrutinee_ty, subst).unfold();
+            if let Ty::Sum(_sum_name, variants) = &resolved {
                 let (_, declared_fields) = variants
                     .iter()
                     .find(|(name, _)| name == vname)
@@ -1451,8 +1526,11 @@ pub fn check_coverage(
     arms: &[(Pattern, Expr)],
     subst: &BTreeMap<u32, Ty>,
 ) -> Result<(), TypeError> {
-    let resolved = resolve(scrutinee_ty, subst);
-    if let Ty::Sum(_sum_name, variants) = resolved {
+    // Unfold first: a `Rec` has no variants of its own, so reading its shape
+    // directly would leave `uncovered` empty and pass a non-exhaustive match
+    // vacuously — accepting unsound code rather than rejecting it.
+    let resolved = resolve(scrutinee_ty, subst).unfold();
+    if let Ty::Sum(_sum_name, variants) = &resolved {
         let mut uncovered: Vec<String> = variants.iter().map(|(vname, _)| vname.clone()).collect();
         for (pat, _) in arms {
             match pat {
@@ -1528,6 +1606,11 @@ pub fn zonk(ty: &Ty, subst: &BTreeMap<u32, Ty>) -> Ty {
     match resolve(ty, subst) {
         Ty::Con(name) => Ty::Con(name),
         Ty::Var(v) => Ty::Var(*v),
+        // Zonked under the binder, never unfolded: unfolding here would not
+        // terminate, and a `Rec` body contains no unification variables that
+        // its own unfolding would resolve differently.
+        Ty::Rec(var, body) => Ty::Rec(var.clone(), Box::new(zonk(body, subst))),
+        Ty::RecVar(var) => Ty::RecVar(var.clone()),
         Ty::Fn(a, b) => Ty::Fn(Box::new(zonk(a, subst)), Box::new(zonk(b, subst))),
         Ty::Record(fields) => {
             let mut sorted: Vec<(String, Ty)> = fields
@@ -1561,6 +1644,10 @@ pub fn occurs(v: u32, ty: &Ty, subst: &BTreeMap<u32, Ty>) -> bool {
         Ty::Sum(_, variants) => variants
             .iter()
             .any(|(_, fields)| fields.iter().any(|f| occurs(v, f, subst))),
+        // A `RecVar` binds no unification variable; a `Rec` is searched under
+        // its binder without unfolding, which terminates.
+        Ty::RecVar(_) => false,
+        Ty::Rec(_, body) => occurs(v, body, subst),
     }
 }
 
@@ -1639,6 +1726,45 @@ pub fn unify(t1: &Ty, t2: &Ty, subst: &BTreeMap<u32, Ty>) -> Result<BTreeMap<u32
                 curr_subst = unify(&a.1, &b.1, &curr_subst)?;
             }
             Ok(curr_subst)
+        }
+        // Two recursive types are the same type iff they bind the same name.
+        // Names come from `config` declarations, and a name has exactly one
+        // declaration in a module, so nominal equality here IS structural
+        // equality — and it terminates, which structural descent would not.
+        (Ty::Rec(a, _), Ty::Rec(b, _)) => {
+            if a == b {
+                Ok(subst.clone())
+            } else {
+                Err(TypeError::Mismatch)
+            }
+        }
+        (Ty::RecVar(a), Ty::RecVar(b)) => {
+            if a == b {
+                Ok(subst.clone())
+            } else {
+                Err(TypeError::Mismatch)
+            }
+        }
+        // A bound occurrence and its own binder denote the same type — that is
+        // what the binder means. Handled before the unfold arms below, which
+        // would otherwise turn this into `RecVar` vs `Sum` and mismatch.
+        (Ty::RecVar(a), Ty::Rec(b, _)) | (Ty::Rec(b, _), Ty::RecVar(a)) => {
+            if a == b {
+                Ok(subst.clone())
+            } else {
+                Err(TypeError::Mismatch)
+            }
+        }
+        // A `Rec` meeting anything else is unfolded exactly once. The unfolding
+        // is a `Sum`, whose recursive fields are `RecVar`s, and `RecVar` vs
+        // `RecVar` terminates above — so this cannot loop.
+        (Ty::Rec(_, _), other) => {
+            let unfolded = r1.unfold();
+            unify(&unfolded, &other.clone(), subst)
+        }
+        (other, Ty::Rec(_, _)) => {
+            let unfolded = r2.unfold();
+            unify(&other.clone(), &unfolded, subst)
         }
         (Ty::Sum(n1, vs1), Ty::Sum(n2, vs2)) => {
             if n1 != n2 || vs1.len() != vs2.len() {
@@ -2159,8 +2285,11 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             }
         }
         Expr::Ctor(sum_ty, variant, args) => {
-            let resolved = resolve(sum_ty, &st.subst);
-            if let Ty::Sum(_sum_name, variants) = resolved {
+            // Unfolded to read the variants; the *result* type stays the
+            // folded `sum_ty`, so the constructed value is a `Nat` rather than
+            // a one-step unfolding of one.
+            let resolved = resolve(sum_ty, &st.subst).unfold();
+            if let Ty::Sum(_sum_name, variants) = &resolved {
                 let (_, declared_fields) = variants
                     .iter()
                     .find(|(vname, _)| vname == variant)

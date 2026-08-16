@@ -143,13 +143,18 @@ pub enum LowerError {
         declared: String,
         inferred: String,
     },
-    /// A `config` refers to itself, directly or through other configs.
+    /// A `config` cycle that runs through **another** config — mutual
+    /// recursion, such as `config A = MkA(B)` with `config B = MkB(A)`.
     ///
-    /// Not yet supported: the native type has no by-name constructor, so a
-    /// referenced config is expanded in place and a cyclic one would not
-    /// terminate (see `resolve_config_ty`). Refused by name rather than
-    /// approximated. `cycle` closes on its first element.
-    RecursiveConfig { config: String, cycle: Vec<String> },
+    /// Direct self-reference (`config List = Nil | Cons(Int, List)`) is
+    /// supported and becomes a μ-type. Mutual recursion is not: expansion is
+    /// by inlining, so `A` and `B` would each acquire a different μ-type
+    /// depending on which was entered first, and the two representations do
+    /// not unify. Refused by name rather than approximated — and rather than
+    /// overflowing the stack, which is what it did before.
+    ///
+    /// `cycle` closes on its first element.
+    MutuallyRecursiveConfig { config: String, cycle: Vec<String> },
 }
 
 impl From<TypeError> for LowerError {
@@ -240,10 +245,13 @@ pub fn diagnose_gap(err: &LowerError) -> ProofGap {
         // Not an obstruction in the program — a fragment the language does not
         // cover yet. The distinction matters: `whynot` must not tell a user
         // their correct program is wrong.
-        LowerError::RecursiveConfig { config, cycle } => ProofGap::UnsupportedFragment(format!(
-            "config '{config}' is recursive ({}), which L2 does not support yet",
-            cycle.join(" -> ")
-        )),
+        LowerError::MutuallyRecursiveConfig { config, cycle } => {
+            ProofGap::UnsupportedFragment(format!(
+                "config '{config}' is mutually recursive ({}), which L2 does not support yet — \
+                 direct self-reference is supported",
+                cycle.join(" -> ")
+            ))
+        }
     }
 }
 
@@ -288,10 +296,26 @@ fn resolve_config_ty(
             let Some(body) = configs.get(n) else {
                 return Err(ConfigTyError::Unknown(n.clone()));
             };
+            // A back-reference to the config currently being expanded — a
+            // DIRECT self-reference. Emitted as the bound variable of the
+            // enclosing `Rec`, which is what makes
+            // `config List = Nil | Cons(Int, List)` a type rather than a
+            // non-terminating expansion.
+            if stack.last().is_some_and(|c| c == n) {
+                return Ok(TrTy::RecVar(n.clone()));
+            }
+            // A cycle that runs through *another* config — mutual recursion.
+            // Inlining cannot express it: `A` and `B` would each expand to a
+            // different μ-type depending on which was entered first, and the
+            // two representations do not unify. Refused by name.
+            //
+            // This previously overflowed the stack, which is the one outcome
+            // worse than refusing: a crash establishes nothing and takes the
+            // process with it.
             if stack.iter().any(|c| c == n) {
                 let mut cycle = stack.clone();
                 cycle.push(n.clone());
-                return Err(ConfigTyError::Recursive(cycle));
+                return Err(ConfigTyError::Mutual(cycle));
             }
             stack.push(n.clone());
             let resolved = match body {
@@ -315,8 +339,30 @@ fn resolve_config_ty(
                 }
             };
             stack.pop();
+            // Only bind a `Rec` when the body actually refers back — otherwise
+            // every config would acquire a vacuous binder and two structurally
+            // identical types would stop being equal.
+            if mentions_rec_var(&resolved, n) {
+                return Ok(TrTy::Rec(n.clone(), Box::new(resolved)));
+            }
             Ok(resolved)
         }
+    }
+}
+
+/// Whether `ty` contains a free occurrence of `var`, stopping at a shadowing
+/// binder of the same name.
+fn mentions_rec_var(ty: &TrTy, var: &str) -> bool {
+    match ty {
+        TrTy::RecVar(v) => v == var,
+        TrTy::Con(_) | TrTy::Var(_) => false,
+        TrTy::Fn(a, b) => mentions_rec_var(a, var) || mentions_rec_var(b, var),
+        TrTy::Record(fields) => fields.iter().any(|(_, t)| mentions_rec_var(t, var)),
+        TrTy::Sum(_, variants) => variants
+            .iter()
+            .any(|(_, fs)| fs.iter().any(|f| mentions_rec_var(f, var))),
+        TrTy::Rec(v, _) if v == var => false,
+        TrTy::Rec(_, body) => mentions_rec_var(body, var),
     }
 }
 
@@ -325,9 +371,12 @@ fn resolve_config_ty(
 enum ConfigTyError {
     /// The name is neither a builtin nor a declared config.
     Unknown(String),
-    /// The config refers to itself, directly or through other configs. Carries
-    /// the chain, closing on its first element.
-    Recursive(Vec<String>),
+    /// A cycle running through another config — mutual recursion. Carries the
+    /// chain, closing on its first element.
+    ///
+    /// There is deliberately no `Recursive` variant: a *direct* self-reference
+    /// is not an error, it resolves to the bound variable of a μ-type.
+    Mutual(Vec<String>),
 }
 
 fn lower_pattern(p: &ast::Pattern) -> Result<TrPattern, LowerError> {
@@ -465,8 +514,8 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
                                 Err(ConfigTyError::Unknown(name)) => {
                                     return Err(LowerError::UnknownDeclaredType(name));
                                 }
-                                Err(ConfigTyError::Recursive(cycle)) => {
-                                    return Err(LowerError::RecursiveConfig {
+                                Err(ConfigTyError::Mutual(cycle)) => {
+                                    return Err(LowerError::MutuallyRecursiveConfig {
                                         config: config.clone(),
                                         cycle,
                                     });
@@ -691,8 +740,14 @@ fn types_agree(declared: &TrTy, inferred: &TrTy) -> bool {
                 })
         }
         // Sums are nominal: the name is the identity, and two sums sharing a
-        // name share their variants by construction.
-        (TrTy::Sum(a, _), TrTy::Sum(b, _)) => a == b,
+        // name share their variants by construction. A recursive type is
+        // identified the same way, and a `Rec` agrees with the `Sum` it
+        // unfolds to — the declaration wrote one name for both.
+        (TrTy::Sum(a, _), TrTy::Sum(b, _))
+        | (TrTy::Rec(a, _), TrTy::Rec(b, _))
+        | (TrTy::RecVar(a), TrTy::RecVar(b))
+        | (TrTy::Rec(a, _), TrTy::Sum(b, _))
+        | (TrTy::Sum(a, _), TrTy::Rec(b, _)) => a == b,
         _ => false,
     }
 }
@@ -705,6 +760,9 @@ fn render_ty(t: &TrTy) -> String {
         TrTy::Var(v) => format!("?{v}"),
         TrTy::Fn(a, r) => format!("{} -> {}", render_ty(a), render_ty(r)),
         TrTy::Sum(name, _) => name.clone(),
+        // A recursive type is shown by its name; printing the unfolded body
+        // would be unbounded, and the name is what the user wrote.
+        TrTy::Rec(name, _) | TrTy::RecVar(name) => name.clone(),
         TrTy::Record(fields) => {
             let inner: Vec<String> = fields
                 .iter()
@@ -873,8 +931,8 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                                 });
                                 break;
                             }
-                            Err(ConfigTyError::Recursive(cycle)) => {
-                                fault = Some(LowerError::RecursiveConfig {
+                            Err(ConfigTyError::Mutual(cycle)) => {
+                                fault = Some(LowerError::MutuallyRecursiveConfig {
                                     config: c.name.clone(),
                                     cycle,
                                 });
@@ -889,7 +947,16 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                 }
                 match fault {
                     None => {
-                        let sum_ty = TrTy::Sum(c.name.clone(), variant_tys);
+                        let body = TrTy::Sum(c.name.clone(), variant_tys);
+                        // Bind the recursion at the declaration. A variant
+                        // param resolved to `RecVar(name)`; without this
+                        // binder that occurrence would be free, and unifying
+                        // it against the sum would mismatch.
+                        let sum_ty = if mentions_rec_var(&body, &c.name) {
+                            TrTy::Rec(c.name.clone(), Box::new(body))
+                        } else {
+                            body
+                        };
                         sums.insert(c.name.clone(), sum_ty);
                     }
                     Some(err) => {
@@ -922,7 +989,11 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
     }
 
     for sum_ty in sums.values() {
-        if let TrTy::Sum(_, variants) = sum_ty {
+        // Unfolded so a recursive declaration's constructors are registered
+        // with the *unfolded* payload types — `Succ`'s parameter must be the
+        // whole `Nat`, not a free bound variable.
+        let unfolded = sum_ty.unfold();
+        if let TrTy::Sum(_, variants) = &unfolded {
             for (vname, field_tys) in variants {
                 if ambiguous_ctors.contains(vname) {
                     continue;
@@ -931,6 +1002,11 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                     ctors.remove(vname);
                     ambiguous_ctors.insert(vname.clone());
                 } else {
+                    // The constructed value's type is the FOLDED type — `Nat`,
+                    // not its one-step unfolding — while the payload types
+                    // come from the unfolded body. Registering the unfolded
+                    // form as the value's type would leave a free `RecVar` in
+                    // it and mismatch against every other mention of `Nat`.
                     ctors.insert(
                         vname.clone(),
                         (sum_ty.clone(), vname.clone(), field_tys.clone()),
@@ -976,8 +1052,8 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                         Err(ConfigTyError::Unknown(name)) => {
                             return Err(LowerError::UnknownDeclaredType(name));
                         }
-                        Err(ConfigTyError::Recursive(cycle)) => {
-                            return Err(LowerError::RecursiveConfig {
+                        Err(ConfigTyError::Mutual(cycle)) => {
+                            return Err(LowerError::MutuallyRecursiveConfig {
                                 config: cycle.first().cloned().unwrap_or_default(),
                                 cycle,
                             });

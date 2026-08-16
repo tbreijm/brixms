@@ -212,6 +212,9 @@ fn fmt_ty(ty: Option<&Ty>) -> String {
             format!("{{{}}}", elems.join(", "))
         }
         Some(Ty::Sum(name, _)) => name.clone(),
+        // Shown by name: unfolding a recursive type to print it would not
+        // terminate, and the name is what the user wrote.
+        Some(Ty::Rec(name, _)) | Some(Ty::RecVar(name)) => name.clone(),
     }
 }
 
