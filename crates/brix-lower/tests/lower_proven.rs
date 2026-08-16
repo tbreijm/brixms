@@ -835,3 +835,52 @@ fn test_branch_on_comparison() {
         cr.ty
     );
 }
+
+/// A recursive `fn` is refused by name rather than overflowing the stack.
+///
+/// `fn` bodies are inlined at each call site, so a recursive call inlines
+/// forever — this aborted the process before. The obstruction is the lowering
+/// strategy, not the proof system: the standard treatment assumes the
+/// function's type, checks the body under that assumption and discharges, so
+/// the recursive call becomes a hypothesis leaf and the derivation stays
+/// finite. Until that lands, refusing beats crashing.
+#[test]
+fn test_recursive_fn_is_refused_not_crashed() {
+    for (src, head) in [
+        (
+            "config Nat = Zero | Succ(Nat)\n\
+             fn depth(n) = match n { Zero => 0  Succ(k) => depth(k) }\n\
+             let d = depth(Zero)",
+            "depth",
+        ),
+        ("fn f(n) = g(n)\nfn g(n) = f(n)\nlet x = f(1)", "f"),
+    ] {
+        let module = parse(src).expect("parse");
+        let results = check_module(&module);
+        let (_, err) = results[0]
+            .as_ref()
+            .expect_err("a recursive fn must be refused");
+        match err {
+            LowerError::RecursiveFunction { function, cycle } => {
+                assert_eq!(function, head);
+                assert!(
+                    cycle.len() >= 2 && cycle.first() == cycle.last(),
+                    "the cycle must close on itself, got {cycle:?}"
+                );
+            }
+            other => panic!("expected RecursiveFunction, got {other:?}"),
+        }
+    }
+}
+
+/// Non-recursive nesting is unaffected — the guard must not catch a function
+/// that merely calls another one twice.
+#[test]
+fn test_non_recursive_calls_still_inline() {
+    let src = "fn twice(n) = n + n\nfn quad(n) = twice(n) + twice(n)\nlet x = quad(3)";
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    results[0]
+        .as_ref()
+        .unwrap_or_else(|(n, e)| panic!("'{n}' should check, got {e:?}"));
+}
