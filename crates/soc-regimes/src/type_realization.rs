@@ -2627,6 +2627,29 @@ mod tests {
                 Expr::Ctor(opt.clone(), "Some".into(), vec![Expr::Lit(1)]),
                 TyCtx::new(),
             ),
+            // Recursive configs (#298) reach these branches through `.unfold()`;
+            // the corpus has to follow the language.
+            (
+                "nullary variant of a recursive config",
+                Expr::Ctor(
+                    Ty::Rec(
+                        "List".into(),
+                        Box::new(Ty::Sum(
+                            "List".into(),
+                            vec![
+                                ("Nil".into(), vec![]),
+                                (
+                                    "Cons".into(),
+                                    vec![Ty::Con("Int"), Ty::RecVar("List".into())],
+                                ),
+                            ],
+                        )),
+                    ),
+                    "Nil".into(),
+                    vec![],
+                ),
+                TyCtx::new(),
+            ),
             (
                 "field access",
                 Expr::Field(
@@ -3890,7 +3913,29 @@ mod tests {
         //     endpoint the invariant is that `dst` is *always exactly* the sum
         //     type named inside `src`. Checked across several distinct sums so
         //     a hardcoded result type would fail.
+        // A recursive config is included deliberately. #298 made this branch
+        // read its variants through `.unfold()`, so the precondition is now
+        // "declared by *unfold(sum_ty)* with zero fields" — strictly more host
+        // logic between `src` and the emitted claim than when this gate was
+        // written, and unfolding is exactly where a bug would admit a variant
+        // that is not really there. The `dst` must stay the **folded** type:
+        // `Nil` is a `List`, not a one-step unfolding of one.
+        let list = Ty::Rec(
+            "List".into(),
+            Box::new(Ty::Sum(
+                "List".into(),
+                vec![
+                    ("Nil".into(), vec![]),
+                    (
+                        "Cons".into(),
+                        vec![Ty::Con("Int"), Ty::RecVar("List".into())],
+                    ),
+                ],
+            )),
+        );
+
         for (sum, variant) in [
+            (list.clone(), "Nil"),
             (opt.clone(), "None"),
             (
                 Ty::Sum(
@@ -3939,6 +3984,14 @@ mod tests {
             (
                 "nullary spelling of a payload variant",
                 Expr::Ctor(opt.clone(), "Some".into(), vec![]),
+            ),
+            (
+                "undeclared variant of a recursive config",
+                Expr::Ctor(list.clone(), "Empty".into(), vec![]),
+            ),
+            (
+                "nullary spelling of a recursive payload variant",
+                Expr::Ctor(list.clone(), "Cons".into(), vec![]),
             ),
         ] {
             assert_eq!(
