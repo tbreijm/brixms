@@ -948,3 +948,60 @@ fn test_witness_binding_is_checked() {
     assert_eq!(cr.name, "w");
     assert_eq!(cr.ty, Some(TrTy::Con("Int")));
 }
+
+/// A `fn`'s declared parameter and return types are contracts.
+///
+/// They were read for their names only, so `fn f(x: Str): Str = x` accepted
+/// `f(42)` and published `@Proven` over it — the arrow that got witnessed was
+/// not the arrow that was written.
+#[test]
+fn test_fn_declared_types_are_contracts() {
+    let module = parse("fn f(x: Str): Str = x\nlet r = f(42)").expect("parse");
+    let results = check_module(&module);
+    let (_, err) = results[0].as_ref().expect_err("Str vs Int must be refused");
+    assert_eq!(
+        *err,
+        LowerError::ParamTypeMismatch {
+            function: "f".to_string(),
+            param: "x".to_string(),
+            declared: "Str".to_string(),
+            inferred: "Int".to_string(),
+        }
+    );
+
+    let module = parse("fn g(n: Int): Str = n\nlet r = g(1)").expect("parse");
+    let results = check_module(&module);
+    let (_, err) = results[0]
+        .as_ref()
+        .expect_err("a wrong return type must be refused");
+    assert!(
+        matches!(err, LowerError::ReturnTypeMismatch { .. }),
+        "{err:?}"
+    );
+}
+
+/// A declared parameter type binds **before** the body is inferred, which is
+/// what makes a function over a generic recursive collection writable at all.
+///
+/// An unannotated `Lam` binds a fresh unification variable and infers the body
+/// with the parameter unconstrained, so `match l { Nil => … }` cannot resolve
+/// its scrutinee. This is the whole reason `LamAnn` exists.
+#[test]
+fn test_fn_over_generic_collection() {
+    let src = r#"
+        config List<T> = Nil | Cons(T, List<T>)
+
+        fn head_or(l: List<Int>, d: Int): Int = match l {
+          Nil       => d
+          Cons(h,t) => h
+        }
+
+        let x = head_or(Cons(5, Nil), 0)
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    let cr = results[0]
+        .as_ref()
+        .unwrap_or_else(|(n, e)| panic!("'{n}' should check, got {e:?}"));
+    assert_eq!(cr.ty, Some(TrTy::Con("Int")));
+}
