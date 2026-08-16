@@ -1,0 +1,110 @@
+{
+  "format": "brix.regime.constructor-ordinals",
+  "version": 1,
+  "contract": "Type_Realization_Contract.md #1.3",
+  "note": "Canonical ordinals for every Expr and Ty constructor. These are append-only ABI: an ordinal is never renumbered or reused. A diff here means an encoding change, which invalidates every derivation digest and every kernel row built from one.",
+  "expr": [
+    {
+      "constructor": "Expr::Lit",
+      "ordinal": 0,
+      "exemplar_config_id": "70bba652e35d5021570845980c82050519adb4d808ffdb932fd47c99f7624a94"
+    },
+    {
+      "constructor": "Expr::Var",
+      "ordinal": 1,
+      "exemplar_config_id": "27aae7ee049e99bff8ce3dcf515662f460b4fa96c3e45c87714b26f98ee6d388"
+    },
+    {
+      "constructor": "Expr::App",
+      "ordinal": 2,
+      "exemplar_config_id": "45e5f062b2d9d5c15f9247b3787bb0c4b53c99bad05f556bc83762cde06e2a72"
+    },
+    {
+      "constructor": "Expr::Lam",
+      "ordinal": 3,
+      "exemplar_config_id": "d9303ff937320043a3641c366aaaf68acc334e6bed3ea48c18234e73c6793c3f"
+    },
+    {
+      "constructor": "Expr::Record",
+      "ordinal": 4,
+      "exemplar_config_id": "777d69bb169f8fe000ab3e5ad83822d1df58cafc09c1a20aebedeb7ad2c2f9fa"
+    },
+    {
+      "constructor": "Expr::Field",
+      "ordinal": 5,
+      "exemplar_config_id": "e571a3cda0793665b39932fa4e59aef476529cb880bdb2a970ba760d79833f52"
+    },
+    {
+      "constructor": "Expr::StrLit",
+      "ordinal": 6,
+      "exemplar_config_id": "f7dc20d2429c46c7882ac74df083a816270a259c710387a717f83b55683a13a0"
+    },
+    {
+      "constructor": "Expr::FloatLit",
+      "ordinal": 7,
+      "exemplar_config_id": "8bb0b41e9b8f1b430d081f7e4132a0ec5bc0c2ab62cda3e0efbe66be634f694b"
+    },
+    {
+      "constructor": "Expr::Arith",
+      "ordinal": 8,
+      "exemplar_config_id": "fc2ce221297a26e996bcd184883968da43fbfa18c969f7a305eb1b4de44fbf14"
+    },
+    {
+      "constructor": "Expr::Ctor",
+      "ordinal": 9,
+      "exemplar_config_id": "0283503c242578c2afc1e86938f514529d5cc98f0808d88454a835c4d448571e"
+    },
+    {
+      "constructor": "Expr::Match",
+      "ordinal": 10,
+      "exemplar_config_id": "9bd1cc8c1e470c0753006c2ed1ecdb356abbf9d46089ed79ad64fcdcc6979a6d"
+    },
+    {
+      "constructor": "Expr::BoolLit",
+      "ordinal": 11,
+      "exemplar_config_id": "2cc0be42f344c609f0fb718c4042c2c307690e2ac0b31cafe689f5505a8bde65"
+    },
+    {
+      "constructor": "Expr::Cmp",
+      "ordinal": 12,
+      "exemplar_config_id": "776be0f9274f54385354db17a7b55188e13e734b424e9121c064ad82b25bcb53"
+    }
+  ],
+  "ty": [
+    {
+      "constructor": "Ty::Con",
+      "ordinal": 0,
+      "exemplar_config_id": "389d44164f1d264cc524fa8f12e62fc6eda07e04e549c411926abe230bb61cb1"
+    },
+    {
+      "constructor": "Ty::Fn",
+      "ordinal": 1,
+      "exemplar_config_id": "ea93291688ce79f3c001ae257ad2a12468579703c9e44cbd19aba357c9e95a6b"
+    },
+    {
+      "constructor": "Ty::Var",
+      "ordinal": 2,
+      "exemplar_config_id": "278f4d1d1b36ed4eda06935919f821001a9cb744c4441471a279f6ac27230932"
+    },
+    {
+      "constructor": "Ty::Record",
+      "ordinal": 3,
+      "exemplar_config_id": "1c68dc76e12228853445207c99fd23d67c4bde00a4cbf4d0aace3ecfb1309ad7"
+    },
+    {
+      "constructor": "Ty::Sum",
+      "ordinal": 4,
+      "exemplar_config_id": "bd82092941dccb7128c8716eccd7e12b2f4ccd2fb3fc1e1e3732ab8affc166ed"
+    },
+    {
+      "constructor": "Ty::Rec",
+      "ordinal": 5,
+      "exemplar_config_id": "1cc5c75d92b4d511ef5a663ae0490f4c8876e11cc00580d0da22b945ed239cb1"
+    },
+    {
+      "constructor": "Ty::RecVar",
+      "ordinal": 6,
+      "exemplar_config_id": "c1ba4d3a9314f17243b02f5842bc815f7e672cc8b17510f8da808507360011f6"
+    }
+  ]
+}
