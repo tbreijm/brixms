@@ -1,7 +1,7 @@
 use brix_lower::{check_module, LowerError};
 use brix_semantic::Outcome;
 use brix_syntax::parse;
-use soc_regimes::type_realization::{Ty as TrTy, TypeError};
+use soc_regimes::type_realization::{bool_ty, Ty as TrTy, TypeError};
 
 #[test]
 fn test_id_fixture_proven() {
@@ -724,7 +724,13 @@ fn test_comparison_types_to_bool_at_audited() {
     }
     for i in [1, 2] {
         let cr = results[i].as_ref().unwrap();
-        assert_eq!(cr.ty, Some(TrTy::Con("Bool")), "{} should be Bool", cr.name);
+        assert_eq!(
+            cr.ty,
+            Some(bool_ty()),
+            "{} should be Bool — a two-variant sum, so a boolean match is \
+             coverage-certifiable like any other sum",
+            cr.name
+        );
         assert_eq!(
             cr.outcome,
             Outcome::Audited,
@@ -745,7 +751,7 @@ fn test_bool_literal_earns_proven() {
             .as_ref()
             .unwrap_or_else(|(n, e)| panic!("{n}: {e:?}"));
         assert_eq!(cr.name, name);
-        assert_eq!(cr.ty, Some(TrTy::Con("Bool")));
+        assert_eq!(cr.ty, Some(bool_ty()));
         assert_eq!(cr.outcome, Outcome::Proven);
     }
 }
@@ -763,5 +769,63 @@ fn test_comparison_operands_must_agree() {
     assert!(
         matches!(err, LowerError::TypeError(_)),
         "expected a type error, got {err:?}"
+    );
+}
+
+/// A boolean `match` is coverage-certified like any other sum, and a missing
+/// case is caught.
+///
+/// This is the payoff of `Bool` being a real two-variant sum rather than an
+/// opaque constructor: "did you handle both cases" is the question a rules
+/// engine asks constantly, and it gets a kernel certificate rather than a
+/// convention.
+#[test]
+fn test_boolean_match_is_coverage_certified() {
+    use brix_lower::CoverageOutcome;
+
+    let src = "let a = match 1 > 2 {\n  true => 10\n  false => 20\n} proving exhaustive\n";
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    let cr = results[0].as_ref().expect("should check");
+    assert_eq!(cr.coverage, Some(CoverageOutcome::Proven));
+
+    // The typing result stays capped by `g_cmp`; coverage is a separate claim.
+    assert_eq!(cr.outcome, Outcome::Audited);
+
+    // A missing arm is a type error naming the uncovered constructor.
+    let module = parse("let b = match 1 > 2 {\n  true => 10\n}\n").expect("parse");
+    let results = check_module(&module);
+    let (_, err) = results[0]
+        .as_ref()
+        .expect_err("a missing boolean case must be refused");
+    assert_eq!(
+        *err,
+        LowerError::TypeError(TypeError::NonExhaustive(vec!["false".to_string()]))
+    );
+}
+
+/// Branching on a comparison — the shape every rule in a real engine has.
+#[test]
+fn test_branch_on_comparison() {
+    let src = r#"
+        config Outcome = AttackerWins | DefenderWins
+
+        fn resolve(atk: Int, def: Int) = match atk > def {
+          true  => AttackerWins
+          false => DefenderWins
+        }
+
+        let r = resolve(1800, 1500)
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    let cr = results[0]
+        .as_ref()
+        .unwrap_or_else(|(n, e)| panic!("'{n}' should check, got {e:?}"));
+    assert_eq!(cr.name, "r");
+    assert!(
+        format!("{:?}", cr.ty).contains("Outcome"),
+        "expected Outcome, got {:?}",
+        cr.ty
     );
 }

@@ -904,6 +904,23 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
         }
     }
 
+    // `Bool`'s two nullary constructors are builtin, so a boolean `match`
+    // resolves its scrutinee sum through the same path a declared config does
+    // — which is what lets `proving exhaustive` certify it. Seeded first so a
+    // (currently unconstructable) user variant of the same name would collide
+    // rather than silently shadow: `true`/`false` are keywords, so
+    // `parse_variant` cannot accept them as variant names today.
+    for name in ["true", "false"] {
+        ctors.insert(
+            name.to_string(),
+            (
+                soc_regimes::type_realization::bool_ty(),
+                name.to_string(),
+                vec![],
+            ),
+        );
+    }
+
     for sum_ty in sums.values() {
         if let TrTy::Sum(_, variants) = sum_ty {
             for (vname, field_tys) in variants {
