@@ -1,0 +1,52 @@
+{
+  "format": "brix.kernel.pinned-endpoint",
+  "version": 1,
+  "adr": "ADR-0025",
+  "decision": "D-PINNED / D-REDERIVE",
+  "encoder": "soc-regimes::type_realization",
+  "note": "Identities the kernel pins as literal constants. The kernel never decodes these and never reproduces this encoder; it compares digests. A change here breaks brix-kernel's rows and is a kernel-ABI event.",
+  "numeric_types": [
+    {
+      "value": "Ty::Con(\"Nat\")",
+      "config_id": "7eee6973b1b330035c9ed76f7ac96bbe87bdb2f1ef81a15f2595555efe844af0"
+    },
+    {
+      "value": "Ty::Con(\"Int\")",
+      "config_id": "389d44164f1d264cc524fa8f12e62fc6eda07e04e549c411926abe230bb61cb1"
+    },
+    {
+      "value": "Ty::Con(\"Rat\")",
+      "config_id": "a6ba9805cbb4fb5434e6776c4bf2b932fd782bb500aac9ef7b7d41040d7ec0a2"
+    },
+    {
+      "value": "Ty::Con(\"Real\")",
+      "config_id": "3bf2a1beca7a3bd7a88899421fe99c3bc588505b0975045e0d5d8b4ee4c3ab19"
+    },
+    {
+      "value": "Ty::Con(\"Complex\")",
+      "config_id": "1d7016fb3a4053f26a0f5d9334dfb5f3e3cd285adf438dcf1d2dc2a48af18d3d"
+    },
+    {
+      "value": "Ty::Con(\"Float\")",
+      "config_id": "97edda5c8bcde1bdc8d1afdaea131de5bd66cd90b8df65cf7db6ccc9f757c5e7"
+    }
+  ],
+  "operators": [
+    {
+      "value": "ArithOp::Add",
+      "config_id": "c9c095a7d8969fb90d592c5c7926c2251d1fb04db1357d053ee7acf281b8d9ea"
+    },
+    {
+      "value": "ArithOp::Sub",
+      "config_id": "95219e8a7c7f068440471850f4053b35869f31e4ac0bfe1b4bbea775bc1099e6"
+    },
+    {
+      "value": "ArithOp::Mul",
+      "config_id": "504c618345de98f46f2937bfff284415d965de98a3ee544056eeeac7f1093a0d"
+    },
+    {
+      "value": "ArithOp::Div",
+      "config_id": "655296fff7ee570dcc092f34bec47de49e42958abadcb156678dabe7c1ca3d6d"
+    }
+  ]
+}

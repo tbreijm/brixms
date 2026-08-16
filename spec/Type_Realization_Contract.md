@@ -37,7 +37,7 @@ discharge requires; the discharges themselves live in code and in the ADRs.
 ## 1. Canonical typing inputs
 
 **1.1** A typing input is a pair `(e, Γ)` where `e` is an `Expr` and `Γ` a
-`TyCtx`, both canonical under `brix-canon`. **[Partial: `Expr::config_id`/`Ty::config_id` exist and every derivation endpoint is built from them, but no vector freezes an `Expr` or `Ty` encoding — `vectors/` has no expression vector. A re-encoding change would be caught only where it happens to move a frozen arithmetic or certificate digest.]**
+`TyCtx`, both canonical under `brix-canon`. **[Partial: `Expr::config_id`/`Ty::config_id` exist and every derivation endpoint is built from them, but no vector freezes an `Expr` or `Ty` encoding — `vectors/` has no expression vector. A re-encoding change would be caught only where it happens to move a frozen arithmetic or certificate digest. **Narrowed by ADR-0025 Stage A**: the six numeric `Ty::Con` atoms and the four `ArithOp` atoms now have a frozen readable manifest (`vectors/pinned_endpoint_identities_v1.json`) and re-derivation tests, so those ten values are pinned. Every other `Expr`/`Ty` value is not.]**
 
 **1.2** `Expr` is the lowered L2 fragment, not a surface AST and not a revived
 Core IR. Lowering from surface syntax is `brix-lower`'s; this contract begins
@@ -46,10 +46,17 @@ at `Expr`. **[Pinned: the `brix-lower` L2 suite]**
 **1.3** Every `Expr` and `Ty` constructor SHALL carry an append-only canonical
 ordinal. A new constructor takes the next unused ordinal; no existing ordinal is
 renumbered or reused. **[Specified]** — the `ordinal()` methods implement it and
-their doc comments state it, but **nothing tests it**: no frozen vector covers
-`Expr` or `Ty`, so renumbering an ordinal would pass CI. Given #296–#298 added
-four constructors in a week, this is the most load-bearing unpinned clause in
-the document.
+their doc comments state it, but **nothing tests it for the constructor set**:
+renumbering `Expr::Match`'s ordinal, or reordering `Ty::Record`'s fields, would
+pass CI. Given #296–#298 added four constructors in a week, this remains the
+most load-bearing unpinned clause in the document.
+
+> ADR-0025 Stage A narrows it without closing it. Ten specific *values* are now
+> pinned with re-derivation tests, so a renumbering that moves any of them
+> fails. But a constructor none of those ten exercises — `Expr::Match`,
+> `Expr::Lam`, `Ty::Fn`, `Ty::Rec` — is still unguarded. Closing 1.3 needs a
+> vector over the **constructor set**, not over a handful of values that happen
+> to use some of them.
 
 **1.4** A configuration identity is the `ConfigId` of the canonical encoding.
 Two inputs with equal `ConfigId` are the same input for every purpose in this
@@ -57,7 +64,8 @@ contract, including cache and invalidation identity. **[Partial:
 `arith_leaf_round_trips_every_material_field` pins it for the arithmetic source
 object, and the derivation gates compare endpoint `ConfigId`s throughout. There
 is no general round-trip test over `Expr`/`Ty`, so 1.4 rests on the same
-unpinned encoding as 1.1 and 1.3.]**
+unpinned encoding as 1.1 and 1.3, outside the ten values ADR-0025 Stage A
+pins.]**
 
 **1.5** Type variables (`Ty::Var`) are inference-internal. A *published*
 judgement SHALL NOT contain an unresolved `Ty::Var`: the inferred type is zonked
