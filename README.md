@@ -4,24 +4,79 @@
 [![Release](https://img.shields.io/github/v/release/tbreijm/brixms?include_prereleases&sort=semver&label=release)](https://github.com/tbreijm/brixms/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
-**BrixMS is a language and runtime for systems that need to decide what happens
-next—and explain why.**
+**Software is good at producing an answer. It is much worse at preserving why
+that answer was allowed to become the answer. BrixMS is a language and runtime
+for that second problem.**
 
-Most execution engines blur three different questions:
+## The problem
 
-1. What *could* happen from the current state?
-2. Which possibility did the system actually choose?
-3. How strong is the evidence behind the result?
+Imagine a system deciding whether an order may ship. It combines a stock
+measurement, an estimated delivery time, a pricing rule, a compliance rule, and
+the policy in force today. Several outcomes may be possible. Some inputs were
+measured, some derived, and some formally proved. Tomorrow one of them may be
+corrected.
 
-BrixMS keeps those questions separate. Regimes propose possibilities, policy
-filters them, a deterministic calendar commits one next step, and independent
-audit or proof can strengthen the evidence afterward. The result is an
-execution model designed to be reproducible, inspectable, and honest about what
-it does not know.
+A conventional program can certainly calculate `ship = true`. But after it
+stores that boolean, the important distinctions are easy to lose:
 
-**Brix** is the language. **SOC (Settlement-Oriented Computing)** is the
-paradigm: settlement is its organizing idea in the same way that objects
-organize object-oriented systems.
+- What other outcomes were possible?
+- Which policy selected this one?
+- Which facts were measured, inferred, replay-checked, or proved?
+- Can another process reproduce the decision from the same inputs?
+- If one input changes, what must be reconsidered—and what can safely remain?
+
+Logs help, but they usually record what code ran, not why the resulting claim
+deserved a particular level of trust. A database can retain history, but history
+alone does not say which authority was entitled to publish a conclusion. A rule
+engine can derive many facts, but deriving possibilities and committing one
+operational reality are different acts.
+
+Systems faced with incomplete, contested, or revisable information therefore
+tend toward one of two failures: they pretend there is a single truth and
+silently overwrite what came before, or they retain every possibility without a
+disciplined way to commit and act. Neither result is easy to audit later.
+
+## Why the existing pieces are not enough by themselves
+
+BrixMS builds on established tools and theories; it does not claim they are
+defective. They solve different parts of the problem:
+
+| Existing approach | What it is good at | What remains separate |
+| --- | --- | --- |
+| Databases and rule engines | Storing facts and deriving consequences | The evidence grade and authority behind a committed result |
+| Workflow and event systems | Choosing and recording actions | Replayable semantic justification rather than an after-the-fact log |
+| Proof assistants | Checking a theorem in an explicit context | Running a changing world under policy and bounded resources |
+| Incremental dataflow | Updating results from small changes efficiently | Choosing among admissible alternatives and grading the result |
+
+One application can combine all four, but their boundaries then live in glue
+code: a convention says which log counts as an audit, which boolean came from a
+proof, which cache is valid under a new revision, and which component may claim
+success. Those conventions are exactly where evidence can be dropped or
+silently upgraded.
+
+## Why a whole language?
+
+The first versions of Brix were libraries and runtimes. That proved the
+execution idea, but it also exposed the limit of treating the important rules
+as API discipline. If evidence, policy, identity, and provenance are ordinary
+optional values, ordinary code can forget them.
+
+Brix makes them part of the program instead:
+
+- `config`, `witness`, `regime`, and `rule` name the semantic objects directly;
+- evidence grades such as `@Derived`, `@Audited`, and `@Proven` are checked, not
+  comments;
+- composition preserves the witness explaining a result;
+- context, policy, and history are bound into canonical identities;
+- illegal evidence upgrades are rejected at publication boundaries.
+
+The point of a new language is not novel punctuation. It is to make the
+accountability rules structural from source text through execution, audit, and
+proof—so that bypassing them is not the easiest programming path.
+
+**Brix** is that language. **SOC (Settlement-Oriented Computing)** is the
+paradigm underneath it: settlement is the organizing idea in the same way that
+objects organize object-oriented systems.
 
 > BrixMS is experimental and pre-release. The core runtime, proof kernel,
 > incremental engine, and first end-to-end language workflows exist today. The
@@ -30,9 +85,9 @@ organize object-oriented systems.
 
 ## What is BrixMS for?
 
-BrixMS is aimed at executable worlds where choosing an answer is not enough;
-the system must also preserve the context, policy, history, and evidence that
-made the answer legitimate.
+BrixMS is aimed at programs that must act while information is still partial,
+disputed, or subject to revision—and must later explain the context, policy,
+history, and evidence behind the action.
 
 That makes the architecture relevant to rule engines, simulations, planning
 systems, policy-driven automation, and other stateful systems where:
@@ -47,7 +102,86 @@ systems, policy-driven automation, and other stateful systems where:
 It is not presented as a production-ready solution for those domains yet. They
 describe the class of problems the design is being built to handle.
 
-## The four ideas underneath it
+## Where it came from
+
+BrixMS is a continuation of public work, not a new name placed on a blank
+history.
+
+### 2019: the Brix formalism
+
+The documented line begins with Tony Reijm's 2019 TU Delft EPA thesis. It
+described models assembled from context-independent “brix” and a coarse
+detect–execute cycle: find combinations that satisfy an interaction, turn them
+into events, execute them, and repeat. The current
+[`article outline`](./docs/BrixMS_Scientific_Article_Outline.md) records the
+source sections and, importantly, the thesis's own admission that the Cartesian
+detection phase becomes intractable. That limitation is the historical reason
+the current project treats cost proportional to the whole world as a semantic
+failure, not a performance task to postpone.
+
+### The first open-source implementation
+
+The original browser implementation remains public at
+[`tbreijm/tbreijm.github.io`](https://github.com/tbreijm/tbreijm.github.io). Its
+model was already recognizable: structures supplied properties; roles selected
+context-specific views and access; behaviours plus constraints formed
+interactions; collision detection dynamically bound structures to roles and
+generated events until the event set was exhausted. The repository includes the
+JavaScript implementation and a
+[runnable browser demo](https://tbreijm.github.io/) under the MIT license.
+
+That is the project’s detect–execute lineage. It established the useful idea:
+do not hard-wire every object-to-object call; detect which pieces fit the roles
+of an interaction, then execute the resulting event.
+
+### From collisions to indexed relations
+
+A later TypeScript/hypergraph iteration made those relationships explicit and
+moved detection toward incidence indices. The archived
+[`Ring 0 build plan`](./spec/archive/Ring0_Build_Plan.md) records the connection
+directly: the global incidence index was the production form of the original
+collision-loop primitive. It also records the reference-oracle discipline that
+survives today—keep a deliberately simple implementation and differentially
+test the optimized engine against it.
+
+### From detect–execute to settlement
+
+The current Rust implementation is a ground-up SOC-native rebuild. It preserves
+the original concern—discover applicable interactions without scanning an
+inert world—but broadens the question from *what can fire?* to *what may this
+system commit, under this policy, with what evidence?*
+
+The evolution is visible in the architecture:
+
+```text
+original Brix       detect matching structures -> generate and execute events
+hypergraph engine   index incidence -> update affected relations
+current BrixMS      propose candidates -> settle one -> audit or prove it
+```
+
+This is conceptual and experimental continuity, not source compatibility. The
+legacy engine was retained as a differential oracle during the SOC transition
+and then deleted after the native implementation reached parity.
+
+### Prior art, stated openly
+
+The broader design also stands on known work: Datalog and Datomic for facts and
+rules, dependent type systems and Lean for proofs as values, incremental and
+differential dataflow for O(Δ) maintenance, provenance research for derivation
+tracking, and category/coalgebra work for relational composition and
+saturation. [`ADR-0010`](./spec/adr/ADR-0010_SOC_Language_Design.md) summarizes
+that lineage; the article outline records the later prior-art review that
+explicitly rejects claiming the categorical machinery as novel.
+
+The intended contribution is the synthesis and its enforced accountability
+discipline: a committed step factors through declared logged generators;
+replay, settlement, and proof have separate authorities; and evidence cannot be
+upgraded merely because one component says so.
+
+## How BrixMS answers the problem
+
+Four ideas carry the distinction between possibility, commitment, and evidence
+all the way through the system.
 
 ### 1. Configurations and witnesses
 
