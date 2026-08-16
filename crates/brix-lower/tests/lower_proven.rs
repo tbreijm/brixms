@@ -380,9 +380,18 @@ fn test_sum_match_honest_outcomes() {
         .as_ref()
         .expect("let b should lower & type-check");
     assert_eq!(res_b.name, "b");
-    // `None` is a nullary constructor. The current kernel has no zero/unit
-    // introduction, so its source value honestly remains Audited.
-    assert_eq!(res_b.outcome, Outcome::Audited);
+    // `None` is a nullary constructor. This used to stay Audited on the
+    // grounds that "the current kernel has no zero/unit introduction" — true,
+    // but the wrong test: that is what the *structural* coproduct rules must
+    // correspond to, and a nullary constructor has no payload to inject, so it
+    // is a zero-premise introduction discharged on `g_lit`'s ground instead.
+    // See `g_ctor_nullary`'s doc and
+    // `soc_regimes::type_realization::tests::zero_arity_intro_generators_are_faithful`.
+    //
+    // Every leaf here is independently discharged — g_match_split,
+    // g_ctor_nullary, g_lit, g_var, g_match — and the match is exhaustive, so
+    // it emits `g_match` rather than the undischarged `g_match_catchall`.
+    assert_eq!(res_b.outcome, Outcome::Proven);
     assert_eq!(res_b.ty, Some(TrTy::Con("Int")));
 }
 
