@@ -297,6 +297,17 @@ pub enum Expr {
     /// Comparison (append-only ordinal 12). Types to `Bool` whatever it
     /// compared.
     Cmp(CmpOp, Box<Expr>, Box<Expr>),
+    /// A lambda whose parameter type is **given** rather than inferred
+    /// (append-only ordinal 13).
+    ///
+    /// The typing rule is [`Expr::Lam`]'s — same generators, same tree shape —
+    /// and only the determination of the parameter type differs. It exists
+    /// because `Lam` binds a fresh unification variable *before* inferring the
+    /// body, so `fn f(l: List) = match l { … }` cannot resolve its scrutinee:
+    /// the body is inferred while the parameter is still unconstrained. A
+    /// declared type has to be in scope before the body is looked at, not
+    /// unified with it afterwards.
+    LamAnn(String, Ty, Box<Expr>),
 }
 
 impl Canonical for Expr {
@@ -359,6 +370,13 @@ impl Canonical for Expr {
                     w.write_uint(op.ordinal());
                     a.canon_write(w);
                     b.canon_write(w);
+                });
+            }
+            Expr::LamAnn(param, ty, body) => {
+                w.write_enum(13, |w| {
+                    w.write_str(param);
+                    ty.canon_write(w);
+                    body.canon_write(w);
                 });
             }
             Expr::Ctor(sum_ty, variant, args) => {
@@ -2004,6 +2022,37 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                 },
                 st,
             ))
+        }
+        // Same rule as `Lam` — same generators, same tree — with the
+        // parameter's type taken from the declaration instead of a fresh
+        // variable, so the body is inferred with it already in scope.
+        Expr::LamAnn(p, declared, body) => {
+            let ctx_ext = ctx.extend(p.clone(), declared.clone());
+            let (tb, d_body, st_prime) = infer_tree(body, &ctx_ext, st)?;
+            let fn_ty = Ty::Fn(Box::new(declared.clone()), Box::new(tb.clone()));
+
+            let intro = TyTree::Leaf {
+                generator: g_lam_intro(),
+                src: TyObj::Atom(CfgAtom::Expr(Expr::LamAnn(
+                    p.clone(),
+                    declared.clone(),
+                    body.clone(),
+                ))),
+                dst: TyObj::Atom(CfgAtom::Expr((**body).clone())),
+            };
+            let close = TyTree::Leaf {
+                generator: g_lam_close(),
+                src: TyObj::Atom(CfgAtom::Type(tb.clone())),
+                dst: TyObj::Atom(CfgAtom::Type(fn_ty.clone())),
+            };
+            let tree = TyTree::Seq {
+                left: Box::new(intro),
+                right: Box::new(TyTree::Seq {
+                    left: Box::new(d_body),
+                    right: Box::new(close),
+                }),
+            };
+            Ok((fn_ty, tree, st_prime))
         }
         Expr::Lam(p, body) => {
             let (alpha, st_alpha) = st.fresh_var();

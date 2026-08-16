@@ -150,6 +150,25 @@ pub enum LowerError {
         declared: String,
         inferred: String,
     },
+    /// A call passes an argument whose type disagrees with the `fn`'s
+    /// declared parameter type.
+    ///
+    /// Before this existed, `fn f(x: Str): Str = x` accepted `f(42)` and
+    /// reported `@Proven` — the annotation was read for its name and its type
+    /// discarded, so the arrow that got witnessed was not the arrow that was
+    /// written.
+    ParamTypeMismatch {
+        function: String,
+        param: String,
+        declared: String,
+        inferred: String,
+    },
+    /// A call's result disagrees with the `fn`'s declared return type.
+    ReturnTypeMismatch {
+        function: String,
+        declared: String,
+        inferred: String,
+    },
     /// A `fn` calls itself, directly or through other `fn`s.
     ///
     /// Not yet supported, and refused rather than attempted: `fn` bodies are
@@ -267,6 +286,22 @@ pub fn diagnose_gap(err: &LowerError) -> ProofGap {
         // Not an obstruction in the program — a fragment the language does not
         // cover yet. The distinction matters: `whynot` must not tell a user
         // their correct program is wrong.
+        LowerError::ParamTypeMismatch {
+            function,
+            param,
+            declared,
+            inferred,
+        } => ProofGap::Conflict(format!(
+            "parameter '{param}' of '{function}' is declared '{declared}' but the argument is \
+             '{inferred}'"
+        )),
+        LowerError::ReturnTypeMismatch {
+            function,
+            declared,
+            inferred,
+        } => ProofGap::Conflict(format!(
+            "'{function}' is declared to return '{declared}' but returns '{inferred}'"
+        )),
         LowerError::RecursiveFunction { function, cycle } => {
             ProofGap::UnsupportedFragment(format!(
                 "'{function}' is recursive ({}); `fn` bodies are inlined, so recursion needs \
@@ -681,9 +716,31 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
 /// Lower a function definition (`ast::Callable`) to a curried [`soc_regimes::type_realization::Expr::Lam`].
 pub fn lower_fn(c: &ast::Callable, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
     let body_tr = lower_expr(&c.body, ctx)?;
-    Ok(c.params.iter().rfold(body_tr, |acc, param| {
-        TrExpr::Lam(param.name.clone(), Box::new(acc))
-    }))
+    // A declared parameter type binds before the body is inferred. Without
+    // that, `fn f(l: List) = match l { … }` cannot resolve its scrutinee: an
+    // unannotated `Lam` binds a fresh variable and the body is inferred while
+    // the parameter is still unconstrained.
+    c.params.iter().try_rfold(body_tr, |acc, param| {
+        let Some(declared) = &param.ty else {
+            return Ok(TrExpr::Lam(param.name.clone(), Box::new(acc)));
+        };
+        let mut stack = Vec::new();
+        let declared_ty = match resolve_config_ty(declared, ctx.configs, &mut stack) {
+            Ok(ty) => ty,
+            Err(ConfigTyError::Unknown(name)) => return Err(LowerError::UnknownDeclaredType(name)),
+            Err(ConfigTyError::Mutual(cycle)) => {
+                return Err(LowerError::MutuallyRecursiveConfig {
+                    config: cycle.first().cloned().unwrap_or_default(),
+                    cycle,
+                })
+            }
+        };
+        Ok(TrExpr::LamAnn(
+            param.name.clone(),
+            declared_ty,
+            Box::new(acc),
+        ))
+    })
 }
 
 /// The outcome of lowering and checking a `let` binding in a Brix module.
@@ -887,9 +944,77 @@ fn check_declared_field_types(
             }
             Ok(())
         }
-        ast::Expr::Call { args, .. } => {
+        ast::Expr::Call { func, args } => {
             for a in args {
                 check_declared_field_types(a, ctx, ty_ctx)?;
+            }
+
+            // A `fn`'s declared parameter and return types are contracts too.
+            // They were previously read only for their names, so
+            // `fn f(x: Str): Str = x` accepted `f(42)` and published `@Proven`
+            // over it — the same defect the `let` annotation path already
+            // refuses, in the construct next door.
+            let Some(callable) = ctx.fns.get(func) else {
+                return Ok(());
+            };
+            if callable.params.len() != args.len() {
+                // Arity is reported by lowering; nothing to compare here.
+                return Ok(());
+            }
+
+            for (param, arg) in callable.params.iter().zip(args.iter()) {
+                let Some(declared) = &param.ty else { continue };
+                let mut stack = Vec::new();
+                let declared_ty = match resolve_config_ty(declared, ctx.configs, &mut stack) {
+                    Ok(ty) => ty,
+                    Err(ConfigTyError::Unknown(name)) => {
+                        return Err(LowerError::UnknownDeclaredType(name))
+                    }
+                    Err(ConfigTyError::Mutual(cycle)) => {
+                        return Err(LowerError::MutuallyRecursiveConfig {
+                            config: cycle.first().cloned().unwrap_or_default(),
+                            cycle,
+                        })
+                    }
+                };
+                let tr = lower_expr(arg, ctx)?;
+                let (ty, _tree, st) = infer_tree(&tr, ty_ctx, Infer::new())?;
+                let inferred = zonk(&ty, &st.subst);
+                if !types_agree(&declared_ty, &inferred) {
+                    return Err(LowerError::ParamTypeMismatch {
+                        function: func.clone(),
+                        param: param.name.clone(),
+                        declared: render_ty(&declared_ty),
+                        inferred: render_ty(&inferred),
+                    });
+                }
+            }
+
+            // The declared return type, checked against what the call yields.
+            if let Some(declared) = &callable.ret {
+                let mut stack = Vec::new();
+                let declared_ty = match resolve_config_ty(declared, ctx.configs, &mut stack) {
+                    Ok(ty) => ty,
+                    Err(ConfigTyError::Unknown(name)) => {
+                        return Err(LowerError::UnknownDeclaredType(name))
+                    }
+                    Err(ConfigTyError::Mutual(cycle)) => {
+                        return Err(LowerError::MutuallyRecursiveConfig {
+                            config: cycle.first().cloned().unwrap_or_default(),
+                            cycle,
+                        })
+                    }
+                };
+                let tr = lower_expr(e, ctx)?;
+                let (ty, _tree, st) = infer_tree(&tr, ty_ctx, Infer::new())?;
+                let inferred = zonk(&ty, &st.subst);
+                if !types_agree(&declared_ty, &inferred) {
+                    return Err(LowerError::ReturnTypeMismatch {
+                        function: func.clone(),
+                        declared: render_ty(&declared_ty),
+                        inferred: render_ty(&inferred),
+                    });
+                }
             }
             Ok(())
         }

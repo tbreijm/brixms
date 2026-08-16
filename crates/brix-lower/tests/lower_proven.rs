@@ -884,3 +884,74 @@ fn test_non_recursive_calls_still_inline() {
         .as_ref()
         .unwrap_or_else(|(n, e)| panic!("'{n}' should check, got {e:?}"));
 }
+
+/// A `fn`'s declared parameter and return types are contracts.
+///
+/// They were previously read for their names only, so `fn f(x: Str): Str = x`
+/// accepted `f(42)` and published `@Proven` over it — the arrow that got
+/// witnessed was not the arrow that was written. Same defect the `let`
+/// annotation path already refuses, in the construct next door.
+#[test]
+fn test_fn_annotations_are_contracts() {
+    let module = parse("fn f(x: Str): Str = x\nlet r = f(42)").expect("parse");
+    let results = check_module(&module);
+    let (_, err) = results[0].as_ref().expect_err("Str vs Int must be refused");
+    assert_eq!(
+        *err,
+        LowerError::ParamTypeMismatch {
+            function: "f".to_string(),
+            param: "x".to_string(),
+            declared: "Str".to_string(),
+            inferred: "Int".to_string(),
+        }
+    );
+
+    let module = parse("fn g(n: Int): Str = n\nlet r = g(1)").expect("parse");
+    let results = check_module(&module);
+    let (_, err) = results[0]
+        .as_ref()
+        .expect_err("a wrong return type must be refused");
+    assert_eq!(
+        *err,
+        LowerError::ReturnTypeMismatch {
+            function: "g".to_string(),
+            declared: "Str".to_string(),
+            inferred: "Int".to_string(),
+        }
+    );
+}
+
+/// A declared parameter type binds **before** the body is inferred, which is
+/// what makes a function over a recursive config writable at all.
+///
+/// An unannotated `Lam` binds a fresh unification variable and infers the body
+/// with the parameter still unconstrained, so `match l { Nil => … }` cannot
+/// resolve its scrutinee. This is the whole reason `LamAnn` exists.
+#[test]
+fn test_annotated_param_types_the_body() {
+    let src = r#"
+        config List = Nil | Cons(Int, List)
+
+        fn is_empty(l: List) = match l {
+          Nil       => true
+          Cons(h,t) => false
+        }
+
+        fn head_or(l: List, d: Int): Int = match l {
+          Nil       => d
+          Cons(h,t) => h
+        }
+
+        let e = is_empty(Cons(1, Nil))
+        let h = head_or(Cons(5, Nil), 0)
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    assert_eq!(results.len(), 2);
+    for r in &results {
+        r.as_ref()
+            .unwrap_or_else(|(n, e)| panic!("binding '{n}' should check, got {e:?}"));
+    }
+    assert_eq!(results[0].as_ref().unwrap().ty, Some(bool_ty()));
+    assert_eq!(results[1].as_ref().unwrap().ty, Some(TrTy::Con("Int")));
+}
