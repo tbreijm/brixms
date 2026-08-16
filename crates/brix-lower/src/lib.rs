@@ -17,6 +17,7 @@
 //! (`type_realization` for the Proven/positive path vs `soc_regimes::native`
 //! for conflict detection/negative path) into one canonical checker.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod l3;
@@ -72,6 +73,12 @@ pub struct LowerCtx<'a> {
     /// was rejected. Consulted before reporting `Unresolved`, so the
     /// diagnostic names the broken declaration rather than the correct use.
     pub ctor_faults: &'a BTreeMap<String, LowerError>,
+    /// The `fn`s currently being inlined, innermost last.
+    ///
+    /// `fn` bodies are inlined at each call site, so a function that calls
+    /// itself inlines forever. This is the guard that turns that into a
+    /// diagnostic instead of a stack overflow.
+    pub inlining: &'a RefCell<Vec<String>>,
 }
 
 /// Errors surfaced while lowering a surface construct not yet supported by the
@@ -142,6 +149,21 @@ pub enum LowerError {
         field: String,
         declared: String,
         inferred: String,
+    },
+    /// A `fn` calls itself, directly or through other `fn`s.
+    ///
+    /// Not yet supported, and refused rather than attempted: `fn` bodies are
+    /// **inlined** at each call site, so a recursive call inlines forever —
+    /// this previously overflowed the stack.
+    ///
+    /// The obstruction is the lowering strategy, not the proof system. The
+    /// standard treatment assumes the function's type, checks the body under
+    /// that assumption, and discharges, so the recursive call is a hypothesis
+    /// leaf and the derivation stays finite. `cycle` closes on its first
+    /// element.
+    RecursiveFunction {
+        function: String,
+        cycle: Vec<String>,
     },
     /// A `config` cycle that runs through **another** config — mutual
     /// recursion, such as `config A = MkA(B)` with `config B = MkB(A)`.
@@ -245,6 +267,13 @@ pub fn diagnose_gap(err: &LowerError) -> ProofGap {
         // Not an obstruction in the program — a fragment the language does not
         // cover yet. The distinction matters: `whynot` must not tell a user
         // their correct program is wrong.
+        LowerError::RecursiveFunction { function, cycle } => {
+            ProofGap::UnsupportedFragment(format!(
+                "'{function}' is recursive ({}); `fn` bodies are inlined, so recursion needs \
+                 fixpoint typing rather than inlining",
+                cycle.join(" -> ")
+            ))
+        }
         LowerError::MutuallyRecursiveConfig { config, cycle } => {
             ProofGap::UnsupportedFragment(format!(
                 "config '{config}' is mutually recursive ({}), which L2 does not support yet — \
@@ -426,6 +455,24 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
         }
         ast::Expr::Call { func, args } => {
             if let Some(c) = ctx.fns.get(func) {
+                // A call back into a `fn` already being inlined. Refused by
+                // name: inlining cannot express it, and the derivation it
+                // would build is genuinely infinite.
+                //
+                // The proof system is not the obstruction. The standard
+                // treatment assumes the function's type, checks the body under
+                // that assumption, and discharges — so the recursive call is a
+                // hypothesis leaf and the tree stays finite, exactly as
+                // `g_lam_intro`/`g_lam_close` already do for lambdas. That is
+                // the fix; this guard is what stops the crash until it lands.
+                if ctx.inlining.borrow().iter().any(|f| f == func) {
+                    let mut cycle = ctx.inlining.borrow().clone();
+                    cycle.push(func.clone());
+                    return Err(LowerError::RecursiveFunction {
+                        function: func.clone(),
+                        cycle,
+                    });
+                }
                 if c.params.len() != args.len() {
                     return Err(LowerError::Unsupported(format!(
                         "arity mismatch for function '{func}': expected {}, got {}",
@@ -433,7 +480,10 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
                         args.len()
                     )));
                 }
-                let mut acc = lower_fn(c, ctx)?;
+                ctx.inlining.borrow_mut().push(func.clone());
+                let lowered = lower_fn(c, ctx);
+                ctx.inlining.borrow_mut().pop();
+                let mut acc = lowered?;
                 for arg in args {
                     let lowered_arg = lower_expr(arg, ctx)?;
                     acc = TrExpr::App(Box::new(acc), Box::new(lowered_arg));
@@ -911,6 +961,7 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
     // Why a sum was dropped, keyed by each of its constructor names, so a later
     // use reports the declaration's real fault instead of `Unresolved`.
     let mut ctor_faults: BTreeMap<String, LowerError> = BTreeMap::new();
+    let inlining: RefCell<Vec<String>> = RefCell::new(Vec::new());
 
     for item in &m.items {
         if let Item::Config(c) = item {
@@ -1021,6 +1072,7 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
         configs: &configs,
         ctors: &ctors,
         ctor_faults: &ctor_faults,
+        inlining: &inlining,
     };
 
     let mut ty_ctx = TyCtx::new();
