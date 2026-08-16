@@ -90,6 +90,9 @@ pub enum Ty {
     /// A bound occurrence of the enclosing [`Ty::Rec`]'s variable
     /// (append-only ordinal 6).
     RecVar(String),
+    /// A binary product (append-only ordinal 8) — the type of `a and b`,
+    /// whose derivation is a `Tensor` and whose object is a `Prod`.
+    Prod(Box<Ty>, Box<Ty>),
     /// A **type parameter** of a parameterized `config` (append-only ordinal 7).
     ///
     /// Appears only inside a stored declaration *template*. Every use site
@@ -122,6 +125,10 @@ impl Ty {
             Ty::RecVar(v) if v == var => replacement.clone(),
             Ty::RecVar(_) | Ty::Con(_) | Ty::Var(_) | Ty::Param(_) => self.clone(),
             Ty::Fn(a, b) => Ty::Fn(
+                Box::new(a.subst_rec(var, replacement)),
+                Box::new(b.subst_rec(var, replacement)),
+            ),
+            Ty::Prod(a, b) => Ty::Prod(
                 Box::new(a.subst_rec(var, replacement)),
                 Box::new(b.subst_rec(var, replacement)),
             ),
@@ -188,6 +195,12 @@ impl Canonical for Ty {
             }
             Ty::Param(name) => {
                 w.write_enum(7, |w| w.write_str(name));
+            }
+            Ty::Prod(a, b) => {
+                w.write_enum(8, |w| {
+                    a.canon_write(w);
+                    b.canon_write(w);
+                });
             }
             Ty::Sum(sum_name, variants) => {
                 w.write_enum(4, |w| {
@@ -333,6 +346,19 @@ pub enum Expr {
     /// Comparison (append-only ordinal 12). Types to `Bool` whatever it
     /// compared.
     Cmp(CmpOp, Box<Expr>, Box<Expr>),
+    /// Sequential composition of two realizations, `a then b` (append-only
+    /// ordinal 13) — the surface spelling of the kernel's `RealizesComp`.
+    ///
+    /// Its derivation is a `Seq`, so the composite is well-formed only when
+    /// the left's destination is the right's source. L2 does not check that
+    /// agreement itself: the endpoints are *configurations*, not types, and
+    /// `TreeDerivation::verify_structure` and the kernel already decide it
+    /// exactly. A mismatch surfaces as an absent proof, never as a silently
+    /// accepted composition.
+    Then(Box<Expr>, Box<Expr>),
+    /// Parallel composition, `a and b` (append-only ordinal 14) — the surface
+    /// spelling of the kernel's `RealizesTensor`. Types to [`Ty::Prod`].
+    And(Box<Expr>, Box<Expr>),
 }
 
 impl Canonical for Expr {
@@ -393,6 +419,18 @@ impl Canonical for Expr {
             Expr::Cmp(op, a, b) => {
                 w.write_enum(12, |w| {
                     w.write_uint(op.ordinal());
+                    a.canon_write(w);
+                    b.canon_write(w);
+                });
+            }
+            Expr::Then(a, b) => {
+                w.write_enum(13, |w| {
+                    a.canon_write(w);
+                    b.canon_write(w);
+                });
+            }
+            Expr::And(a, b) => {
+                w.write_enum(14, |w| {
                     a.canon_write(w);
                     b.canon_write(w);
                 });
@@ -665,6 +703,42 @@ pub fn g_cmp_split() -> GeneratorId {
 /// derivation, never the truth of the comparison.
 pub fn g_cmp() -> GeneratorId {
     GeneratorId::named("type.rule.cmp@1")
+}
+
+/// Structural split of a sequential composition
+/// (`"type.rule.then.split@1"`).
+///
+/// A `Seq`'s source is the *left* operand's source, but a top-level
+/// derivation's source must be the `Atom` of the whole expression. This leaf
+/// carries `a then b` to `a`, after which the `Seq` composes.
+///
+/// It does **not** discharge the composition condition: whether the left's
+/// destination is the right's source is decided downstream by
+/// `verify_structure` and the kernel's `RealizesComp`, on the actual
+/// configuration endpoints. That is the whole content of `then`, and L2
+/// deliberately does not second-guess it.
+pub fn g_then_split() -> GeneratorId {
+    GeneratorId::named("type.rule.then.split@1")
+}
+
+/// Structural split of a parallel composition (`"type.rule.tensor.split@1"`).
+///
+/// A `Tensor`'s source is structurally a `Prod`, but a top-level derivation's
+/// source must be the `Atom` of the whole expression — so the two operands
+/// have to be split out first, exactly as `g_arith_split` does. Discharged on
+/// ⟨D-SPLIT⟩'s grounds: it decomposes and nothing else.
+pub fn g_tensor_split() -> GeneratorId {
+    GeneratorId::named("type.rule.tensor.split@1")
+}
+
+/// Close a parallel composition into its product type
+/// (`"type.rule.tensor@1"`).
+///
+/// Discharged: it pairs two already-derived types into the product type of
+/// the pair, which is the defining rule of a product and asserts nothing about
+/// either operand.
+pub fn g_tensor() -> GeneratorId {
+    GeneratorId::named("type.rule.tensor@1")
 }
 
 pub fn g_arith_split() -> GeneratorId {
@@ -975,6 +1049,9 @@ pub fn generator_is_tight(kind: ClaimKind, g: &GeneratorId) -> bool {
                 || *g == g_arith_split()
                 || *g == g_bool_lit()
                 || *g == g_cmp_split()
+                || *g == g_then_split()
+                || *g == g_tensor_split()
+                || *g == g_tensor()
                 || *g == g_record_empty()
                 || *g == g_ctor_nullary()
         }
@@ -1061,6 +1138,9 @@ fn minted_generators() -> Vec<(String, GeneratorId)> {
         ("g_bool_lit", g_bool_lit()),
         ("g_cmp_split", g_cmp_split()),
         ("g_cmp", g_cmp()),
+        ("g_then_split", g_then_split()),
+        ("g_tensor_split", g_tensor_split()),
+        ("g_tensor", g_tensor()),
     ];
 
     let mut out: Vec<(String, GeneratorId)> = named
@@ -1502,6 +1582,10 @@ impl TyCtx {
 /// Errors during type checking in slice 2.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeError {
+    /// `a then b` where `a`'s destination is not `b`'s source, so the two
+    /// realizations do not compose. Sequential composition requires a shared
+    /// middle object; that is the whole of what `then` asserts.
+    CompositionEndpointMismatch,
     Unbound(String),
     Mismatch,
     InfiniteType,
@@ -1649,6 +1733,7 @@ pub fn zonk(ty: &Ty, subst: &BTreeMap<u32, Ty>) -> Ty {
         Ty::RecVar(var) => Ty::RecVar(var.clone()),
         Ty::Param(name) => Ty::Param(name.clone()),
         Ty::Fn(a, b) => Ty::Fn(Box::new(zonk(a, subst)), Box::new(zonk(b, subst))),
+        Ty::Prod(a, b) => Ty::Prod(Box::new(zonk(a, subst)), Box::new(zonk(b, subst))),
         Ty::Record(fields) => {
             let mut sorted: Vec<(String, Ty)> = fields
                 .iter()
@@ -1676,7 +1761,7 @@ pub fn occurs(v: u32, ty: &Ty, subst: &BTreeMap<u32, Ty>) -> bool {
     match resolve(ty, subst) {
         Ty::Var(v2) => v == *v2,
         Ty::Con(_) => false,
-        Ty::Fn(a, b) => occurs(v, a, subst) || occurs(v, b, subst),
+        Ty::Fn(a, b) | Ty::Prod(a, b) => occurs(v, a, subst) || occurs(v, b, subst),
         Ty::Record(fields) => fields.iter().any(|(_, t)| occurs(v, t, subst)),
         Ty::Sum(_, variants) => variants
             .iter()
@@ -1715,7 +1800,7 @@ fn collect_params(ty: &Ty, mapping: &mut BTreeMap<String, Ty>, st: &mut Infer) {
             }
         }
         Ty::Con(_) | Ty::Var(_) | Ty::RecVar(_) => {}
-        Ty::Fn(a, b) => {
+        Ty::Fn(a, b) | Ty::Prod(a, b) => {
             collect_params(a, mapping, st);
             collect_params(b, mapping, st);
         }
@@ -1740,6 +1825,10 @@ fn apply_params(ty: &Ty, mapping: &BTreeMap<String, Ty>) -> Ty {
         Ty::Param(name) => mapping.get(name).cloned().unwrap_or_else(|| ty.clone()),
         Ty::Con(_) | Ty::Var(_) | Ty::RecVar(_) => ty.clone(),
         Ty::Fn(a, b) => Ty::Fn(
+            Box::new(apply_params(a, mapping)),
+            Box::new(apply_params(b, mapping)),
+        ),
+        Ty::Prod(a, b) => Ty::Prod(
             Box::new(apply_params(a, mapping)),
             Box::new(apply_params(b, mapping)),
         ),
@@ -1824,6 +1913,10 @@ fn unify_seen(
             } else {
                 Err(TypeError::Mismatch)
             }
+        }
+        (Ty::Prod(a1, b1), Ty::Prod(a2, b2)) => {
+            let s1 = unify_seen(a1, a2, subst, seen)?;
+            unify_seen(b1, b2, &s1, seen)
         }
         (Ty::Fn(a1, b1), Ty::Fn(a2, b2)) => {
             let s1 = unify_seen(a1, a2, subst, seen)?;
@@ -2030,6 +2123,30 @@ pub fn materialize(tree: &TyTree, subst: &BTreeMap<u32, Ty>) -> RealizesTree {
     }
 }
 
+impl TyTree {
+    /// The source object this derivation starts from.
+    pub fn src(&self) -> TyObj {
+        match self {
+            TyTree::Leaf { src, .. } => src.clone(),
+            TyTree::Seq { left, .. } => left.src(),
+            TyTree::Tensor { left, right } => {
+                TyObj::Prod(Box::new(left.src()), Box::new(right.src()))
+            }
+        }
+    }
+
+    /// The destination object this derivation lands on.
+    pub fn dst(&self) -> TyObj {
+        match self {
+            TyTree::Leaf { dst, .. } => dst.clone(),
+            TyTree::Seq { right, .. } => right.dst(),
+            TyTree::Tensor { left, right } => {
+                TyObj::Prod(Box::new(left.dst()), Box::new(right.dst()))
+            }
+        }
+    }
+}
+
 /// Infer tree-structured realization derivation with deferred config materialization (ADR-0008).
 pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer), TypeError> {
     match expr {
@@ -2060,6 +2177,70 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             },
             st,
         )),
+        // `a then b` — the composite derivation is a `Seq`, which is exactly
+        // what the kernel's `RealizesComp` checks. The value's type is the
+        // right operand's: composition lands where the second arrow lands.
+        Expr::Then(a, b) => {
+            let (_ta, da, s1) = infer_tree(a, ctx, st)?;
+            let (tb, db, s2) = infer_tree(b, ctx, s1)?;
+            // The composition condition, checked here so it can be REPORTED
+            // rather than surfacing as a bare `IllFormedDerivation` from the
+            // structural check downstream. The condition itself is unchanged —
+            // `verify_structure` and the kernel still decide it — this only
+            // names it.
+            if da.dst() != db.src() {
+                return Err(TypeError::CompositionEndpointMismatch);
+            }
+            let split = TyTree::Leaf {
+                generator: g_then_split(),
+                src: TyObj::Atom(CfgAtom::Expr(Expr::Then(a.clone(), b.clone()))),
+                dst: TyObj::Atom(CfgAtom::Expr((**a).clone())),
+            };
+            let tree = TyTree::Seq {
+                left: Box::new(split),
+                right: Box::new(TyTree::Seq {
+                    left: Box::new(da),
+                    right: Box::new(db),
+                }),
+            };
+            Ok((tb, tree, s2))
+        }
+        // `a and b` — a `Tensor`, the kernel's `RealizesTensor`. Both arrows
+        // stand side by side, so the value is the product of both.
+        Expr::And(a, b) => {
+            let (ta, da, s1) = infer_tree(a, ctx, st)?;
+            let (tb, db, s2) = infer_tree(b, ctx, s1)?;
+            let prod_ty = Ty::Prod(Box::new(ta.clone()), Box::new(tb.clone()));
+
+            let split = TyTree::Leaf {
+                generator: g_tensor_split(),
+                src: TyObj::Atom(CfgAtom::Expr(Expr::And(a.clone(), b.clone()))),
+                dst: TyObj::Prod(
+                    Box::new(TyObj::Atom(CfgAtom::Expr((**a).clone()))),
+                    Box::new(TyObj::Atom(CfgAtom::Expr((**b).clone()))),
+                ),
+            };
+            let tensor = TyTree::Tensor {
+                left: Box::new(da),
+                right: Box::new(db),
+            };
+            let close = TyTree::Leaf {
+                generator: g_tensor(),
+                src: TyObj::Prod(
+                    Box::new(TyObj::Atom(CfgAtom::Type(ta))),
+                    Box::new(TyObj::Atom(CfgAtom::Type(tb))),
+                ),
+                dst: TyObj::Atom(CfgAtom::Type(prod_ty.clone())),
+            };
+            let tree = TyTree::Seq {
+                left: Box::new(split),
+                right: Box::new(TyTree::Seq {
+                    left: Box::new(tensor),
+                    right: Box::new(close),
+                }),
+            };
+            Ok((prod_ty, tree, s2))
+        }
         Expr::BoolLit(b) => Ok((
             bool_ty(),
             TyTree::Leaf {
@@ -4847,6 +5028,17 @@ mod tests {
             // L2 (#296, #297).
             g_bool_lit(),
             g_cmp_split(),
+            // Composition plumbing. `g_then_split` and `g_tensor_split`
+            // decompose and nothing else, on ⟨D-SPLIT⟩'s grounds; `g_tensor`
+            // pairs two already-derived types into their product, which is the
+            // defining rule of a product and asserts nothing about either
+            // operand. None of the three asserts an operation semantics —
+            // whether the composition actually holds is decided downstream by
+            // `verify_structure` and the kernel, on the configuration
+            // endpoints, not by any of these leaves.
+            g_then_split(),
+            g_tensor_split(),
+            g_tensor(),
         ];
 
         // **Exhaustive by construction, not by a hand-maintained count.** This

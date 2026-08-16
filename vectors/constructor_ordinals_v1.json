@@ -68,6 +68,16 @@
       "constructor": "Expr::Cmp",
       "ordinal": 12,
       "exemplar_config_id": "776be0f9274f54385354db17a7b55188e13e734b424e9121c064ad82b25bcb53"
+    },
+    {
+      "constructor": "Expr::Then",
+      "ordinal": 13,
+      "exemplar_config_id": "feb5d152249afb138395a4ac16066eda08fb0d3af9368704f674834c40331acd"
+    },
+    {
+      "constructor": "Expr::And",
+      "ordinal": 14,
+      "exemplar_config_id": "00abdeba8f13d864279ca07206298b53a033190034964838fde1f34bea7f5147"
     }
   ],
   "ty": [
@@ -110,6 +120,11 @@
       "constructor": "Ty::Param",
       "ordinal": 7,
       "exemplar_config_id": "9d3454e5fdbf6ca764abee599dcc44c6fbd90caa6f02f42bd79cd32fe2cf9ed8"
+    },
+    {
+      "constructor": "Ty::Prod",
+      "ordinal": 8,
+      "exemplar_config_id": "d463da5b289b216a10095028228f1127e5c196471de7947fde7cc1bb0b81903b"
     }
   ]
 }

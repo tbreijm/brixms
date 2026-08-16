@@ -216,6 +216,7 @@ fn fmt_ty(ty: Option<&Ty>) -> String {
         Some(Ty::Con(name)) => name.to_string(),
         Some(Ty::Var(v)) => format!("?{v}"),
         Some(Ty::Fn(a, b)) => format!("({} -> {})", fmt_ty(Some(a)), fmt_ty(Some(b))),
+        Some(Ty::Prod(a, b)) => format!("({} and {})", fmt_ty(Some(a)), fmt_ty(Some(b))),
         Some(Ty::Record(fields)) => {
             let elems: Vec<String> = fields
                 .iter()
@@ -1122,7 +1123,10 @@ mod tests {
 
     #[test]
     fn whynot_distinguishes_unsupported_fragment() {
-        let (report, had_error) = whynot_report("let y = 1 then 2\n");
+        // `then` used to stand in for "outside the fragment"; it now lowers
+        // onto the kernel's `RealizesComp`. `prove` is still unlowered, so it
+        // is the honest example of a fragment gap.
+        let (report, had_error) = whynot_report("let y = prove 1\n");
         assert!(had_error);
         assert!(report.contains("y: unsupported-fragment — "), "{report}");
         assert_no_refutation_words(&report, "whynot (unsupported fragment)");

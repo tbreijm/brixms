@@ -43,8 +43,9 @@ fn test_let_lit_earns_proven() {
 
 #[test]
 fn test_unsupported_construct_negative() {
-    // Witness composition (`then`/`and`) is still outside the current fragment.
-    let source = "let y = 1 then 2";
+    // `then`/`and` now lower onto the kernel's composition operators, so the
+    // fragment gap is elsewhere: `prove` is still unlowered.
+    let source = "let y = prove 1";
     let module = parse(source).expect("witness-composition expression should parse");
     let results = check_module(&module);
 
@@ -58,7 +59,7 @@ fn test_unsupported_construct_negative() {
     assert_eq!(name, "y");
     match err {
         LowerError::Unsupported(msg) => {
-            assert!(msg.contains("L2-first fragment"));
+            assert!(msg.contains("L2-first fragment"), "{msg}");
         }
         _ => panic!("Expected LowerError::Unsupported, got {:?}", err),
     }
@@ -892,4 +893,58 @@ fn test_non_recursive_calls_still_inline() {
     results[0]
         .as_ref()
         .unwrap_or_else(|(n, e)| panic!("'{n}' should check, got {e:?}"));
+}
+
+/// `then` and `and` lower onto the kernel's own composition operators.
+///
+/// These were the only binary operators in the language with no lowering at
+/// all, which left Brix able to express configurations and unable to express
+/// witnesses — half a language in a two-piece paradigm.
+#[test]
+fn test_composition_operators_lower() {
+    // Parallel composition is a `Tensor`: two arrows side by side, no shared
+    // endpoint required, so it composes unconditionally.
+    let module = parse("let pair = 1 and \"x\"").expect("parse");
+    let results = check_module(&module);
+    let cr = results[0]
+        .as_ref()
+        .unwrap_or_else(|(n, e)| panic!("'{n}' should check, got {e:?}"));
+    assert_eq!(
+        cr.ty,
+        Some(TrTy::Prod(
+            Box::new(TrTy::Con("Int")),
+            Box::new(TrTy::Con("Str"))
+        ))
+    );
+    assert_eq!(cr.outcome, Outcome::Proven);
+
+    // Sequential composition requires a shared middle object, and `1`'s
+    // destination is not `2`'s source — so it is refused, by name.
+    let module = parse("let x = 1 then 2").expect("parse");
+    let results = check_module(&module);
+    let (_, err) = results[0]
+        .as_ref()
+        .expect_err("a composition with no shared middle must be refused");
+    assert_eq!(
+        *err,
+        LowerError::TypeError(TypeError::CompositionEndpointMismatch),
+        "the diagnostic must name the composition condition, not a bare structural failure"
+    );
+}
+
+/// `witness w = e` is checked, not dropped.
+///
+/// The AST calls it sugar-equivalent to `let` and keeps it distinct only for
+/// round-trip fidelity — but it lowered to nothing, so the one binding form
+/// *named* for the witness half of the paradigm produced no judgement at all.
+#[test]
+fn test_witness_binding_is_checked() {
+    let module = parse("let a = 42\nwitness w = a").expect("parse");
+    let results = check_module(&module);
+    assert_eq!(results.len(), 2, "the witness binding must be checked too");
+    let cr = results[1]
+        .as_ref()
+        .unwrap_or_else(|(n, e)| panic!("'{n}' should check, got {e:?}"));
+    assert_eq!(cr.name, "w");
+    assert_eq!(cr.ty, Some(TrTy::Con("Int")));
 }
