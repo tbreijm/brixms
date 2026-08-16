@@ -39,7 +39,7 @@ fixture.
 | ID | Law | Current status | Owning authority or validator | Open obligation |
 | --- | --- | --- | --- | --- |
 | SOC-LAW-01 | Canonical identity | Partial | `brix-canon` plus semantic canonical implementations | #56 |
-| SOC-LAW-02 | Realization compositionality | Partial | `brix-kernel` for proof claims; regime owners for primitive relations | #53, #178 |
+| SOC-LAW-02 | Realization compositionality | Partial | `brix-kernel` for proof claims; regime owners for primitive relations; the typing regime's obligations are specified in [`Type_Realization_Contract.md`](./Type_Realization_Contract.md) | #53, #178 |
 | SOC-LAW-03 | Audit honesty | Enforced | `soc-core::audit` in the current journal profile | #228 for publication hardening |
 | SOC-LAW-04 | Epistemic non-escalation | Enforced | outcome lattice, audit, elaboration, and result-grade cap | — |
 | SOC-LAW-05 | Authority non-escalation | Enforced | the two kernels and named external drivers | — |
@@ -102,6 +102,15 @@ rejected with no theorem. Missing primitive discharge remains `Audited` or
 **Evolution.** New composition rules require an explicit kernel profile and
 adversarial vectors. New generators require a named semantics and discharge
 story under #53/#178.
+
+**Typing-regime contract.** [`Type_Realization_Contract.md`](./Type_Realization_Contract.md)
+specifies that discharge story for the typing regime — every primitive
+generator's exact source/target relation, derivation well-formedness, the
+negative-outcome taxonomy, and what a discharge artifact must contain (§9).
+Each clause carries its evidence status, so the document states what is pinned
+by a test, what is only partly pinned, and what is specified with no
+implementation. It **defines** these obligations; it does not discharge them,
+and this law stays `Partial` until the obligations it names are met.
 
 ## SOC-LAW-03 — Audit honesty
 
