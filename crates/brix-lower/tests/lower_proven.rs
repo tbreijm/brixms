@@ -701,3 +701,67 @@ fn test_named_variant_field_types_are_checked() {
         }
     );
 }
+
+/// Comparison types to `Bool`, and does so honestly: `g_cmp` asserts an
+/// operation semantics the kernel does not own, so the result is capped at
+/// `@Audited` exactly as arithmetic is.
+#[test]
+fn test_comparison_types_to_bool_at_audited() {
+    let src = r#"
+        config Stats = { atk: Int, def: Int }
+        let a = Stats { atk: 1500, def: 1400 }
+        let wins = a.atk > 1000
+        let same = a.atk == a.def
+    "#;
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+
+    for (i, name) in ["a", "wins", "same"].iter().enumerate() {
+        let cr = results[i]
+            .as_ref()
+            .unwrap_or_else(|(n, e)| panic!("'{n}' should check, got {e:?}"));
+        assert_eq!(&cr.name, name);
+    }
+    for i in [1, 2] {
+        let cr = results[i].as_ref().unwrap();
+        assert_eq!(cr.ty, Some(TrTy::Con("Bool")), "{} should be Bool", cr.name);
+        assert_eq!(
+            cr.outcome,
+            Outcome::Audited,
+            "{} must not claim more than g_cmp earns",
+            cr.name
+        );
+    }
+}
+
+/// A boolean literal is discharged like the other literal introductions: it
+/// establishes `HasType(true, Bool)` and asserts nothing further.
+#[test]
+fn test_bool_literal_earns_proven() {
+    for (src, name) in [("let t = true", "t"), ("let f = false", "f")] {
+        let module = parse(src).expect("parse");
+        let results = check_module(&module);
+        let cr = results[0]
+            .as_ref()
+            .unwrap_or_else(|(n, e)| panic!("{n}: {e:?}"));
+        assert_eq!(cr.name, name);
+        assert_eq!(cr.ty, Some(TrTy::Con("Bool")));
+        assert_eq!(cr.outcome, Outcome::Proven);
+    }
+}
+
+/// Comparison does not promote: mixing types is refused rather than silently
+/// coerced, because choosing which side moves is a decision a structural split
+/// may not make (ADR-0015 D-SPLIT).
+#[test]
+fn test_comparison_operands_must_agree() {
+    let module = parse("let x = 1 > \"a\"").expect("parse");
+    let results = check_module(&module);
+    let (_, err) = results[0]
+        .as_ref()
+        .expect_err("comparing Int to Str must be refused");
+    assert!(
+        matches!(err, LowerError::TypeError(_)),
+        "expected a type error, got {err:?}"
+    );
+}

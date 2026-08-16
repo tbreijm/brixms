@@ -411,9 +411,9 @@ impl Parser {
     }
 
     fn parse_expr_bin1(&mut self) -> Result<Expr, ParseError> {
-        let mut lhs = self.parse_expr_bin2()?;
+        let mut lhs = self.parse_expr_cmp()?;
         while let Some(op) = self.match_bin1() {
-            let rhs = self.parse_expr_bin2()?;
+            let rhs = self.parse_expr_cmp()?;
             lhs = Expr::Bin {
                 op,
                 lhs: Box::new(lhs),
@@ -433,6 +433,70 @@ impl Parser {
         } else {
             None
         }
+    }
+
+    /// Comparison — binds looser than `+`/`-` and tighter than `then`/`and`.
+    ///
+    /// **Non-associative on purpose.** `a < b < c` is a mistake in every
+    /// language that reads it as `(a < b) < c`, and here it would surface as a
+    /// confusing type error about comparing a `Bool`. Rejected by name instead.
+    fn parse_expr_cmp(&mut self) -> Result<Expr, ParseError> {
+        let lhs = self.parse_expr_bin2()?;
+        let Some(op) = self.match_cmp() else {
+            return Ok(lhs);
+        };
+        let rhs = self.parse_expr_bin2()?;
+        if self.peek_cmp() {
+            // Deliberately refused rather than read as `(a < b) < c`, which is
+            // a mistake wherever it type-checks, and refused *now* so that
+            // chaining can be defined later without breaking a program that
+            // exists today.
+            //
+            // What it will mean is already settled, and it is not conjunction:
+            // under ADR-0010 ⟨D-OPARROW⟩ an operation is an arrow, so `a < b`
+            // and `b < c` share the object `b` and chaining is exactly their
+            // **composition** — the existing `then` (∘, `RealizesComp`), not
+            // the parallel `and` (⊗). "The chain holds" is then just "the
+            // composite exists", since composing requires both links.
+            //
+            // It is not available yet because this comparison is an arrow in
+            // the *typing* regime (`Prod(Type, Type) -> Type(Bool)`), and two
+            // of those do not compose. Chaining needs the order arrow between
+            // the compared values (`Expr(a) -> Expr(b)`), which is a
+            // value-level regime this fragment does not have.
+            return Err(self.error("comparison operators do not chain; parenthesise instead"));
+        }
+        Ok(Expr::Bin {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        })
+    }
+
+    fn peek_cmp(&self) -> bool {
+        matches!(
+            self.peek(),
+            TokenKind::Lt
+                | TokenKind::Le
+                | TokenKind::Gt
+                | TokenKind::Ge
+                | TokenKind::EqEq
+                | TokenKind::Ne
+        )
+    }
+
+    fn match_cmp(&mut self) -> Option<BinOp> {
+        let op = match self.peek() {
+            TokenKind::Lt => BinOp::Lt,
+            TokenKind::Le => BinOp::Le,
+            TokenKind::Gt => BinOp::Gt,
+            TokenKind::Ge => BinOp::Ge,
+            TokenKind::EqEq => BinOp::Eq,
+            TokenKind::Ne => BinOp::Ne,
+            _ => return None,
+        };
+        self.advance();
+        Some(op)
     }
 
     fn parse_expr_bin2(&mut self) -> Result<Expr, ParseError> {
@@ -531,6 +595,14 @@ impl Parser {
             TokenKind::Str(s) => {
                 self.advance();
                 Ok(Expr::Str(s))
+            }
+            TokenKind::True => {
+                self.advance();
+                Ok(Expr::Bool(true))
+            }
+            TokenKind::False => {
+                self.advance();
+                Ok(Expr::Bool(false))
             }
             TokenKind::Match => {
                 self.advance();

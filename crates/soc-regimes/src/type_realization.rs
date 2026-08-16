@@ -19,6 +19,36 @@ use brix_semantic::{
 
 use crate::tree_audit::audit_tree;
 
+/// The comparison operators, as a closed set with frozen ordinals.
+///
+/// Separate from [`ArithOp`] because the claims differ: an arithmetic operator
+/// produces a number in the operands' own numeric type, while a comparison
+/// produces a `Bool` regardless of what it compared. Sharing one operator
+/// enum would put those two different result rules behind one tag.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum CmpOp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
+}
+
+impl CmpOp {
+    /// Frozen ordinal — ABI, never reordered.
+    pub const fn ordinal(self) -> u64 {
+        match self {
+            CmpOp::Lt => 0,
+            CmpOp::Le => 1,
+            CmpOp::Gt => 2,
+            CmpOp::Ge => 3,
+            CmpOp::Eq => 4,
+            CmpOp::Ne => 5,
+        }
+    }
+}
+
 /// Native representation of types in the type-realization regime (ADR-0005).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Ty {
@@ -169,6 +199,11 @@ pub enum Expr {
     Ctor(Ty, String, Vec<Expr>),
     /// Pattern match expression (append-only ordinal 10).
     Match(Box<Expr>, Vec<(Pattern, Expr)>),
+    /// Boolean literal (append-only ordinal 11). Types to `Bool`.
+    BoolLit(bool),
+    /// Comparison (append-only ordinal 12). Types to `Bool` whatever it
+    /// compared.
+    Cmp(CmpOp, Box<Expr>, Box<Expr>),
 }
 
 impl Canonical for Expr {
@@ -218,6 +253,16 @@ impl Canonical for Expr {
             }
             Expr::Arith(op, a, b) => {
                 w.write_enum(8, |w| {
+                    w.write_uint(op.ordinal());
+                    a.canon_write(w);
+                    b.canon_write(w);
+                });
+            }
+            Expr::BoolLit(b) => {
+                w.write_enum(11, |w| w.write_bool(*b));
+            }
+            Expr::Cmp(op, a, b) => {
+                w.write_enum(12, |w| {
                     w.write_uint(op.ordinal());
                     a.canon_write(w);
                     b.canon_write(w);
@@ -375,6 +420,48 @@ pub fn g_arith() -> GeneratorId {
 }
 
 /// Typing-rule generator for arithmetic operand splitting (`"type.rule.arith.split@1"`).
+/// Typing-rule generator for a boolean literal (`"type.rule.bool.lit@1"`).
+///
+/// Discharged tight on the same grounds as [`g_lit`], [`g_str_lit`] and
+/// [`g_float_lit`]: under ADR-0015 ⟨D-JUDGE⟩ it establishes `HasType(true,
+/// Bool)` and nothing else. It asserts no operation, representation, or value
+/// semantics, so there is nothing further for it to be capped by.
+pub fn g_bool_lit() -> GeneratorId {
+    GeneratorId::named("type.rule.bool.lit@1")
+}
+
+/// Structural split of a comparison node (`"type.rule.cmp.split@1"`).
+///
+/// Discharged on the same grounds as the other split generators (ADR-0015
+/// ⟨D-SPLIT⟩): the claim is purely structural — a comparison node contains
+/// these two ordered subexpressions, and typing it yields those two child
+/// obligations in the same context. It selects no coercion and synthesises no
+/// result type.
+pub fn g_cmp_split() -> GeneratorId {
+    GeneratorId::named("type.rule.cmp.split@1")
+}
+
+/// Typing-rule generator for a comparison (`"type.rule.cmp@1"`).
+///
+/// **Deliberately NOT discharged.** Like `g_arith` it asserts an operation
+/// semantics — that these operand types are comparable under this operator,
+/// and that the result is `Bool` — which is the class of claim ADR-0015 §8.5
+/// declines to trust because the host computed it. A comparison therefore
+/// types at `@Audited`, and discharging it would need the same ⟨D-PRIM⟩
+/// kernel-relation treatment `g_arith` is receiving.
+///
+/// **The result being a plain `Bool` loses nothing** (ADR-0010 ⟨D-OPARROW⟩).
+/// An operation is an *arrow*, not a configuration: `Bool` is the endpoint,
+/// and the reason it holds is carried by the judgement rather than by the
+/// result's type — `brix why` renders this leaf and its undischarged status.
+/// There is deliberately no proposition-valued twin of this generator.
+///
+/// Note also what the grade means here: `@Audited` grades the **typing**
+/// derivation, never the truth of the comparison.
+pub fn g_cmp() -> GeneratorId {
+    GeneratorId::named("type.rule.cmp@1")
+}
+
 pub fn g_arith_split() -> GeneratorId {
     GeneratorId::named("type.rule.arith.split@1")
 }
@@ -666,6 +753,8 @@ pub fn generator_is_tight(kind: ClaimKind, g: &GeneratorId) -> bool {
                 || *g == g_match_split()
                 || *g == g_match()
                 || *g == g_arith_split()
+                || *g == g_bool_lit()
+                || *g == g_cmp_split()
         }
     }
 }
@@ -747,6 +836,9 @@ fn minted_generators() -> Vec<(String, GeneratorId)> {
         ("g_arith_split", g_arith_split()),
         ("g_arith_input", g_arith_input()),
         ("g_arith_result", g_arith_result()),
+        ("g_bool_lit", g_bool_lit()),
+        ("g_cmp_split", g_cmp_split()),
+        ("g_cmp", g_cmp()),
     ];
 
     let mut out: Vec<(String, GeneratorId)> = named
@@ -1589,6 +1681,65 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             },
             st,
         )),
+        Expr::BoolLit(b) => Ok((
+            Ty::Con("Bool"),
+            TyTree::Leaf {
+                generator: g_bool_lit(),
+                src: TyObj::Atom(CfgAtom::Expr(Expr::BoolLit(*b))),
+                dst: TyObj::Atom(CfgAtom::Type(Ty::Con("Bool"))),
+            },
+            st,
+        )),
+        Expr::Cmp(op, a, b) => {
+            let (ta, da, s1) = infer_tree(a, ctx, st)?;
+            let (tb, db, s2) = infer_tree(b, ctx, s1)?;
+
+            // Both operands must land on the same type. No promotion: mixing
+            // `Int` and `Float` under a comparison would need the coercion
+            // lattice to decide which side moves, and that is a choice
+            // ⟨D-SPLIT⟩ keeps out of a structural split. Refused rather than
+            // guessed.
+            let subst = unify(&ta, &tb, &s2.subst)?;
+            let operand_ty = resolve(&ta, &subst).clone();
+            let s3 = Infer {
+                subst,
+                ..s2.clone()
+            };
+
+            let split = TyTree::Leaf {
+                generator: g_cmp_split(),
+                src: TyObj::Atom(CfgAtom::Expr(Expr::Cmp(
+                    *op,
+                    Box::new((**a).clone()),
+                    Box::new((**b).clone()),
+                ))),
+                dst: TyObj::Prod(
+                    Box::new(TyObj::Atom(CfgAtom::Expr((**a).clone()))),
+                    Box::new(TyObj::Atom(CfgAtom::Expr((**b).clone()))),
+                ),
+            };
+            let operands = TyTree::Tensor {
+                left: Box::new(da),
+                right: Box::new(db),
+            };
+            let cmp_leaf = TyTree::Leaf {
+                generator: g_cmp(),
+                src: TyObj::Prod(
+                    Box::new(TyObj::Atom(CfgAtom::Type(operand_ty.clone()))),
+                    Box::new(TyObj::Atom(CfgAtom::Type(operand_ty))),
+                ),
+                dst: TyObj::Atom(CfgAtom::Type(Ty::Con("Bool"))),
+            };
+
+            let tree = TyTree::Seq {
+                left: Box::new(split),
+                right: Box::new(TyTree::Seq {
+                    left: Box::new(operands),
+                    right: Box::new(cmp_leaf),
+                }),
+            };
+            Ok((Ty::Con("Bool"), tree, s3))
+        }
         Expr::Arith(op, a, b) => {
             let (ta, da, s1) = infer_tree(a, ctx, st)?;
             let (tb, db, s2) = infer_tree(b, ctx, s1)?;

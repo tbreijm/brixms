@@ -147,6 +147,8 @@ pub enum Expr {
     Num(String),
     /// String literal.
     Str(String),
+    /// Boolean literal, `true` or `false`.
+    Bool(bool),
     /// A variable / nullary reference (also a nullary constructor like `Zero`).
     Var(String),
     /// Record literal: `Item { name: e, base: e }`.
@@ -196,6 +198,29 @@ pub enum BinOp {
     Then,
     /// `wf and wx` — parallel witness composition (⊗, kernel `RealizesTensor`).
     And,
+    /// `<`
+    Lt,
+    /// `<=`
+    Le,
+    /// `>`
+    Gt,
+    /// `>=`
+    Ge,
+    /// `==`
+    Eq,
+    /// `!=`
+    Ne,
+}
+
+impl BinOp {
+    /// Whether this is a comparison, which types to `Bool` rather than to the
+    /// type of its operands.
+    pub const fn is_comparison(self) -> bool {
+        matches!(
+            self,
+            BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne
+        )
+    }
 }
 
 /// One arm of a `match`.
