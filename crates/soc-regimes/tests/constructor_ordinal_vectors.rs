@@ -72,6 +72,8 @@ fn expr_constructor(e: &Expr) -> (&'static str, u64) {
         Expr::Match(_, _) => ("Expr::Match", 10),
         Expr::BoolLit(_) => ("Expr::BoolLit", 11),
         Expr::Cmp(_, _, _) => ("Expr::Cmp", 12),
+        Expr::Then(_, _) => ("Expr::Then", 13),
+        Expr::And(_, _) => ("Expr::And", 14),
     }
 }
 
@@ -85,6 +87,7 @@ fn ty_constructor(t: &Ty) -> (&'static str, u64) {
         Ty::Rec(_, _) => ("Ty::Rec", 5),
         Ty::RecVar(_) => ("Ty::RecVar", 6),
         Ty::Param(_) => ("Ty::Param", 7),
+        Ty::Prod(_, _) => ("Ty::Prod", 8),
     }
 }
 
@@ -109,6 +112,8 @@ fn expr_exemplars() -> Vec<Expr> {
         ),
         Expr::BoolLit(true),
         Expr::Cmp(CmpOp::Eq, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2))),
+        Expr::Then(Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2))),
+        Expr::And(Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2))),
     ]
 }
 
@@ -122,6 +127,7 @@ fn ty_exemplars() -> Vec<Ty> {
         Ty::Rec("L".into(), Box::new(Ty::RecVar("L".into()))),
         Ty::RecVar("L".into()),
         Ty::Param("T".into()),
+        Ty::Prod(Box::new(Ty::Con("Int")), Box::new(Ty::Con("Str"))),
     ]
 }
 
@@ -400,6 +406,33 @@ fn every_digest_is_reproduced_by_primitive_canon_writes() {
         (
             "Ty::Param",
             build(|w| w.write_enum(7, |w| w.write_str("T"))),
+        ),
+        (
+            "Ty::Prod",
+            build(|w| {
+                w.write_enum(8, |w| {
+                    w.write_enum(0, |w| w.write_str("Int"));
+                    w.write_enum(0, |w| w.write_str("Str"));
+                })
+            }),
+        ),
+        (
+            "Expr::Then",
+            build(|w| {
+                w.write_enum(13, |w| {
+                    w.write_enum(0, |w| w.write_int(1));
+                    w.write_enum(0, |w| w.write_int(2));
+                })
+            }),
+        ),
+        (
+            "Expr::And",
+            build(|w| {
+                w.write_enum(14, |w| {
+                    w.write_enum(0, |w| w.write_int(1));
+                    w.write_enum(0, |w| w.write_int(2));
+                })
+            }),
         ),
     ];
 

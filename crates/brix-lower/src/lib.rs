@@ -480,7 +480,7 @@ fn mentions_rec_var(ty: &TrTy, var: &str) -> bool {
     match ty {
         TrTy::RecVar(v) => v == var,
         TrTy::Con(_) | TrTy::Var(_) | TrTy::Param(_) => false,
-        TrTy::Fn(a, b) => mentions_rec_var(a, var) || mentions_rec_var(b, var),
+        TrTy::Fn(a, b) | TrTy::Prod(a, b) => mentions_rec_var(a, var) || mentions_rec_var(b, var),
         TrTy::Record(fields) => fields.iter().any(|(_, t)| mentions_rec_var(t, var)),
         TrTy::Sum(_, variants) => variants
             .iter()
@@ -714,6 +714,27 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
             Box::new(lower_expr(base, ctx)?),
             name.clone(),
         )),
+        // `then` / `and` — the category's own composition operators, lowered
+        // onto the kernel's `RealizesComp` / `RealizesTensor`. These were the
+        // only binary operators in the language with no lowering at all, which
+        // left Brix able to express configurations and unable to express
+        // witnesses — half a language in a two-piece paradigm.
+        ast::Expr::Bin {
+            op: ast::BinOp::Then,
+            lhs,
+            rhs,
+        } => Ok(TrExpr::Then(
+            Box::new(lower_expr(lhs, ctx)?),
+            Box::new(lower_expr(rhs, ctx)?),
+        )),
+        ast::Expr::Bin {
+            op: ast::BinOp::And,
+            lhs,
+            rhs,
+        } => Ok(TrExpr::And(
+            Box::new(lower_expr(lhs, ctx)?),
+            Box::new(lower_expr(rhs, ctx)?),
+        )),
         ast::Expr::Bin { op, lhs, rhs } if op.is_comparison() => {
             let cmp_op = match op {
                 ast::BinOp::Lt => CmpOp::Lt,
@@ -745,9 +766,11 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
                 ast::BinOp::Div => ArithOp::Div,
                 // `then`/`and` are witness composition, not numeric arithmetic —
                 // deferred to the L4 witness/proof surface.
+                // Composition is not arithmetic — handled by the guarded arm
+                // above, which lowers onto the kernel's own operators.
                 ast::BinOp::Then | ast::BinOp::And => {
                     return Err(LowerError::Unsupported(
-                        "witness composition ('then'/'and') not in L2-first fragment".to_string(),
+                        "composition reached the arithmetic path".to_string(),
                     ))
                 }
                 // Handled by the guarded arm above.
@@ -916,6 +939,11 @@ fn render_ty_at(t: &TrTy, unfold_rec: bool) -> String {
         TrTy::Var(v) => format!("?{v}"),
         TrTy::Param(name) => name.clone(),
         TrTy::Fn(a, b) => format!("{} -> {}", render_ty_at(a, false), render_ty_at(b, false)),
+        TrTy::Prod(a, b) => format!(
+            "({} and {})",
+            render_ty_at(a, false),
+            render_ty_at(b, false)
+        ),
         TrTy::RecVar(name) => name.clone(),
         TrTy::Rec(name, _) if !unfold_rec => name.clone(),
         TrTy::Rec(name, _) => {
@@ -1204,6 +1232,22 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
     let mut results = Vec::new();
 
     for item in &m.items {
+        // `witness w = e` is checked exactly as `let` is. The AST calls the two
+        // sugar-equivalent and keeps them distinct only for round-trip
+        // fidelity; dropping `witness` entirely meant the one binding form
+        // *named* for the witness half of the paradigm produced nothing.
+        let normalized;
+        let item = match item {
+            Item::Witness { name, value } => {
+                normalized = Item::Let(ast::LetDecl {
+                    name: name.clone(),
+                    ty: None,
+                    value: value.clone(),
+                });
+                &normalized
+            }
+            other => other,
+        };
         if let Item::Let(let_decl) = item {
             let res = (|| {
                 check_declared_field_types(&let_decl.value, ctx, &ty_ctx)?;
