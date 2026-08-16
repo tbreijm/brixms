@@ -13,13 +13,19 @@ This directory holds the **governing decisions** (ADRs), the **master plan**, th
 2. **[`SOC_Semantic_Laws.md`](./SOC_Semantic_Laws.md)** — the normative law
    registry and executable conformance map. Every law names its exact domain,
    context, authority, evidence, failure form, current gate, and open obligation.
-3. **[`Build_Plan_v3_SOC.md`](./Build_Plan_v3_SOC.md)** — the master plan: SOC's
+3. **[`Type_Realization_Contract.md`](./Type_Realization_Contract.md)** — the
+   normative contract for the native typing regime (issue #53): canonical
+   inputs, contexts, every primitive generator's exact realization relation,
+   derivation well-formedness, the negative-outcome taxonomy, grades, and the
+   discharge artifact. Every clause carries its evidence status — pinned by a
+   named test, partly pinned, or specified with no implementation yet.
+4. **[`Build_Plan_v3_SOC.md`](./Build_Plan_v3_SOC.md)** — the master plan: SOC's
    semantic stages interleaved with the engineering order into one
    dependency-ordered sequence with per-step gates.
-4. **[`Next_Steps.md`](./Next_Steps.md)** — the immediate 3–5 actions.
-5. **[`Issue_Disposition_2026-07.md`](./Issue_Disposition_2026-07.md)** — every
+5. **[`Next_Steps.md`](./Next_Steps.md)** — the immediate 3–5 actions.
+6. **[`Issue_Disposition_2026-07.md`](./Issue_Disposition_2026-07.md)** — every
    open issue re-classified (keep/reframe/park/close) + the new issues to open.
-6. **[`adr/ADR-0001_Proof_Substrate.md`](./adr/ADR-0001_Proof_Substrate.md)** —
+7. **[`adr/ADR-0001_Proof_Substrate.md`](./adr/ADR-0001_Proof_Substrate.md)** —
    *superseded-in-part.* Its epistemic half (outcome lattice, authority table,
    artifact identities, retraction, cost-in-propositions) **survives verbatim**
    and is carried into ADR-0002; its hypergraph-as-ontology thesis is superseded.
