@@ -48,6 +48,9 @@ pub enum Item {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfigDecl {
     pub name: String,
+    /// Declared type parameters, `config List<T> = …`. Empty for an ordinary
+    /// config, which keeps every existing declaration unchanged.
+    pub params: Vec<String>,
     pub body: ConfigBody,
 }
 
@@ -128,6 +131,9 @@ pub enum Ty {
     /// Written directly in a type position, and also the desugaring target for
     /// a named-field sum variant (see [`Variant`]).
     Record(Vec<FieldDecl>),
+    /// Type application, `List<Int>` — a parameterized config at a specific
+    /// instantiation.
+    App(String, Vec<Ty>),
 }
 
 /// An epistemic grade on the outcome lattice (`Derived → Audited → Proven`).

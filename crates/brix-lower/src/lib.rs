@@ -67,7 +67,7 @@ use soc_regimes::type_realization::{
 #[derive(Clone, Copy, Debug)]
 pub struct LowerCtx<'a> {
     pub fns: &'a BTreeMap<String, &'a ast::Callable>,
-    pub configs: &'a BTreeMap<String, &'a ast::ConfigBody>,
+    pub configs: &'a BTreeMap<String, &'a ast::ConfigDecl>,
     pub ctors: &'a BTreeMap<String, (TrTy, String, Vec<TrTy>)>,
     /// Why a constructor is absent from `ctors`, when its declaring `config`
     /// was rejected. Consulted before reporting `Unresolved`, so the
@@ -149,6 +149,13 @@ pub enum LowerError {
         field: String,
         declared: String,
         inferred: String,
+    },
+    /// A parameterized `config` used at the wrong number of type arguments,
+    /// including a bare `List` where `List<Int>` was required.
+    ConfigArityMismatch {
+        config: String,
+        expected: usize,
+        found: usize,
     },
     /// A `fn` calls itself, directly or through other `fn`s.
     ///
@@ -267,6 +274,13 @@ pub fn diagnose_gap(err: &LowerError) -> ProofGap {
         // Not an obstruction in the program — a fragment the language does not
         // cover yet. The distinction matters: `whynot` must not tell a user
         // their correct program is wrong.
+        LowerError::ConfigArityMismatch {
+            config,
+            expected,
+            found,
+        } => ProofGap::Conflict(format!(
+            "config '{config}' takes {expected} type argument(s), used with {found}"
+        )),
         LowerError::RecursiveFunction { function, cycle } => {
             ProofGap::UnsupportedFragment(format!(
                 "'{function}' is recursive ({}); `fn` bodies are inlined, so recursion needs \
@@ -300,31 +314,99 @@ pub fn diagnose_gap(err: &LowerError) -> ProofGap {
 /// at the point it closes rather than by depth-limiting.
 fn resolve_config_ty(
     t: &ast::Ty,
-    configs: &BTreeMap<String, &ast::ConfigBody>,
+    configs: &BTreeMap<String, &ast::ConfigDecl>,
     stack: &mut Vec<String>,
 ) -> Result<TrTy, ConfigTyError> {
+    resolve_config_ty_in(t, configs, stack, &BTreeMap::new())
+}
+
+/// [`resolve_config_ty`] under a binding environment for the enclosing
+/// declaration's type parameters.
+///
+/// Inside `config List<T> = …`, `T` resolves to `TrTy::Param("T")`; at a use
+/// site `List<Int>`, it resolves to `Int`. That is the whole of what makes a
+/// config parameterized — the declaration is a template with `Param`s, and a
+/// use substitutes them.
+fn resolve_config_ty_in(
+    t: &ast::Ty,
+    configs: &BTreeMap<String, &ast::ConfigDecl>,
+    stack: &mut Vec<String>,
+    bindings: &BTreeMap<String, TrTy>,
+) -> Result<TrTy, ConfigTyError> {
     match t {
-        ast::Ty::Graded(inner, _) => resolve_config_ty(inner, configs, stack),
+        ast::Ty::App(name, args) => {
+            let mut resolved_args = Vec::new();
+            for a in args {
+                resolved_args.push(resolve_config_ty_in(a, configs, stack, bindings)?);
+            }
+            let Some(decl) = configs.get(name) else {
+                return Err(ConfigTyError::Unknown(name.clone()));
+            };
+            if decl.params.len() != resolved_args.len() {
+                return Err(ConfigTyError::Arity {
+                    config: name.clone(),
+                    expected: decl.params.len(),
+                    found: resolved_args.len(),
+                });
+            }
+            // The recursive occurrence inside the declaration. Its arguments
+            // are the declaration's own parameters, which the enclosing `Rec`
+            // already binds, so the bound variable carries them.
+            if stack.last().is_some_and(|c| c == name) {
+                return Ok(TrTy::RecVar(name.clone()));
+            }
+            if stack.iter().any(|c| c == name) {
+                let mut cycle = stack.clone();
+                cycle.push(name.clone());
+                return Err(ConfigTyError::Mutual(cycle));
+            }
+            let inner: BTreeMap<String, TrTy> =
+                decl.params.iter().cloned().zip(resolved_args).collect();
+            stack.push(name.clone());
+            let resolved = resolve_body(decl, configs, stack, &inner)?;
+            stack.pop();
+            if mentions_rec_var(&resolved, name) {
+                return Ok(TrTy::Rec(name.clone(), Box::new(resolved)));
+            }
+            Ok(resolved)
+        }
+        ast::Ty::Graded(inner, _) => resolve_config_ty_in(inner, configs, stack, bindings),
         // Anonymous, so there is no name to cycle through; its fields are
         // resolved under the same stack so a record reaching back into an
         // enclosing config is still caught.
         ast::Ty::Record(decls) => {
             let mut out = Vec::new();
             for d in decls {
-                out.push((d.name.clone(), resolve_config_ty(&d.ty, configs, stack)?));
+                out.push((
+                    d.name.clone(),
+                    resolve_config_ty_in(&d.ty, configs, stack, bindings)?,
+                ));
             }
             Ok(TrTy::Record(out))
         }
         ast::Ty::Named(n) => {
+            // A type parameter of the enclosing declaration shadows everything
+            // else — inside `config Box<T>`, `T` is the parameter, not a config
+            // that happens to be called `T`.
+            if let Some(bound) = bindings.get(n) {
+                return Ok(bound.clone());
+            }
             match n.as_str() {
                 "Int" => return Ok(TrTy::Con("Int")),
                 "Str" => return Ok(TrTy::Con("Str")),
                 "Float" => return Ok(TrTy::Con("Float")),
                 _ => {}
             }
-            let Some(body) = configs.get(n) else {
+            let Some(decl) = configs.get(n) else {
                 return Err(ConfigTyError::Unknown(n.clone()));
             };
+            if !decl.params.is_empty() {
+                return Err(ConfigTyError::Arity {
+                    config: n.clone(),
+                    expected: decl.params.len(),
+                    found: 0,
+                });
+            }
             // A back-reference to the config currently being expanded — a
             // DIRECT self-reference. Emitted as the bound variable of the
             // enclosing `Rec`, which is what makes
@@ -347,26 +429,7 @@ fn resolve_config_ty(
                 return Err(ConfigTyError::Mutual(cycle));
             }
             stack.push(n.clone());
-            let resolved = match body {
-                ast::ConfigBody::Sum(variants) => {
-                    let mut out = Vec::new();
-                    for v in variants {
-                        let mut tys = Vec::new();
-                        for p in &v.params {
-                            tys.push(resolve_config_ty(p, configs, stack)?);
-                        }
-                        out.push((v.name.clone(), tys));
-                    }
-                    TrTy::Sum(n.clone(), out)
-                }
-                ast::ConfigBody::Record(decls) => {
-                    let mut out = Vec::new();
-                    for d in decls {
-                        out.push((d.name.clone(), resolve_config_ty(&d.ty, configs, stack)?));
-                    }
-                    TrTy::Record(out)
-                }
-            };
+            let resolved = resolve_body(decl, configs, stack, &BTreeMap::new())?;
             stack.pop();
             // Only bind a `Rec` when the body actually refers back — otherwise
             // every config would acquire a vacuous binder and two structurally
@@ -379,12 +442,44 @@ fn resolve_config_ty(
     }
 }
 
+/// Resolve a declaration's body under a parameter binding.
+fn resolve_body(
+    decl: &ast::ConfigDecl,
+    configs: &BTreeMap<String, &ast::ConfigDecl>,
+    stack: &mut Vec<String>,
+    bindings: &BTreeMap<String, TrTy>,
+) -> Result<TrTy, ConfigTyError> {
+    Ok(match &decl.body {
+        ast::ConfigBody::Sum(variants) => {
+            let mut out = Vec::new();
+            for v in variants {
+                let mut tys = Vec::new();
+                for p in &v.params {
+                    tys.push(resolve_config_ty_in(p, configs, stack, bindings)?);
+                }
+                out.push((v.name.clone(), tys));
+            }
+            TrTy::Sum(decl.name.clone(), out)
+        }
+        ast::ConfigBody::Record(decls) => {
+            let mut out = Vec::new();
+            for d in decls {
+                out.push((
+                    d.name.clone(),
+                    resolve_config_ty_in(&d.ty, configs, stack, bindings)?,
+                ));
+            }
+            TrTy::Record(out)
+        }
+    })
+}
+
 /// Whether `ty` contains a free occurrence of `var`, stopping at a shadowing
 /// binder of the same name.
 fn mentions_rec_var(ty: &TrTy, var: &str) -> bool {
     match ty {
         TrTy::RecVar(v) => v == var,
-        TrTy::Con(_) | TrTy::Var(_) => false,
+        TrTy::Con(_) | TrTy::Var(_) | TrTy::Param(_) => false,
         TrTy::Fn(a, b) => mentions_rec_var(a, var) || mentions_rec_var(b, var),
         TrTy::Record(fields) => fields.iter().any(|(_, t)| mentions_rec_var(t, var)),
         TrTy::Sum(_, variants) => variants
@@ -400,6 +495,13 @@ fn mentions_rec_var(ty: &TrTy, var: &str) -> bool {
 enum ConfigTyError {
     /// The name is neither a builtin nor a declared config.
     Unknown(String),
+    /// A parameterized config used at the wrong number of type arguments —
+    /// including a bare `List` where `List<Int>` was required.
+    Arity {
+        config: String,
+        expected: usize,
+        found: usize,
+    },
     /// A cycle running through another config — mutual recursion. Carries the
     /// chain, closing on its first element.
     ///
@@ -546,7 +648,7 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
                 return Err(fault.clone());
             }
             if let Some(body) = ctx.configs.get(config) {
-                match body {
+                match &body.body {
                     ast::ConfigBody::Sum(_) => {
                         return Err(LowerError::Unsupported(format!(
                             "'{config}' is a sum config, not a record"
@@ -563,6 +665,17 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
                                 Ok(_) => {}
                                 Err(ConfigTyError::Unknown(name)) => {
                                     return Err(LowerError::UnknownDeclaredType(name));
+                                }
+                                Err(ConfigTyError::Arity {
+                                    config,
+                                    expected,
+                                    found,
+                                }) => {
+                                    return Err(LowerError::ConfigArityMismatch {
+                                        config,
+                                        expected,
+                                        found,
+                                    })
                                 }
                                 Err(ConfigTyError::Mutual(cycle)) => {
                                     return Err(LowerError::MutuallyRecursiveConfig {
@@ -776,47 +889,58 @@ fn coverage_for(value: &ast::Expr, tr_expr: &TrExpr, ctx: LowerCtx) -> Option<Co
 /// arrives in canonical (sorted) order while a declaration is written in
 /// whatever order reads best, and those are the same type.
 fn types_agree(declared: &TrTy, inferred: &TrTy) -> bool {
-    match (declared, inferred) {
-        // Not yet determined — no contradiction to report.
-        (TrTy::Var(_), _) | (_, TrTy::Var(_)) => true,
-        (TrTy::Con(a), TrTy::Con(b)) => a == b,
-        (TrTy::Fn(a1, r1), TrTy::Fn(a2, r2)) => types_agree(a1, a2) && types_agree(r1, r2),
-        (TrTy::Record(d), TrTy::Record(i)) => {
-            d.len() == i.len()
-                && d.iter().all(|(name, dty)| {
-                    i.iter()
-                        .find(|(n, _)| n == name)
-                        .is_some_and(|(_, ity)| types_agree(dty, ity))
-                })
-        }
-        // Sums are nominal: the name is the identity, and two sums sharing a
-        // name share their variants by construction. A recursive type is
-        // identified the same way, and a `Rec` agrees with the `Sum` it
-        // unfolds to — the declaration wrote one name for both.
-        (TrTy::Sum(a, _), TrTy::Sum(b, _))
-        | (TrTy::Rec(a, _), TrTy::Rec(b, _))
-        | (TrTy::RecVar(a), TrTy::RecVar(b))
-        | (TrTy::Rec(a, _), TrTy::Sum(b, _))
-        | (TrTy::Sum(a, _), TrTy::Rec(b, _)) => a == b,
-        _ => false,
-    }
+    // Delegated to unification rather than re-implemented.
+    //
+    // A hand-written comparison drifted from `unify` the moment parameterized
+    // configs arrived: it compared recursive types by NAME, so a declared
+    // `List<Str>` agreed with an inferred `List<Int>` and the contract passed
+    // silently. `unify` already decides this correctly — equi-recursively,
+    // with an assumption set — and it is permissive about unresolved
+    // variables by construction, which is the other property this needs.
+    soc_regimes::type_realization::unify(declared, inferred, &BTreeMap::new()).is_ok()
 }
 
 /// Render a type for a diagnostic. `Debug` leaks the internal representation
 /// into user-facing output, so the surface spelling is reconstructed here.
 fn render_ty(t: &TrTy) -> String {
+    render_ty_at(t, true)
+}
+
+/// Render a type. `unfold_rec` shows a recursive type's payloads one level
+/// deep, which is what distinguishes `List<Int>` from `List<Str>` — both are
+/// bound as `List`, so rendering the name alone produces the useless
+/// "declared 'List' but inferred 'List'".
+fn render_ty_at(t: &TrTy, unfold_rec: bool) -> String {
     match t {
         TrTy::Con(c) => (*c).to_string(),
         TrTy::Var(v) => format!("?{v}"),
-        TrTy::Fn(a, r) => format!("{} -> {}", render_ty(a), render_ty(r)),
+        TrTy::Param(name) => name.clone(),
+        TrTy::Fn(a, b) => format!("{} -> {}", render_ty_at(a, false), render_ty_at(b, false)),
+        TrTy::RecVar(name) => name.clone(),
+        TrTy::Rec(name, _) if !unfold_rec => name.clone(),
+        TrTy::Rec(name, _) => {
+            let TrTy::Sum(_, variants) = t.unfold() else {
+                return name.clone();
+            };
+            let payloads: Vec<String> = variants
+                .iter()
+                .filter(|(_, fs)| !fs.is_empty())
+                .map(|(v, fs)| {
+                    let inner: Vec<String> = fs.iter().map(|f| render_ty_at(f, false)).collect();
+                    format!("{v}({})", inner.join(", "))
+                })
+                .collect();
+            if payloads.is_empty() {
+                name.clone()
+            } else {
+                format!("{name}[{}]", payloads.join(" | "))
+            }
+        }
         TrTy::Sum(name, _) => name.clone(),
-        // A recursive type is shown by its name; printing the unfolded body
-        // would be unbounded, and the name is what the user wrote.
-        TrTy::Rec(name, _) | TrTy::RecVar(name) => name.clone(),
         TrTy::Record(fields) => {
             let inner: Vec<String> = fields
                 .iter()
-                .map(|(n, t)| format!("{n}: {}", render_ty(t)))
+                .map(|(n, t)| format!("{n}: {}", render_ty_at(t, false)))
                 .collect();
             format!("{{{}}}", inner.join(", "))
         }
@@ -847,27 +971,28 @@ fn check_declared_field_types(
 
             // The declared field types, from either a record config or the
             // record payload of a named-field variant.
-            let declared: Vec<(String, TrTy)> =
-                if let Some(ast::ConfigBody::Record(decls)) = ctx.configs.get(config).copied() {
-                    let mut out = Vec::new();
-                    for d in decls {
-                        let mut stack = vec![config.clone()];
-                        match resolve_config_ty(&d.ty, ctx.configs, &mut stack) {
-                            Ok(ty) => out.push((d.name.clone(), ty)),
-                            // Unresolvable declarations are reported by the paths
-                            // that own them; nothing to compare against here.
-                            Err(_) => return Ok(()),
-                        }
+            let declared: Vec<(String, TrTy)> = if let Some(ast::ConfigBody::Record(decls)) =
+                ctx.configs.get(config).map(|d| &d.body)
+            {
+                let mut out = Vec::new();
+                for d in decls {
+                    let mut stack = vec![config.clone()];
+                    match resolve_config_ty(&d.ty, ctx.configs, &mut stack) {
+                        Ok(ty) => out.push((d.name.clone(), ty)),
+                        // Unresolvable declarations are reported by the paths
+                        // that own them; nothing to compare against here.
+                        Err(_) => return Ok(()),
                     }
-                    out
-                } else if let Some((_, _, field_tys)) = ctx.ctors.get(config) {
-                    match field_tys.as_slice() {
-                        [TrTy::Record(decls)] => decls.clone(),
-                        _ => return Ok(()),
-                    }
-                } else {
-                    return Ok(());
-                };
+                }
+                out
+            } else if let Some((_, _, field_tys)) = ctx.ctors.get(config) {
+                match field_tys.as_slice() {
+                    [TrTy::Record(decls)] => decls.clone(),
+                    _ => return Ok(()),
+                }
+            } else {
+                return Ok(());
+            };
 
             for (name, declared_ty) in &declared {
                 let Some((_, value)) = fields.iter().find(|(f, _)| f == name) else {
@@ -948,7 +1073,7 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                 fns.insert(c.name.clone(), c);
             }
             Item::Config(c) => {
-                configs.insert(c.name.clone(), &c.body);
+                configs.insert(c.name.clone(), c);
             }
             _ => {}
         }
@@ -966,39 +1091,18 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
     for item in &m.items {
         if let Item::Config(c) = item {
             if let ast::ConfigBody::Sum(variants) = &c.body {
-                let mut variant_tys = Vec::new();
-                let mut fault = None;
-                for v in variants {
-                    let mut field_tys = Vec::new();
-                    for param in &v.params {
-                        let mut stack = vec![c.name.clone()];
-                        match resolve_config_ty(param, &configs, &mut stack) {
-                            Ok(ty) => field_tys.push(ty),
-                            Err(ConfigTyError::Unknown(ty)) => {
-                                fault = Some(LowerError::UnknownVariantType {
-                                    config: c.name.clone(),
-                                    variant: v.name.clone(),
-                                    ty,
-                                });
-                                break;
-                            }
-                            Err(ConfigTyError::Mutual(cycle)) => {
-                                fault = Some(LowerError::MutuallyRecursiveConfig {
-                                    config: c.name.clone(),
-                                    cycle,
-                                });
-                                break;
-                            }
-                        }
-                    }
-                    if fault.is_some() {
-                        break;
-                    }
-                    variant_tys.push((v.name.clone(), field_tys));
-                }
-                match fault {
-                    None => {
-                        let body = TrTy::Sum(c.name.clone(), variant_tys);
+                // A parameterized declaration is a TEMPLATE: its own type
+                // parameters resolve to `Param`, which every use site later
+                // instantiates to fresh variables. For an ordinary config the
+                // binding map is empty and this is the previous behaviour.
+                let bindings: BTreeMap<String, TrTy> = c
+                    .params
+                    .iter()
+                    .map(|p| (p.clone(), TrTy::Param(p.clone())))
+                    .collect();
+                let mut stack = vec![c.name.clone()];
+                let fault = match resolve_body(c, &configs, &mut stack, &bindings) {
+                    Ok(body) => {
                         // Bind the recursion at the declaration. A variant
                         // param resolved to `RecVar(name)`; without this
                         // binder that occurrence would be free, and unifying
@@ -1009,13 +1113,34 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                             body
                         };
                         sums.insert(c.name.clone(), sum_ty);
+                        None
                     }
-                    Some(err) => {
-                        // The sum is unusable, but every constructor it declared
-                        // now carries the reason rather than going silent.
-                        for v in variants {
-                            ctor_faults.entry(v.name.clone()).or_insert(err.clone());
-                        }
+                    Err(ConfigTyError::Unknown(ty)) => Some(LowerError::UnknownVariantType {
+                        config: c.name.clone(),
+                        variant: variants.first().map(|v| v.name.clone()).unwrap_or_default(),
+                        ty,
+                    }),
+                    Err(ConfigTyError::Arity {
+                        config,
+                        expected,
+                        found,
+                    }) => Some(LowerError::ConfigArityMismatch {
+                        config,
+                        expected,
+                        found,
+                    }),
+                    Err(ConfigTyError::Mutual(cycle)) => {
+                        Some(LowerError::MutuallyRecursiveConfig {
+                            config: c.name.clone(),
+                            cycle,
+                        })
+                    }
+                };
+                if let Some(err) = fault {
+                    // The sum is unusable, but every constructor it declared
+                    // now carries the reason rather than going silent.
+                    for v in variants {
+                        ctor_faults.entry(v.name.clone()).or_insert(err.clone());
                     }
                 }
             }
@@ -1103,6 +1228,17 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                         }
                         Err(ConfigTyError::Unknown(name)) => {
                             return Err(LowerError::UnknownDeclaredType(name));
+                        }
+                        Err(ConfigTyError::Arity {
+                            config,
+                            expected,
+                            found,
+                        }) => {
+                            return Err(LowerError::ConfigArityMismatch {
+                                config,
+                                expected,
+                                found,
+                            })
                         }
                         Err(ConfigTyError::Mutual(cycle)) => {
                             return Err(LowerError::MutuallyRecursiveConfig {

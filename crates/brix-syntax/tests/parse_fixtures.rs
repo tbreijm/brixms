@@ -10,7 +10,7 @@ fn test_parse_pricing_fixture() {
 
     // 1. config Item = { name: Str, base: Int }
     match &module.items[0] {
-        Item::Config(ConfigDecl { name, body }) => {
+        Item::Config(ConfigDecl { name, body, .. }) => {
             assert_eq!(name, "Item");
             match body {
                 ConfigBody::Record(fields) => {
@@ -116,7 +116,7 @@ fn test_parse_nat_fixture() {
 
     // 1. config Nat = Zero | Succ(Nat)
     match &module.items[0] {
-        Item::Config(ConfigDecl { name, body }) => {
+        Item::Config(ConfigDecl { name, body, .. }) => {
             assert_eq!(name, "Nat");
             match body {
                 ConfigBody::Sum(variants) => {

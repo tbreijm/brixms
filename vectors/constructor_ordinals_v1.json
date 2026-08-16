@@ -105,6 +105,11 @@
       "constructor": "Ty::RecVar",
       "ordinal": 6,
       "exemplar_config_id": "c1ba4d3a9314f17243b02f5842bc815f7e672cc8b17510f8da808507360011f6"
+    },
+    {
+      "constructor": "Ty::Param",
+      "ordinal": 7,
+      "exemplar_config_id": "9d3454e5fdbf6ca764abee599dcc44c6fbd90caa6f02f42bd79cd32fe2cf9ed8"
     }
   ]
 }
