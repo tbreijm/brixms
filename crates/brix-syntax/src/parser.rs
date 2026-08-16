@@ -690,6 +690,21 @@ impl Parser {
             return Ok(Pattern::Wildcard);
         }
 
+        // `true`/`false` are the two nullary constructors of `Bool`, so they
+        // pattern-match through the ordinary constructor path. They are
+        // keywords rather than identifiers, so they need naming here — but
+        // they carry no special pattern kind, which is what lets a boolean
+        // match be coverage-certified like any other sum.
+        for (tok, name) in [(TokenKind::True, "true"), (TokenKind::False, "false")] {
+            if self.check(&tok) {
+                self.advance();
+                return Ok(Pattern::Ctor {
+                    name: name.to_string(),
+                    args: vec![],
+                });
+            }
+        }
+
         let (name, _) = self.expect_ident("pattern")?;
         let is_capitalized = name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
 

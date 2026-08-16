@@ -19,6 +19,26 @@ use brix_semantic::{
 
 use crate::tree_audit::audit_tree;
 
+/// The `Bool` type, as a genuine two-variant sum rather than an opaque
+/// constructor.
+///
+/// **Why a sum and not `Ty::Con("Bool")`.** `certify_exhaustive` resolves a
+/// scrutinee's constructor set from `Ty::Sum` and returns `Unknown` for
+/// anything else, so an opaque `Bool` could never have its coverage certified.
+/// A boolean match is exactly where "did you handle both cases" is worth
+/// certifying — it is the shape every rules engine is made of — so `Bool`
+/// carries its two nullary variants and `match b { true => … false => … }`
+/// goes through the ordinary sum path with no special case anywhere.
+///
+/// Variant order is declaration order, `false` then `true`, and is ABI: it
+/// participates in the type's canonical identity.
+pub fn bool_ty() -> Ty {
+    Ty::Sum(
+        "Bool".to_string(),
+        vec![("false".to_string(), vec![]), ("true".to_string(), vec![])],
+    )
+}
+
 /// The comparison operators, as a closed set with frozen ordinals.
 ///
 /// Separate from [`ArithOp`] because the claims differ: an arithmetic operator
@@ -1682,11 +1702,11 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             st,
         )),
         Expr::BoolLit(b) => Ok((
-            Ty::Con("Bool"),
+            bool_ty(),
             TyTree::Leaf {
                 generator: g_bool_lit(),
                 src: TyObj::Atom(CfgAtom::Expr(Expr::BoolLit(*b))),
-                dst: TyObj::Atom(CfgAtom::Type(Ty::Con("Bool"))),
+                dst: TyObj::Atom(CfgAtom::Type(bool_ty())),
             },
             st,
         )),
@@ -1728,7 +1748,7 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                     Box::new(TyObj::Atom(CfgAtom::Type(operand_ty.clone()))),
                     Box::new(TyObj::Atom(CfgAtom::Type(operand_ty))),
                 ),
-                dst: TyObj::Atom(CfgAtom::Type(Ty::Con("Bool"))),
+                dst: TyObj::Atom(CfgAtom::Type(bool_ty())),
             };
 
             let tree = TyTree::Seq {
@@ -1738,7 +1758,7 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                     right: Box::new(cmp_leaf),
                 }),
             };
-            Ok((Ty::Con("Bool"), tree, s3))
+            Ok((bool_ty(), tree, s3))
         }
         Expr::Arith(op, a, b) => {
             let (ta, da, s1) = infer_tree(a, ctx, st)?;
