@@ -4,7 +4,7 @@
 //! judgements through the SOC proof substrate with App/Lam typing, declarative
 //! unification, and multi-step composed derivations.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use brix_canon::{CanonWriter, Canonical};
 use brix_elaborate::{RealizesTree, TreeObj};
@@ -90,6 +90,13 @@ pub enum Ty {
     /// A bound occurrence of the enclosing [`Ty::Rec`]'s variable
     /// (append-only ordinal 6).
     RecVar(String),
+    /// A **type parameter** of a parameterized `config` (append-only ordinal 7).
+    ///
+    /// Appears only inside a stored declaration *template*. Every use site
+    /// instantiates it to a fresh unification variable, so a `Param` must
+    /// never reach an inferred type — `instantiate` is what guarantees that,
+    /// and a `Param` surviving into a result is a bug, not a polymorphic type.
+    Param(String),
 }
 
 impl Ty {
@@ -113,7 +120,7 @@ impl Ty {
     fn subst_rec(&self, var: &str, replacement: &Ty) -> Ty {
         match self {
             Ty::RecVar(v) if v == var => replacement.clone(),
-            Ty::RecVar(_) | Ty::Con(_) | Ty::Var(_) => self.clone(),
+            Ty::RecVar(_) | Ty::Con(_) | Ty::Var(_) | Ty::Param(_) => self.clone(),
             Ty::Fn(a, b) => Ty::Fn(
                 Box::new(a.subst_rec(var, replacement)),
                 Box::new(b.subst_rec(var, replacement)),
@@ -178,6 +185,9 @@ impl Canonical for Ty {
             }
             Ty::RecVar(var) => {
                 w.write_enum(6, |w| w.write_str(var));
+            }
+            Ty::Param(name) => {
+                w.write_enum(7, |w| w.write_str(name));
             }
             Ty::Sum(sum_name, variants) => {
                 w.write_enum(4, |w| {
@@ -1637,6 +1647,7 @@ pub fn zonk(ty: &Ty, subst: &BTreeMap<u32, Ty>) -> Ty {
         // its own unfolding would resolve differently.
         Ty::Rec(var, body) => Ty::Rec(var.clone(), Box::new(zonk(body, subst))),
         Ty::RecVar(var) => Ty::RecVar(var.clone()),
+        Ty::Param(name) => Ty::Param(name.clone()),
         Ty::Fn(a, b) => Ty::Fn(Box::new(zonk(a, subst)), Box::new(zonk(b, subst))),
         Ty::Record(fields) => {
             let mut sorted: Vec<(String, Ty)> = fields
@@ -1672,8 +1683,85 @@ pub fn occurs(v: u32, ty: &Ty, subst: &BTreeMap<u32, Ty>) -> bool {
             .any(|(_, fields)| fields.iter().any(|f| occurs(v, f, subst))),
         // A `RecVar` binds no unification variable; a `Rec` is searched under
         // its binder without unfolding, which terminates.
-        Ty::RecVar(_) => false,
+        Ty::RecVar(_) | Ty::Param(_) => false,
         Ty::Rec(_, body) => occurs(v, body, subst),
+    }
+}
+
+/// Replace every [`Ty::Param`] in `ty` with a fresh unification variable, one
+/// per distinct parameter name.
+///
+/// This is what makes a parameterized `config` polymorphic: the declaration is
+/// stored once as a template, and each *use* gets its own variables, so
+/// `Nil` at `List<Int>` and `Nil` at `List<Str>` are different types rather
+/// than one over-constrained one.
+///
+/// Instantiating is also what keeps `Param` out of inferred types. A `Param`
+/// reaching a result means a use site was not instantiated.
+pub fn instantiate(ty: &Ty, st: Infer) -> (Ty, Infer) {
+    let mut mapping: BTreeMap<String, Ty> = BTreeMap::new();
+    let mut state = st;
+    collect_params(ty, &mut mapping, &mut state);
+    (apply_params(ty, &mapping), state)
+}
+
+fn collect_params(ty: &Ty, mapping: &mut BTreeMap<String, Ty>, st: &mut Infer) {
+    match ty {
+        Ty::Param(name) => {
+            if !mapping.contains_key(name) {
+                let (v, next) = st.fresh_var();
+                *st = next;
+                mapping.insert(name.clone(), Ty::Var(v));
+            }
+        }
+        Ty::Con(_) | Ty::Var(_) | Ty::RecVar(_) => {}
+        Ty::Fn(a, b) => {
+            collect_params(a, mapping, st);
+            collect_params(b, mapping, st);
+        }
+        Ty::Record(fields) => {
+            for (_, t) in fields {
+                collect_params(t, mapping, st);
+            }
+        }
+        Ty::Sum(_, variants) => {
+            for (_, fs) in variants {
+                for f in fs {
+                    collect_params(f, mapping, st);
+                }
+            }
+        }
+        Ty::Rec(_, body) => collect_params(body, mapping, st),
+    }
+}
+
+fn apply_params(ty: &Ty, mapping: &BTreeMap<String, Ty>) -> Ty {
+    match ty {
+        Ty::Param(name) => mapping.get(name).cloned().unwrap_or_else(|| ty.clone()),
+        Ty::Con(_) | Ty::Var(_) | Ty::RecVar(_) => ty.clone(),
+        Ty::Fn(a, b) => Ty::Fn(
+            Box::new(apply_params(a, mapping)),
+            Box::new(apply_params(b, mapping)),
+        ),
+        Ty::Record(fields) => Ty::Record(
+            fields
+                .iter()
+                .map(|(n, t)| (n.clone(), apply_params(t, mapping)))
+                .collect(),
+        ),
+        Ty::Sum(name, variants) => Ty::Sum(
+            name.clone(),
+            variants
+                .iter()
+                .map(|(n, fs)| {
+                    (
+                        n.clone(),
+                        fs.iter().map(|f| apply_params(f, mapping)).collect(),
+                    )
+                })
+                .collect(),
+        ),
+        Ty::Rec(v, body) => Ty::Rec(v.clone(), Box::new(apply_params(body, mapping))),
     }
 }
 
@@ -1696,6 +1784,17 @@ pub fn occurs(v: u32, ty: &Ty, subst: &BTreeMap<u32, Ty>) -> bool {
 /// generator ids carries no `src`/`dst` and so cannot be audited by
 /// `verify_structure` or discharged by ADR-0015 ⟨D-PRIM⟩'s mechanism.
 pub fn unify(t1: &Ty, t2: &Ty, subst: &BTreeMap<u32, Ty>) -> Result<BTreeMap<u32, Ty>, TypeError> {
+    unify_seen(t1, t2, subst, &BTreeSet::new())
+}
+
+/// [`unify`] carrying the set of recursive-type pairs already under
+/// comparison. See the `Rec`/`Rec` arm for why it is needed.
+fn unify_seen(
+    t1: &Ty,
+    t2: &Ty,
+    subst: &BTreeMap<u32, Ty>,
+    seen: &BTreeSet<(Ty, Ty)>,
+) -> Result<BTreeMap<u32, Ty>, TypeError> {
     let r1 = resolve(t1, subst);
     let r2 = resolve(t2, subst);
 
@@ -1727,8 +1826,8 @@ pub fn unify(t1: &Ty, t2: &Ty, subst: &BTreeMap<u32, Ty>) -> Result<BTreeMap<u32
             }
         }
         (Ty::Fn(a1, b1), Ty::Fn(a2, b2)) => {
-            let s1 = unify(a1, a2, subst)?;
-            unify(b1, b2, &s1)
+            let s1 = unify_seen(a1, a2, subst, seen)?;
+            unify_seen(b1, b2, &s1, seen)
         }
         (Ty::Record(f1), Ty::Record(f2)) => {
             let mut s1_fields = f1.clone();
@@ -1749,21 +1848,36 @@ pub fn unify(t1: &Ty, t2: &Ty, subst: &BTreeMap<u32, Ty>) -> Result<BTreeMap<u32
             }
             let mut curr_subst = subst.clone();
             for (a, b) in s1_fields.iter().zip(s2_fields.iter()) {
-                curr_subst = unify(&a.1, &b.1, &curr_subst)?;
+                curr_subst = unify_seen(&a.1, &b.1, &curr_subst, seen)?;
             }
             Ok(curr_subst)
         }
-        // Two recursive types are the same type iff they bind the same name.
-        // Names come from `config` declarations, and a name has exactly one
-        // declaration in a module, so nominal equality here IS structural
-        // equality — and it terminates, which structural descent would not.
+        // Two recursive types must agree on their binder AND their contents.
+        //
+        // Comparing names alone was sound while a name had exactly one
+        // declaration — but a *parameterized* config gives one name many
+        // instantiations, and `List<Int>` must not unify with `List<Str>`.
+        // So: same binder, then unfold both and compare structurally, with an
+        // assumption set that makes the descent terminate. Re-encountering a
+        // pair already being compared succeeds, which is the standard
+        // equi-recursive coinductive rule — the pair is only revisited because
+        // everything reachable from it already agreed.
         (Ty::Rec(a, _), Ty::Rec(b, _)) => {
-            if a == b {
-                Ok(subst.clone())
-            } else {
-                Err(TypeError::Mismatch)
+            if a != b {
+                return Err(TypeError::Mismatch);
             }
+            let pair = (r1.clone(), r2.clone());
+            if seen.contains(&pair) {
+                return Ok(subst.clone());
+            }
+            let mut seen_next = seen.clone();
+            seen_next.insert(pair);
+            unify_seen(&r1.unfold(), &r2.unfold(), subst, &seen_next)
         }
+        // A `Param` reaching unification means a use site was not
+        // instantiated. Refused rather than silently unified, which would
+        // let one declaration's parameter bind to a caller's type.
+        (Ty::Param(_), _) | (_, Ty::Param(_)) => Err(TypeError::Mismatch),
         (Ty::RecVar(a), Ty::RecVar(b)) => {
             if a == b {
                 Ok(subst.clone())
@@ -1786,11 +1900,11 @@ pub fn unify(t1: &Ty, t2: &Ty, subst: &BTreeMap<u32, Ty>) -> Result<BTreeMap<u32
         // `RecVar` terminates above — so this cannot loop.
         (Ty::Rec(_, _), other) => {
             let unfolded = r1.unfold();
-            unify(&unfolded, &other.clone(), subst)
+            unify_seen(&unfolded, &other.clone(), subst, seen)
         }
         (other, Ty::Rec(_, _)) => {
             let unfolded = r2.unfold();
-            unify(&other.clone(), &unfolded, subst)
+            unify_seen(&other.clone(), &unfolded, subst, seen)
         }
         (Ty::Sum(n1, vs1), Ty::Sum(n2, vs2)) => {
             if n1 != n2 || vs1.len() != vs2.len() {
@@ -1804,7 +1918,7 @@ pub fn unify(t1: &Ty, t2: &Ty, subst: &BTreeMap<u32, Ty>) -> Result<BTreeMap<u32
             let mut curr_subst = subst.clone();
             for ((_, v1_fields), (_, v2_fields)) in vs1.iter().zip(vs2.iter()) {
                 for (f1, f2) in v1_fields.iter().zip(v2_fields.iter()) {
-                    curr_subst = unify(f1, f2, &curr_subst)?;
+                    curr_subst = unify_seen(f1, f2, &curr_subst, seen)?;
                 }
             }
             Ok(curr_subst)
@@ -2311,9 +2425,16 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             }
         }
         Expr::Ctor(sum_ty, variant, args) => {
+            // Instantiated first: a parameterized `config` is stored once as a
+            // template, and each use needs its own variables — otherwise
+            // `Nil` at `List<Int>` and `Nil` at `List<Str>` would share one
+            // over-constrained type. For a non-parameterized config this is
+            // the identity.
+            let (sum_ty, st) = instantiate(sum_ty, st);
+            let sum_ty = &sum_ty;
             // Unfolded to read the variants; the *result* type stays the
-            // folded `sum_ty`, so the constructed value is a `Nat` rather than
-            // a one-step unfolding of one.
+            // folded `sum_ty`, so the constructed value is a `List<Int>`
+            // rather than a one-step unfolding of one.
             let resolved = resolve(sum_ty, &st.subst).unfold();
             if let Ty::Sum(_sum_name, variants) = &resolved {
                 let (_, declared_fields) = variants

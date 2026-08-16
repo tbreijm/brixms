@@ -227,6 +227,9 @@ fn fmt_ty(ty: Option<&Ty>) -> String {
         // Shown by name: unfolding a recursive type to print it would not
         // terminate, and the name is what the user wrote.
         Some(Ty::Rec(name, _)) | Some(Ty::RecVar(name)) => name.clone(),
+        // A type parameter should never reach a rendered result — every use
+        // site instantiates it. Shown rather than hidden if one ever does.
+        Some(Ty::Param(name)) => format!("{name} (uninstantiated)"),
     }
 }
 

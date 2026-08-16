@@ -604,6 +604,10 @@ fn resolve_ty(ty: &ast::Ty, config_names: &BTreeSet<String>) -> Result<L3TypeRef
         ast::Ty::Graded(inner, _) => Err(L3LowerError::GradeAssertionUnsupported(format!(
             "{inner:?}"
         ))),
+        // Type application — a parameterized config at an instantiation. The
+        // v1 profile's config vocabulary is monomorphic, so it is refused by
+        // name rather than approximated by its head.
+        ast::Ty::App(name, _) => Err(L3LowerError::UnknownTypeName(name.clone())),
         // An anonymous record type — the desugaring of a named-field sum
         // variant. The v1 profile has no anonymous payload type, and its
         // constructors are nullary anyway (`PayloadBearingConstructor`), so it

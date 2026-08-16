@@ -84,6 +84,7 @@ fn ty_constructor(t: &Ty) -> (&'static str, u64) {
         Ty::Sum(_, _) => ("Ty::Sum", 4),
         Ty::Rec(_, _) => ("Ty::Rec", 5),
         Ty::RecVar(_) => ("Ty::RecVar", 6),
+        Ty::Param(_) => ("Ty::Param", 7),
     }
 }
 
@@ -120,6 +121,7 @@ fn ty_exemplars() -> Vec<Ty> {
         sum_ty(),
         Ty::Rec("L".into(), Box::new(Ty::RecVar("L".into()))),
         Ty::RecVar("L".into()),
+        Ty::Param("T".into()),
     ]
 }
 
@@ -394,6 +396,10 @@ fn every_digest_is_reproduced_by_primitive_canon_writes() {
         (
             "Ty::RecVar",
             build(|w| w.write_enum(6, |w| w.write_str("L"))),
+        ),
+        (
+            "Ty::Param",
+            build(|w| w.write_enum(7, |w| w.write_str("T"))),
         ),
     ];
 

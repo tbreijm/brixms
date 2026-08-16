@@ -256,6 +256,20 @@ impl Parser {
 
     fn parse_config_decl(&mut self) -> Result<ConfigDecl, ParseError> {
         let name = self.expect_ident("config declaration name")?.0;
+        // `config List<T, U> = …`. Absent for an ordinary config.
+        let mut params = Vec::new();
+        if self.check(&TokenKind::Lt) {
+            self.advance();
+            loop {
+                params.push(self.expect_ident("type parameter")?.0);
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.consume(TokenKind::Gt, "type parameter list '>'")?;
+        }
         self.consume(TokenKind::Equals, "config declaration '='")?;
         if self.check(&TokenKind::OpenBrace) {
             self.advance();
@@ -264,6 +278,7 @@ impl Parser {
             self.consume(TokenKind::CloseBrace, "config record '}'")?;
             Ok(ConfigDecl {
                 name,
+                params,
                 body: ConfigBody::Record(fields),
             })
         } else {
@@ -278,6 +293,7 @@ impl Parser {
             }
             Ok(ConfigDecl {
                 name,
+                params,
                 body: ConfigBody::Sum(variants),
             })
         }
@@ -370,7 +386,24 @@ impl Parser {
 
     fn parse_ty(&mut self) -> Result<Ty, ParseError> {
         let name = self.expect_ident("type name")?.0;
-        let base_ty = Ty::Named(name);
+        // `List<Int>` — a parameterized config at an instantiation. The `<`
+        // is unambiguous here because a type position has no comparison.
+        let base_ty = if self.check(&TokenKind::Lt) {
+            self.advance();
+            let mut args = Vec::new();
+            loop {
+                args.push(self.parse_ty()?);
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            self.consume(TokenKind::Gt, "type argument list '>'")?;
+            Ty::App(name, args)
+        } else {
+            Ty::Named(name)
+        };
         if self.check(&TokenKind::At) {
             self.advance();
             let grade = match self.peek() {
