@@ -74,6 +74,7 @@ fn expr_constructor(e: &Expr) -> (&'static str, u64) {
         Expr::Cmp(_, _, _) => ("Expr::Cmp", 12),
         Expr::Then(_, _) => ("Expr::Then", 13),
         Expr::And(_, _) => ("Expr::And", 14),
+        Expr::LamAnn(_, _, _) => ("Expr::LamAnn", 15),
     }
 }
 
@@ -114,6 +115,7 @@ fn expr_exemplars() -> Vec<Expr> {
         Expr::Cmp(CmpOp::Eq, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2))),
         Expr::Then(Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2))),
         Expr::And(Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2))),
+        Expr::LamAnn("p".into(), Ty::Con("Int"), Box::new(Expr::Lit(1))),
     ]
 }
 
@@ -431,6 +433,16 @@ fn every_digest_is_reproduced_by_primitive_canon_writes() {
                 w.write_enum(14, |w| {
                     w.write_enum(0, |w| w.write_int(1));
                     w.write_enum(0, |w| w.write_int(2));
+                })
+            }),
+        ),
+        (
+            "Expr::LamAnn",
+            build(|w| {
+                w.write_enum(15, |w| {
+                    w.write_str("p");
+                    w.write_enum(0, |w| w.write_str("Int"));
+                    w.write_enum(0, |w| w.write_int(1));
                 })
             }),
         ),

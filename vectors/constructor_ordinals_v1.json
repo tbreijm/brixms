@@ -78,6 +78,11 @@
       "constructor": "Expr::And",
       "ordinal": 14,
       "exemplar_config_id": "00abdeba8f13d864279ca07206298b53a033190034964838fde1f34bea7f5147"
+    },
+    {
+      "constructor": "Expr::LamAnn",
+      "ordinal": 15,
+      "exemplar_config_id": "7184e055775d292ab5fb9a6d0855da8803fe6dc09b79f39ac1194662ea687a25"
     }
   ],
   "ty": [
