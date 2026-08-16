@@ -111,7 +111,11 @@ pub fn certify_exhaustive(
     context: ContextId,
     budget: Budget,
 ) -> CoverageOutcome {
-    let (sum_name, variants) = match sum_ty {
+    // Unfolded first: a recursive scrutinee is a `Rec`, which carries no
+    // variants of its own, and reading its shape directly would report "not a
+    // sum" for a type that plainly is one.
+    let unfolded = sum_ty.unfold();
+    let (sum_name, variants) = match &unfolded {
         Ty::Sum(name, vs) => (name, vs),
         _ => return CoverageOutcome::Unknown("scrutinee is not a sum type".into()),
     };

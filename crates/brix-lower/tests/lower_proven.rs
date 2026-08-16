@@ -406,82 +406,88 @@ fn test_sum_match_non_exhaustive() {
     );
 }
 
-/// A recursive `config` is still refused — but by name, against the
-/// declaration.
+/// Direct self-reference is a real type: `config List = Nil | Cons(Int, List)`
+/// becomes a μ-type and its values check.
 ///
-/// This previously asserted `Unresolved("Succ")`, which was the *symptom* of
-/// the sum being silently dropped from the constructor table: an error naming
-/// a correct use rather than the unsupported declaration. The refusal itself
-/// is unchanged — recursion is still not supported, and nothing that was
-/// rejected before is accepted now.
+/// This previously asserted a refusal. Recursion is now supported, so the
+/// assertion is obsolete by feature rather than by convenience — the test is
+/// rewritten to pin what the language does instead of what it used to refuse.
 #[test]
-fn test_recursive_sum_refused_by_name() {
+fn test_direct_recursion_is_supported() {
     let src = r#"
-        config Nat = Zero | Succ(Nat)
-        let x = Succ(1)
+        config List = Nil | Cons(Int, List)
+        let empty = Nil
+        let three = Cons(1, Cons(2, Cons(3, Nil)))
+        let head = match three { Nil => 0  Cons(h, t) => h }
+        let tail = match three { Nil => Nil  Cons(h, t) => t }
+        let nested = match tail { Nil => 0  Cons(h, t) => h }
     "#;
     let module = parse(src).expect("parse");
-    let results = check_module(&module);
-    assert_eq!(results.len(), 1);
+    for r in check_module(&module) {
+        r.unwrap_or_else(|(n, e)| panic!("binding '{n}' should check, got {e:?}"));
+    }
+}
 
-    let (name, err) = results[0]
+/// A recursive scrutinee unfolds before coverage is decided.
+///
+/// This is the trap the μ-type encoding has to avoid: a `Rec` carries no
+/// variants of its own, so reading its shape without unfolding would leave
+/// nothing uncovered and pass a non-exhaustive match **vacuously** — accepting
+/// unsound code rather than rejecting it.
+#[test]
+fn test_recursive_match_coverage_is_decided_not_skipped() {
+    use brix_lower::CoverageOutcome;
+
+    let src = "config List = Nil | Cons(Int, List)\n\
+               let l = Cons(1, Nil)\n\
+               let ok = match l { Nil => 0  Cons(h, t) => h } proving exhaustive\n";
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    let cr = results[1].as_ref().expect("should check");
+    assert_eq!(cr.coverage, Some(CoverageOutcome::Proven));
+
+    // And a missing arm is still caught, rather than passing vacuously.
+    let src = "config List = Nil | Cons(Int, List)\n\
+               let l = Cons(1, Nil)\n\
+               let bad = match l { Nil => 0 }\n";
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    let (_, err) = results[1]
         .as_ref()
-        .expect_err("a recursive config is not supported yet");
-    assert_eq!(name, "x");
+        .expect_err("a non-exhaustive recursive match must be refused");
     assert_eq!(
         *err,
-        LowerError::RecursiveConfig {
-            config: "Nat".to_string(),
-            cycle: vec!["Nat".to_string(), "Nat".to_string()],
-        }
+        LowerError::TypeError(TypeError::NonExhaustive(vec!["Cons".to_string()]))
     );
 }
 
-/// The nullary constructor of a refused `config` reports the same fault.
+/// Mutual recursion is refused by name, with the cycle.
 ///
-/// Without this it falls through to the variable path and surfaces as
-/// `Unbound("Zero")` — a second error about correct code, and a different one
-/// from its sibling constructor, for the same single cause.
+/// Expansion is by inlining, so `A` and `B` would each acquire a different
+/// μ-type depending on which was entered first and the two would not unify.
+/// **This used to overflow the stack** — a crash establishes nothing and takes
+/// the process with it, which is the one outcome worse than a refusal.
 #[test]
-fn test_nullary_ctor_of_refused_config_reports_the_declaration() {
+fn test_mutually_recursive_configs_are_refused_not_crashed() {
     let src = r#"
-        config Nat = Zero | Succ(Nat)
-        let x = Zero
-    "#;
-    let module = parse(src).expect("parse");
-    let results = check_module(&module);
-
-    let (name, err) = results[0].as_ref().expect_err("Nat is still refused");
-    assert_eq!(name, "x");
-    assert!(
-        matches!(err, LowerError::RecursiveConfig { config, .. } if config == "Nat"),
-        "expected the declaration's fault, got {err:?}"
-    );
-}
-
-/// Indirect recursion is caught at the point the cycle closes, and the chain
-/// is reported rather than just the entry point.
-#[test]
-fn test_mutually_recursive_configs_report_the_cycle() {
-    let src = r#"
-        config A = MkA(B)
-        config B = MkB(A)
-        let x = MkA(1)
+        config A = MkA(B) | AEnd
+        config B = MkB(A) | BEnd
+        let x = MkA(BEnd)
     "#;
     let module = parse(src).expect("parse");
     let results = check_module(&module);
 
     let (_, err) = results[0]
         .as_ref()
-        .expect_err("mutual recursion is refused");
+        .expect_err("mutual recursion must be refused");
     match err {
-        LowerError::RecursiveConfig { cycle, .. } => {
+        LowerError::MutuallyRecursiveConfig { cycle, .. } => {
             assert!(
-                cycle.len() >= 2 && cycle.first() == cycle.last(),
+                cycle.len() >= 3 && cycle.first() == cycle.last(),
                 "the cycle must close on itself, got {cycle:?}"
             );
         }
-        other => panic!("expected RecursiveConfig, got {other:?}"),
+        other => panic!("expected MutuallyRecursiveConfig, got {other:?}"),
     }
 }
 
