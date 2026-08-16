@@ -239,6 +239,32 @@ impl ArithOp {
             ArithOp::Div => ArithOperatorV1::Div,
         }
     }
+
+    /// Content-addressed operator identity (`ConfigId`), for ADR-0025
+    /// ⟨D-OPPROJECT⟩ and ⟨D-PINNED⟩.
+    ///
+    /// This is the identity the kernel pins so that ⟨D-OPPROJECT⟩ can carry the
+    /// regime's *own* operator forward through the split without the TCB
+    /// reproducing this crate's encoder — it needs the digest, not the encoder
+    /// (ADR-0025 §1).
+    pub fn config_id(&self) -> ConfigId {
+        ConfigId::of(self)
+    }
+}
+
+/// **Byte-identical to how `Expr::Arith` has always written its operator**, and
+/// deliberately so: `Expr::Arith`'s encoding is frozen, so this impl writes the
+/// same `write_uint(ordinal)` and `Expr::Arith` now calls it rather than
+/// repeating it. One encoder, no second spelling of the same value, and no
+/// change to any existing expression digest.
+///
+/// The alternative — a distinct standalone encoding such as `write_enum` — was
+/// rejected on that ground: it would give one `ArithOp` two canonical forms,
+/// which is exactly what a pinned identity must not rest on.
+impl Canonical for ArithOp {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        w.write_uint(self.ordinal());
+    }
 }
 
 /// Pattern representation for match expressions (ADR-0011 Slice 2).
@@ -346,7 +372,7 @@ impl Canonical for Expr {
             }
             Expr::Arith(op, a, b) => {
                 w.write_enum(8, |w| {
-                    w.write_uint(op.ordinal());
+                    op.canon_write(w);
                     a.canon_write(w);
                     b.canon_write(w);
                 });
