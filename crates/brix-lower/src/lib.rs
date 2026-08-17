@@ -25,6 +25,7 @@ pub mod l3_audit;
 pub mod l3_canon;
 pub mod l3_regime;
 pub mod l3_run;
+pub mod l3_v2;
 pub use l3::{
     lower_l3_plan, L3ConfigBody, L3ConfigDecl, L3LowerError, L3PlanItem, L3PlanV1, L3TypeRef,
     L3ValueV1, PlanLimitsV1, L3_PROFILE_MARKER_RETIRED_V0, L3_PROFILE_MARKER_V1,
