@@ -234,12 +234,16 @@ pub enum L3V2LowerError {
     /// or self reference surfaces here instead. A variant that can never be
     /// constructed is a latent liability, not a safety net (#254).
     ///
-    /// **Nor is there a `NonExhaustiveMatch` variant yet.** Exhaustiveness is
-    /// required by ADR-0027 §5, and Stage A does not check it — the config
-    /// bodies it carries are declaration shapes, not a resolved variant
-    /// universe. Declaring the error before it can fire would claim a check
-    /// that does not run; it arrives with the evaluator in Stage B.
     UnresolvedReference(String),
+    /// A `match` that does not cover every variant of its scrutinee's sum.
+    ///
+    /// Declared in Stage B, where `check_exhaustive` can actually fire it —
+    /// Stage A deliberately left it out rather than claim a check that did not
+    /// run.
+    NonExhaustiveMatch {
+        sum: String,
+        missing: Vec<String>,
+    },
     /// A wildcard or binder arm at the top level of a `match`. Rejected so a
     /// default arm cannot silently swallow malformed input.
     DefaultArmNotAllowed,
@@ -581,9 +585,17 @@ fn lower_expr_v2(
                         return Err(L3V2LowerError::DefaultArmNotAllowed)
                     }
                 };
+                // The arm's binders are in scope in its body. Without this,
+                // `match b { MkBox(v) => v }` reports `v` unresolved — the
+                // pattern binds it and the body could not see it.
+                let mut arm_lets = lets.clone();
+                let L3PatternV2::Ctor { binders, .. } = &pat;
+                for b in binders.iter().flatten() {
+                    arm_lets.insert(b.clone());
+                }
                 out.push((
                     pat,
-                    lower_expr_v2(&arm.body, lets, rules, nullary, variants_of, in_rule)?,
+                    lower_expr_v2(&arm.body, &arm_lets, rules, nullary, variants_of, in_rule)?,
                 ));
             }
             Ok(L3ExprV2::Match {
@@ -594,5 +606,352 @@ fn lower_expr_v2(
         ast::Expr::Prove(_) => Err(L3V2LowerError::Unsupported("prove".to_string())),
         ast::Expr::Why(_) => Err(L3V2LowerError::Unsupported("why".to_string())),
         ast::Expr::Audit(_) => Err(L3V2LowerError::Unsupported("audit".to_string())),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stage B — the evaluator (ADR-0027 §10)
+// ---------------------------------------------------------------------------
+
+/// A v2 value: what a rule body evaluates to, and what a committed fact
+/// carries.
+///
+/// Record and constructor identity include the declaring nominal config, so
+/// structurally identical values from different declarations never collapse —
+/// the discipline v1 established for `L3ValueV1`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum L3ValueV2 {
+    Int(i64),
+    Str(String),
+    Bool(bool),
+    Ctor {
+        nominal_sum: String,
+        variant: String,
+        args: Vec<L3ValueV2>,
+    },
+    Record {
+        nominal_config: String,
+        fields: Vec<(String, L3ValueV2)>,
+    },
+}
+
+/// Why an evaluation could not produce a value.
+///
+/// **Every variant is a refusal, never a weaker result.** ADR-0027 §9 requires
+/// a runtime fault to surface as `Unknown(EvaluationFault)` through a
+/// distinguished path — never as an empty frontier, never as quiescence, and
+/// never as a refutation. Absence of a value is not evidence of anything.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EvalFault {
+    /// Checked arithmetic overflowed.
+    ///
+    /// Not wrapped, not saturated, not truncated (ADR-0027 §9.7). A wrapping
+    /// result would be a *false record*: the fact would claim a value the
+    /// arithmetic did not produce.
+    Overflow(ArithOpV2),
+    /// A binding or fact that is not in scope at evaluation time.
+    Unbound(String),
+    /// A field projected from something that is not a record, or a field the
+    /// record does not have.
+    NoSuchField(String),
+    /// A `match` whose scrutinee matched no arm.
+    ///
+    /// Reachable only if exhaustiveness was not established — which is why
+    /// `check_exhaustive` exists and runs before a plan is accepted.
+    NoMatchingArm,
+    /// An operator applied to operands of the wrong shape.
+    ///
+    /// Total rather than a panic: the evaluator must stay total on any plan it
+    /// is handed, including one whose types were never checked.
+    OperandShape(&'static str),
+}
+
+/// The bindings an evaluation runs under: prior `let` values, and the facts
+/// earlier rules have committed.
+///
+/// The two are separate on purpose. A `let` is a closed static binding fixed
+/// when the plan is built; a fact exists only once its rule has committed, and
+/// reading one is precisely what ⟨D-DERIVE⟩ admits.
+#[derive(Clone, Debug, Default)]
+pub struct EvalEnv {
+    lets: BTreeMap<String, L3ValueV2>,
+    facts: BTreeMap<String, L3ValueV2>,
+    locals: BTreeMap<String, L3ValueV2>,
+}
+
+impl EvalEnv {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_let(mut self, name: impl Into<String>, v: L3ValueV2) -> Self {
+        self.lets.insert(name.into(), v);
+        self
+    }
+
+    pub fn with_fact(mut self, rule: impl Into<String>, v: L3ValueV2) -> Self {
+        self.facts.insert(rule.into(), v);
+        self
+    }
+
+    /// Whether every rule in `deps` has committed a fact — the eligibility
+    /// condition ⟨D-DERIVE⟩ states.
+    pub fn satisfies(&self, deps: &[String]) -> bool {
+        deps.iter().all(|d| self.facts.contains_key(d))
+    }
+}
+
+/// Evaluate a v2 expression to a value.
+///
+/// **Big-step, and deliberately so.** A rule body evaluates atomically inside
+/// one commit, which is what keeps every committed step *realizing* and leaves
+/// `𝒢_τ = ∅` — so ⟨D-TAUZERO⟩ and the O(Δ) gate carry over from v1 unchanged
+/// (ADR-0027 §2 erratum). A small-step machine would put administrative steps
+/// in the journal and forfeit both, to guard a non-termination case
+/// ⟨D-DERIVE⟩ has already made unreachable.
+///
+/// Operands evaluate **left to right**, which is ABI: it fixes which fault a
+/// program with two faulty operands reports.
+pub fn eval(e: &L3ExprV2, env: &EvalEnv) -> Result<L3ValueV2, EvalFault> {
+    match e {
+        L3ExprV2::Int(n) => Ok(L3ValueV2::Int(*n)),
+        L3ExprV2::Str(s) => Ok(L3ValueV2::Str(s.clone())),
+        L3ExprV2::Bool(b) => Ok(L3ValueV2::Bool(*b)),
+        L3ExprV2::LetRef(name) => env
+            .locals
+            .get(name)
+            .or_else(|| env.lets.get(name))
+            .cloned()
+            .ok_or_else(|| EvalFault::Unbound(name.clone())),
+        L3ExprV2::RuleFact(rule) => env
+            .facts
+            .get(rule)
+            .cloned()
+            .ok_or_else(|| EvalFault::Unbound(rule.clone())),
+        L3ExprV2::NullaryVariant {
+            nominal_sum,
+            variant,
+        } => Ok(L3ValueV2::Ctor {
+            nominal_sum: nominal_sum.clone(),
+            variant: variant.clone(),
+            args: Vec::new(),
+        }),
+        L3ExprV2::Ctor {
+            nominal_sum,
+            variant,
+            args,
+        } => {
+            let mut out = Vec::new();
+            for a in args {
+                out.push(eval(a, env)?);
+            }
+            Ok(L3ValueV2::Ctor {
+                nominal_sum: nominal_sum.clone(),
+                variant: variant.clone(),
+                args: out,
+            })
+        }
+        L3ExprV2::Record {
+            nominal_config,
+            fields,
+        } => {
+            let mut out = Vec::new();
+            for (name, value) in fields {
+                out.push((name.clone(), eval(value, env)?));
+            }
+            Ok(L3ValueV2::Record {
+                nominal_config: nominal_config.clone(),
+                fields: out,
+            })
+        }
+        L3ExprV2::Field(base, field) => match eval(base, env)? {
+            L3ValueV2::Record { fields, .. } => fields
+                .into_iter()
+                .find(|(n, _)| n == field)
+                .map(|(_, v)| v)
+                .ok_or_else(|| EvalFault::NoSuchField(field.clone())),
+            _ => Err(EvalFault::NoSuchField(field.clone())),
+        },
+        L3ExprV2::Arith(op, a, b) => {
+            let (x, y) = (eval(a, env)?, eval(b, env)?);
+            let (L3ValueV2::Int(x), L3ValueV2::Int(y)) = (x, y) else {
+                return Err(EvalFault::OperandShape("arithmetic requires Int operands"));
+            };
+            // Checked, never wrapping. An overflowed fact would claim a value
+            // the arithmetic did not produce.
+            let r = match op {
+                ArithOpV2::Add => x.checked_add(y),
+                ArithOpV2::Sub => x.checked_sub(y),
+                ArithOpV2::Mul => x.checked_mul(y),
+            };
+            r.map(L3ValueV2::Int).ok_or(EvalFault::Overflow(*op))
+        }
+        L3ExprV2::Cmp(op, a, b) => {
+            let (x, y) = (eval(a, env)?, eval(b, env)?);
+            // Ordering comparisons are numeric; equality is structural, so it
+            // works for any two values of the same shape.
+            let out = match op {
+                CmpOpV2::Eq => x == y,
+                CmpOpV2::Ne => x != y,
+                _ => {
+                    let (L3ValueV2::Int(x), L3ValueV2::Int(y)) = (x, y) else {
+                        return Err(EvalFault::OperandShape(
+                            "ordering comparison requires Int operands",
+                        ));
+                    };
+                    match op {
+                        CmpOpV2::Lt => x < y,
+                        CmpOpV2::Le => x <= y,
+                        CmpOpV2::Gt => x > y,
+                        CmpOpV2::Ge => x >= y,
+                        CmpOpV2::Eq | CmpOpV2::Ne => unreachable!("handled above"),
+                    }
+                }
+            };
+            Ok(L3ValueV2::Bool(out))
+        }
+        L3ExprV2::Match { scrutinee, arms } => {
+            let v = eval(scrutinee, env)?;
+            let (variant, args) = match &v {
+                L3ValueV2::Ctor { variant, args, .. } => (variant.clone(), args.clone()),
+                // A boolean scrutinee matches the `true`/`false` constructors,
+                // which is how `Bool` is spelled as a two-variant sum.
+                L3ValueV2::Bool(b) => (if *b { "true" } else { "false" }.to_string(), Vec::new()),
+                _ => return Err(EvalFault::OperandShape("match requires a sum value")),
+            };
+            for (pat, body) in arms {
+                let L3PatternV2::Ctor {
+                    variant: pv,
+                    binders,
+                } = pat;
+                if pv != &variant {
+                    continue;
+                }
+                if binders.len() != args.len() {
+                    return Err(EvalFault::OperandShape("constructor arity mismatch"));
+                }
+                let mut arm_env = env.clone();
+                for (b, a) in binders.iter().zip(args.iter()) {
+                    if let Some(name) = b {
+                        arm_env.locals.insert(name.clone(), a.clone());
+                    }
+                }
+                return eval(body, &arm_env);
+            }
+            Err(EvalFault::NoMatchingArm)
+        }
+    }
+}
+
+/// Check that every `match` in `plan` is exhaustive over its scrutinee's sum.
+///
+/// ADR-0027 §5 requires exhaustiveness, and Stage A deliberately declared no
+/// error for it because Stage A could not check it. This is that check, using
+/// the variant universe the plan now carries.
+///
+/// Deliberately **conservative about what it can see**: a `match` whose
+/// scrutinee's sum cannot be determined from the plan is left alone rather
+/// than guessed at. It will fault at evaluation as `NoMatchingArm` if a case
+/// is missing, which is a refusal, not a wrong answer.
+pub fn check_exhaustive(plan: &L3PlanV2) -> Result<(), L3V2LowerError> {
+    let mut sum_of_variant: BTreeMap<String, String> = BTreeMap::new();
+    let mut variants_of_sum: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for item in &plan.items {
+        if let L3PlanItemV2::Config(c) = item {
+            if let L3ConfigBodyV2::Sum(variants) = &c.body {
+                for (v, _) in variants {
+                    sum_of_variant.insert(v.clone(), c.name.clone());
+                }
+                variants_of_sum.insert(
+                    c.name.clone(),
+                    variants.iter().map(|(v, _)| v.clone()).collect(),
+                );
+            }
+        }
+    }
+    // `Bool` is a builtin two-variant sum; a boolean match must cover both.
+    variants_of_sum.insert("Bool".to_string(), vec!["false".into(), "true".into()]);
+    sum_of_variant.insert("true".to_string(), "Bool".to_string());
+    sum_of_variant.insert("false".to_string(), "Bool".to_string());
+
+    for item in &plan.items {
+        let body = match item {
+            L3PlanItemV2::Let { value, .. } => value,
+            L3PlanItemV2::Rule { body, .. } => body,
+            L3PlanItemV2::Config(_) => continue,
+        };
+        check_exhaustive_expr(body, &sum_of_variant, &variants_of_sum)?;
+    }
+    Ok(())
+}
+
+fn check_exhaustive_expr(
+    e: &L3ExprV2,
+    sum_of_variant: &BTreeMap<String, String>,
+    variants_of_sum: &BTreeMap<String, Vec<String>>,
+) -> Result<(), L3V2LowerError> {
+    match e {
+        L3ExprV2::Match { scrutinee, arms } => {
+            check_exhaustive_expr(scrutinee, sum_of_variant, variants_of_sum)?;
+            for (_, body) in arms {
+                check_exhaustive_expr(body, sum_of_variant, variants_of_sum)?;
+            }
+            let covered: BTreeSet<&str> = arms
+                .iter()
+                .map(|(L3PatternV2::Ctor { variant, .. }, _)| variant.as_str())
+                .collect();
+            // The sum is identified from the arms, not from the scrutinee:
+            // Stage A does not type expressions, and an arm's constructor
+            // names its sum unambiguously.
+            let Some(first) = arms.first() else {
+                return Err(L3V2LowerError::NonExhaustiveMatch {
+                    sum: "<empty match>".to_string(),
+                    missing: Vec::new(),
+                });
+            };
+            let L3PatternV2::Ctor { variant, .. } = &first.0;
+            let Some(sum) = sum_of_variant.get(variant) else {
+                return Ok(()); // unknown sum — left alone rather than guessed
+            };
+            let Some(all) = variants_of_sum.get(sum) else {
+                return Ok(());
+            };
+            let missing: Vec<String> = all
+                .iter()
+                .filter(|v| !covered.contains(v.as_str()))
+                .cloned()
+                .collect();
+            if missing.is_empty() {
+                Ok(())
+            } else {
+                Err(L3V2LowerError::NonExhaustiveMatch {
+                    sum: sum.clone(),
+                    missing,
+                })
+            }
+        }
+        L3ExprV2::Ctor { args, .. } => {
+            for a in args {
+                check_exhaustive_expr(a, sum_of_variant, variants_of_sum)?;
+            }
+            Ok(())
+        }
+        L3ExprV2::Record { fields, .. } => {
+            for (_, v) in fields {
+                check_exhaustive_expr(v, sum_of_variant, variants_of_sum)?;
+            }
+            Ok(())
+        }
+        L3ExprV2::Field(b, _) => check_exhaustive_expr(b, sum_of_variant, variants_of_sum),
+        L3ExprV2::Arith(_, a, b) | L3ExprV2::Cmp(_, a, b) => {
+            check_exhaustive_expr(a, sum_of_variant, variants_of_sum)?;
+            check_exhaustive_expr(b, sum_of_variant, variants_of_sum)
+        }
+        L3ExprV2::Int(_)
+        | L3ExprV2::Str(_)
+        | L3ExprV2::Bool(_)
+        | L3ExprV2::LetRef(_)
+        | L3ExprV2::RuleFact(_)
+        | L3ExprV2::NullaryVariant { .. } => Ok(()),
     }
 }

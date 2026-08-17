@@ -67,10 +67,20 @@ marker and the evaluator-semantics version bound into `ProgramIdV2`; `CommittedS
 lattice, the authority table and the certificate envelope untouched; and a differential suite
 proving the v1 fragment still produces byte-identical results under v1.
 
-**⟨D-TAUZERO⟩ and the O(Δ) gate's verbatim applicability are forfeited together.** ADR-0012 §13
-is explicit that the first profile to move a generator into `𝒢_τ` invalidates both conveniences
-and must re-derive them rather than inherit them. v2 does exactly that (§4), so its fixture
-asserting no step is ever `Administrative` is **replaced**, not carried forward.
+**⟨D-TAUZERO⟩ and the O(Δ) gate's verbatim applicability are forfeited together** by any profile
+that moves a generator into `𝒢_τ`. ADR-0012 §13 is explicit that such a profile must re-derive
+both conveniences rather than inherit them.
+
+> **Erratum (2026-08-17, found while implementing Stage B).** This section originally asserted
+> that v2 *does* forfeit them. **It does not, and the correction is a simplification rather than a
+> repair.**
+>
+> A v2 rule body evaluates **atomically inside one commit**, so every committed step publishes a
+> fact and is *realizing*. No generator moves into `𝒢_τ`, `𝒢_τ = ∅` is preserved, and ⟨D-TAUZERO⟩
+> and the O(Δ) gate carry over unchanged. v1's fixture asserting no step is ever `Administrative`
+> is **carried forward, not replaced**.
+>
+> The same correction retires ⟨D-MEASURE⟩ for v2 — see §4.
 
 ## 3. Decision — ⟨D-DERIVE⟩ derivation is an acyclic rule-fact dependency
 
@@ -112,11 +122,57 @@ total, and the single terminal re-enumeration `check_quiescence_certificate` per
 once-per-run cost. Both reviews independently reached this, and it is the single largest saving
 available — protect it.
 
-## 4. Decision — ⟨D-MEASURE⟩ termination is a well-founded measure, not a divergence certificate
+## 4. Decision — ⟨D-TERMINATES⟩ v2 terminates structurally; the measure is a v3 concern
 
-> Every v2 generator SHALL declare whether it strictly decreases a well-founded progress measure
-> carried in the world, or advances it. The adapter SHALL check the decrease **per step, in O(1),
-> before committing**. A violation is `Unknown`, never a commit.
+> A v2 run SHALL terminate because each rule commits **at most once** and the dependency graph is
+> **acyclic** (⟨D-DERIVE⟩). A plan of `N` rules therefore admits at most `N` commits. No progress
+> measure, and no per-step measure check, is required.
+
+**Erratum (2026-08-17), same origin as §2's.** This section originally ruled ⟨D-MEASURE⟩ — a
+well-founded ordinal carried in the world, with an O(1) per-step decrease check. That was designed
+against a more ambitious v2 in which derivation could loop. ⟨D-DERIVE⟩ removed the possibility:
+commit-at-most-once plus acyclicity makes termination *structural*, and a measure would be
+machinery guarding a case that cannot arise.
+
+**The measure returns in v3**, and the reason is precise: a rule *schema* instantiated over a
+growing fact base can commit repeatedly, so "at most once" no longer bounds the run. That is the
+profile that needs a well-founded measure, and it should adopt this section's original design.
+
+What does **not** change is the ruling against divergence certificates, which stands for v2 and
+for every successor:
+
+**Free recursion relying on ADR-0014's divergence certificates is rejected**, and both reviews
+killed it for complementary reasons worth recording together, because it looks like a safety net
+and is not one:
+
+1. ADR-0014 certifies only **administrative τ-divergence** — a repeating *projected* state with
+   every step in the cycle administrative. A recursion that emits facts is realizing, so no
+   certificate applies.
+2. Divergence detection is lasso detection on `ObservableState = (world, policy)`. The L3 world
+   contains a strictly-appending fact chain and a monotonically incrementing count, so **the world
+   identity is fresh at every step and a lasso can never close.** In a monotone fact-accumulating
+   model, divergence is structurally uncertifiable.
+
+Either way a non-terminating run reports budget exhaustion — `Unknown`, which establishes nothing
+(ADR-0014 §5). Calling that "certified divergence" would be a false record.
+
+### The original ⟨D-MEASURE⟩ design, retained for v3
+
+Retained rather than deleted, because v3 needs it and rediscovering it would be waste. ADR-0012
+§3.3 is explicit that v1's termination comes from the pending suffix shrinking — a degenerate
+well-founded measure. A profile whose rules can commit repeatedly keeps the shape of that argument
+and enriches the measure: the measure lives **in the world**, hence in the journal, hence is
+independently re-derivable by a checker, with each generator declaring whether it strictly
+decreases the measure or advances it and the adapter checking the decrease per step, in O(1),
+before committing. A violation is `Unknown`, never a commit.
+
+Stratified evaluation survives as an *implementation technique* within a measure level, but it is
+not the top-level model: stratification buys nothing about termination once arithmetic can create
+values.
+
+**Stated honestly for that future profile:** termination would not be a static property. It would
+be a per-run, per-step, checkable one. For v2 it *is* static, which is the whole gain of keeping
+the fragment this narrow.
 
 **Free recursion relying on ADR-0014's divergence certificates is rejected, and both reviews
 killed it for complementary reasons that are worth recording together, because it looks like a
