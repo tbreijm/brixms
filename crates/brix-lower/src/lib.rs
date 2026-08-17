@@ -430,6 +430,10 @@ fn resolve_config_ty_in(
                 "Int" => return Ok(TrTy::Con("Int")),
                 "Str" => return Ok(TrTy::Con("Str")),
                 "Float" => return Ok(TrTy::Con("Float")),
+                // `Bool` is a real two-variant sum in the checker but was not
+                // nameable in a declaration, so a config could hold a boolean
+                // it could not declare.
+                "Bool" => return Ok(soc_regimes::type_realization::bool_ty()),
                 _ => {}
             }
             let Some(decl) = configs.get(n) else {

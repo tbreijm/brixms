@@ -242,9 +242,15 @@ pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token
                     "audit" => TokenKind::Audit,
                     "then" => TokenKind::Then,
                     "and" => TokenKind::And,
-                    "Derived" => TokenKind::Derived,
-                    "Audited" => TokenKind::Audited,
-                    "Proven" => TokenKind::Proven,
+                    // `Derived`/`Audited`/`Proven` are deliberately NOT
+                    // keywords. They are grade names only in grade position
+                    // (after `@`), which the parser recognizes; everywhere
+                    // else they are ordinary identifiers.
+                    //
+                    // Reserving them stopped SOC's own outcome lattice from
+                    // being spelled in Brix — `config Outcome = ... | Derived
+                    // | ...` was a parse error, which is an odd thing for a
+                    // language to forbid about its own vocabulary.
                     _ => TokenKind::Ident(ident),
                 }
             };
