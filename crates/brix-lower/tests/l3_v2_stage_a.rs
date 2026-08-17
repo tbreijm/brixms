@@ -19,8 +19,8 @@ fn lower(src: &str) -> Result<brix_lower::l3_v2::L3PlanV2, L3V2LowerError> {
 /// is an independent constant and a run has no computation in it at all.
 #[test]
 fn a_rule_may_read_an_earlier_rules_fact() {
-    let plan = lower("config Z = Hand | Field\nrule a() = Hand\nrule b() = a\n")
-        .expect("a backward fact reference is the v2 fragment");
+    let plan = lower("config Z = Hand | Field\nrule a() = Hand\nrule b(a) = a\n")
+        .expect("a declared fact dependency is the v2 fragment");
 
     let rules: Vec<&L3PlanItemV2> = plan
         .items
@@ -55,15 +55,21 @@ fn a_rule_may_read_an_earlier_rules_fact() {
 /// nothing and a self-reference is refused by name.
 #[test]
 fn forward_and_self_dependencies_are_refused() {
-    // Self-reference.
-    match lower("config Z = Hand\nrule a() = a\n") {
-        Err(L3V2LowerError::UnresolvedReference(name)) => assert_eq!(name, "a"),
-        other => panic!("a self-reference must be refused, got {other:?}"),
+    // Self-dependency.
+    match lower("config Z = Hand\nrule a(a) = a\n") {
+        Err(L3V2LowerError::ForwardOrSelfDependency { rule, depends_on }) => {
+            assert_eq!(rule, "a");
+            assert_eq!(depends_on, "a");
+        }
+        other => panic!("a self-dependency must be refused, got {other:?}"),
     }
-    // Forward reference: `a` is declared after `b`.
-    match lower("config Z = Hand\nrule b() = a\nrule a() = Hand\n") {
-        Err(L3V2LowerError::UnresolvedReference(name)) => assert_eq!(name, "a"),
-        other => panic!("a forward reference must be refused, got {other:?}"),
+    // Forward dependency: `a` is declared after `b`.
+    match lower("config Z = Hand\nrule b(a) = a\nrule a() = Hand\n") {
+        Err(L3V2LowerError::UndeclaredDependency { rule, param }) => {
+            assert_eq!(rule, "b");
+            assert_eq!(param, "a");
+        }
+        other => panic!("a forward dependency must be refused, got {other:?}"),
     }
 }
 
@@ -75,6 +81,11 @@ fn a_let_may_not_read_a_fact() {
         Err(L3V2LowerError::UnresolvedReference(name)) => assert_eq!(name, "a"),
         other => panic!("a let must not depend on a committed fact, got {other:?}"),
     }
+    // And a `let` has no signature to declare one with.
+    assert!(
+        lower("rule a() = 1\nlet x = a\n").is_err(),
+        "a let can never read a fact"
+    );
 }
 
 /// The forms v1 rejects by name are the v2 fragment.
@@ -165,13 +176,53 @@ fn disallowed_items_are_named() {
     }
 }
 
-/// A parameterized rule is deferred to v3 with a stated reason, not silently
-/// accepted (ADR-0027 §7).
+/// A rule parameter **is** a declared dependency: it names an earlier rule and
+/// binds that rule's committed fact.
+///
+/// This is not the schema case ADR-0027 §7 defers — a parameter here binds
+/// exactly one fact, so there is no quantification domain to supply. A
+/// parameter naming something that is not an earlier rule is refused.
 #[test]
-fn a_parameterized_rule_is_deferred_by_name() {
-    match lower("rule m(z) = 1\n") {
-        Err(L3V2LowerError::ParameterizedRule(name)) => assert_eq!(name, "m"),
-        other => panic!("expected ParameterizedRule, got {other:?}"),
+fn a_rule_parameter_is_a_declared_dependency() {
+    let plan = lower("rule base() = 1500\nrule boosted(base) = base + 500\n")
+        .expect("a parameter naming an earlier rule is the v2 fragment");
+
+    match plan
+        .items
+        .iter()
+        .find(|i| matches!(i, L3PlanItemV2::Rule { name, .. } if name == "boosted"))
+        .expect("rule present")
+    {
+        L3PlanItemV2::Rule { depends_on, .. } => {
+            assert_eq!(
+                depends_on,
+                &vec!["base".to_string()],
+                "the dependency is DECLARED by the signature, not extracted from the body"
+            );
+        }
+        other => panic!("expected a rule, got {other:?}"),
+    }
+
+    // A parameter that names nothing declared earlier.
+    match lower("rule r(nope) = 1\n") {
+        Err(L3V2LowerError::UndeclaredDependency { rule, param }) => {
+            assert_eq!(rule, "r");
+            assert_eq!(param, "nope");
+        }
+        other => panic!("expected UndeclaredDependency, got {other:?}"),
+    }
+}
+
+/// A body may read only what its signature declares, which is what keeps the
+/// plan's dependency list from drifting from what the body actually does.
+#[test]
+fn a_body_may_not_read_an_undeclared_fact() {
+    match lower("rule base() = 1\nrule other() = 2\nrule r(base) = base + other\n") {
+        Err(L3V2LowerError::UndeclaredFactRead { rule, fact }) => {
+            assert_eq!(rule, "r");
+            assert_eq!(fact, "other");
+        }
+        other => panic!("expected UndeclaredFactRead, got {other:?}"),
     }
 }
 

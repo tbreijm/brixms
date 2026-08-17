@@ -213,10 +213,25 @@ pub enum L3V2LowerError {
     },
     /// A top-level item outside `{config, let, rule}`.
     ItemNotAllowed(String),
-    /// A rule with parameters. Deferred to v3 with a stated reason: a
-    /// parameter is a schema, and the AST supplies no quantification domain
-    /// (ADR-0027 §7).
-    ParameterizedRule(String),
+    /// A rule parameter that does not name an earlier rule.
+    ///
+    /// A v2 parameter is a **declared dependency**, not a schema variable: it
+    /// names exactly one earlier rule and binds that rule's committed fact. So
+    /// there is no quantification domain to supply and none of ADR-0027 §7's
+    /// grounding problem arises — that objection is about parameters ranging
+    /// over *values*, which v2 still does not have.
+    UndeclaredDependency {
+        rule: String,
+        param: String,
+    },
+    /// A rule body reads a fact the signature does not declare.
+    ///
+    /// The body may read only its declared parameters, which is what keeps the
+    /// plan's dependency list from drifting from what the body actually does.
+    UndeclaredFactRead {
+        rule: String,
+        fact: String,
+    },
     /// A rule reads a fact from a rule declared later, or from itself.
     ///
     /// v2's dependency graph is acyclic and order-respecting by construction:
@@ -354,19 +369,49 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
                 });
             }
             ast::Item::Rule(r) => {
-                if !r.params.is_empty() {
-                    return Err(L3V2LowerError::ParameterizedRule(r.name.clone()));
+                // The parameter list IS the dependency list. Each parameter
+                // names an earlier rule and binds that rule's committed fact,
+                // so `depends_on` is DECLARED rather than extracted from the
+                // body — the plan cannot disagree with what the body reads.
+                //
+                // A parameter here is not a schema variable: it names exactly
+                // one rule and binds exactly one fact, so there is no
+                // quantification domain to supply. ADR-0027 §7's grounding
+                // problem is about parameters ranging over *values*, which v2
+                // still does not have.
+                let mut depends_on: Vec<String> = Vec::new();
+                for param in &r.params {
+                    if param.name == r.name {
+                        return Err(L3V2LowerError::ForwardOrSelfDependency {
+                            rule: r.name.clone(),
+                            depends_on: param.name.clone(),
+                        });
+                    }
+                    if !rules_so_far.contains(&param.name) {
+                        return Err(L3V2LowerError::UndeclaredDependency {
+                            rule: r.name.clone(),
+                            param: param.name.clone(),
+                        });
+                    }
+                    if !depends_on.contains(&param.name) {
+                        depends_on.push(param.name.clone());
+                    }
                 }
-                let body =
-                    lower_expr_v2(&r.body, &lets, &rules_so_far, &nullary, &variants_of, true)?;
-                let mut depends_on = Vec::new();
-                collect_rule_deps(&body, &mut depends_on);
-                if depends_on.iter().any(|d| d == &r.name) {
-                    return Err(L3V2LowerError::ForwardOrSelfDependency {
-                        rule: r.name.clone(),
-                        depends_on: r.name.clone(),
-                    });
-                }
+                // Only the declared dependencies are readable in the body.
+                let readable: BTreeSet<String> = depends_on.iter().cloned().collect();
+                let body = lower_expr_v2(&r.body, &lets, &readable, &nullary, &variants_of, true)
+                    .map_err(|e| match e {
+                    // A bare reference to a rule that exists but was not
+                    // declared as a parameter: named as the undeclared
+                    // read it is, rather than as an unresolved name.
+                    L3V2LowerError::UnresolvedReference(n) if rules_so_far.contains(&n) => {
+                        L3V2LowerError::UndeclaredFactRead {
+                            rule: r.name.clone(),
+                            fact: n,
+                        }
+                    }
+                    other => other,
+                })?;
                 rules_so_far.insert(r.name.clone());
                 items.push(L3PlanItemV2::Rule {
                     name: r.name.clone(),
@@ -383,43 +428,6 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
         format: L3_PLAN_FORMAT_V2,
         items,
     })
-}
-
-/// The rules a body reads facts from, in first-mention order and deduplicated.
-fn collect_rule_deps(e: &L3ExprV2, out: &mut Vec<String>) {
-    match e {
-        L3ExprV2::RuleFact(name) => {
-            if !out.iter().any(|d| d == name) {
-                out.push(name.clone());
-            }
-        }
-        L3ExprV2::Int(_)
-        | L3ExprV2::Str(_)
-        | L3ExprV2::Bool(_)
-        | L3ExprV2::LetRef(_)
-        | L3ExprV2::NullaryVariant { .. } => {}
-        L3ExprV2::Ctor { args, .. } => {
-            for a in args {
-                collect_rule_deps(a, out);
-            }
-        }
-        L3ExprV2::Record { fields, .. } => {
-            for (_, v) in fields {
-                collect_rule_deps(v, out);
-            }
-        }
-        L3ExprV2::Field(b, _) => collect_rule_deps(b, out),
-        L3ExprV2::Arith(_, a, b) | L3ExprV2::Cmp(_, a, b) => {
-            collect_rule_deps(a, out);
-            collect_rule_deps(b, out);
-        }
-        L3ExprV2::Match { scrutinee, arms } => {
-            collect_rule_deps(scrutinee, out);
-            for (_, body) in arms {
-                collect_rule_deps(body, out);
-            }
-        }
-    }
 }
 
 /// Lower one surface expression into the v2 IR.
@@ -953,5 +961,156 @@ fn check_exhaustive_expr(
         | L3ExprV2::LetRef(_)
         | L3ExprV2::RuleFact(_)
         | L3ExprV2::NullaryVariant { .. } => Ok(()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stage C — the runner (ADR-0027 §10)
+// ---------------------------------------------------------------------------
+
+/// One committed fact: a rule's body evaluated, published, and available for
+/// later rules to read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommittedFactV2 {
+    /// Commit order, from zero. Part of the record rather than derived from
+    /// position, so a reader never has to trust the container's ordering.
+    pub ordinal: u64,
+    pub rule: String,
+    pub value: L3ValueV2,
+    /// The facts this one was derived from, as declared in the plan.
+    pub depends_on: Vec<String>,
+}
+
+/// Why a v2 run stopped.
+///
+/// **None of these is a quiescence certificate**, and the names deliberately
+/// avoid borrowing that word. ADR-0012 §5 makes `Quiescent` the only decided
+/// negative *and* makes it certificate-backed: an empty frontier is a decided
+/// negative only when a checker can re-derive that it was empty. This runner
+/// produces no certificate — it is driven directly rather than through
+/// `run_saturated` — so it reports what it observed and claims nothing more.
+/// Wiring it to the saturated driver, and earning the certificate, is a later
+/// stage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RunStopV2 {
+    /// Every rule in the plan committed.
+    AllRulesCommitted,
+    /// No rule is eligible, and some remain uncommitted.
+    ///
+    /// Reachable when a rule depends on one that faulted. Not an error in
+    /// itself — it is the honest report that the run ran out of eligible work
+    /// with obligations outstanding, which ADR-0012 ⟨D-RESIDUE⟩ treats as a
+    /// result that MUST qualify the output rather than be presented as
+    /// success.
+    NoEligibleRule { pending: Vec<String> },
+    /// A rule's body faulted. The run stops: a later rule may depend on this
+    /// fact, and continuing would silently publish a world in which the
+    /// dependency never resolved.
+    Faulted { rule: String, fault: EvalFault },
+}
+
+/// The result of running a v2 plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct L3RunV2 {
+    pub facts: Vec<CommittedFactV2>,
+    pub stop: RunStopV2,
+}
+
+/// Run a v2 plan to completion.
+///
+/// **Terminates structurally** (ADR-0027 §4 ⟨D-TERMINATES⟩): each rule commits
+/// at most once over an acyclic dependency graph, so a plan of `N` rules
+/// admits at most `N` commits. There is no budget parameter because there is
+/// no unbounded case to bound — a measure would be machinery guarding a case
+/// that cannot arise.
+///
+/// **Deterministic.** Among eligible rules the runner always takes the one
+/// declared earliest, so the same plan produces the same fact order every
+/// time. That ordering is semantic: it is what a later stage's journal and
+/// certificate identities would be built from.
+pub fn run_l3_plan_v2(plan: &L3PlanV2) -> L3RunV2 {
+    // Rules in declaration order, which is also the selection order.
+    let rules: Vec<(&str, &L3ExprV2, &[String])> = plan
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            L3PlanItemV2::Rule {
+                name,
+                body,
+                depends_on,
+            } => Some((name.as_str(), body, depends_on.as_slice())),
+            _ => None,
+        })
+        .collect();
+
+    // `let` bindings are closed and evaluated once, before any rule runs.
+    let mut env = EvalEnv::new();
+    for item in &plan.items {
+        if let L3PlanItemV2::Let { name, value } = item {
+            match eval(value, &env) {
+                Ok(v) => env = env.with_let(name.clone(), v),
+                Err(fault) => {
+                    return L3RunV2 {
+                        facts: Vec::new(),
+                        stop: RunStopV2::Faulted {
+                            rule: name.clone(),
+                            fault,
+                        },
+                    }
+                }
+            }
+        }
+    }
+
+    let mut committed: BTreeSet<String> = BTreeSet::new();
+    let mut facts: Vec<CommittedFactV2> = Vec::new();
+
+    loop {
+        // Eligibility is exactly ⟨D-DERIVE⟩'s condition: uncommitted, and
+        // every declared dependency already committed.
+        let next = rules
+            .iter()
+            .find(|(name, _, deps)| {
+                !committed.contains(*name) && deps.iter().all(|d| committed.contains(d))
+            })
+            .copied();
+
+        let Some((name, body, deps)) = next else {
+            let pending: Vec<String> = rules
+                .iter()
+                .filter(|(n, _, _)| !committed.contains(*n))
+                .map(|(n, _, _)| (*n).to_string())
+                .collect();
+            return L3RunV2 {
+                facts,
+                stop: if pending.is_empty() {
+                    RunStopV2::AllRulesCommitted
+                } else {
+                    RunStopV2::NoEligibleRule { pending }
+                },
+            };
+        };
+
+        match eval(body, &env) {
+            Ok(value) => {
+                facts.push(CommittedFactV2 {
+                    ordinal: facts.len() as u64,
+                    rule: name.to_string(),
+                    value: value.clone(),
+                    depends_on: deps.to_vec(),
+                });
+                env = env.with_fact(name.to_string(), value);
+                committed.insert(name.to_string());
+            }
+            Err(fault) => {
+                return L3RunV2 {
+                    facts,
+                    stop: RunStopV2::Faulted {
+                        rule: name.to_string(),
+                        fault,
+                    },
+                }
+            }
+        }
     }
 }
