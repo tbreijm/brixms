@@ -84,10 +84,32 @@ both conveniences rather than inherit them.
 
 ## 3. Decision — ⟨D-DERIVE⟩ derivation is an acyclic rule-fact dependency
 
-> A rule body MAY reference an earlier rule by name, meaning: **read the payload of that rule's
-> already-committed fact**, identified by its exact fact identity. It SHALL NOT re-evaluate or
-> invoke the referenced rule. Dependencies SHALL be extracted statically, encoded in the plan,
-> and SHALL be acyclic. A rule remains zero-parameter and commits at most once.
+> A rule SHALL **declare** the facts it reads as its parameters. Each parameter names an earlier
+> rule and binds that rule's already-committed fact. A body SHALL read only its declared
+> parameters. It SHALL NOT re-evaluate or invoke the referenced rule. Dependencies SHALL be
+> acyclic, and a rule commits at most once.
+>
+> ```brix
+> rule base()        = 1500
+> rule boosted(base) = base + 500
+> ```
+
+**Erratum (2026-08-17, maintainer ruling during Stage C).** This originally had a rule remain
+zero-parameter, with dependencies **extracted** by scanning the body for bare references. The
+parameter list is strictly better and replaces it:
+
+- The dependency is **declared**, so the plan's dependency list cannot drift from what the body
+  actually reads. Under extraction the two were the same only because one was computed from the
+  other; under declaration the body can read *only* what the signature names, and an undeclared
+  read is `UndeclaredFactRead` rather than a silent new edge.
+- It removes a surprising asymmetry. Under extraction a bare name meant "read a fact" inside a
+  rule and "unresolved" inside a `let`, with nothing in the source marking the difference.
+- The dependency is visible at the declaration rather than only by reading the whole body.
+
+**This does not reopen §7's deferral of schemas, and the distinction is the load-bearing one.** A
+v2 parameter names exactly **one rule** and binds exactly **one fact**, so there is no
+quantification and no grounding domain to supply. §7 defers parameters that range over *values* —
+a different construct that v2 still does not have.
 
 **The two reviews disagreed here, and the disagreement resolves rather than persists.** One
 argued for exactly the above. The other argued that rules should *observe the world* through
@@ -270,8 +292,10 @@ influence a content-addressed run.
 
 ## 7. What v2 deliberately does not do
 
-**Rule parameters / schemas — deferred to v3.** A parameter is syntax for a schema, and the AST
-supplies no quantification domain. Admitting them now forces an arbitrary choice among "all values
+**Rule schemas — deferred to v3.** Note this is narrower than it first reads, after §3's erratum:
+a v2 rule *does* take parameters, and each names one rule and binds one fact. What is deferred is
+a parameter that **ranges over values** — a schema. Such a parameter supplies no quantification
+domain, and the AST has none to offer. Admitting them now forces an arbitrary choice among "all values
 of the type", "all initial facts", "all currently committed facts", or an incrementally expanding
 Herbrand universe — choices with different semantics and different termination properties, several
 of them infinite once arithmetic can create values. A schema profile must require an explicit

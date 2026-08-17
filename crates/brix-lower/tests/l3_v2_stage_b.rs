@@ -25,7 +25,7 @@ fn rule_body<'a>(p: &'a L3PlanV2, name: &str) -> &'a L3ExprV2 {
 /// committed fact — the thing v1 cannot express at all.
 #[test]
 fn a_rule_derives_from_a_committed_fact() {
-    let p = plan("rule base() = 1500\nrule boosted() = base + 500\n");
+    let p = plan("rule base() = 1500\nrule boosted(base) = base + 500\n");
     let env = EvalEnv::new().with_fact("base", L3ValueV2::Int(1500));
 
     assert_eq!(
@@ -38,7 +38,7 @@ fn a_rule_derives_from_a_committed_fact() {
 /// once every dependency has committed.
 #[test]
 fn a_rule_is_ineligible_until_its_dependency_commits() {
-    let p = plan("rule base() = 1\nrule derived() = base\n");
+    let p = plan("rule base() = 1\nrule derived(base) = base\n");
     let deps = p
         .items
         .iter()
@@ -83,7 +83,7 @@ fn operands_evaluate_left_to_right() {
     // Both operands read facts that have not committed, so both would fault.
     // Lowering accepts this — the rules exist — and evaluation decides which
     // fault is reported, which is exactly what the ordering fixes.
-    let p = plan("rule a() = 1\nrule b() = 2\nrule r() = a + b\n");
+    let p = plan("rule a() = 1\nrule b() = 2\nrule r(a, b) = a + b\n");
     match eval(rule_body(&p, "r"), &EvalEnv::new()) {
         Err(EvalFault::Unbound(name)) => {
             assert_eq!(name, "a", "the LEFT operand's fault is the reported one")
