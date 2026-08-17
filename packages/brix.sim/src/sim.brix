@@ -1,3 +1,0 @@
-package brix.sim @ 0.1.0
-
-pub rel Now { at: Instant }

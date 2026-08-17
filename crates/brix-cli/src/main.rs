@@ -103,6 +103,29 @@ use brix_syntax::{parse_bounded, ParseLimits};
 fn parse(source: &str) -> Result<brix_syntax::ast::Module, brix_syntax::ParseError> {
     parse_bounded(source, ParseLimits::strict())
 }
+
+/// Where packaged Brix sources live: `packages/<name>/src/<tail>.brix`, where
+/// `<tail>` is the package name's last dotted segment.
+///
+/// Deliberately the CLI's business rather than `brix-lower`'s — resolution
+/// takes a loader so the lowering crate never touches a filesystem.
+fn load_package(path: &str) -> Option<String> {
+    let tail = path.rsplit('.').next()?;
+    for root in ["packages", "../packages", "../../packages"] {
+        let candidate = format!("{root}/{path}/src/{tail}.brix");
+        if let Ok(src) = std::fs::read_to_string(&candidate) {
+            return Some(src);
+        }
+    }
+    None
+}
+
+/// Parse, then resolve any `use` declarations.
+fn parse_and_resolve(source: &str) -> Result<brix_syntax::ast::Module, String> {
+    let module = parse(source).map_err(|e| format!("parse error: {e}\n"))?;
+    brix_lower::imports::resolve_imports(&module, &load_package)
+        .map_err(|e| format!("import error: {e:?}\n"))
+}
 use soc_core::{
     check_quiescence_certificate, Adm, AuditResult, DeclaredAssumptions, Interner, PresentationV1,
     QuiescenceCertificateId, SaturationBudget, SettlementRegime,
@@ -173,9 +196,11 @@ fn exit_code(had_error: bool) -> ExitCode {
 /// whether any binding failed (parse error, or a binding that did not lower /
 /// type-check / prove). Separated from `main` so it can be unit-tested.
 fn check_report(source: &str) -> (String, bool) {
-    let module = match parse(source) {
+    let module = match parse_and_resolve(source) {
         Ok(m) => m,
-        Err(e) => return (format!("parse error: {e}\n"), true),
+        // `parse_and_resolve` already names which stage failed — parsing or
+        // import resolution — so the message is used as it stands.
+        Err(e) => return (e, true),
     };
 
     let results = check_module(&module);
@@ -282,9 +307,11 @@ type CheckResults = Vec<Result<brix_lower::CheckResult, (String, LowerError)>>;
 /// construct `Err` cases (e.g. `Verdict::ResourceExhausted`) that no real
 /// `.brix` source is known to reach through this pipeline today.
 fn prove_report(source: &str) -> (String, bool) {
-    let module = match parse(source) {
+    let module = match parse_and_resolve(source) {
         Ok(m) => m,
-        Err(e) => return (format!("parse error: {e}\n"), true),
+        // `parse_and_resolve` already names which stage failed — parsing or
+        // import resolution — so the message is used as it stands.
+        Err(e) => return (e, true),
     };
     format_prove(&check_module(&module))
 }
@@ -362,9 +389,11 @@ fn format_prove(results: &CheckResults) -> (String, bool) {
 /// `brix why <file.brix>`: thin wrapper around [`format_why`] (see
 /// `format_prove`'s doc comment for why the split exists).
 fn why_report(source: &str) -> (String, bool) {
-    let module = match parse(source) {
+    let module = match parse_and_resolve(source) {
         Ok(m) => m,
-        Err(e) => return (format!("parse error: {e}\n"), true),
+        // `parse_and_resolve` already names which stage failed — parsing or
+        // import resolution — so the message is used as it stands.
+        Err(e) => return (e, true),
     };
     format_why(&check_module(&module))
 }
@@ -428,9 +457,11 @@ fn format_why(results: &CheckResults) -> (String, bool) {
 /// `brix whynot <file.brix>`: thin wrapper around [`format_whynot`] (see
 /// `format_prove`'s doc comment for why the split exists).
 fn whynot_report(source: &str) -> (String, bool) {
-    let module = match parse(source) {
+    let module = match parse_and_resolve(source) {
         Ok(m) => m,
-        Err(e) => return (format!("parse error: {e}\n"), true),
+        // `parse_and_resolve` already names which stage failed — parsing or
+        // import resolution — so the message is used as it stands.
+        Err(e) => return (e, true),
     };
     format_whynot(&check_module(&module))
 }

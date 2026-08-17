@@ -359,6 +359,20 @@ pub enum Expr {
     /// Parallel composition, `a and b` (append-only ordinal 14) — the surface
     /// spelling of the kernel's `RealizesTensor`. Types to [`Ty::Prod`].
     And(Box<Expr>, Box<Expr>),
+    /// A recursive definition, `fix f : T. body` (append-only ordinal 16).
+    ///
+    /// Binds `f` to its **declared** type while checking `body`, so a
+    /// recursive call inside the body is a hypothesis lookup rather than an
+    /// inlined copy — which is what keeps the derivation finite. The declared
+    /// type is required rather than inferred: a recursive definition's type
+    /// cannot be inferred from a body that mentions it.
+    ///
+    /// **Scope, under ⟨D-JUDGE⟩.** Assuming `f : T` to check `f : T` is the
+    /// standard typing rule for recursion and it establishes TYPING only. It
+    /// says nothing about termination — `fn loop(x: Int): Int = loop(x)` types
+    /// fine, and correctly so, because a typing judgement never claimed the
+    /// function halts.
+    Fix(String, Ty, Box<Expr>),
     /// A lambda whose parameter type is **given** rather than inferred
     /// (append-only ordinal 15).
     ///
@@ -444,6 +458,13 @@ impl Canonical for Expr {
                 w.write_enum(14, |w| {
                     a.canon_write(w);
                     b.canon_write(w);
+                });
+            }
+            Expr::Fix(name, ty, body) => {
+                w.write_enum(16, |w| {
+                    w.write_str(name);
+                    ty.canon_write(w);
+                    body.canon_write(w);
                 });
             }
             Expr::LamAnn(param, ty, body) => {
@@ -687,6 +708,18 @@ pub fn g_arith() -> GeneratorId {
 /// [`g_float_lit`]: under ADR-0015 ⟨D-JUDGE⟩ it establishes `HasType(true,
 /// Bool)` and nothing else. It asserts no operation, representation, or value
 /// semantics, so there is nothing further for it to be capped by.
+/// Typing-rule generator for a recursive definition (`"type.rule.fix@1"`).
+///
+/// **Deliberately NOT discharged.** It introduces the definition's own type as
+/// an assumption in order to check the body — assuming what is being
+/// established. That is the standard and sound rule *for typing*, but it is
+/// not a correspondence the kernel owns, so a recursive definition types at
+/// `@Audited` until a kernel fixpoint rule exists. Discharging it by analogy
+/// would be exactly the prose-argument mechanism ADR-0015 §1.2 rejects.
+pub fn g_fix() -> GeneratorId {
+    GeneratorId::named("type.rule.fix@1")
+}
+
 pub fn g_bool_lit() -> GeneratorId {
     GeneratorId::named("type.rule.bool.lit@1")
 }
@@ -1153,6 +1186,7 @@ fn minted_generators() -> Vec<(String, GeneratorId)> {
         ("g_arith_split", g_arith_split()),
         ("g_arith_input", g_arith_input()),
         ("g_arith_result", g_arith_result()),
+        ("g_fix", g_fix()),
         ("g_bool_lit", g_bool_lit()),
         ("g_cmp_split", g_cmp_split()),
         ("g_cmp", g_cmp()),
@@ -2447,6 +2481,37 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
         // Same rule as `Lam` — same generators, same tree — with the
         // parameter's type taken from the declaration instead of a fresh
         // variable, so the body is inferred with it already in scope.
+        Expr::Fix(name, declared, body) => {
+            // The definition's own type is assumed while its body is checked,
+            // so a recursive call is a hypothesis lookup and the derivation
+            // stays finite.
+            let ctx_ext = ctx.extend(name.clone(), declared.clone());
+            let (tb, d_body, st_prime) = infer_tree(body, &ctx_ext, st)?;
+            // The body must actually have the type that was assumed.
+            let subst = unify(&tb, declared, &st_prime.subst)?;
+            let st_out = Infer {
+                subst,
+                ..st_prime.clone()
+            };
+
+            // No closing leaf: the body's type IS the declared type after the
+            // unification above, so a leaf from one to the other would have
+            // `src == dst` — the padded step #287 removed as unsound.
+            let intro = TyTree::Leaf {
+                generator: g_fix(),
+                src: TyObj::Atom(CfgAtom::Expr(Expr::Fix(
+                    name.clone(),
+                    declared.clone(),
+                    body.clone(),
+                ))),
+                dst: TyObj::Atom(CfgAtom::Expr((**body).clone())),
+            };
+            let tree = TyTree::Seq {
+                left: Box::new(intro),
+                right: Box::new(d_body),
+            };
+            Ok((declared.clone(), tree, st_out))
+        }
         Expr::LamAnn(p, declared, body) => {
             let ctx_ext = ctx.extend(p.clone(), declared.clone());
             let (tb, d_body, st_prime) = infer_tree(body, &ctx_ext, st)?;

@@ -1,28 +1,29 @@
-# Core package status
+# Packaged Brix sources
 
-The north-star for this directory is **`brix.type` — a self-hosted BrixMS
-type checker that retires the Rust core entirely.** The Rust checkers
-(`crates/brix-ir/src/{infer,reflect}.rs`) are the trusted reference the
-native package mirrors; the goal is to grow `brix.type` slice-by-slice until
-it is authoritative and the Rust reference can be removed.
+Brix programs that ship with the toolchain. Each one must keep checking —
+`crates/brix-lower/tests/packaged_brix.rs` is the gate, and it exists because
+a `.brix` file nobody runs rots exactly like a stale comment. The shipped
+examples declared a `base: Money` field for months with no such type in the
+language.
 
 | Package | Content | State |
 |---|---|---|
-| [`brix.type`](brix.type) | shadow-mode type checker (slices 1–2: role-binding `HasType`, literal + var-at-two-roles mismatch), proven `FactId`-for-`FactId` equal to `reflect.rs` | **The real track.** Runs as a compiled + executed BrixMS program in the native engine, shadow-mode only (never gates a build). |
+| [`brix.soc`](brix.soc) | SOC's own core: the identities, the outcome lattice, `Generator`/`Chain`, `Judgement`, and `honest_outcome` — the honesty rule the substrate turns on | **Live.** Checked on every build. |
 
-## Removed (2026-07-21)
+## Removed 2026-08-18
 
-`brix.core`, `brix.math`, `brix.rel`, `brix.time` were throwaway output of
-the overnight BrixBuilder loop and produced nothing of lasting value. They
-have been cleaned out; each needs a proper ground-up design before it comes
-back (e.g. `brix.math` needs a new design — `Decimal`, units, `%` are still
-Ring 0 gaps, and nominal newtypes for `Instant`/`Duration` aren't landed).
-Do not resurrect the deleted sources; redesign from the spec.
+`brix.core`, `brix.math`, `brix.ops`, `brix.sim`, `brix.type`, `brix.music`.
 
-Note: the compiler still carries Rust-core intrinsics that a future
-`brix.math`/`brix.core` must eventually subsume and retire — e.g. the
-`brix.math.clamp` builtin registered in `crates/brixc/src/lower/resolve.rs`
-and the unit intrinsics exercised by `crates/brixc/tests/lower_units.rs`.
-These are string-literal builtins, not dependencies on the deleted package
-sources (removal is build-safe), but they mark surface the self-hosted
-packages will need to reclaim.
+None of them parsed. They were written against the pre-SOC language — `pub`,
+`measure`, `unit`, `enum`, `Result<T, E>`, `F64`, `package … @ version` — none
+of which is in the current surface. `brix.music` was an empty directory.
+
+The previous version of this file described `brix.type` as "the real track", a
+self-hosted type checker shadowing `crates/brix-ir`. **That crate no longer
+exists** — the legacy IR and its checkers were deleted when the native
+type-realization regime became authoritative. The file was describing a world
+that had been gone for weeks, which is the same failure mode the gate above
+now prevents for the sources themselves.
+
+Do not resurrect the deleted sources. Anything worth having from them is worth
+redesigning against the current spec.
