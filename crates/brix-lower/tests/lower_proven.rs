@@ -1005,3 +1005,27 @@ fn test_fn_over_generic_collection() {
         .unwrap_or_else(|(n, e)| panic!("'{n}' should check, got {e:?}"));
     assert_eq!(cr.ty, Some(TrTy::Con("Int")));
 }
+
+/// `Bool` is nameable in a declaration.
+///
+/// It has been a real two-variant sum in the checker since #297, but was not
+/// among the resolvable type names — so a config could hold a boolean it could
+/// not declare.
+#[test]
+fn test_bool_is_a_declarable_type() {
+    let src = "config Flagged = MkFlagged { on: Bool }\nlet f = MkFlagged { on: true }";
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    let cr = results[0]
+        .as_ref()
+        .unwrap_or_else(|(n, e)| panic!("'{n}' should check, got {e:?}"));
+    assert!(format!("{:?}", cr.ty).contains("Bool"), "{:?}", cr.ty);
+
+    // And the declared type is still a contract.
+    let module = parse("config F = MkF { on: Bool }\nlet bad = MkF { on: 1 }").expect("parse");
+    let results = check_module(&module);
+    assert!(
+        results[0].is_err(),
+        "an Int where Bool is declared must be refused"
+    );
+}

@@ -406,16 +406,18 @@ impl Parser {
         };
         if self.check(&TokenKind::At) {
             self.advance();
+            // Grade names are contextual: they are recognized here, in grade
+            // position, and are ordinary identifiers everywhere else.
             let grade = match self.peek() {
-                TokenKind::Derived => {
+                TokenKind::Ident(name) if name == "Derived" => {
                     self.advance();
                     Grade::Derived
                 }
-                TokenKind::Audited => {
+                TokenKind::Ident(name) if name == "Audited" => {
                     self.advance();
                     Grade::Audited
                 }
-                TokenKind::Proven => {
+                TokenKind::Ident(name) if name == "Proven" => {
                     self.advance();
                     Grade::Proven
                 }

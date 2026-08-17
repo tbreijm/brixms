@@ -1,0 +1,159 @@
+// brix.soc — SOC's own core, written in Brix.
+//
+// SOC has two pieces: configurations (objects) and witnesses (arrows), plus a
+// frozen behaviour signature and the epistemic grading (ADR-0002 §1,
+// ADR-0010 §7a).
+//
+// A note on what this file IS, so it is not read as a category error. A
+// witness is an arrow and never a configuration (ADR-0010 D-OPARROW). This
+// model does not make witnesses into configurations — it makes configurations
+// that DENOTE witnesses, which is reification, and is exactly what the
+// kernel's own `Realizes(w, x, y)` proposition already does: an object-side
+// statement ABOUT an arrow.
+
+// ---------------------------------------------------------------------------
+// Identities
+// ---------------------------------------------------------------------------
+
+config ConfigId    = MkConfigId(Str)
+config WitnessId   = MkWitnessId(Str)
+config GeneratorId = MkGeneratorId(Str)
+config ContextId   = MkContextId(Str)
+
+// ---------------------------------------------------------------------------
+// The epistemic lattice (ADR-0002 §4.1, §5.3)
+// ---------------------------------------------------------------------------
+
+// Derived < Audited < Proven are the earned grades. Unknown is the absence of
+// a result and establishes nothing; Refuted is a decided negative and is NOT
+// reachable by absence.
+config Outcome = Unknown | Refuted | Derived | Audited | Proven
+
+// Rank an outcome so the lattice can be compared. Unknown and Refuted sit
+// outside the earned chain and rank below it: neither may be strengthened by
+// composition.
+fn rank(o: Outcome): Int = match o {
+  Unknown => 0
+  Refuted => 0
+  Derived => 1
+  Audited => 2
+  Proven  => 3
+}
+
+// The weaker of two outcomes. This is the shape of every honesty rule in the
+// system: a result is capped by its least-established part.
+fn weaker(a: Outcome, b: Outcome): Outcome = match rank(a) <= rank(b) {
+  true  => a
+  false => b
+}
+
+// ---------------------------------------------------------------------------
+// Generators and decompositions
+// ---------------------------------------------------------------------------
+
+// A generator is a *logged primitive witness* — one arrow of the class G that
+// generates the tight subcategory K (ADR-0002 §10, PD-1).
+//
+// `tight` records whether its realization semantics has been DISCHARGED. It is
+// deliberately a fact about the generator and not about any occurrence:
+// membership in a registry never makes an occurrence proven (ADR-0015 §8.7).
+config Generator = MkGenerator {
+  id:    GeneratorId,
+  src:   ConfigId,
+  dst:   ConfigId,
+  tight: Bool
+}
+
+// A decomposition: k = g_n after ... after g_1, as a chain of generators.
+config Chain = Nil | Link(Generator, Chain)
+
+// Is every generator in the chain discharged?
+//
+// ⚠ NOT YET EXPRESSIBLE, and this is the most useful thing this file has
+// found. The predicate is a FOLD over the chain, and a fold is recursive:
+//
+//     fn all_tight(c: Chain): Bool = match c {
+//       Nil        => true
+//       Link(g, r) => match g.tight { true => all_tight(r)  false => false }
+//     }
+//
+// Brix refuses that today — `RecursiveFunction`. `fn` bodies are inlined at
+// each call site, so a recursive one inlines forever; it used to overflow the
+// stack and now fails by name.
+//
+// The obstruction is the LOWERING STRATEGY, not the proof system. The standard
+// treatment assumes the function's type, checks the body under that
+// assumption, and discharges — so the recursive call is a hypothesis leaf and
+// the derivation stays finite, exactly as `g_lam_intro`/`g_lam_close` already
+// do for lambdas.
+//
+// Until then, tightness is taken as given so the honesty rule below can still
+// be stated. That substitution is the whole compromise in this file, and it is
+// marked rather than hidden.
+
+// ---------------------------------------------------------------------------
+// The honesty rule
+// ---------------------------------------------------------------------------
+
+// The honest grade of a result whose kernel composition earned `composition`,
+// resting on the primitive leaves in `c`.
+//
+// The kernel proves the COMPOSITION conditional on its leaves, so the result
+// may only claim the composition's grade when every leaf is discharged.
+// Otherwise it is capped at Audited — replay-verified, not proven.
+//
+// This is the rule the whole substrate turns on, and writing it here is the
+// point of this file: SOC stating its own honesty condition in the language
+// it defines.
+fn honest_outcome(composition: Outcome, every_leaf_tight: Bool): Outcome =
+  match every_leaf_tight {
+    true  => composition
+    false => weaker(composition, Audited)
+  }
+
+// ---------------------------------------------------------------------------
+// Judgements
+// ---------------------------------------------------------------------------
+
+// A judgement is what the system publishes: an outcome for a proposition, in
+// a context, on named evidence (ADR-0002 §6). The evidence is what makes the
+// outcome checkable rather than asserted.
+config Judgement = MkJudgement {
+  context:     ContextId,
+  proposition: Str,
+  outcome:     Outcome,
+  evidence:    WitnessId
+}
+
+// ---------------------------------------------------------------------------
+// A worked example: the arithmetic cap that is live in the system today
+// ---------------------------------------------------------------------------
+
+// `g_lit` is discharged; `g_arith` is not, because it asserts an operation
+// semantics the kernel does not own (ADR-0015 §8.5).
+let g_lit = MkGenerator {
+  id:    MkGeneratorId("type.rule.lit@1"),
+  src:   MkConfigId("Expr(1)"),
+  dst:   MkConfigId("Type(Int)"),
+  tight: true
+}
+
+let g_arith = MkGenerator {
+  id:    MkGeneratorId("type.rule.arith@1"),
+  src:   MkConfigId("ArithInput"),
+  dst:   MkConfigId("ArithResult"),
+  tight: false
+}
+
+// The derivation of `1 + 2`: two literals and the arithmetic rule. The chain
+// is expressible — it is only the FOLD over it that is not.
+let one_plus_two = Link(g_lit, Link(g_lit, Link(g_arith, Nil)))
+
+// The kernel proves the composition at Proven. The honest result is Audited,
+// because `g_arith` is undischarged — which is exactly what `brix check`
+// reports for `let x = 1 + 2` today.
+let honest = honest_outcome(Proven, false)
+
+// And a derivation resting only on discharged leaves keeps its grade.
+let all_discharged = Link(g_lit, Link(g_lit, Nil))
+let stays_proven   = honest_outcome(Proven, true)

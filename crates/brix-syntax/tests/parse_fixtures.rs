@@ -482,3 +482,31 @@ fn boolean_literals_parse() {
         assert_eq!(*value, Expr::Bool(expected));
     }
 }
+
+#[test]
+fn grade_names_are_contextual_not_reserved() {
+    // `Derived`/`Audited`/`Proven` name a grade only after `@`. Reserving them
+    // stopped SOC's own outcome lattice from being spelled in Brix, which is
+    // an odd thing for a language to forbid about its own vocabulary.
+    let module = parse("config Outcome = Unknown | Derived | Audited | Proven")
+        .expect("grade names must be usable as ordinary variant names");
+    let Item::Config(ConfigDecl {
+        body: ConfigBody::Sum(variants),
+        ..
+    }) = &module.items[0]
+    else {
+        panic!("expected a sum config");
+    };
+    let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["Unknown", "Derived", "Audited", "Proven"]);
+
+    // And they still mean a grade in grade position.
+    let module = parse("let x: Int @Proven = 1").expect("grade annotations still parse");
+    let Item::Let(LetDecl { ty, .. }) = &module.items[0] else {
+        panic!("expected a let");
+    };
+    assert_eq!(
+        *ty,
+        Some(Ty::Graded(Box::new(Ty::Named("Int".into())), Grade::Proven))
+    );
+}
