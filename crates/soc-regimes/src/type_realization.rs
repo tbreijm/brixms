@@ -2309,160 +2309,8 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             },
             st,
         )),
-        Expr::Cmp(op, a, b) => {
-            let (ta, da, s1) = infer_tree(a, ctx, st)?;
-            let (tb, db, s2) = infer_tree(b, ctx, s1)?;
-
-            // Both operands must land on the same type. No promotion: mixing
-            // `Int` and `Float` under a comparison would need the coercion
-            // lattice to decide which side moves, and that is a choice
-            // ⟨D-SPLIT⟩ keeps out of a structural split. Refused rather than
-            // guessed.
-            let subst = unify(&ta, &tb, &s2.subst)?;
-            let operand_ty = resolve(&ta, &subst).clone();
-            let s3 = Infer {
-                subst,
-                ..s2.clone()
-            };
-
-            let split = TyTree::Leaf {
-                generator: g_cmp_split(),
-                src: TyObj::Atom(CfgAtom::Expr(Expr::Cmp(
-                    *op,
-                    Box::new((**a).clone()),
-                    Box::new((**b).clone()),
-                ))),
-                dst: TyObj::Prod(
-                    Box::new(TyObj::Atom(CfgAtom::Expr((**a).clone()))),
-                    Box::new(TyObj::Atom(CfgAtom::Expr((**b).clone()))),
-                ),
-            };
-            let operands = TyTree::Tensor {
-                left: Box::new(da),
-                right: Box::new(db),
-            };
-            let cmp_leaf = TyTree::Leaf {
-                generator: g_cmp(),
-                src: TyObj::Prod(
-                    Box::new(TyObj::Atom(CfgAtom::Type(operand_ty.clone()))),
-                    Box::new(TyObj::Atom(CfgAtom::Type(operand_ty))),
-                ),
-                dst: TyObj::Atom(CfgAtom::Type(bool_ty())),
-            };
-
-            let tree = TyTree::Seq {
-                left: Box::new(split),
-                right: Box::new(TyTree::Seq {
-                    left: Box::new(operands),
-                    right: Box::new(cmp_leaf),
-                }),
-            };
-            Ok((bool_ty(), tree, s3))
-        }
-        Expr::Arith(op, a, b) => {
-            let (ta, da, s1) = infer_tree(a, ctx, st)?;
-            let (tb, db, s2) = infer_tree(b, ctx, s1)?;
-            let ra = resolve(&ta, &s2.subst).clone();
-            let rb = resolve(&tb, &s2.subst).clone();
-            let plan = plan_arith(*op, &ra, &rb)?;
-
-            let mut subst = s2.subst.clone();
-            if plan.unify_a {
-                let s = unify(&ra, &Ty::Con(plan.base), &subst)?;
-                subst = s;
-            }
-            if plan.unify_b {
-                let s = unify(&rb, &Ty::Con(plan.base), &subst)?;
-                subst = s;
-            }
-
-            let result_ty = Ty::Con(plan.result);
-
-            // ADR-0015 §5 Stage B0. The operands are NOT coerced up to the
-            // result type here any more. Splicing one embedding leaf per
-            // promotion edge was what erased the arithmetic source object: it
-            // presented both operands already at the result type, so the
-            // `g_arith` leaf could not say what they had started as, which is
-            // why `1.0 + 2.0` and `7 / 2` emitted the identical leaf
-            // `Prod(Float, Float) → Float`. The promotion paths are now
-            // ordered data inside `ArithTypingInputV1`.
-            let split = TyTree::Leaf {
-                generator: g_arith_split(),
-                src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
-                dst: TyObj::Prod(
-                    Box::new(TyObj::Atom(CfgAtom::Expr((**a).clone()))),
-                    Box::new(TyObj::Atom(CfgAtom::Expr((**b).clone()))),
-                ),
-            };
-            let tensor = TyTree::Tensor {
-                left: Box::new(da),
-                right: Box::new(db),
-            };
-            // The operand types the `Tensor` actually lands on. For an operand
-            // that was an unbound var, `eff` is `plan.base` and the operand's
-            // own `Var(n)` endpoint zonks to exactly that under the
-            // substitution unified above — so the `Seq` middle matches either
-            // way.
-            let operand_types = TyObj::Prod(
-                Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con(plan.eff_a)))),
-                Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con(plan.eff_b)))),
-            );
-            let input = TyObj::Atom(CfgAtom::ArithInput(plan.typing_input(*op)?));
-            // The bridge. `TreeObj::Atom` can never equal a `TreeObj::Prod`,
-            // and a `Tensor`'s `dst` is structurally always a `Prod`, so the
-            // packaging of two operand types into one source object has to be
-            // its own leaf. It is deliberately not folded into `g_arith_split`
-            // — ⟨D-SPLIT⟩ discharges the split only while it stays purely
-            // structural. See `g_arith_input`.
-            let input_leaf = TyTree::Leaf {
-                generator: g_arith_input(),
-                src: operand_types,
-                dst: input.clone(),
-            };
-            // ADR-0015 §5 Stage B. `g_arith`'s `dst` is the kernel's own
-            // `NumericResultTypeV1`, not a `Ty` atom: a registry row is matched
-            // by canonical bytes, and the kernel may not reproduce this crate's
-            // `Ty` encoding to author one (§8.5; DEPS.md, "never a second
-            // semantic encoder"). The rename back into `Ty` is the separate,
-            // explicitly undischarged `g_arith_result` bridge below.
-            let arith_result = NumericResultTypeV1 {
-                name: NumericTypeNameV1::from_lattice_node(plan.result)
-                    .ok_or(TypeError::Mismatch)?,
-            };
-            let result_obj = TyObj::Atom(CfgAtom::ArithResult(arith_result));
-            let arith_leaf = TyTree::Leaf {
-                generator: g_arith(),
-                src: input,
-                dst: result_obj.clone(),
-            };
-            let result_leaf = TyTree::Leaf {
-                generator: g_arith_result(),
-                src: result_obj,
-                dst: TyObj::Atom(CfgAtom::Type(result_ty.clone())),
-            };
-            let tree = TyTree::Seq {
-                left: Box::new(split),
-                right: Box::new(TyTree::Seq {
-                    left: Box::new(tensor),
-                    right: Box::new(TyTree::Seq {
-                        left: Box::new(input_leaf),
-                        right: Box::new(TyTree::Seq {
-                            left: Box::new(arith_leaf),
-                            right: Box::new(result_leaf),
-                        }),
-                    }),
-                }),
-            };
-
-            Ok((
-                result_ty,
-                tree,
-                Infer {
-                    subst,
-                    next_var: s2.next_var,
-                },
-            ))
-        }
+        Expr::Cmp(..) => infer_cmp(expr, ctx, st),
+        Expr::Arith(..) => infer_arith(expr, ctx, st),
         Expr::Var(name) => {
             let t = ctx
                 .get(name)
@@ -2566,136 +2414,8 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             };
             Ok((fn_ty, tree, st_prime))
         }
-        Expr::App(f, x) => {
-            let (tf, df, s1) = infer_tree(f, ctx, st)?;
-            let (tx, dx, s2) = infer_tree(x, ctx, s1)?;
-            let (beta, s_beta) = s2.fresh_var();
-
-            let target = Ty::Fn(
-                Box::new(resolve(&tx, &s_beta.subst).clone()),
-                Box::new(Ty::Var(beta)),
-            );
-
-            let s3 = unify(resolve(&tf, &s_beta.subst), &target, &s_beta.subst)?;
-
-            let a = zonk(&tx, &s3);
-            let b = zonk(&Ty::Var(beta), &s3);
-            let fn_ty = Ty::Fn(Box::new(a.clone()), Box::new(b.clone()));
-
-            let split = TyTree::Leaf {
-                generator: g_split(),
-                src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
-                dst: TyObj::Prod(
-                    Box::new(TyObj::Atom(CfgAtom::Expr((**f).clone()))),
-                    Box::new(TyObj::Atom(CfgAtom::Expr((**x).clone()))),
-                ),
-            };
-
-            let tensor = TyTree::Tensor {
-                left: Box::new(df),
-                right: Box::new(dx),
-            };
-
-            let app = TyTree::Leaf {
-                generator: g_app2(),
-                src: TyObj::Prod(
-                    Box::new(TyObj::Atom(CfgAtom::Type(fn_ty.clone()))),
-                    Box::new(TyObj::Atom(CfgAtom::Type(a.clone()))),
-                ),
-                dst: TyObj::Atom(CfgAtom::Type(b.clone())),
-            };
-
-            let tree = TyTree::Seq {
-                left: Box::new(split),
-                right: Box::new(TyTree::Seq {
-                    left: Box::new(tensor),
-                    right: Box::new(app),
-                }),
-            };
-
-            Ok((
-                b,
-                tree,
-                Infer {
-                    subst: s3,
-                    next_var: s_beta.next_var,
-                },
-            ))
-        }
-        Expr::Record(fields) => {
-            let mut sorted_fields = fields.clone();
-            sorted_fields.sort_by(|a, b| a.0.cmp(&b.0));
-            sorted_fields.dedup_by(|a, b| a.0 == b.0);
-
-            if sorted_fields.is_empty() {
-                // No split leaf: `{}` has no subexpressions, so there is
-                // nothing to decompose. This branch used to emit
-                // `Seq(g_record_split{Expr({}) -> Expr({})}, g_record_empty)`,
-                // and that first leaf was a padded step — `src == dst`, the
-                // faked intermediate config ADR-0007 §1 calls unsound and its
-                // §5 criterion 2 forbids ("no endpoint equals its neighbor by
-                // padding"), and the shape ADR-0018 §4 retired the flat lane
-                // over. It passed `elaborate_tree`'s `Seq` middle-match for
-                // exactly the reason ADR-0007 §1 gives: a padded middle
-                // `dst ≡ dst` always matches syntactically.
-                //
-                // It was also emitted under `g_record_split`, which *is*
-                // discharged tight — but on ⟨D-SPLIT⟩'s ground that a split
-                // "yields exactly two ordered child obligations", which at
-                // zero arity it does not. Nothing was over-graded, because
-                // `g_record_empty` capped the result at `@Audited`; the hazard
-                // was that discharging `g_record_empty` would have published
-                // `@Proven` over the padded step.
-                let rec_ty = Ty::Record(vec![]);
-                let tree = TyTree::Leaf {
-                    generator: g_record_empty(),
-                    src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
-                    dst: TyObj::Atom(CfgAtom::Type(rec_ty.clone())),
-                };
-                return Ok((rec_ty, tree, st));
-            }
-
-            let mut sorted_types = Vec::new();
-            let mut expr_atoms = Vec::new();
-            let mut type_atoms = Vec::new();
-            let mut d_trees = Vec::new();
-            let mut curr_st = st;
-
-            for (name, val_expr) in sorted_fields {
-                let (t_i, d_i, next_st) = infer_tree(&val_expr, ctx, curr_st)?;
-                sorted_types.push((name, t_i.clone()));
-                expr_atoms.push(TyObj::Atom(CfgAtom::Expr(val_expr)));
-                type_atoms.push(TyObj::Atom(CfgAtom::Type(t_i)));
-                d_trees.push(d_i);
-                curr_st = next_st;
-            }
-
-            let result_ty = Ty::Record(sorted_types);
-
-            let split = TyTree::Leaf {
-                generator: g_record_split(),
-                src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
-                dst: right_nest_prod(expr_atoms),
-            };
-
-            let fields_tensor = right_nest_tensor(d_trees);
-
-            let record_leaf = TyTree::Leaf {
-                generator: g_record(),
-                src: right_nest_prod(type_atoms),
-                dst: TyObj::Atom(CfgAtom::Type(result_ty.clone())),
-            };
-
-            let tree = TyTree::Seq {
-                left: Box::new(split),
-                right: Box::new(TyTree::Seq {
-                    left: Box::new(fields_tensor),
-                    right: Box::new(record_leaf),
-                }),
-            };
-
-            Ok((result_ty, tree, curr_st))
-        }
+        Expr::App(..) => infer_app(expr, ctx, st),
+        Expr::Record(..) => infer_record(expr, ctx, st),
         Expr::Field(base, fname) => {
             let (t_base, d_base, st1) = infer_tree(base, ctx, st)?;
             let zonked_base = zonk(&t_base, &st1.subst);
@@ -2726,157 +2446,8 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                 Err(TypeError::Mismatch)
             }
         }
-        Expr::Ctor(sum_ty, variant, args) => {
-            // Instantiated first: a parameterized `config` is stored once as a
-            // template, and each use needs its own variables — otherwise
-            // `Nil` at `List<Int>` and `Nil` at `List<Str>` would share one
-            // over-constrained type. For a non-parameterized config this is
-            // the identity.
-            let (sum_ty, st) = instantiate(sum_ty, st);
-            let sum_ty = &sum_ty;
-            // Unfolded to read the variants; the *result* type stays the
-            // folded `sum_ty`, so the constructed value is a `List<Int>`
-            // rather than a one-step unfolding of one.
-            let resolved = resolve(sum_ty, &st.subst).unfold();
-            if let Ty::Sum(_sum_name, variants) = &resolved {
-                let (_, declared_fields) = variants
-                    .iter()
-                    .find(|(vname, _)| vname == variant)
-                    .ok_or(TypeError::Mismatch)?;
-                if args.len() != declared_fields.len() {
-                    return Err(TypeError::Mismatch);
-                }
-                let declared_fields = declared_fields.clone();
-                if args.is_empty() {
-                    // No split leaf: a nullary constructor has no argument
-                    // subexpressions, so there is nothing to decompose. See
-                    // the empty-record branch above for the full reasoning —
-                    // this branch carried the identical padded step under
-                    // `g_ctor_split`, which is likewise discharged tight on a
-                    // ⟨D-SPLIT⟩ ground that does not hold at zero arity.
-                    let tree = TyTree::Leaf {
-                        generator: g_ctor_nullary(),
-                        src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
-                        dst: TyObj::Atom(CfgAtom::Type(sum_ty.clone())),
-                    };
-                    return Ok((sum_ty.clone(), tree, st));
-                }
-
-                let mut expr_atoms = Vec::new();
-                let mut type_atoms = Vec::new();
-                let mut d_trees = Vec::new();
-                let mut curr_st = st;
-
-                for (arg_expr, declared_field_ty) in args.iter().zip(declared_fields.iter()) {
-                    let (t_i, d_i, next_st) = infer_tree(arg_expr, ctx, curr_st)?;
-                    let next_subst = unify(&t_i, declared_field_ty, &next_st.subst)?;
-                    expr_atoms.push(TyObj::Atom(CfgAtom::Expr(arg_expr.clone())));
-                    let zonked_field = zonk(declared_field_ty, &next_subst);
-                    type_atoms.push(TyObj::Atom(CfgAtom::Type(zonked_field)));
-                    d_trees.push(d_i);
-                    curr_st = Infer {
-                        subst: next_subst,
-                        next_var: next_st.next_var,
-                    };
-                }
-
-                let split = TyTree::Leaf {
-                    generator: g_ctor_split(),
-                    src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
-                    dst: right_nest_prod(expr_atoms),
-                };
-
-                let args_tensor = right_nest_tensor(d_trees);
-
-                let ctor_leaf = TyTree::Leaf {
-                    generator: g_ctor(),
-                    src: right_nest_prod(type_atoms),
-                    dst: TyObj::Atom(CfgAtom::Type(sum_ty.clone())),
-                };
-
-                let tree = TyTree::Seq {
-                    left: Box::new(split),
-                    right: Box::new(TyTree::Seq {
-                        left: Box::new(args_tensor),
-                        right: Box::new(ctor_leaf),
-                    }),
-                };
-
-                Ok((sum_ty.clone(), tree, curr_st))
-            } else {
-                Err(TypeError::Mismatch)
-            }
-        }
-        Expr::Match(scrutinee, arms) => {
-            let (t_s, d_s, s1) = infer_tree(scrutinee, ctx, st)?;
-            check_coverage(&t_s, arms, &s1.subst)?;
-            let mut curr_st = s1;
-            let mut parts_exprs = vec![TyObj::Atom(CfgAtom::Expr((**scrutinee).clone()))];
-            let mut parts_derivs = vec![d_s];
-            let mut res_ty: Option<Ty> = None;
-
-            for (pat, body) in arms {
-                let bindings = bind_pattern(pat, &t_s, &curr_st.subst)?;
-                let mut arm_ctx = ctx.clone();
-                for (x, t) in bindings {
-                    arm_ctx = arm_ctx.extend(x, t);
-                }
-                let (t_i, d_i, next_st) = infer_tree(body, &arm_ctx, curr_st)?;
-                parts_exprs.push(TyObj::Atom(CfgAtom::Expr(body.clone())));
-                parts_derivs.push(d_i);
-                if let Some(ref r_ty) = res_ty {
-                    let next_subst = unify(r_ty, &t_i, &next_st.subst)?;
-                    curr_st = Infer {
-                        subst: next_subst,
-                        next_var: next_st.next_var,
-                    };
-                } else {
-                    res_ty = Some(t_i);
-                    curr_st = next_st;
-                }
-            }
-
-            let result_ty = res_ty.ok_or(TypeError::Mismatch)?;
-            let zonked_t_s = zonk(&t_s, &curr_st.subst);
-            let zonked_t_res = zonk(&result_ty, &curr_st.subst);
-
-            let mut parts_types = vec![TyObj::Atom(CfgAtom::Type(zonked_t_s))];
-            for _ in arms {
-                parts_types.push(TyObj::Atom(CfgAtom::Type(zonked_t_res.clone())));
-            }
-
-            let split = TyTree::Leaf {
-                generator: g_match_split(),
-                src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
-                dst: right_nest_prod(parts_exprs),
-            };
-
-            let parts_tensor = right_nest_tensor(parts_derivs);
-
-            let match_generator = if arms
-                .iter()
-                .any(|(pattern, _)| matches!(pattern, Pattern::Wildcard | Pattern::Var(_)))
-            {
-                g_match_catchall()
-            } else {
-                g_match()
-            };
-            let match_leaf = TyTree::Leaf {
-                generator: match_generator,
-                src: right_nest_prod(parts_types),
-                dst: TyObj::Atom(CfgAtom::Type(result_ty.clone())),
-            };
-
-            let tree = TyTree::Seq {
-                left: Box::new(split),
-                right: Box::new(TyTree::Seq {
-                    left: Box::new(parts_tensor),
-                    right: Box::new(match_leaf),
-                }),
-            };
-
-            Ok((result_ty, tree, curr_st))
-        }
+        Expr::Ctor(..) => infer_ctor(expr, ctx, st),
+        Expr::Match(..) => infer_match(expr, ctx, st),
     }
 }
 
@@ -2939,6 +2510,536 @@ pub fn audited_type_check_tree(
     )
     .map_err(|_| TypeError::IllFormedDerivation)?;
     Ok((audited, derivation))
+}
+
+/// `infer_tree`'s `arith` arm, extracted.
+///
+/// **Split for stack frame size, not tidiness.** `infer_tree` was one match
+/// with a dozen-odd arms, and a debug build allocates a stack slot for every
+/// arm's locals in the *same* frame — so every recursive level paid for arms
+/// it never entered. Roughly 65 KB per level, which overflowed a 2 MiB stack
+/// at a nesting depth of 32; the same source then checked in release and
+/// aborted in debug. A level now pays only for the arm it takes.
+///
+/// The pattern is re-matched here rather than passed as arguments so the body
+/// is byte-identical to the arm it came from: a move, not a change.
+#[inline(never)]
+fn infer_arith(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer), TypeError> {
+    let Expr::Arith(op, a, b) = expr else {
+        unreachable!("infer_arith is only reached from its own arm")
+    };
+    let (ta, da, s1) = infer_tree(a, ctx, st)?;
+    let (tb, db, s2) = infer_tree(b, ctx, s1)?;
+    let ra = resolve(&ta, &s2.subst).clone();
+    let rb = resolve(&tb, &s2.subst).clone();
+    let plan = plan_arith(*op, &ra, &rb)?;
+
+    let mut subst = s2.subst.clone();
+    if plan.unify_a {
+        let s = unify(&ra, &Ty::Con(plan.base), &subst)?;
+        subst = s;
+    }
+    if plan.unify_b {
+        let s = unify(&rb, &Ty::Con(plan.base), &subst)?;
+        subst = s;
+    }
+
+    let result_ty = Ty::Con(plan.result);
+
+    // ADR-0015 §5 Stage B0. The operands are NOT coerced up to the
+    // result type here any more. Splicing one embedding leaf per
+    // promotion edge was what erased the arithmetic source object: it
+    // presented both operands already at the result type, so the
+    // `g_arith` leaf could not say what they had started as, which is
+    // why `1.0 + 2.0` and `7 / 2` emitted the identical leaf
+    // `Prod(Float, Float) → Float`. The promotion paths are now
+    // ordered data inside `ArithTypingInputV1`.
+    let split = TyTree::Leaf {
+        generator: g_arith_split(),
+        src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+        dst: TyObj::Prod(
+            Box::new(TyObj::Atom(CfgAtom::Expr((**a).clone()))),
+            Box::new(TyObj::Atom(CfgAtom::Expr((**b).clone()))),
+        ),
+    };
+    let tensor = TyTree::Tensor {
+        left: Box::new(da),
+        right: Box::new(db),
+    };
+    // The operand types the `Tensor` actually lands on. For an operand
+    // that was an unbound var, `eff` is `plan.base` and the operand's
+    // own `Var(n)` endpoint zonks to exactly that under the
+    // substitution unified above — so the `Seq` middle matches either
+    // way.
+    let operand_types = TyObj::Prod(
+        Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con(plan.eff_a)))),
+        Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con(plan.eff_b)))),
+    );
+    let input = TyObj::Atom(CfgAtom::ArithInput(plan.typing_input(*op)?));
+    // The bridge. `TreeObj::Atom` can never equal a `TreeObj::Prod`,
+    // and a `Tensor`'s `dst` is structurally always a `Prod`, so the
+    // packaging of two operand types into one source object has to be
+    // its own leaf. It is deliberately not folded into `g_arith_split`
+    // — ⟨D-SPLIT⟩ discharges the split only while it stays purely
+    // structural. See `g_arith_input`.
+    let input_leaf = TyTree::Leaf {
+        generator: g_arith_input(),
+        src: operand_types,
+        dst: input.clone(),
+    };
+    // ADR-0015 §5 Stage B. `g_arith`'s `dst` is the kernel's own
+    // `NumericResultTypeV1`, not a `Ty` atom: a registry row is matched
+    // by canonical bytes, and the kernel may not reproduce this crate's
+    // `Ty` encoding to author one (§8.5; DEPS.md, "never a second
+    // semantic encoder"). The rename back into `Ty` is the separate,
+    // explicitly undischarged `g_arith_result` bridge below.
+    let arith_result = NumericResultTypeV1 {
+        name: NumericTypeNameV1::from_lattice_node(plan.result).ok_or(TypeError::Mismatch)?,
+    };
+    let result_obj = TyObj::Atom(CfgAtom::ArithResult(arith_result));
+    let arith_leaf = TyTree::Leaf {
+        generator: g_arith(),
+        src: input,
+        dst: result_obj.clone(),
+    };
+    let result_leaf = TyTree::Leaf {
+        generator: g_arith_result(),
+        src: result_obj,
+        dst: TyObj::Atom(CfgAtom::Type(result_ty.clone())),
+    };
+    let tree = TyTree::Seq {
+        left: Box::new(split),
+        right: Box::new(TyTree::Seq {
+            left: Box::new(tensor),
+            right: Box::new(TyTree::Seq {
+                left: Box::new(input_leaf),
+                right: Box::new(TyTree::Seq {
+                    left: Box::new(arith_leaf),
+                    right: Box::new(result_leaf),
+                }),
+            }),
+        }),
+    };
+
+    Ok((
+        result_ty,
+        tree,
+        Infer {
+            subst,
+            next_var: s2.next_var,
+        },
+    ))
+}
+
+/// `infer_tree`'s `record` arm, extracted.
+///
+/// **Split for stack frame size, not tidiness.** `infer_tree` was one match
+/// with a dozen-odd arms, and a debug build allocates a stack slot for every
+/// arm's locals in the *same* frame — so every recursive level paid for arms
+/// it never entered. Roughly 65 KB per level, which overflowed a 2 MiB stack
+/// at a nesting depth of 32; the same source then checked in release and
+/// aborted in debug. A level now pays only for the arm it takes.
+///
+/// The pattern is re-matched here rather than passed as arguments so the body
+/// is byte-identical to the arm it came from: a move, not a change.
+#[inline(never)]
+fn infer_record(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer), TypeError> {
+    let Expr::Record(fields) = expr else {
+        unreachable!("infer_record is only reached from its own arm")
+    };
+    let mut sorted_fields = fields.clone();
+    sorted_fields.sort_by(|a, b| a.0.cmp(&b.0));
+    sorted_fields.dedup_by(|a, b| a.0 == b.0);
+
+    if sorted_fields.is_empty() {
+        // No split leaf: `{}` has no subexpressions, so there is
+        // nothing to decompose. This branch used to emit
+        // `Seq(g_record_split{Expr({}) -> Expr({})}, g_record_empty)`,
+        // and that first leaf was a padded step — `src == dst`, the
+        // faked intermediate config ADR-0007 §1 calls unsound and its
+        // §5 criterion 2 forbids ("no endpoint equals its neighbor by
+        // padding"), and the shape ADR-0018 §4 retired the flat lane
+        // over. It passed `elaborate_tree`'s `Seq` middle-match for
+        // exactly the reason ADR-0007 §1 gives: a padded middle
+        // `dst ≡ dst` always matches syntactically.
+        //
+        // It was also emitted under `g_record_split`, which *is*
+        // discharged tight — but on ⟨D-SPLIT⟩'s ground that a split
+        // "yields exactly two ordered child obligations", which at
+        // zero arity it does not. Nothing was over-graded, because
+        // `g_record_empty` capped the result at `@Audited`; the hazard
+        // was that discharging `g_record_empty` would have published
+        // `@Proven` over the padded step.
+        let rec_ty = Ty::Record(vec![]);
+        let tree = TyTree::Leaf {
+            generator: g_record_empty(),
+            src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+            dst: TyObj::Atom(CfgAtom::Type(rec_ty.clone())),
+        };
+        return Ok((rec_ty, tree, st));
+    }
+
+    let mut sorted_types = Vec::new();
+    let mut expr_atoms = Vec::new();
+    let mut type_atoms = Vec::new();
+    let mut d_trees = Vec::new();
+    let mut curr_st = st;
+
+    for (name, val_expr) in sorted_fields {
+        let (t_i, d_i, next_st) = infer_tree(&val_expr, ctx, curr_st)?;
+        sorted_types.push((name, t_i.clone()));
+        expr_atoms.push(TyObj::Atom(CfgAtom::Expr(val_expr)));
+        type_atoms.push(TyObj::Atom(CfgAtom::Type(t_i)));
+        d_trees.push(d_i);
+        curr_st = next_st;
+    }
+
+    let result_ty = Ty::Record(sorted_types);
+
+    let split = TyTree::Leaf {
+        generator: g_record_split(),
+        src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+        dst: right_nest_prod(expr_atoms),
+    };
+
+    let fields_tensor = right_nest_tensor(d_trees);
+
+    let record_leaf = TyTree::Leaf {
+        generator: g_record(),
+        src: right_nest_prod(type_atoms),
+        dst: TyObj::Atom(CfgAtom::Type(result_ty.clone())),
+    };
+
+    let tree = TyTree::Seq {
+        left: Box::new(split),
+        right: Box::new(TyTree::Seq {
+            left: Box::new(fields_tensor),
+            right: Box::new(record_leaf),
+        }),
+    };
+
+    Ok((result_ty, tree, curr_st))
+}
+
+/// `infer_tree`'s `match` arm, extracted.
+///
+/// **Split for stack frame size, not tidiness.** `infer_tree` was one match
+/// with a dozen-odd arms, and a debug build allocates a stack slot for every
+/// arm's locals in the *same* frame — so every recursive level paid for arms
+/// it never entered. Roughly 65 KB per level, which overflowed a 2 MiB stack
+/// at a nesting depth of 32; the same source then checked in release and
+/// aborted in debug. A level now pays only for the arm it takes.
+///
+/// The pattern is re-matched here rather than passed as arguments so the body
+/// is byte-identical to the arm it came from: a move, not a change.
+#[inline(never)]
+fn infer_match(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer), TypeError> {
+    let Expr::Match(scrutinee, arms) = expr else {
+        unreachable!("infer_match is only reached from its own arm")
+    };
+    let (t_s, d_s, s1) = infer_tree(scrutinee, ctx, st)?;
+    check_coverage(&t_s, arms, &s1.subst)?;
+    let mut curr_st = s1;
+    let mut parts_exprs = vec![TyObj::Atom(CfgAtom::Expr((**scrutinee).clone()))];
+    let mut parts_derivs = vec![d_s];
+    let mut res_ty: Option<Ty> = None;
+
+    for (pat, body) in arms {
+        let bindings = bind_pattern(pat, &t_s, &curr_st.subst)?;
+        let mut arm_ctx = ctx.clone();
+        for (x, t) in bindings {
+            arm_ctx = arm_ctx.extend(x, t);
+        }
+        let (t_i, d_i, next_st) = infer_tree(body, &arm_ctx, curr_st)?;
+        parts_exprs.push(TyObj::Atom(CfgAtom::Expr(body.clone())));
+        parts_derivs.push(d_i);
+        if let Some(ref r_ty) = res_ty {
+            let next_subst = unify(r_ty, &t_i, &next_st.subst)?;
+            curr_st = Infer {
+                subst: next_subst,
+                next_var: next_st.next_var,
+            };
+        } else {
+            res_ty = Some(t_i);
+            curr_st = next_st;
+        }
+    }
+
+    let result_ty = res_ty.ok_or(TypeError::Mismatch)?;
+    let zonked_t_s = zonk(&t_s, &curr_st.subst);
+    let zonked_t_res = zonk(&result_ty, &curr_st.subst);
+
+    let mut parts_types = vec![TyObj::Atom(CfgAtom::Type(zonked_t_s))];
+    for _ in arms {
+        parts_types.push(TyObj::Atom(CfgAtom::Type(zonked_t_res.clone())));
+    }
+
+    let split = TyTree::Leaf {
+        generator: g_match_split(),
+        src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+        dst: right_nest_prod(parts_exprs),
+    };
+
+    let parts_tensor = right_nest_tensor(parts_derivs);
+
+    let match_generator = if arms
+        .iter()
+        .any(|(pattern, _)| matches!(pattern, Pattern::Wildcard | Pattern::Var(_)))
+    {
+        g_match_catchall()
+    } else {
+        g_match()
+    };
+    let match_leaf = TyTree::Leaf {
+        generator: match_generator,
+        src: right_nest_prod(parts_types),
+        dst: TyObj::Atom(CfgAtom::Type(result_ty.clone())),
+    };
+
+    let tree = TyTree::Seq {
+        left: Box::new(split),
+        right: Box::new(TyTree::Seq {
+            left: Box::new(parts_tensor),
+            right: Box::new(match_leaf),
+        }),
+    };
+
+    Ok((result_ty, tree, curr_st))
+}
+
+/// `infer_tree`'s `app` arm, extracted.
+///
+/// **Split for stack frame size, not tidiness.** `infer_tree` was one match
+/// with a dozen-odd arms, and a debug build allocates a stack slot for every
+/// arm's locals in the *same* frame — so every recursive level paid for arms
+/// it never entered. Roughly 65 KB per level, which overflowed a 2 MiB stack
+/// at a nesting depth of 32; the same source then checked in release and
+/// aborted in debug. A level now pays only for the arm it takes.
+///
+/// The pattern is re-matched here rather than passed as arguments so the body
+/// is byte-identical to the arm it came from: a move, not a change.
+#[inline(never)]
+fn infer_app(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer), TypeError> {
+    let Expr::App(f, x) = expr else {
+        unreachable!("infer_app is only reached from its own arm")
+    };
+    let (tf, df, s1) = infer_tree(f, ctx, st)?;
+    let (tx, dx, s2) = infer_tree(x, ctx, s1)?;
+    let (beta, s_beta) = s2.fresh_var();
+
+    let target = Ty::Fn(
+        Box::new(resolve(&tx, &s_beta.subst).clone()),
+        Box::new(Ty::Var(beta)),
+    );
+
+    let s3 = unify(resolve(&tf, &s_beta.subst), &target, &s_beta.subst)?;
+
+    let a = zonk(&tx, &s3);
+    let b = zonk(&Ty::Var(beta), &s3);
+    let fn_ty = Ty::Fn(Box::new(a.clone()), Box::new(b.clone()));
+
+    let split = TyTree::Leaf {
+        generator: g_split(),
+        src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+        dst: TyObj::Prod(
+            Box::new(TyObj::Atom(CfgAtom::Expr((**f).clone()))),
+            Box::new(TyObj::Atom(CfgAtom::Expr((**x).clone()))),
+        ),
+    };
+
+    let tensor = TyTree::Tensor {
+        left: Box::new(df),
+        right: Box::new(dx),
+    };
+
+    let app = TyTree::Leaf {
+        generator: g_app2(),
+        src: TyObj::Prod(
+            Box::new(TyObj::Atom(CfgAtom::Type(fn_ty.clone()))),
+            Box::new(TyObj::Atom(CfgAtom::Type(a.clone()))),
+        ),
+        dst: TyObj::Atom(CfgAtom::Type(b.clone())),
+    };
+
+    let tree = TyTree::Seq {
+        left: Box::new(split),
+        right: Box::new(TyTree::Seq {
+            left: Box::new(tensor),
+            right: Box::new(app),
+        }),
+    };
+
+    Ok((
+        b,
+        tree,
+        Infer {
+            subst: s3,
+            next_var: s_beta.next_var,
+        },
+    ))
+}
+
+/// `infer_tree`'s `cmp` arm, extracted.
+///
+/// **Split for stack frame size, not tidiness.** `infer_tree` was one match
+/// with a dozen-odd arms, and a debug build allocates a stack slot for every
+/// arm's locals in the *same* frame — so every recursive level paid for arms
+/// it never entered. Roughly 65 KB per level, which overflowed a 2 MiB stack
+/// at a nesting depth of 32; the same source then checked in release and
+/// aborted in debug. A level now pays only for the arm it takes.
+///
+/// The pattern is re-matched here rather than passed as arguments so the body
+/// is byte-identical to the arm it came from: a move, not a change.
+#[inline(never)]
+fn infer_cmp(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer), TypeError> {
+    let Expr::Cmp(op, a, b) = expr else {
+        unreachable!("infer_cmp is only reached from its own arm")
+    };
+    let (ta, da, s1) = infer_tree(a, ctx, st)?;
+    let (tb, db, s2) = infer_tree(b, ctx, s1)?;
+
+    // Both operands must land on the same type. No promotion: mixing
+    // `Int` and `Float` under a comparison would need the coercion
+    // lattice to decide which side moves, and that is a choice
+    // ⟨D-SPLIT⟩ keeps out of a structural split. Refused rather than
+    // guessed.
+    let subst = unify(&ta, &tb, &s2.subst)?;
+    let operand_ty = resolve(&ta, &subst).clone();
+    let s3 = Infer {
+        subst,
+        ..s2.clone()
+    };
+
+    let split = TyTree::Leaf {
+        generator: g_cmp_split(),
+        src: TyObj::Atom(CfgAtom::Expr(Expr::Cmp(
+            *op,
+            Box::new((**a).clone()),
+            Box::new((**b).clone()),
+        ))),
+        dst: TyObj::Prod(
+            Box::new(TyObj::Atom(CfgAtom::Expr((**a).clone()))),
+            Box::new(TyObj::Atom(CfgAtom::Expr((**b).clone()))),
+        ),
+    };
+    let operands = TyTree::Tensor {
+        left: Box::new(da),
+        right: Box::new(db),
+    };
+    let cmp_leaf = TyTree::Leaf {
+        generator: g_cmp(),
+        src: TyObj::Prod(
+            Box::new(TyObj::Atom(CfgAtom::Type(operand_ty.clone()))),
+            Box::new(TyObj::Atom(CfgAtom::Type(operand_ty))),
+        ),
+        dst: TyObj::Atom(CfgAtom::Type(bool_ty())),
+    };
+
+    let tree = TyTree::Seq {
+        left: Box::new(split),
+        right: Box::new(TyTree::Seq {
+            left: Box::new(operands),
+            right: Box::new(cmp_leaf),
+        }),
+    };
+    Ok((bool_ty(), tree, s3))
+}
+
+/// `infer_tree`'s `ctor` arm, extracted.
+///
+/// **Split for stack frame size, not tidiness.** `infer_tree` was one match
+/// with a dozen-odd arms, and a debug build allocates a stack slot for every
+/// arm's locals in the *same* frame — so every recursive level paid for arms
+/// it never entered. Roughly 65 KB per level, which overflowed a 2 MiB stack
+/// at a nesting depth of 32; the same source then checked in release and
+/// aborted in debug. A level now pays only for the arm it takes.
+///
+/// The pattern is re-matched here rather than passed as arguments so the body
+/// is byte-identical to the arm it came from: a move, not a change.
+#[inline(never)]
+fn infer_ctor(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer), TypeError> {
+    let Expr::Ctor(sum_ty, variant, args) = expr else {
+        unreachable!("infer_ctor is only reached from its own arm")
+    };
+    // Instantiated first: a parameterized `config` is stored once as a
+    // template, and each use needs its own variables — otherwise
+    // `Nil` at `List<Int>` and `Nil` at `List<Str>` would share one
+    // over-constrained type. For a non-parameterized config this is
+    // the identity.
+    let (sum_ty, st) = instantiate(sum_ty, st);
+    let sum_ty = &sum_ty;
+    // Unfolded to read the variants; the *result* type stays the
+    // folded `sum_ty`, so the constructed value is a `List<Int>`
+    // rather than a one-step unfolding of one.
+    let resolved = resolve(sum_ty, &st.subst).unfold();
+    if let Ty::Sum(_sum_name, variants) = &resolved {
+        let (_, declared_fields) = variants
+            .iter()
+            .find(|(vname, _)| vname == variant)
+            .ok_or(TypeError::Mismatch)?;
+        if args.len() != declared_fields.len() {
+            return Err(TypeError::Mismatch);
+        }
+        let declared_fields = declared_fields.clone();
+        if args.is_empty() {
+            // No split leaf: a nullary constructor has no argument
+            // subexpressions, so there is nothing to decompose. See
+            // the empty-record branch above for the full reasoning —
+            // this branch carried the identical padded step under
+            // `g_ctor_split`, which is likewise discharged tight on a
+            // ⟨D-SPLIT⟩ ground that does not hold at zero arity.
+            let tree = TyTree::Leaf {
+                generator: g_ctor_nullary(),
+                src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+                dst: TyObj::Atom(CfgAtom::Type(sum_ty.clone())),
+            };
+            return Ok((sum_ty.clone(), tree, st));
+        }
+
+        let mut expr_atoms = Vec::new();
+        let mut type_atoms = Vec::new();
+        let mut d_trees = Vec::new();
+        let mut curr_st = st;
+
+        for (arg_expr, declared_field_ty) in args.iter().zip(declared_fields.iter()) {
+            let (t_i, d_i, next_st) = infer_tree(arg_expr, ctx, curr_st)?;
+            let next_subst = unify(&t_i, declared_field_ty, &next_st.subst)?;
+            expr_atoms.push(TyObj::Atom(CfgAtom::Expr(arg_expr.clone())));
+            let zonked_field = zonk(declared_field_ty, &next_subst);
+            type_atoms.push(TyObj::Atom(CfgAtom::Type(zonked_field)));
+            d_trees.push(d_i);
+            curr_st = Infer {
+                subst: next_subst,
+                next_var: next_st.next_var,
+            };
+        }
+
+        let split = TyTree::Leaf {
+            generator: g_ctor_split(),
+            src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+            dst: right_nest_prod(expr_atoms),
+        };
+
+        let args_tensor = right_nest_tensor(d_trees);
+
+        let ctor_leaf = TyTree::Leaf {
+            generator: g_ctor(),
+            src: right_nest_prod(type_atoms),
+            dst: TyObj::Atom(CfgAtom::Type(sum_ty.clone())),
+        };
+
+        let tree = TyTree::Seq {
+            left: Box::new(split),
+            right: Box::new(TyTree::Seq {
+                left: Box::new(args_tensor),
+                right: Box::new(ctor_leaf),
+            }),
+        };
+
+        Ok((sum_ty.clone(), tree, curr_st))
+    } else {
+        Err(TypeError::Mismatch)
+    }
 }
 
 #[cfg(test)]
