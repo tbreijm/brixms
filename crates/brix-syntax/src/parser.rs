@@ -219,6 +219,10 @@ impl Parser {
 
     fn parse_item(&mut self) -> Result<Item, ParseError> {
         match self.peek() {
+            TokenKind::Use => {
+                self.advance();
+                self.parse_use_path().map(Item::Use)
+            }
             TokenKind::Config => {
                 self.advance();
                 self.parse_config_decl().map(Item::Config)
@@ -252,6 +256,17 @@ impl Parser {
             }
             other => Err(self.error(format!("Unexpected token {:?} at top-level item", other))),
         }
+    }
+
+    /// `use brix.soc` — a dotted package path.
+    fn parse_use_path(&mut self) -> Result<String, ParseError> {
+        let mut path = self.expect_ident("package name")?.0;
+        while self.check(&TokenKind::Dot) {
+            self.advance();
+            path.push('.');
+            path.push_str(&self.expect_ident("package path segment")?.0);
+        }
+        Ok(path)
     }
 
     fn parse_config_decl(&mut self) -> Result<ConfigDecl, ParseError> {

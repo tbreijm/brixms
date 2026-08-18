@@ -846,39 +846,69 @@ fn test_branch_on_comparison() {
     );
 }
 
-/// A recursive `fn` is refused by name rather than overflowing the stack.
+/// A recursive `fn` now checks: the recursive call is a hypothesis lookup
+/// under the definition's own declared type, not an inlined copy.
 ///
-/// `fn` bodies are inlined at each call site, so a recursive call inlines
-/// forever — this aborted the process before. The obstruction is the lowering
-/// strategy, not the proof system: the standard treatment assumes the
-/// function's type, checks the body under that assumption and discharges, so
-/// the recursive call becomes a hypothesis leaf and the derivation stays
-/// finite. Until that lands, refusing beats crashing.
+/// This previously asserted a refusal, and before that it overflowed the
+/// stack. The refusal was always a guard rather than a design — the standard
+/// treatment assumes the function's type, checks the body under that
+/// assumption, and discharges, which is what `Expr::Fix` now does.
 #[test]
-fn test_recursive_fn_is_refused_not_crashed() {
-    for (src, head) in [
-        (
-            "config Nat = Zero | Succ(Nat)\n\
-             fn depth(n) = match n { Zero => 0  Succ(k) => depth(k) }\n\
-             let d = depth(Zero)",
-            "depth",
-        ),
-        ("fn f(n) = g(n)\nfn g(n) = f(n)\nlet x = f(1)", "f"),
+fn test_recursive_fn_checks() {
+    let src = "config Nat = Zero | Succ(Nat)\n\
+               fn depth(n: Nat): Int = match n { Zero => 0  Succ(k) => depth(k) }\n\
+               let d = depth(Succ(Succ(Zero)))";
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    let cr = results[0]
+        .as_ref()
+        .unwrap_or_else(|(n, e)| panic!("'{n}' should check, got {e:?}"));
+    assert_eq!(cr.ty, Some(TrTy::Con("Int")));
+    assert_eq!(
+        cr.outcome,
+        Outcome::Audited,
+        "capped by the undischarged `g_fix` — assuming what is being \
+         established is not a correspondence the kernel owns"
+    );
+}
+
+/// A fold over a generic recursive collection — the thing a core library is
+/// made of, and the reason recursion was the blocker.
+#[test]
+fn test_fold_over_a_generic_list() {
+    let src = "config List<T> = Nil | Cons(T, List<T>)\n\
+               fn total(l: List<Int>): Int = match l { Nil => 0  Cons(h, t) => h + total(t) }\n\
+               let s = total(Cons(10, Cons(20, Nil)))";
+    let module = parse(src).expect("parse");
+    let results = check_module(&module);
+    let cr = results[0]
+        .as_ref()
+        .unwrap_or_else(|(n, e)| panic!("'{n}' should check, got {e:?}"));
+    assert_eq!(cr.ty, Some(TrTy::Con("Int")));
+}
+
+/// A recursive definition must declare its type: it cannot be inferred from a
+/// body that mentions the name being defined.
+#[test]
+fn test_recursive_fn_requires_annotation() {
+    for (src, missing) in [
+        ("fn loopy(n) = loopy(n)\nlet x = loopy(1)", "return type"),
+        ("fn loopy(n): Int = loopy(n)\nlet x = loopy(1)", "parameter"),
     ] {
         let module = parse(src).expect("parse");
         let results = check_module(&module);
         let (_, err) = results[0]
             .as_ref()
-            .expect_err("a recursive fn must be refused");
+            .expect_err("an unannotated recursive fn must be refused");
         match err {
-            LowerError::RecursiveFunction { function, cycle } => {
-                assert_eq!(function, head);
-                assert!(
-                    cycle.len() >= 2 && cycle.first() == cycle.last(),
-                    "the cycle must close on itself, got {cycle:?}"
-                );
+            LowerError::RecursiveFunctionNeedsAnnotation {
+                function,
+                missing: m,
+            } => {
+                assert_eq!(function, "loopy");
+                assert!(m.contains(missing), "expected '{missing}', got '{m}'");
             }
-            other => panic!("expected RecursiveFunction, got {other:?}"),
+            other => panic!("expected RecursiveFunctionNeedsAnnotation, got {other:?}"),
         }
     }
 }

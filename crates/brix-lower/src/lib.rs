@@ -20,6 +20,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod imports;
 pub mod l3;
 pub mod l3_audit;
 pub mod l3_canon;
@@ -183,6 +184,13 @@ pub enum LowerError {
         expected: usize,
         found: usize,
     },
+    /// A recursive `fn` without the annotations its typing requires.
+    ///
+    /// A recursive definition's type cannot be inferred from a body that
+    /// mentions the name being defined, so every parameter and the return type
+    /// must be written. Refused by name rather than inferred to something
+    /// arbitrary.
+    RecursiveFunctionNeedsAnnotation { function: String, missing: String },
     /// A `fn` calls itself, directly or through other `fn`s.
     ///
     /// Not yet supported, and refused rather than attempted: `fn` bodies are
@@ -323,6 +331,12 @@ pub fn diagnose_gap(err: &LowerError) -> ProofGap {
         } => ProofGap::Conflict(format!(
             "config '{config}' takes {expected} type argument(s), used with {found}"
         )),
+        LowerError::RecursiveFunctionNeedsAnnotation { function, missing } => {
+            ProofGap::Conflict(format!(
+                "recursive function '{function}' needs its {missing} declared — a recursive \
+                 definition's type cannot be inferred from a body that mentions it"
+            ))
+        }
         LowerError::RecursiveFunction { function, cycle } => {
             ProofGap::UnsupportedFragment(format!(
                 "'{function}' is recursive ({}); `fn` bodies are inlined, so recursion needs \
@@ -603,23 +617,22 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
         }
         ast::Expr::Call { func, args } => {
             if let Some(c) = ctx.fns.get(func) {
-                // A call back into a `fn` already being inlined. Refused by
-                // name: inlining cannot express it, and the derivation it
-                // would build is genuinely infinite.
+                // A call back into a `fn` already being lowered. It is NOT
+                // inlined again — inlining a recursive call never terminates.
+                // Instead it becomes a reference to the definition's own name,
+                // which `Expr::Fix` has bound to its declared type: the
+                // recursive call is a hypothesis lookup and the derivation
+                // stays finite.
                 //
-                // The proof system is not the obstruction. The standard
-                // treatment assumes the function's type, checks the body under
-                // that assumption, and discharges — so the recursive call is a
-                // hypothesis leaf and the tree stays finite, exactly as
-                // `g_lam_intro`/`g_lam_close` already do for lambdas. That is
-                // the fix; this guard is what stops the crash until it lands.
+                // This requires the declaration to be fully annotated, because
+                // a recursive definition's type cannot be inferred from a body
+                // that mentions it — checked below where the `Fix` is built.
                 if ctx.inlining.borrow().iter().any(|f| f == func) {
-                    let mut cycle = ctx.inlining.borrow().clone();
-                    cycle.push(func.clone());
-                    return Err(LowerError::RecursiveFunction {
-                        function: func.clone(),
-                        cycle,
-                    });
+                    let mut acc = TrExpr::Var(func.clone());
+                    for arg in args {
+                        acc = TrExpr::App(Box::new(acc), Box::new(lower_expr(arg, ctx)?));
+                    }
+                    return Ok(acc);
                 }
                 if c.params.len() != args.len() {
                     return Err(LowerError::Unsupported(format!(
@@ -863,23 +876,83 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
 /// Lower a function definition (`ast::Callable`) to a curried [`soc_regimes::type_realization::Expr::Lam`].
 pub fn lower_fn(c: &ast::Callable, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
     let body_tr = lower_expr(&c.body, ctx)?;
+    // Did the body refer back to this definition? `lower_expr` emits a bare
+    // `Var(name)` for a recursive call, so its presence is the signal.
+    let is_recursive = mentions_var(&body_tr, &c.name);
     // A declared parameter type binds before the body is inferred. Without
     // that, `fn f(l: List<Int>) = match l { … }` cannot resolve its scrutinee:
     // an unannotated `Lam` binds a fresh variable and the body is inferred
     // while the parameter is still unconstrained.
-    c.params.iter().try_rfold(body_tr, |acc, param| {
+    let lam = c
+        .params
+        .iter()
+        .try_rfold::<_, _, Result<TrExpr, LowerError>>(body_tr, |acc, param| {
+            let Some(declared) = &param.ty else {
+                return Ok(TrExpr::Lam(param.name.clone(), Box::new(acc)));
+            };
+            let mut stack = Vec::new();
+            let declared_ty =
+                resolve_config_ty(declared, ctx.configs, &mut stack).map_err(config_ty_error)?;
+            Ok(TrExpr::LamAnn(
+                param.name.clone(),
+                declared_ty,
+                Box::new(acc),
+            ))
+        })?;
+
+    if !is_recursive {
+        return Ok(lam);
+    }
+
+    // A recursive definition binds its own declared type while its body is
+    // checked. That type must be written out: it cannot be inferred from a
+    // body that mentions the very name being defined.
+    let mut fn_ty = match &c.ret {
+        Some(ret) => {
+            let mut stack = Vec::new();
+            resolve_config_ty(ret, ctx.configs, &mut stack).map_err(config_ty_error)?
+        }
+        None => {
+            return Err(LowerError::RecursiveFunctionNeedsAnnotation {
+                function: c.name.clone(),
+                missing: "return type".to_string(),
+            })
+        }
+    };
+    for param in c.params.iter().rev() {
         let Some(declared) = &param.ty else {
-            return Ok(TrExpr::Lam(param.name.clone(), Box::new(acc)));
+            return Err(LowerError::RecursiveFunctionNeedsAnnotation {
+                function: c.name.clone(),
+                missing: format!("type of parameter '{}'", param.name),
+            });
         };
         let mut stack = Vec::new();
-        let declared_ty =
+        let param_ty =
             resolve_config_ty(declared, ctx.configs, &mut stack).map_err(config_ty_error)?;
-        Ok(TrExpr::LamAnn(
-            param.name.clone(),
-            declared_ty,
-            Box::new(acc),
-        ))
-    })
+        fn_ty = TrTy::Fn(Box::new(param_ty), Box::new(fn_ty));
+    }
+    Ok(TrExpr::Fix(c.name.clone(), fn_ty, Box::new(lam)))
+}
+
+/// Whether `e` contains a free reference to `name`.
+fn mentions_var(e: &TrExpr, name: &str) -> bool {
+    match e {
+        TrExpr::Var(v) => v == name,
+        TrExpr::Lit(_) | TrExpr::StrLit(_) | TrExpr::FloatLit(_) | TrExpr::BoolLit(_) => false,
+        TrExpr::Lam(p, b) => p != name && mentions_var(b, name),
+        TrExpr::LamAnn(p, _, b) => p != name && mentions_var(b, name),
+        TrExpr::Fix(f, _, b) => f != name && mentions_var(b, name),
+        TrExpr::App(f, x) => mentions_var(f, name) || mentions_var(x, name),
+        TrExpr::Field(b, _) => mentions_var(b, name),
+        TrExpr::Arith(_, a, b) | TrExpr::Cmp(_, a, b) | TrExpr::Then(a, b) | TrExpr::And(a, b) => {
+            mentions_var(a, name) || mentions_var(b, name)
+        }
+        TrExpr::Record(fields) => fields.iter().any(|(_, v)| mentions_var(v, name)),
+        TrExpr::Ctor(_, _, args) => args.iter().any(|a| mentions_var(a, name)),
+        TrExpr::Match(s, arms) => {
+            mentions_var(s, name) || arms.iter().any(|(_, b)| mentions_var(b, name))
+        }
+    }
 }
 
 /// Convert a type-resolution failure into the `LowerError` that names it.

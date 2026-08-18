@@ -300,6 +300,11 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
                 return Err(L3V2LowerError::ItemNotAllowed(format!("regime {}", r.name)))
             }
             ast::Item::Show(_) => return Err(L3V2LowerError::ItemNotAllowed("show".to_string())),
+            // Imports are resolved before lowering; one arriving here means
+            // resolution was skipped.
+            ast::Item::Use(path) => {
+                return Err(L3V2LowerError::ItemNotAllowed(format!("use {path}")))
+            }
             ast::Item::Witness { name, .. } => {
                 return Err(L3V2LowerError::ItemNotAllowed(format!("witness {name}")))
             }
