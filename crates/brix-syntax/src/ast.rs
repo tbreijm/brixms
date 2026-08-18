@@ -26,6 +26,12 @@ pub struct Module {
 /// A top-level declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Item {
+    /// `use brix.soc` — bring another package's declarations into scope.
+    ///
+    /// Carries the package name as written. Resolution is deliberately not the
+    /// parser's business: the surface records what was asked for, and a loader
+    /// decides what that names on disk.
+    Use(String),
     /// `config Name = <body>` — a configuration family (algebraic).
     Config(ConfigDecl),
     /// `regime Name { gen … }` — a realization regime bundling generators.

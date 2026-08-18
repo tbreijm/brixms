@@ -203,6 +203,9 @@ pub enum L3LowerError {
     RegimeItemNotAllowed(String),
     /// A top-level `show` is present (ADR-0012 §1.4).
     ShowItemNotAllowed,
+    /// A `use` reached lowering. Imports are resolved first; one arriving
+    /// here means resolution was skipped.
+    UnresolvedImport(String),
     /// A top-level `witness` binding is present (ADR-0012 §1.4).
     WitnessItemNotAllowed(String),
     /// A `rule` was declared with one or more parameters (ADR-0012 §1: "every
@@ -384,6 +387,10 @@ pub fn lower_l3_plan(
             ast::Item::Fn(c) => return Err(L3LowerError::FnItemNotAllowed(c.name.clone())),
             ast::Item::Regime(r) => return Err(L3LowerError::RegimeItemNotAllowed(r.name.clone())),
             ast::Item::Show(_) => return Err(L3LowerError::ShowItemNotAllowed),
+            // Imports are resolved before lowering, so a `use` reaching here
+            // means the caller skipped resolution — refused rather than
+            // silently ignored.
+            ast::Item::Use(path) => return Err(L3LowerError::UnresolvedImport(path.clone())),
             ast::Item::Witness { name, .. } => {
                 return Err(L3LowerError::WitnessItemNotAllowed(name.clone()))
             }

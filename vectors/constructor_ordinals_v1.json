@@ -83,6 +83,11 @@
       "constructor": "Expr::LamAnn",
       "ordinal": 15,
       "exemplar_config_id": "7184e055775d292ab5fb9a6d0855da8803fe6dc09b79f39ac1194662ea687a25"
+    },
+    {
+      "constructor": "Expr::Fix",
+      "ordinal": 16,
+      "exemplar_config_id": "046a1ed2bd543cc826fdf0bec6399dff8629ed8f4c9a863d1d120aabcd3151a9"
     }
   ],
   "ty": [

@@ -57,7 +57,7 @@ fn weaker(a: Outcome, b: Outcome): Outcome = match rank(a) <= rank(b) {
 // `tight` records whether its realization semantics has been DISCHARGED. It is
 // deliberately a fact about the generator and not about any occurrence:
 // membership in a registry never makes an occurrence proven (ADR-0015 §8.7).
-config Generator = MkGenerator {
+config Generator = {
   id:    GeneratorId,
   src:   ConfigId,
   dst:   ConfigId,
@@ -69,27 +69,20 @@ config Chain = Nil | Link(Generator, Chain)
 
 // Is every generator in the chain discharged?
 //
-// ⚠ NOT YET EXPRESSIBLE, and this is the most useful thing this file has
-// found. The predicate is a FOLD over the chain, and a fold is recursive:
+// This is the predicate `honest_result_outcome` consults. A chain with one
+// undischarged leaf is not tight, however many discharged ones surround it.
 //
-//     fn all_tight(c: Chain): Bool = match c {
-//       Nil        => true
-//       Link(g, r) => match g.tight { true => all_tight(r)  false => false }
-//     }
-//
-// Brix refuses that today — `RecursiveFunction`. `fn` bodies are inlined at
-// each call site, so a recursive one inlines forever; it used to overflow the
-// stack and now fails by name.
-//
-// The obstruction is the LOWERING STRATEGY, not the proof system. The standard
-// treatment assumes the function's type, checks the body under that
-// assumption, and discharges — so the recursive call is a hypothesis leaf and
-// the derivation stays finite, exactly as `g_lam_intro`/`g_lam_close` already
-// do for lambdas.
-//
-// Until then, tightness is taken as given so the honesty rule below can still
-// be stated. That substitution is the whole compromise in this file, and it is
-// marked rather than hidden.
+// A fold over the chain, and therefore recursive — which is why this function
+// could not be written until recursive `fn` existed. Its type is declared
+// because a recursive definition's type cannot be inferred from a body that
+// mentions the name being defined.
+fn all_tight(c: Chain): Bool = match c {
+  Nil        => true
+  Link(g, r) => match g.tight {
+    true  => all_tight(r)
+    false => false
+  }
+}
 
 // ---------------------------------------------------------------------------
 // The honesty rule
@@ -105,11 +98,10 @@ config Chain = Nil | Link(Generator, Chain)
 // This is the rule the whole substrate turns on, and writing it here is the
 // point of this file: SOC stating its own honesty condition in the language
 // it defines.
-fn honest_outcome(composition: Outcome, every_leaf_tight: Bool): Outcome =
-  match every_leaf_tight {
-    true  => composition
-    false => weaker(composition, Audited)
-  }
+fn honest_outcome(composition: Outcome, c: Chain): Outcome = match all_tight(c) {
+  true  => composition
+  false => weaker(composition, Audited)
+}
 
 // ---------------------------------------------------------------------------
 // Judgements
@@ -118,7 +110,7 @@ fn honest_outcome(composition: Outcome, every_leaf_tight: Bool): Outcome =
 // A judgement is what the system publishes: an outcome for a proposition, in
 // a context, on named evidence (ADR-0002 §6). The evidence is what makes the
 // outcome checkable rather than asserted.
-config Judgement = MkJudgement {
+config Judgement = {
   context:     ContextId,
   proposition: Str,
   outcome:     Outcome,
@@ -131,29 +123,28 @@ config Judgement = MkJudgement {
 
 // `g_lit` is discharged; `g_arith` is not, because it asserts an operation
 // semantics the kernel does not own (ADR-0015 §8.5).
-let g_lit = MkGenerator {
+let g_lit = Generator {
   id:    MkGeneratorId("type.rule.lit@1"),
   src:   MkConfigId("Expr(1)"),
   dst:   MkConfigId("Type(Int)"),
   tight: true
 }
 
-let g_arith = MkGenerator {
+let g_arith = Generator {
   id:    MkGeneratorId("type.rule.arith@1"),
   src:   MkConfigId("ArithInput"),
   dst:   MkConfigId("ArithResult"),
   tight: false
 }
 
-// The derivation of `1 + 2`: two literals and the arithmetic rule. The chain
-// is expressible — it is only the FOLD over it that is not.
+// The derivation of `1 + 2`: two literals and the arithmetic rule.
 let one_plus_two = Link(g_lit, Link(g_lit, Link(g_arith, Nil)))
 
 // The kernel proves the composition at Proven. The honest result is Audited,
 // because `g_arith` is undischarged — which is exactly what `brix check`
 // reports for `let x = 1 + 2` today.
-let honest = honest_outcome(Proven, false)
+let honest = honest_outcome(Proven, one_plus_two)
 
 // And a derivation resting only on discharged leaves keeps its grade.
 let all_discharged = Link(g_lit, Link(g_lit, Nil))
-let stays_proven   = honest_outcome(Proven, true)
+let stays_proven   = honest_outcome(Proven, all_discharged)
