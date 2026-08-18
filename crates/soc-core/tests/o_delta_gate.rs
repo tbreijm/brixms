@@ -42,20 +42,19 @@ use std::collections::BTreeSet;
 use brix_canon::{Digest, Domain};
 use soc_core::adm::AdmAll;
 use soc_core::delta::{CandidateDelta, Delta, Footprint};
-use soc_core::engine::{naive_view_over_instrumented, IncrementalEngine, IncrementalRegime};
+use soc_core::engine::{naive_view_over_instrumented, IncrementalEngine, IncrementalWitnessIndex};
 use soc_core::exec::ExecConfig;
 use soc_core::intern::{Handle, Interner};
-use soc_core::regime::{Candidate, Regime};
+use soc_core::witness_provider::{Candidate, WitnessProvider};
 
 /// The single active regime: sensitive to exactly one configuration
 /// `active`, for which it proposes one reflexive candidate `active → active`.
-/// Implements **both** [`Regime`] (the naive baseline recomputes through it)
-/// and [`IncrementalRegime`] (the engine routes deltas through it), from one
+/// Implements **both** [`WitnessProvider`] (the naive baseline recomputes through it)
+/// and [`IncrementalWitnessIndex`] (the engine routes deltas through it), from one
 /// candidate definition — so the two engines are measured over identical
 /// semantics, not two hand-written approximations.
 #[derive(Clone, Copy)]
 struct ActiveRegime {
-    id: Handle,
     active: Handle,
     witness: Handle,
 }
@@ -63,14 +62,13 @@ struct ActiveRegime {
 impl ActiveRegime {
     fn candidate(&self) -> Candidate {
         Candidate {
-            regime: self.id,
             witness: self.witness,
             successor: self.active,
         }
     }
 }
 
-impl Regime for ActiveRegime {
+impl WitnessProvider for ActiveRegime {
     fn candidates(&self, e: &ExecConfig) -> Vec<Candidate> {
         if e.world == self.active {
             vec![self.candidate()]
@@ -80,7 +78,7 @@ impl Regime for ActiveRegime {
     }
 }
 
-impl IncrementalRegime for ActiveRegime {
+impl IncrementalWitnessIndex for ActiveRegime {
     fn footprint(&self) -> Footprint {
         Footprint::configs([self.active])
     }
@@ -116,18 +114,14 @@ fn build_fixture(n_inert: usize) -> Fixture {
     let mut i = Interner::new();
     let active = tag(&mut i, "o_delta.active");
     let witness = tag(&mut i, "o_delta.witness");
-    let id = tag(&mut i, "o_delta.regime.active");
+    let _presentation_handle = tag(&mut i, "o_delta.regime.active");
     let policy = tag(&mut i, "o_delta.policy");
     let history = Digest::of(Domain::Value, b"o_delta.h0");
     let inert = (0..n_inert)
         .map(|k| tag(&mut i, &format!("o_delta.inert.{k}")))
         .collect();
     Fixture {
-        active_regime: ActiveRegime {
-            id,
-            active,
-            witness,
-        },
+        active_regime: ActiveRegime { active, witness },
         active,
         inert,
         policy,
@@ -141,7 +135,7 @@ fn build_fixture(n_inert: usize) -> Fixture {
 fn measure_naive(f: &Fixture) -> u64 {
     let mut present = f.inert.clone();
     present.insert(f.active);
-    let regimes: Vec<&dyn Regime> = vec![&f.active_regime];
+    let regimes: Vec<&dyn WitnessProvider> = vec![&f.active_regime];
     let (_view, cost) =
         naive_view_over_instrumented(&regimes, &AdmAll, &present, f.policy, f.history);
     cost.work_units()

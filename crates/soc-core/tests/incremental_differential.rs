@@ -16,21 +16,20 @@
 use std::collections::BTreeSet;
 
 use brix_canon::{Digest, Domain};
-use soc_core::adm::{AdmAll, AdmRegimeAllowlist};
+use soc_core::adm::{AdmAll, AdmWitnessAllowlist};
 use soc_core::delta::{CandidateDelta, Delta, Footprint};
-use soc_core::engine::{naive_view_over, IncrementalEngine, IncrementalRegime};
+use soc_core::engine::{naive_view_over, IncrementalEngine, IncrementalWitnessIndex};
 use soc_core::exec::ExecConfig;
 use soc_core::intern::{Handle, Interner};
-use soc_core::regime::{Candidate, Regime};
+use soc_core::witness_provider::{Candidate, WitnessProvider};
 
-/// A regime that, for each config in a fixed set it "knows", proposes one
+/// A provider that, for each config in a fixed set it "knows", proposes one
 /// reflexive candidate `x → x`. Its footprint is that known set (or
 /// `AllConfigs` when `universal` is set — modelling a regime that declines to
 /// name its configs and so can never be skipped). Implements both traits from
 /// one candidate definition, so naive and incremental are the same semantics.
 #[derive(Clone)]
 struct KnownSetRegime {
-    id: Handle,
     witness: Handle,
     known: BTreeSet<Handle>,
     universal: bool,
@@ -40,7 +39,6 @@ impl KnownSetRegime {
     fn candidate(&self, config: Handle) -> Option<Candidate> {
         if self.known.contains(&config) {
             Some(Candidate {
-                regime: self.id,
                 witness: self.witness,
                 successor: config,
             })
@@ -50,13 +48,13 @@ impl KnownSetRegime {
     }
 }
 
-impl Regime for KnownSetRegime {
+impl WitnessProvider for KnownSetRegime {
     fn candidates(&self, e: &ExecConfig) -> Vec<Candidate> {
         self.candidate(e.world).into_iter().collect()
     }
 }
 
-impl IncrementalRegime for KnownSetRegime {
+impl IncrementalWitnessIndex for KnownSetRegime {
     fn footprint(&self) -> Footprint {
         if self.universal {
             Footprint::AllConfigs
@@ -88,7 +86,7 @@ fn tag(i: &mut Interner, s: &str) -> Handle {
 /// Drive both engines over `stream` and assert view identity after every
 /// step, under a given `Adm`. Returns the number of steps checked.
 fn assert_view_identity_over_stream(
-    naive_regimes: &[&dyn Regime],
+    naive_regimes: &[&dyn WitnessProvider],
     engine: &mut IncrementalEngine,
     adm: &dyn soc_core::adm::Adm,
     policy: Handle,
@@ -117,26 +115,22 @@ fn assert_view_identity_over_stream(
 }
 
 fn build_regimes(i: &mut Interner, configs: &[Handle]) -> Vec<KnownSetRegime> {
-    let w = tag(i, "witness");
-    // Regime A: single-config footprint over configs[0].
+    // Witness provider A: single-config footprint over configs[0].
     let a = KnownSetRegime {
-        id: tag(i, "regime.a"),
-        witness: w,
+        witness: tag(i, "witness.a"),
         known: BTreeSet::from([configs[0]]),
         universal: false,
     };
-    // Regime B: multi-config footprint over configs[1], configs[2], configs[3].
+    // WitnessProvider B: multi-config footprint over configs[1], configs[2], configs[3].
     let b = KnownSetRegime {
-        id: tag(i, "regime.b"),
-        witness: w,
+        witness: tag(i, "witness.b"),
         known: BTreeSet::from([configs[1], configs[2], configs[3]]),
         universal: false,
     };
-    // Regime C: AllConfigs — knows configs[2] and configs[4] but declares an
+    // WitnessProvider C: AllConfigs — knows configs[2] and configs[4] but declares an
     // un-skippable footprint, so the engine must consult it on every delta.
     let c = KnownSetRegime {
-        id: tag(i, "regime.c"),
-        witness: w,
+        witness: tag(i, "witness.c"),
         known: BTreeSet::from([configs[2], configs[4]]),
         universal: true,
     };
@@ -163,13 +157,14 @@ fn incremental_view_equals_naive_recompute_under_adm_all() {
     let configs: Vec<Handle> = (0..5).map(|k| tag(&mut i, &format!("c{k}"))).collect();
 
     let regimes = build_regimes(&mut i, &configs);
-    let engine_regimes: Vec<Box<dyn IncrementalRegime>> = regimes
+    let engine_regimes: Vec<Box<dyn IncrementalWitnessIndex>> = regimes
         .iter()
         .cloned()
-        .map(|r| Box::new(r) as Box<dyn IncrementalRegime>)
+        .map(|r| Box::new(r) as Box<dyn IncrementalWitnessIndex>)
         .collect();
     let mut engine = IncrementalEngine::new(engine_regimes);
-    let naive: Vec<&dyn Regime> = regimes.iter().map(|r| r as &dyn Regime).collect();
+    let naive: Vec<&dyn WitnessProvider> =
+        regimes.iter().map(|r| r as &dyn WitnessProvider).collect();
 
     let s = stream(&configs);
     let checked =
@@ -181,7 +176,7 @@ fn incremental_view_equals_naive_recompute_under_adm_all() {
 #[test]
 fn incremental_view_equals_naive_recompute_under_a_tightened_adm() {
     // Governance monotonicity (ADR-0002 §5.5): under a tightened Adm that
-    // admits only regime A's candidates, the incremental view must still
+    // admits only provider A's witnesses, the incremental view must still
     // equal the naive recompute. The engine applies Adm at materialization
     // parity by construction — this pins that the delta path honours it too.
     let mut i = Interner::new();
@@ -190,17 +185,18 @@ fn incremental_view_equals_naive_recompute_under_a_tightened_adm() {
     let configs: Vec<Handle> = (0..5).map(|k| tag(&mut i, &format!("c{k}"))).collect();
 
     let regimes = build_regimes(&mut i, &configs);
-    let allow_a = AdmRegimeAllowlist::new([regimes[0].id]);
+    let allow_a = AdmWitnessAllowlist::new([regimes[0].witness]);
 
     // The incremental engine's regimes must themselves only emit A-admissible
     // candidates for the comparison to hold; here we simply restrict the
     // engine to regime A, and compare against the naive recompute over all
     // regimes filtered by the same allowlist — both must yield only A's
     // candidates.
-    let engine_regimes: Vec<Box<dyn IncrementalRegime>> =
-        vec![Box::new(regimes[0].clone()) as Box<dyn IncrementalRegime>];
+    let engine_regimes: Vec<Box<dyn IncrementalWitnessIndex>> =
+        vec![Box::new(regimes[0].clone()) as Box<dyn IncrementalWitnessIndex>];
     let mut engine = IncrementalEngine::new(engine_regimes);
-    let naive: Vec<&dyn Regime> = regimes.iter().map(|r| r as &dyn Regime).collect();
+    let naive: Vec<&dyn WitnessProvider> =
+        regimes.iter().map(|r| r as &dyn WitnessProvider).collect();
 
     let s = stream(&configs);
     let checked =
@@ -215,14 +211,15 @@ fn empty_stream_leaves_an_empty_view_equal_to_the_empty_recompute() {
     let history = Digest::of(Domain::Value, b"history");
     let configs: Vec<Handle> = (0..5).map(|k| tag(&mut i, &format!("c{k}"))).collect();
     let regimes = build_regimes(&mut i, &configs);
-    let engine_regimes: Vec<Box<dyn IncrementalRegime>> = regimes
+    let engine_regimes: Vec<Box<dyn IncrementalWitnessIndex>> = regimes
         .iter()
         .cloned()
-        .map(|r| Box::new(r) as Box<dyn IncrementalRegime>)
+        .map(|r| Box::new(r) as Box<dyn IncrementalWitnessIndex>)
         .collect();
     let engine = IncrementalEngine::new(engine_regimes);
     let empty: BTreeSet<Handle> = BTreeSet::new();
-    let naive: Vec<&dyn Regime> = regimes.iter().map(|r| r as &dyn Regime).collect();
+    let naive: Vec<&dyn WitnessProvider> =
+        regimes.iter().map(|r| r as &dyn WitnessProvider).collect();
     assert!(engine.view().is_empty());
     assert_eq!(
         engine.view(),

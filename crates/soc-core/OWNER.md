@@ -25,7 +25,7 @@ change without a **new envelope format version**.
 Note one live constraint the freeze carries. The v1 quiescence certificate can
 only ever assert a *complete* enumeration, because `EnumerationCompleteness`
 admits exactly one ordinal and the reader accepts exactly that one. That is sound
-only while `Regime::candidates -> Vec<Candidate>` stays unbounded and total. If
+only while `WitnessProvider::candidates -> Vec<Candidate>` stays unbounded and total. If
 ADR-0012 §4's contemplated bounded or fallible regime API ever lands, it **must**
 mint a v2 certificate and **must not** emit v1.
 

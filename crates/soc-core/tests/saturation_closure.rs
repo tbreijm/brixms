@@ -16,17 +16,17 @@ use brix_canon::{CanonWriter, Digest, Domain};
 use brix_semantic::{ConfigId, ContextId, Decomposition, GeneratorId};
 use soc_core::adm::AdmAll;
 use soc_core::calendar::Key;
-use soc_core::commit::{CommitError, SettlementRegime};
+use soc_core::commit::{CommitError, SettlementWitnessProvider};
 use soc_core::exec::ExecConfig;
 use soc_core::history::History;
 use soc_core::intern::{Handle, Interner};
-use soc_core::regime::{Candidate, Regime};
 use soc_core::saturate::{
     adequacy_of, check_closure, fo_definedness, run_saturated, sat_step, ClosureMode,
     ClosureResult, ClosureUnknown, DeclaredAssumptions, FoDefinedness, FoUndefined, FoValue,
     GeneratorPartitionProfile, ObservationProfile, PresentationIdV1, PresentationV1, SafetyState,
     SaturationBudget, ViolationSite,
 };
+use soc_core::witness_provider::{Candidate, WitnessProvider};
 
 // ---------------------------------------------------------------------------
 // Fixture
@@ -39,18 +39,16 @@ struct Edge {
 }
 
 struct ChainRegime {
-    id: Handle,
     edges: BTreeMap<Handle, Edge>,
     configs: BTreeMap<Handle, ConfigId>,
 }
 
-impl Regime for ChainRegime {
+impl WitnessProvider for ChainRegime {
     fn candidates(&self, e: &ExecConfig) -> Vec<Candidate> {
         self.edges
             .get(&e.world)
             .map(|edge| {
                 vec![Candidate {
-                    regime: self.id,
                     witness: edge.witness,
                     successor: edge.successor,
                 }]
@@ -59,7 +57,7 @@ impl Regime for ChainRegime {
     }
 }
 
-impl SettlementRegime for ChainRegime {
+impl SettlementWitnessProvider for ChainRegime {
     fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError> {
         let edge = self
             .edges
@@ -117,7 +115,7 @@ fn build_fixture(spec: &[(&'static str, &'static str, Vec<GeneratorId>)]) -> Fix
         }
     }
     let policy = tag(&mut interner, "closure.policy");
-    let regime_id = tag(&mut interner, "closure.regime");
+    let _presentation_handle = tag(&mut interner, "closure.regime");
 
     let configs = worlds
         .values()
@@ -139,11 +137,7 @@ fn build_fixture(spec: &[(&'static str, &'static str, Vec<GeneratorId>)]) -> Fix
 
     Fixture {
         interner,
-        regime: ChainRegime {
-            id: regime_id,
-            edges,
-            configs,
-        },
+        regime: ChainRegime { edges, configs },
         worlds,
         policy,
     }
@@ -160,7 +154,7 @@ impl Fixture {
 }
 
 fn presentation<'a>(
-    regimes: &'a [&'a dyn SettlementRegime],
+    regimes: &'a [&'a dyn SettlementWitnessProvider],
     profile: &'a dyn ObservationProfile,
     interner: &'a Interner,
 ) -> PresentationV1<'a> {
@@ -210,7 +204,7 @@ fn acceptance_fixture() -> Fixture {
 fn the_acceptance_fixture_is_closed_under_visible_and_violated_under_raw() {
     let fx = acceptance_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner);
     let bad = fx.config("w_bad");
@@ -267,7 +261,7 @@ fn a_violation_at_a_visible_successor_is_caught_under_visible() {
         ("w1", "w_bad", vec![gen_realizing()]),
     ]);
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner);
     let bad = fx.config("w_bad");
@@ -300,7 +294,7 @@ fn a_violation_at_a_visible_successor_is_caught_under_visible() {
 fn a_predicate_false_at_the_initial_state_is_reported_as_such() {
     let fx = acceptance_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner);
     let start = fx.config("w0");
@@ -331,7 +325,7 @@ fn a_predicate_false_at_the_initial_state_is_reported_as_such() {
 fn a_certified_lasso_still_decides_closure() {
     let fx = build_fixture(&[("w0", "w1", vec![gen_tau()]), ("w1", "w0", vec![gen_tau()])]);
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner);
     let absent = ConfigId::from_canon(b"a world this fixture never reaches");
@@ -364,7 +358,7 @@ fn an_exhausted_run_yields_unknown_never_closed() {
         ("w3", "w4", vec![gen_realizing()]),
     ]);
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner);
     let absent = ConfigId::from_canon(b"a world this fixture never reaches");
@@ -400,7 +394,7 @@ fn an_exhausted_run_yields_unknown_never_closed() {
 fn a_true_predicate_is_closed_and_reports_its_coverage() {
     let fx = acceptance_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner);
 
@@ -439,10 +433,10 @@ fn every_saturated_summand_classifies_against_the_fo_sub_carrier() {
     let looping = build_fixture(&[("w0", "w1", vec![gen_tau()]), ("w1", "w0", vec![gen_tau()])]);
     let profile = hiding_profile();
 
-    let t_regime: &dyn SettlementRegime = &terminating.regime;
+    let t_regime: &dyn SettlementWitnessProvider = &terminating.regime;
     let t_regimes = std::slice::from_ref(&t_regime);
     let t_pres = presentation(t_regimes, &profile, &terminating.interner);
-    let l_regime: &dyn SettlementRegime = &looping.regime;
+    let l_regime: &dyn SettlementWitnessProvider = &looping.regime;
     let l_regimes = std::slice::from_ref(&l_regime);
     let l_pres = presentation(l_regimes, &profile, &looping.interner);
 
@@ -502,7 +496,7 @@ fn a_terminating_run_is_fo_defined_throughout_and_a_diverging_one_is_not() {
     ]);
     let profile = hiding_profile();
 
-    let t_regime: &dyn SettlementRegime = &terminating.regime;
+    let t_regime: &dyn SettlementWitnessProvider = &terminating.regime;
     let t_regimes = std::slice::from_ref(&t_regime);
     let t_pres = presentation(t_regimes, &profile, &terminating.interner);
     let mut k = keyer();
@@ -512,7 +506,7 @@ fn a_terminating_run_is_fo_defined_throughout_and_a_diverging_one_is_not() {
     assert_eq!(t_report.outcome, FoDefinedness::Defined(FoValue::Quiescent));
     assert_eq!(t_report.left_at_visible_depth, None);
 
-    let l_regime: &dyn SettlementRegime = &looping.regime;
+    let l_regime: &dyn SettlementWitnessProvider = &looping.regime;
     let l_regimes = std::slice::from_ref(&l_regime);
     let l_pres = presentation(l_regimes, &profile, &looping.interner);
     let mut k = keyer();

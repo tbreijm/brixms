@@ -7,29 +7,27 @@ use brix_semantic::{
 };
 use soc_core::{
     audit_step, commit_tick, AdmAll, AuditResult, AuditedStep, Candidate, CommitError, ExecConfig,
-    Handle, History, Interner, Key, Regime, SettlementRegime,
+    Handle, History, Interner, Key, SettlementWitnessProvider, WitnessProvider,
 };
 
 /// A multi-generator (n=2) settlement regime fixture.
 struct MultiGenFixtureRegime {
-    regime_handle: Handle,
     witness_handle: Handle,
     successor_handle: Handle,
     generators: Vec<GeneratorId>,
     configs: Vec<ConfigId>,
 }
 
-impl Regime for MultiGenFixtureRegime {
+impl WitnessProvider for MultiGenFixtureRegime {
     fn candidates(&self, _e: &ExecConfig) -> Vec<Candidate> {
         vec![Candidate {
-            regime: self.regime_handle,
             witness: self.witness_handle,
             successor: self.successor_handle,
         }]
     }
 }
 
-impl SettlementRegime for MultiGenFixtureRegime {
+impl SettlementWitnessProvider for MultiGenFixtureRegime {
     fn try_decompose(&self, _e: &ExecConfig, _c: &Candidate) -> Result<Decomposition, CommitError> {
         Ok(
             Decomposition::recorded(self.generators.clone(), self.configs.clone())
@@ -51,7 +49,6 @@ fn test_b3_end_to_end_audited_decomposition_to_proven() {
     let mut interner = Interner::new();
     let world_handle = interner.intern(Digest::of(Domain::Value, b"world_0"));
     let policy_handle = interner.intern(Digest::of(Domain::Value, b"policy_0"));
-    let regime_handle = interner.intern(Digest::of(Domain::Value, b"regime_0"));
     let witness_handle = interner.intern(Digest::of(Domain::Value, b"witness_0"));
     let successor_handle = interner.intern(Digest::of(Domain::Value, b"world_1"));
 
@@ -66,14 +63,13 @@ fn test_b3_end_to_end_audited_decomposition_to_proven() {
     let x2 = ConfigId(interner.resolve(successor_handle));
 
     let fixture_regime = MultiGenFixtureRegime {
-        regime_handle,
         witness_handle,
         successor_handle,
         generators: vec![g1, g2],
         configs: vec![x0, x1, x2],
     };
 
-    let regimes: Vec<&dyn SettlementRegime> = vec![&fixture_regime];
+    let regimes: Vec<&dyn SettlementWitnessProvider> = vec![&fixture_regime];
 
     // Call commit_tick to get the committed step (Outcome::Derived)
     let (committed, step_opt, _cost) = commit_tick(

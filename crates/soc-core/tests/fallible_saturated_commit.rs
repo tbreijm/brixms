@@ -21,15 +21,15 @@ use brix_canon::{CanonWriter, Digest, Domain};
 use brix_semantic::{ConfigId, ContextId, Decomposition, GeneratorId};
 use soc_core::adm::AdmAll;
 use soc_core::calendar::Key;
-use soc_core::commit::{CommitError, SettlementRegime};
+use soc_core::commit::{CommitError, SettlementWitnessProvider};
 use soc_core::exec::ExecConfig;
 use soc_core::history::History;
 use soc_core::intern::{Handle, Interner};
-use soc_core::regime::{Candidate, Regime};
 use soc_core::saturate::{
     run_saturated, DeclaredAssumptions, GeneratorPartitionProfile, ObservationProfile,
     PresentationIdV1, PresentationV1, SaturatedStop, SaturationBudget, SaturationUnknown,
 };
+use soc_core::witness_provider::{Candidate, WitnessProvider};
 
 // ---------------------------------------------------------------------------
 // Fixture: one world with a configurable number of outgoing candidates, and a
@@ -37,7 +37,6 @@ use soc_core::saturate::{
 // ---------------------------------------------------------------------------
 
 struct FaultyRegime {
-    id: Handle,
     /// Every candidate offered at `origin`, in order. Two distinct successors
     /// are what a colliding keyer needs in order to actually conflict — one
     /// candidate keyed twice is idempotent, not a conflict.
@@ -49,7 +48,7 @@ struct FaultyRegime {
     decompose_error: Option<CommitError>,
 }
 
-impl Regime for FaultyRegime {
+impl WitnessProvider for FaultyRegime {
     fn candidates(&self, e: &ExecConfig) -> Vec<Candidate> {
         if e.world != self.origin {
             return Vec::new();
@@ -57,7 +56,6 @@ impl Regime for FaultyRegime {
         self.edges
             .iter()
             .map(|(witness, successor)| Candidate {
-                regime: self.id,
                 witness: *witness,
                 successor: *successor,
             })
@@ -65,7 +63,7 @@ impl Regime for FaultyRegime {
     }
 }
 
-impl SettlementRegime for FaultyRegime {
+impl SettlementWitnessProvider for FaultyRegime {
     fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError> {
         if let Some(error) = &self.decompose_error {
             return Err(error.clone());
@@ -104,7 +102,7 @@ fn fixture(successors: usize, decompose_error: Option<CommitError>) -> Fixture {
     let mut interner = Interner::new();
     let origin = tag(&mut interner, "w0");
     let policy = tag(&mut interner, "fallible.policy");
-    let regime_id = tag(&mut interner, "fallible.regime");
+    let _presentation_handle = tag(&mut interner, "fallible.regime");
 
     let mut edges = Vec::new();
     let mut worlds = vec![origin];
@@ -122,7 +120,6 @@ fn fixture(successors: usize, decompose_error: Option<CommitError>) -> Fixture {
 
     Fixture {
         regime: FaultyRegime {
-            id: regime_id,
             edges,
             origin,
             configs,
@@ -141,7 +138,7 @@ impl Fixture {
 }
 
 fn presentation<'a>(
-    regimes: &'a [&'a dyn SettlementRegime],
+    regimes: &'a [&'a dyn SettlementWitnessProvider],
     profile: &'a dyn ObservationProfile,
     interner: &'a Interner,
 ) -> PresentationV1<'a> {
@@ -188,7 +185,7 @@ fn a_key_conflict_during_a_run_is_unknown_never_a_panic() {
     // Two candidates with different observed successors, one key: the B^uk
     // discipline is violated. The reference driver panics here; a run must not.
     let f = fixture(2, None);
-    let regime: &dyn SettlementRegime = &f.regime;
+    let regime: &dyn SettlementWitnessProvider = &f.regime;
     let profile = profile();
     let pres = presentation(std::slice::from_ref(&regime), &profile, &f.interner);
 
@@ -221,7 +218,7 @@ fn a_commit_boundary_failure_during_a_run_is_unknown_and_preserves_the_error() {
     // own candidate is `GeneratorMismatch`, and the run must say so rather
     // than flattening it to a generic failure.
     let f = fixture(1, Some(CommitError::GeneratorMismatch));
-    let regime: &dyn SettlementRegime = &f.regime;
+    let regime: &dyn SettlementWitnessProvider = &f.regime;
     let profile = profile();
     let pres = presentation(std::slice::from_ref(&regime), &profile, &f.interner);
 
@@ -267,7 +264,7 @@ fn every_stage_b_commit_error_survives_the_trip() {
         },
     ] {
         let f = fixture(1, Some(expected.clone()));
-        let regime: &dyn SettlementRegime = &f.regime;
+        let regime: &dyn SettlementWitnessProvider = &f.regime;
         let profile = profile();
         let pres = presentation(std::slice::from_ref(&regime), &profile, &f.interner);
 
@@ -288,7 +285,7 @@ fn an_honest_run_still_reaches_quiescence() {
     // The fence refuses only faulty runs. Without an injected fault the same
     // fixture settles: one realizing step, then certified quiescence.
     let f = fixture(1, None);
-    let regime: &dyn SettlementRegime = &f.regime;
+    let regime: &dyn SettlementWitnessProvider = &f.regime;
     let profile = profile();
     let pres = presentation(std::slice::from_ref(&regime), &profile, &f.interner);
 
@@ -311,7 +308,7 @@ fn the_reference_driver_still_panics_on_a_key_conflict() {
     // caller handles. That is the whole reason the fallible sibling exists
     // rather than the reference driver simply becoming fallible.
     let f = fixture(2, None);
-    let regime: &dyn SettlementRegime = &f.regime;
+    let regime: &dyn SettlementWitnessProvider = &f.regime;
     let mut k = colliding_keyer();
 
     let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

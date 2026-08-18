@@ -85,13 +85,14 @@ use brix_semantic::{ConfigId, ContextId, GeneratorId, Outcome};
 
 use crate::adm::Adm;
 use crate::commit::{
-    try_commit_tick, CommitError, CommitTickError, Committed, Observation, SettlementRegime,
+    try_commit_tick, CommitError, CommitTickError, Committed, Observation,
+    SettlementWitnessProvider,
 };
 use crate::cost::CostRecord;
 use crate::exec::ExecConfig;
 use crate::intern::{Handle, Interner};
 use crate::journal::CommittedStep;
-use crate::regime::Candidate;
+use crate::witness_provider::Candidate;
 
 pub mod adequacy;
 pub mod bisimulation;
@@ -349,7 +350,7 @@ pub fn project(e: &ExecConfig) -> ObservableState {
 /// Which presentation-level hypothesis a result depended on.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum AssumptionId {
-    /// **P1** — `Regime::candidates` and `Adm::admits` depend on the exec
+    /// **P1** — `WitnessProvider::candidates` and `Adm::admits` depend on the exec
     /// config only through [`project`].
     HistoryIndependence,
     /// **P6** — the keyer's `priority` and `tiebreak` components do not depend
@@ -394,7 +395,7 @@ pub struct PresentationV1<'a> {
     /// Opaque canonical program/world revision identity, caller-supplied.
     pub id: PresentationIdV1,
     /// The regimes in play.
-    pub regimes: &'a [&'a dyn SettlementRegime],
+    pub regimes: &'a [&'a dyn SettlementWitnessProvider],
     /// Caller-supplied canonical identity of the ordered regime set.
     pub regime_set: Digest,
     /// The governance predicate.
@@ -449,7 +450,7 @@ impl SaturationBudget {
 /// [`commit_tick`] keeps its own inline copy because it keys and frontiers as
 /// it goes; this one only needs the set.
 pub(crate) fn enumerate_admissible(
-    regimes: &[&dyn SettlementRegime],
+    regimes: &[&dyn SettlementWitnessProvider],
     adm: &dyn Adm,
     e: &ExecConfig,
 ) -> (BTreeSet<Candidate>, u64) {
@@ -620,7 +621,7 @@ pub fn sat_step<F>(
     budget: SaturationBudget,
 ) -> (SaturatedStep, Vec<CommittedStep>, CostRecord)
 where
-    F: FnMut(&crate::regime::Candidate, u64) -> crate::calendar::Key,
+    F: FnMut(&crate::witness_provider::Candidate, u64) -> crate::calendar::Key,
 {
     let mut consumed: Vec<CommittedStep> = Vec::new();
     let mut current = *e;

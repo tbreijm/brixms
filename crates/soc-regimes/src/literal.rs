@@ -8,7 +8,7 @@
 //! **reflexive** witness `x → x` — under [`RegimeId::named("literal-equality@1")`].
 //!
 //! **Why registration, not universal enumeration.** A genuinely naive
-//! `Regime::candidates` would have to enumerate *every* configuration in the
+//! `WitnessProvider::candidates` would have to enumerate *every* configuration in the
 //! world and propose `x → x` for each; this crate has no notion of "every
 //! configuration" (that lives in whatever client owns the world), so instead
 //! the regime is told, once, which configurations to reflexively relate
@@ -17,7 +17,7 @@
 //! honest (real reflexive-equality semantics, checked against the interner)
 //! without inventing a walk over an unbounded world this crate doesn't own.
 //!
-//! **Why registration needs `&mut Interner`.** [`soc_core::regime::Candidate`]
+//! **Why registration needs `&mut Interner`.** [`soc_core::witness_provider::Candidate`]
 //! carries only interned [`soc_core::Handle`]s; [`soc_core::commit::commit_tick`]
 //! resolves a committed candidate's `witness` handle straight to a
 //! [`brix_semantic::WitnessId`] via `interner.resolve(candidate.witness)` —
@@ -38,12 +38,12 @@ use std::collections::BTreeMap;
 use brix_semantic::{ConfigId, Decomposition, GeneratorId, RegimeId, Witness};
 
 use soc_core::audit::GeneratorSemanticsV1;
-use soc_core::commit::{CommitError, SettlementRegime};
+use soc_core::commit::{CommitError, SettlementWitnessProvider};
 use soc_core::delta::{CandidateDelta, Delta, Footprint};
-use soc_core::engine::IncrementalRegime;
+use soc_core::engine::IncrementalWitnessIndex;
 use soc_core::exec::ExecConfig;
 use soc_core::intern::{Handle, Interner};
-use soc_core::regime::{Candidate, Regime};
+use soc_core::witness_provider::{Candidate, WitnessProvider};
 
 /// A configuration this regime has been [`register`](LiteralEqualityRegime::register)ed
 /// for: its reflexive witness handle (already interned to
@@ -61,7 +61,6 @@ struct Known {
 /// [`register`](LiteralEqualityRegime::register)ed for.
 #[derive(Clone, Debug)]
 pub struct LiteralEqualityRegime {
-    regime_handle: Handle,
     regime_id: RegimeId,
     known: BTreeMap<Handle, Known>,
 }
@@ -80,11 +79,9 @@ impl LiteralEqualityRegime {
     /// Starts with no known configurations — call [`register`](Self::register)
     /// for each configuration this regime should propose the reflexive
     /// witness for.
-    pub fn new(interner: &mut Interner) -> Self {
+    pub fn new(_interner: &mut Interner) -> Self {
         let regime_id = RegimeId::named(Self::NAME);
-        let regime_handle = interner.intern(regime_id.digest());
         LiteralEqualityRegime {
-            regime_handle,
             regime_id,
             known: BTreeMap::new(),
         }
@@ -98,12 +95,11 @@ impl LiteralEqualityRegime {
     /// The reflexive candidate `config → config` this regime proposes for a
     /// registered `config`, or `None` if `config` is not registered. The
     /// single source of truth for the candidate identity shared by both the
-    /// naive [`Regime::candidates`] path and the incremental
-    /// [`IncrementalRegime::apply`] path, so the two produce byte-identical
+    /// naive [`WitnessProvider::candidates`] path and the incremental
+    /// [`IncrementalWitnessIndex::apply`] path, so the two produce byte-identical
     /// candidates (the differential-identity anchor, ADR-0002 §9.2).
     fn candidate_for(&self, config: Handle) -> Option<Candidate> {
         self.known.get(&config).map(|known| Candidate {
-            regime: self.regime_handle,
             witness: known.witness_handle,
             // Reflexive: the successor IS the source, x → x.
             successor: config,
@@ -114,7 +110,7 @@ impl LiteralEqualityRegime {
     /// `ExecConfig::world`) as known to this regime: computes and interns its
     /// reflexive witness `Witness::new(x, x, regime_id)` once (idempotent —
     /// re-registering the same handle is a no-op), so
-    /// [`Regime::candidates`]/[`SettlementRegime::try_decompose`] can look it up
+    /// [`WitnessProvider::candidates`]/[`SettlementWitnessProvider::try_decompose`] can look it up
     /// without ever hashing inside the hot enumeration path.
     ///
     /// # Panics
@@ -137,7 +133,7 @@ impl LiteralEqualityRegime {
     }
 }
 
-impl Regime for LiteralEqualityRegime {
+impl WitnessProvider for LiteralEqualityRegime {
     /// Enumerate the reflexive candidate `x → x` for every configuration
     /// registered for `e.world` — naive by construction (no incremental
     /// state beyond the registration table), matching this crate's Step 5(a)
@@ -148,7 +144,7 @@ impl Regime for LiteralEqualityRegime {
     }
 }
 
-impl IncrementalRegime for LiteralEqualityRegime {
+impl IncrementalWitnessIndex for LiteralEqualityRegime {
     /// This regime is sensitive to exactly its registered configurations: a
     /// delta touching only unregistered configs induces no candidate change,
     /// so the engine skips it (ADR-0002 §9.1). Declaring the footprint as the
@@ -159,7 +155,7 @@ impl IncrementalRegime for LiteralEqualityRegime {
         Footprint::configs(self.known.keys().copied())
     }
 
-    /// The dataflow-operator form of [`Regime::candidates`] (ADR-0002 §9.2):
+    /// The dataflow-operator form of [`WitnessProvider::candidates`] (ADR-0002 §9.2):
     /// for each **registered** config that entered the world, the reflexive
     /// candidate `x → x` enters the view; for each registered config that
     /// left, it leaves. Reuses [`candidate_for`](Self::candidate_for), so an
@@ -183,7 +179,7 @@ impl IncrementalRegime for LiteralEqualityRegime {
     }
 }
 
-impl SettlementRegime for LiteralEqualityRegime {
+impl SettlementWitnessProvider for LiteralEqualityRegime {
     /// The tight decomposition realizing a reflexive candidate is a single
     /// generator step over the diagonal: `x =[literal-equality.refl@1]=> x`
     /// — one generator, the two (identical) endpoints `[x, x]`.
@@ -274,7 +270,6 @@ mod tests {
 
         let cs = regime.candidates(&e);
         assert_eq!(cs.len(), 1);
-        assert_eq!(cs[0].regime, regime.regime_handle);
         assert_eq!(cs[0].successor, world, "reflexive: successor is the source");
     }
 

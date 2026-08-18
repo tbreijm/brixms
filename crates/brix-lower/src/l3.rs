@@ -9,7 +9,7 @@
 //! [`lower_l3_plan`] never needs a digest to decide whether a module is
 //! admissible.
 //!
-//! - **No `Regime`/`IncrementalRegime`, no settlement adapter/driver, no
+//! - **No `Regime`/`IncrementalWitnessIndex`, no settlement adapter/driver, no
 //!   audit semantics, no CLI.** Those are ADR-0012 Stages B–D and are out of
 //!   scope here (ADR-0012 §9).
 //!
@@ -17,7 +17,7 @@
 //! the ADR-0012 §1 fragment (`config` + immutable `let` + zero-argument
 //! `rule`, with every rule body a closed static value), and lower it,
 //! **in exact `Module.items` order**, to [`L3PlanV1`] — enough owned data for
-//! a later slice to build one `Regime`/`IncrementalRegime` without
+//! a later slice to build one `Regime`/`IncrementalWitnessIndex` without
 //! re-validating the source.
 //!
 //! # Fail-closed choices on genuinely ambiguous ground

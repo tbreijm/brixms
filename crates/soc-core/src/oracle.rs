@@ -7,7 +7,7 @@
 //!
 //! `brix-oracle`'s role reborn at the SOC layer: single-threaded,
 //! recompute-the-world, **correct, not fast**. `cand(e)` is the union over
-//! regimes of their (naive) [`crate::regime::Regime::candidates`], filtered
+//! providers of their (naive) [`crate::witness_provider::WitnessProvider::candidates`], filtered
 //! by an [`crate::adm::Adm`]. `Succ(e)` is the observed successor-config
 //! set: every admissible candidate applied to `e`. This is deliberately the
 //! differential-test baseline the later incremental engine (`Build_Plan_v3_SOC.md`
@@ -19,18 +19,22 @@ use crate::cost::CostRecord;
 use crate::exec::ExecConfig;
 use crate::history::History;
 use crate::intern::Handle;
-use crate::regime::{Candidate, Regime};
+use crate::witness_provider::{Candidate, WitnessProvider};
 use brix_canon::{CanonWriter, Canonical, Digest};
 use std::collections::BTreeSet;
 
-/// `cand(e)` = the union over `regimes` of `regime.candidates(e)`, filtered
+/// `cand(e)` = the union over `providers` of `provider.candidates(e)`, filtered
 /// by `adm`. A `BTreeSet` (Ring0 §0 determinism discipline — no `HashSet`)
 /// so two calls with identical inputs return byte-identical results in the
 /// same iteration order.
-pub fn cand(regimes: &[&dyn Regime], adm: &dyn Adm, e: &ExecConfig) -> BTreeSet<Candidate> {
+pub fn cand(
+    providers: &[&dyn WitnessProvider],
+    adm: &dyn Adm,
+    e: &ExecConfig,
+) -> BTreeSet<Candidate> {
     let mut out = BTreeSet::new();
-    for regime in regimes {
-        for c in regime.candidates(e) {
+    for provider in providers {
+        for c in provider.candidates(e) {
             if adm.admits(e, &c) {
                 out.insert(c);
             }
@@ -49,29 +53,29 @@ pub fn cand(regimes: &[&dyn Regime], adm: &dyn Adm, e: &ExecConfig) -> BTreeSet<
 /// instrumentation beside it, not instead of it).
 ///
 /// **Why this is exactly the naive oracle's real cost.** `cand` asks
-/// *every* regime in `regimes` for its candidates on *every* call,
-/// unconditionally — whether that regime is active (produces a candidate
+/// *every* provider in `providers` for its candidates on *every* call,
+/// unconditionally — whether that provider is active (produces a candidate
 /// for this `e`) or inert (produces nothing). That unconditional scan is
 /// the O(|world|) "recompute-the-world" cost ADR-0002 §9.1's O(Δ) gate
-/// exists to catch. Work units here: one per regime scanned
-/// (`regimes.len()` scans, paid regardless of relevance) plus one per raw
-/// candidate a regime returns, scanned for admissibility before any
+/// exists to catch. Work units here: one per provider scanned
+/// (`providers.len()` scans, paid regardless of relevance) plus one per raw
+/// candidate a provider returns, scanned for admissibility before any
 /// admissible ones are inserted into the output set. Doubling the number of
-/// *inert* regimes in `regimes` therefore directly doubles the work-unit
+/// *inert* providers in `providers` therefore directly doubles the work-unit
 /// count measured here — that is what makes the naive oracle's
 /// world-proportional cost observable at all (see `tests/o_delta_gate.rs`).
 pub fn cand_instrumented(
-    regimes: &[&dyn Regime],
+    providers: &[&dyn WitnessProvider],
     adm: &dyn Adm,
     e: &ExecConfig,
 ) -> (BTreeSet<Candidate>, CostRecord) {
     let mut out = BTreeSet::new();
     let mut work: u64 = 0;
-    for regime in regimes {
-        // One work unit per regime scanned, paid unconditionally — this is
+    for provider in providers {
+        // One work unit per provider scanned, paid unconditionally — this is
         // the naive oracle's O(|world|) shape, made measurable.
         work += 1;
-        for c in regime.candidates(e) {
+        for c in provider.candidates(e) {
             // One work unit per raw candidate scanned for admissibility,
             // whether or not it ends up admitted.
             work += 1;
@@ -97,8 +101,12 @@ pub fn cand_instrumented(
 /// of `cand(e)` under that function — which is *why* the governance
 /// conservation law (`cand'(e) ⊆ cand(e) ⟹ Succ'(e) ⊆ Succ(e)`) holds
 /// structurally here, not merely by the test fixture's luck.
-pub fn succ(regimes: &[&dyn Regime], adm: &dyn Adm, e: &ExecConfig) -> BTreeSet<ExecConfig> {
-    cand(regimes, adm, e)
+pub fn succ(
+    providers: &[&dyn WitnessProvider],
+    adm: &dyn Adm,
+    e: &ExecConfig,
+) -> BTreeSet<ExecConfig> {
+    cand(providers, adm, e)
         .into_iter()
         .map(|c| apply(e, &c))
         .collect()
@@ -155,19 +163,14 @@ mod tests {
     use brix_canon::Domain;
 
     struct FixedRegime {
-        regime: Handle,
         out: Vec<(Handle, Handle)>,
     }
 
-    impl Regime for FixedRegime {
+    impl WitnessProvider for FixedRegime {
         fn candidates(&self, _e: &ExecConfig) -> Vec<Candidate> {
             self.out
                 .iter()
-                .map(|&(witness, successor)| Candidate {
-                    regime: self.regime,
-                    witness,
-                    successor,
-                })
+                .map(|&(witness, successor)| Candidate { witness, successor })
                 .collect()
         }
     }
@@ -176,14 +179,12 @@ mod tests {
         let mut i = Interner::new();
         let world = i.intern(Digest::of(Domain::Value, b"w0"));
         let policy = i.intern(Digest::of(Domain::Value, b"p0"));
-        let regime = i.intern(Digest::of(Domain::Value, b"r"));
         let witness = i.intern(Digest::of(Domain::Value, b"wit"));
         let successor = i.intern(Digest::of(Domain::Value, b"w1"));
         let e = ExecConfig::new(world, policy, History::empty().digest());
         (
             i,
             FixedRegime {
-                regime,
                 out: vec![(witness, successor)],
             },
             e,
@@ -192,56 +193,56 @@ mod tests {
 
     #[test]
     fn cand_under_adm_none_is_always_empty() {
-        let (_i, regime, e) = setup();
-        let regimes: Vec<&dyn Regime> = vec![&regime];
-        assert!(cand(&regimes, &AdmNone, &e).is_empty());
-        assert!(succ(&regimes, &AdmNone, &e).is_empty());
+        let (_i, provider, e) = setup();
+        let providers: Vec<&dyn WitnessProvider> = vec![&provider];
+        assert!(cand(&providers, &AdmNone, &e).is_empty());
+        assert!(succ(&providers, &AdmNone, &e).is_empty());
     }
 
     #[test]
     fn cand_under_adm_all_returns_the_regimes_candidates() {
-        let (_i, regime, e) = setup();
-        let regimes: Vec<&dyn Regime> = vec![&regime];
-        let cs = cand(&regimes, &AdmAll, &e);
+        let (_i, provider, e) = setup();
+        let providers: Vec<&dyn WitnessProvider> = vec![&provider];
+        let cs = cand(&providers, &AdmAll, &e);
         assert_eq!(cs.len(), 1);
     }
 
     #[test]
     fn succ_advances_the_world_handle_and_the_history_digest() {
-        let (_i, regime, e) = setup();
-        let regimes: Vec<&dyn Regime> = vec![&regime];
-        let successors = succ(&regimes, &AdmAll, &e);
+        let (_i, provider, e) = setup();
+        let providers: Vec<&dyn WitnessProvider> = vec![&provider];
+        let successors = succ(&providers, &AdmAll, &e);
         assert_eq!(successors.len(), 1);
         let s = successors.into_iter().next().unwrap();
-        assert_eq!(s.world, regime.out[0].1);
+        assert_eq!(s.world, provider.out[0].1);
         assert_eq!(s.policy, e.policy);
         assert_ne!(s.history, e.history, "applying a step must advance history");
     }
 
     #[test]
     fn succ_is_deterministic() {
-        let (_i, regime, e) = setup();
-        let regimes: Vec<&dyn Regime> = vec![&regime];
-        assert_eq!(succ(&regimes, &AdmAll, &e), succ(&regimes, &AdmAll, &e));
+        let (_i, provider, e) = setup();
+        let providers: Vec<&dyn WitnessProvider> = vec![&provider];
+        assert_eq!(succ(&providers, &AdmAll, &e), succ(&providers, &AdmAll, &e));
     }
 
     #[test]
     fn cand_instrumented_matches_cand_s_candidate_set() {
-        let (_i, regime, e) = setup();
-        let regimes: Vec<&dyn Regime> = vec![&regime];
-        let (instrumented, _cost) = cand_instrumented(&regimes, &AdmAll, &e);
+        let (_i, provider, e) = setup();
+        let providers: Vec<&dyn WitnessProvider> = vec![&provider];
+        let (instrumented, _cost) = cand_instrumented(&providers, &AdmAll, &e);
         assert_eq!(
             instrumented,
-            cand(&regimes, &AdmAll, &e),
+            cand(&providers, &AdmAll, &e),
             "cand_instrumented must not change cand's candidate set"
         );
     }
 
     #[test]
     fn cand_instrumented_never_emits_unknown_cost() {
-        let (_i, regime, e) = setup();
-        let regimes: Vec<&dyn Regime> = vec![&regime];
-        let (_c, cost) = cand_instrumented(&regimes, &AdmAll, &e);
+        let (_i, provider, e) = setup();
+        let providers: Vec<&dyn WitnessProvider> = vec![&provider];
+        let (_c, cost) = cand_instrumented(&providers, &AdmAll, &e);
         assert!(
             cost.work_units().is_some(),
             "the instrumented oracle path always measures — never UnknownCost"
@@ -250,14 +251,14 @@ mod tests {
 
     #[test]
     fn cand_instrumented_cost_scales_with_the_number_of_regimes_scanned() {
-        let (_i, regime, e) = setup();
-        let regimes_one: Vec<&dyn Regime> = vec![&regime];
-        let regimes_two: Vec<&dyn Regime> = vec![&regime, &regime];
+        let (_i, provider, e) = setup();
+        let regimes_one: Vec<&dyn WitnessProvider> = vec![&provider];
+        let regimes_two: Vec<&dyn WitnessProvider> = vec![&provider, &provider];
         let (_c1, cost1) = cand_instrumented(&regimes_one, &AdmAll, &e);
         let (_c2, cost2) = cand_instrumented(&regimes_two, &AdmAll, &e);
         assert!(
             cost2.work_units().unwrap() > cost1.work_units().unwrap(),
-            "scanning more regimes must cost strictly more work units \
+            "scanning more providers must cost strictly more work units \
              (the O(|world|) shape the O(Δ) gate is built to catch)"
         );
     }

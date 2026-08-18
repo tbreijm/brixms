@@ -44,7 +44,7 @@ fixture.
 | SOC-LAW-04 | Epistemic non-escalation | Enforced | outcome lattice, audit, elaboration, and result-grade cap | — |
 | SOC-LAW-05 | Authority non-escalation | Enforced | the two kernels and named external drivers | — |
 | SOC-LAW-06 | Context confinement | Open | future context validator and transport checker | #59 |
-| SOC-LAW-07 | Governance monotonicity | Enforced | `Adm` conformance over the current candidate interface | #52 |
+| SOC-LAW-07 | Governance monotonicity | Enforced | `Adm` conformance over witness+successor candidates | #52, ADR-0028 |
 | SOC-LAW-08 | Incremental agreement and cost honesty | Enforced | reference oracle, incremental engine, deterministic cost gate | #52, #178 for future regimes |
 | SOC-LAW-09 | Correction and retraction non-erasure | Partial | evidence durability taxonomy and future invalidation engine | #59, #178 |
 | SOC-LAW-10 | Observable-behavior fidelity | Partial | soc-core saturation, certificate, and bisimulation checkers | #59, #178 |
@@ -211,7 +211,7 @@ contraction, strengthening, transport, or prohibition.
 
 ## SOC-LAW-07 — Governance monotonicity
 
-**Domain and context.** A fixed regime set and execution configuration `e`, and
+**Domain and context.** A fixed witness-provider presentation and execution configuration `e`, and
 two admissibility predicates where `Adm_tight(c) ⇒ Adm_loose(c)`.
 
 **Rule.** Tightening governance MUST shrink candidates and successors
@@ -221,7 +221,7 @@ tightening. Governance may remove authority to act; it cannot manufacture a
 candidate, successor, or stronger epistemic outcome.
 
 **Authority and evidence.** `soc-core`'s retained naive oracle is the reference
-for the current `Regime`/`Adm` interface. The executable fixture checks every
+for the current `WitnessProvider`/`Adm` interface. The executable fixture checks every
 reachable configuration and composed allowlists.
 
 **Failure form.** A candidate or successor present only under the tighter
@@ -233,7 +233,7 @@ implication relation they claim; #52 owns the general resolution contract.
 
 ## SOC-LAW-08 — Incremental agreement and cost honesty
 
-**Domain and context.** A fixed regime/admissibility set, world-delta stream,
+**Domain and context.** A fixed provider/admissibility presentation, world-delta stream,
 reference candidate view, incremental materialized view, and deterministic
 work-unit model.
 

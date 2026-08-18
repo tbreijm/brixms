@@ -57,7 +57,7 @@ use brix_semantic::{ConfigId, ContextId};
 
 use soc_core::adm::Adm;
 use soc_core::calendar::{Frontier, FrontierDeltaError, Key};
-use soc_core::commit::{prospective_successor, CommitError, SettlementRegime};
+use soc_core::commit::{prospective_successor, CommitError, SettlementWitnessProvider};
 use soc_core::cost::CostRecord;
 use soc_core::delta::Delta;
 use soc_core::engine::IncrementalEngine;
@@ -65,13 +65,13 @@ use soc_core::exec::ExecConfig;
 use soc_core::history::History;
 use soc_core::intern::{Handle, Interner};
 use soc_core::journal::Journal;
-use soc_core::regime::{Candidate, Regime};
 use soc_core::saturate::{
     quiescence_certificate_id, run_saturated, DeclaredAssumptions, DivergenceCertificateV1,
     GeneratorPartitionProfile, ObservationProfile, ObservationProfileId,
     PresentationIdV1 as SocPresentationIdV1, PresentationV1, QuiescenceCertificateId,
     QuiescenceCertificateV1, SaturatedRun, SaturatedStop, SaturationBudget, SaturationUnknown,
 };
+use soc_core::witness_provider::{Candidate, WitnessProvider};
 
 use crate::l3::{L3PlanV1, PlanLimitsV1, L3_PROFILE_MARKER_V1};
 use crate::l3_canon::{context_id, policy_id, program_id, ProgramIdV1, RunContextV1};
@@ -115,7 +115,7 @@ pub enum L3UnknownReasonV1 {
     /// ([`FrontierDeltaError::InsertConflict`]).
     KeyConflict,
     /// An adapter-local integrity failure: the incrementally maintained
-    /// candidate/frontier view disagreed with the naive `Regime` relation, a
+    /// candidate/frontier view disagreed with the naive `WitnessProvider` relation, a
     /// staged update failed, or a committed successor did not equal its
     /// pre-checked prospect (ADR-0012 §2 item 4, §4.3 steps 4-5). Never a
     /// commit, never a certificate. [`L3RunReport::adapter_failure`] carries
@@ -354,7 +354,7 @@ pub enum L3AdmChoice<'a> {
 /// the semantic identity") — carried only on [`L3RunReport`] for operators.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdapterFailureDetail {
-    /// The naive `Regime` relation at the adapter's tracked world disagreed
+    /// The naive `WitnessProvider` relation at the adapter's tracked world disagreed
     /// with the candidate `commit_tick` is about to key (ADR-0012 §4.3 step
     /// 4).
     DifferentialMismatch,
@@ -484,10 +484,10 @@ impl<'a> L3StepAdapter<'a> {
         }
     }
 
-    /// ADR-0012 §3.4's tie-break: `H("brix.l3.key@1", plan, resolved(regime),
-    /// resolved(witness), resolved(successor))`.
+    /// ADR-0012's frozen tie-break retains the witness interpretation digest
+    /// from the plan table; candidates themselves are witness+successor only.
     fn tiebreak(&mut self, candidate: &Candidate) -> Digest {
-        let regime_digest = self.resolve(candidate.regime);
+        let regime_digest = self.resolve(self.naive_regime.table().regime_handle());
         let witness_digest = self.resolve(candidate.witness);
         let successor_digest = self.resolve(candidate.successor);
         let mut w = CanonWriter::new();
@@ -760,7 +760,7 @@ pub fn run_l3_plan_with_interner(
     let interner_ref: &Interner = &*interner;
 
     let presentation_regime = L3Regime::new(Rc::clone(&table));
-    let regimes: [&dyn SettlementRegime; 1] = [&presentation_regime];
+    let regimes: [&dyn SettlementWitnessProvider; 1] = [&presentation_regime];
 
     let presentation = PresentationV1 {
         id: presentation_id,
@@ -772,8 +772,8 @@ pub fn run_l3_plan_with_interner(
         interner: interner_ref,
         context,
         // P1 holds structurally: `L3Regime::candidates` reads only
-        // `e.world`, and `AdmRegimeAllowlist::admits` reads only
-        // `c.regime` — neither depends on `e.history`. P6 holds
+        // `e.world`, and `AdmWitnessAllowlist::admits` reads only
+        // `c.witness` — neither depends on `e.history`. P6 holds
         // structurally too: the key formula's priority/tiebreak read only
         // the plan/candidate, never `phase`.
         assumptions: DeclaredAssumptions::all(),
@@ -890,7 +890,7 @@ mod tests {
     }
 
     enum AdmChoiceOwned {
-        Compiled(soc_core::adm::AdmRegimeAllowlist),
+        Compiled(soc_core::adm::AdmWitnessAllowlist),
         DenyAll,
     }
 
@@ -959,7 +959,7 @@ mod tests {
     /// keeps its own `regimes` array and `PresentationV1` in one scope.
     fn build_presentation<'a>(
         s: &'a Setup,
-        regimes: &'a [&'a dyn SettlementRegime],
+        regimes: &'a [&'a dyn SettlementWitnessProvider],
     ) -> PresentationV1<'a> {
         PresentationV1 {
             id: SocPresentationIdV1(s.program.digest()),
@@ -1146,18 +1146,15 @@ mod tests {
         // discipline `Frontier::apply_delta` (ADR-0012 §2 item 6/§9 Stage C
         // fixture 7) is built to catch, never silently resolved.
         let mut i = Interner::new();
-        let regime = i.intern(Digest::of(Domain::Value, b"r"));
         let w0 = i.intern(Digest::of(Domain::Value, b"w0"));
         let w1 = i.intern(Digest::of(Domain::Value, b"w1"));
         let w2 = i.intern(Digest::of(Domain::Value, b"w2"));
         let key = Key::new(0, 0, Digest::of(Domain::Value, b"collide"));
         let c1 = Candidate {
-            regime,
             witness: i.intern(Digest::of(Domain::Value, b"wit1")),
             successor: w1,
         };
         let c2 = Candidate {
-            regime,
             witness: i.intern(Digest::of(Domain::Value, b"wit2")),
             successor: w2,
         };
@@ -1230,7 +1227,7 @@ mod tests {
     #[test]
     fn fixture_9_differential_equality_and_zero_hidden_steps_on_every_step() {
         let s = setup("rule a() = 1\nrule b() = 2\nrule c() = 3\n", false);
-        let regimes: [&dyn SettlementRegime; 1] = [&s.regime];
+        let regimes: [&dyn SettlementWitnessProvider; 1] = [&s.regime];
         let pres = build_presentation(&s, &regimes);
         let mut adapter = L3StepAdapter::new(s.program, &s.table, &s.interner, s.e0.policy);
         let mut keyer = |c: &Candidate, phase: u64| adapter.key_for(c, phase);
@@ -1275,7 +1272,7 @@ mod tests {
         let large = setup(&rules, false);
 
         for s in [&small, &large] {
-            let regimes: [&dyn SettlementRegime; 1] = [&s.regime];
+            let regimes: [&dyn SettlementWitnessProvider; 1] = [&s.regime];
             let pres = build_presentation(s, &regimes);
             let mut adapter = L3StepAdapter::new(s.program, &s.table, &s.interner, s.e0.policy);
             let mut keyer = |c: &Candidate, phase: u64| adapter.key_for(c, phase);
@@ -1337,7 +1334,7 @@ mod tests {
     #[test]
     fn fixture_12_certificate_independently_verifies_and_agenda_frontier_coincide() {
         let s = setup("rule a() = 1\nrule b() = 2\n", false);
-        let regimes: [&dyn SettlementRegime; 1] = [&s.regime];
+        let regimes: [&dyn SettlementWitnessProvider; 1] = [&s.regime];
         let pres = build_presentation(&s, &regimes);
         let mut adapter = L3StepAdapter::new(s.program, &s.table, &s.interner, s.e0.policy);
         let run = {

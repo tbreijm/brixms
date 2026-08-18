@@ -23,19 +23,19 @@ use brix_canon::{CanonWriter, Digest, Domain};
 use brix_semantic::{ConfigId, ContextId, Decomposition, GeneratorId};
 use soc_core::adm::AdmAll;
 use soc_core::calendar::Key;
-use soc_core::commit::{CommitError, SettlementRegime};
+use soc_core::commit::{CommitError, SettlementWitnessProvider};
 use soc_core::delta::{CandidateDelta, Delta, Footprint};
-use soc_core::engine::{naive_view_over, IncrementalEngine, IncrementalRegime};
+use soc_core::engine::{naive_view_over, IncrementalEngine, IncrementalWitnessIndex};
 use soc_core::exec::ExecConfig;
 use soc_core::history::History;
 use soc_core::intern::{Handle, Interner};
-use soc_core::regime::{Candidate, Regime};
 use soc_core::saturate::{
     check_saturated, run_saturated, AssumptionId, ComparisonUnknown, Contract, DeclaredAssumptions,
     GeneratorPartitionProfile, MismatchKind, ObservationProfile, PresentationIdV1, PresentationV1,
     PresentedSystem, SaturatedComparison, SaturatedStop, SaturationBudget, SaturationUnknown,
     Summand,
 };
+use soc_core::witness_provider::{Candidate, WitnessProvider};
 
 // ---------------------------------------------------------------------------
 // Fixture — the edge-table regime idiom, with a per-edge generator so an
@@ -51,7 +51,6 @@ struct Edge {
 
 #[derive(Clone)]
 struct ChainRegime {
-    id: Handle,
     edges: BTreeMap<Handle, Edge>,
     configs: BTreeMap<Handle, ConfigId>,
 }
@@ -59,7 +58,6 @@ struct ChainRegime {
 impl ChainRegime {
     fn candidate_at(&self, world: Handle) -> Option<Candidate> {
         self.edges.get(&world).map(|edge| Candidate {
-            regime: self.id,
             witness: edge.witness,
             successor: edge.successor,
         })
@@ -78,19 +76,19 @@ impl ChainRegime {
     }
 }
 
-impl Regime for ChainRegime {
+impl WitnessProvider for ChainRegime {
     fn candidates(&self, e: &ExecConfig) -> Vec<Candidate> {
         self.candidate_at(e.world).into_iter().collect()
     }
 }
 
-impl SettlementRegime for ChainRegime {
+impl SettlementWitnessProvider for ChainRegime {
     fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError> {
         Ok(self.decomposition(e.world, c.successor))
     }
 }
 
-impl IncrementalRegime for ChainRegime {
+impl IncrementalWitnessIndex for ChainRegime {
     fn footprint(&self) -> Footprint {
         Footprint::configs(self.edges.keys().copied())
     }
@@ -122,9 +120,9 @@ struct NaiveSource {
     inner: ChainRegime,
 }
 
-impl Regime for NaiveSource {
+impl WitnessProvider for NaiveSource {
     fn candidates(&self, e: &ExecConfig) -> Vec<Candidate> {
-        let regime: &dyn Regime = &self.inner;
+        let regime: &dyn WitnessProvider = &self.inner;
         let present = BTreeSet::from([e.world]);
         naive_view_over(
             std::slice::from_ref(&regime),
@@ -138,7 +136,7 @@ impl Regime for NaiveSource {
     }
 }
 
-impl SettlementRegime for NaiveSource {
+impl SettlementWitnessProvider for NaiveSource {
     fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError> {
         Ok(self.inner.decomposition(e.world, c.successor))
     }
@@ -147,7 +145,7 @@ impl SettlementRegime for NaiveSource {
 /// The incremental candidate source: an [`IncrementalEngine`] whose presented
 /// set is kept at exactly `{e.world}`, answering from its materialized view.
 ///
-/// `Regime::candidates` takes `&self`, so the engine sits behind a `RefCell` and
+/// `WitnessProvider::candidates` takes `&self`, so the engine sits behind a `RefCell` and
 /// syncs lazily. That is a fixture concern, not a production one: what is being
 /// tested is that the *view* and the *recompute* drive saturation identically,
 /// and the sync is how a single-world driver presents itself to a set-shaped
@@ -168,7 +166,7 @@ impl IncrementalSource {
     }
 }
 
-impl Regime for IncrementalSource {
+impl WitnessProvider for IncrementalSource {
     fn candidates(&self, e: &ExecConfig) -> Vec<Candidate> {
         if self.presented.get() != Some(e.world) {
             let delta = match self.presented.get() {
@@ -182,7 +180,7 @@ impl Regime for IncrementalSource {
     }
 }
 
-impl SettlementRegime for IncrementalSource {
+impl SettlementWitnessProvider for IncrementalSource {
     fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError> {
         Ok(self.shape.decomposition(e.world, c.successor))
     }
@@ -236,7 +234,7 @@ fn build_fixture(spec: &[(&'static str, &'static str, Vec<GeneratorId>)]) -> Fix
         }
     }
     let policy = tag(&mut interner, "bisim.policy");
-    let regime_id = tag(&mut interner, "bisim.regime");
+    let _presentation_handle = tag(&mut interner, "bisim.regime");
 
     let configs = worlds
         .values()
@@ -261,11 +259,7 @@ fn build_fixture(spec: &[(&'static str, &'static str, Vec<GeneratorId>)]) -> Fix
 
     Fixture {
         interner,
-        regime: ChainRegime {
-            id: regime_id,
-            edges,
-            configs,
-        },
+        regime: ChainRegime { edges, configs },
         worlds,
         policy,
     }
@@ -279,7 +273,7 @@ impl Fixture {
 
 fn presentation<'a>(
     seed: &[u8],
-    regimes: &'a [&'a dyn SettlementRegime],
+    regimes: &'a [&'a dyn SettlementWitnessProvider],
     profile: &'a dyn ObservationProfile,
     interner: &'a Interner,
     assumptions: DeclaredAssumptions,
@@ -323,7 +317,7 @@ fn mixed_fixture() -> Fixture {
 fn a_saturated_run_exports_only_visible_steps_but_journals_everything() {
     let fx = mixed_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(
         b"run@1",
@@ -364,7 +358,7 @@ fn a_looping_run_stops_divergent_not_quiescent() {
         ("w2", "w1", vec![gen_tau()]),
     ]);
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(
         b"run@1",
@@ -392,7 +386,7 @@ fn a_looping_run_stops_divergent_not_quiescent() {
 fn the_visible_budget_is_an_explicit_unknown_never_a_quiescent_stop() {
     let fx = mixed_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(
         b"run@1",
@@ -429,7 +423,7 @@ fn the_visible_budget_is_an_explicit_unknown_never_a_quiescent_stop() {
 fn saturated_runs_are_deterministic() {
     let fx = mixed_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(
         b"run@1",
@@ -466,9 +460,9 @@ fn the_incremental_and_naive_candidate_sources_are_saturated_bisimilar() {
     };
     let incremental = IncrementalSource::new(fx.regime.clone());
 
-    let naive_regime: &dyn SettlementRegime = &naive;
+    let naive_regime: &dyn SettlementWitnessProvider = &naive;
     let naive_regimes = std::slice::from_ref(&naive_regime);
-    let incremental_regime: &dyn SettlementRegime = &incremental;
+    let incremental_regime: &dyn SettlementWitnessProvider = &incremental;
     let incremental_regimes = std::slice::from_ref(&incremental_regime);
 
     let mut naive_system = PresentedSystem::new(
@@ -531,9 +525,9 @@ fn different_administrative_layouts_with_equal_visible_behavior_are_bisimilar() 
     let short = build_fixture(&[("w0", "m", vec![gen_tau()]), ("m", "end", vec![gen_o("a")])]);
     let profile = hiding_profile();
 
-    let long_regime: &dyn SettlementRegime = &long.regime;
+    let long_regime: &dyn SettlementWitnessProvider = &long.regime;
     let long_regimes = std::slice::from_ref(&long_regime);
-    let short_regime: &dyn SettlementRegime = &short.regime;
+    let short_regime: &dyn SettlementWitnessProvider = &short.regime;
     let short_regimes = std::slice::from_ref(&short_regime);
 
     let mut long_system = PresentedSystem::new(
@@ -614,9 +608,9 @@ fn an_observation_mismatch_at_visible_depth_two_yields_a_prefix_of_exactly_two()
     ]);
     let profile = hiding_profile();
 
-    let left_regime: &dyn SettlementRegime = &left.regime;
+    let left_regime: &dyn SettlementWitnessProvider = &left.regime;
     let left_regimes = std::slice::from_ref(&left_regime);
-    let right_regime: &dyn SettlementRegime = &right.regime;
+    let right_regime: &dyn SettlementWitnessProvider = &right.regime;
     let right_regimes = std::slice::from_ref(&right_regime);
 
     let mut left_system = PresentedSystem::new(
@@ -684,9 +678,9 @@ fn a_terminating_impl_refines_a_diverging_spec_but_is_not_bisimilar_to_it() {
     let looping = build_fixture(&[("w0", "w1", vec![gen_tau()]), ("w1", "w0", vec![gen_tau()])]);
     let profile = hiding_profile();
 
-    let terminating_regime: &dyn SettlementRegime = &terminating.regime;
+    let terminating_regime: &dyn SettlementWitnessProvider = &terminating.regime;
     let terminating_regimes = std::slice::from_ref(&terminating_regime);
-    let looping_regime: &dyn SettlementRegime = &looping.regime;
+    let looping_regime: &dyn SettlementWitnessProvider = &looping.regime;
     let looping_regimes = std::slice::from_ref(&looping_regime);
 
     let mut implementation = PresentedSystem::new(
@@ -751,9 +745,9 @@ fn refines_rejects_an_implementation_that_spins_where_the_spec_stops() {
     let looping = build_fixture(&[("w0", "w1", vec![gen_tau()]), ("w1", "w0", vec![gen_tau()])]);
     let profile = hiding_profile();
 
-    let looping_regime: &dyn SettlementRegime = &looping.regime;
+    let looping_regime: &dyn SettlementWitnessProvider = &looping.regime;
     let looping_regimes = std::slice::from_ref(&looping_regime);
-    let terminating_regime: &dyn SettlementRegime = &terminating.regime;
+    let terminating_regime: &dyn SettlementWitnessProvider = &terminating.regime;
     let terminating_regimes = std::slice::from_ref(&terminating_regime);
 
     let mut implementation = PresentedSystem::new(
@@ -804,9 +798,9 @@ fn a_system_that_does_not_declare_p1_makes_the_comparison_unknown() {
     let a = mixed_fixture();
     let b = mixed_fixture();
     let profile = hiding_profile();
-    let a_regime: &dyn SettlementRegime = &a.regime;
+    let a_regime: &dyn SettlementWitnessProvider = &a.regime;
     let a_regimes = std::slice::from_ref(&a_regime);
-    let b_regime: &dyn SettlementRegime = &b.regime;
+    let b_regime: &dyn SettlementWitnessProvider = &b.regime;
     let b_regimes = std::slice::from_ref(&b_regime);
 
     let mut left = PresentedSystem::new(
@@ -856,9 +850,9 @@ fn systems_at_different_observation_boundaries_are_not_comparable() {
     all.extend(["a", "b", "c", "d"].into_iter().map(gen_o));
     let exposing = GeneratorPartitionProfile::all_realizing(all);
 
-    let a_regime: &dyn SettlementRegime = &a.regime;
+    let a_regime: &dyn SettlementWitnessProvider = &a.regime;
     let a_regimes = std::slice::from_ref(&a_regime);
-    let b_regime: &dyn SettlementRegime = &b.regime;
+    let b_regime: &dyn SettlementWitnessProvider = &b.regime;
     let b_regimes = std::slice::from_ref(&b_regime);
 
     let mut left = PresentedSystem::new(
@@ -898,9 +892,9 @@ fn a_step_that_establishes_nothing_makes_the_comparison_unknown() {
     let a = mixed_fixture();
     let b = mixed_fixture();
     let profile = hiding_profile();
-    let a_regime: &dyn SettlementRegime = &a.regime;
+    let a_regime: &dyn SettlementWitnessProvider = &a.regime;
     let a_regimes = std::slice::from_ref(&a_regime);
-    let b_regime: &dyn SettlementRegime = &b.regime;
+    let b_regime: &dyn SettlementWitnessProvider = &b.regime;
     let b_regimes = std::slice::from_ref(&b_regime);
 
     // A hidden-step budget of zero: the very first τ step exhausts it.

@@ -14,7 +14,7 @@
 //! gate: `tests/governance_conservation.rs`.
 
 use crate::exec::ExecConfig;
-use crate::regime::Candidate;
+use crate::witness_provider::Candidate;
 
 /// An admissibility predicate over candidates for a given exec config.
 pub trait Adm {
@@ -44,33 +44,33 @@ impl Adm for AdmNone {
     }
 }
 
-/// Admits only candidates whose regime handle is in an explicit allow-list.
+/// Admits only candidates whose witness handle is in an explicit allow-list.
 /// A concrete, strictly-tighter `Adm'` for exercising the conservation law:
 /// any proper-subset allow-list admits a subset of what [`AdmAll`] admits, by
 /// construction.
 #[derive(Clone, Debug, Default)]
-pub struct AdmRegimeAllowlist {
+pub struct AdmWitnessAllowlist {
     allowed: std::collections::BTreeSet<crate::intern::Handle>,
 }
 
-impl AdmRegimeAllowlist {
-    /// Build an allow-list from an iterable of regime handles.
+impl AdmWitnessAllowlist {
+    /// Build an allow-list from an iterable of witness handles.
     pub fn new(allowed: impl IntoIterator<Item = crate::intern::Handle>) -> Self {
-        AdmRegimeAllowlist {
+        AdmWitnessAllowlist {
             allowed: allowed.into_iter().collect(),
         }
     }
 }
 
-impl Adm for AdmRegimeAllowlist {
+impl Adm for AdmWitnessAllowlist {
     fn admits(&self, _e: &ExecConfig, c: &Candidate) -> bool {
-        self.allowed.contains(&c.regime)
+        self.allowed.contains(&c.witness)
     }
 }
 
 /// Admits only candidates whose successor handle passes a caller-supplied
 /// predicate. A second, orthogonal tightening — combine with
-/// [`AdmRegimeAllowlist`] via [`AndAdm`] to test that composed governance
+/// [`AdmWitnessAllowlist`] via [`AndAdm`] to test that composed governance
 /// policies still conserve.
 pub struct AdmSuccessorFilter<F: Fn(crate::intern::Handle) -> bool> {
     /// The predicate a candidate's successor handle must satisfy.
@@ -106,16 +106,11 @@ mod tests {
         let world = i.intern(Digest::of(Domain::Value, b"w"));
         let policy = i.intern(Digest::of(Domain::Value, b"p"));
         let history = Digest::of(Domain::Value, b"h");
-        let regime = i.intern(Digest::of(Domain::Value, b"regime"));
         let witness = i.intern(Digest::of(Domain::Value, b"witness"));
         let successor = i.intern(Digest::of(Domain::Value, b"succ"));
         (
             ExecConfig::new(world, policy, history),
-            Candidate {
-                regime,
-                witness,
-                successor,
-            },
+            Candidate { witness, successor },
         )
     }
 
@@ -132,12 +127,12 @@ mod tests {
     }
 
     #[test]
-    fn allowlist_admits_only_listed_regimes() {
+    fn allowlist_admits_only_listed_witnesses() {
         let (e, c) = fixture();
-        let allow = AdmRegimeAllowlist::new([c.regime]);
+        let allow = AdmWitnessAllowlist::new([c.witness]);
         assert!(allow.admits(&e, &c));
 
-        let deny = AdmRegimeAllowlist::new(std::iter::empty());
+        let deny = AdmWitnessAllowlist::new(std::iter::empty());
         assert!(!deny.admits(&e, &c));
     }
 
@@ -158,7 +153,7 @@ mod tests {
     #[test]
     fn and_adm_is_the_intersection() {
         let (e, c) = fixture();
-        let allow = AdmRegimeAllowlist::new([c.regime]);
+        let allow = AdmWitnessAllowlist::new([c.witness]);
         let deny_successor = AdmSuccessorFilter {
             predicate: |h| h != c.successor,
         };

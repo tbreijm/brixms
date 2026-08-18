@@ -45,7 +45,7 @@ fn literal_equality_derives_then_audits_the_reflexive_witness() {
     // --- The regime: literal equality, registered for this one world. ---
     let mut regime = LiteralEqualityRegime::new(&mut interner);
     regime.register(&mut interner, world);
-    let regimes: Vec<&dyn soc_core::SettlementRegime> = vec![&regime];
+    let regimes: Vec<&dyn soc_core::SettlementWitnessProvider> = vec![&regime];
 
     // --- Run the committed loop: one tick, since the reflexive witness is
     // a self-loop (world -> world) and would otherwise commit forever. ---

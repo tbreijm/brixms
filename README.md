@@ -63,7 +63,9 @@ optional values, ordinary code can forget them.
 
 Brix makes them part of the program instead:
 
-- `config`, `witness`, `regime`, and `rule` name the semantic objects directly;
+- `config` and `witness` are the primitive semantic objects; `rule`, source
+  `regime` syntax, and runtime providers construct or present witness
+  relations without becoming additional semantic entities;
 - evidence grades such as `@Derived`, `@Audited`, and `@Proven` are checked, not
   comments;
 - composition preserves the witness explaining a result;
@@ -187,8 +189,8 @@ all the way through the system.
 
 A configuration is a state, value, model, program fragment, or world fragment.
 A witness records a meaningful relationship or transition between two
-configurations. Typing is therefore not a privileged built-in relation; it is
-one realization regime among others.
+configurations. Its `RegimeId` is provenance for the interpretation under
+which that witness is meaningful; it is not a discovery-provider identity.
 
 Mathematically, configurations are the objects of one category and witnesses
 are its arrows. In everyday use, that means every important transition has a
@@ -196,16 +198,17 @@ nameable, content-addressed explanation.
 
 ### 2. Deliberation is plural; commitment is singular
 
-More than one regime may propose a candidate next step. An admissibility policy
-filters those candidates, and a keyed calendar selects exactly one in a stable
-order. The committed journal therefore does not depend on thread timing or map
-iteration order.
+More than one non-ontological witness provider may present the same or distinct
+candidate witnesses. Candidates are deduplicated by witness and successor; an
+admissibility policy filters them, and a keyed calendar selects exactly one in
+a stable order. The committed journal therefore does not depend on thread
+timing, map iteration, or provider identity.
 
 ```text
 world + policy + history
           |
           v
-  regimes propose candidates
+ witness providers present possibilities
           |
           v
    admissibility filter

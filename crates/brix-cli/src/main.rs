@@ -105,7 +105,7 @@ fn parse(source: &str) -> Result<brix_syntax::ast::Module, brix_syntax::ParseErr
 }
 use soc_core::{
     check_quiescence_certificate, Adm, AuditResult, DeclaredAssumptions, Interner, PresentationV1,
-    QuiescenceCertificateId, SaturationBudget, SettlementRegime,
+    QuiescenceCertificateId, SaturationBudget, SettlementWitnessProvider,
 };
 use soc_regimes::type_realization::{generator_is_tight, generator_name, ClaimKind, Ty};
 
@@ -545,7 +545,7 @@ fn verify_quiescence(
 ) -> Option<QuiescenceCertificateId> {
     let certificate = report.quiescence_certificate.as_ref()?;
     let regime = L3Regime::new(Rc::clone(&report.table));
-    let regimes: [&dyn SettlementRegime; 1] = [&regime];
+    let regimes: [&dyn SettlementWitnessProvider; 1] = [&regime];
     let presentation = PresentationV1 {
         id: report.run.presentation,
         regimes: &regimes,
