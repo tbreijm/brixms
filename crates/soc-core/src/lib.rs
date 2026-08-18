@@ -8,9 +8,9 @@
 //!   ([`store::PersistentMap`]; the HAMT-shaped ADR target, `BTreeMap`/`Arc`
 //!   v1 — see that module's docs for the dependency-policy rationale); the
 //!   chained history digest `h' = H(h_digest, step)`, O(1)/step.
-//! - **S2⋈E2** ([`exec`], [`regime`], [`adm`], [`oracle`]): the execution
+//! - **S2⋈E2** ([`exec`], [`witness_provider`], [`adm`], [`oracle`]): the execution
 //!   config `e = ⟨x, p, h⟩`; the realization interface
-//!   ([`regime::Regime::candidates`], the deliberately-naive enumerate form —
+//!   ([`witness_provider::WitnessProvider::candidates`], the deliberately-naive enumerate form —
 //!   see that module's docs); the admissibility judgment ([`adm::Adm`]); the
 //!   naive reference oracle ([`oracle::cand`]/[`oracle::succ`]) —
 //!   `brix-oracle`'s role reborn at the SOC layer (ADR-0002 §3, §9.2).
@@ -42,10 +42,10 @@
 //!   yields `Unknown(reason)`, never a pass (`Build_Plan_v3_SOC.md` Step 4
 //!   gate; PD-1's operational discharge).
 //!
-//! - **E3⋈E5** ([`delta`], [`engine`]): the incremental delta-driven regime
+//! - **E3⋈E5** ([`delta`], [`engine`]): the incremental delta-driven provider
 //!   form. [`delta::Delta`]/[`delta::CandidateDelta`]/[`delta::Footprint`] are
 //!   the delta protocol over content-addressed world-config handles;
-//!   [`engine::IncrementalRegime`] is the regime as a **dataflow operator**
+//!   [`engine::IncrementalWitnessIndex`] is the provider as a **dataflow operator**
 //!   (`footprint`/`apply(delta) → candidate delta`, ADR-0002 §9.2); and
 //!   [`engine::IncrementalEngine`] maintains the materialized candidate view
 //!   via a footprint index, so a committed step's cost is `∝ |Δ| × fanout`,
@@ -128,28 +128,28 @@ pub mod history;
 pub mod intern;
 pub mod journal;
 pub mod oracle;
-pub mod regime;
 pub mod saturate;
 pub mod store;
+pub mod witness_provider;
 
-pub use adm::{Adm, AdmAll, AdmNone, AdmRegimeAllowlist, AdmSuccessorFilter, AndAdm};
+pub use adm::{Adm, AdmAll, AdmNone, AdmSuccessorFilter, AdmWitnessAllowlist, AndAdm};
 pub use audit::{audit_journal, audit_step, AuditResult, AuditedStep, GeneratorSemanticsV1};
 pub use calendar::{Frontier, FrontierDeltaError, Key, KeyConflict};
 pub use commit::{
     commit_tick, prospective_successor, run, run_reason, step_world_delta, try_commit_selected,
-    CommitError, Committed, Observation, SettlementRegime, UnsaturatedStop,
+    CommitError, Committed, Observation, SettlementWitnessProvider, UnsaturatedStop,
 };
 pub use cost::CostRecord;
 pub use delta::{CandidateDelta, Delta, Footprint};
 pub use engine::{
-    naive_view_over, naive_view_over_instrumented, IncrementalEngine, IncrementalRegime, StepReport,
+    naive_view_over, naive_view_over_instrumented, IncrementalEngine, IncrementalWitnessIndex,
+    StepReport,
 };
 pub use exec::{intern_context, ExecConfig};
 pub use history::History;
 pub use intern::{Handle, Interner};
 pub use journal::{CommittedStep, Journal};
 pub use oracle::{cand, cand_instrumented, succ};
-pub use regime::{Candidate, Regime};
 pub use saturate::{adequacy, bisimulation, certificate, closure, driver};
 pub use saturate::{
     adequacy_of, check_closure, check_divergence_certificate, check_quiescence_certificate,
@@ -169,3 +169,4 @@ pub use saturate::{
     SATURATION_PROFILE_V1,
 };
 pub use store::{ArcMap, PersistentMap};
+pub use witness_provider::{Candidate, WitnessProvider};

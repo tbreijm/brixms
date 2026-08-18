@@ -17,11 +17,10 @@ use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_semantic::{ConfigId, ContextId, Decomposition, GeneratorId, Outcome};
 use soc_core::adm::AdmAll;
 use soc_core::calendar::Key;
-use soc_core::commit::{CommitError, SettlementRegime};
+use soc_core::commit::{CommitError, SettlementWitnessProvider};
 use soc_core::exec::ExecConfig;
 use soc_core::history::History;
 use soc_core::intern::{Handle, Interner};
-use soc_core::regime::{Candidate, Regime};
 use soc_core::saturate::{
     check_divergence_certificate, check_quiescence_certificate, decode_divergence_v1,
     decode_quiescence_v1, encode_divergence_v1, encode_quiescence_v1, quiescence_certificate_id,
@@ -31,6 +30,7 @@ use soc_core::saturate::{
     QuiescenceCertificateV1, SaturatedStep, SaturationBudget, SaturationUnknown,
     CERTIFICATE_FORMAT_V1, QUIESCENCE_MARKER, SATURATION_PROFILE_V1,
 };
+use soc_core::witness_provider::{Candidate, WitnessProvider};
 
 // ---------------------------------------------------------------------------
 // Fixture — the edge-table regime idiom, as in `saturation_labels.rs`.
@@ -43,18 +43,16 @@ struct Edge {
 }
 
 struct ChainRegime {
-    id: Handle,
     edges: BTreeMap<Handle, Edge>,
     configs: BTreeMap<Handle, ConfigId>,
 }
 
-impl Regime for ChainRegime {
+impl WitnessProvider for ChainRegime {
     fn candidates(&self, e: &ExecConfig) -> Vec<Candidate> {
         self.edges
             .get(&e.world)
             .map(|edge| {
                 vec![Candidate {
-                    regime: self.id,
                     witness: edge.witness,
                     successor: edge.successor,
                 }]
@@ -63,7 +61,7 @@ impl Regime for ChainRegime {
     }
 }
 
-impl SettlementRegime for ChainRegime {
+impl SettlementWitnessProvider for ChainRegime {
     fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError> {
         let edge = self
             .edges
@@ -87,7 +85,6 @@ impl SettlementRegime for ChainRegime {
 /// candidate set at the *same* observable state. That is precisely the
 /// falsification the bounded P1 check is looking for.
 struct HistoryPeekingRegime {
-    id: Handle,
     w0: Handle,
     w1: Handle,
     w2: Handle,
@@ -96,7 +93,7 @@ struct HistoryPeekingRegime {
     generators: Vec<GeneratorId>,
 }
 
-impl Regime for HistoryPeekingRegime {
+impl WitnessProvider for HistoryPeekingRegime {
     fn candidates(&self, e: &ExecConfig) -> Vec<Candidate> {
         let successor = if e.world == self.w0 {
             if e.history == History::empty().digest() {
@@ -110,14 +107,13 @@ impl Regime for HistoryPeekingRegime {
             return Vec::new();
         };
         vec![Candidate {
-            regime: self.id,
             witness: self.witness,
             successor,
         }]
     }
 }
 
-impl SettlementRegime for HistoryPeekingRegime {
+impl SettlementWitnessProvider for HistoryPeekingRegime {
     fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError> {
         Ok(Decomposition::recorded(
             self.generators.clone(),
@@ -171,7 +167,7 @@ fn build_fixture(spec: &[(&'static str, &'static str, Vec<GeneratorId>)]) -> Fix
         }
     }
     let policy = tag(&mut interner, "policy");
-    let regime_id = tag(&mut interner, "regime.chain");
+    let _presentation_handle = tag(&mut interner, "regime.chain");
 
     let mut configs = BTreeMap::new();
     for handle in worlds.values() {
@@ -193,11 +189,7 @@ fn build_fixture(spec: &[(&'static str, &'static str, Vec<GeneratorId>)]) -> Fix
 
     Fixture {
         interner,
-        regime: ChainRegime {
-            id: regime_id,
-            edges,
-            configs,
-        },
+        regime: ChainRegime { edges, configs },
         worlds,
         policy,
     }
@@ -214,7 +206,7 @@ const REGIME_SET_SEED: &[u8] = b"saturation-cert-fixture.regime-set";
 const ADM_SEED: &[u8] = b"saturation-cert-fixture.adm-all";
 
 fn presentation<'a>(
-    regimes: &'a [&'a dyn SettlementRegime],
+    regimes: &'a [&'a dyn SettlementWitnessProvider],
     profile: &'a dyn ObservationProfile,
     interner: &'a Interner,
     assumptions: DeclaredAssumptions,
@@ -263,7 +255,7 @@ fn looping_fixture() -> Fixture {
 fn a_terminal_state_certifies_and_the_certificate_re_derives() {
     let fx = terminating_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner, DeclaredAssumptions::all());
     let mut k = keyer();
@@ -683,7 +675,7 @@ impl DivergenceBytes {
 fn a_well_formed_certificate_over_a_live_frontier_is_refused() {
     let fx = terminating_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner, DeclaredAssumptions::all());
     let mut k = keyer();
@@ -718,7 +710,7 @@ fn a_prefix_containing_a_realizing_step_invalidates_the_certificate() {
     // step; forcing that step into a quiescence prefix must be refused.
     let fx = build_fixture(&[("w0", "w1", vec![gen_realizing()])]);
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner, DeclaredAssumptions::all());
     let mut k = keyer();
@@ -753,7 +745,7 @@ fn a_prefix_containing_a_realizing_step_invalidates_the_certificate() {
 fn a_certificate_whose_steps_do_not_replay_is_refused() {
     let fx = terminating_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner, DeclaredAssumptions::all());
     let mut k = keyer();
@@ -789,7 +781,7 @@ fn a_certificate_whose_steps_do_not_replay_is_refused() {
 fn a_certificate_bound_to_another_governance_policy_is_refused() {
     let fx = terminating_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner, DeclaredAssumptions::all());
     let mut k = keyer();
@@ -813,7 +805,7 @@ fn a_certificate_bound_to_another_governance_policy_is_refused() {
 fn a_certificate_whose_judgement_does_not_recompute_is_refused() {
     let fx = terminating_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner, DeclaredAssumptions::all());
     let mut k = keyer();
@@ -834,7 +826,7 @@ fn a_certificate_whose_judgement_does_not_recompute_is_refused() {
 fn a_certificate_offered_against_the_wrong_configuration_is_refused() {
     let fx = terminating_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner, DeclaredAssumptions::all());
     let mut k = keyer();
@@ -879,7 +871,7 @@ fn a_two_step_administrative_loop_certifies_divergence() {
 fn the_divergence_certificate_re_derives_and_round_trips() {
     let fx = looping_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner, DeclaredAssumptions::all());
     let mut k = keyer();
@@ -902,7 +894,7 @@ fn the_divergence_certificate_re_derives_and_round_trips() {
 fn a_divergence_certificate_whose_cycle_does_not_close_is_refused() {
     let fx = looping_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner, DeclaredAssumptions::all());
     let mut k = keyer();
@@ -925,7 +917,7 @@ fn a_divergence_certificate_whose_cycle_does_not_close_is_refused() {
 fn a_loop_without_declared_history_independence_yields_undeclared_not_divergence() {
     let fx = looping_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(
         regimes,
@@ -951,7 +943,7 @@ fn a_loop_without_declared_history_independence_yields_undeclared_not_divergence
 fn a_loop_without_declared_phase_stable_keying_yields_undeclared_not_divergence() {
     let fx = looping_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(
         regimes,
@@ -983,14 +975,13 @@ fn a_declared_p1_that_the_bounded_check_falsifies_yields_assumption_violated() {
     let w2 = tag(&mut interner, "w2");
     let witness = tag(&mut interner, "witness");
     let policy = tag(&mut interner, "policy");
-    let regime_id = tag(&mut interner, "regime.history-peeking");
+    let _presentation_handle = tag(&mut interner, "regime.history-peeking");
     let configs = [w0, w1, w2]
         .into_iter()
         .map(|h| (h, ConfigId(interner.resolve(h))))
         .collect();
 
     let peeking = HistoryPeekingRegime {
-        id: regime_id,
         w0,
         w1,
         w2,
@@ -999,7 +990,7 @@ fn a_declared_p1_that_the_bounded_check_falsifies_yields_assumption_violated() {
         generators: vec![gen_tau()],
     };
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &peeking;
+    let regime: &dyn SettlementWitnessProvider = &peeking;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &interner, DeclaredAssumptions::all());
     let mut k = keyer();
@@ -1022,7 +1013,7 @@ fn a_declared_p1_that_the_bounded_check_falsifies_yields_assumption_violated() {
 fn a_declared_p6_that_the_bounded_check_falsifies_yields_assumption_violated() {
     let fx = looping_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner, DeclaredAssumptions::all());
     let mut k = phase_dependent_keyer();
@@ -1056,7 +1047,7 @@ fn an_exhausted_budget_produces_neither_certificate() {
         ("w9", "w10", vec![gen_realizing()]),
     ]);
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner, DeclaredAssumptions::all());
     let mut k = keyer();
@@ -1087,7 +1078,7 @@ fn the_visited_state_budget_is_its_own_distinct_unknown() {
         ("w3", "w4", vec![gen_tau()]),
     ]);
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner, DeclaredAssumptions::all());
     let mut k = keyer();
@@ -1127,7 +1118,7 @@ fn a_terminal_state_and_an_infinitely_searching_state_are_distinguished() {
     let looping_fx = looping_fixture();
     let profile = hiding_profile();
 
-    let terminal_regime: &dyn SettlementRegime = &terminal_fx.regime;
+    let terminal_regime: &dyn SettlementWitnessProvider = &terminal_fx.regime;
     let terminal_regimes = std::slice::from_ref(&terminal_regime);
     let terminal_pres = presentation(
         terminal_regimes,
@@ -1136,7 +1127,7 @@ fn a_terminal_state_and_an_infinitely_searching_state_are_distinguished() {
         DeclaredAssumptions::all(),
     );
 
-    let looping_regime: &dyn SettlementRegime = &looping_fx.regime;
+    let looping_regime: &dyn SettlementWitnessProvider = &looping_fx.regime;
     let looping_regimes = std::slice::from_ref(&looping_regime);
     let looping_pres = presentation(
         looping_regimes,
@@ -1233,7 +1224,7 @@ fn a_terminal_state_and_an_infinitely_searching_state_are_distinguished() {
 fn the_same_terminal_world_gives_one_proposition_but_evidence_specific_judgements() {
     let fx = terminating_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner, DeclaredAssumptions::all());
     let mut k = keyer();
@@ -1296,7 +1287,7 @@ fn certificates_are_byte_identical_across_two_runs() {
 fn mint_quiescence() -> QuiescenceCertificateV1 {
     let fx = terminating_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner, DeclaredAssumptions::all());
     let mut k = keyer();
@@ -1314,7 +1305,7 @@ fn mint_divergence() -> (
 ) {
     let fx = looping_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner, DeclaredAssumptions::all());
     let mut k = keyer();

@@ -16,33 +16,37 @@
 //! would pass trivially.
 
 use brix_canon::{Digest, Domain};
-use soc_core::adm::{AdmAll, AdmRegimeAllowlist, AndAdm};
+use soc_core::adm::{AdmAll, AdmWitnessAllowlist, AndAdm};
 use soc_core::exec::ExecConfig;
 use soc_core::history::History;
 use soc_core::intern::{Handle, Interner};
 use soc_core::oracle::{cand, succ};
-use soc_core::regime::{Candidate, Regime};
+use soc_core::witness_provider::{Candidate, WitnessProvider};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// A regime whose full `ρ_w` relation is a fixed edge list keyed by world
+/// A provider whose full `ρ_w` relation is a fixed edge list keyed by world
 /// handle — enough control to build a small, deterministic fixture graph
 /// without a real `brix.type`-style regime.
 struct FixtureRegime {
-    id: Handle,
     edges: BTreeMap<Handle, Vec<(Handle, Handle)>>, // world -> [(witness, successor)]
 }
 
-impl Regime for FixtureRegime {
+impl FixtureRegime {
+    fn witnesses(&self) -> BTreeSet<Handle> {
+        self.edges
+            .values()
+            .flat_map(|edges| edges.iter().map(|(witness, _)| *witness))
+            .collect()
+    }
+}
+
+impl WitnessProvider for FixtureRegime {
     fn candidates(&self, e: &ExecConfig) -> Vec<Candidate> {
         self.edges
             .get(&e.world)
             .into_iter()
             .flatten()
-            .map(|&(witness, successor)| Candidate {
-                regime: self.id,
-                witness,
-                successor,
-            })
+            .map(|&(witness, successor)| Candidate { witness, successor })
             .collect()
     }
 }
@@ -74,9 +78,6 @@ fn build_fixture() -> (Interner, FixtureRegime, FixtureRegime, ExecConfig) {
     let w3 = tag(&mut i, "world3");
     let w4 = tag(&mut i, "world4");
 
-    let regime_a = tag(&mut i, "regime.a");
-    let regime_b = tag(&mut i, "regime.b");
-
     let w01a = tag(&mut i, "w0->w1@a");
     let w13a = tag(&mut i, "w1->w3@a");
     let w23a = tag(&mut i, "w2->w3@a");
@@ -101,14 +102,8 @@ fn build_fixture() -> (Interner, FixtureRegime, FixtureRegime, ExecConfig) {
 
     (
         i,
-        FixtureRegime {
-            id: regime_a,
-            edges: edges_a,
-        },
-        FixtureRegime {
-            id: regime_b,
-            edges: edges_b,
-        },
+        FixtureRegime { edges: edges_a },
+        FixtureRegime { edges: edges_b },
         e0,
     )
 }
@@ -118,7 +113,7 @@ const MAX_DEPTH: usize = 6;
 /// Every `e` reachable from `e0` up to `MAX_DEPTH` steps, computed under the
 /// loosest `Adm` ([`AdmAll`]) — the maximal reachable universe any tighter
 /// `Adm'` could possibly need, since tightening only removes successors.
-fn reachable(regimes: &[&dyn Regime], e0: ExecConfig) -> BTreeSet<ExecConfig> {
+fn reachable(regimes: &[&dyn WitnessProvider], e0: ExecConfig) -> BTreeSet<ExecConfig> {
     let adm_all = AdmAll;
     let mut visited: BTreeSet<ExecConfig> = BTreeSet::new();
     visited.insert(e0);
@@ -143,11 +138,11 @@ fn reachable(regimes: &[&dyn Regime], e0: ExecConfig) -> BTreeSet<ExecConfig> {
 #[test]
 fn tightening_adm_shrinks_cand_and_succ_pointwise_over_every_reachable_config() {
     let (_i, regime_a, regime_b, e0) = build_fixture();
-    let regimes: Vec<&dyn Regime> = vec![&regime_a, &regime_b];
+    let regimes: Vec<&dyn WitnessProvider> = vec![&regime_a, &regime_b];
 
     let adm_loose = AdmAll;
-    // Adm' — strictly tighter: only regime A's witnesses are admissible.
-    let adm_tight = AdmRegimeAllowlist::new([regime_a.id]);
+    // Adm' — strictly tighter: only provider A's witnesses are admissible.
+    let adm_tight = AdmWitnessAllowlist::new(regime_a.witnesses());
 
     let reachable_configs = reachable(&regimes, e0);
     assert!(
@@ -185,10 +180,10 @@ fn tightening_adm_shrinks_cand_and_succ_pointwise_over_every_reachable_config() 
 #[test]
 fn a_second_independently_tightened_adm_also_conserves() {
     let (_i, regime_a, regime_b, e0) = build_fixture();
-    let regimes: Vec<&dyn Regime> = vec![&regime_a, &regime_b];
+    let regimes: Vec<&dyn WitnessProvider> = vec![&regime_a, &regime_b];
 
     let adm_loose = AdmAll;
-    let adm_b_only = AdmRegimeAllowlist::new([regime_b.id]);
+    let adm_b_only = AdmWitnessAllowlist::new(regime_b.witnesses());
 
     let reachable_configs = reachable(&regimes, e0);
     let mut saw_strict_shrink = false;
@@ -210,19 +205,19 @@ fn a_second_independently_tightened_adm_also_conserves() {
 #[test]
 fn composing_two_tightenings_via_and_adm_conserves_transitively() {
     // Adm'' = AndAdm(Adm'_a, Adm'_b) is at least as tight as either alone.
-    // regime A's and regime B's allow-lists are disjoint, so their
+    // provider A's and provider B's witness allow-lists are disjoint, so their
     // intersection admits nothing — the tightest possible Adm — and the
     // chain Adm'' ⊆ Adm'_a ⊆ Adm (and Adm'' ⊆ Adm'_b ⊆ Adm) must all hold
     // pointwise.
     let (_i, regime_a, regime_b, e0) = build_fixture();
-    let regimes: Vec<&dyn Regime> = vec![&regime_a, &regime_b];
+    let regimes: Vec<&dyn WitnessProvider> = vec![&regime_a, &regime_b];
 
     let adm_loose = AdmAll;
-    let adm_a = AdmRegimeAllowlist::new([regime_a.id]);
-    let adm_b = AdmRegimeAllowlist::new([regime_b.id]);
+    let adm_a = AdmWitnessAllowlist::new(regime_a.witnesses());
+    let adm_b = AdmWitnessAllowlist::new(regime_b.witnesses());
     let adm_neither = AndAdm(
-        AdmRegimeAllowlist::new([regime_a.id]),
-        AdmRegimeAllowlist::new([regime_b.id]),
+        AdmWitnessAllowlist::new(regime_a.witnesses()),
+        AdmWitnessAllowlist::new(regime_b.witnesses()),
     );
 
     let reachable_configs = reachable(&regimes, e0);
@@ -238,7 +233,7 @@ fn composing_two_tightenings_via_and_adm_conserves_transitively() {
         assert!(cand_neither.is_subset(&cand_b));
         assert!(
             cand_neither.is_empty(),
-            "intersection of two disjoint regime allow-lists must admit nothing at {e:?}"
+            "intersection of two disjoint provider witness allow-lists must admit nothing at {e:?}"
         );
 
         let succ_loose = succ(&regimes, &adm_loose, e);

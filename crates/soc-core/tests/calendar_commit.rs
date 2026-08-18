@@ -21,12 +21,12 @@ use brix_semantic::{
 };
 use soc_core::adm::{AdmAll, AdmNone};
 use soc_core::calendar::{Frontier, Key};
-use soc_core::commit::{commit_tick, run, CommitError, Committed, SettlementRegime};
+use soc_core::commit::{commit_tick, run, CommitError, Committed, SettlementWitnessProvider};
 use soc_core::exec::ExecConfig;
 use soc_core::history::History;
 use soc_core::intern::{Handle, Interner};
 use soc_core::journal::Journal;
-use soc_core::regime::{Candidate, Regime};
+use soc_core::witness_provider::{Candidate, WitnessProvider};
 
 /// A single-candidate fixture regime. Its candidate and its recorded
 /// `Decomposition` are both constant, which keeps the deterministic-replay
@@ -34,15 +34,13 @@ use soc_core::regime::{Candidate, Regime};
 /// the fixture is exercised through the same public `commit_tick`/`run`
 /// entry points any real regime would go through.
 struct FixtureRegime {
-    id: Handle,
     witness: Handle,
     successor: Handle,
 }
 
-impl Regime for FixtureRegime {
+impl WitnessProvider for FixtureRegime {
     fn candidates(&self, _e: &ExecConfig) -> Vec<Candidate> {
         vec![Candidate {
-            regime: self.id,
             witness: self.witness,
             successor: self.successor,
         }]
@@ -60,7 +58,7 @@ fn fixture_decomposition() -> Decomposition {
     .unwrap()
 }
 
-impl SettlementRegime for FixtureRegime {
+impl SettlementWitnessProvider for FixtureRegime {
     fn try_decompose(&self, _e: &ExecConfig, _c: &Candidate) -> Result<Decomposition, CommitError> {
         Ok(fixture_decomposition())
     }
@@ -81,19 +79,11 @@ fn setup() -> (Interner, FixtureRegime, ExecConfig) {
     let mut i = Interner::new();
     let world = i.intern(Digest::of(Domain::Value, b"cc-w0"));
     let policy = i.intern(Digest::of(Domain::Value, b"cc-p0"));
-    let regime = i.intern(Digest::of(Domain::Value, b"cc-r"));
+    let _presentation_handle = i.intern(Digest::of(Domain::Value, b"cc-r"));
     let witness = i.intern(Digest::of(Domain::Value, b"cc-wit"));
     let successor = i.intern(Digest::of(Domain::Value, b"cc-w1"));
     let e = ExecConfig::new(world, policy, History::empty().digest());
-    (
-        i,
-        FixtureRegime {
-            id: regime,
-            witness,
-            successor,
-        },
-        e,
-    )
+    (i, FixtureRegime { witness, successor }, e)
 }
 
 // --- 1. select_K totality: equal phase+priority, digest tie-break decides ---
@@ -148,7 +138,7 @@ fn buk_divergent_duplicate_key_is_rejected_idempotent_duplicate_is_accepted() {
 #[test]
 fn committed_coalgebra_steps_when_admissible_and_is_quiescent_otherwise() {
     let (i, regime, e) = setup();
-    let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+    let regimes: Vec<&dyn SettlementWitnessProvider> = vec![&regime];
 
     let (committed, step, cost) = commit_tick(
         &regimes,
@@ -190,7 +180,7 @@ fn committed_coalgebra_steps_when_admissible_and_is_quiescent_otherwise() {
 #[test]
 fn deterministic_replay_is_byte_identical_across_two_runs() {
     let (i, regime, e) = setup();
-    let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+    let regimes: Vec<&dyn SettlementWitnessProvider> = vec![&regime];
     let context = ContextId::root();
     let keyer = |c: &Candidate, phase: u64| Key::new(phase, 0, tiebreak_of(c));
 
@@ -218,7 +208,7 @@ fn deterministic_replay_is_byte_identical_across_two_runs() {
 #[test]
 fn a_cost_record_is_emitted_for_every_committed_tick() {
     let (i, regime, e) = setup();
-    let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+    let regimes: Vec<&dyn SettlementWitnessProvider> = vec![&regime];
     let keyer = |c: &Candidate, phase: u64| Key::new(phase, 0, tiebreak_of(c));
 
     let (journal, costs) = run(&regimes, &AdmAll, &i, e, ContextId::root(), keyer, 4);
@@ -239,7 +229,7 @@ fn a_cost_record_is_emitted_for_every_committed_tick() {
 #[test]
 fn committed_observation_judgement_digest_matches_independent_reconstruction() {
     let (i, regime, e) = setup();
-    let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+    let regimes: Vec<&dyn SettlementWitnessProvider> = vec![&regime];
     let context = ContextId::root();
 
     let (committed, _step, _cost) =

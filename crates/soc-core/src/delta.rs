@@ -2,7 +2,7 @@
 //! incremental view"; `Build_Plan_v3_SOC.md` Step 6, E3):
 //!
 //! > Candidates are a materialized incremental view (semi-naive,
-//! > delta-driven), never a re-run query. The regime trait is a dataflow
+//! > delta-driven), never a re-run query. The provider trait is a dataflow
 //! > operator: `footprint()` / `apply(delta) → candidate delta`.
 //!
 //! World/config identities are content-addressed [`Handle`]s, so a *change*
@@ -10,8 +10,8 @@
 //! **remove-old-handle + add-new-handle**. A [`Delta`] is exactly that pair
 //! of `BTreeSet`s over world-configuration handles; a [`CandidateDelta`] is
 //! its image on the candidate view; and a [`Footprint`] is the declared
-//! index domain a regime is sensitive to, so the incremental engine
-//! ([`crate::engine`]) can **skip** any regime whose footprint does not
+//! index domain a provider is sensitive to, so the incremental engine
+//! ([`crate::engine`]) can **skip** any provider whose footprint does not
 //! intersect a delta (that skip is what makes per-step cost `∝ |Δ|`, never
 //! `∝ |world|` — ADR-0002 §9.1).
 //!
@@ -23,7 +23,7 @@
 use std::collections::BTreeSet;
 
 use crate::intern::Handle;
-use crate::regime::Candidate;
+use crate::witness_provider::Candidate;
 
 /// A change to the set of world-configuration handles between two states:
 /// the handles that **entered** (`added`) and **left** (`removed`). Because
@@ -89,7 +89,7 @@ impl Delta {
 
     /// Every handle this delta touches — added first (ascending), then
     /// removed (ascending). Deterministic order (both halves are
-    /// `BTreeSet`s). Used by the engine to route a delta to the regimes whose
+    /// `BTreeSet`s). Used by the engine to route a delta to the providers whose
     /// footprint intersects it.
     pub fn touched(&self) -> impl Iterator<Item = Handle> + '_ {
         self.added
@@ -101,8 +101,8 @@ impl Delta {
 
 /// The image of a world [`Delta`] on the materialized candidate view: the
 /// [`Candidate`]s that entered (`added`) and left (`removed`) as a
-/// consequence. This is the *only* thing a regime's
-/// [`crate::engine::IncrementalRegime::apply`] returns — never the whole
+/// consequence. This is the *only* thing a provider's
+/// [`crate::engine::IncrementalWitnessIndex::apply`] returns — never the whole
 /// view.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct CandidateDelta {
@@ -145,7 +145,7 @@ impl CandidateDelta {
     }
 
     /// Fold `other` into `self`: union the added and removed sets. Used by
-    /// the engine to combine the candidate deltas of every regime a single
+    /// the engine to combine the candidate deltas of every provider a single
     /// world delta was routed to, before materializing them into the view.
     pub fn merge(&mut self, other: CandidateDelta) {
         self.added.extend(other.added);
@@ -153,8 +153,8 @@ impl CandidateDelta {
     }
 }
 
-/// The index/key domain a regime declares itself sensitive to — the feed the
-/// engine consults to decide whether a regime must be re-run for a given
+/// The index/key domain a provider declares itself sensitive to — the feed the
+/// engine consults to decide whether a provider must be re-run for a given
 /// delta (ADR-0002 §9.1/§9.2). Coarse is acceptable for v1 ([`AllConfigs`]),
 /// but a footprint MUST be *declared*: an undeclared "sensitive to
 /// everything" default would silently defeat the O(Δ) skip and re-introduce
@@ -165,12 +165,12 @@ impl CandidateDelta {
 pub enum Footprint {
     /// Sensitive to *every* configuration — the coarsest footprint, and the
     /// one the engine can **never** skip (any non-empty delta intersects it).
-    /// Valid for v1 but pays full fan-in on every delta; a regime that can
+    /// Valid for v1 but pays full fan-in on every delta; a provider that can
     /// name the configs it cares about should return [`Footprint::Configs`]
     /// instead.
     AllConfigs,
     /// Sensitive only to this explicit set of configuration handles. The
-    /// empty set (`Configs(∅)`) is a genuinely **inert** regime: no delta
+    /// empty set (`Configs(∅)`) is a genuinely **inert** provider: no delta
     /// ever intersects it, so the engine never re-runs it — the exact shape
     /// the O(Δ) gate scales as ballast.
     Configs(BTreeSet<Handle>),
@@ -188,7 +188,7 @@ impl Footprint {
     }
 
     /// Whether this footprint intersects `delta` — i.e. whether `delta`
-    /// touches at least one configuration this regime is sensitive to.
+    /// touches at least one configuration this provider is sensitive to.
     ///
     /// - [`Footprint::AllConfigs`] intersects any *non-empty* delta (and, as
     ///   for every footprint, never intersects the empty delta — nothing
@@ -261,7 +261,7 @@ mod tests {
         let (_i, h) = handles(2);
         let fp = Footprint::empty();
         let d = Delta::of_added([h[0], h[1]]);
-        assert!(!fp.intersects(&d), "an inert regime is never re-run");
+        assert!(!fp.intersects(&d), "an inert provider is never re-run");
     }
 
     #[test]
@@ -287,11 +287,10 @@ mod tests {
     fn candidate_delta_merge_unions_both_halves() {
         let (mut i, _h) = handles(0);
         let mut mk = |tag: &str| {
-            let r = i.intern(Digest::of(Domain::Value, format!("r{tag}").as_bytes()));
+            let _r = i.intern(Digest::of(Domain::Value, format!("r{tag}").as_bytes()));
             let w = i.intern(Digest::of(Domain::Value, format!("w{tag}").as_bytes()));
             let s = i.intern(Digest::of(Domain::Value, format!("s{tag}").as_bytes()));
             Candidate {
-                regime: r,
                 witness: w,
                 successor: s,
             }

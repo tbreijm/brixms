@@ -18,17 +18,17 @@ use brix_semantic::{ConfigId, ContextId, Decomposition, GeneratorId};
 use soc_core::adm::AdmAll;
 use soc_core::calendar::Key;
 use soc_core::commit::{
-    commit_tick, run_reason, CommitError, Committed, SettlementRegime, UnsaturatedStop,
+    commit_tick, run_reason, CommitError, Committed, SettlementWitnessProvider, UnsaturatedStop,
 };
 use soc_core::exec::ExecConfig;
 use soc_core::history::History;
 use soc_core::intern::{Handle, Interner};
 use soc_core::journal::Journal;
-use soc_core::regime::{Candidate, Regime};
 use soc_core::saturate::{
     sat_step, DeclaredAssumptions, GeneratorPartitionProfile, ObservationProfile, PresentationIdV1,
     PresentationV1, ProfileError, SaturatedStep, SaturationBudget, SaturationUnknown, StepLabel,
 };
+use soc_core::witness_provider::{Candidate, WitnessProvider};
 
 // ---------------------------------------------------------------------------
 // Fixture: a world graph whose every edge names the generator that realizes it,
@@ -44,18 +44,16 @@ struct Edge {
 }
 
 struct ChainRegime {
-    id: Handle,
     edges: BTreeMap<Handle, Edge>,
     configs: BTreeMap<Handle, ConfigId>,
 }
 
-impl Regime for ChainRegime {
+impl WitnessProvider for ChainRegime {
     fn candidates(&self, e: &ExecConfig) -> Vec<Candidate> {
         self.edges
             .get(&e.world)
             .map(|edge| {
                 vec![Candidate {
-                    regime: self.id,
                     witness: edge.witness,
                     successor: edge.successor,
                 }]
@@ -64,7 +62,7 @@ impl Regime for ChainRegime {
     }
 }
 
-impl SettlementRegime for ChainRegime {
+impl SettlementWitnessProvider for ChainRegime {
     fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError> {
         let edge = self
             .edges
@@ -152,7 +150,7 @@ fn build_fixture(spec: &[(&'static str, &'static str, Vec<GeneratorId>)]) -> Fix
         }
     }
     let policy = tag(&mut interner, "policy");
-    let regime_id = tag(&mut interner, "regime.chain");
+    let _presentation_handle = tag(&mut interner, "regime.chain");
 
     let mut configs = BTreeMap::new();
     for (_, handle) in worlds.iter() {
@@ -176,11 +174,7 @@ fn build_fixture(spec: &[(&'static str, &'static str, Vec<GeneratorId>)]) -> Fix
 
     Fixture {
         interner,
-        regime: ChainRegime {
-            id: regime_id,
-            edges,
-            configs,
-        },
+        regime: ChainRegime { edges, configs },
         worlds,
         policy,
     }
@@ -193,9 +187,9 @@ impl Fixture {
 }
 
 /// Assemble a presentation. The regime slice must be a caller-held local — a
-/// `&[&dyn SettlementRegime]` cannot outlive the `&dyn` temporary it borrows.
+/// `&[&dyn SettlementWitnessProvider]` cannot outlive the `&dyn` temporary it borrows.
 fn presentation<'a>(
-    regimes: &'a [&'a dyn SettlementRegime],
+    regimes: &'a [&'a dyn SettlementWitnessProvider],
     profile: &'a dyn ObservationProfile,
     interner: &'a Interner,
 ) -> PresentationV1<'a> {
@@ -229,7 +223,7 @@ fn budget() -> SaturationBudget {
 fn finite_tau_prefix_exports_the_same_observation_as_the_unsaturated_step() {
     let fx = linear_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner);
     let mut k = keyer();
@@ -285,7 +279,7 @@ fn finite_tau_prefix_exports_the_same_observation_as_the_unsaturated_step() {
 fn saturated_stepping_is_deterministic_across_two_runs() {
     let fx = linear_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
 
     let run_once = || {
@@ -312,7 +306,7 @@ fn saturated_stepping_is_deterministic_across_two_runs() {
 #[test]
 fn one_journal_under_two_profiles_has_two_visible_traces_and_one_chain_digest() {
     let fx = linear_fixture();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let mut k = keyer();
 
@@ -374,7 +368,7 @@ fn one_journal_under_two_profiles_has_two_visible_traces_and_one_chain_digest() 
 fn an_all_realizing_profile_makes_saturation_degenerate_to_one_committed_step() {
     let fx = linear_fixture();
     let profile = all_realizing_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner);
     let mut k = keyer();
@@ -400,7 +394,7 @@ fn a_mixed_generator_decomposition_fails_closed_without_an_observation() {
     // One edge whose decomposition draws from BOTH partitions.
     let fx = build_fixture(&[("w0", "w1", vec![gen_tau_a(), gen_realizing()])]);
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner);
     let mut k = keyer();
@@ -424,7 +418,7 @@ fn an_unregistered_generator_fails_closed() {
         vec![GeneratorId::named("saturation-fixture.unknown@1")],
     )]);
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner);
     let mut k = keyer();
@@ -448,7 +442,7 @@ fn an_unregistered_generator_fails_closed() {
 fn a_terminal_configuration_yields_a_quiescence_claim_graded_derived() {
     let fx = linear_fixture();
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner);
     let mut k = keyer();
@@ -476,7 +470,7 @@ fn a_tau_prefix_before_quiescence_is_recorded_in_the_claim() {
     // w0 -τa-> w1, and w1 is terminal: saturation hides one step, then certifies.
     let fx = build_fixture(&[("w0", "w1", vec![gen_tau_a()])]);
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner);
     let mut k = keyer();
@@ -519,7 +513,7 @@ fn a_tau_chain_past_the_budget_exhausts_and_never_certifies_quiescence() {
         ("w9", "w10", vec![gen_realizing()]),
     ]);
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner);
     let mut k = keyer();
@@ -554,7 +548,7 @@ fn a_tau_chain_past_the_budget_exhausts_and_never_certifies_quiescence() {
 #[test]
 fn run_reason_distinguishes_an_empty_frontier_from_an_exhausted_tick_budget() {
     let terminating = linear_fixture();
-    let regime: &dyn SettlementRegime = &terminating.regime;
+    let regime: &dyn SettlementWitnessProvider = &terminating.regime;
     let regimes = std::slice::from_ref(&regime);
     let mut k = keyer();
     let (journal, _, stop) = run_reason(
@@ -571,7 +565,7 @@ fn run_reason_distinguishes_an_empty_frontier_from_an_exhausted_tick_budget() {
 
     // The same driver on a non-terminating world, cut off by its tick budget.
     let looping = build_fixture(&[("w0", "w0", vec![gen_tau_a()])]);
-    let looping_regime: &dyn SettlementRegime = &looping.regime;
+    let looping_regime: &dyn SettlementWitnessProvider = &looping.regime;
     let looping_regimes = std::slice::from_ref(&looping_regime);
     let mut k2 = keyer();
     let (looping_journal, _, looping_stop) = run_reason(
@@ -634,7 +628,7 @@ fn edge_semantics(
 fn administrative_steps_audit_exactly_like_realizing_ones() {
     let fx = linear_fixture(); // w0 -τa-> w1 -τb-> w2 -o-> w3
     let profile = hiding_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner);
     let mut k = keyer();

@@ -26,12 +26,12 @@ use soc_core::audit_receipt::{
     AUDIT_PROFILE_V1, AUDIT_RECEIPT_MARKER_V1, AUDIT_RECEIPT_VERSION_V1,
 };
 use soc_core::calendar::Key;
-use soc_core::commit::{run, CommitError, SettlementRegime};
+use soc_core::commit::{run, CommitError, SettlementWitnessProvider};
 use soc_core::exec::ExecConfig;
 use soc_core::history::History;
 use soc_core::intern::{Handle, Interner};
 use soc_core::journal::CommittedStep;
-use soc_core::regime::{Candidate, Regime};
+use soc_core::witness_provider::{Candidate, WitnessProvider};
 
 // ---------------------------------------------------------------------------
 // Fixture — a real `commit::run` tick producing a genuine two-generator chain.
@@ -44,15 +44,13 @@ use soc_core::regime::{Candidate, Regime};
 /// genuine two-generator chain `x0 --g1--> x1 --g2--> x2` — non-trivial
 /// composition, exercising the stepwise `ρ_k = ρ_g2 ∘ ρ_g1` check.
 struct FixtureRegime {
-    id: Handle,
     witness: Handle,
     successor: Handle,
 }
 
-impl Regime for FixtureRegime {
+impl WitnessProvider for FixtureRegime {
     fn candidates(&self, _e: &ExecConfig) -> Vec<Candidate> {
         vec![Candidate {
-            regime: self.id,
             witness: self.witness,
             successor: self.successor,
         }]
@@ -79,7 +77,7 @@ fn fixture_decomposition() -> Decomposition {
     Decomposition::recorded(vec![gen1(), gen2()], vec![cfg_x0(), cfg_x1(), cfg_x2()]).unwrap()
 }
 
-impl SettlementRegime for FixtureRegime {
+impl SettlementWitnessProvider for FixtureRegime {
     fn try_decompose(&self, _e: &ExecConfig, _c: &Candidate) -> Result<Decomposition, CommitError> {
         Ok(fixture_decomposition())
     }
@@ -102,19 +100,11 @@ fn setup() -> (Interner, FixtureRegime, ExecConfig) {
     let mut i = Interner::new();
     let world = i.intern(cfg_x0().digest());
     let policy = i.intern(Digest::of(Domain::Value, b"audit-fixture-p0"));
-    let regime = i.intern(Digest::of(Domain::Value, b"audit-fixture-r"));
+    let _presentation_handle = i.intern(Digest::of(Domain::Value, b"audit-fixture-r"));
     let witness = i.intern(Digest::of(Domain::Value, b"audit-fixture-witness"));
     let successor = i.intern(cfg_x2().digest());
     let e = ExecConfig::new(world, policy, History::empty().digest());
-    (
-        i,
-        FixtureRegime {
-            id: regime,
-            witness,
-            successor,
-        },
-        e,
-    )
+    (i, FixtureRegime { witness, successor }, e)
 }
 
 /// Drive the real `commit::run` loop for exactly one tick to produce a
@@ -122,7 +112,7 @@ fn setup() -> (Interner, FixtureRegime, ExecConfig) {
 /// real regime goes through.
 fn committed_fixture_step() -> (CommittedStep, ContextId) {
     let (i, regime, e) = setup();
-    let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+    let regimes: Vec<&dyn SettlementWitnessProvider> = vec![&regime];
     let context = ContextId::root();
     let keyer = |c: &Candidate, phase: u64| Key::new(phase, 0, tiebreak_of(c));
 

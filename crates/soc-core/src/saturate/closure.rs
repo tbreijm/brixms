@@ -179,7 +179,7 @@ pub fn check_closure<F>(
     budget: SaturationBudget,
 ) -> ClosureResult
 where
-    F: FnMut(&crate::regime::Candidate, u64) -> crate::calendar::Key,
+    F: FnMut(&crate::witness_provider::Candidate, u64) -> crate::calendar::Key,
 {
     let Some(policy) = pres.interner.try_resolve(e0.policy).map(ConfigId) else {
         return ClosureResult::Unknown(ClosureUnknown::UnresolvedConfiguration);

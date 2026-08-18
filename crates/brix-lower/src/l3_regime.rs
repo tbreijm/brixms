@@ -6,14 +6,14 @@
 //! - **§3.3**'s precomputed transition table: during bounded setup, the
 //!   plan's `N + 1` deterministic prefix worlds and `N` head candidate
 //!   triples are built and interned once ([`build_l3_transition_table`]).
-//!   `Candidate` has no canonical identity of its own — it is the regime,
-//!   witness, and successor *constituents* that get interned — so the hot
-//!   regime maps each nonterminal world handle **directly** to one
+//!   `Candidate` has no canonical identity of its own — its witness and
+//!   successor *constituents* get interned — so the hot provider maps each
+//!   nonterminal world handle **directly** to one
 //!   preconstructed candidate, never scanning the pending agenda or hashing
 //!   source-sized data.
 //! - **§2 item 3**'s compiler-owned dual regime ([`L3Regime`]): one type
-//!   implementing both the retained naive [`Regime`] and the incremental
-//!   [`IncrementalRegime`] over the *same* immutable
+//!   implementing both the retained naive [`WitnessProvider`] and the incremental
+//!   [`IncrementalWitnessIndex`] over the *same* immutable
 //!   [`L3TransitionTable`]. Because [`soc_core::engine::IncrementalEngine`]
 //!   owns its regime mutably, the naive differential oracle is expected to
 //!   run a **separate** `L3Regime` instance sharing the same `Rc`-held table
@@ -37,14 +37,14 @@ use std::rc::Rc;
 
 use brix_semantic::{ConfigId, Decomposition, GeneratorId, RegimeId};
 
-use soc_core::adm::AdmRegimeAllowlist;
-use soc_core::commit::{CommitError, SettlementRegime};
+use soc_core::adm::AdmWitnessAllowlist;
+use soc_core::commit::{CommitError, SettlementWitnessProvider};
 use soc_core::delta::{CandidateDelta, Delta, Footprint};
-use soc_core::engine::IncrementalRegime;
+use soc_core::engine::IncrementalWitnessIndex;
 use soc_core::exec::ExecConfig;
 use soc_core::intern::{Handle, Interner};
-use soc_core::regime::{Candidate, Regime};
 use soc_core::saturate::GeneratorPartitionProfile;
+use soc_core::witness_provider::{Candidate, WitnessProvider};
 
 use crate::l3::{L3PlanItem, L3PlanV1, L3ValueV1, L3_PROFILE_MARKER_V1};
 use crate::l3_canon::{
@@ -91,7 +91,7 @@ pub struct L3TransitionTable {
     regime_id: RegimeId,
     regime_handle: Handle,
     /// The `N + 1` world handles `W0..WN`, in order. This is exactly the
-    /// declared [`IncrementalRegime::footprint`] (ADR-0012 §3.3: "its
+    /// declared [`IncrementalWitnessIndex::footprint`] (ADR-0012 §3.3: "its
     /// footprint is exactly those N + 1 world handles").
     worlds: Vec<Handle>,
     /// The `N + 1` canonical world identities, index-aligned with `worlds`.
@@ -116,8 +116,9 @@ impl L3TransitionTable {
         self.regime_id
     }
 
-    /// The interned handle of [`Self::regime_id`] — precisely the handle
-    /// [`l3_adm`] allow-lists.
+    /// The interned handle of [`Self::regime_id`]. It is retained for frozen
+    /// v1 presentation/key material as witness-interpretation provenance;
+    /// [`l3_adm`] allow-lists the table's witness handles instead.
     pub fn regime_handle(&self) -> Handle {
         self.regime_handle
     }
@@ -171,7 +172,7 @@ impl L3TransitionTable {
     /// The one candidate this table associates with `world`, or `None` if
     /// `world` proposes none (the terminal world, or a handle this table does
     /// not know about at all). The single source of truth both
-    /// [`Regime::candidates`] and [`IncrementalRegime::apply`] read, so the
+    /// [`WitnessProvider::candidates`] and [`IncrementalWitnessIndex::apply`] read, so the
     /// two are byte-identical by construction — never two independently
     /// maintained lookups that could drift (the differential-identity anchor,
     /// ADR-0002 §9.2).
@@ -329,7 +330,6 @@ fn build_l3_transition_table_with_program(
 
         world_index.insert(worlds[i], i);
         candidates.push(Candidate {
-            regime: regime_handle,
             witness: witness_handle,
             successor: worlds[i + 1],
         });
@@ -366,11 +366,11 @@ pub fn l3_policy(program: ProgramIdV1, table: &L3TransitionTable) -> L3PolicyV1 
     }
 }
 
-/// The compiled ADR-0012 §3.4 policy: `AdmRegimeAllowlist` containing
-/// **precisely** `table.regime_id()`'s interned handle — never
-/// [`soc_core::adm::AdmAll`].
-pub fn l3_adm(table: &L3TransitionTable) -> AdmRegimeAllowlist {
-    AdmRegimeAllowlist::new([table.regime_handle()])
+/// The compiled policy admits exactly the precomputed primitive witnesses.
+/// `RegimeId` remains witness-interpretation provenance in [`l3_policy`]; it
+/// is not candidate/provider identity.
+pub fn l3_adm(table: &L3TransitionTable) -> AdmWitnessAllowlist {
+    AdmWitnessAllowlist::new(table.candidates.iter().map(|c| c.witness))
 }
 
 // ---------------------------------------------------------------------------
@@ -378,7 +378,7 @@ pub fn l3_adm(table: &L3TransitionTable) -> AdmRegimeAllowlist {
 // ---------------------------------------------------------------------------
 
 /// The compiler-owned dual regime: one type implementing both the retained
-/// naive [`Regime`] and the incremental [`IncrementalRegime`] over the same
+/// naive [`WitnessProvider`] and the incremental [`IncrementalWitnessIndex`] over the same
 /// [`L3TransitionTable`]. It derives a [`Candidate`] only from the head of
 /// the pending v1 agenda — concretely, from whichever nonterminal world
 /// [`L3TransitionTable::candidate_for`] maps the current world handle to.
@@ -403,7 +403,7 @@ impl L3Regime {
         &self.table
     }
 
-    /// ADR-0012 §4.3's shared counted apply. `IncrementalRegime::apply`
+    /// ADR-0012 §4.3's shared counted apply. `IncrementalWitnessIndex::apply`
     /// delegates to this so the deterministic per-touched-handle lookup count
     /// is independently observable in conformance tests —
     /// `IncrementalEngine::StepReport` counts produced entries but cannot see
@@ -434,7 +434,7 @@ impl L3Regime {
     }
 }
 
-impl Regime for L3Regime {
+impl WitnessProvider for L3Regime {
     /// Naive by trait contract (unbounded, total — ADR-0012 §4.2 ⟨D-CAND⟩),
     /// but structurally free here: this table's `candidate_for` is a single
     /// precomputed lookup, never a scan of the pending agenda, so there is no
@@ -445,7 +445,7 @@ impl Regime for L3Regime {
     }
 }
 
-impl IncrementalRegime for L3Regime {
+impl IncrementalWitnessIndex for L3Regime {
     /// Exactly the plan's `N + 1` world handles (ADR-0012 §3.3).
     fn footprint(&self) -> Footprint {
         Footprint::configs(self.table.worlds.iter().copied())
@@ -517,7 +517,7 @@ fn check_l3_decomposition(
     Ok(())
 }
 
-impl SettlementRegime for L3Regime {
+impl SettlementWitnessProvider for L3Regime {
     /// The tight decomposition realizing a committed L3 candidate is always a
     /// single generator step `src -[g(program, rule)]-> dst`, per ADR-0012
     /// §3.1's one-generator-per-rule decomposition. Fallible: an `e.world`
@@ -594,7 +594,6 @@ mod tests {
 
     fn tiebreak_of(c: &Candidate) -> Digest {
         let mut w = CanonWriter::new();
-        w.write_uint(c.regime.raw() as u64);
         w.write_uint(c.witness.raw() as u64);
         w.write_uint(c.successor.raw() as u64);
         w.digest(Domain::Value)
@@ -624,7 +623,7 @@ mod tests {
 
         let policy = interner.intern(Digest::of(Domain::Value, b"policy"));
         let regime = L3Regime::new(Rc::new(table));
-        let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+        let regimes: Vec<&dyn SettlementWitnessProvider> = vec![&regime];
         let adm = l3_adm(regime.table());
         let context = ContextId::root();
 
@@ -709,8 +708,8 @@ mod tests {
 
     #[test]
     fn candidates_and_apply_agree_on_the_same_precomputed_candidate() {
-        // The differential-identity anchor at the unit level: Regime and
-        // IncrementalRegime must derive the SAME candidate for the same
+        // The differential-identity anchor at the unit level: WitnessProvider and
+        // IncrementalWitnessIndex must derive the SAME candidate for the same
         // world, because both read through `L3TransitionTable::candidate_for`.
         let (_, _, _, table) = plan_and_table("rule a() = 1\n");
         let table = Rc::new(table);
@@ -770,7 +769,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn policy_allowlists_precisely_the_one_regime_handle() {
+    fn policy_provenance_and_witness_allowlist_are_distinct() {
         let (_, program, mut interner, table) = plan_and_table("rule a() = 1\n");
         let policy = l3_policy(program, &table);
         assert_eq!(policy.regime, table.regime_id());
@@ -778,14 +777,9 @@ mod tests {
         let policy_h = interner.intern(Digest::of(Domain::Value, b"policy"));
         let world_h = interner.intern(Digest::of(Domain::Value, b"world"));
         let e = ExecConfig::new(world_h, policy_h, History::empty().digest());
-        let admitted = Candidate {
-            regime: table.regime_handle(),
-            witness: interner.intern(Digest::of(Domain::Value, b"w")),
-            successor: world_h,
-        };
+        let admitted = table.candidate_at(0).unwrap();
         let denied = Candidate {
-            regime: interner.intern(Digest::of(Domain::Value, b"some-other-regime")),
-            witness: admitted.witness,
+            witness: interner.intern(Digest::of(Domain::Value, b"other-witness")),
             successor: world_h,
         };
         let adm = l3_adm(&table);
@@ -1031,7 +1025,6 @@ mod tests {
         let policy = i.intern(Digest::of(Domain::Value, b"policy"));
         let e = ExecConfig::new(unknown_world, policy, History::empty().digest());
         let bogus = Candidate {
-            regime: regime.table().regime_handle(),
             witness: i.intern(Digest::of(Domain::Value, b"w")),
             successor: unknown_world,
         };
@@ -1051,7 +1044,7 @@ mod tests {
         let regime = L3Regime::new(Rc::clone(&table));
         let profile = build_l3_observation_profile(&table);
 
-        let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+        let regimes: Vec<&dyn SettlementWitnessProvider> = vec![&regime];
         let adm = l3_adm(&table);
         let e0 = ExecConfig::new(table.initial_world(), policy, History::empty().digest());
         let (committed, step, _cost) = commit_tick(

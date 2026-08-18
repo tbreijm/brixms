@@ -1,7 +1,7 @@
 //! Checker fixture suite for the audit-factorization checker (Lane 2;
 //! ADR-0002 §4.1, §5 point 1; `Build_Plan_v3_SOC.md` Step 4 gate).
 //!
-//! Builds one real end-to-end fixture: a [`SettlementRegime`] whose recorded
+//! Builds one real end-to-end fixture: a [`SettlementWitnessProvider`] whose recorded
 //! [`Decomposition`] is a genuine `𝒢`-chain with **two** generators (so the
 //! relational composition being verified is non-trivial), driven through
 //! Lane 1's `commit::run` to produce a real [`Journal`]/`CommittedStep` —
@@ -24,26 +24,24 @@ use brix_semantic::{
 use soc_core::adm::AdmAll;
 use soc_core::audit::{audit_step, AuditResult, GeneratorSemanticsV1};
 use soc_core::calendar::Key;
-use soc_core::commit::{run, CommitError, SettlementRegime};
+use soc_core::commit::{run, CommitError, SettlementWitnessProvider};
 use soc_core::exec::ExecConfig;
 use soc_core::history::History;
 use soc_core::intern::{Handle, Interner};
 use soc_core::journal::CommittedStep;
-use soc_core::regime::{Candidate, Regime};
+use soc_core::witness_provider::{Candidate, WitnessProvider};
 
 /// A single-candidate fixture regime whose recorded `Decomposition` is a
 /// genuine two-generator chain `x0 --g1--> x1 --g2--> x2` — non-trivial
 /// composition, exercising the stepwise `ρ_k = ρ_g2 ∘ ρ_g1` check.
 struct FixtureRegime {
-    id: Handle,
     witness: Handle,
     successor: Handle,
 }
 
-impl Regime for FixtureRegime {
+impl WitnessProvider for FixtureRegime {
     fn candidates(&self, _e: &ExecConfig) -> Vec<Candidate> {
         vec![Candidate {
-            regime: self.id,
             witness: self.witness,
             successor: self.successor,
         }]
@@ -70,7 +68,7 @@ fn fixture_decomposition() -> Decomposition {
     Decomposition::recorded(vec![gen1(), gen2()], vec![cfg_x0(), cfg_x1(), cfg_x2()]).unwrap()
 }
 
-impl SettlementRegime for FixtureRegime {
+impl SettlementWitnessProvider for FixtureRegime {
     fn try_decompose(&self, _e: &ExecConfig, _c: &Candidate) -> Result<Decomposition, CommitError> {
         Ok(fixture_decomposition())
     }
@@ -93,19 +91,11 @@ fn setup() -> (Interner, FixtureRegime, ExecConfig) {
     let mut i = Interner::new();
     let world = i.intern(cfg_x0().digest());
     let policy = i.intern(Digest::of(Domain::Value, b"audit-fixture-p0"));
-    let regime = i.intern(Digest::of(Domain::Value, b"audit-fixture-r"));
+    let _presentation_handle = i.intern(Digest::of(Domain::Value, b"audit-fixture-r"));
     let witness = i.intern(Digest::of(Domain::Value, b"audit-fixture-witness"));
     let successor = i.intern(cfg_x2().digest());
     let e = ExecConfig::new(world, policy, History::empty().digest());
-    (
-        i,
-        FixtureRegime {
-            id: regime,
-            witness,
-            successor,
-        },
-        e,
-    )
+    (i, FixtureRegime { witness, successor }, e)
 }
 
 /// The honest declaration for this fixture's two-link chain (ADR-0020 D2):
@@ -136,7 +126,7 @@ fn registry_with(gens: &[GeneratorId]) -> GeneratorRegistry {
 /// real regime goes through.
 fn committed_fixture_step() -> (CommittedStep, ContextId) {
     let (i, regime, e) = setup();
-    let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+    let regimes: Vec<&dyn SettlementWitnessProvider> = vec![&regime];
     let context = ContextId::root();
     let keyer = |c: &Candidate, phase: u64| Key::new(phase, 0, tiebreak_of(c));
 

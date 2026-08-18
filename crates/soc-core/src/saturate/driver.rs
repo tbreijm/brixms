@@ -116,7 +116,7 @@ pub fn run_saturated<F>(
     budget: SaturationBudget,
 ) -> SaturatedRun
 where
-    F: FnMut(&crate::regime::Candidate, u64) -> crate::calendar::Key,
+    F: FnMut(&crate::witness_provider::Candidate, u64) -> crate::calendar::Key,
 {
     let mut journal = Journal::new();
     let mut visible = Vec::new();
@@ -250,7 +250,7 @@ pub struct PresentedSystem<'a, F> {
 
 impl<'a, F> PresentedSystem<'a, F>
 where
-    F: FnMut(&crate::regime::Candidate, u64) -> crate::calendar::Key,
+    F: FnMut(&crate::witness_provider::Candidate, u64) -> crate::calendar::Key,
 {
     /// Present `presentation` starting from `initial`, keyed by `keyer` under
     /// `budget`.
@@ -286,7 +286,7 @@ where
 
 impl<F> SaturatedSystem for PresentedSystem<'_, F>
 where
-    F: FnMut(&crate::regime::Candidate, u64) -> crate::calendar::Key,
+    F: FnMut(&crate::witness_provider::Candidate, u64) -> crate::calendar::Key,
 {
     fn initial(&self) -> ExecConfig {
         self.initial

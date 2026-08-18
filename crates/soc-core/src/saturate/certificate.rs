@@ -76,7 +76,7 @@ pub const SATURATION_PROFILE_V1: &str = "brix.soc.saturation@1";
 ///
 /// The load-bearing honesty field of the certificate: "the frontier is empty"
 /// is a decided negative **only if** enumeration was complete. That holds in v1
-/// solely because `Regime::candidates -> Vec<Candidate>` is unbounded and
+/// solely because `WitnessProvider::candidates -> Vec<Candidate>` is unbounded and
 /// total. A bounded or fallible regime API requires a v2 certificate and MUST
 /// NOT emit v1 (ADR-0014 §6.2, risk 1) — which is why this enum has exactly one
 /// variant and the reader accepts exactly one ordinal. Adding a second variant

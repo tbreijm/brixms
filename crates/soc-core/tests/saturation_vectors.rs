@@ -31,11 +31,10 @@ use brix_semantic::{
 };
 use soc_core::adm::AdmAll;
 use soc_core::calendar::Key;
-use soc_core::commit::{CommitError, SettlementRegime};
+use soc_core::commit::{CommitError, SettlementWitnessProvider};
 use soc_core::exec::ExecConfig;
 use soc_core::history::History;
 use soc_core::intern::{Handle, Interner};
-use soc_core::regime::{Candidate, Regime};
 use soc_core::saturate::{
     divergence_certificate_id, encode_divergence_v1, encode_quiescence_v1,
     quiescence_certificate_id, sat_step, DeclaredAssumptions, DivergenceCertificateV1,
@@ -43,6 +42,7 @@ use soc_core::saturate::{
     PresentationV1, QuiescenceCertificateV1, SaturatedStep, SaturationBudget,
     CERTIFICATE_FORMAT_V1, SATURATION_PROFILE_V1,
 };
+use soc_core::witness_provider::{Candidate, WitnessProvider};
 
 // ---------------------------------------------------------------------------
 // Fixture
@@ -55,18 +55,16 @@ struct Edge {
 }
 
 struct ChainRegime {
-    id: Handle,
     edges: BTreeMap<Handle, Edge>,
     configs: BTreeMap<Handle, ConfigId>,
 }
 
-impl Regime for ChainRegime {
+impl WitnessProvider for ChainRegime {
     fn candidates(&self, e: &ExecConfig) -> Vec<Candidate> {
         self.edges
             .get(&e.world)
             .map(|edge| {
                 vec![Candidate {
-                    regime: self.id,
                     witness: edge.witness,
                     successor: edge.successor,
                 }]
@@ -75,7 +73,7 @@ impl Regime for ChainRegime {
     }
 }
 
-impl SettlementRegime for ChainRegime {
+impl SettlementWitnessProvider for ChainRegime {
     fn try_decompose(&self, e: &ExecConfig, c: &Candidate) -> Result<Decomposition, CommitError> {
         let edge = self
             .edges
@@ -143,7 +141,7 @@ fn build_fixture(spec: &[(&'static str, &'static str)]) -> Fixture {
         }
     }
     let policy = tag(&mut interner, "vector.policy");
-    let regime_id = tag(&mut interner, "vector.regime");
+    let _presentation_handle = tag(&mut interner, "vector.regime");
 
     let configs = worlds
         .values()
@@ -165,11 +163,7 @@ fn build_fixture(spec: &[(&'static str, &'static str)]) -> Fixture {
 
     Fixture {
         interner,
-        regime: ChainRegime {
-            id: regime_id,
-            edges,
-            configs,
-        },
+        regime: ChainRegime { edges, configs },
         worlds,
         policy,
     }
@@ -182,7 +176,7 @@ impl Fixture {
 }
 
 fn presentation<'a>(
-    regimes: &'a [&'a dyn SettlementRegime],
+    regimes: &'a [&'a dyn SettlementWitnessProvider],
     profile: &'a dyn ObservationProfile,
     interner: &'a Interner,
 ) -> PresentationV1<'a> {
@@ -233,7 +227,7 @@ fn quiescence_fixtures() -> Vec<QuiescenceFixture> {
 fn mint_quiescence(from: &str) -> QuiescenceCertificateV1 {
     let fx = build_fixture(&[("w0", "w1"), ("w1", "w2")]);
     let profile = vector_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner);
     let mut k = keyer();
@@ -269,7 +263,7 @@ fn divergence_fixtures() -> Vec<DivergenceFixture> {
 fn mint_divergence() -> DivergenceCertificateV1 {
     let fx = build_fixture(&[("w0", "w1"), ("w1", "w0")]);
     let profile = vector_profile();
-    let regime: &dyn SettlementRegime = &fx.regime;
+    let regime: &dyn SettlementWitnessProvider = &fx.regime;
     let regimes = std::slice::from_ref(&regime);
     let pres = presentation(regimes, &profile, &fx.interner);
     let mut k = keyer();

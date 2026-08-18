@@ -27,6 +27,7 @@ pub mod l3_canon;
 pub mod l3_regime;
 pub mod l3_run;
 pub mod l3_v2;
+pub mod l3_witness_frontier;
 pub use l3::{
     lower_l3_plan, L3ConfigBody, L3ConfigDecl, L3LowerError, L3PlanItem, L3PlanV1, L3TypeRef,
     L3ValueV1, PlanLimitsV1, L3_PROFILE_MARKER_RETIRED_V0, L3_PROFILE_MARKER_V1,
@@ -52,6 +53,12 @@ pub use l3_run::{
     commit_error_reason, frontier_conflict_reason, run_l3_plan, run_l3_plan_with_interner,
     settlement_run_id, AdapterFailureDetail, L3AdmChoice, L3RunReport, L3UnknownReasonV1,
     SettlementRunId, SettlementRunV1, SettlementStopV1,
+};
+pub use l3_witness_frontier::{
+    lower_witness_frontier_plan, run_witness_frontier_once, witness_frontier_program_id,
+    WitnessCandidate, WitnessFrontierLowerError, WitnessFrontierPlan, WitnessFrontierProgramId,
+    WitnessFrontierRun, WitnessFrontierRunError, WitnessFrontierRuntime, WitnessRule,
+    L3_WITNESS_FRONTIER_PROFILE,
 };
 
 use brix_elaborate::{elaborate_tree, ElaborationResult, RealizesTree};

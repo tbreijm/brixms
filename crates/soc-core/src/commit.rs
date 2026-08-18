@@ -11,17 +11,15 @@
 //!
 //! **Enumeration-sharing note (a documented design choice).** [`run`]/
 //! [`commit_tick`] do not call [`crate::oracle::cand_instrumented`] directly.
-//! Doing so would need `regimes: &[&dyn SettlementRegime]` converted to a
-//! fresh `Vec<&dyn Regime>` (an extra allocation) and then a *second*,
-//! redundant enumeration pass to recover which concrete regime produced the
-//! selected candidate (needed to call [`SettlementRegime::try_decompose`] on the
-//! right regime — [`crate::regime::Candidate::regime`] is only a bare
-//! interned [`crate::intern::Handle`], not a way back to the `&dyn
-//! SettlementRegime` that produced it). Instead, `commit_tick` enumerates
+//! Doing so would need `providers: &[&dyn SettlementWitnessProvider]` converted to a
+//! fresh `Vec<&dyn WitnessProvider>` (an extra allocation) and then a *second*,
+//! redundant enumeration pass to recover which concrete provider presented the
+//! selected candidate (needed to call [`SettlementWitnessProvider::try_decompose`] on the
+//! selected provider). Instead, `commit_tick` enumerates
 //! inline, **mirroring `cand`/`cand_instrumented`'s exact algorithm and cost
-//! accounting** (one work unit per regime scanned, unconditionally; one more
+//! accounting** (one work unit per provider scanned, unconditionally; one more
 //! per raw candidate scanned for admissibility) while keeping each
-//! candidate's originating regime index alongside it in the frontier. The
+//! candidate's originating provider index alongside it in the frontier. The
 //! enumeration *algorithm* is therefore identical to the oracle's; only the
 //! call site differs, for the reason above.
 
@@ -38,7 +36,7 @@ use crate::exec::ExecConfig;
 use crate::intern::Interner;
 use crate::journal::{CommittedStep, Journal};
 use crate::oracle;
-use crate::regime::{Candidate, Regime};
+use crate::witness_provider::{Candidate, WitnessProvider};
 
 /// `O_min` (ADR-0002 §8.3): "a small finite set of settlement-event *tags* —
 /// the committed outcome class + a digest of the committed `JudgementId`."
@@ -95,34 +93,34 @@ pub enum Committed {
     },
 }
 
-/// The committed-path extension of [`Regime`] (ADR-0002 §6 `Decomposition`;
+/// The committed-path extension of [`WitnessProvider`] (ADR-0002 §6 `Decomposition`;
 /// §5.1 "the hot loop records a compact support record plus the
 /// (unverified) `Decomposition`"). [`Candidate`] stays lean (`Copy`, lives in
-/// a `BTreeSet` in the naive oracle) — this trait is where a regime supplies
+/// a `BTreeSet` in the naive oracle) — this trait is where a provider supplies
 /// the tight `𝒢`-decomposition realizing one *specific* committed candidate,
 /// called only at the commit boundary (once per tick, on the single
 /// selected candidate), never in the `Ord`-set hot enumeration path.
-pub trait SettlementRegime: Regime {
+pub trait SettlementWitnessProvider: WitnessProvider {
     /// The tight `𝒢`-decomposition realizing `c`'s witness, in RECORDED
     /// (unverified) form (ADR-0002 §5.1 — the hot loop records, never
     /// verifies). Called at the commit boundary, not in the `Ord`-set hot
     /// path.
     ///
-    /// Fallible (ADR-0012 §2 item 6, §6.3): a regime driven from untrusted
+    /// Fallible (ADR-0012 §2 item 6, §6.3): a provider driven from untrusted
     /// source-derived state (a malformed plan, a missing interner entry, an
     /// empty decomposition) cannot honour an infallible signature without
     /// panicking or fabricating a `Decomposition`. Rejecting is reported
     /// through the same [`CommitError`] vocabulary [`try_commit_selected`]
-    /// already uses at the commit boundary — `SettlementRegime` is already
+    /// already uses at the commit boundary — `SettlementWitnessProvider` is already
     /// commit-boundary-specific (see the trait doc above), so there is no
-    /// need for a second, regime-local error type; extending `CommitError`
+    /// need for a second, provider-local error type; extending `CommitError`
     /// keeps exactly one rejection vocabulary instead of two that would need
     /// to be kept in sync.
     ///
     /// This is deliberately the trait's only decomposition method — no
     /// infallible `decompose` survives beside it. A blanket default
     /// (`decompose` kept, `try_decompose` wrapping it in `Ok`) would let a
-    /// future regime silently opt out of the fail-closed contract by
+    /// future provider silently opt out of the fail-closed contract by
     /// implementing only the infallible half; every current implementor in
     /// this workspace already constructs a fixed, valid `Decomposition`, so
     /// migrating them is mechanical (ADR-0012 §2 item 6).
@@ -131,7 +129,7 @@ pub trait SettlementRegime: Regime {
 
 /// One tick of the committed coalgebra `γ = select_K ∘ δ`:
 ///
-/// 1. **`δ`** — enumerate every regime's candidates at `e`, filter by `adm`
+/// 1. **`δ`** — enumerate every provider's candidates at `e`, filter by `adm`
 ///    (mirroring [`crate::oracle::cand`]/[`crate::oracle::cand_instrumented`],
 ///    see module docs), key each admissible candidate via `keyer`, and
 ///    insert it into a fresh [`crate::calendar::Frontier`] — enforcing the
@@ -140,10 +138,10 @@ pub trait SettlementRegime: Regime {
 ///    misordering a candidate would violate `cand`'s completeness).
 /// 2. **`select_K`** — pop the frontier's least key. Empty ⇒
 ///    [`Committed::Quiescent`] (the `1` summand); otherwise the selected
-///    `(Candidate, regime)` commits.
+///    `(Candidate, provider)` commits.
 /// 3. **Commit boundary** (ADR-0002 §9.2: "digests computed at boundaries,
 ///    not in the hot loop") — resolve `e.world`/`candidate.successor` through
-///    `interner` to digests, obtain the regime's recorded (unverified)
+///    `interner` to digests, obtain the provider's recorded (unverified)
 ///    [`Decomposition`], set `witness` to the canonical composition of its
 ///    generators ([`brix_semantic::compose_chain`]), build
 ///    `Realizes(witness, src, dst)`'s `PropositionId`, and publish the
@@ -162,7 +160,7 @@ pub trait SettlementRegime: Regime {
 /// omitted, matching [`crate::oracle::cand_instrumented`]'s work-unit
 /// shape).
 pub fn commit_tick<F>(
-    regimes: &[&dyn SettlementRegime],
+    providers: &[&dyn SettlementWitnessProvider],
     adm: &dyn Adm,
     interner: &Interner,
     e: &ExecConfig,
@@ -173,7 +171,7 @@ pub fn commit_tick<F>(
 where
     F: FnMut(&Candidate, u64) -> Key,
 {
-    match try_commit_tick(regimes, adm, interner, e, context, phase, keyer) {
+    match try_commit_tick(providers, adm, interner, e, context, phase, keyer) {
         Ok(committed) => committed,
         // The reference driver's contract is unchanged (ADR-0012 §2.5): it
         // commits a valid selected candidate under a keyer whose tie-break is
@@ -210,7 +208,7 @@ pub enum CommitTickError {
     ///
     /// The frontier is left exactly as it was ([`Frontier::insert`]), so no
     /// partially-built tick escapes.
-    KeyConflict(KeyConflict<(Candidate, usize)>),
+    KeyConflict(KeyConflict<Candidate>),
     /// The commit boundary rejected the selected candidate — an unresolved
     /// handle, a malformed or endpoint-mismatched decomposition, or any other
     /// [`CommitError`] from [`try_commit_selected`].
@@ -237,7 +235,7 @@ impl From<CommitError> for CommitTickError {
 /// no successor is produced. Neither condition is ever `Refuted`; the caller
 /// grades both as `Unknown` (ADR-0014 §5.1).
 pub fn try_commit_tick<F>(
-    regimes: &[&dyn SettlementRegime],
+    providers: &[&dyn SettlementWitnessProvider],
     adm: &dyn Adm,
     interner: &Interner,
     e: &ExecConfig,
@@ -250,21 +248,31 @@ where
 {
     // δ: oracle-shared enumeration (see module docs for why this mirrors
     // cand_instrumented inline rather than calling it).
-    let mut frontier: Frontier<(Candidate, usize)> = Frontier::new();
+    // Candidate equality is witness+successor equality. If several discovery
+    // providers present the same possibility, it occupies one frontier entry;
+    // the earliest provider in this presentation supplies its recorded
+    // decomposition. Provider order is therefore presentation metadata, not
+    // candidate identity or semantic authority.
+    let mut frontier: Frontier<Candidate> = Frontier::new();
+    let mut first_provider: std::collections::BTreeMap<Candidate, usize> =
+        std::collections::BTreeMap::new();
     let mut work: u64 = 0;
 
-    for (idx, regime) in regimes.iter().enumerate() {
-        // One work unit per regime scanned, paid unconditionally — same
+    for (idx, provider) in providers.iter().enumerate() {
+        // One work unit per provider scanned, paid unconditionally — same
         // shape as oracle::cand_instrumented.
         work += 1;
-        for c in regime.candidates(e) {
+        for c in provider.candidates(e) {
             // One work unit per raw candidate scanned for admissibility.
             work += 1;
             if adm.admits(e, &c) {
                 let key = keyer(&c, phase);
-                frontier
-                    .insert(key, (c, idx))
-                    .map_err(CommitTickError::KeyConflict)?;
+                if frontier
+                    .insert(key, c)
+                    .map_err(CommitTickError::KeyConflict)?
+                {
+                    first_provider.insert(c, idx);
+                }
             }
         }
     }
@@ -272,7 +280,7 @@ where
     let cost = CostRecord::Steps(work);
 
     // select_K.
-    let Some((key, (candidate, regime_idx))) = frontier.select_least() else {
+    let Some((key, candidate)) = frontier.select_least() else {
         return Ok((Committed::Quiescent, None, cost));
     };
 
@@ -281,8 +289,10 @@ where
     // this reference driver commits a valid selected candidate, so the fallible
     // conditions cannot arise — an error here is an internal-consistency bug,
     // exactly like the previous `interner.resolve` / `compose_chain` panics.
-    let regime = regimes[regime_idx];
-    let (committed, step) = try_commit_selected(key, &candidate, regime, interner, e, context)?;
+    let provider = providers[*first_provider
+        .get(&candidate)
+        .expect("frontier candidate inserted with a provider")];
+    let (committed, step) = try_commit_selected(key, &candidate, provider, interner, e, context)?;
 
     Ok((committed, Some(step), cost))
 }
@@ -292,10 +302,10 @@ where
 /// [`try_commit_selected`] surfaces them so the L3 runtime can convert
 /// untrusted/source-derived state into a `RuntimeUnknown` result.
 ///
-/// This is also the rejection vocabulary [`SettlementRegime::try_decompose`]
+/// This is also the rejection vocabulary [`SettlementWitnessProvider::try_decompose`]
 /// reports through (ADR-0012 §2 item 6): rather than mint a second,
 /// decompose-local error type, the fallible decomposition seam extends this
-/// one, since `SettlementRegime` is already commit-boundary-specific.
+/// one, since `SettlementWitnessProvider` is already commit-boundary-specific.
 /// [`UnresolvedHandle`](Self::UnresolvedHandle),
 /// [`EmptyDecomposition`](Self::EmptyDecomposition),
 /// [`ChainLengthMismatch`](Self::ChainLengthMismatch), and
@@ -305,7 +315,7 @@ where
 /// [`CandidateMismatch`](Self::CandidateMismatch),
 /// [`WitnessMismatch`](Self::WitnessMismatch), and
 /// [`GeneratorMismatch`](Self::GeneratorMismatch) were added additively for
-/// ADR-0012 Stage B (#251): its source-derived regime validates a candidate
+/// ADR-0012 Stage B (#251): its source-derived provider validates a candidate
 /// against a precomputed transition table (§6.3's four required conditions),
 /// and three of those four failures have no honest existing variant —
 /// `UnresolvedHandle` means the *interner* failed to resolve a handle, which
@@ -321,12 +331,12 @@ where
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommitError {
     /// A world or successor handle was not resolvable in the interner (or,
-    /// from [`SettlementRegime::try_decompose`], some other handle the
-    /// regime needed to resolve while building the decomposition).
+    /// from [`SettlementWitnessProvider::try_decompose`], some other handle the
+    /// provider needed to resolve while building the decomposition).
     UnresolvedHandle,
     /// The committed decomposition had no generators, so no witness can be
     /// composed (`k = g_n ∘ … ∘ g_1` requires at least one generator). Also
-    /// returned by a regime whose source-derived plan yielded no rule/step to
+    /// returned by a provider whose source-derived plan yielded no rule/step to
     /// decompose at all.
     EmptyDecomposition,
     /// The proposed generator chain and configuration chain are structurally
@@ -346,7 +356,7 @@ pub enum CommitError {
     /// requires — e.g. (ADR-0012 §6.3) `decomposition.configs()` is not exactly
     /// `[expected_src, expected_dst]` for the candidate being committed.
     EndpointMismatch,
-    /// The candidate a regime was asked to decompose is not the one its own
+    /// The candidate a provider was asked to decompose is not the one its own
     /// precomputed transition relation associates with the current world
     /// (ADR-0012 §6.3 condition 1: `candidate != transition_table[current_world]`).
     /// Every handle involved resolves fine — this is deliberately distinct
@@ -355,7 +365,7 @@ pub enum CommitError {
     /// candidate itself is simply not the expected one, e.g. a stale or
     /// forged selection reaching the commit boundary.
     CandidateMismatch,
-    /// The candidate's witness handle does not equal the one the regime
+    /// The candidate's witness handle does not equal the one the provider
     /// interned for its expected generator's primitive `WitnessId` (ADR-0012
     /// §6.3 condition 2). A generator *is* present and a decomposition can be
     /// built from it — this is deliberately distinct from
@@ -363,7 +373,7 @@ pub enum CommitError {
     /// simply does not match the one that generator would produce.
     WitnessMismatch,
     /// The decomposition's generator chain is not exactly the one this
-    /// regime expected for the transition being committed (ADR-0012 §6.3
+    /// provider expected for the transition being committed (ADR-0012 §6.3
     /// condition 3: `decomposition.generators() != [expected_generator]`). The
     /// chain is non-empty and correctly shaped — this is deliberately
     /// distinct from both [`EmptyDecomposition`](Self::EmptyDecomposition)
@@ -413,7 +423,7 @@ pub fn prospective_successor(e: &ExecConfig, candidate: &Candidate) -> ExecConfi
 
 /// The **sole** constructor of a `Derived` settlement judgement, factored out of
 /// [`commit_tick`] (ADR-0012 §2.5). Given an already-selected `key`/`candidate`
-/// and its `regime`, it validates/decomposes the candidate, resolves the world
+/// and its `provider`, it validates/decomposes the candidate, resolves the world
 /// endpoints, composes the committed witness `k = g_n ∘ … ∘ g_1`, constructs
 /// the `Derived` [`Judgement`]/[`Observation`] and [`CommittedStep`], and
 /// computes the successor via [`prospective_successor`]. Both the naive
@@ -422,7 +432,7 @@ pub fn prospective_successor(e: &ExecConfig, candidate: &Candidate) -> ExecConfi
 ///
 /// Fallible where the reference driver panicked: an unresolved handle, a
 /// rejected decomposition (malformed, empty, or endpoint-mismatched — see
-/// [`SettlementRegime::try_decompose`]), or an empty composed witness each
+/// [`SettlementWitnessProvider::try_decompose`]), or an empty composed witness each
 /// return [`CommitError`] instead of panicking, so the L3 boundary can fail
 /// closed on untrusted source-derived state. A rejected decomposition short-
 /// circuits before any `CommittedStep` is built and before any `Derived`
@@ -431,12 +441,12 @@ pub fn prospective_successor(e: &ExecConfig, candidate: &Candidate) -> ExecConfi
 pub fn try_commit_selected(
     key: Key,
     candidate: &Candidate,
-    regime: &dyn SettlementRegime,
+    provider: &dyn SettlementWitnessProvider,
     interner: &Interner,
     e: &ExecConfig,
     context: ContextId,
 ) -> Result<(Committed, CommittedStep), CommitError> {
-    let decomposition = regime.try_decompose(e, candidate)?;
+    let decomposition = provider.try_decompose(e, candidate)?;
 
     let src = ConfigId(
         interner
@@ -449,7 +459,7 @@ pub fn try_commit_selected(
             .ok_or(CommitError::UnresolvedHandle)?,
     );
     // Committed witness identity IS the canonical composition of its generators;
-    // `candidate.witness` is the regime's proposal, the COMMITTED identity is
+    // `candidate.witness` is the provider's proposal, the COMMITTED identity is
     // derived from the factorization.
     let witness = brix_semantic::compose_chain(decomposition.generators())
         .ok_or(CommitError::EmptyDecomposition)?;
@@ -507,11 +517,11 @@ pub fn try_commit_selected(
 /// brief — resolving `Handle → Digest` at the commit boundary (ADR-0002
 /// §9.2) is not optional, and there is no way to build `ConfigId`/
 /// `WitnessId` without the same `Interner` that minted `e0`'s and each
-/// regime's handles. The design sketch's generic parameter name `K` was
+/// provider's handles. The design sketch's generic parameter name `K` was
 /// renamed to `F` to avoid reading confusingly next to the unrelated `Key`
 /// type.
 pub fn run<F>(
-    regimes: &[&dyn SettlementRegime],
+    providers: &[&dyn SettlementWitnessProvider],
     adm: &dyn Adm,
     interner: &Interner,
     e0: ExecConfig,
@@ -522,7 +532,7 @@ pub fn run<F>(
 where
     F: FnMut(&Candidate, u64) -> Key,
 {
-    let (journal, costs, _) = run_reason(regimes, adm, interner, e0, context, keyer, max_ticks);
+    let (journal, costs, _) = run_reason(providers, adm, interner, e0, context, keyer, max_ticks);
     (journal, costs)
 }
 
@@ -553,7 +563,7 @@ pub enum UnsaturatedStop {
 /// terminated has proved nothing"), so callers that care about the difference
 /// MUST use this entry point.
 pub fn run_reason<F>(
-    regimes: &[&dyn SettlementRegime],
+    providers: &[&dyn SettlementWitnessProvider],
     adm: &dyn Adm,
     interner: &Interner,
     e0: ExecConfig,
@@ -570,7 +580,7 @@ where
 
     for phase in 0..max_ticks as u64 {
         let (committed, step, cost) =
-            commit_tick(regimes, adm, interner, &e, context, phase, &mut keyer);
+            commit_tick(providers, adm, interner, &e, context, phase, &mut keyer);
         match committed {
             Committed::Quiescent => {
                 return (journal, costs, UnsaturatedStop::ImmediateFrontierEmpty)
@@ -604,7 +614,7 @@ where
 /// - [`Committed::Step`] induces `{ removed: {before.world}, added:
 ///   {successor.world} }` — collapsing to empty for a reflexive step whose
 ///   successor world equals `before.world` (e.g. the literal-equality
-///   regime's `x → x`), via [`Delta::between_worlds`].
+///   provider's `x → x`), via [`Delta::between_worlds`].
 pub fn step_world_delta(before: &ExecConfig, committed: &Committed) -> Delta {
     match committed {
         Committed::Quiescent => Delta::new(),
@@ -621,26 +631,24 @@ mod tests {
     use brix_canon::Domain;
     use brix_semantic::{Evidence, GeneratorId};
 
-    /// A single-candidate fixture regime whose `decompose` always returns
+    /// A single-candidate fixture provider whose `decompose` always returns
     /// the same fixed, valid recorded `Decomposition` — deterministic and
     /// simple enough for tests to reconstruct independently.
     struct FixtureRegime {
-        id: crate::intern::Handle,
         witness: crate::intern::Handle,
         successor: crate::intern::Handle,
     }
 
-    impl Regime for FixtureRegime {
+    impl WitnessProvider for FixtureRegime {
         fn candidates(&self, _e: &ExecConfig) -> Vec<Candidate> {
             vec![Candidate {
-                regime: self.id,
                 witness: self.witness,
                 successor: self.successor,
             }]
         }
     }
 
-    impl SettlementRegime for FixtureRegime {
+    impl SettlementWitnessProvider for FixtureRegime {
         fn try_decompose(
             &self,
             _e: &ExecConfig,
@@ -672,27 +680,19 @@ mod tests {
         let mut i = Interner::new();
         let world = i.intern(Digest::of(Domain::Value, b"w0"));
         let policy = i.intern(Digest::of(Domain::Value, b"p0"));
-        let regime = i.intern(Digest::of(Domain::Value, b"r"));
+        let _presentation_handle = i.intern(Digest::of(Domain::Value, b"r"));
         let witness = i.intern(Digest::of(Domain::Value, b"wit"));
         let successor = i.intern(Digest::of(Domain::Value, b"w1"));
         let e = ExecConfig::new(world, policy, History::empty().digest());
-        (
-            i,
-            FixtureRegime {
-                id: regime,
-                witness,
-                successor,
-            },
-            e,
-        )
+        (i, FixtureRegime { witness, successor }, e)
     }
 
     #[test]
     fn commit_tick_with_no_admissible_candidate_is_quiescent() {
-        let (i, regime, e) = setup();
-        let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+        let (i, provider, e) = setup();
+        let providers: Vec<&dyn SettlementWitnessProvider> = vec![&provider];
         let (committed, step, cost) = commit_tick(
-            &regimes,
+            &providers,
             &AdmNone,
             &i,
             &e,
@@ -707,10 +707,10 @@ mod tests {
 
     #[test]
     fn commit_tick_with_one_admissible_candidate_commits_derived() {
-        let (i, regime, e) = setup();
-        let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+        let (i, provider, e) = setup();
+        let providers: Vec<&dyn SettlementWitnessProvider> = vec![&provider];
         let (committed, step, cost) = commit_tick(
-            &regimes,
+            &providers,
             &AdmAll,
             &i,
             &e,
@@ -733,12 +733,35 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_provider_discovery_deduplicates_one_witness_candidate() {
+        let (i, first, e) = setup();
+        let second = FixtureRegime {
+            witness: first.witness,
+            successor: first.successor,
+        };
+        let providers: Vec<&dyn SettlementWitnessProvider> = vec![&first, &second];
+        let (committed, step, cost) = try_commit_tick(
+            &providers,
+            &AdmAll,
+            &i,
+            &e,
+            ContextId::root(),
+            0,
+            &mut |c, phase| Key::new(phase, 0, tiebreak_of(c)),
+        )
+        .expect("same witness/successor is one semantic possibility");
+        assert!(matches!(committed, Committed::Step { .. }));
+        assert!(step.is_some(), "one deduplicated candidate commits once");
+        assert_eq!(cost, CostRecord::Steps(4), "both providers were observed");
+    }
+
+    #[test]
     fn observation_judgement_digest_matches_an_independently_rebuilt_judgement() {
-        let (i, regime, e) = setup();
-        let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+        let (i, provider, e) = setup();
+        let providers: Vec<&dyn SettlementWitnessProvider> = vec![&provider];
         let context = ContextId::root();
         let (committed, _step, _cost) =
-            commit_tick(&regimes, &AdmAll, &i, &e, context, 0, &mut |c, phase| {
+            commit_tick(&providers, &AdmAll, &i, &e, context, 0, &mut |c, phase| {
                 Key::new(phase, 0, tiebreak_of(c))
             });
         let Committed::Step { observation, .. } = committed else {
@@ -749,7 +772,7 @@ mod tests {
         // chain by hand, using only public constructors and the fixture's
         // known handles — non-vacuous, since this does not call commit_tick.
         let src = ConfigId(i.resolve(e.world));
-        let dst = ConfigId(i.resolve(regime.successor));
+        let dst = ConfigId(i.resolve(provider.successor));
         let decomposition = Decomposition::recorded(
             vec![GeneratorId::named("fixture.step@1")],
             vec![
@@ -773,10 +796,10 @@ mod tests {
 
     #[test]
     fn cost_is_emitted_for_every_committed_tick_never_omitted() {
-        let (i, regime, e) = setup();
-        let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+        let (i, provider, e) = setup();
+        let providers: Vec<&dyn SettlementWitnessProvider> = vec![&provider];
         let (journal, costs) = run(
-            &regimes,
+            &providers,
             &AdmAll,
             &i,
             e,
@@ -797,10 +820,10 @@ mod tests {
 
     #[test]
     fn step_world_delta_of_a_committed_step_removes_old_world_adds_successor() {
-        let (i, regime, e) = setup();
-        let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+        let (i, provider, e) = setup();
+        let providers: Vec<&dyn SettlementWitnessProvider> = vec![&provider];
         let (committed, _step, _cost) = commit_tick(
-            &regimes,
+            &providers,
             &AdmAll,
             &i,
             &e,
@@ -822,10 +845,10 @@ mod tests {
 
     #[test]
     fn step_world_delta_of_quiescence_is_empty() {
-        let (i, regime, e) = setup();
-        let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+        let (i, provider, e) = setup();
+        let providers: Vec<&dyn SettlementWitnessProvider> = vec![&provider];
         let (committed, _step, _cost) = commit_tick(
-            &regimes,
+            &providers,
             &AdmNone,
             &i,
             &e,
@@ -839,10 +862,10 @@ mod tests {
 
     #[test]
     fn run_is_quiescent_immediately_under_adm_none() {
-        let (i, regime, e) = setup();
-        let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+        let (i, provider, e) = setup();
+        let providers: Vec<&dyn SettlementWitnessProvider> = vec![&provider];
         let (journal, costs) = run(
-            &regimes,
+            &providers,
             &AdmNone,
             &i,
             e,
@@ -856,15 +879,15 @@ mod tests {
 
     #[test]
     fn running_twice_from_the_same_inputs_is_byte_identical_deterministic_replay() {
-        let (i, regime, e) = setup();
-        let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+        let (i, provider, e) = setup();
+        let providers: Vec<&dyn SettlementWitnessProvider> = vec![&provider];
 
-        // The fixture regime is a fixed point after one step (its candidate
+        // The fixture provider is a fixed point after one step (its candidate
         // is constant regardless of e), so bound max_ticks to keep the loop
         // finite for this determinism check — one commit, then re-run from
         // scratch and compare.
         let (journal_a, costs_a) = run(
-            &regimes,
+            &providers,
             &AdmAll,
             &i,
             e,
@@ -873,7 +896,7 @@ mod tests {
             1,
         );
         let (journal_b, costs_b) = run(
-            &regimes,
+            &providers,
             &AdmAll,
             &i,
             e,
@@ -892,24 +915,22 @@ mod tests {
     }
 
     struct MultiGenRegime {
-        id: Handle,
         witness: Handle,
         successor: Handle,
         generators: Vec<GeneratorId>,
         configs: Vec<ConfigId>,
     }
 
-    impl Regime for MultiGenRegime {
+    impl WitnessProvider for MultiGenRegime {
         fn candidates(&self, _e: &ExecConfig) -> Vec<Candidate> {
             vec![Candidate {
-                regime: self.id,
                 witness: self.witness,
                 successor: self.successor,
             }]
         }
     }
 
-    impl SettlementRegime for MultiGenRegime {
+    impl SettlementWitnessProvider for MultiGenRegime {
         fn try_decompose(
             &self,
             _e: &ExecConfig,
@@ -924,7 +945,7 @@ mod tests {
         let mut i = Interner::new();
         let world = i.intern(Digest::of(Domain::Value, b"mw0"));
         let policy = i.intern(Digest::of(Domain::Value, b"mp0"));
-        let regime = i.intern(Digest::of(Domain::Value, b"mr"));
+        let _presentation_handle = i.intern(Digest::of(Domain::Value, b"mr"));
         let witness_handle = i.intern(Digest::of(Domain::Value, b"mwit"));
         let successor = i.intern(Digest::of(Domain::Value, b"mw1"));
         let e = ExecConfig::new(world, policy, History::empty().digest());
@@ -942,17 +963,16 @@ mod tests {
         ];
 
         let multi_regime = MultiGenRegime {
-            id: regime,
             witness: witness_handle,
             successor,
             generators: generators.clone(),
             configs: configs.clone(),
         };
 
-        let regimes: Vec<&dyn SettlementRegime> = vec![&multi_regime];
+        let providers: Vec<&dyn SettlementWitnessProvider> = vec![&multi_regime];
         let context = ContextId::root();
         let (committed, step_opt, _cost) =
-            commit_tick(&regimes, &AdmAll, &i, &e, context, 0, &mut |c, phase| {
+            commit_tick(&providers, &AdmAll, &i, &e, context, 0, &mut |c, phase| {
                 Key::new(phase, 0, tiebreak_of(c))
             });
 
@@ -989,19 +1009,19 @@ mod tests {
         // committing through the factored `try_commit_selected`. CommittedStep
         // and Committed derive Eq over content-addressed fields, so equality is
         // byte-identity.
-        let (i, regime, e) = setup();
-        let regimes: Vec<&dyn SettlementRegime> = vec![&regime];
+        let (i, provider, e) = setup();
+        let providers: Vec<&dyn SettlementWitnessProvider> = vec![&provider];
         let context = ContextId::root();
         let key_of = |c: &Candidate, phase: u64| Key::new(phase, 0, tiebreak_of(c));
 
         let (committed_tick, step_tick, _cost) =
-            commit_tick(&regimes, &AdmAll, &i, &e, context, 0, &mut |c, p| {
+            commit_tick(&providers, &AdmAll, &i, &e, context, 0, &mut |c, p| {
                 key_of(c, p)
             });
 
         // Reproduce commit_tick's δ-enumeration + select boundary by hand.
         let mut frontier: Frontier<(Candidate, usize)> = Frontier::new();
-        for (idx, r) in regimes.iter().enumerate() {
+        for (idx, r) in providers.iter().enumerate() {
             for c in r.candidates(&e) {
                 if AdmAll.admits(&e, &c) {
                     frontier.insert(key_of(&c, 0), (c, idx)).unwrap();
@@ -1010,7 +1030,7 @@ mod tests {
         }
         let (key, (candidate, idx)) = frontier.select_least().expect("one admissible candidate");
         let (committed_direct, step_direct) =
-            try_commit_selected(key, &candidate, regimes[idx], &i, &e, context)
+            try_commit_selected(key, &candidate, providers[idx], &i, &e, context)
                 .expect("valid candidate commits");
 
         assert_eq!(committed_tick, committed_direct);
@@ -1021,46 +1041,43 @@ mod tests {
     fn try_commit_selected_reports_unresolved_handle_instead_of_panicking() {
         // The fallible seam (ADR-0012 §6): a successor handle not resolvable in
         // the commit interner is a recoverable error, not a panic.
-        let (i, regime, e) = setup();
+        let (i, provider, e) = setup();
         let mut other = Interner::new();
         let bad = (0..64)
             .map(|n| other.intern(Digest::of(Domain::Value, format!("x{n}").as_bytes())))
             .last()
             .unwrap();
         let candidate = Candidate {
-            regime: regime.id,
-            witness: regime.witness,
+            witness: provider.witness,
             successor: bad,
         };
         let key = Key::new(0, 0, tiebreak_of(&candidate));
-        let err = try_commit_selected(key, &candidate, &regime, &i, &e, ContextId::root())
+        let err = try_commit_selected(key, &candidate, &provider, &i, &e, ContextId::root())
             .expect_err("an unresolvable handle must fail, not panic");
         assert_eq!(err, CommitError::UnresolvedHandle);
     }
 
-    /// A regime whose `try_decompose` always rejects with a fixed
+    /// A provider whose `try_decompose` always rejects with a fixed
     /// [`CommitError`] — exercising the fail-closed contract
-    /// [`SettlementRegime::try_decompose`] documents (ADR-0012 §2 item 6): a
+    /// [`SettlementWitnessProvider::try_decompose`] documents (ADR-0012 §2 item 6): a
     /// malformed/empty/endpoint-mismatched decomposition must produce a typed
     /// commit failure, never a panic and never a fabricated `Decomposition`.
     struct RejectingRegime {
-        id: Handle,
         witness: Handle,
         successor: Handle,
         error: CommitError,
     }
 
-    impl Regime for RejectingRegime {
+    impl WitnessProvider for RejectingRegime {
         fn candidates(&self, _e: &ExecConfig) -> Vec<Candidate> {
             vec![Candidate {
-                regime: self.id,
                 witness: self.witness,
                 successor: self.successor,
             }]
         }
     }
 
-    impl SettlementRegime for RejectingRegime {
+    impl SettlementWitnessProvider for RejectingRegime {
         fn try_decompose(
             &self,
             _e: &ExecConfig,
@@ -1072,18 +1089,16 @@ mod tests {
 
     fn rejecting_fixture(error: CommitError) -> (Interner, RejectingRegime, ExecConfig, Candidate) {
         let (i, base, e) = setup();
-        let regime = RejectingRegime {
-            id: base.id,
+        let provider = RejectingRegime {
             witness: base.witness,
             successor: base.successor,
             error,
         };
         let candidate = Candidate {
-            regime: regime.id,
-            witness: regime.witness,
-            successor: regime.successor,
+            witness: provider.witness,
+            successor: provider.successor,
         };
-        (i, regime, e, candidate)
+        (i, provider, e, candidate)
     }
 
     #[test]
@@ -1092,9 +1107,9 @@ mod tests {
         // panic and not a fabricated Decomposition — and no CommittedStep or
         // Derived judgement is ever constructed on this path, since
         // try_commit_selected short-circuits on `?` before building either.
-        let (i, regime, e, candidate) = rejecting_fixture(CommitError::EmptyDecomposition);
+        let (i, provider, e, candidate) = rejecting_fixture(CommitError::EmptyDecomposition);
         let key = Key::new(0, 0, tiebreak_of(&candidate));
-        let err = try_commit_selected(key, &candidate, &regime, &i, &e, ContextId::root())
+        let err = try_commit_selected(key, &candidate, &provider, &i, &e, ContextId::root())
             .expect_err("an empty decomposition must fail, not panic");
         assert_eq!(err, CommitError::EmptyDecomposition);
     }
@@ -1103,38 +1118,36 @@ mod tests {
     fn try_commit_selected_reports_endpoint_mismatch_instead_of_panicking() {
         // Acceptance (#244): the interface makes an endpoint-mismatched
         // decomposition expressible (ADR-0012 §6.3 condition 4) even though
-        // no regime in this issue's scope produces it yet (that is Stage B's
-        // source-derived regime).
-        let (i, regime, e, candidate) = rejecting_fixture(CommitError::EndpointMismatch);
+        // no provider in this issue's scope produces it yet (that is Stage B's
+        // source-derived provider).
+        let (i, provider, e, candidate) = rejecting_fixture(CommitError::EndpointMismatch);
         let key = Key::new(0, 0, tiebreak_of(&candidate));
-        let err = try_commit_selected(key, &candidate, &regime, &i, &e, ContextId::root())
+        let err = try_commit_selected(key, &candidate, &provider, &i, &e, ContextId::root())
             .expect_err("an endpoint-mismatched decomposition must fail, not panic");
         assert_eq!(err, CommitError::EndpointMismatch);
     }
 
-    /// A regime whose `try_decompose` builds a genuinely malformed chain (two
+    /// A provider whose `try_decompose` builds a genuinely malformed chain (two
     /// generators, only two configs — one short of the three a two-generator
     /// chain needs) via [`Decomposition::recorded`] and propagates its
     /// `DecompositionError` with `?`, exercising the real
     /// `From<DecompositionError> for CommitError` conversion rather than a
     /// hand-constructed error.
     struct MismatchedChainRegime {
-        id: Handle,
         witness: Handle,
         successor: Handle,
     }
 
-    impl Regime for MismatchedChainRegime {
+    impl WitnessProvider for MismatchedChainRegime {
         fn candidates(&self, _e: &ExecConfig) -> Vec<Candidate> {
             vec![Candidate {
-                regime: self.id,
                 witness: self.witness,
                 successor: self.successor,
             }]
         }
     }
 
-    impl SettlementRegime for MismatchedChainRegime {
+    impl SettlementWitnessProvider for MismatchedChainRegime {
         fn try_decompose(
             &self,
             _e: &ExecConfig,
@@ -1159,18 +1172,16 @@ mod tests {
         // structural half of "malformed" — fails closed via the real
         // DecompositionError -> CommitError conversion, not a panic.
         let (i, base, e) = setup();
-        let regime = MismatchedChainRegime {
-            id: base.id,
+        let provider = MismatchedChainRegime {
             witness: base.witness,
             successor: base.successor,
         };
         let candidate = Candidate {
-            regime: regime.id,
-            witness: regime.witness,
-            successor: regime.successor,
+            witness: provider.witness,
+            successor: provider.successor,
         };
         let key = Key::new(0, 0, tiebreak_of(&candidate));
-        let err = try_commit_selected(key, &candidate, &regime, &i, &e, ContextId::root())
+        let err = try_commit_selected(key, &candidate, &provider, &i, &e, ContextId::root())
             .expect_err("a chain-length-mismatched decomposition must fail, not panic");
         assert_eq!(
             err,

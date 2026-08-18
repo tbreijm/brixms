@@ -10,7 +10,7 @@
 //! > one `ρ_w` interpretation.
 //!
 //! This crate is that package layer: it implements `soc_core`'s
-//! [`soc_core::Regime`] / [`soc_core::SettlementRegime`] traits (and, for the
+//! [`soc_core::WitnessProvider`] / [`soc_core::SettlementWitnessProvider`] traits (and, for the
 //! audit boundary, [`soc_core::audit::GeneratorSemantics`]) **without
 //! modifying `soc-core` itself** — a regime proposes candidates and records
 //! decompositions; it never publishes `Derived` (only the calendar/commit
