@@ -1502,8 +1502,7 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                 // `TreeDerivation` artifact its judgement's evidence names
                 // (ADR-0017), not a bare tree — `elaborate_tree` binds the
                 // source to it at the boundary.
-                let (audited_judgement, derivation) =
-                    audited_type_check_tree(&tr_expr, &ty_ctx, ContextId::root())?;
+                let (audited_judgement, derivation) = audited_type_check_tree(&tr_expr, &ty_ctx)?;
                 match elaborate_tree(&audited_judgement, &derivation, Budget::new(2000, 2000)) {
                     ElaborationResult::Proven { judgement, edge } => {
                         // The kernel proves the *composition* (judgement.outcome,

@@ -1612,22 +1612,60 @@ fn plan_arith(op: ArithOp, ra: &Ty, rb: &Ty) -> Result<ArithPlan, TypeError> {
 }
 
 /// Immutable typing context mapping variable names to types for variable lookup.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
-pub struct TyCtx(pub BTreeMap<String, Ty>);
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct TyCtx {
+    bindings: BTreeMap<String, Ty>,
+    /// The identity of the assumption scope these bindings constitute
+    /// (ADR-0028 ⟨D-CTXPUBLISH⟩).
+    ///
+    /// Carried here rather than passed alongside so it cannot drift from the
+    /// bindings it names: every `extend` moves both or neither.
+    context: ContextId,
+}
 
 impl TyCtx {
     pub fn new() -> Self {
-        Self(BTreeMap::new())
+        Self {
+            bindings: BTreeMap::new(),
+            context: ContextId::root(),
+        }
     }
 
+    /// Extend with an assumption, moving the context identity with it.
+    ///
+    /// The assumption's canonical bytes are what distinguish one scope from
+    /// another, so `x : Int` and `x : Str` are different contexts rather than
+    /// the same scope under a different name.
     pub fn extend(&self, var: impl Into<String>, ty: Ty) -> Self {
-        let mut map = self.0.clone();
-        map.insert(var.into(), ty);
-        Self(map)
+        let var = var.into();
+        let mut bindings = self.bindings.clone();
+        bindings.insert(var.clone(), ty.clone());
+
+        let mut w = CanonWriter::new();
+        w.write_str(&var);
+        ty.canon_write(&mut w);
+        let context = self.context.extend(&w.finish());
+
+        Self { bindings, context }
     }
 
     pub fn get(&self, var: &str) -> Option<&Ty> {
-        self.0.get(var)
+        self.bindings.get(var)
+    }
+
+    /// The identity of this assumption scope. `ContextId::root()` only for a
+    /// scope that genuinely assumes nothing.
+    pub fn context(&self) -> ContextId {
+        self.context
+    }
+}
+
+impl Default for TyCtx {
+    /// The root scope — written out rather than derived, because a derived
+    /// `Default` would give `ContextId`'s zero digest rather than the frozen
+    /// root, and a scope that assumes nothing must *be* the root.
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -2088,6 +2126,10 @@ fn unify_seen(
 /// Deferred-materialization atom for tree leaf endpoints (ADR-0008).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum CfgAtom {
+    /// A bare expression. **Retired from emission** by ADR-0028
+    /// ⟨D-CTXENDPOINT⟩ in favour of [`CfgAtom::Judged`], and kept only so a
+    /// decoder meeting an old artifact fails closed on an ordinal it knows
+    /// rather than silently reinterpreting one it does not.
     Expr(Expr),
     Type(Ty),
     /// The kernel-owned arithmetic typing source object (ADR-0015 §5 Stage
@@ -2111,6 +2153,21 @@ pub enum CfgAtom {
     /// Like `ArithInput`, not zonked: the result type is already resolved when
     /// the plan is built.
     ArithResult(NumericResultTypeV1),
+    /// An expression **under the context it is typed in** — the typing
+    /// regime's real object (ADR-0028 ⟨D-CTXENDPOINT⟩), append-only after the
+    /// four above.
+    ///
+    /// A typing judgement is `Γ ⊢ e : T`, and this vocabulary carried only
+    /// `e`. With the context in no endpoint, `g_var`'s relation was
+    /// **non-functional in its source** — one `Expr(Var "x")`, a different
+    /// type per context — which is precisely the obstruction `g_arith_input`
+    /// is *held out* for. Naming the context makes `Γ` determine the
+    /// destination, so the relation a discharged generator rests on is one the
+    /// derivation exhibits rather than asserts.
+    Judged {
+        context: ContextId,
+        expr: Expr,
+    },
 }
 
 /// Deferred-materialization tree object (ADR-0008).
@@ -2139,12 +2196,31 @@ pub enum TyTree {
     },
 }
 
+/// The content-addressed identity of a `(Γ, e)` pair.
+///
+/// A dedicated tag rather than a bare concatenation, so a judged atom can
+/// never collide with another canonical value that happens to serialize to the
+/// same bytes.
+pub fn judged_config_id(context: ContextId, expr: &Expr) -> ConfigId {
+    let mut w = CanonWriter::new();
+    w.write_tag("brix.regime.typing.judged");
+    w.write_bytes(context.0.as_bytes());
+    expr.canon_write(&mut w);
+    ConfigId::from_canon(&w.finish())
+}
+
 fn materialize_obj(obj: &TyObj, subst: &BTreeMap<u32, Ty>) -> TreeObj {
     match obj {
+        // The retired bare-expression atom. Nothing emits it since ADR-0028;
+        // it is materialized as it always was so an artifact built before the
+        // change still resolves rather than silently meaning something else.
         TyObj::Atom(CfgAtom::Expr(e)) => TreeObj::Atom(e.config_id()),
         TyObj::Atom(CfgAtom::Type(t)) => TreeObj::Atom(zonk(t, subst).config_id()),
         TyObj::Atom(CfgAtom::ArithInput(i)) => TreeObj::Atom(i.config_id()),
         TyObj::Atom(CfgAtom::ArithResult(r)) => TreeObj::Atom(r.config_id()),
+        TyObj::Atom(CfgAtom::Judged { context, expr }) => {
+            TreeObj::Atom(judged_config_id(*context, expr))
+        }
         TyObj::Prod(a, b) => TreeObj::Prod(
             Box::new(materialize_obj(a, subst)),
             Box::new(materialize_obj(b, subst)),
@@ -2206,7 +2282,10 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             Ty::Con("Int"),
             TyTree::Leaf {
                 generator: g_lit(),
-                src: TyObj::Atom(CfgAtom::Expr(Expr::Lit(*n))),
+                src: TyObj::Atom(CfgAtom::Judged {
+                    context: ctx.context(),
+                    expr: Expr::Lit(*n),
+                }),
                 dst: TyObj::Atom(CfgAtom::Type(Ty::Con("Int"))),
             },
             st,
@@ -2215,7 +2294,10 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             Ty::Con("Str"),
             TyTree::Leaf {
                 generator: g_str_lit(),
-                src: TyObj::Atom(CfgAtom::Expr(Expr::StrLit(s.clone()))),
+                src: TyObj::Atom(CfgAtom::Judged {
+                    context: ctx.context(),
+                    expr: Expr::StrLit(s.clone()),
+                }),
                 dst: TyObj::Atom(CfgAtom::Type(Ty::Con("Str"))),
             },
             st,
@@ -2224,7 +2306,10 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             Ty::Con("Float"),
             TyTree::Leaf {
                 generator: g_float_lit(),
-                src: TyObj::Atom(CfgAtom::Expr(Expr::FloatLit(s.clone()))),
+                src: TyObj::Atom(CfgAtom::Judged {
+                    context: ctx.context(),
+                    expr: Expr::FloatLit(s.clone()),
+                }),
                 dst: TyObj::Atom(CfgAtom::Type(Ty::Con("Float"))),
             },
             st,
@@ -2252,7 +2337,10 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             // with the composition.
             let split = TyTree::Leaf {
                 generator: g_then_split(),
-                src: TyObj::Atom(CfgAtom::Expr(Expr::Then(a.clone(), b.clone()))),
+                src: TyObj::Atom(CfgAtom::Judged {
+                    context: ctx.context(),
+                    expr: Expr::Then(a.clone(), b.clone()),
+                }),
                 dst: da.src(),
             };
             let tree = TyTree::Seq {
@@ -2273,10 +2361,19 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
 
             let split = TyTree::Leaf {
                 generator: g_tensor_split(),
-                src: TyObj::Atom(CfgAtom::Expr(Expr::And(a.clone(), b.clone()))),
+                src: TyObj::Atom(CfgAtom::Judged {
+                    context: ctx.context(),
+                    expr: Expr::And(a.clone(), b.clone()),
+                }),
                 dst: TyObj::Prod(
-                    Box::new(TyObj::Atom(CfgAtom::Expr((**a).clone()))),
-                    Box::new(TyObj::Atom(CfgAtom::Expr((**b).clone()))),
+                    Box::new(TyObj::Atom(CfgAtom::Judged {
+                        context: ctx.context(),
+                        expr: (**a).clone(),
+                    })),
+                    Box::new(TyObj::Atom(CfgAtom::Judged {
+                        context: ctx.context(),
+                        expr: (**b).clone(),
+                    })),
                 ),
             };
             let tensor = TyTree::Tensor {
@@ -2304,7 +2401,10 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             bool_ty(),
             TyTree::Leaf {
                 generator: g_bool_lit(),
-                src: TyObj::Atom(CfgAtom::Expr(Expr::BoolLit(*b))),
+                src: TyObj::Atom(CfgAtom::Judged {
+                    context: ctx.context(),
+                    expr: Expr::BoolLit(*b),
+                }),
                 dst: TyObj::Atom(CfgAtom::Type(bool_ty())),
             },
             st,
@@ -2320,7 +2420,10 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                 t.clone(),
                 TyTree::Leaf {
                     generator: g_var(),
-                    src: TyObj::Atom(CfgAtom::Expr(Expr::Var(name.clone()))),
+                    src: TyObj::Atom(CfgAtom::Judged {
+                        context: ctx.context(),
+                        expr: Expr::Var(name.clone()),
+                    }),
                     dst: TyObj::Atom(CfgAtom::Type(t.clone())),
                 },
                 st,
@@ -2347,12 +2450,16 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
             // `src == dst` — the padded step #287 removed as unsound.
             let intro = TyTree::Leaf {
                 generator: g_fix(),
-                src: TyObj::Atom(CfgAtom::Expr(Expr::Fix(
-                    name.clone(),
-                    declared.clone(),
-                    body.clone(),
-                ))),
-                dst: TyObj::Atom(CfgAtom::Expr((**body).clone())),
+                src: TyObj::Atom(CfgAtom::Judged {
+                    context: ctx.context(),
+                    expr: Expr::Fix(name.clone(), declared.clone(), body.clone()),
+                }),
+                // Judged under the scope that assumes the definition's own
+                // type — which is exactly what makes the derivation finite.
+                dst: TyObj::Atom(CfgAtom::Judged {
+                    context: ctx_ext.context(),
+                    expr: (**body).clone(),
+                }),
             };
             let tree = TyTree::Seq {
                 left: Box::new(intro),
@@ -2367,12 +2474,19 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
 
             let intro = TyTree::Leaf {
                 generator: g_lam_intro(),
-                src: TyObj::Atom(CfgAtom::Expr(Expr::LamAnn(
-                    p.clone(),
-                    declared.clone(),
-                    body.clone(),
-                ))),
-                dst: TyObj::Atom(CfgAtom::Expr((**body).clone())),
+                src: TyObj::Atom(CfgAtom::Judged {
+                    context: ctx.context(),
+                    expr: Expr::LamAnn(p.clone(), declared.clone(), body.clone()),
+                }),
+                // The body is judged under the EXTENDED scope — which is what
+                // introducing a binder means, and what the body's own
+                // derivation starts from. Naming the outer scope here would
+                // make the `Seq` ill-formed, and correctly so: the two would
+                // be talking about different judgements.
+                dst: TyObj::Atom(CfgAtom::Judged {
+                    context: ctx_ext.context(),
+                    expr: (**body).clone(),
+                }),
             };
             let close = TyTree::Leaf {
                 generator: g_lam_close(),
@@ -2397,8 +2511,15 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
 
             let intro = TyTree::Leaf {
                 generator: g_lam_intro(),
-                src: TyObj::Atom(CfgAtom::Expr(Expr::Lam(p.clone(), body.clone()))),
-                dst: TyObj::Atom(CfgAtom::Expr((**body).clone())),
+                src: TyObj::Atom(CfgAtom::Judged {
+                    context: ctx.context(),
+                    expr: Expr::Lam(p.clone(), body.clone()),
+                }),
+                // Judged under the extended scope — see `LamAnn` above.
+                dst: TyObj::Atom(CfgAtom::Judged {
+                    context: ctx_ext.context(),
+                    expr: (**body).clone(),
+                }),
             };
             let close = TyTree::Leaf {
                 generator: g_lam_close(),
@@ -2423,8 +2544,14 @@ pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, In
                 if let Some((_, t_f)) = fields.iter().find(|(n, _)| n == fname) {
                     let split = TyTree::Leaf {
                         generator: g_field_split(),
-                        src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
-                        dst: TyObj::Atom(CfgAtom::Expr((**base).clone())),
+                        src: TyObj::Atom(CfgAtom::Judged {
+                            context: ctx.context(),
+                            expr: expr.clone(),
+                        }),
+                        dst: TyObj::Atom(CfgAtom::Judged {
+                            context: ctx.context(),
+                            expr: (**base).clone(),
+                        }),
                     };
                     let field_leaf = TyTree::Leaf {
                         generator: g_field(),
@@ -2475,22 +2602,32 @@ fn right_nest_tensor(items: Vec<TyTree>) -> TyTree {
 }
 
 /// Upgrades a native `infer_tree` derivation to an `Audited` `Judgement` and `RealizesTree` (ADR-0008).
+///
+/// The assumption scope comes from `ctx` and nowhere else: it is the scope the
+/// derivation ran under, so it is the scope the judgement is published under
+/// and the scope the endpoint names (ADR-0028).
 pub fn audited_type_check_tree(
     expr: &Expr,
     ctx: &TyCtx,
-    context: ContextId,
 ) -> Result<(Judgement, TreeDerivation), TypeError> {
     let (ty, ty_tree, st) = infer_tree(expr, ctx, Infer::new())?;
     let tree = materialize(&ty_tree, &st.subst);
     let final_ty = zonk(&ty, &st.subst);
+
+    // The derivation's source is the `(Γ, e)` pair, not the bare expression
+    // (ADR-0028 ⟨D-CTXENDPOINT⟩) — so the endpoint this is checked against,
+    // and the one the published proposition names, must be that pair too. A
+    // proposition naming the bare expression would claim the derivation
+    // established `e : T` under *no* assumptions.
+    let judged = judged_config_id(ctx.context(), expr);
     if !tree.well_formed()
-        || tree.src() != TreeObj::Atom(expr.config_id())
+        || tree.src() != TreeObj::Atom(judged)
         || tree.dst() != TreeObj::Atom(final_ty.config_id())
     {
         return Err(TypeError::IllFormedDerivation);
     }
     let witness_id = tree.witness_id();
-    let prop = Realizes::new(witness_id, expr.config_id(), final_ty.config_id()).proposition_id();
+    let prop = Realizes::new(witness_id, judged, final_ty.config_id()).proposition_id();
 
     // The audit that earns the evidence (ADR-0017 §5 D3). It re-checks
     // well-formedness and endpoints — the conditions above already established
@@ -2498,12 +2635,17 @@ pub fn audited_type_check_tree(
     // be checking nothing — and adds the leaf-generator membership check the
     // tree lane was missing (§4 row c). It does **not** check any leaf's ρ_g;
     // see `tree_audit`'s module doc.
-    let derivation = audit_tree(&tree, expr.config_id(), final_ty.config_id())
+    let derivation = audit_tree(&tree, judged, final_ty.config_id())
         .map_err(|_| TypeError::IllFormedDerivation)?;
 
+    // Published under the context the derivation actually ran under
+    // (ADR-0028 ⟨D-CTXPUBLISH⟩), not one the caller supplies. Taking it as a
+    // parameter is what let every typing judgement claim `ContextId::root()`
+    // while its derivation depended on bindings: the caller had no way to know
+    // what the binders below it assumed, so it always passed the root.
     let audited = Judgement::publish(
         Authority::AuditChecker,
-        context,
+        ctx.context(),
         prop,
         Outcome::Audited,
         Support::Tree(&derivation),
@@ -2556,10 +2698,19 @@ fn infer_arith(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer
     // ordered data inside `ArithTypingInputV1`.
     let split = TyTree::Leaf {
         generator: g_arith_split(),
-        src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+        src: TyObj::Atom(CfgAtom::Judged {
+            context: ctx.context(),
+            expr: expr.clone(),
+        }),
         dst: TyObj::Prod(
-            Box::new(TyObj::Atom(CfgAtom::Expr((**a).clone()))),
-            Box::new(TyObj::Atom(CfgAtom::Expr((**b).clone()))),
+            Box::new(TyObj::Atom(CfgAtom::Judged {
+                context: ctx.context(),
+                expr: (**a).clone(),
+            })),
+            Box::new(TyObj::Atom(CfgAtom::Judged {
+                context: ctx.context(),
+                expr: (**b).clone(),
+            })),
         ),
     };
     let tensor = TyTree::Tensor {
@@ -2673,7 +2824,10 @@ fn infer_record(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infe
         let rec_ty = Ty::Record(vec![]);
         let tree = TyTree::Leaf {
             generator: g_record_empty(),
-            src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+            src: TyObj::Atom(CfgAtom::Judged {
+                context: ctx.context(),
+                expr: expr.clone(),
+            }),
             dst: TyObj::Atom(CfgAtom::Type(rec_ty.clone())),
         };
         return Ok((rec_ty, tree, st));
@@ -2688,7 +2842,10 @@ fn infer_record(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infe
     for (name, val_expr) in sorted_fields {
         let (t_i, d_i, next_st) = infer_tree(&val_expr, ctx, curr_st)?;
         sorted_types.push((name, t_i.clone()));
-        expr_atoms.push(TyObj::Atom(CfgAtom::Expr(val_expr)));
+        expr_atoms.push(TyObj::Atom(CfgAtom::Judged {
+            context: ctx.context(),
+            expr: val_expr,
+        }));
         type_atoms.push(TyObj::Atom(CfgAtom::Type(t_i)));
         d_trees.push(d_i);
         curr_st = next_st;
@@ -2698,7 +2855,10 @@ fn infer_record(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infe
 
     let split = TyTree::Leaf {
         generator: g_record_split(),
-        src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+        src: TyObj::Atom(CfgAtom::Judged {
+            context: ctx.context(),
+            expr: expr.clone(),
+        }),
         dst: right_nest_prod(expr_atoms),
     };
 
@@ -2740,7 +2900,10 @@ fn infer_match(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer
     let (t_s, d_s, s1) = infer_tree(scrutinee, ctx, st)?;
     check_coverage(&t_s, arms, &s1.subst)?;
     let mut curr_st = s1;
-    let mut parts_exprs = vec![TyObj::Atom(CfgAtom::Expr((**scrutinee).clone()))];
+    let mut parts_exprs = vec![TyObj::Atom(CfgAtom::Judged {
+        context: ctx.context(),
+        expr: (**scrutinee).clone(),
+    })];
     let mut parts_derivs = vec![d_s];
     let mut res_ty: Option<Ty> = None;
 
@@ -2751,7 +2914,12 @@ fn infer_match(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer
             arm_ctx = arm_ctx.extend(x, t);
         }
         let (t_i, d_i, next_st) = infer_tree(body, &arm_ctx, curr_st)?;
-        parts_exprs.push(TyObj::Atom(CfgAtom::Expr(body.clone())));
+        // The arm's body is judged under the scope its pattern bound, not the
+        // scrutinee's scope.
+        parts_exprs.push(TyObj::Atom(CfgAtom::Judged {
+            context: arm_ctx.context(),
+            expr: body.clone(),
+        }));
         parts_derivs.push(d_i);
         if let Some(ref r_ty) = res_ty {
             let next_subst = unify(r_ty, &t_i, &next_st.subst)?;
@@ -2776,7 +2944,10 @@ fn infer_match(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer
 
     let split = TyTree::Leaf {
         generator: g_match_split(),
-        src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+        src: TyObj::Atom(CfgAtom::Judged {
+            context: ctx.context(),
+            expr: expr.clone(),
+        }),
         dst: right_nest_prod(parts_exprs),
     };
 
@@ -2840,10 +3011,19 @@ fn infer_app(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer),
 
     let split = TyTree::Leaf {
         generator: g_split(),
-        src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+        src: TyObj::Atom(CfgAtom::Judged {
+            context: ctx.context(),
+            expr: expr.clone(),
+        }),
         dst: TyObj::Prod(
-            Box::new(TyObj::Atom(CfgAtom::Expr((**f).clone()))),
-            Box::new(TyObj::Atom(CfgAtom::Expr((**x).clone()))),
+            Box::new(TyObj::Atom(CfgAtom::Judged {
+                context: ctx.context(),
+                expr: (**f).clone(),
+            })),
+            Box::new(TyObj::Atom(CfgAtom::Judged {
+                context: ctx.context(),
+                expr: (**x).clone(),
+            })),
         ),
     };
 
@@ -2912,14 +3092,19 @@ fn infer_cmp(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer),
 
     let split = TyTree::Leaf {
         generator: g_cmp_split(),
-        src: TyObj::Atom(CfgAtom::Expr(Expr::Cmp(
-            *op,
-            Box::new((**a).clone()),
-            Box::new((**b).clone()),
-        ))),
+        src: TyObj::Atom(CfgAtom::Judged {
+            context: ctx.context(),
+            expr: Expr::Cmp(*op, Box::new((**a).clone()), Box::new((**b).clone())),
+        }),
         dst: TyObj::Prod(
-            Box::new(TyObj::Atom(CfgAtom::Expr((**a).clone()))),
-            Box::new(TyObj::Atom(CfgAtom::Expr((**b).clone()))),
+            Box::new(TyObj::Atom(CfgAtom::Judged {
+                context: ctx.context(),
+                expr: (**a).clone(),
+            })),
+            Box::new(TyObj::Atom(CfgAtom::Judged {
+                context: ctx.context(),
+                expr: (**b).clone(),
+            })),
         ),
     };
     let operands = TyTree::Tensor {
@@ -2990,7 +3175,10 @@ fn infer_ctor(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer)
             // ⟨D-SPLIT⟩ ground that does not hold at zero arity.
             let tree = TyTree::Leaf {
                 generator: g_ctor_nullary(),
-                src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+                src: TyObj::Atom(CfgAtom::Judged {
+                    context: ctx.context(),
+                    expr: expr.clone(),
+                }),
                 dst: TyObj::Atom(CfgAtom::Type(sum_ty.clone())),
             };
             return Ok((sum_ty.clone(), tree, st));
@@ -3004,7 +3192,10 @@ fn infer_ctor(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer)
         for (arg_expr, declared_field_ty) in args.iter().zip(declared_fields.iter()) {
             let (t_i, d_i, next_st) = infer_tree(arg_expr, ctx, curr_st)?;
             let next_subst = unify(&t_i, declared_field_ty, &next_st.subst)?;
-            expr_atoms.push(TyObj::Atom(CfgAtom::Expr(arg_expr.clone())));
+            expr_atoms.push(TyObj::Atom(CfgAtom::Judged {
+                context: ctx.context(),
+                expr: arg_expr.clone(),
+            }));
             let zonked_field = zonk(declared_field_ty, &next_subst);
             type_atoms.push(TyObj::Atom(CfgAtom::Type(zonked_field)));
             d_trees.push(d_i);
@@ -3016,7 +3207,10 @@ fn infer_ctor(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer)
 
         let split = TyTree::Leaf {
             generator: g_ctor_split(),
-            src: TyObj::Atom(CfgAtom::Expr(expr.clone())),
+            src: TyObj::Atom(CfgAtom::Judged {
+                context: ctx.context(),
+                expr: expr.clone(),
+            }),
             dst: right_nest_prod(expr_atoms),
         };
 
@@ -3216,7 +3410,7 @@ mod tests {
         ];
 
         for (label, expr, ctx) in corpus {
-            let (_, derivation) = audited_type_check_tree(&expr, &ctx, ContextId::root())
+            let (_, derivation) = audited_type_check_tree(&expr, &ctx)
                 .unwrap_or_else(|e| panic!("{label} must type: {e:?}"));
 
             for leaf in derivation.tree().leaves() {
@@ -3262,8 +3456,7 @@ mod tests {
                 g_ctor_nullary(),
             ),
         ] {
-            let (_, derivation) =
-                audited_type_check_tree(&expr, &TyCtx::new(), ContextId::root()).expect("types");
+            let (_, derivation) = audited_type_check_tree(&expr, &TyCtx::new()).expect("types");
             let leaves = derivation.tree().leaves();
             assert_eq!(leaves.len(), 1, "{label}: expected a single leaf");
             match leaves[0] {
@@ -3321,8 +3514,8 @@ mod tests {
             "f",
             Ty::Fn(Box::new(Ty::Con("Int")), Box::new(Ty::Con("Bool"))),
         );
-        let (j1, d1) = audited_type_check_tree(&expr, &ctx, ContextId::root()).unwrap();
-        let (j2, d2) = audited_type_check_tree(&expr, &ctx, ContextId::root()).unwrap();
+        let (j1, d1) = audited_type_check_tree(&expr, &ctx).unwrap();
+        let (j2, d2) = audited_type_check_tree(&expr, &ctx).unwrap();
         assert_eq!(
             j1.id(),
             j2.id(),
@@ -3338,9 +3531,8 @@ mod tests {
             "f",
             Ty::Fn(Box::new(Ty::Con("Int")), Box::new(Ty::Con("Bool"))),
         );
-        let context = ContextId::root();
 
-        let (aud, tree) = audited_type_check_tree(&expr, &ctx, context).unwrap();
+        let (aud, tree) = audited_type_check_tree(&expr, &ctx).unwrap();
         assert_eq!(aud.outcome, Outcome::Audited);
 
         // Inspect tree: g_app2 leaf src config equals Prod(Atom(Fn(Int,Bool).config_id()), Atom(Int.config_id()))
@@ -3383,9 +3575,62 @@ mod tests {
         }
 
         // Determinism check
-        let (aud2, tree2) = audited_type_check_tree(&expr, &ctx, context).unwrap();
+        let (aud2, tree2) = audited_type_check_tree(&expr, &ctx).unwrap();
         assert_eq!(aud, aud2);
         assert_eq!(tree, tree2);
+    }
+
+    /// ADR-0028's two hard boundaries, as a gate rather than a claim.
+    ///
+    /// Both findings it fixes were *invisible to the suite* — every judgement
+    /// published `ContextId::root()` and every test passed, because nothing
+    /// ever asked. These assertions are what stop that recurring.
+    #[test]
+    fn a_judgement_is_scoped_to_what_it_assumed() {
+        let x = Expr::Var("x".to_string());
+
+        // (1) §6.1: root is published only by a derivation that assumed
+        //     nothing. Under a binding, the judgement must say so.
+        let ctx = TyCtx::new().extend("x", Ty::Con("Int"));
+        let (under_assumption, _) =
+            audited_type_check_tree(&x, &ctx).expect("a bound variable checks");
+        assert_ne!(
+            under_assumption.context,
+            ContextId::root(),
+            "a judgement resting on a binding must not claim an empty scope"
+        );
+        assert_eq!(
+            under_assumption.context,
+            ctx.context(),
+            "and the scope it claims must be the one it derived under"
+        );
+
+        // A derivation that genuinely assumes nothing still gets the root, so
+        // the check above is not satisfied by simply never emitting it.
+        let (assumption_free, _) =
+            audited_type_check_tree(&Expr::Lit(1), &TyCtx::new()).expect("a literal checks");
+        assert_eq!(assumption_free.context, ContextId::root());
+
+        // (2) Finding (b): `g_var`'s relation is functional. The same
+        //     expression under two scopes that give `x` different types is two
+        //     different sources — so one source no longer has two targets.
+        let int_ctx = TyCtx::new().extend("x", Ty::Con("Int"));
+        let str_ctx = TyCtx::new().extend("x", Ty::Con("Str"));
+        let src_of = |c: &TyCtx| {
+            let (_, tree, _) = infer_tree(&x, c, Infer::new()).expect("infers");
+            leaf_endpoints(&tree, &g_var())
+        };
+        let (int_src, int_dst) = src_of(&int_ctx);
+        let (str_src, str_dst) = src_of(&str_ctx);
+        assert_ne!(
+            int_dst, str_dst,
+            "the two scopes must genuinely give different types, or this proves nothing"
+        );
+        assert_ne!(
+            int_src, str_src,
+            "differing targets must come from differing sources — that is what \
+             'functional' means, and what naming the scope in the endpoint buys"
+        );
     }
 
     #[test]
@@ -3398,7 +3643,7 @@ mod tests {
             Box::new(Expr::Lit(42)),
         );
         let ctx = TyCtx::new();
-        let (aud, tree) = audited_type_check_tree(&expr, &ctx, ContextId::root()).unwrap();
+        let (aud, tree) = audited_type_check_tree(&expr, &ctx).unwrap();
         assert_eq!(aud.outcome, Outcome::Audited);
 
         let res = brix_elaborate::elaborate_tree(&aud, &tree, Budget::new(2000, 2000));
@@ -3414,7 +3659,7 @@ mod tests {
 
         let expected_prop = Realizes::new(
             brix_elaborate::witness_object(tree.tree()).witness_digest(),
-            expr.config_id(),
+            judged_config_id(ctx.context(), &expr),
             Ty::Con("Int").config_id(),
         )
         .proposition_id();
@@ -3462,7 +3707,7 @@ mod tests {
     fn test_bare_lambda_audited() {
         let expr = Expr::Lam("x".to_string(), Box::new(Expr::Var("x".to_string())));
         let ctx = TyCtx::new();
-        let (aud, tree) = audited_type_check_tree(&expr, &ctx, ContextId::root()).unwrap();
+        let (aud, tree) = audited_type_check_tree(&expr, &ctx).unwrap();
         assert_eq!(aud.outcome, Outcome::Audited);
         assert!(tree.tree().well_formed());
     }
@@ -3475,7 +3720,6 @@ mod tests {
             ("x".to_string(), Expr::Lit(1)),
         ]);
         let ctx = TyCtx::new();
-        let context = ContextId::root();
 
         let (ty, _ty_tree, st) = infer_tree(&expr, &ctx, Infer::new()).expect("infer record");
         let final_ty = zonk(&ty, &st.subst);
@@ -3492,7 +3736,7 @@ mod tests {
         ]);
         assert_eq!(expr.config_id(), expr_sorted.config_id());
 
-        let (aud, tree) = audited_type_check_tree(&expr, &ctx, context).expect("audited record");
+        let (aud, tree) = audited_type_check_tree(&expr, &ctx).expect("audited record");
         assert_eq!(aud.outcome, Outcome::Audited);
         assert!(tree.tree().well_formed());
 
@@ -3510,7 +3754,7 @@ mod tests {
         // 1-field record: {a: 42}
         let expr1 = Expr::Record(vec![("a".to_string(), Expr::Lit(42))]);
         let ctx = TyCtx::new();
-        let (aud1, tree1) = audited_type_check_tree(&expr1, &ctx, ContextId::root()).unwrap();
+        let (aud1, tree1) = audited_type_check_tree(&expr1, &ctx).unwrap();
         assert!(tree1.tree().well_formed());
         assert!(matches!(
             brix_elaborate::elaborate_tree(&aud1, &tree1, Budget::new(1000, 1000)),
@@ -3522,7 +3766,7 @@ mod tests {
             "inner".to_string(),
             Expr::Record(vec![("val".to_string(), Expr::Lit(7))]),
         )]);
-        let (aud2, tree2) = audited_type_check_tree(&expr_nested, &ctx, ContextId::root()).unwrap();
+        let (aud2, tree2) = audited_type_check_tree(&expr_nested, &ctx).unwrap();
         assert!(tree2.tree().well_formed());
         let res2 = brix_elaborate::elaborate_tree(&aud2, &tree2, Budget::new(2000, 2000));
         assert!(matches!(res2, ElaborationResult::Proven { .. }));
@@ -3537,13 +3781,12 @@ mod tests {
         ]);
         let ctx = TyCtx::new().extend("r", r_ty);
         let expr = Expr::Field(Box::new(Expr::Var("r".to_string())), "base".to_string());
-        let context = ContextId::root();
 
         let (ty, _tree, st) = infer_tree(&expr, &ctx, Infer::new()).expect("infer field access");
         let final_ty = zonk(&ty, &st.subst);
         assert_eq!(final_ty, Ty::Con("Int"));
 
-        let (aud, tree) = audited_type_check_tree(&expr, &ctx, context).expect("audited field");
+        let (aud, tree) = audited_type_check_tree(&expr, &ctx).expect("audited field");
         assert!(tree.tree().well_formed());
 
         let res = brix_elaborate::elaborate_tree(&aud, &tree, Budget::new(1000, 1000));
@@ -3561,7 +3804,7 @@ mod tests {
         let ctx = TyCtx::new().extend("r", r_ty);
         let expr = Expr::Field(Box::new(Expr::Var("r".to_string())), "y".to_string());
 
-        let res = audited_type_check_tree(&expr, &ctx, ContextId::root());
+        let res = audited_type_check_tree(&expr, &ctx);
         assert_eq!(res, Err(TypeError::NoField("y".to_string())));
     }
 
@@ -3636,8 +3879,7 @@ mod tests {
         let (ty, _tree, _st) = infer_tree(&expr, &ctx, Infer::new()).unwrap();
         assert_eq!(ty, Ty::Con("Rat"));
 
-        let (judgement, tree) =
-            audited_type_check_tree(&expr, &ctx, ContextId::root()).expect("audited arith");
+        let (judgement, tree) = audited_type_check_tree(&expr, &ctx).expect("audited arith");
         assert_eq!(judgement.outcome, Outcome::Audited);
 
         let res = brix_elaborate::elaborate_tree(&judgement, &tree, Budget::new(2000, 2000));
@@ -3655,8 +3897,7 @@ mod tests {
         let (ty, _, _) = infer_tree(&expr, &ctx, Infer::new()).unwrap();
         assert_eq!(ty, Ty::Con("Float"));
 
-        let (judgement, tree) =
-            audited_type_check_tree(&expr, &ctx, ContextId::root()).expect("audited div");
+        let (judgement, tree) = audited_type_check_tree(&expr, &ctx).expect("audited div");
         assert_eq!(judgement.outcome, Outcome::Audited);
         let res = brix_elaborate::elaborate_tree(&judgement, &tree, Budget::new(2000, 2000));
         assert!(
@@ -4118,7 +4359,6 @@ mod tests {
         // working rather than merely asserted, and without a second row table.
         let relation = resolve_primitive_relation(&typing_arith_v2()).expect("TypingArithV2");
         let mut relocated = 0;
-        let ctx_id = ContextId::root();
         let ops = [ArithOp::Add, ArithOp::Sub, ArithOp::Mul, ArithOp::Div];
 
         let mut checked = 0;
@@ -4148,6 +4388,9 @@ mod tests {
                 };
                 let src = PropositionId(src_cfg.digest());
                 let dst = PropositionId(dst_cfg.digest());
+                // The kernel's own assumption scope for the acceptance below —
+                // nothing to do with the typing regime's context.
+                let ctx_id = ContextId::root();
 
                 // The precise conclusion: the generator comes from the relation,
                 // the endpoints from the leaf.
@@ -4359,7 +4602,13 @@ mod tests {
                     dst,
                 } => {
                     assert_eq!(generator, gen);
-                    assert_eq!(src, TyObj::Atom(CfgAtom::Expr(expr)));
+                    assert_eq!(
+                        src,
+                        TyObj::Atom(CfgAtom::Judged {
+                            context: TyCtx::new().context(),
+                            expr
+                        })
+                    );
                     assert_eq!(dst, TyObj::Atom(CfgAtom::Type(ty)));
                 }
                 other => panic!("expected a single faithful leaf, got {other:?}"),
@@ -4371,8 +4620,7 @@ mod tests {
     fn literal_binding_earns_proven_but_composite_stays_audited() {
         // A pure literal rests only on a discharged (tight) generator, so its
         // honest result outcome is the kernel's Proven composition.
-        let (_, lit_tree) =
-            audited_type_check_tree(&Expr::Lit(42), &TyCtx::new(), ContextId::root()).unwrap();
+        let (_, lit_tree) = audited_type_check_tree(&Expr::Lit(42), &TyCtx::new()).unwrap();
         assert_eq!(
             honest_result_outcome(Outcome::Proven, lit_tree.tree()),
             Outcome::Proven,
@@ -4388,8 +4636,7 @@ mod tests {
             )),
             Box::new(Expr::Lit(42)),
         );
-        let (_, app_tree) =
-            audited_type_check_tree(&app, &TyCtx::new(), ContextId::root()).unwrap();
+        let (_, app_tree) = audited_type_check_tree(&app, &TyCtx::new()).unwrap();
         assert_eq!(
             honest_result_outcome(Outcome::Proven, app_tree.tree()),
             Outcome::Proven,
@@ -4399,8 +4646,7 @@ mod tests {
         // `1 + 2` uses g_arith, which asserts operation semantics and is NOT
         // discharged, so it is honestly capped at Audited.
         let arith = Expr::Arith(ArithOp::Add, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2)));
-        let (_, arith_tree) =
-            audited_type_check_tree(&arith, &TyCtx::new(), ContextId::root()).unwrap();
+        let (_, arith_tree) = audited_type_check_tree(&arith, &TyCtx::new()).unwrap();
         assert_eq!(
             honest_result_outcome(Outcome::Proven, arith_tree.tree()),
             Outcome::Audited,
@@ -4419,13 +4665,11 @@ mod tests {
     /// implies.
     #[test]
     fn zero_arity_intro_generators_are_faithful() {
-        let ctx_id = ContextId::root();
-
         // (1) Zero premises: each derives as a single leaf, with no
         //     subderivation and no split. If either ever composes something,
         //     the "nothing to check" argument lapses and so does the discharge.
-        let (_, empty) = audited_type_check_tree(&Expr::Record(vec![]), &TyCtx::new(), ctx_id)
-            .expect("empty record");
+        let (_, empty) =
+            audited_type_check_tree(&Expr::Record(vec![]), &TyCtx::new()).expect("empty record");
         assert_eq!(empty.tree().leaves().len(), 1);
 
         let opt = Ty::Sum(
@@ -4438,7 +4682,6 @@ mod tests {
         let (_, none) = audited_type_check_tree(
             &Expr::Ctor(opt.clone(), "None".into(), vec![]),
             &TyCtx::new(),
-            ctx_id,
         )
         .expect("nullary ctor");
         assert_eq!(none.tree().leaves().len(), 1);
@@ -4453,7 +4696,13 @@ mod tests {
                 dst,
             } => {
                 assert_eq!(*generator, g_record_empty());
-                assert_eq!(*src, TreeObj::Atom(Expr::Record(vec![]).config_id()));
+                assert_eq!(
+                    *src,
+                    TreeObj::Atom(judged_config_id(
+                        TyCtx::new().context(),
+                        &Expr::Record(vec![])
+                    ))
+                );
                 assert_eq!(*dst, TreeObj::Atom(Ty::Record(vec![]).config_id()));
             }
             other => panic!("expected a single leaf, got {other:?}"),
@@ -4500,8 +4749,7 @@ mod tests {
             ),
         ] {
             let expr = Expr::Ctor(sum.clone(), variant.into(), vec![]);
-            let (_, derivation) =
-                audited_type_check_tree(&expr, &TyCtx::new(), ctx_id).expect("types");
+            let (_, derivation) = audited_type_check_tree(&expr, &TyCtx::new()).expect("types");
             match derivation.tree() {
                 RealizesTree::Leaf {
                     generator,
@@ -4509,7 +4757,10 @@ mod tests {
                     dst,
                 } => {
                     assert_eq!(*generator, g_ctor_nullary());
-                    assert_eq!(*src, TreeObj::Atom(expr.config_id()));
+                    assert_eq!(
+                        *src,
+                        TreeObj::Atom(judged_config_id(TyCtx::new().context(), &expr))
+                    );
                     assert_eq!(
                         *dst,
                         TreeObj::Atom(sum.config_id()),
@@ -4545,7 +4796,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                audited_type_check_tree(&expr, &TyCtx::new(), ctx_id).map(|_| ()),
+                audited_type_check_tree(&expr, &TyCtx::new()).map(|_| ()),
                 Err(TypeError::Mismatch),
                 "{label} must not derive at all"
             );
@@ -4736,7 +4987,7 @@ mod tests {
 
         let empty_record = Expr::Record(vec![]);
         let (_, empty_tree) =
-            audited_type_check_tree(&empty_record, &TyCtx::new(), ctx).expect("empty record");
+            audited_type_check_tree(&empty_record, &TyCtx::new()).expect("empty record");
         assert!(has_leaf(empty_tree.tree(), &g_record_empty()));
         assert!(
             !has_leaf(empty_tree.tree(), &g_record())
@@ -4754,7 +5005,7 @@ mod tests {
         );
         let nullary_ctor = Expr::Ctor(bool_ty, "True".into(), vec![]);
         let (_, nullary_tree) =
-            audited_type_check_tree(&nullary_ctor, &TyCtx::new(), ctx).expect("nullary ctor");
+            audited_type_check_tree(&nullary_ctor, &TyCtx::new()).expect("nullary ctor");
         assert!(has_leaf(nullary_tree.tree(), &g_ctor_nullary()));
         assert!(
             !has_leaf(nullary_tree.tree(), &g_ctor())
@@ -4777,8 +5028,6 @@ mod tests {
         use brix_kernel::{ExplicitTerm, Prop, TermKind, Var, Verdict};
         use brix_semantic::PropositionId;
 
-        let ctx_id = ContextId::root();
-
         // (i) Exactly two ordered child obligations, and the packaging is the
         //     kernel's own binary product introduction — the same rule the
         //     other `*_split` leaves rest on (`g_record_split` /
@@ -4786,6 +5035,8 @@ mod tests {
         //     precisely the "same structural grounds" ⟨D-SPLIT⟩ appeals to.
         let atom = |name| Prop::Atom(PropositionId::from_canon(name));
         let (lhs, rhs) = (atom(b"lhs obligation"), atom(b"rhs obligation"));
+        // The kernel's assumption scope for the acceptances below.
+        let ctx_id = ContextId::root();
         let pair_formation = Prop::Impl(
             Box::new(lhs.clone()),
             Box::new(Prop::Impl(
@@ -4826,12 +5077,25 @@ mod tests {
         let one_plus_two =
             Expr::Arith(ArithOp::Add, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2)));
         let (src, dst) = split_of(&one_plus_two, &TyCtx::new());
-        assert_eq!(src, TyObj::Atom(CfgAtom::Expr(one_plus_two.clone())));
+        let root = TyCtx::new().context();
+        assert_eq!(
+            src,
+            TyObj::Atom(CfgAtom::Judged {
+                context: root,
+                expr: one_plus_two.clone()
+            })
+        );
         assert_eq!(
             dst,
             TyObj::Prod(
-                Box::new(TyObj::Atom(CfgAtom::Expr(Expr::Lit(1)))),
-                Box::new(TyObj::Atom(CfgAtom::Expr(Expr::Lit(2)))),
+                Box::new(TyObj::Atom(CfgAtom::Judged {
+                    context: root,
+                    expr: Expr::Lit(1)
+                })),
+                Box::new(TyObj::Atom(CfgAtom::Judged {
+                    context: root,
+                    expr: Expr::Lit(2)
+                })),
             ),
             "exactly two children, in source order"
         );
@@ -4857,12 +5121,25 @@ mod tests {
         // (iii) No promotion is chosen and no result type is synthesised.
         //
         //       The direct demonstration: one expression, two contexts that
-        //       force *different* promotions and different result types, and a
-        //       byte-identical split leaf. `x + y` types as `Int` under the
-        //       first (no promotion) and `Rat` under the second (splicing
-        //       Int↪Rat). If the split had any promotion or result-type
-        //       content, these could not agree — and ⟨D-SPLIT⟩'s conditional
-        //       would have lapsed.
+        //       force *different* promotions and different result types, and
+        //       the same split leaf. `x + y` types as `Int` under the first (no
+        //       promotion) and `Rat` under the second (splicing Int↪Rat). If
+        //       the split had any promotion or result-type content, these could
+        //       not agree — and ⟨D-SPLIT⟩'s conditional would have lapsed.
+        //
+        //       Since ADR-0028 the endpoints also name their assumption scope,
+        //       and two contexts forcing different promotions necessarily *are*
+        //       different scopes — so the leaves are no longer byte-identical
+        //       and cannot be. That does not weaken the claim: ⟨D-SPLIT⟩ says
+        //       the split encodes no promotion and no result type, not that it
+        //       encodes nothing. The scope is part of which judgement is being
+        //       made, not part of what the split concluded.
+        //
+        //       So the comparison is modulo the scope — and to stop that being
+        //       a hole wide enough to smuggle a result type through, `skeleton`
+        //       *checks* on the way past that every context in the leaf is the
+        //       ambient one. A split that varied its endpoints' scope with the
+        //       result would fail there rather than be normalised away.
         let x_plus_y = Expr::Arith(
             ArithOp::Add,
             Box::new(Expr::Var("x".to_string())),
@@ -4883,9 +5160,33 @@ mod tests {
             Ty::Con("Rat"),
             "the second context must genuinely force a different result"
         );
+        fn skeleton(obj: &TyObj, ambient: ContextId) -> TyObj {
+            match obj {
+                TyObj::Atom(CfgAtom::Judged { context, expr }) => {
+                    assert_eq!(
+                        *context, ambient,
+                        "a split endpoint must be scoped to the judgement's own \
+                         context and no other"
+                    );
+                    TyObj::Atom(CfgAtom::Judged {
+                        context: ContextId::root(),
+                        expr: expr.clone(),
+                    })
+                }
+                TyObj::Prod(l, r) => TyObj::Prod(
+                    Box::new(skeleton(l, ambient)),
+                    Box::new(skeleton(r, ambient)),
+                ),
+                other => other.clone(),
+            }
+        }
+        let (int_src, int_dst) = split_of(&x_plus_y, &int_ctx);
+        let (rat_src, rat_dst) = split_of(&x_plus_y, &rat_ctx);
+        let (i, r) = (int_ctx.context(), rat_ctx.context());
+        assert_ne!(i, r, "the two contexts must genuinely differ");
         assert_eq!(
-            split_of(&x_plus_y, &int_ctx),
-            split_of(&x_plus_y, &rat_ctx),
+            (skeleton(&int_src, i), skeleton(&int_dst, i)),
+            (skeleton(&rat_src, r), skeleton(&rat_dst, r)),
             "the split must not vary with the promotion or the result type"
         );
 
@@ -4894,7 +5195,7 @@ mod tests {
         // would be a representation claim it is not entitled to make.
         fn only_expressions(obj: &TyObj) -> bool {
             match obj {
-                TyObj::Atom(CfgAtom::Expr(_)) => true,
+                TyObj::Atom(CfgAtom::Judged { .. }) | TyObj::Atom(CfgAtom::Expr(_)) => true,
                 TyObj::Atom(CfgAtom::Type(_))
                 | TyObj::Atom(CfgAtom::ArithInput(_))
                 | TyObj::Atom(CfgAtom::ArithResult(_)) => false,
@@ -4909,7 +5210,7 @@ mod tests {
         //      against the operand tensor, and the audit refuses to produce an
         //      artifact rather than downgrading one.
         let (_, real_tree) =
-            audited_type_check_tree(&one_plus_two, &TyCtx::new(), ctx_id).expect("audited");
+            audited_type_check_tree(&one_plus_two, &TyCtx::new()).expect("audited");
         let forged = forge_split_child(real_tree.tree(), &Expr::Lit(99).config_id());
         match audit_tree(
             &forged,
@@ -4972,10 +5273,11 @@ mod tests {
         // the base expression rather than at `base.field`.
         let assert_endpoints = |expr: Expr, ctx: TyCtx| {
             let (ty, _tree, state) = infer_tree(&expr, &ctx, Infer::new()).expect("infer");
-            let expected_src = TreeObj::Atom(expr.config_id());
+            // The source is the `(Γ, e)` pair the judgement is about, not the
+            // bare expression (ADR-0028 ⟨D-CTXENDPOINT⟩).
+            let expected_src = TreeObj::Atom(judged_config_id(ctx.context(), &expr));
             let expected_dst = TreeObj::Atom(zonk(&ty, &state.subst).config_id());
-            let (_audited, tree) =
-                audited_type_check_tree(&expr, &ctx, ContextId::root()).expect("audited");
+            let (_audited, tree) = audited_type_check_tree(&expr, &ctx).expect("audited");
             assert_eq!(
                 tree.tree().src(),
                 expected_src,
@@ -5063,14 +5365,12 @@ mod tests {
         );
         let expr = Expr::Ctor(bool_ty.clone(), "True".into(), vec![]);
         let ctx = TyCtx::new();
-        let context = ContextId::root();
 
         let (ty, _ty_tree, st) = infer_tree(&expr, &ctx, Infer::new()).expect("infer ctor nullary");
         let final_ty = zonk(&ty, &st.subst);
         assert_eq!(final_ty, bool_ty);
 
-        let (aud, tree) =
-            audited_type_check_tree(&expr, &ctx, context).expect("audited ctor nullary");
+        let (aud, tree) = audited_type_check_tree(&expr, &ctx).expect("audited ctor nullary");
         assert_eq!(aud.outcome, Outcome::Audited);
         assert_eq!(
             honest_result_outcome(Outcome::Proven, tree.tree()),
@@ -5100,13 +5400,12 @@ mod tests {
         );
         let expr = Expr::Ctor(opt_ty.clone(), "Some".into(), vec![Expr::Lit(3)]);
         let ctx = TyCtx::new();
-        let context = ContextId::root();
 
         let (ty, _ty_tree, st) = infer_tree(&expr, &ctx, Infer::new()).expect("infer ctor opt");
         let final_ty = zonk(&ty, &st.subst);
         assert_eq!(final_ty, opt_ty);
 
-        let (aud, tree) = audited_type_check_tree(&expr, &ctx, context).expect("audited ctor opt");
+        let (aud, tree) = audited_type_check_tree(&expr, &ctx).expect("audited ctor opt");
         assert_eq!(aud.outcome, Outcome::Audited);
         assert!(tree.tree().well_formed());
 
@@ -5131,13 +5430,12 @@ mod tests {
             vec![Expr::Lit(1), Expr::StrLit("x".into())],
         );
         let ctx = TyCtx::new();
-        let context = ContextId::root();
 
         let (ty, _ty_tree, st) = infer_tree(&expr, &ctx, Infer::new()).expect("infer ctor pair");
         let final_ty = zonk(&ty, &st.subst);
         assert_eq!(final_ty, pair_ty);
 
-        let (aud, tree) = audited_type_check_tree(&expr, &ctx, context).expect("audited ctor pair");
+        let (aud, tree) = audited_type_check_tree(&expr, &ctx).expect("audited ctor pair");
         assert_eq!(aud.outcome, Outcome::Audited);
         assert!(tree.tree().well_formed());
 
@@ -5162,7 +5460,7 @@ mod tests {
         let expr = Expr::Ctor(opt_ty, "Some".into(), vec![Expr::StrLit("bad".into())]);
         let ctx = TyCtx::new();
 
-        let res = audited_type_check_tree(&expr, &ctx, ContextId::root());
+        let res = audited_type_check_tree(&expr, &ctx);
         assert_eq!(res, Err(TypeError::Mismatch));
     }
 
@@ -5178,7 +5476,7 @@ mod tests {
         let expr = Expr::Ctor(opt_ty, "Nope".into(), vec![]);
         let ctx = TyCtx::new();
 
-        let res = audited_type_check_tree(&expr, &ctx, ContextId::root());
+        let res = audited_type_check_tree(&expr, &ctx);
         assert_eq!(res, Err(TypeError::Mismatch));
     }
 
@@ -5334,13 +5632,11 @@ mod tests {
             ],
         );
         let ctx = TyCtx::new().extend("o", opt_ty);
-        let context = ContextId::root();
 
         let (ty, _tree, _st) = infer_tree(&expr, &ctx, Infer::new()).expect("infer match opt");
         assert_eq!(ty, Ty::Con("Int"));
 
-        let (aud, real_tree) =
-            audited_type_check_tree(&expr, &ctx, context).expect("audited match opt");
+        let (aud, real_tree) = audited_type_check_tree(&expr, &ctx).expect("audited match opt");
         assert_eq!(aud.outcome, Outcome::Audited);
         assert!(real_tree.tree().well_formed());
 
@@ -5368,13 +5664,12 @@ mod tests {
             ],
         );
         let ctx = TyCtx::new().extend("b", bool_ty);
-        let context = ContextId::root();
 
         let (ty, _tree, _st) = infer_tree(&expr, &ctx, Infer::new()).expect("infer match wildcard");
         assert_eq!(ty, Ty::Con("Int"));
 
         let (aud, real_tree) =
-            audited_type_check_tree(&expr, &ctx, context).expect("audited match wildcard");
+            audited_type_check_tree(&expr, &ctx).expect("audited match wildcard");
         assert_eq!(aud.outcome, Outcome::Audited);
         assert_eq!(
             honest_result_outcome(Outcome::Proven, real_tree.tree()),
