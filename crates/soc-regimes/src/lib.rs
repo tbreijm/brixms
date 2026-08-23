@@ -37,6 +37,26 @@ pub mod coverage;
 pub mod literal;
 pub mod native;
 pub mod tree_audit;
+// A generator's discharge ground under the type-realization contract §9.2(1)
+// lives in its doc comment; §9.1 is explicit that the `generator_is_tight`
+// entry alone is not a discharge. So an undocumented item in this module is a
+// missing normative artifact, not a missing convenience.
+//
+// This is scoped here rather than crate-wide because it guards a specific
+// failure that has happened twice: inserting a new generator between an
+// existing doc comment and the `pub fn` it belongs to. #296 did it to
+// `g_arith_split` and #317 did it to `g_bool_lit`, each time leaving the
+// displaced item bare and stacking its ground onto the newcomer — which is how
+// `g_fix`, deliberately NOT discharged, came to carry a doc opening
+// "Discharged tight on the same grounds as `g_lit`". Verified to fire on that
+// exact shape rather than assumed to: reinserting a documented generator ahead
+// of `g_bool_lit`'s `pub fn` fails the build.
+//
+// The residual gap, stated rather than glossed: this catches an insertion
+// between a doc BLOCK and its item, which is what both instances were. An
+// insertion *inside* a block leaves the displaced item holding the block's
+// tail, and a partial doc is still a doc. Nothing here catches that.
+#[deny(missing_docs)]
 pub mod type_realization;
 
 pub use literal::{literal_equality_semantics, LiteralEqualityRegime};

@@ -47,11 +47,17 @@ pub fn bool_ty() -> Ty {
 /// enum would put those two different result rules behind one tag.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum CmpOp {
+    /// `<` (ordinal 0).
     Lt,
+    /// `<=` (ordinal 1).
     Le,
+    /// `>` (ordinal 2).
     Gt,
+    /// `>=` (ordinal 3).
     Ge,
+    /// `==` (ordinal 4).
     Eq,
+    /// `!=` (ordinal 5).
     Ne,
 }
 
@@ -72,10 +78,19 @@ impl CmpOp {
 /// Native representation of types in the type-realization regime (ADR-0005).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Ty {
+    /// A type constant — `Int`, `Str`, `Float`, `Bool` (ordinal 0). These are
+    /// the atoms ADR-0025 ⟨D-PINNED⟩ freezes for the kernel's rows.
     Con(&'static str),
+    /// A function type `a -> b` (ordinal 1).
     Fn(Box<Ty>, Box<Ty>),
+    /// A unification variable (ordinal 2). **Inference-internal**: contract
+    /// §1.5 forbids one in a published judgement, so the inferred type is
+    /// zonked before the result is formed.
     Var(u32),
+    /// A record type — its fields, in declaration order (ordinal 3).
     Record(Vec<(String, Ty)>),
+    /// A named sum type and its variants, each with its field types
+    /// (ordinal 4).
     Sum(String, Vec<(String, Vec<Ty>)>),
     /// A recursive type, `μX. body` (append-only ordinal 5). The `String` names
     /// the bound variable; occurrences of it inside `body` are [`Ty::RecVar`].
@@ -231,9 +246,14 @@ impl Ty {
 /// value, not the type — so they carry a single `g_arith` generator.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum ArithOp {
+    /// `+` (ordinal 0).
     Add,
+    /// `-` (ordinal 1).
     Sub,
+    /// `*` (ordinal 2).
     Mul,
+    /// `/` (ordinal 3). The only one whose result type can differ from its
+    /// operands' — integer division embeds into `Float` (ADR-0024).
     Div,
 }
 
@@ -293,8 +313,13 @@ impl Canonical for ArithOp {
 /// Pattern representation for match expressions (ADR-0011 Slice 2).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Pattern {
+    /// `_` — matches anything and binds nothing (ordinal 0). An arm using it
+    /// is typed by `g_match_catchall`, which is deliberately undischarged.
     Wildcard,
+    /// A binding pattern: matches anything and binds it (ordinal 1).
     Var(String),
+    /// An explicit constructor pattern with its sub-patterns (ordinal 2).
+    /// Only these arms are certified; nested sub-patterns are not.
     Ctor(String, Vec<Pattern>),
 }
 
@@ -323,11 +348,19 @@ impl Canonical for Pattern {
 /// Expression AST for the native type-realization regime (ADR-0005).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Expr {
+    /// An integer literal (ordinal 0). Types to `Int`.
     Lit(i64),
+    /// A variable occurrence (ordinal 1), resolved against the [`TyCtx`] it is
+    /// judged under.
     Var(String),
+    /// Application `f x` (ordinal 2).
     App(Box<Expr>, Box<Expr>),
+    /// A lambda whose parameter type is inferred (ordinal 3). See
+    /// [`Expr::LamAnn`] for the annotated form.
     Lam(String, Box<Expr>),
+    /// Record construction — its fields, in source order (ordinal 4).
     Record(Vec<(String, Expr)>),
+    /// Field projection `b.f` (ordinal 5).
     Field(Box<Expr>, String),
     /// String literal (append-only ordinal 6). Types to `Str`.
     StrLit(String),
@@ -701,13 +734,6 @@ pub fn g_arith() -> GeneratorId {
     GeneratorId::named("type.rule.arith@1")
 }
 
-/// Typing-rule generator for arithmetic operand splitting (`"type.rule.arith.split@1"`).
-/// Typing-rule generator for a boolean literal (`"type.rule.bool.lit@1"`).
-///
-/// Discharged tight on the same grounds as [`g_lit`], [`g_str_lit`] and
-/// [`g_float_lit`]: under ADR-0015 ⟨D-JUDGE⟩ it establishes `HasType(true,
-/// Bool)` and nothing else. It asserts no operation, representation, or value
-/// semantics, so there is nothing further for it to be capped by.
 /// Typing-rule generator for a recursive definition (`"type.rule.fix@1"`).
 ///
 /// **Deliberately NOT discharged.** It introduces the definition's own type as
@@ -720,6 +746,12 @@ pub fn g_fix() -> GeneratorId {
     GeneratorId::named("type.rule.fix@1")
 }
 
+/// Typing-rule generator for a boolean literal (`"type.rule.bool.lit@1"`).
+///
+/// Discharged tight on the same grounds as [`g_lit`], [`g_str_lit`] and
+/// [`g_float_lit`]: under ADR-0015 ⟨D-JUDGE⟩ it establishes `HasType(true,
+/// Bool)` and nothing else. It asserts no operation, representation, or value
+/// semantics, so there is nothing further for it to be capped by.
 pub fn g_bool_lit() -> GeneratorId {
     GeneratorId::named("type.rule.bool.lit@1")
 }
@@ -792,6 +824,7 @@ pub fn g_tensor() -> GeneratorId {
     GeneratorId::named("type.rule.tensor@1")
 }
 
+/// Typing-rule generator for arithmetic operand splitting (`"type.rule.arith.split@1"`).
 pub fn g_arith_split() -> GeneratorId {
     GeneratorId::named("type.rule.arith.split@1")
 }
@@ -1624,6 +1657,9 @@ pub struct TyCtx {
 }
 
 impl TyCtx {
+    /// The empty context. Its identity is `ContextId::root()` — which
+    /// ADR-0028 ⟨D-CTXPUBLISH⟩ reserves for a derivation that genuinely
+    /// assumes nothing.
     pub fn new() -> Self {
         Self {
             bindings: BTreeMap::new(),
@@ -1649,6 +1685,7 @@ impl TyCtx {
         Self { bindings, context }
     }
 
+    /// The type assumed for `var`, or `None` if it is unbound here.
     pub fn get(&self, var: &str) -> Option<&Ty> {
         self.bindings.get(var)
     }
@@ -1676,10 +1713,17 @@ pub enum TypeError {
     /// realizations do not compose. Sequential composition requires a shared
     /// middle object; that is the whole of what `then` asserts.
     CompositionEndpointMismatch,
+    /// A variable occurrence with no assumption in the context it is judged
+    /// under.
     Unbound(String),
+    /// Two types that do not unify.
     Mismatch,
+    /// The occurs check rejected a substitution binding a variable to a type
+    /// containing it. Never a panic and never a judgement (contract §2.4).
     InfiniteType,
+    /// Syntax outside the L2 fragment this regime types.
     Unsupported,
+    /// Field projection naming a field the record type does not have.
     NoField(String),
     /// The built derivation tree is not well-formed (a `Seq` middle does not match),
     /// so it cannot be honestly labelled `Audited`. Arises when a leaf endpoint config
@@ -1775,11 +1819,14 @@ pub fn check_coverage(
 /// sharing; `BTreeMap` clone-extend is used here for slice-2 correctness without external dependencies.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Infer {
+    /// The substitution accumulated so far, from [`Ty::Var`] index to type.
     pub subst: BTreeMap<u32, Ty>,
+    /// The next unused [`Ty::Var`] index.
     pub next_var: u32,
 }
 
 impl Infer {
+    /// Empty substitution, no variables allocated.
     pub fn new() -> Self {
         Self {
             subst: BTreeMap::new(),
@@ -2131,6 +2178,7 @@ pub enum CfgAtom {
     /// decoder meeting an old artifact fails closed on an ordinal it knows
     /// rather than silently reinterpreting one it does not.
     Expr(Expr),
+    /// A type.
     Type(Ty),
     /// The kernel-owned arithmetic typing source object (ADR-0015 §5 Stage
     /// B0) — **append-only**, never reordered ahead of the two above.
@@ -2165,7 +2213,9 @@ pub enum CfgAtom {
     /// destination, so the relation a discharged generator rests on is one the
     /// derivation exhibits rather than asserts.
     Judged {
+        /// The identity of the assumption scope `expr` is typed under.
         context: ContextId,
+        /// The expression being typed.
         expr: Expr,
     },
 }
@@ -2173,7 +2223,9 @@ pub enum CfgAtom {
 /// Deferred-materialization tree object (ADR-0008).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TyObj {
+    /// A single configuration.
     Atom(CfgAtom),
+    /// A product of two objects. Products are right-nested (contract §4.4).
     Prod(Box<TyObj>, Box<TyObj>),
 }
 
@@ -2181,17 +2233,30 @@ pub enum TyObj {
 #[derive(Clone, PartialEq, Eq, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TyTree {
+    /// A single generator application. Its `src` and `dst` must differ —
+    /// contract §4.3 forbids a padded step, because no generator realizes
+    /// `(x, x)`.
     Leaf {
+        /// The typing rule this step cites. Must be in `𝒢`.
         generator: GeneratorId,
+        /// What the step starts from.
         src: TyObj,
+        /// What it establishes.
         dst: TyObj,
     },
+    /// Sequential composition. Well-formed only when `left.dst() ==
+    /// right.src()` (contract §4.2).
     Seq {
+        /// The step that runs first.
         left: Box<TyTree>,
+        /// The step that consumes its destination.
         right: Box<TyTree>,
     },
+    /// Parallel composition, over a [`TyObj::Prod`] of both sides' endpoints.
     Tensor {
+        /// The first component, in source order.
         left: Box<TyTree>,
+        /// The second component.
         right: Box<TyTree>,
     },
 }
