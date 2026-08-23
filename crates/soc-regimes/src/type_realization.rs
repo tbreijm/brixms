@@ -5579,6 +5579,92 @@ mod tests {
         );
     }
 
+    /// The contract's §3.4 table and `minted_generators()` name the same
+    /// generators, with the same tightness — closing
+    /// `Type_Realization_Contract.md` §12.2, which said a new generator
+    /// "SHALL arrive with its row in §3.4" and was prose.
+    ///
+    /// **What was unguarded.** Four generators arrived without one. #308
+    /// minted `g_then_split`, `g_tensor_split` and `g_tensor` and discharged
+    /// all three; #317 minted `g_fix` undischarged. The table did not move
+    /// either time, so the normative document described a generator set two
+    /// weeks behind the one that exists — and the `T` column, which is the
+    /// only place a reader can see *what a grade rests on*, was silently
+    /// incomplete.
+    ///
+    /// **Both sides are derived.** The row set is read out of the document;
+    /// the comparison set comes from [`minted_generators`], which §3.1 makes
+    /// the single source. Neither is a literal written beside the other —
+    /// the shape #299 identified as the tell for an assertion that cannot
+    /// fire.
+    ///
+    /// The residual gap, stated rather than glossed: this pins that a row
+    /// *exists* and that its `T` cell agrees with the code. It does not read
+    /// the `src → dst` column, so a row whose endpoints stop matching the
+    /// emission still passes. §3.4.2's finding — three ✓ rows without §9.2's
+    /// faithfulness and negative pins — is likewise out of its reach; that
+    /// was found by reading.
+    #[test]
+    fn the_contract_table_matches_the_minted_generators() {
+        let contract = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../spec/Type_Realization_Contract.md"),
+        )
+        .expect("the contract this crate implements must be readable");
+
+        // The `NUMERIC`/`GRADE` coercion edges are deliberately excluded:
+        // §3.4 covers the whole open-ended family with one row, and §3.5
+        // records why they never reach a leaf at all.
+        let minted: BTreeMap<String, bool> = minted_generators()
+            .into_iter()
+            .filter(|(name, _)| name.starts_with("g_"))
+            .map(|(name, g)| (name, generator_is_tight(ClaimKind::Typing, &g)))
+            .collect();
+
+        let mut tabled: BTreeMap<String, bool> = BTreeMap::new();
+        for line in contract.lines() {
+            let cells: Vec<&str> = line.split('|').collect();
+            // `| `g_name` | src → dst | T | ground |` splits into six.
+            if cells.len() < 5 {
+                continue;
+            }
+            let name = cells[1].trim().trim_matches('`');
+            if !name.starts_with("g_") {
+                continue;
+            }
+            let tight = match cells[3].trim() {
+                "✓" => true,
+                "✗" => false,
+                other => panic!("§3.4 row `{name}` has an unreadable T cell: {other:?}"),
+            };
+            assert!(
+                tabled.insert(name.to_string(), tight).is_none(),
+                "§3.4 lists `{name}` twice"
+            );
+        }
+        assert!(
+            !tabled.is_empty(),
+            "no §3.4 rows parsed — the table's shape changed and this test \
+             stopped measuring anything, which is worse than it failing"
+        );
+
+        let missing: Vec<&String> = minted.keys().filter(|n| !tabled.contains_key(*n)).collect();
+        let stale: Vec<&String> = tabled.keys().filter(|n| !minted.contains_key(*n)).collect();
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "§3.4 and `minted_generators()` disagree; missing from the table = \
+             {missing:?}, in the table but not minted = {stale:?}"
+        );
+
+        for (name, tight) in &minted {
+            assert_eq!(
+                tabled[name], *tight,
+                "§3.4's T column for `{name}` says {}, `generator_is_tight` says {tight}",
+                tabled[name]
+            );
+        }
+    }
+
     #[test]
     fn claim_kind_typing_discharge_is_not_portable() {
         // ADR-0015 Stage A gate: a generator tight for typing is NOT tight for
