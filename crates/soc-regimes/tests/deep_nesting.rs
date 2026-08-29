@@ -23,14 +23,17 @@
 //! arena, a separate change with its own justification.
 //!
 //! The one that actually binds is `brix_kernel::acceptance`, which
-//! `elaborate_tree` runs over the proof term this derivation becomes. It
-//! overflows the same 2 MiB stack at an expression depth of about **16** —
-//! lower than the recursive inference limit this file was written to remove,
-//! and well below the parser's 128. So `check_module` still aborts on input
-//! these tests pass, and `brix-lower/tests/packaged_brix.rs` still needs its
-//! large-stack helper. These tests stop at `audited_type_check_tree` for that
-//! reason, not by oversight: extending them through elaboration would only
-//! re-measure the kernel's limit.
+//! `elaborate_tree` runs over the proof term this derivation becomes. On the
+//! same 2 MiB stack it aborts between expression depth 8 and 12 in **debug**,
+//! and between 128 and 256 in release — so it is mostly the debug frame-size
+//! pathology #319 named, but release also clears the parser's 128 by less than
+//! a factor of two. `check_module` therefore aborts in debug on input these
+//! tests pass, and `brix-lower/tests/packaged_brix.rs` still needs its
+//! large-stack helper.
+//!
+//! These tests stop at `audited_type_check_tree` for that reason, not by
+//! oversight: extending them through elaboration would only re-measure the
+//! kernel's limit. See `Type_Realization_Contract.md` §5.5.
 
 use soc_regimes::type_realization::*;
 

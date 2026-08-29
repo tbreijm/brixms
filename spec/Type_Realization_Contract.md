@@ -374,15 +374,30 @@ expression level and aborted between depth 24 and 32 on a 2 MiB stack, and now
 reaches ~1500, bounded by derived `Clone`/`Drop` glue on the `Box`-based `Expr`
 (`soc-regimes/tests/deep_nesting.rs`). What remains is
 `brix_kernel::acceptance`, which `elaborate_tree` runs over the emitted proof
-term: it overflows the same stack at an expression depth of about **16** —
-below the inference limit that was removed, and an order of magnitude below the
-parser's `max_nesting_depth` of 128. Measured, not inferred: with a budget of
-1, so acceptance bails before recursing, the same input passes. `check_module`
-therefore still aborts on input this crate handles comfortably, which is why
-`brix-lower/tests/packaged_brix.rs` runs on a large stack. Closing this is a
-`brix-kernel` change; recorded here because this contract is where the checker's
-totality obligations live, and an unrecorded abort is the kind of gap §12.3
-says recurs when nothing forces the document to track the code.**]**
+term.
+
+Measured on a 2 MiB stack, against `max_nesting_depth = 128`:
+
+| build | greatest expression depth accepted |
+|---|---|
+| debug | between 8 and 12 |
+| release | between 128 and 256 |
+
+So this is chiefly the *debug* frame-size pathology #319 named — a match whose
+every arm's locals share one frame, so a level pays for arms it never enters —
+and release optimizes the unused slots away. It is not only that. Release
+clears the parser's limit by less than a factor of two, which is no margin at
+all for a normative bound: a maximally-nested legal program sits at the edge of
+aborting in the build that ships.
+
+Both halves are measured rather than inferred; with a budget of 1, so
+acceptance bails before recursing, the same input passes in either build.
+`check_module` therefore aborts in debug on input this crate handles
+comfortably, which is why `brix-lower/tests/packaged_brix.rs` runs on a large
+stack. Closing this is a `brix-kernel` change; recorded here because this
+contract is where the checker's totality obligations live, and an unrecorded
+abort is the kind of gap §12.3 says recurs when nothing forces the document to
+track the code.**]**
 
 ---
 
