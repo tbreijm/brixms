@@ -2460,17 +2460,14 @@ enum Absorbed<'a> {
 /// `tests/derivation_differential.rs` is the check on that claim, not this
 /// paragraph.
 ///
-/// **This does not make the pipeline safe at depth.** Inference now handles
-/// ~1500 levels on a 2 MiB stack (`tests/deep_nesting.rs`), bounded by the
-/// derived `Clone`/`Drop` glue on the `Box`-based `Expr` rather than by this
-/// traversal. But `brix_kernel::acceptance`, which `elaborate_tree` calls on
-/// the resulting proof term, overflows the same stack between expression depth
-/// 8 and 12 *in debug* — so `check_module` still aborts on input this function
-/// handles comfortably. In release the kernel clears the parser's limit of 128,
-/// but only just: it aborts by 256. Measured rather than inferred; with a
-/// budget of 1, so acceptance bails before recursing, the same input passes.
-/// See `Type_Realization_Contract.md` §5.5. Whoever removes that limit should
-/// know this one is already gone.
+/// **Inference is no longer the pipeline's depth limit; the kernel is.**
+/// This traversal reaches ~1500 levels on a 2 MiB stack
+/// (`tests/deep_nesting.rs`), bounded by derived `Clone`/`Drop` glue on the
+/// `Box`-based `Expr` rather than by anything here. `brix_kernel::acceptance`,
+/// which `elaborate_tree` runs over the emitted proof term, recurses once per
+/// `RealizesComp` node and gives out far sooner — see
+/// `Type_Realization_Contract.md` §5.5 and
+/// `brix-lower/tests/deep_expression.rs`.
 pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer), TypeError> {
     /// Either enter a node or hand a finished result to its parent.
     ///
