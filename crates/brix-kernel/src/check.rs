@@ -45,19 +45,26 @@ impl CheckerState {
         Ok(())
     }
 
-    fn enter_depth<F, R>(&mut self, f: F) -> Result<R, Verdict>
-    where
-        F: FnOnce(&mut CheckerState) -> Result<R, Verdict>,
-    {
+    /// Take one depth unit, or refuse.
+    ///
+    /// Paired with [`CheckerState::leave_depth`] rather than wrapping a
+    /// closure: the closure form cost a stack frame per level on the one path
+    /// in this checker that recurses as deep as a program is large, and the
+    /// two call sites hold the unit across a loop or a call that must not be
+    /// inside another frame.
+    fn enter_depth(&mut self) -> Result<(), Verdict> {
         if self.depth == 0 {
             return Err(Verdict::ResourceExhausted(
                 ResourceBudgetReason::DepthLimitExceeded,
             ));
         }
         self.depth -= 1;
-        let res = f(self);
-        self.depth += 1;
-        res
+        Ok(())
+    }
+
+    /// Give back `n` depth units taken by [`CheckerState::enter_depth`].
+    fn leave_depth(&mut self, n: usize) {
+        self.depth += n;
     }
 }
 
@@ -145,9 +152,70 @@ fn check_type(
     kind: &TermKind,
     expected: &Prop,
 ) -> Result<(), Verdict> {
-    state.step()?;
+    // (→I) is peeled iteratively rather than recursively.
+    //
+    // **Why this rule and not the others.** A lambda checked against an
+    // implication is a *tail* position: push the hypothesis, then check the
+    // body against the consequent, and the only thing left to do afterwards is
+    // pop. Nothing is computed on the way back out, so the native frame the
+    // recursive form held there carried nothing.
+    //
+    // It is also the rule that actually gets deep. `brix-elaborate` discharges
+    // a derivation's leaves as hypotheses, emitting `λh₁…λhₘ. body` against
+    // `H₁ → … → Hₘ → G` — so the spine's length is the derivation's *leaf
+    // count*, which grows with the program. Every other introduction rule here
+    // nests only as deep as the proposition's own structure.
+    //
+    // The budget is accounted exactly as the recursion accounted it: one step
+    // and one depth unit per peeled binder, all of them still held while the
+    // body is checked, all released together afterwards. `ResourceExhausted`
+    // therefore fires on the same terms at the same budgets — the verdict is
+    // observable, so this may not be an approximation of the old behaviour.
+    let mut kind = kind;
+    let mut expected = expected;
+    let mut depth_taken = 0usize;
+    let mut pushed = 0usize;
 
-    state.enter_depth(|state| match (kind, expected) {
+    let outcome = loop {
+        if let Err(v) = state.step() {
+            break Err(v);
+        }
+        if let Err(v) = state.enter_depth() {
+            break Err(v);
+        }
+        depth_taken += 1;
+
+        match (kind, expected) {
+            (TermKind::Lam { var_name, body }, Prop::Impl(param_prop, result_prop)) => {
+                gamma.push((var_name.clone(), *param_prop.clone()));
+                pushed += 1;
+                kind = body;
+                expected = result_prop;
+            }
+            _ => break check_rule(state, gamma, kind, expected),
+        }
+    };
+
+    for _ in 0..pushed {
+        gamma.pop();
+    }
+    state.leave_depth(depth_taken);
+    outcome
+}
+
+/// The non-(→I) rules of [`check_type`].
+///
+/// Split out so the spine loop above stays readable, and so a level pays for
+/// the arm it takes rather than for the union of every arm's locals — the
+/// debug frame-size cost #319 measured on the inference side. The step and
+/// depth units for this level are already taken by the caller.
+fn check_rule(
+    state: &mut CheckerState,
+    gamma: &mut Gamma,
+    kind: &TermKind,
+    expected: &Prop,
+) -> Result<(), Verdict> {
+    match (kind, expected) {
         // (=I) Equality Reflexivity
         (TermKind::Refl(t), Prop::Eq(a, b)) => {
             if a == b && a == t {
@@ -161,7 +229,13 @@ fn check_type(
         }
 
         // (∃I) Existential Pack
-        (TermKind::Pack { witness, body_proof }, Prop::Exists(pred)) => {
+        (
+            TermKind::Pack {
+                witness,
+                body_proof,
+            },
+            Prop::Exists(pred),
+        ) => {
             let expected_body_type = instantiate(pred, witness);
             check_type(state, gamma, body_proof, &expected_body_type)
         }
@@ -189,7 +263,10 @@ fn check_type(
 
             // Eigenvariable freshness side condition check for proof_var in gamma
             if let Some(ref name) = proof_var {
-                if gamma.iter().any(|(opt, _)| opt.as_deref() == Some(name.as_str())) {
+                if gamma
+                    .iter()
+                    .any(|(opt, _)| opt.as_deref() == Some(name.as_str()))
+                {
                     return Err(Verdict::Malformed(format!(
                         "Eigenvariable freshness condition failed: '{name}' already present in context"
                     )));
@@ -221,12 +298,9 @@ fn check_type(
         }
 
         // (-> I) Implication Introduction
-        (TermKind::Lam { var_name, body }, Prop::Impl(param_prop, result_prop)) => {
-            gamma.push((var_name.clone(), *param_prop.clone()));
-            let res = check_type(state, gamma, body, result_prop);
-            gamma.pop();
-            res
-        }
+        // (→I) is handled by `check_type`'s spine loop and never reaches here.
+        // A `Lam` against a non-`Impl` falls through to the synthesis
+        // fallback below, exactly as it did when this was one match.
 
         // (x I) Product Introduction
         (TermKind::Pair { fst, snd }, Prop::Prod(p1, p2)) => {
@@ -264,14 +338,20 @@ fn check_type(
 
             // Eigenvariable freshness side condition check (ADR-0003 §5.2)
             if let Some(ref name) = left_var {
-                if gamma.iter().any(|(opt, _)| opt.as_deref() == Some(name.as_str())) {
+                if gamma
+                    .iter()
+                    .any(|(opt, _)| opt.as_deref() == Some(name.as_str()))
+                {
                     return Err(Verdict::Malformed(format!(
                         "Eigenvariable freshness condition failed: '{name}' already present in context"
                     )));
                 }
             }
             if let Some(ref name) = right_var {
-                if gamma.iter().any(|(opt, _)| opt.as_deref() == Some(name.as_str())) {
+                if gamma
+                    .iter()
+                    .any(|(opt, _)| opt.as_deref() == Some(name.as_str()))
+                {
                     return Err(Verdict::Malformed(format!(
                         "Eigenvariable freshness condition failed: '{name}' already present in context"
                     )));
@@ -426,7 +506,7 @@ fn check_type(
                 }))
             }
         }
-    })
+    }
 }
 
 /// Infer/synthesize the type of `kind` in context `gamma`.
@@ -437,7 +517,31 @@ fn infer_type(
 ) -> Result<Prop, Verdict> {
     state.step()?;
 
-    state.enter_depth(|state| match kind {
+    // `enter_depth`'s closure is spelled out here rather than used, and the
+    // accounting is identical — take a depth unit, run, give it back. The
+    // closure is a whole extra frame on the one path in this checker that
+    // recurses as deep as a program is large, and this is that path's entry.
+    state.enter_depth()?;
+    let res = infer_rule(state, gamma, kind);
+    state.leave_depth(1);
+    res
+}
+
+/// The synthesis rules of [`infer_type`], with the step and depth units for
+/// this level already taken.
+///
+/// The rules that carry real work are each their own `#[inline(never)]`
+/// function below rather than an arm here. That is the #319 measurement
+/// applied to the kernel: a debug build gives one frame every arm's locals, so
+/// a level on the recursion's hot path — `RealizesComp`, which is as deep as
+/// the derivation has leaves — paid for `Unpack`'s and `PrimRealizes`'s
+/// temporaries too. The bodies are moved unchanged; only where they live moved.
+fn infer_rule(
+    state: &mut CheckerState,
+    gamma: &mut Gamma,
+    kind: &TermKind,
+) -> Result<Prop, Verdict> {
+    match kind {
         // (Hyp) Hypothesis lookup
         TermKind::Hyp(var) => match var {
             Var::Index(idx) => match gamma.iter().rev().nth(*idx) {
@@ -464,21 +568,7 @@ fn infer_type(
         TermKind::Refl(t) => Ok(Prop::Eq(t.clone(), t.clone())),
 
         // (=E) Equality Substitution
-        TermKind::Subst { eq, motive, sub } => {
-            let eq_type = infer_type(state, gamma, eq)?;
-            let (a, b) = match eq_type {
-                Prop::Eq(a, b) => (a, b),
-                other => {
-                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
-                        expected: "Eq(a, b)".into(),
-                        found: format!("{other:?}"),
-                    }));
-                }
-            };
-            let expected_sub_type = instantiate(motive, &a);
-            check_type(state, gamma, sub, &expected_sub_type)?;
-            Ok(instantiate(motive, &b))
-        }
+        TermKind::Subst { eq, motive, sub } => infer_subst(state, gamma, eq, motive, sub),
 
         // (∃E) Existential Unpack synthesis
         TermKind::Unpack {
@@ -486,51 +576,7 @@ fn infer_type(
             obj_var,
             proof_var,
             body,
-        } => {
-            let scrut_type = infer_type(state, gamma, scrutinee)?;
-            let pred = match scrut_type {
-                Prop::Exists(pred) => pred,
-                other => {
-                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
-                        expected: "Exists(pred)".into(),
-                        found: format!("{other:?}"),
-                    }));
-                }
-            };
-
-            if let Some(ref name) = proof_var {
-                if gamma.iter().any(|(opt, _)| opt.as_deref() == Some(name.as_str())) {
-                    return Err(Verdict::Malformed(format!(
-                        "Eigenvariable freshness condition failed: '{name}' already present in context"
-                    )));
-                }
-            }
-
-            let fresh_id = PropositionId::from_canon(
-                format!(
-                    "eigenvar:{}:{}",
-                    obj_var.as_deref().unwrap_or("anon"),
-                    state.steps
-                )
-                .as_bytes(),
-            );
-            let fresh_x = ObjectTerm::Const(fresh_id);
-
-            let hyp_type = instantiate(&pred, &fresh_x);
-            gamma.push((proof_var.clone(), hyp_type));
-            let body_type = infer_type(state, gamma, body);
-            gamma.pop();
-            let body_type = body_type?;
-
-            // Eigenvariable freshness: x MUST NOT occur free in conclusion body_type
-            if prop_contains_obj_term(&body_type, &fresh_x) {
-                return Err(Verdict::Malformed(
-                    "Eigenvariable witness escape: eigenvariable occurs free in conclusion".into(),
-                ));
-            }
-
-            Ok(body_type)
-        }
+        } => infer_unpack(state, gamma, scrutinee, obj_var, proof_var, body),
 
         // (Trans-Pres) Transformation Preservation
         TermKind::Pres {
@@ -538,26 +584,7 @@ fn infer_type(
             preserves,
             motive,
             sub,
-        } => {
-            let realizes_type = infer_type(state, gamma, realizes)?;
-            let (w, x, y) = match realizes_type {
-                Prop::Realizes(w, x, y) => (w, x, y),
-                other => {
-                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
-                        expected: "Realizes(w, x, y)".into(),
-                        found: format!("{other:?}"),
-                    }));
-                }
-            };
-
-            let expected_preserves_type = Prop::Preserves(w.clone(), motive.clone());
-            check_type(state, gamma, preserves, &expected_preserves_type)?;
-
-            let expected_sub_type = instantiate(motive, &x);
-            check_type(state, gamma, sub, &expected_sub_type)?;
-
-            Ok(instantiate(motive, &y))
-        }
+        } => infer_pres(state, gamma, realizes, preserves, motive, sub),
 
         // (-> E) Implication Elimination
         TermKind::App { function, argument } => {
@@ -606,72 +633,11 @@ fn infer_type(
         }
 
         // (RealizesComp) Realization Composition (Profile 1.1)
-        TermKind::RealizesComp { left, right } => {
-            let left_type = infer_type(state, gamma, left)?;
-            let (g1, xl, y) = match left_type {
-                Prop::Realizes(g1, xl, y) => (g1, xl, y),
-                other => {
-                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
-                        expected: "Realizes(g1, x, y)".into(),
-                        found: format!("{other:?}"),
-                    }));
-                }
-            };
-
-            let right_type = infer_type(state, gamma, right)?;
-            let (g2, ys, z2) = match right_type {
-                Prop::Realizes(g2, ys, z2) => (g2, ys, z2),
-                other => {
-                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
-                        expected: "Realizes(g2, y, z)".into(),
-                        found: format!("{other:?}"),
-                    }));
-                }
-            };
-
-            if y != ys {
-                return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
-                    expected: format!("Middle endpoint matching {y:?}"),
-                    found: format!("{ys:?}"),
-                }));
-            }
-
-            Ok(Prop::Realizes(
-                ObjectTerm::Compose(Box::new(g2), Box::new(g1)),
-                xl,
-                z2,
-            ))
-        }
+        TermKind::RealizesComp { left, right } => infer_realizes_comp(state, gamma, left, right),
 
         // (RealizesTensor) Realization Tensor (Profile 1.2)
         TermKind::RealizesTensor { left, right } => {
-            let left_type = infer_type(state, gamma, left)?;
-            let (w1, x1, y1) = match left_type {
-                Prop::Realizes(w1, x1, y1) => (w1, x1, y1),
-                other => {
-                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
-                        expected: "Realizes(w1, x1, y1)".into(),
-                        found: format!("{other:?}"),
-                    }));
-                }
-            };
-
-            let right_type = infer_type(state, gamma, right)?;
-            let (w2, x2, y2) = match right_type {
-                Prop::Realizes(w2, x2, y2) => (w2, x2, y2),
-                other => {
-                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
-                        expected: "Realizes(w2, x2, y2)".into(),
-                        found: format!("{other:?}"),
-                    }));
-                }
-            };
-
-            Ok(Prop::Realizes(
-                ObjectTerm::Tensor(Box::new(w1), Box::new(w2)),
-                ObjectTerm::Tensor(Box::new(x1), Box::new(x2)),
-                ObjectTerm::Tensor(Box::new(y1), Box::new(y2)),
-            ))
+            infer_realizes_tensor(state, gamma, left, right)
         }
 
         // (PrimRealizes) Primitive realization introduction (ADR-0015 ⟨D-PRIM⟩).
@@ -686,45 +652,7 @@ fn infer_type(
         // ordinary synthesize-then-compare fallback above — there is no
         // expected-mode arm here, deliberately, because one would let the
         // caller's goal reconstruct a field the registry is supposed to decide.
-        TermKind::PrimRealizes {
-            relation,
-            src,
-            dst,
-        } => {
-            let Some(resolved) = prim_registry::resolve(relation) else {
-                // Absence, not refutation (§8.8): the kernel has not introduced
-                // the fact, which says nothing about its negation.
-                return Err(Verdict::Rejected(RejectionReason::UnknownPrimitiveRelation(
-                    relation.to_hex(),
-                )));
-            };
-
-            // Endpoints must be object constants. A composition, tensor, or
-            // bound variable in an endpoint position is not a canonical value
-            // under either schema, so it cannot be a row member; refusing it
-            // here keeps the failure legible rather than reporting a missing
-            // row for a term that could never have been one.
-            let (ObjectTerm::Const(src_id), ObjectTerm::Const(dst_id)) = (src, dst) else {
-                return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
-                    expected: "PrimRealizes endpoints as object constants".into(),
-                    found: format!("({src:?}, {dst:?})"),
-                }));
-            };
-
-            if !resolved.admits(src_id, dst_id) {
-                return Err(Verdict::Rejected(RejectionReason::PrimitiveRowNotFound {
-                    relation: relation.to_hex(),
-                    src: src_id.to_hex(),
-                    dst: dst_id.to_hex(),
-                }));
-            }
-
-            Ok(Prop::Realizes(
-                ObjectTerm::Const(PropositionId(resolved.generator.digest())),
-                src.clone(),
-                dst.clone(),
-            ))
-        }
+        TermKind::PrimRealizes { relation, src, dst } => infer_prim_realizes(relation, src, dst),
 
         // Out-of-slice unsupported construct placeholder
         TermKind::Unsupported(msg) => Err(Verdict::Unsupported(UnsupportedConstruct::Construct(
@@ -732,7 +660,251 @@ fn infer_type(
         ))),
 
         _ => Err(Verdict::Rejected(RejectionReason::ProofGoalNotReached)),
-    })
+    }
+}
+
+/// (PrimRealizes) Primitive realization introduction (ADR-0015 ⟨D-PRIM⟩).
+///
+/// Takes no `CheckerState` and no `Gamma`, which is the rule's content rather
+/// than an omission: it has zero premises and consults no hypothesis context,
+/// so nothing the caller put in Γ can influence the result. The signature is
+/// the closedness claim, checkable by reading it.
+#[inline(never)]
+fn infer_prim_realizes(
+    relation: &crate::prim_registry::PrimitiveRelationId,
+    src: &ObjectTerm,
+    dst: &ObjectTerm,
+) -> Result<Prop, Verdict> {
+    let Some(resolved) = prim_registry::resolve(relation) else {
+        // Absence, not refutation (§8.8): the kernel has not introduced
+        // the fact, which says nothing about its negation.
+        return Err(Verdict::Rejected(
+            RejectionReason::UnknownPrimitiveRelation(relation.to_hex()),
+        ));
+    };
+
+    // Endpoints must be object constants. A composition, tensor, or
+    // bound variable in an endpoint position is not a canonical value
+    // under either schema, so it cannot be a row member; refusing it
+    // here keeps the failure legible rather than reporting a missing
+    // row for a term that could never have been one.
+    let (ObjectTerm::Const(src_id), ObjectTerm::Const(dst_id)) = (src, dst) else {
+        return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+            expected: "PrimRealizes endpoints as object constants".into(),
+            found: format!("({src:?}, {dst:?})"),
+        }));
+    };
+
+    if !resolved.admits(src_id, dst_id) {
+        return Err(Verdict::Rejected(RejectionReason::PrimitiveRowNotFound {
+            relation: relation.to_hex(),
+            src: src_id.to_hex(),
+            dst: dst_id.to_hex(),
+        }));
+    }
+
+    Ok(Prop::Realizes(
+        ObjectTerm::Const(PropositionId(resolved.generator.digest())),
+        src.clone(),
+        dst.clone(),
+    ))
+}
+
+/// (=E) Equality Substitution, synthesis mode.
+#[inline(never)]
+fn infer_subst(
+    state: &mut CheckerState,
+    gamma: &mut Gamma,
+    eq: &TermKind,
+    motive: &Prop,
+    sub: &TermKind,
+) -> Result<Prop, Verdict> {
+    let eq_type = infer_type(state, gamma, eq)?;
+    let (a, b) = match eq_type {
+        Prop::Eq(a, b) => (a, b),
+        other => {
+            return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                expected: "Eq(a, b)".into(),
+                found: format!("{other:?}"),
+            }));
+        }
+    };
+    let expected_sub_type = instantiate(motive, &a);
+    check_type(state, gamma, sub, &expected_sub_type)?;
+    Ok(instantiate(motive, &b))
+}
+
+/// (∃E) Existential Unpack, synthesis mode.
+#[inline(never)]
+fn infer_unpack(
+    state: &mut CheckerState,
+    gamma: &mut Gamma,
+    scrutinee: &TermKind,
+    obj_var: &Option<String>,
+    proof_var: &Option<String>,
+    body: &TermKind,
+) -> Result<Prop, Verdict> {
+    let scrut_type = infer_type(state, gamma, scrutinee)?;
+    let pred = match scrut_type {
+        Prop::Exists(pred) => pred,
+        other => {
+            return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                expected: "Exists(pred)".into(),
+                found: format!("{other:?}"),
+            }));
+        }
+    };
+
+    if let Some(ref name) = proof_var {
+        if gamma
+            .iter()
+            .any(|(opt, _)| opt.as_deref() == Some(name.as_str()))
+        {
+            return Err(Verdict::Malformed(format!(
+                "Eigenvariable freshness condition failed: '{name}' already present in context"
+            )));
+        }
+    }
+
+    let fresh_id = PropositionId::from_canon(
+        format!(
+            "eigenvar:{}:{}",
+            obj_var.as_deref().unwrap_or("anon"),
+            state.steps
+        )
+        .as_bytes(),
+    );
+    let fresh_x = ObjectTerm::Const(fresh_id);
+
+    let hyp_type = instantiate(&pred, &fresh_x);
+    gamma.push((proof_var.clone(), hyp_type));
+    let body_type = infer_type(state, gamma, body);
+    gamma.pop();
+    let body_type = body_type?;
+
+    // Eigenvariable freshness: x MUST NOT occur free in conclusion body_type
+    if prop_contains_obj_term(&body_type, &fresh_x) {
+        return Err(Verdict::Malformed(
+            "Eigenvariable witness escape: eigenvariable occurs free in conclusion".into(),
+        ));
+    }
+
+    Ok(body_type)
+}
+
+/// (Trans-Pres) Transformation Preservation, synthesis mode.
+#[inline(never)]
+fn infer_pres(
+    state: &mut CheckerState,
+    gamma: &mut Gamma,
+    realizes: &TermKind,
+    preserves: &TermKind,
+    motive: &Prop,
+    sub: &TermKind,
+) -> Result<Prop, Verdict> {
+    let realizes_type = infer_type(state, gamma, realizes)?;
+    let (w, x, y) = match realizes_type {
+        Prop::Realizes(w, x, y) => (w, x, y),
+        other => {
+            return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                expected: "Realizes(w, x, y)".into(),
+                found: format!("{other:?}"),
+            }));
+        }
+    };
+
+    let expected_preserves_type = Prop::Preserves(w.clone(), Box::new(motive.clone()));
+    check_type(state, gamma, preserves, &expected_preserves_type)?;
+
+    let expected_sub_type = instantiate(motive, &x);
+    check_type(state, gamma, sub, &expected_sub_type)?;
+
+    Ok(instantiate(motive, &y))
+}
+
+/// (RealizesComp) Realization Composition (Profile 1.1), synthesis mode.
+///
+/// Its own frame because this is the rule the recursion actually gets deep in:
+/// a derivation's `Seq` spine elaborates to a right-nested `RealizesComp`
+/// chain as long as the derivation has leaves.
+#[inline(never)]
+fn infer_realizes_comp(
+    state: &mut CheckerState,
+    gamma: &mut Gamma,
+    left: &TermKind,
+    right: &TermKind,
+) -> Result<Prop, Verdict> {
+    let left_type = infer_type(state, gamma, left)?;
+    let (g1, xl, y) = match left_type {
+        Prop::Realizes(g1, xl, y) => (g1, xl, y),
+        other => {
+            return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                expected: "Realizes(g1, x, y)".into(),
+                found: format!("{other:?}"),
+            }));
+        }
+    };
+
+    let right_type = infer_type(state, gamma, right)?;
+    let (g2, ys, z2) = match right_type {
+        Prop::Realizes(g2, ys, z2) => (g2, ys, z2),
+        other => {
+            return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                expected: "Realizes(g2, y, z)".into(),
+                found: format!("{other:?}"),
+            }));
+        }
+    };
+
+    if y != ys {
+        return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+            expected: format!("Middle endpoint matching {y:?}"),
+            found: format!("{ys:?}"),
+        }));
+    }
+
+    Ok(Prop::Realizes(
+        ObjectTerm::Compose(Box::new(g2), Box::new(g1)),
+        xl,
+        z2,
+    ))
+}
+
+/// (RealizesTensor) Realization Tensor (Profile 1.2), synthesis mode.
+#[inline(never)]
+fn infer_realizes_tensor(
+    state: &mut CheckerState,
+    gamma: &mut Gamma,
+    left: &TermKind,
+    right: &TermKind,
+) -> Result<Prop, Verdict> {
+    let left_type = infer_type(state, gamma, left)?;
+    let (w1, x1, y1) = match left_type {
+        Prop::Realizes(w1, x1, y1) => (w1, x1, y1),
+        other => {
+            return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                expected: "Realizes(w1, x1, y1)".into(),
+                found: format!("{other:?}"),
+            }));
+        }
+    };
+
+    let right_type = infer_type(state, gamma, right)?;
+    let (w2, x2, y2) = match right_type {
+        Prop::Realizes(w2, x2, y2) => (w2, x2, y2),
+        other => {
+            return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                expected: "Realizes(w2, x2, y2)".into(),
+                found: format!("{other:?}"),
+            }));
+        }
+    };
+
+    Ok(Prop::Realizes(
+        ObjectTerm::Tensor(Box::new(w1), Box::new(w2)),
+        ObjectTerm::Tensor(Box::new(x1), Box::new(x2)),
+        ObjectTerm::Tensor(Box::new(y1), Box::new(y2)),
+    ))
 }
 
 #[cfg(test)]

@@ -843,3 +843,57 @@ fn test_realizes_comp_3_generator_chain_returns_accepted() {
         "3-generator chain RealizesComp proof should be Accepted, got {verdict:?}"
     );
 }
+
+/// The depth budget bounds a lambda spine at exactly the documented point.
+///
+/// **Why this is pinned separately from the step budget.** (→I) is peeled by a
+/// loop rather than by recursion, so the depth accounting is done by hand:
+/// take one unit per binder, hold them all while the body is checked, release
+/// them together. The recursion used to do that implicitly, and nothing here
+/// checked the result — `StepLimitExceeded` had a test, `DepthLimitExceeded`
+/// had none, so an off-by-one in that hand accounting would have been silent.
+///
+/// A spine of `n` binders costs `n + 2` depth units, and the `+ 2` is the part
+/// worth writing down: one for the `check_type` level that meets the body, and
+/// one more because a `Hyp` is not checked directly — it falls through to the
+/// synthesis fallback, and `infer_type` takes a unit of its own. The two
+/// assertions bracket the boundary rather than merely showing that exhaustion
+/// is reachable, which is what makes this a test of the accounting instead of
+/// a test that budgets exist.
+#[test]
+fn depth_budget_bounds_a_lambda_spine_at_the_documented_point() {
+    const N: usize = 8;
+
+    let ctx = sample_context_a();
+    let p = sample_prop_p();
+
+    // ⊢ P → P → … → P → P, and λ…λ. h₀ proving it by returning the innermost.
+    let mut goal = p.clone();
+    let mut term = TermKind::Hyp(Var::Index(0));
+    for i in 0..N {
+        goal = Prop::Impl(Box::new(p.clone()), Box::new(goal));
+        term = TermKind::Lam {
+            var_name: Some(format!("x{i}")),
+            body: Box::new(term),
+        };
+    }
+    let term = ExplicitTerm::new(ctx, term);
+
+    let verdict = acceptance(&ctx, &goal, &term, Budget::new(10_000, N + 2));
+    assert!(
+        matches!(verdict, Verdict::Accepted(_)),
+        "N + 2 depth units must suffice, got {verdict:?}"
+    );
+
+    let verdict = acceptance(&ctx, &goal, &term, Budget::new(10_000, N + 1));
+    assert!(
+        matches!(
+            verdict,
+            Verdict::ResourceExhausted(ResourceBudgetReason::DepthLimitExceeded)
+        ),
+        "one unit short must exhaust on depth, got {verdict:?}"
+    );
+
+    // Exhaustion is absence of a proof, never its negation (§8.8).
+    assert_eq!(verdict.outcome(), Some(brix_semantic::Outcome::Unknown));
+}

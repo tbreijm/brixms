@@ -368,36 +368,40 @@ rejected, never abort the process. A stack overflow is neither an outcome in
 cannot distinguish "too deep" from "the compiler died", and no budget bounds
 it.
 
-**[Open: violated, in the kernel rather than here.** Inference itself was the
-violation until the traversal was made iterative — it recursed once per
-expression level and aborted between depth 24 and 32 on a 2 MiB stack, and now
+**[Partial: the reachable abort is gone; the recursion is not.**
+
+**It was reachable, and by ordinary input.** `brix check` on
+`let x = 1 + 1 + …` with **50 terms** died with
+`thread 'main' has overflowed its stack` — no diagnostic, no exit code, no
+verdict. `max_nesting_depth` does not protect against this: it caps *parser
+recursion*, and a binary-operator chain is parsed by a loop, so the expression
+tree is as deep as the chain is long however short the parse is. Nothing
+between the lexer and the kernel bounded it.
+
+Two causes, both since addressed. Inference recursed once per expression level
+and aborted between depth 24 and 32 on a 2 MiB stack; it is now iterative and
 reaches ~1500, bounded by derived `Clone`/`Drop` glue on the `Box`-based `Expr`
-(`soc-regimes/tests/deep_nesting.rs`). What remains is
-`brix_kernel::acceptance`, which `elaborate_tree` runs over the emitted proof
-term.
+(`soc-regimes/tests/deep_nesting.rs`). `brix_kernel::acceptance` then recursed
+once per binder of the `λh₁…λhₘ` spine `brix-elaborate` emits — a spine as long
+as the derivation has leaves. (→I) is now peeled by a loop, and the rules that
+carry work have their own frames.
 
-Measured on a 2 MiB stack, against `max_nesting_depth = 128`:
+Measured through `check_module` on a 2 MiB thread, as chain length:
 
-| build | greatest expression depth accepted |
+| | survives |
 |---|---|
-| debug | between 8 and 12 |
-| release | between 128 and 256 |
+| before | ~12 |
+| after | ~57 |
 
-So this is chiefly the *debug* frame-size pathology #319 named — a match whose
-every arm's locals share one frame, so a level pays for arms it never enters —
-and release optimizes the unused slots away. It is not only that. Release
-clears the parser's limit by less than a factor of two, which is no margin at
-all for a normative bound: a maximally-nested legal program sits at the edge of
-aborting in the build that ships.
-
-Both halves are measured rather than inferred; with a budget of 1, so
-acceptance bails before recursing, the same input passes in either build.
-`check_module` therefore aborts in debug on input this crate handles
-comfortably, which is why `brix-lower/tests/packaged_brix.rs` runs on a large
-stack. Closing this is a `brix-kernel` change; recorded here because this
-contract is where the checker's totality obligations live, and an unrecorded
-abort is the kind of gap §12.3 says recurs when nothing forces the document to
-track the code.**]**
+**What remains, stated as a limit rather than a fix.** The kernel still
+recurses once per `RealizesComp` node, so a long enough chain still aborts on a
+small enough stack. `brix check` is safe for *any* input only because its 8 MiB
+main thread outlasts the 2000-step budget that ends the search around 140
+terms — two numbers that happen to be ordered correctly. That is not the
+guarantee this clause asks for, and it silently depends on a budget chosen for
+a different purpose (§5.4). Closing it properly means an iterative
+`infer_type`, which is a `brix-kernel` change; pinned meanwhile by
+`brix-lower/tests/deep_expression.rs`.**]**
 
 ---
 
