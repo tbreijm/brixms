@@ -2460,15 +2460,16 @@ enum Absorbed<'a> {
 /// `tests/derivation_differential.rs` is the check on that claim, not this
 /// paragraph.
 ///
-/// **This does not make the pipeline safe at depth, and the next limit is
-/// lower than the one removed.** Inference now handles ~1500 levels on a 2 MiB
-/// stack (`tests/deep_nesting.rs`), bounded by the derived `Clone`/`Drop` glue
-/// on the `Box`-based `Expr` rather than by this traversal. But
-/// `brix_kernel::acceptance`, which `elaborate_tree` calls on the resulting
-/// proof term, overflows the same stack at an expression depth of about *16* —
-/// so `check_module` still aborts on input this function handles comfortably.
-/// Measured rather than inferred: with a budget of 1, so acceptance bails
-/// before recursing, the same input passes. Whoever removes that limit should
+/// **This does not make the pipeline safe at depth.** Inference now handles
+/// ~1500 levels on a 2 MiB stack (`tests/deep_nesting.rs`), bounded by the
+/// derived `Clone`/`Drop` glue on the `Box`-based `Expr` rather than by this
+/// traversal. But `brix_kernel::acceptance`, which `elaborate_tree` calls on
+/// the resulting proof term, overflows the same stack between expression depth
+/// 8 and 12 *in debug* — so `check_module` still aborts on input this function
+/// handles comfortably. In release the kernel clears the parser's limit of 128,
+/// but only just: it aborts by 256. Measured rather than inferred; with a
+/// budget of 1, so acceptance bails before recursing, the same input passes.
+/// See `Type_Realization_Contract.md` §5.5. Whoever removes that limit should
 /// know this one is already gone.
 pub fn infer_tree(expr: &Expr, ctx: &TyCtx, st: Infer) -> Result<(Ty, TyTree, Infer), TypeError> {
     /// Either enter a node or hand a finished result to its parent.
