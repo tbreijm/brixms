@@ -362,6 +362,28 @@ kernel's `ResourceBudget` verdict, so the information survives; but it is not
 mapped to a distinct typing-level negative outcome, and no fixture drives a
 budget exhaustion through the public entry point.]**
 
+**5.5 Nesting depth.** A program the parser accepts SHALL be checked or
+rejected, never abort the process. A stack overflow is neither an outcome in
+5.2 nor an exhaustion under 5.4: it produces no verdict at all, so a caller
+cannot distinguish "too deep" from "the compiler died", and no budget bounds
+it.
+
+**[Open: violated, in the kernel rather than here.** Inference itself was the
+violation until the traversal was made iterative — it recursed once per
+expression level and aborted between depth 24 and 32 on a 2 MiB stack, and now
+reaches ~1500, bounded by derived `Clone`/`Drop` glue on the `Box`-based `Expr`
+(`soc-regimes/tests/deep_nesting.rs`). What remains is
+`brix_kernel::acceptance`, which `elaborate_tree` runs over the emitted proof
+term: it overflows the same stack at an expression depth of about **16** —
+below the inference limit that was removed, and an order of magnitude below the
+parser's `max_nesting_depth` of 128. Measured, not inferred: with a budget of
+1, so acceptance bails before recursing, the same input passes. `check_module`
+therefore still aborts on input this crate handles comfortably, which is why
+`brix-lower/tests/packaged_brix.rs` runs on a large stack. Closing this is a
+`brix-kernel` change; recorded here because this contract is where the checker's
+totality obligations live, and an unrecorded abort is the kind of gap §12.3
+says recurs when nothing forces the document to track the code.**]**
+
 ---
 
 ## 6. Annotations, grades, and coercion coherence
