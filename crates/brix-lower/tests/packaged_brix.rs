@@ -4,25 +4,32 @@
 //! declared a `base: Money` field for months with no such type existing —
 //! exactly the rot this guards against, and the reason a shipped `.brix`
 //! source needs a test rather than a good intention.
+//!
+//! **The stack workaround, and what it is actually for now.** These run on a
+//! large stack because checking `brix.soc` — about 130 lines — overflows a
+//! default 2 MiB test thread; the CLI only works because its main thread gets
+//! 8 MiB.
+//!
+//! The cause moved. It used to be `infer_tree`, which recursed once per
+//! expression level and aborted between depth 24 and 32; that is fixed, and it
+//! now handles ~1500 (see `soc-regimes/tests/deep_nesting.rs`). What remains is
+//! `brix_kernel::acceptance`, the proof-term checker `elaborate_tree` calls:
+//! it overflows a 2 MiB stack at an expression depth of about 16, which is
+//! *lower* than the old inference limit and an order of magnitude below the
+//! parser's nesting limit of 128. Measured, not inferred — with a budget of 1,
+//! so acceptance bails before recursing, the same input is fine.
+//!
+//! So the size below compensates for the kernel, not the checker. `brix.soc`
+//! needs 4 MiB today; the headroom is for CI's debug frames, and the number
+//! comes down when the kernel's term checker stops recursing.
 
 use brix_lower::check_module;
 use brix_syntax::parse;
 
-/// Run `f` on a thread with a large stack.
-///
-/// ⚠ **This is a workaround for a real cost, not a formality.** Checking
-/// `brix.soc` — about 130 lines — overflows a default 2 MiB test-thread stack.
-/// The CLI only works because the main thread gets 8 MiB.
-///
-/// The cause is that derivation building is quadratic in expression depth:
-/// every `Ctor` clones and digests its *whole* sub-expression as its `src`
-/// atom, so a nested literal is re-hashed once per enclosing level. Raising
-/// the stack here keeps the gate honest about what it is measuring — whether
-/// the source still checks — rather than turning a depth problem into a
-/// spurious failure. The depth problem itself is worth its own fix.
+/// Run `f` on a thread with a large stack. See the module doc for why.
 fn with_deep_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
     std::thread::Builder::new()
-        .stack_size(32 * 1024 * 1024)
+        .stack_size(16 * 1024 * 1024)
         .spawn(f)
         .expect("spawn")
         .join()

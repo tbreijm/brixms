@@ -24,19 +24,28 @@
 //! re-capture legitimate — otherwise this file is a rubber stamp.
 //!
 //! What did **not** move is the more telling half: all fourteen witness ids
-//! survived the migration byte-for-byte. The same generators fire in the same
-//! composition; only the claim's subject gained its assumption scope. That is
-//! the evidence that ADR-0028 was an endpoint change and not a behaviour
-//! change — and it is why the two ids are pinned separately rather than as one
-//! digest over the pair.
+//! then pinned survived the migration byte-for-byte. The same generators fire
+//! in the same composition; only the claim's subject gained its assumption
+//! scope. That is the evidence that ADR-0028 was an endpoint change and not a
+//! behaviour change — and it is why the two ids are pinned separately rather
+//! than as one digest over the pair.
+//!
+//! **Extended before the traversal rewrite.** The original fourteen left the
+//! arms a traversal rewrite is *most* likely to break unguarded: no `Var` under
+//! a real scope, no binder whose body is judged under an extended one (`Fix`,
+//! nested `Lam`), no `FloatLit`, and nothing deep enough for the order of
+//! operations to matter. Those were added and captured against the recursive
+//! implementation first, so the rewrite has something to be measured against.
+//! Adding them moved none of the existing entries.
 
 use soc_regimes::type_realization::*;
 
 /// `(name, witness id, proposition id)`.
 ///
-/// Witness ids: captured 2026-08-18, before the iterative-traversal work, and
-/// unchanged since.
-/// Proposition ids: re-captured 2026-08-19 for ADR-0028 (see the module doc).
+/// The original fourteen: witness ids captured 2026-08-18 and unchanged since;
+/// proposition ids re-captured 2026-08-19 for ADR-0028 (see the module doc).
+/// `float`, `var`, `fix`, `nested_lam`, `deep_spine`: captured 2026-08-20
+/// against the recursive traversal, before the iterative rewrite.
 const EXPECTED: &[(&str, &str, &str)] = &[
     (
         "lit",
@@ -52,6 +61,31 @@ const EXPECTED: &[(&str, &str, &str)] = &[
         "bool",
         "9a80c18a42512810ec4e8dbdca7c69f4162357798a318772ad1140285945008e",
         "117ba31c1ac7950329340be076003335b3ab4d287a6d4869fe64236ed16daa14",
+    ),
+    (
+        "float",
+        "84d5f0c7a0e9b49eaf9941af22a4a433df415eab2dfcf0b4b6eb6f491ea923bb",
+        "873c32f7cad0479ba709fe3355d1560fee06fa1e89687b1e1ed4a191ce6ed409",
+    ),
+    (
+        "var",
+        "4b7c492c3fafc0673d9b352fbda1657baec68ffd24794bc728caa6896a2c6a39",
+        "7d0bb9831bcf20fe0d38467560247e3d79a59c1bf0d27706c39041f3ef2d4203",
+    ),
+    (
+        "fix",
+        "60399c40b7a2edc4af18f9be0712da7c8165465787ffa5f85765ba5637c369b8",
+        "abbe70d1dede14c2ef80d268a72754e99e53652f5afb8aa6f4d3c0314b42ad52",
+    ),
+    (
+        "nested_lam",
+        "7cae7dc0fccb16ab47aa385cc45e25c961c7d7aa553670f3b73c9e50004d00f6",
+        "1b000c577185fd5c1650335d8cb6c36beab2aba98c001efb0fcbebfcdd270137",
+    ),
+    (
+        "deep_spine",
+        "84aa9b0982273cca22166b294492a08734a53fd4cd60026aa3156d8a2914effd",
+        "6e9232fc02a1365b9503009c8b615f94b3577c795a548c9972e4cd74590d4f68",
     ),
     (
         "arith",
@@ -133,24 +167,82 @@ fn list_ty() -> Ty {
     )
 }
 
-fn corpus() -> Vec<(&'static str, Expr)> {
+/// The scope an entry is checked under.
+///
+/// Most entries assume nothing, but `Var` and the binder forms are exactly the
+/// arms where a traversal rewrite is most likely to go wrong — and since
+/// ADR-0028 they are also where the *endpoints* carry something other than the
+/// root. An entry that could only ever be checked under an empty scope could
+/// not guard them.
+fn bound_ctx() -> TyCtx {
+    TyCtx::new()
+        .extend("n", Ty::Con("Int"))
+        .extend("s", Ty::Con("Str"))
+}
+
+fn corpus() -> Vec<(&'static str, Expr, TyCtx)> {
     let opt = opt_ty();
     let lst = list_ty();
     let mut deep = Expr::Ctor(lst.clone(), "Nil".into(), vec![]);
     for _ in 0..6 {
         deep = Expr::Ctor(lst.clone(), "Cons".into(), vec![Expr::Lit(1), deep]);
     }
+    // Nested binders: the context extends at each level, so every inner
+    // endpoint names a different scope. A traversal that threaded contexts
+    // wrongly — reusing a parent's scope for a child, or vice versa — moves
+    // these and nothing else.
+    let nested_lam = Expr::Lam(
+        "f".into(),
+        Box::new(Expr::Lam(
+            "g".into(),
+            Box::new(Expr::App(
+                Box::new(Expr::Var("f".into())),
+                Box::new(Expr::Var("g".into())),
+            )),
+        )),
+    );
+    // A left-nested spine. Deliberately kept at a depth the *recursive*
+    // implementation survives, so these identities can be captured before the
+    // traversal is rewritten — pinning behaviour at depth is this entry's job.
+    // Proving the depth limit is gone is a different claim and gets its own
+    // test, so that an abort is never reported as an identity change.
+    let mut spine = Expr::Lit(0);
+    for _ in 0..20 {
+        spine = Expr::Arith(ArithOp::Add, Box::new(spine), Box::new(Expr::Lit(1)));
+    }
     vec![
-        ("lit", Expr::Lit(42)),
-        ("str", Expr::StrLit("x".into())),
-        ("bool", Expr::BoolLit(true)),
+        ("lit", Expr::Lit(42), TyCtx::new()),
+        ("str", Expr::StrLit("x".into()), TyCtx::new()),
+        ("bool", Expr::BoolLit(true), TyCtx::new()),
+        ("float", Expr::FloatLit("1.5".into()), TyCtx::new()),
+        // A bound variable, under a scope that is not the root.
+        ("var", Expr::Var("n".into()), bound_ctx()),
+        // A fixpoint: the body is judged under a scope assuming the
+        // definition's own type, which is what keeps the derivation finite.
+        (
+            "fix",
+            Expr::Fix(
+                "loop".into(),
+                Ty::Fn(Box::new(Ty::Con("Int")), Box::new(Ty::Con("Int"))),
+                Box::new(Expr::LamAnn(
+                    "k".into(),
+                    Ty::Con("Int"),
+                    Box::new(Expr::Var("k".into())),
+                )),
+            ),
+            TyCtx::new(),
+        ),
+        ("nested_lam", nested_lam, TyCtx::new()),
+        ("deep_spine", spine, TyCtx::new()),
         (
             "arith",
             Expr::Arith(ArithOp::Add, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2))),
+            TyCtx::new(),
         ),
         (
             "cmp",
             Expr::Cmp(CmpOp::Lt, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2))),
+            TyCtx::new(),
         ),
         (
             "record",
@@ -158,6 +250,7 @@ fn corpus() -> Vec<(&'static str, Expr)> {
                 ("a".into(), Expr::Lit(1)),
                 ("b".into(), Expr::StrLit("s".into())),
             ]),
+            TyCtx::new(),
         ),
         (
             "field",
@@ -165,14 +258,17 @@ fn corpus() -> Vec<(&'static str, Expr)> {
                 Box::new(Expr::Record(vec![("a".into(), Expr::Lit(7))])),
                 "a".into(),
             ),
+            TyCtx::new(),
         ),
         (
             "ctor_nullary",
             Expr::Ctor(opt.clone(), "None".into(), vec![]),
+            TyCtx::new(),
         ),
         (
             "ctor_payload",
             Expr::Ctor(opt.clone(), "Some".into(), vec![Expr::Lit(3)]),
+            TyCtx::new(),
         ),
         (
             "match",
@@ -186,6 +282,7 @@ fn corpus() -> Vec<(&'static str, Expr)> {
                     ),
                 ],
             ),
+            TyCtx::new(),
         ),
         (
             "lam_app",
@@ -193,6 +290,7 @@ fn corpus() -> Vec<(&'static str, Expr)> {
                 Box::new(Expr::Lam("x".into(), Box::new(Expr::Var("x".into())))),
                 Box::new(Expr::Lit(5)),
             ),
+            TyCtx::new(),
         ),
         (
             "lamann",
@@ -204,13 +302,43 @@ fn corpus() -> Vec<(&'static str, Expr)> {
                 )),
                 Box::new(Expr::Lit(5)),
             ),
+            TyCtx::new(),
         ),
         (
             "and",
             Expr::And(Box::new(Expr::Lit(1)), Box::new(Expr::StrLit("s".into()))),
+            TyCtx::new(),
         ),
-        ("deep_list", deep),
+        ("deep_list", deep, TyCtx::new()),
     ]
+}
+
+/// `then` on value expressions is refused, and that is the specification.
+///
+/// ADR-0010 gives `then` as sequential composition (∘, the kernel's
+/// `RealizesComp`) with the precondition stated outright: *endpoints must
+/// meet*. Every typing derivation runs `Judged(Γ, e) → Type(t)`, so for two
+/// value expressions the left lands on a type and the right starts at a
+/// judgement — they cannot meet, and `CompositionEndpointMismatch` is the
+/// right answer rather than a defect.
+///
+/// It is pinned **negatively** because the alternative readings are both bad.
+/// If a later change makes this succeed, either `then` acquired a meaning
+/// nobody decided on, or some coercion leaf was inserted to make the endpoints
+/// meet — the padded step #287 removed as unsound. `then` becomes usable when
+/// a regime exists whose derivations do not start at their own expression (an
+/// ordering witness starts at a *value*), which is what `g_then_split` landing
+/// on `da.src()` rather than the operand already anticipates.
+#[test]
+fn then_on_values_is_refused_because_the_endpoints_cannot_meet() {
+    let e = Expr::Then(
+        Box::new(Expr::Var("n".into())),
+        Box::new(Expr::Var("s".into())),
+    );
+    assert!(matches!(
+        audited_type_check_tree(&e, &bound_ctx()),
+        Err(TypeError::CompositionEndpointMismatch)
+    ));
 }
 
 #[test]
@@ -222,13 +350,13 @@ fn derivations_are_unchanged() {
         "every corpus entry must be pinned; a new one needs its identities captured"
     );
 
-    for ((name, expr), (expected_name, witness, proposition)) in corpus.iter().zip(EXPECTED) {
+    for ((name, expr, ctx), (expected_name, witness, proposition)) in corpus.iter().zip(EXPECTED) {
         assert_eq!(
             name, expected_name,
             "corpus and expectations must stay aligned"
         );
 
-        let (judgement, derivation) = audited_type_check_tree(expr, &TyCtx::new())
+        let (judgement, derivation) = audited_type_check_tree(expr, ctx)
             .unwrap_or_else(|e| panic!("'{name}' must still check: {e:?}"));
 
         assert_eq!(
