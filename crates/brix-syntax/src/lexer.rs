@@ -26,6 +26,11 @@ pub enum TokenKind {
     Proven,
     True,
     False,
+    Propose,
+    Priority,
+    When,
+    Commit,
+    From,
 
     // Identifiers & Literals
     Ident(String),
@@ -244,6 +249,11 @@ pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token
                     "audit" => TokenKind::Audit,
                     "then" => TokenKind::Then,
                     "and" => TokenKind::And,
+                    "propose" => TokenKind::Propose,
+                    "priority" => TokenKind::Priority,
+                    "when" => TokenKind::When,
+                    "commit" => TokenKind::Commit,
+                    "from" => TokenKind::From,
                     // `Derived`/`Audited`/`Proven` are deliberately NOT
                     // keywords. They are grade names only in grade position
                     // (after `@`), which the parser recognizes; everywhere

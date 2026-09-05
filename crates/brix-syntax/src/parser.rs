@@ -254,6 +254,14 @@ impl Parser {
                 let value = self.parse_expr()?;
                 Ok(Item::Witness { name, value })
             }
+            TokenKind::Propose => {
+                self.advance();
+                self.parse_propose_decl().map(Item::Propose)
+            }
+            TokenKind::Commit => {
+                self.advance();
+                self.parse_commit_decl().map(Item::Commit)
+            }
             other => Err(self.error(format!("Unexpected token {:?} at top-level item", other))),
         }
     }
@@ -397,6 +405,80 @@ impl Parser {
         self.consume(TokenKind::Equals, "let declaration '='")?;
         let value = self.parse_expr()?;
         Ok(LetDecl { name, ty, value })
+    }
+
+    fn parse_propose_decl(&mut self) -> Result<ProposeDecl, ParseError> {
+        let name = self.expect_ident("propose candidate name")?.0;
+        self.consume(TokenKind::OpenParen, "propose candidate dependencies '('")?;
+        let deps = self.parse_comma_separated(TokenKind::CloseParen, |p| {
+            p.expect_ident("candidate dependency").map(|(id, _)| id)
+        })?;
+        self.consume(TokenKind::CloseParen, "propose candidate dependencies ')'")?;
+        self.consume(TokenKind::Priority, "propose declaration 'priority'")?;
+        let priority = self.parse_priority()?;
+        self.consume(TokenKind::When, "propose declaration 'when'")?;
+        let guard = self.parse_expr()?;
+        self.consume(
+            TokenKind::Equals,
+            "propose declaration '=' between guard and value",
+        )?;
+        let value = self.parse_expr()?;
+        Ok(ProposeDecl {
+            name,
+            deps,
+            priority,
+            guard,
+            value,
+        })
+    }
+
+    fn parse_priority(&mut self) -> Result<u64, ParseError> {
+        let tok = self.current().clone();
+        match &tok.kind {
+            TokenKind::Num(s) => match s.parse::<u64>() {
+                Ok(val) => {
+                    self.advance();
+                    Ok(val)
+                }
+                Err(_) => Err(ParseError::at(
+                    format!(
+                        "Expected nonnegative unsigned integer for priority, found '{}'",
+                        s
+                    ),
+                    tok.line,
+                    tok.col,
+                )),
+            },
+            other => Err(ParseError::at(
+                format!(
+                    "Expected nonnegative unsigned integer for priority, found {:?}",
+                    other
+                ),
+                tok.line,
+                tok.col,
+            )),
+        }
+    }
+
+    fn parse_commit_decl(&mut self) -> Result<CommitDecl, ParseError> {
+        let name = self.expect_ident("commit declaration name")?.0;
+        self.consume(TokenKind::From, "commit declaration 'from'")?;
+        let lparen_tok = self
+            .consume(TokenKind::OpenParen, "commit candidate list '('")?
+            .clone();
+        let candidates = self.parse_comma_separated(TokenKind::CloseParen, |p| {
+            p.expect_ident("candidate identifier in commit")
+                .map(|(id, _)| id)
+        })?;
+        self.consume(TokenKind::CloseParen, "commit candidate list ')'")?;
+        if candidates.is_empty() {
+            return Err(ParseError::at(
+                "commit candidate list cannot be empty",
+                lparen_tok.line,
+                lparen_tok.col,
+            ));
+        }
+        Ok(CommitDecl { name, candidates })
     }
 
     fn parse_ty(&mut self) -> Result<Ty, ParseError> {

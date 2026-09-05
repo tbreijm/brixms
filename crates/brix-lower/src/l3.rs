@@ -208,6 +208,10 @@ pub enum L3LowerError {
     UnresolvedImport(String),
     /// A top-level `witness` binding is present (ADR-0012 §1.4).
     WitnessItemNotAllowed(String),
+    /// A top-level `propose` declaration is present.
+    ProposeItemNotAllowed(String),
+    /// A top-level `commit` declaration is present.
+    CommitItemNotAllowed(String),
     /// A `rule` was declared with one or more parameters (ADR-0012 §1: "every
     /// selected rule has zero parameters").
     ParameterizedRule(String),
@@ -394,6 +398,10 @@ pub fn lower_l3_plan(
             ast::Item::Witness { name, .. } => {
                 return Err(L3LowerError::WitnessItemNotAllowed(name.clone()))
             }
+            ast::Item::Propose(p) => {
+                return Err(L3LowerError::ProposeItemNotAllowed(p.name.clone()))
+            }
+            ast::Item::Commit(c) => return Err(L3LowerError::CommitItemNotAllowed(c.name.clone())),
             ast::Item::Config(_) | ast::Item::Let(_) | ast::Item::Rule(_) => {}
         }
     }

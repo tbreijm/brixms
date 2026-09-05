@@ -21,9 +21,10 @@ use brix_semantic::{
 };
 use soc_core::adm::AdmAll;
 use soc_core::audit::{audit_step, AuditResult};
+use soc_core::audit_bundle::AuditDecodeLimits;
 use soc_core::audit_receipt::{
-    check_audit_receipt_v1, committed_step_digest, ReceiptError, SettlementAuditReceiptV1,
-    AUDIT_PROFILE_V1, AUDIT_RECEIPT_MARKER_V1, AUDIT_RECEIPT_VERSION_V1,
+    check_audit_receipt_bytes_v1, check_audit_receipt_v1, committed_step_digest, ReceiptError,
+    SettlementAuditReceiptV1, AUDIT_PROFILE_V1, AUDIT_RECEIPT_MARKER_V1, AUDIT_RECEIPT_VERSION_V1,
 };
 use soc_core::calendar::Key;
 use soc_core::commit::{run, CommitError, SettlementWitnessProvider};
@@ -381,4 +382,253 @@ fn receipt_constants_are_frozen() {
     assert_eq!(AUDIT_RECEIPT_MARKER_V1, b"brix.soc.audit-receipt");
     assert_eq!(AUDIT_RECEIPT_VERSION_V1, 1);
     assert_eq!(AUDIT_PROFILE_V1, "brix.soc.audit-factorization@1");
+}
+
+// ---------------------------------------------------------------------------
+// Stage B tests — strict receipt byte checking (ADR-0026 ⟨D-REISSUE⟩)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn honest_receipt_bytes_validate_by_reissue_and_compare() {
+    let (step, context, receipt) = audited_receipt();
+    let registry = registry_with(&[gen1(), gen2()]);
+    let limits = AuditDecodeLimits::strict();
+
+    let id = check_audit_receipt_bytes_v1(
+        &receipt.canon_bytes(),
+        &step,
+        context,
+        &registry,
+        &honest_semantics(),
+        &limits,
+    )
+    .expect("an honest receipt byte slice must validate");
+    assert_eq!(id, receipt.id());
+}
+
+#[test]
+fn receipt_bytes_substituted_oracle_is_refused() {
+    let (step, context, receipt) = audited_receipt();
+    let registry = registry_with(&[gen1(), gen2()]);
+    let other = substituted_semantics();
+    let limits = AuditDecodeLimits::strict();
+
+    match check_audit_receipt_bytes_v1(
+        &receipt.canon_bytes(),
+        &step,
+        context,
+        &registry,
+        &other,
+        &limits,
+    ) {
+        Err(ReceiptError::UnexpectedSemantics { expected, found }) => {
+            assert_eq!(expected, other.id());
+            assert_eq!(found, honest_semantics().id());
+        }
+        other => panic!("substituted oracle must be refused by name, got {other:?}"),
+    }
+}
+
+#[test]
+fn receipt_bytes_tampered_step_is_refused() {
+    let (_, context, receipt) = audited_receipt();
+    let registry = registry_with(&[gen1(), gen2()]);
+    let (other_step, _) = committed_fixture_step();
+    let mut tampered = other_step;
+    tampered.src = ConfigId::from_canon(b"a different source");
+    let limits = AuditDecodeLimits::strict();
+
+    match check_audit_receipt_bytes_v1(
+        &receipt.canon_bytes(),
+        &tampered,
+        context,
+        &registry,
+        &honest_semantics(),
+        &limits,
+    ) {
+        Err(ReceiptError::FieldMismatch { field }) => assert_eq!(field, "committed_step"),
+        other => panic!("transplanted receipt bytes must be refused, got {other:?}"),
+    }
+}
+
+#[test]
+fn receipt_bytes_tampered_context_is_refused() {
+    let (step, _, receipt) = audited_receipt();
+    let registry = registry_with(&[gen1(), gen2()]);
+    let other_context = ContextId::root().extend(b"elsewhere");
+    let limits = AuditDecodeLimits::strict();
+
+    match check_audit_receipt_bytes_v1(
+        &receipt.canon_bytes(),
+        &step,
+        other_context,
+        &registry,
+        &honest_semantics(),
+        &limits,
+    ) {
+        Err(ReceiptError::FieldMismatch { field }) => assert_eq!(field, "context"),
+        other => panic!("receipt bytes with mismatched context must be refused, got {other:?}"),
+    }
+}
+
+#[test]
+fn receipt_bytes_tampered_payload_byte_for_byte_mismatch() {
+    let (step, context, receipt) = audited_receipt();
+    let registry = registry_with(&[gen1(), gen2()]);
+    let limits = AuditDecodeLimits::strict();
+
+    let mut tampered_bytes = receipt.canon_bytes();
+    // Tamper the last byte
+    let last = tampered_bytes.len() - 1;
+    tampered_bytes[last] ^= 0xff;
+
+    assert!(
+        check_audit_receipt_bytes_v1(
+            &tampered_bytes,
+            &step,
+            context,
+            &registry,
+            &honest_semantics(),
+            &limits,
+        )
+        .is_err(),
+        "tampered receipt bytes must not validate"
+    );
+}
+
+#[test]
+fn receipt_bytes_exceeding_limit_refused_before_decode() {
+    let (step, context, receipt) = audited_receipt();
+    let registry = registry_with(&[gen1(), gen2()]);
+    let bytes = receipt.canon_bytes();
+
+    // Exact boundary: max_receipt_bytes == bytes.len() passes
+    let mut limits = AuditDecodeLimits::strict();
+    limits.max_receipt_bytes = bytes.len();
+    assert!(check_audit_receipt_bytes_v1(
+        &bytes,
+        &step,
+        context,
+        &registry,
+        &honest_semantics(),
+        &limits,
+    )
+    .is_ok());
+
+    // One under (limit = bytes.len() - 1): fails with ReceiptBytesTooLarge
+    limits.max_receipt_bytes = bytes.len() - 1;
+    match check_audit_receipt_bytes_v1(
+        &bytes,
+        &step,
+        context,
+        &registry,
+        &honest_semantics(),
+        &limits,
+    ) {
+        Err(ReceiptError::ReceiptBytesTooLarge { limit, found }) => {
+            assert_eq!(limit, bytes.len() - 1);
+            assert_eq!(found, bytes.len());
+        }
+        other => panic!("expected ReceiptBytesTooLarge, got {other:?}"),
+    }
+}
+
+#[test]
+fn receipt_bytes_hostile_decode_refusals() {
+    let (step, context, receipt) = audited_receipt();
+    let registry = registry_with(&[gen1(), gen2()]);
+    let limits = AuditDecodeLimits::strict();
+    let honest_bytes = receipt.canon_bytes();
+
+    // 1. Trailing bytes
+    let mut with_trailing = honest_bytes.clone();
+    with_trailing.push(0x42);
+    assert_eq!(
+        check_audit_receipt_bytes_v1(
+            &with_trailing,
+            &step,
+            context,
+            &registry,
+            &honest_semantics(),
+            &limits,
+        ),
+        Err(ReceiptError::TrailingBytes)
+    );
+
+    // 2. Bad marker
+    let mut bad_marker = CanonWriter::new();
+    bad_marker.write_bytes(b"brix.soc.bad-marker");
+    bad_marker.write_uint(1);
+    bad_marker.write_str(AUDIT_PROFILE_V1);
+    bad_marker.write_bytes(context.digest().as_bytes());
+    bad_marker.write_bytes(receipt.committed_step().as_bytes());
+    bad_marker.write_bytes(receipt.verified_decomposition().digest().as_bytes());
+    bad_marker.write_bytes(receipt.registry().digest().as_bytes());
+    bad_marker.write_bytes(receipt.semantics().digest().as_bytes());
+    assert_eq!(
+        check_audit_receipt_bytes_v1(
+            &bad_marker.finish(),
+            &step,
+            context,
+            &registry,
+            &honest_semantics(),
+            &limits,
+        ),
+        Err(ReceiptError::BadMarker)
+    );
+
+    // 3. Unknown version
+    let mut bad_version = CanonWriter::new();
+    bad_version.write_bytes(AUDIT_RECEIPT_MARKER_V1);
+    bad_version.write_uint(2); // unknown version 2
+    bad_version.write_str(AUDIT_PROFILE_V1);
+    bad_version.write_bytes(context.digest().as_bytes());
+    bad_version.write_bytes(receipt.committed_step().as_bytes());
+    bad_version.write_bytes(receipt.verified_decomposition().digest().as_bytes());
+    bad_version.write_bytes(receipt.registry().digest().as_bytes());
+    bad_version.write_bytes(receipt.semantics().digest().as_bytes());
+    assert_eq!(
+        check_audit_receipt_bytes_v1(
+            &bad_version.finish(),
+            &step,
+            context,
+            &registry,
+            &honest_semantics(),
+            &limits,
+        ),
+        Err(ReceiptError::UnknownVersion(2))
+    );
+
+    // 4. Unknown profile
+    let mut bad_profile = CanonWriter::new();
+    bad_profile.write_bytes(AUDIT_RECEIPT_MARKER_V1);
+    bad_profile.write_uint(1);
+    bad_profile.write_str("brix.soc.other-profile@1");
+    bad_profile.write_bytes(context.digest().as_bytes());
+    bad_profile.write_bytes(receipt.committed_step().as_bytes());
+    bad_profile.write_bytes(receipt.verified_decomposition().digest().as_bytes());
+    bad_profile.write_bytes(receipt.registry().digest().as_bytes());
+    bad_profile.write_bytes(receipt.semantics().digest().as_bytes());
+    assert_eq!(
+        check_audit_receipt_bytes_v1(
+            &bad_profile.finish(),
+            &step,
+            context,
+            &registry,
+            &honest_semantics(),
+            &limits,
+        ),
+        Err(ReceiptError::UnknownProfile)
+    );
+
+    // 5. Truncated bytes
+    assert!(check_audit_receipt_bytes_v1(
+        &honest_bytes[..10],
+        &step,
+        context,
+        &registry,
+        &honest_semantics(),
+        &limits,
+    )
+    .is_err());
 }

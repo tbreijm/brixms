@@ -20,6 +20,8 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod audit_bundle;
+pub mod finite_decision;
 pub mod imports;
 pub mod l3;
 pub mod l3_audit;
@@ -27,7 +29,27 @@ pub mod l3_canon;
 pub mod l3_regime;
 pub mod l3_run;
 pub mod l3_v2;
-pub mod l3_witness_frontier;
+pub use audit_bundle::{
+    check_finite_decision_audit_input_bundle_from_module_v1,
+    check_finite_decision_audit_input_bundle_from_source_v1,
+    check_l3_audit_input_bundle_from_module_v1, check_l3_audit_input_bundle_from_source_v1,
+    produce_finite_decision_audit_input_bundle_v1,
+    produce_finite_decision_audit_input_bundle_with_limits_v1, produce_l3_audit_input_bundle_v1,
+    produce_l3_audit_input_bundle_with_limits_v1, AuditBundleVerificationReport,
+    FiniteDecisionAuditBundleVerificationReport, FiniteDecisionSourceBundleError,
+    L3AuditBundleVerificationReport, L3SourceBundleError, SourceBundleError,
+    SourceBundleProducerError,
+};
+pub use brix_semantic::{ContextId, Outcome};
+pub use finite_decision::{
+    finite_decision_audit_environment_from_plan, finite_decision_program_id,
+    finite_decision_program_preimage, lower_finite_decision_plan, run_finite_decision_plan,
+    type_of_value, CandidateDisposition, CandidateStatus, DerivedFact, FiniteDecisionCommit,
+    FiniteDecisionLowerError, FiniteDecisionPlan, FiniteDecisionProgramId, FiniteDecisionProposal,
+    FiniteDecisionRule, FiniteDecisionRun, FiniteDecisionRuntime, FiniteDecisionStop,
+    FiniteDecisionUnknownReason, L3ValueType, QuiescenceCertificateId, SelectedDecision,
+    WhyExplanation, WhyNotExplanation, FINITE_DECISION_PROFILE,
+};
 pub use l3::{
     lower_l3_plan, L3ConfigBody, L3ConfigDecl, L3LowerError, L3PlanItem, L3PlanV1, L3TypeRef,
     L3ValueV1, PlanLimitsV1, L3_PROFILE_MARKER_RETIRED_V0, L3_PROFILE_MARKER_V1,
@@ -54,16 +76,15 @@ pub use l3_run::{
     settlement_run_id, AdapterFailureDetail, L3AdmChoice, L3RunReport, L3UnknownReasonV1,
     SettlementRunId, SettlementRunV1, SettlementStopV1,
 };
-pub use l3_witness_frontier::{
-    lower_witness_frontier_plan, run_witness_frontier_once, witness_frontier_program_id,
-    WitnessCandidate, WitnessFrontierLowerError, WitnessFrontierPlan, WitnessFrontierProgramId,
-    WitnessFrontierRun, WitnessFrontierRunError, WitnessFrontierRuntime, WitnessRule,
-    L3_WITNESS_FRONTIER_PROFILE,
+pub use soc_core::{
+    decode_audit_input_bundle_v1, encode_audit_input_bundle_v1, AuditDecodeLimits,
+    BundleCheckError, BundleDecodeError, BundleProducerError, SettlementAuditInputBundleIdV1,
+    SettlementAuditInputBundleV1,
 };
 
 use brix_elaborate::{elaborate_tree, ElaborationResult, RealizesTree};
 use brix_kernel::{Budget, Verdict};
-use brix_semantic::{ContextId, Dependency, EvidenceId, Outcome, PropositionId};
+use brix_semantic::{Dependency, EvidenceId, PropositionId};
 use brix_syntax::ast::{self, Item};
 use soc_regimes::coverage::certify_exhaustive;
 pub use soc_regimes::coverage::CoverageOutcome;

@@ -162,6 +162,8 @@ fn declared_name(item: &Item) -> Option<String> {
         Item::Regime(r) => Some(r.name.clone()),
         Item::Let(l) => Some(l.name.clone()),
         Item::Witness { name, .. } => Some(name.clone()),
+        Item::Propose(p) => Some(p.name.clone()),
+        Item::Commit(c) => Some(c.name.clone()),
         Item::Show(_) | Item::Use(_) => None,
     }
 }

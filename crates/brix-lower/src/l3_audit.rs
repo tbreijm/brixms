@@ -633,3 +633,9 @@ pub fn check_l3_audit_receipt_from_source_v1(
     soc_core::audit_receipt::check_audit_receipt_v1(receipt, step, context, &registry, &semantics)
         .map_err(SourceReceiptError::Receipt)
 }
+
+pub use crate::audit_bundle::{
+    check_l3_audit_input_bundle_from_source_v1, produce_l3_audit_input_bundle_v1,
+    produce_l3_audit_input_bundle_with_limits_v1, L3AuditBundleVerificationReport,
+    L3SourceBundleError,
+};

@@ -1,6 +1,9 @@
 # ADR-0027 — L3 v2: A Derivation-Capable Executable Profile
 
-Status: **Proposed** (2026-08-16). Defines the successor to
+Status: **Partially Implemented** (2026-08-17; Proposed 2026-08-16). Stages A–C landed in
+`crates/brix-lower` (PRs #312, #313, #314: `L3PlanV2`, expression IR, evaluator, and static
+derivation eligibility). Stages D–G (measure, state revisions, v2 audit/CLI integration, and
+adversarial gates) remain pending. Defines the successor to
 [ADR-0012](./ADR-0012_L3_Executable_Settlement.md)'s `brix.l3.rule-agenda-saturated@1`, which
 cannot express a computation. Governs issue #178 and the "run a real program" goal.
 
@@ -371,17 +374,20 @@ No public `@2` run is emitted until the whole chosen fragment lands.
 - **Stage A — profile, IR and identities.** `L3PlanV2`/`ProgramIdV2`, the expression IR, dependency
   encoding, value/fact/world encoders, the observation-profile preimage with its non-empty `𝒢_τ`,
   and frozen vectors under the two-consumer discipline. v1 tests byte-identical.
+  *Landed in PR #312.*
 - **Stage B — the evaluator.** Field access, `match`, payload constructors, checked arithmetic and
   comparison, as a deterministic small-step machine whose steps are administrative generators.
+  *Landed in PR #313.*
 - **Stage C — derivation.** Static dependency extraction, acyclicity, and eligibility on committed
   dependencies. **First stage where a genuinely derived fact is reachable.**
+  *Landed in PR #314.*
 - **Stage D — the measure.** The progress ordinal in the world, per-generator decrease
-  declarations, and the O(1) per-step check.
-- **Stage E — state revisions** (§6) and the generic/parameterized config vocabulary v1 rejects.
+  declarations, and the O(1) per-step check. *Pending.*
+- **Stage E — state revisions** (§6) and the generic/parameterized config vocabulary v1 rejects. *Pending.*
 - **Stage F — audit and CLI.** v2 audit semantics, `brix run`/`brix audit` over the v2 profile, and
-  the differential suite against v1.
+  the differential suite against v1. *Pending.*
 - **Stage G — adversarial gates.** Non-termination, evaluation faults, overflow, dependency cycles,
-  determinism and reproducibility. Release gates, not deferred polish.
+  determinism and reproducibility. Release gates, not deferred polish. *Pending.*
 
 ## 11. Open decisions
 

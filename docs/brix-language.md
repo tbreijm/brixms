@@ -132,16 +132,18 @@ Output of `brix check`:
 
 The following surface features are not yet in the L2 lowering fragment:
 
-- **Witness composition:** Sequential composition (`then` / $\circ$) and parallel composition (`and` / $\otimes$).
-- **Proof & Explanation Keywords:** `prove`, `why`, and `audit`.
-- **Regime & Rule Declarations:** Surface `regime`, `gen`, and `rule` checking.
+- **Witness composition:** Sequential composition (`then` / $\circ$) and parallel composition (`and` / $\otimes$) are parsed in syntax but not supported in lowering.
+- **Surface Expression Keywords:** `prove`, `why`, and `audit` inside expressions (these are CLI driver commands over `.brix` files, not surface expression operators).
+- **Surface Regime & Rule Declarations:** Surface `regime` and `gen` syntax; `rule` declarations are evaluated by L3 execution profiles, not L2 type-realization bindings.
+- **Directly Recursive Functions:** Recursive `fn` definitions are refused because functions are currently inlined.
 - **Recursive/Custom Sum Payloads:** Constructor payloads are currently limited to `Int`, `Str`, and `Float`; recursive sums remain deferred.
 - **Full Structural Discharge:** Empty records and nullary constructors require a kernel unit proposition, while wildcard/variable catch-all matches require explicit repeated-branch premises; these forms type-check but remain `@Audited`.
 
 ---
 
-## 6. Roadmap
+## 6. Roadmap & Execution Profiles
 
 - **Generator Discharge:** Add unit/nullary and catch-all proof schemas, then discharge arithmetic and numeric coercion semantics when value execution exists.
 - **Fragment Expansion:** Add recursive/custom sum payloads and witness composition (`then`/`and`).
-- **Fixpoint Execution:** Introduce L3 `brix run` settlement to evaluate programs to fixpoints.
+- **Finite-Decision Alpha (`0.1.0-alpha.2`):** The `brix.l3.finite-decision@1` candidate deliberation profile ([ADR-0030](../spec/adr/ADR-0030_Finite_Decision_Alpha.md)) is implemented in `soc-regimes`, evaluating complete candidate frontiers, structured rejection reasons, and deterministic calendar selection at phase zero.
+- **L3 v2 Derivation:** Stages A–C ([ADR-0027](../spec/adr/ADR-0027_L3_V2_Derivation.md)) are landed in `brix-lower`, defining the derivation evaluator and eligibility rules on committed dependencies.

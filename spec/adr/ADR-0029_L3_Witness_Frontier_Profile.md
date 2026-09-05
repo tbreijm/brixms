@@ -1,6 +1,16 @@
 # ADR-0029 — L3 Witness-Frontier Profile
 
-Status: **Proposed** (2026-08-18).
+Status: **Withdrawn / Superseded by [ADR-0030](./ADR-0030_Finite_Decision_Alpha.md)** (2026-09-05; Proposed 2026-08-18).
+
+> **Supercession Notice (2026-09-05):** Withdrawn and superseded by
+> [ADR-0030: Finite-Decision Alpha](./ADR-0030_Finite_Decision_Alpha.md).
+> ADR-0029 proposed an early sketch (`brix.l3.witness-frontier@1`) that lowered
+> ordinary source rules directly into candidate witnesses without explicit
+> propose-plus-commit grammar, complete deliberation frontier semantics,
+> structured rejection reasons, fail-closed fault/key conflict handling,
+> certified quiescence when all candidates are rejected, or program identity bindings
+> over normalized guards and priorities. ADR-0030 defines the normative finite-decision
+> alpha execution profile (`brix.l3.finite-decision@1`).
 
 `brix.l3.witness-frontier@1` is a new executable profile. It neither widens
 ADR-0012's serial rule-agenda v1 profile nor changes SOC core semantics. It
