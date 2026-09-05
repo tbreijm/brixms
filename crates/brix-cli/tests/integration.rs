@@ -21,7 +21,10 @@ use std::process::{Command, Output};
 use brix_canon::Canonical;
 
 fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
+    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    manifest_dir
         .parent()
         .expect("crates parent")
         .parent()
@@ -29,8 +32,15 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn brix_bin() -> PathBuf {
+    std::env::var_os("CARGO_BIN_EXE_brix")
+        .or_else(|| std::env::var_os("NEXTEST_BIN_EXE_brix"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_brix")))
+}
+
 fn brix() -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_brix"));
+    let mut cmd = Command::new(brix_bin());
     cmd.current_dir(repo_root());
     cmd
 }
