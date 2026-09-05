@@ -117,6 +117,7 @@
 
 pub mod adm;
 pub mod audit;
+pub mod audit_bundle;
 pub mod audit_receipt;
 pub mod calendar;
 pub mod commit;
@@ -134,6 +135,19 @@ pub mod witness_provider;
 
 pub use adm::{Adm, AdmAll, AdmNone, AdmSuccessorFilter, AdmWitnessAllowlist, AndAdm};
 pub use audit::{audit_journal, audit_step, AuditResult, AuditedStep, GeneratorSemanticsV1};
+pub use audit_bundle::{
+    check_audit_input_bundle_v1, decode_audit_input_bundle_v1, encode_audit_input_bundle_v1,
+    produce_audit_input_bundle_v1, produce_audit_input_bundle_with_limits_v1,
+    validate_audit_input_bundle_snapshot_v1, validate_bundle_limits, AuditDecodeLimits,
+    BundleCheckError, BundleDecodeError, BundleProducerError, Entry, RecordedStepMaterialV1,
+    SettlementAuditInputBundleIdV1, SettlementAuditInputBundleV1, SnapshotValidationError,
+    BUNDLE_MARKER_V1, BUNDLE_PROFILE_V1, BUNDLE_VERSION_V1,
+};
+pub use audit_receipt::{
+    check_audit_receipt_bytes_v1, check_audit_receipt_v1, committed_step_digest, ReceiptError,
+    SettlementAuditReceiptIdV1, SettlementAuditReceiptV1, AUDIT_PROFILE_V1,
+    AUDIT_RECEIPT_MARKER_V1, AUDIT_RECEIPT_VERSION_V1,
+};
 pub use calendar::{Frontier, FrontierDeltaError, Key, KeyConflict};
 pub use commit::{
     commit_tick, prospective_successor, run, run_reason, step_world_delta, try_commit_selected,

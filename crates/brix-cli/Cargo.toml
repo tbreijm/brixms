@@ -16,6 +16,9 @@ brix-lower = { path = "../brix-lower" }
 brix-elaborate = { path = "../brix-elaborate" }
 brix-kernel = { path = "../brix-kernel" }
 brix-semantic = { workspace = true }
+brix-canon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 soc-core = { path = "../soc-core" }
 soc-regimes = { path = "../soc-regimes" }
 

@@ -1,0 +1,11 @@
+config Decision = Expedite | Ship | Hold
+
+rule stock() = 12
+rule threshold() = 10
+
+propose expedite(stock) priority 5 when stock >= 50 = Expedite
+propose ship(stock, threshold) priority 10 when stock >= threshold = Ship
+propose hold() priority 100 when true = Hold
+
+commit shipping from (expedite, ship, hold)
+show shipping

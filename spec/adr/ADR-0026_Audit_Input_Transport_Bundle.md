@@ -4,6 +4,13 @@ Status: **Proposed** (2026-08-16). Closes [ADR-0022](./ADR-0022_Source_Re_Derive
 residual 5 (complete transport of every audit input) and rules on residual 8 (journal inclusion).
 Governs issue #290.
 
+> **Implementation Precondition (0.1.0-alpha.2):** This ADR remains **Proposed** and is **not ratified**
+> by the `0.1.0-alpha.2` finite-decision alpha release slice. Ratification requires full implementation
+> of the exact bundle contract: Stages B–H (canonical decoding of `AuditInputBundleV1` without verification
+> tags under ⟨D-NOTAG⟩, `check_l3_audit_input_bundle_from_source_v1`, the `brix verify` CLI command, and
+> frozen vector acceptance gates). Until all stages land, the CLI verification surface remains unimplemented
+> and external audit bundles cannot be accepted.
+
 Date: 2026-08-16.
 
 Foundation documents: [ADR-0002: SOC Constitution](./ADR-0002_SOC_Constitution.md) (§5.3 fail

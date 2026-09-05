@@ -10,6 +10,7 @@ digraph brixms_workspace {
   "brix-syntax";
   "soc-core";
   "soc-regimes";
+  "brix-cli" -> "brix-canon";
   "brix-cli" -> "brix-elaborate";
   "brix-cli" -> "brix-kernel";
   "brix-cli" -> "brix-lower";

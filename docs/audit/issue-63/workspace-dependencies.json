@@ -15,6 +15,8 @@
       "brix-semantic",
       "brix-syntax",
       "indexmap",
+      "serde",
+      "serde_json",
       "soc-core",
       "soc-regimes",
       "unicode-normalization"
@@ -72,6 +74,10 @@
     ]
   },
   "production_dependency_edges": [
+    {
+      "from": "brix-cli",
+      "to": "brix-canon"
+    },
     {
       "from": "brix-cli",
       "to": "brix-elaborate"

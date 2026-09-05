@@ -51,13 +51,14 @@
 //! the receipt itself* has authenticated nothing (ADR-0020 §2) — the expected
 //! registry and semantics are parameters for exactly that reason.
 
-use brix_canon::{CanonWriter, Canonical, Digest, Domain};
+use brix_canon::{CanonReader, CanonWriter, Canonical, Digest, Domain};
 use brix_semantic::{
     ContextId, DecompositionId, GeneratorRegistry, GeneratorRegistryId, GeneratorSemanticsIdV1,
     GeneratorSemanticsV1,
 };
 
 use crate::audit::{audit_step, AuditResult};
+use crate::audit_bundle::AuditDecodeLimits;
 use crate::journal::CommittedStep;
 
 /// The fixed marker opening a [`SettlementAuditReceiptV1`] preimage
@@ -75,7 +76,7 @@ pub const AUDIT_RECEIPT_VERSION_V1: u64 = 1;
 /// independent choice to validate.
 pub const AUDIT_PROFILE_V1: &str = "brix.soc.audit-factorization@1";
 
-/// Why a receipt was refused (ADR-0020 D7).
+/// Why a receipt was refused (ADR-0020 D7, ADR-0026 ⟨D-REISSUE⟩).
 ///
 /// Rust-side validation only — never canonically encoded, so no ABI ordinal.
 /// Every variant means **the receipt is not accepted**; none of them
@@ -106,6 +107,18 @@ pub enum ReceiptError {
         /// Which field disagreed, as a fixed name.
         field: &'static str,
     },
+    /// Bad fixed marker bytes opening receipt payload (ADR-0026 §6).
+    BadMarker,
+    /// Unknown receipt format version (ADR-0026 §6).
+    UnknownVersion(u64),
+    /// Unknown receipt profile (ADR-0026 §6).
+    UnknownProfile,
+    /// Receipt frame carried trailing unconsumed bytes (ADR-0026 §6).
+    TrailingBytes,
+    /// Receipt length in bytes exceeded the configured limit (ADR-0026 §6).
+    ReceiptBytesTooLarge { limit: usize, found: usize },
+    /// Canonical framing error or malformed structure.
+    MalformedReceipt(&'static str),
 }
 
 /// A settlement audit receipt: the exact inputs and checker profile a
@@ -114,6 +127,20 @@ pub enum ReceiptError {
 /// Fields are private, following ADR-0019 D1 — this artifact's identity *is*
 /// the claim, so a caller able to set a field could mint a receipt naming an
 /// audit environment that never ran.
+///
+/// # No public constructor from decoded bytes (ADR-0026 ⟨D-REISSUE⟩)
+///
+/// ```compile_fail
+/// use soc_core::audit_receipt::SettlementAuditReceiptV1;
+/// // Fields are private; no public decoded-bytes constructor exists.
+/// let _ = SettlementAuditReceiptV1 {
+///     context: todo!(),
+///     committed_step: todo!(),
+///     verified_decomposition: todo!(),
+///     registry: todo!(),
+///     semantics: todo!(),
+/// };
+/// ```
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SettlementAuditReceiptV1 {
     context: ContextId,
@@ -316,4 +343,187 @@ pub fn check_audit_receipt_v1(
     }
 
     Ok(receipt.id())
+}
+
+/// The crate-private claimed view of receipt bytes (ADR-0026 ⟨D-REISSUE⟩).
+///
+/// Has NO public conversion to [`SettlementAuditReceiptV1`]. Acceptance is by
+/// re-running the audit, locally reissuing, and byte-for-byte equality.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct ClaimedReceiptV1 {
+    pub(crate) context: ContextId,
+    pub(crate) committed_step: Digest,
+    pub(crate) verified_decomposition: DecompositionId,
+    pub(crate) registry: GeneratorRegistryId,
+    pub(crate) semantics: GeneratorSemanticsIdV1,
+}
+
+impl ClaimedReceiptV1 {
+    pub(crate) fn decode(bytes: &[u8], max_receipt_bytes: usize) -> Result<Self, ReceiptError> {
+        if bytes.len() > max_receipt_bytes {
+            return Err(ReceiptError::ReceiptBytesTooLarge {
+                limit: max_receipt_bytes,
+                found: bytes.len(),
+            });
+        }
+        let mut r = CanonReader::new(bytes);
+        let marker = r
+            .read_bytes()
+            .map_err(|_| ReceiptError::MalformedReceipt("cannot read marker"))?;
+        if marker != AUDIT_RECEIPT_MARKER_V1 {
+            return Err(ReceiptError::BadMarker);
+        }
+        let version = r
+            .read_uint()
+            .map_err(|_| ReceiptError::MalformedReceipt("cannot read version"))?;
+        if version != AUDIT_RECEIPT_VERSION_V1 {
+            return Err(ReceiptError::UnknownVersion(version));
+        }
+        let profile = r
+            .read_bytes()
+            .map_err(|_| ReceiptError::MalformedReceipt("cannot read profile"))?;
+        if profile != AUDIT_PROFILE_V1.as_bytes() {
+            return Err(ReceiptError::UnknownProfile);
+        }
+
+        let context_bytes = r
+            .read_bytes()
+            .map_err(|_| ReceiptError::MalformedReceipt("cannot read context"))?;
+        let context_arr: [u8; 32] = context_bytes
+            .try_into()
+            .map_err(|_| ReceiptError::MalformedReceipt("context digest not 32 bytes"))?;
+        let context = ContextId(Digest::from_bytes(context_arr));
+
+        let step_bytes = r
+            .read_bytes()
+            .map_err(|_| ReceiptError::MalformedReceipt("cannot read committed_step"))?;
+        let step_arr: [u8; 32] = step_bytes
+            .try_into()
+            .map_err(|_| ReceiptError::MalformedReceipt("committed_step digest not 32 bytes"))?;
+        let committed_step = Digest::from_bytes(step_arr);
+
+        let decomp_bytes = r
+            .read_bytes()
+            .map_err(|_| ReceiptError::MalformedReceipt("cannot read verified_decomposition"))?;
+        let decomp_arr: [u8; 32] = decomp_bytes.try_into().map_err(|_| {
+            ReceiptError::MalformedReceipt("verified_decomposition digest not 32 bytes")
+        })?;
+        let verified_decomposition = DecompositionId(Digest::from_bytes(decomp_arr));
+
+        let reg_bytes = r
+            .read_bytes()
+            .map_err(|_| ReceiptError::MalformedReceipt("cannot read registry"))?;
+        let reg_arr: [u8; 32] = reg_bytes
+            .try_into()
+            .map_err(|_| ReceiptError::MalformedReceipt("registry digest not 32 bytes"))?;
+        let registry = GeneratorRegistryId(Digest::from_bytes(reg_arr));
+
+        let sem_bytes = r
+            .read_bytes()
+            .map_err(|_| ReceiptError::MalformedReceipt("cannot read semantics"))?;
+        let sem_arr: [u8; 32] = sem_bytes
+            .try_into()
+            .map_err(|_| ReceiptError::MalformedReceipt("semantics digest not 32 bytes"))?;
+        let semantics = GeneratorSemanticsIdV1(Digest::from_bytes(sem_arr));
+
+        if !r.is_empty() {
+            return Err(ReceiptError::TrailingBytes);
+        }
+
+        Ok(ClaimedReceiptV1 {
+            context,
+            committed_step,
+            verified_decomposition,
+            registry,
+            semantics,
+        })
+    }
+}
+
+/// Validate receipt bytes by **reissue and byte-for-byte compare** (ADR-0026 ⟨D-REISSUE⟩).
+///
+/// Decodes receipt bytes ONLY to a crate-private claimed view, verifies expectations
+/// and contextual values, replays the audit, reissues the receipt locally, and requires
+/// byte-for-byte equality with `receipt_bytes`.
+///
+/// There is NO public conversion from decoded bytes to [`SettlementAuditReceiptV1`].
+pub fn check_audit_receipt_bytes_v1(
+    receipt_bytes: &[u8],
+    step: &CommittedStep,
+    context: ContextId,
+    expected_registry: &GeneratorRegistry,
+    expected_semantics: &GeneratorSemanticsV1,
+    limits: &AuditDecodeLimits,
+) -> Result<SettlementAuditReceiptIdV1, ReceiptError> {
+    // 0. Enforce limit before decoding
+    if receipt_bytes.len() > limits.max_receipt_bytes {
+        return Err(ReceiptError::ReceiptBytesTooLarge {
+            limit: limits.max_receipt_bytes,
+            found: receipt_bytes.len(),
+        });
+    }
+
+    // 1. Decode to crate-private claimed view (rejects bad marker, version, profile, lengths, trailing bytes)
+    let claimed = ClaimedReceiptV1::decode(receipt_bytes, limits.max_receipt_bytes)?;
+
+    // 2. Expectations check first (ADR-0020 D7)
+    let expected_semantics_id = expected_semantics.id();
+    if claimed.semantics != expected_semantics_id {
+        return Err(ReceiptError::UnexpectedSemantics {
+            expected: expected_semantics_id,
+            found: claimed.semantics,
+        });
+    }
+    let expected_registry_id = expected_registry.id();
+    if claimed.registry != expected_registry_id {
+        return Err(ReceiptError::UnexpectedRegistry {
+            expected: expected_registry_id,
+            found: claimed.registry,
+        });
+    }
+
+    // 3. Environment coherence (ADR-0020 D2)
+    if expected_semantics
+        .require_matches_registry(expected_registry)
+        .is_err()
+    {
+        return Err(ReceiptError::SemanticsRegistryDisagreement);
+    }
+
+    // 4. Contextual fields
+    if claimed.context != context {
+        return Err(ReceiptError::FieldMismatch { field: "context" });
+    }
+    if claimed.committed_step != committed_step_digest(step) {
+        return Err(ReceiptError::FieldMismatch {
+            field: "committed_step",
+        });
+    }
+
+    // 5. Rerun audit
+    let audited = match audit_step(step, context, expected_registry, expected_semantics) {
+        AuditResult::Audited(a) => a,
+        AuditResult::Unknown(reason) => return Err(ReceiptError::ReplayFailed(reason)),
+    };
+
+    if claimed.verified_decomposition != audited.verified.id() {
+        return Err(ReceiptError::FieldMismatch {
+            field: "verified_decomposition",
+        });
+    }
+
+    // 6. Reissue and byte-for-byte compare (ADR-0026 ⟨D-REISSUE⟩)
+    let reissued = issue_receipt(
+        step,
+        context,
+        expected_registry,
+        expected_semantics,
+        audited.verified.id(),
+    );
+
+    if reissued.canon_bytes() != receipt_bytes {
+        return Err(ReceiptError::FieldMismatch { field: "receipt" });
+    }
+
+    Ok(reissued.id())
 }

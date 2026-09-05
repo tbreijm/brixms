@@ -48,6 +48,10 @@ pub enum Item {
     /// `witness name = expr` — bind a witness value (power-user surface;
     /// sugar-equivalent to `let`, kept distinct for round-trip fidelity).
     Witness { name: String, value: Expr },
+    /// `propose NAME(DEPS...) priority UINT when GUARD = VALUE` — finite-decision candidate proposal.
+    Propose(ProposeDecl),
+    /// `commit NAME from (CANDIDATE, ...)` — finite-decision commitment.
+    Commit(CommitDecl),
 }
 
 /// `config Name = <body>`.
@@ -122,6 +126,30 @@ pub struct LetDecl {
     /// annotation is an *assertion the checker must discharge*, never required.
     pub ty: Option<Ty>,
     pub value: Expr,
+}
+
+/// `propose NAME(DEPS...) priority UINT when GUARD = VALUE`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProposeDecl {
+    pub name: String,
+    pub deps: Vec<String>,
+    pub priority: u64,
+    pub guard: Expr,
+    pub value: Expr,
+}
+
+/// `commit NAME from (CANDIDATE, ...)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitDecl {
+    pub name: String,
+    pub candidates: Vec<String>,
+}
+
+impl CommitDecl {
+    /// Nonempty ordered list of candidate members.
+    pub fn members(&self) -> &[String] {
+        &self.candidates
+    }
 }
 
 /// A surface type.

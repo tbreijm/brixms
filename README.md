@@ -268,7 +268,7 @@ covered by executable gates:
 
 | Layer | Current implementation |
 | --- | --- |
-| Brix language | Hand-written lexer/parser; functions and bindings; records and algebraic sums; directly recursive and parameterized configurations; matching; arithmetic and comparison; grade annotations; sequential and parallel witness composition |
+| Brix language | Hand-written lexer/parser; functions and bindings; records and algebraic sums; directly recursive and parameterized configurations; matching; arithmetic and comparison; grade annotations |
 | Type realization | Tree-shaped derivations, conflict reporting, declared function contracts, certified match coverage, and honest per-result grade caps |
 | Command line | `check`, `run`, `audit`, `prove`, `why`, and `whynot` |
 | Settlement runtime | Admission policies, deterministic keyed selection, transactional candidate deltas, persistent state, append-only journals, and deterministic replay |
@@ -278,14 +278,20 @@ covered by executable gates:
 | Proof | A small dependent kernel with explicit proof terms, composition and tensor rules, primitive relations, canonical certificate envelopes, and adversarial vectors |
 | Reproducibility | Pinned Rust toolchain, canonical encodings, frozen vectors, independent cross-checks, deterministic-order lints, and artifact-drift CI |
 
-There are two language profiles today:
+Execution profiles currently in the workspace:
 
-- `brix check`, `prove`, `why`, and `whynot` exercise the growing type-
-  realization frontend;
-- `brix run` and `audit` use the deliberately smaller
-  `brix.l3.rule-agenda-saturated@1` execution profile.
+- `brix check`, `prove`, `why`, and `whynot` exercise the native type-realization
+  regime over top-level bindings (`soc-regimes`);
+- `brix run` and `audit` drive the `brix.l3.rule-agenda-saturated@1` static
+  execution profile to its certified quiescence stop and independent journal audit;
+- `brix.l3.finite-decision@1` ([ADR-0030](./spec/adr/ADR-0030_Finite_Decision_Alpha.md))
+  implements the finite-decision alpha deliberation profile in `crates/soc-regimes`,
+  evaluating complete candidate frontiers, structured rejection reasons, and
+  deterministic calendar selection at phase zero;
+- `crates/brix-lower` additionally contains Stages A–C of L3 v2 derivation
+  ([ADR-0027](./spec/adr/ADR-0027_L3_V2_Derivation.md)).
 
-The parser recognizes some designed syntax that a downstream profile does not
+The parser recognizes some designed syntax that downstream execution profiles do not
 yet implement. Those constructs are refused before execution; they do not
 become guessed results.
 
@@ -328,17 +334,25 @@ both the declared type and the requested evidence grade.
 
 ### CLI guide
 
+All runnable CLI commands operate on a single `.brix` file path (`brix <command> <file.brix>`):
+
 ```text
 brix check   <file.brix>  infer types and report their evidence grades
-brix run     <file.brix>  run L3 and report quiescence, divergence, or Unknown
-brix audit   <file.brix>  run L3, then independently replay the journal
-brix prove   <file.brix>  show kernel proposition and certificate details
+brix run     <file.brix>  run L3 and report certified quiescence, divergence, or Unknown
+brix audit   <file.brix>  run L3, then independently replay and audit the journal
+brix prove   <file.brix>  run kernel acceptance and show certificates per binding
 brix why     <file.brix>  show the derivation and any grade-limiting leaves
 brix whynot  <file.brix>  explain conflicts, unsupported syntax, or proof gaps
 ```
 
 From the workspace, prefix a command with `cargo run -p brix-cli --`, or build
 the executable once with `cargo build -p brix-cli`.
+
+**CLI target surface & status:**
+- `brix` implements exactly the six file-oriented subcommands above.
+- `brix verify <bundle.json>` is specified in [ADR-0026](./spec/adr/ADR-0026_Audit_Input_Transport_Bundle.md)
+  for offline audit bundle verification, but is not yet implemented in the CLI.
+- `brix test`, `brix sim`, and interactive REPLs are deliberately out of scope and not implemented.
 
 ## What is coming
 
@@ -462,13 +476,23 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 python3 scripts/canon_crosscheck.py
 python3 scripts/check_tcb_dependencies.py --check
+scripts/test_tcb_dependency_gate.sh
 python3 scripts/check_soc_law_map.py
+scripts/test_law_map_provisional_gate.sh
 ```
 
-CI also repeats the suite to detect artifact drift, exposes dedicated
-conformance, acceptance, and reproducibility jobs, checks dependency policy
-with `cargo-deny`, and reports coverage. `unsafe` is denied workspace-wide, and
-unordered standard hash maps are denied in semantic paths.
+The required CI merge gates protecting `main` (defined in [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)) are:
+
+1. **`lint`**: formatting (`cargo fmt`), TCB dependency policy (`check_tcb_dependencies.py`), law-map traceability (`check_soc_law_map.py`), canon vector cross-check (`canon_crosscheck.py`), and Clippy warnings-as-errors;
+2. **`build`**: workspace test archiving and doctests (`cargo test --doc --workspace`);
+3. **`test`**: execution of the workspace test suite via `cargo nextest`;
+4. **`determinism`**: repeated test execution asserting zero git status drift on frozen artifacts (proxy for G3 reproducibility);
+5. **`conformance`**: dedicated regime test gate covering `soc-regimes` native type-checker parity;
+6. **`acceptance`**: adversarial certificate vector verification in `brix-kernel`;
+7. **`reproducibility`**: reproducible emit, cache integrity, and deterministic size budgets in `soc-core`;
+8. **`cargo-deny`**: supply-chain security, license compatibility, crate bans, and advisory checks.
+
+`unsafe` is denied workspace-wide, and unordered standard hash maps are denied in semantic paths.
 
 See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the determinism discipline,
 dependency policy, and specification-erratum workflow.

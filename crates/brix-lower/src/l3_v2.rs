@@ -308,6 +308,15 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
             ast::Item::Witness { name, .. } => {
                 return Err(L3V2LowerError::ItemNotAllowed(format!("witness {name}")))
             }
+            ast::Item::Propose(p) => {
+                return Err(L3V2LowerError::ItemNotAllowed(format!(
+                    "propose {}",
+                    p.name
+                )))
+            }
+            ast::Item::Commit(c) => {
+                return Err(L3V2LowerError::ItemNotAllowed(format!("commit {}", c.name)))
+            }
         }
     }
 
@@ -441,7 +450,7 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
 /// from a `let` value, which may not: a `let` is a closed static binding, and
 /// letting it depend on a committed fact would make plan construction depend
 /// on run order.
-fn lower_expr_v2(
+pub(crate) fn lower_expr_v2(
     e: &ast::Expr,
     lets: &BTreeSet<String>,
     rules: &BTreeSet<String>,
