@@ -29,6 +29,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # The merge bar, re-asserted for the exact tagged commit.
+      - name: Verify release tag equals workspace version
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "${TAG}" != v* ]]; then
+            echo "ERROR: Release tag '${TAG}' must start with 'v' (e.g. v0.1.0-alpha.2)" >&2
+            exit 1
+          fi
+          TAG_VER="${TAG#v}"
+          PKG_VER=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "brix-cli") | .version' | head -n 1)
+          echo "Release tag:       ${TAG}"
+          echo "Tag version:       ${TAG_VER}"
+          echo "Workspace version: ${PKG_VER}"
+          if [[ "${TAG_VER}" != "${PKG_VER}" ]]; then
+            echo "ERROR: Release tag version '${TAG_VER}' does not equal workspace package version '${PKG_VER}'" >&2
+            exit 1
+          fi
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy (warnings are errors)
@@ -72,6 +89,23 @@ jobs:
           fi
           echo "Package created: ${ARCHIVE}"
           cat "${ARCHIVE}.sha256"
+      - name: Smoke check release archive
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          ARCHIVE="brix-${TAG}-${{ matrix.target }}.tar.gz"
+          SMOKE_DIR=$(mktemp -d)
+          tar -xzf "${ARCHIVE}" -C "${SMOKE_DIR}"
+          VERSION_OUTPUT=$("${SMOKE_DIR}/brix" --version)
+          echo "Smoke check output: ${VERSION_OUTPUT}"
+          TAG_VER="${TAG#v}"
+          if [[ "${VERSION_OUTPUT}" != "brix ${TAG_VER}" ]]; then
+            echo "ERROR: Smoke check version '${VERSION_OUTPUT}' does not match expected 'brix ${TAG_VER}'" >&2
+            rm -rf "${SMOKE_DIR}"
+            exit 1
+          fi
+          rm -rf "${SMOKE_DIR}"
+          echo "Smoke check passed for ${{ matrix.target }}"
       - name: Upload asset artifacts
         uses: actions/upload-artifact@v7
         with:

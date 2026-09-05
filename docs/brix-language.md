@@ -88,8 +88,8 @@ Output of `brix check`:
 Brix categorizes statement outcomes using three epistemic grades:
 
 - **`@Proven`**: Certified end-to-end by the kernel down to discharged tight-generator leaves.
-- **`@Audited`**: Certified compositionally given primitive generator leaves whose semantic validity remains open.
-- **`@Derived`**: Unverified candidate facts recorded in the settlement hot loop.
+- **`@Audited`**: Certified compositionally given primitive generator leaves whose semantic validity remains open, or verified independently via offline audit input transport bundles (issuing separate `@Audited` audit receipts).
+- **`@Derived`**: Unverified candidate facts and runtime settlement commitments (the runtime decision remains `@Derived`; successful independent replay issues and verifies separate `@Audited` receipts).
 
 ### Honest Status of Type Checking
 
@@ -133,7 +133,7 @@ Output of `brix check`:
 The following surface features are not yet in the L2 lowering fragment:
 
 - **Witness composition:** Sequential composition (`then` / $\circ$) and parallel composition (`and` / $\otimes$) are parsed in syntax but not supported in lowering.
-- **Surface Expression Keywords:** `prove`, `why`, and `audit` inside expressions (these are CLI driver commands over `.brix` files, not surface expression operators).
+- **Surface Expression Keywords:** keywords like `why` and `audit` inside expressions (these are CLI driver subcommands over `.brix` files, not surface expression operators).
 - **Surface Regime & Rule Declarations:** Surface `regime` and `gen` syntax; `rule` declarations are evaluated by L3 execution profiles, not L2 type-realization bindings.
 - **Directly Recursive Functions:** Recursive `fn` definitions are refused because functions are currently inlined.
 - **Recursive/Custom Sum Payloads:** Constructor payloads are currently limited to `Int`, `Str`, and `Float`; recursive sums remain deferred.
@@ -143,7 +143,8 @@ The following surface features are not yet in the L2 lowering fragment:
 
 ## 6. Roadmap & Execution Profiles
 
+- **Finite-Decision Alpha (`0.1.0-alpha.2`):** The `brix.l3.finite-decision@1` candidate deliberation profile ([ADR-0030](../spec/adr/ADR-0030_Finite_Decision_Alpha.md)) is implemented across `brix-syntax`, `soc-regimes`, `brix-lower`, and `brix-cli`. It evaluates complete candidate frontiers, structured rejection reasons, and deterministic calendar selection at phase zero. Decisions are committed as `@Derived` at runtime; the runtime decision remains `@Derived`, while successful independent replay issues and verifies separate `@Audited` audit receipts via `brix verify` ([ADR-0026](../spec/adr/ADR-0026_Audit_Input_Transport_Bundle.md)).
+- **CLI Driver:** The live toolchain provides six file-oriented subcommands: `check`, `run`, `audit`, `verify`, `why`, and `whynot`.
+- **L3 v2 Derivation:** Stages A–C ([ADR-0027](../spec/adr/ADR-0027_L3_V2_Derivation.md)) are landed in `brix-lower`, defining the derivation evaluator and eligibility rules on committed dependencies.
 - **Generator Discharge:** Add unit/nullary and catch-all proof schemas, then discharge arithmetic and numeric coercion semantics when value execution exists.
 - **Fragment Expansion:** Add recursive/custom sum payloads and witness composition (`then`/`and`).
-- **Finite-Decision Alpha (`0.1.0-alpha.2`):** The `brix.l3.finite-decision@1` candidate deliberation profile ([ADR-0030](../spec/adr/ADR-0030_Finite_Decision_Alpha.md)) is implemented in `soc-regimes`, evaluating complete candidate frontiers, structured rejection reasons, and deterministic calendar selection at phase zero.
-- **L3 v2 Derivation:** Stages A–C ([ADR-0027](../spec/adr/ADR-0027_L3_V2_Derivation.md)) are landed in `brix-lower`, defining the derivation evaluator and eligibility rules on committed dependencies.

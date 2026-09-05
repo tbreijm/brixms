@@ -1,15 +1,17 @@
 # ADR-0026 — The Audit-Input Transport Bundle, and `brix verify`
 
-Status: **Proposed** (2026-08-16). Closes [ADR-0022](./ADR-0022_Source_Re_Derived_Manifests.md) §5
+Status: **Accepted** (2026-09-05; Proposed 2026-08-16). Closes [ADR-0022](./ADR-0022_Source_Re_Derived_Manifests.md) §5
 residual 5 (complete transport of every audit input) and rules on residual 8 (journal inclusion).
 Governs issue #290.
 
-> **Implementation Precondition (0.1.0-alpha.2):** This ADR remains **Proposed** and is **not ratified**
-> by the `0.1.0-alpha.2` finite-decision alpha release slice. Ratification requires full implementation
-> of the exact bundle contract: Stages B–H (canonical decoding of `AuditInputBundleV1` without verification
-> tags under ⟨D-NOTAG⟩, `check_l3_audit_input_bundle_from_source_v1`, the `brix verify` CLI command, and
-> frozen vector acceptance gates). Until all stages land, the CLI verification surface remains unimplemented
-> and external audit bundles cannot be accepted.
+> **Ratification and Implementation Note (0.1.0-alpha.2):** This ADR is **Accepted** following full
+> implementation and verification of every required stage (Stages A–H): canonical decoding of
+> `SettlementAuditInputBundleV1` under ⟨D-NOTAG⟩ without wire verification tags, strict receipt-byte
+> reissue and comparison (`check_audit_receipt_bytes_v1`), source re-derivation and verification
+> (`check_l3_audit_input_bundle_from_source_v1`), the live `brix audit --bundle <out>` and
+> `brix verify --expect-program <hex> <file.brix> <bundle.brixaudit>` CLI subcommands, and frozen vector
+> acceptance gates (`vectors/settlement_audit_input_bundle_v1.json`). All required bundle stages are
+> genuinely implemented and tested.
 
 Date: 2026-08-16.
 
@@ -329,21 +331,21 @@ named as such.
 - **Stage B — strict receipt-byte checking.** The crate-private claimed view, `AuditDecodeLimits`,
   and `check_audit_receipt_bytes_v1` by reissue-and-compare, with negative and independent vectors.
   **First stage where a verifier accepts receipt bytes it previously could not** — still requiring
-  typed step, context and environment.
+  typed step, context and environment. *Landed in `soc-core` (`audit_receipt.rs`).*
 - **Stage C — recorded step material.** The transport projection with no verification field,
   `Derived`-only observation decoding, reconstruction solely via `Decomposition::recorded`, and
-  `compile_fail` gates against any conversion route.
+  `compile_fail` gates against any conversion route. *Landed in `soc-core` (`audit_bundle.rs`).*
 - **Stage D — bundle identity and snapshot checking.** The artifact, the full-history fold from
   `empty`, ordinal/prefix/final-chain checks, the checked issuer, v1 vectors under the two-consumer
-  discipline, and marker non-collision tests.
+  discipline, and marker non-collision tests. *Landed in `soc-core` (`audit_bundle.rs`).*
 - **Stage E — L3 source integration.** `check_l3_audit_input_bundle_from_source_v1`: independently
   check the expected program, derive registry and semantics once, then validate every receipt.
-  **First stage providing complete cross-process audit acceptance.**
-- **Stage F — producer CLI.** `brix audit --bundle`, atomic output, no artifact on any `Unknown`.
-- **Stage G — verifier CLI.** The pinned `brix verify` surface, with exact rendering and exit tests.
+  **First stage providing complete cross-process audit acceptance.** *Landed in `brix-lower` (`audit_bundle.rs`).*
+- **Stage F — producer CLI.** `brix audit --bundle`, atomic output, no artifact on any `Unknown`. *Landed in `brix-cli` (`commands/audit.rs`).*
+- **Stage G — verifier CLI.** The pinned `brix verify` surface, with exact rendering and exit tests. *Landed in `brix-cli` (`commands/verify.rs`).*
 - **Stage H — hostile-input gates.** Truncations, nonminimal lengths, huge counts, cumulative
   overflow, duplicate and sparse ordinals, altered prefixes, nested frame trailing bytes, wrong
-  markers and profiles, and both limit boundaries. **Release gates, not deferred polish.**
+  markers and profiles, and both limit boundaries. **Release gates, not deferred polish.** *Landed in `soc-core`, `brix-lower`, and `brix-cli` test suites.*
 
 ## 11. Compatibility
 

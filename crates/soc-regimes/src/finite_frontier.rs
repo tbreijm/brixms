@@ -133,18 +133,6 @@ impl NamedCandidate {
         }
     }
 
-    /// Construct a new `NamedCandidate` specialized for alpha phase 0 ordering.
-    pub fn for_phase0(
-        name: impl Into<String>,
-        regime_id: RegimeId,
-        src: ConfigId,
-        dst: ConfigId,
-        priority: u64,
-        interner: &mut Interner,
-    ) -> Self {
-        Self::new(name, regime_id, src, dst, priority, interner)
-    }
-
     /// Construct a `NamedCandidate` with explicitly provided handles, enforcing phase 0.
     #[allow(clippy::too_many_arguments)]
     pub fn with_handles(
@@ -204,11 +192,6 @@ impl NamedCandidate {
             witness: self.witness_handle,
             successor: self.successor_handle,
         }
-    }
-
-    /// Project this named candidate to a lean `soc_core::witness_provider::Candidate`.
-    pub fn candidate(&self) -> Candidate {
-        self.to_candidate()
     }
 
     /// Resolve this candidate to the canonical `(regime, witness, successor)`
@@ -736,12 +719,6 @@ impl EvaluatedFrontier {
         }
     }
 
-    /// Convenience alias for [`EvaluatedFrontier::selection_outcome`].
-    #[allow(clippy::result_large_err)]
-    pub fn try_selected(&self) -> Result<Option<(Key, NamedCandidate)>, EvaluationFault> {
-        self.selection_outcome()
-    }
-
     /// Determine the candidate outcome status for candidate `c`.
     /// Preserves the actual structured reason code for custom rejections.
     pub fn status_of(&self, c: &NamedCandidate) -> Option<CandidateStatus> {
@@ -1158,63 +1135,5 @@ impl IncrementalWitnessIndex for FiniteCandidateRegime {
             }
         }
         cd
-    }
-}
-
-/// A comprehensive execution profile bundling a candidate pool and an admission policy.
-#[derive(Clone, Debug)]
-pub struct FiniteExecutionProfile<P = AdmitAllPolicy> {
-    /// Regime provider managing candidates and footprint.
-    pub regime: FiniteCandidateRegime,
-    /// Admission policy gating candidates.
-    pub policy: P,
-}
-
-impl FiniteExecutionProfile<AdmitAllPolicy> {
-    /// Create a new execution profile with [`AdmitAllPolicy`].
-    pub fn new(regime: FiniteCandidateRegime) -> Self {
-        FiniteExecutionProfile {
-            regime,
-            policy: AdmitAllPolicy,
-        }
-    }
-}
-
-impl<P: AdmissionPolicy> FiniteExecutionProfile<P> {
-    /// Create an execution profile with a custom admission policy.
-    pub fn with_policy(regime: FiniteCandidateRegime, policy: P) -> Self {
-        FiniteExecutionProfile { regime, policy }
-    }
-
-    /// Evaluate deliberation over all candidates registered in this profile.
-    pub fn evaluate(&self, e: &ExecConfig, interner: &Interner) -> EvaluatedFrontier {
-        EvaluatedFrontier::evaluate(
-            self.regime.all_candidates().iter().cloned(),
-            &self.policy,
-            e,
-            interner,
-        )
-    }
-
-    /// Re-derive why a candidate was admitted/selected fresh from current inputs.
-    pub fn why(
-        &self,
-        e: &ExecConfig,
-        target: &NamedCandidate,
-        interner: &Interner,
-    ) -> WhyExplanation {
-        let all: Vec<_> = self.regime.all_candidates().iter().cloned().collect();
-        explain_why(&all, &self.policy, e, target, interner)
-    }
-
-    /// Re-derive why a candidate was NOT admitted or NOT selected fresh from current inputs.
-    pub fn why_not(
-        &self,
-        e: &ExecConfig,
-        target: &NamedCandidate,
-        interner: &Interner,
-    ) -> WhyNotExplanation {
-        let all: Vec<_> = self.regime.all_candidates().iter().cloned().collect();
-        explain_why_not(&all, &self.policy, e, target, interner)
     }
 }

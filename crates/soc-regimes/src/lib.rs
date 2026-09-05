@@ -63,10 +63,9 @@ pub mod type_realization;
 pub use finite_frontier::{
     explain_why, explain_why_not, AdmissionDecision, AdmissionPolicy, AdmitAllPolicy,
     CandidateStatus, CanonicalCandidateV1, DeliberationOutcome, DenyAllPolicy, EvaluatedFrontier,
-    EvaluationFault, FiniteCandidateRegime, FiniteExecutionProfile, FnPolicy, GuardPolicy,
-    NamedCandidate, PolicyToAdmAdapter, ReasonCode, WhyExplanation, WhyNotExplanation,
-    CANONICAL_TIEBREAK_TAG, FINITE_DECISION_PROFILE_MARKER, FINITE_FRONTIER_GENERATOR_NAME,
-    FINITE_FRONTIER_REGIME_NAME,
+    EvaluationFault, FiniteCandidateRegime, FnPolicy, GuardPolicy, NamedCandidate,
+    PolicyToAdmAdapter, ReasonCode, WhyExplanation, WhyNotExplanation, CANONICAL_TIEBREAK_TAG,
+    FINITE_DECISION_PROFILE_MARKER, FINITE_FRONTIER_GENERATOR_NAME, FINITE_FRONTIER_REGIME_NAME,
 };
 pub use literal::{literal_equality_semantics, LiteralEqualityRegime};
 pub use type_realization::{g_lit, g_var, Expr, Ty, TyCtx, TypeError};
