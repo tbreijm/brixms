@@ -58,14 +58,15 @@ runtime adapter, and canonical program identity.
 ### ⟨D-GRAMMAR⟩ Propose-Plus-Commit Grammar
 
 A finite-decision program extends the module grammar with explicit candidate proposal declarations
-and a terminating commit block:
+and a terminating commit block. Declarations are newline-delimited; the surface grammar contains
+no trailing semicolons:
 
 1. **Definitions and Rules:** Closed type configurations (`config`), top-level bindings (`let`), and
    derived rules (`rule`) compute the prerequisite fact environment.
 2. **Proposals (`propose`):** Each proposal declares a candidate transition with explicit dependencies,
-   priority, guard condition, and successor expression:
+   priority, guard condition, and successor expression (newline-delimited, no trailing semicolon):
    ```brix
-   propose <name>(<deps>...) priority <p> when <guard> = <value>;
+   propose <name>(<deps>...) priority <p> when <guard> = <value>
    ```
    - `<name>`: Unique identifier for the proposal within the module.
    - `(<deps>...)`: Comma-separated list of rule or fact dependencies required by this candidate.
@@ -74,9 +75,10 @@ and a terminating commit block:
    - `when <guard>`: Boolean guard predicate evaluated against the current world and derived facts.
      A guard evaluating to `false` causes immediate candidate rejection under structured reason code.
    - `= <value>`: Closed expression evaluating to the candidate successor configuration.
-3. **Commit Block (`commit`):** Exactly one nonempty `commit` declaration is defined per decision slice:
+3. **Commit Block (`commit`):** Exactly one nonempty `commit` declaration is defined per decision slice
+   (newline-delimited, no trailing semicolon):
    ```brix
-   commit <name> from (<candidate_1>, <candidate_2>, ...);
+   commit <name> from (<candidate_1>, <candidate_2>, ...)
    ```
    The commit declaration defines the active candidate pool eligible for frontier deliberation. Programs
    with zero commit declarations, multiple commit declarations, or an empty candidate list in `commit`
@@ -100,8 +102,8 @@ prerequisite rules have been derived:
      admission policy (`AdmissionPolicy`).
    - **Rejected Set:** All candidates whose guards evaluate to `false` or which are rejected by the
      admission policy, each accompanied by its structured reason code (`ReasonCode`).
-3. The complete evaluated frontier is retained in `EvaluatedFrontier` for audit, explanation
-   (`explain_why`, `explain_why_not`), and shadow comparison (`compare_shadow`).
+3. The complete evaluated frontier is retained in `EvaluatedFrontier` for audit and explanation
+   (`explain_why`, `explain_why_not`).
 
 ### ⟨D-PHASEZERO⟩ Calendar Ordering at Phase Zero
 
@@ -187,11 +189,11 @@ change to rules, guards, candidate expressions, priorities, or commit membership
 Evidence grades adhere strictly to the SOC authority publication fence (ADR-0002 §4.1, ADR-0016):
 - **Runtime Settlement:** The settlement hot loop executes via `soc_core::try_commit_tick` and publishes
   the committed step at grade **`Derived`**. The runtime does not have the authority to publish `Audited`
-  or `Proven`.
+  or `Proven`. The runtime decision remains at grade **`Derived`**.
 - **Replay Audit:** Auditing is an explicit, separate verification pass (`soc_core::audit_journal`). It
   takes the emitted journal, re-derives generator decompositions via `SettlementWitnessProvider`, and
-  verifies them against the registered generator semantics. Only successful replay verification
-  publishes **`Audited`**.
+  verifies them against the registered generator semantics. Successful independent replay issues and
+  verifies separate **`Audited`** audit receipts.
 - An `Unknown` audit verdict leaves the settlement outcome unchanged and never upgrades evidence.
 
 ### ⟨D-PRESERVE⟩ Preservation of L3 v1 Artifacts
@@ -242,24 +244,24 @@ All existing L3 v1 data types, artifacts, and test vectors remain completely unt
                  |                         v
                  v                 (All rejected?)
            select_least                    |
-                 |                   YES -> Quiescent (@Verified)
-        (Conflict? Fault?)                 |
-          YES -> Unknown                   +------------------+
-          NO  -> Selected                                     |
-                 |                                            |
-                 v                                            v
-           [soc-core]                                    Diagnostics
-         try_commit_tick                               (Why / WhyNot /
-                 |                                     Shadow Report)
-                 v
-        Journal Step (@Derived)
-                 |
-                 v
-           [soc-core]
-          audit_journal
-                 |
-                 v
-        Audit Receipt (@Audited)
+                  |                   YES -> Certified Quiescence
+         (Conflict? Fault?)                 |
+           YES -> Unknown                   +------------------+
+           NO  -> Selected                                     |
+                  |                                            |
+                   v                                            v
+             [soc-core]                                    Diagnostics
+           try_commit_tick                               (Why / WhyNot)
+                   |                                            |
+                   v                                            |
+          Journal Step (@Derived)                               |
+                   |                                            |
+                   v                                            v
+             [soc-core]                                  Exit 0 / Exit 1
+            audit_journal
+                   |
+                   v
+          Audit Receipt (@Audited)
 ```
 
 ---
@@ -271,7 +273,8 @@ The core capabilities of this ADR are anchored in the workspace as follows:
 | Specification Requirement | Implementation Anchor |
 |---|---|
 | Profile marker `brix.l3.finite-decision@1` | `crates/soc-regimes/src/finite_frontier.rs` (`FINITE_FRONTIER_REGIME_NAME`) |
-| Named candidates & interning | `NamedCandidate<N>` in `soc_regimes::finite_frontier` |
+| Surface grammar & parser | `propose`, `commit`, `show` in `crates/brix-syntax` (`ast.rs`, `parser.rs`) |
+| Named candidates & interning | `NamedCandidate` in `crates/soc-regimes/src/finite_frontier.rs` |
 | Canonical identity & tie-break | `CanonicalCandidateV1`, `canonical_tiebreak`, `CANONICAL_TIEBREAK_TAG` |
 | Calendar key: phase 0, priority, tiebreak | `NamedCandidate::canonical_key` |
 | Complete deliberation frontier | `EvaluatedFrontier::evaluate` |
@@ -279,9 +282,12 @@ The core capabilities of this ADR are anchored in the workspace as follows:
 | Rejection on guard false | `AdmissionPolicy` evaluation over candidate pool |
 | Fail-closed on key conflict | `EvaluatedFrontier::key_conflicts`, `candidate_key_conflicts` |
 | Fresh why / why-not re-derivation | `explain_why`, `explain_why_not` |
-| Shadow comparison across profiles | `compare_shadow`, `ShadowComparisonReport` |
-| Incremental $O(\|\Delta\|)$ view & footprint | `FiniteCandidateRegime`, `FiniteExecutionProfile`, `Footprint` |
-| Runtime settlement & audit separation | `soc_core::try_commit_tick` (`Derived`) vs `soc_core::audit_journal` (`Audited`) |
+| Incremental $O(\|\Delta\|)$ view & footprint | `FiniteCandidateRegime`, `Footprint` in `soc-core` |
+| Plan lowering & canonical program identity | `FiniteDecisionPlan`, `FiniteDecisionProgramId` in `crates/brix-lower/src/finite_decision/plan.rs` |
+| Execution runtime & commit journaling | `FiniteDecisionRuntime` in `crates/brix-lower/src/finite_decision/runtime.rs` |
+| Audit input transport & verification | ADR-0026 `SettlementAuditInputBundleV1` (`soc-core`), `check_l3_audit_input_bundle_from_source_v1` (`brix-lower`) |
+| CLI subcommands | `check`, `run`, `audit`, `verify`, `why`, `whynot` in `crates/brix-cli` |
+| Runtime settlement & audit separation | `soc_core::try_commit_tick` (`Derived` decision) vs `soc_core::audit_journal` (separate `Audited` receipts) |
 | L3 v1 preservation | Untouched `crates/brix-lower/src/l3.rs`, `l3_canon.rs`, `vectors/l3_plan_v1.json` |
 
 ---
@@ -290,4 +296,4 @@ The core capabilities of this ADR are anchored in the workspace as follows:
 
 - **Status:** Accepted (2026-09-05).
 - **Supersedes:** ADR-0029 (`brix.l3.witness-frontier@1`).
-- **Compatibility:** Additive. Implements the candidate execution profile in `crates/soc-regimes/src/finite_frontier.rs` and provides the normative specification for end-to-end propose-plus-commit pipeline integration without modifying v1 artifacts.
+- **Compatibility:** Additive. Implemented for the `0.1.0-alpha.2` release slice. Implements the complete propose-plus-commit workflow across `brix-syntax` (grammar and parser), `soc-regimes` (`finite_frontier`), `brix-lower` (decision lowering, `FiniteDecisionPlan`, `FiniteDecisionProgramId`, and `FiniteDecisionRuntime`), `soc-core` (commit loop and audit bundles), and `brix-cli` (live subcommands `check`, `run`, `audit`, `verify`, `why`, `whynot`). Canonical program identity is anchored by `FiniteDecisionProgramId` without dependency on or claiming un-landed v2 execution profile identity types.

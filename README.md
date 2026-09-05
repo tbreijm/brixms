@@ -270,7 +270,7 @@ covered by executable gates:
 | --- | --- |
 | Brix language | Hand-written lexer/parser; functions and bindings; records and algebraic sums; directly recursive and parameterized configurations; matching; arithmetic and comparison; grade annotations |
 | Type realization | Tree-shaped derivations, conflict reporting, declared function contracts, certified match coverage, and honest per-result grade caps |
-| Command line | `check`, `run`, `audit`, `prove`, `why`, and `whynot` |
+| Command line | `check`, `run`, `audit`, `verify`, `why`, and `whynot` |
 | Settlement runtime | Admission policies, deterministic keyed selection, transactional candidate deltas, persistent state, append-only journals, and deterministic replay |
 | Incremental engine | Materialized candidate views, footprint indexing, differential agreement with the naïve oracle, and the green O(Δ) gate |
 | Audit | Replay-verified decompositions, authority-checked `Audited` publication, oracle-bound receipts, and source-re-derived L3 manifests |
@@ -280,14 +280,15 @@ covered by executable gates:
 
 Execution profiles currently in the workspace:
 
-- `brix check`, `prove`, `why`, and `whynot` exercise the native type-realization
-  regime over top-level bindings (`soc-regimes`);
-- `brix run` and `audit` drive the `brix.l3.rule-agenda-saturated@1` static
-  execution profile to its certified quiescence stop and independent journal audit;
+- `brix check` exercises native type-realization over top-level bindings (`soc-regimes`)
+  or runs preflight verification on finite-decision modules;
 - `brix.l3.finite-decision@1` ([ADR-0030](./spec/adr/ADR-0030_Finite_Decision_Alpha.md))
-  implements the finite-decision alpha deliberation profile in `crates/soc-regimes`,
+  implements the finite-decision alpha deliberation profile across `crates/soc-regimes` and `crates/brix-lower`,
   evaluating complete candidate frontiers, structured rejection reasons, and
-  deterministic calendar selection at phase zero;
+  deterministic calendar selection at phase zero. Deliberated outcomes are committed as `@Derived`
+  at runtime; the runtime decision remains `@Derived`, while successful independent replay issues and
+  verifies separate `@Audited` audit receipts via audit bundle verification;
+- `brix run`, `audit`, `verify`, `why`, and `whynot` drive the finite-decision alpha workflow;
 - `crates/brix-lower` additionally contains Stages A–C of L3 v2 derivation
   ([ADR-0027](./spec/adr/ADR-0027_L3_V2_Derivation.md)).
 
@@ -332,26 +333,82 @@ let answer: Int @Proven = head_or(Cons(42, Nil), 0)
 The annotation is a contract, not documentation: the checker must establish
 both the declared type and the requested evidence grade.
 
+### Quickstart: End-to-end decision workflow (`examples/shipping.brix`)
+
+The repository includes a complete finite-decision workflow in [`examples/shipping.brix`](./examples/shipping.brix):
+
+```brix
+config Decision = Expedite | Ship | Hold
+
+rule stock() = 12
+rule threshold() = 10
+
+propose expedite(stock) priority 5 when stock >= 50 = Expedite
+propose ship(stock, threshold) priority 10 when stock >= threshold = Ship
+propose hold() priority 100 when true = Hold
+
+commit shipping from (expedite, ship, hold)
+show shipping
+```
+
+Run the pipeline from preflight check through execution, audit bundle creation, offline verification, and explanation:
+
+```bash
+# 1. Preflight check: parses, resolves imports, and validates the plan
+cargo run -p brix-cli -- check examples/shipping.brix
+
+# 2. Run deliberation to completion (committed at @Derived)
+cargo run -p brix-cli -- run examples/shipping.brix
+
+# 3. Deliberate, commit, and emit an ADR-0026 audit input bundle
+cargo run -p brix-cli -- audit examples/shipping.brix --bundle /tmp/shipping.brixaudit --force
+
+# 4. Verify the bundle independently against source (replaying and verifying separate @Audited receipts)
+cargo run -p brix-cli -- verify \
+  --expect-program 3a815590c807a8af7e7756d8f0edef99a4938e15830de282b24949fe88ba0d5e \
+  examples/shipping.brix /tmp/shipping.brixaudit
+
+# 5. Inspect why the winning candidate was selected
+cargo run -p brix-cli -- why examples/shipping.brix --candidate ship
+
+# 6. Inspect why another candidate was rejected
+cargo run -p brix-cli -- whynot examples/shipping.brix --candidate expedite
+```
+
+In finite-decision deliberation, candidate selection commits at evidence grade **`@Derived`** during runtime execution, and the runtime decision remains **`@Derived`**. Successful independent replay issues and verifies separate **`@Audited`** audit receipts via `brix verify`.
+
 ### CLI guide
 
-All runnable CLI commands operate on a single `.brix` file path (`brix <command> <file.brix>`):
+The `brix` CLI driver provides six file-oriented subcommands:
 
 ```text
-brix check   <file.brix>  infer types and report their evidence grades
-brix run     <file.brix>  run L3 and report certified quiescence, divergence, or Unknown
-brix audit   <file.brix>  run L3, then independently replay and audit the journal
-brix prove   <file.brix>  run kernel acceptance and show certificates per binding
-brix why     <file.brix>  show the derivation and any grade-limiting leaves
-brix whynot  <file.brix>  explain conflicts, unsupported syntax, or proof gaps
+brix check   <file.brix> [--json] [--package-path <dir>...]
+             check a module; runs profile preflight for finite-decision
+
+brix run     <file.brix> [--json] [--package-path <dir>...]
+             execute a finite-decision deliberation plan to completion (@Derived)
+
+brix audit   <file.brix> --bundle <out> [--force] [--json] [--package-path <dir>...]
+             run and audit a finite-decision plan, emitting an audit input bundle on success
+
+brix verify  --expect-program <hex> <file.brix> <bundle> [--profile <finite-decision|l3-v1>] [--json] [--package-path <dir>...]
+             verify an audit input bundle against source and expected program pin (@Audited)
+
+brix why     <file.brix> --candidate <name> [--json] [--package-path <dir>...]
+             explain why a candidate was admitted or selected in deliberation
+
+brix whynot  <file.brix> --candidate <name> [--json] [--package-path <dir>...]
+             explain why a candidate was not admitted or not selected in deliberation
 ```
+
+Global options: `--help` and `--version`.
 
 From the workspace, prefix a command with `cargo run -p brix-cli --`, or build
 the executable once with `cargo build -p brix-cli`.
 
 **CLI target surface & status:**
-- `brix` implements exactly the six file-oriented subcommands above.
-- `brix verify <bundle.json>` is specified in [ADR-0026](./spec/adr/ADR-0026_Audit_Input_Transport_Bundle.md)
-  for offline audit bundle verification, but is not yet implemented in the CLI.
+- `brix` implements exactly the six subcommands above.
+- `brix verify` implements offline verification of ADR-0026 audit input transport bundles.
 - `brix test`, `brix sim`, and interactive REPLs are deliberately out of scope and not implemented.
 
 ## What is coming
@@ -363,13 +420,12 @@ language surface, not replacing the architecture above.
 
 - discharge the remaining primitive typing relations so arithmetic,
   comparisons, and more matches can move from `Audited` to genuine `Proven`;
-- implement the proposed offline audit bundle and
-  [`brix verify`](./spec/adr/ADR-0026_Audit_Input_Transport_Bundle.md), so a
-  separate process can reconstruct and verify every audit input;
+- widen offline audit bundle verification and transport beyond single-module
+  finite-decision snapshots;
 - add dependency tracking and incremental invalidation for type-realization
   results;
-- extend the executable L3 subset beyond its current static rule-agenda
-  profile;
+- extend the executable L3 subset beyond the current static rule-agenda and
+  live finite-decision profiles;
 - finish versioned context transport and confinement checks.
 
 ### Longer-term design and research
@@ -389,8 +445,7 @@ The precise status is intentionally explicit:
 - recursive functions are refused because functions are currently inlined;
 - certified refutation does not exist yet, so negative results are conflicts or
   `Unknown`, never `Refuted`;
-- context confinement and several durable artifact obligations remain partial;
-- `brix verify` is designed but not implemented.
+- context confinement and several durable artifact obligations remain partial.
 
 The authoritative status ledger is
 [`SOC_Semantic_Laws.md`](./spec/SOC_Semantic_Laws.md). The exact distinction
