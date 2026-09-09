@@ -1,0 +1,17 @@
+{
+  "schema": "brix.input@1",
+  "values": {
+    "stock": {
+      "type": "int",
+      "value": "12"
+    },
+    "eligible": {
+      "type": "bool",
+      "value": true
+    },
+    "region": {
+      "type": "string",
+      "value": "EU-NORTH"
+    }
+  }
+}

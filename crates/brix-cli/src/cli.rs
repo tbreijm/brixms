@@ -15,17 +15,20 @@ pub const EXIT_USAGE_OR_IO: u8 = 2;
 pub enum Command {
     Check {
         file: PathBuf,
+        input_paths: Vec<PathBuf>,
         json: bool,
         package_paths: Vec<PathBuf>,
     },
     Run {
         file: PathBuf,
+        input_paths: Vec<PathBuf>,
         json: bool,
         package_paths: Vec<PathBuf>,
     },
     Audit {
         file: PathBuf,
         bundle_out: PathBuf,
+        input_paths: Vec<PathBuf>,
         force: bool,
         json: bool,
         package_paths: Vec<PathBuf>,
@@ -35,18 +38,21 @@ pub enum Command {
         file: PathBuf,
         bundle: PathBuf,
         profile: VerifyProfile,
+        input_paths: Vec<PathBuf>,
         json: bool,
         package_paths: Vec<PathBuf>,
     },
     Why {
         file: PathBuf,
         candidate: String,
+        input_paths: Vec<PathBuf>,
         json: bool,
         package_paths: Vec<PathBuf>,
     },
     WhyNot {
         file: PathBuf,
         candidate: String,
+        input_paths: Vec<PathBuf>,
         json: bool,
         package_paths: Vec<PathBuf>,
     },
@@ -162,14 +168,63 @@ where
     }
 }
 
+/// Parse an `--input` argument from `args` at index `*i`.
+///
+/// Handles separated `--input <path>` and joined `--input=<path>`.
+/// A separated `--input` followed by an option token (starting with `-`) or EOF reports a missing argument error.
+/// Paths beginning with a dash can be supplied via `--input=-name`.
+pub fn try_parse_input_flag(
+    arg: &str,
+    args: &[String],
+    i: &mut usize,
+    input_paths: &mut Vec<PathBuf>,
+    cmd_name: &str,
+    json: bool,
+) -> Result<bool, CliUsageError> {
+    if arg == "--input" {
+        *i += 1;
+        if *i >= args.len() || args[*i].starts_with('-') {
+            return Err(CliUsageError::usage(
+                "missing argument for '--input'",
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        }
+        if args[*i].is_empty() {
+            return Err(CliUsageError::usage(
+                "empty value for '--input'",
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        }
+        input_paths.push(PathBuf::from(&args[*i]));
+        Ok(true)
+    } else if let Some(stripped) = arg.strip_prefix("--input=") {
+        if stripped.is_empty() {
+            return Err(CliUsageError::usage(
+                "empty value for '--input'",
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        }
+        input_paths.push(PathBuf::from(stripped));
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 fn parse_check_args(args: &[String], json: bool) -> Result<Command, CliUsageError> {
     let mut positionals = Vec::new();
     let mut package_paths = Vec::new();
+    let mut input_paths = Vec::new();
     let mut i = 0;
 
     while i < args.len() {
         let arg = &args[i];
-        if arg == "--json" {
+        if arg == "--json"
+            || try_parse_input_flag(arg, args, &mut i, &mut input_paths, "check", json)?
+        {
             // Handled
         } else if arg == "--package-path" {
             i += 1;
@@ -212,6 +267,7 @@ fn parse_check_args(args: &[String], json: bool) -> Result<Command, CliUsageErro
 
     Ok(Command::Check {
         file: positionals.remove(0),
+        input_paths,
         json,
         package_paths,
     })
@@ -220,11 +276,14 @@ fn parse_check_args(args: &[String], json: bool) -> Result<Command, CliUsageErro
 fn parse_run_args(args: &[String], json: bool) -> Result<Command, CliUsageError> {
     let mut positionals = Vec::new();
     let mut package_paths = Vec::new();
+    let mut input_paths = Vec::new();
     let mut i = 0;
 
     while i < args.len() {
         let arg = &args[i];
-        if arg == "--json" {
+        if arg == "--json"
+            || try_parse_input_flag(arg, args, &mut i, &mut input_paths, "run", json)?
+        {
             // Handled
         } else if arg == "--package-path" {
             i += 1;
@@ -267,6 +326,7 @@ fn parse_run_args(args: &[String], json: bool) -> Result<Command, CliUsageError>
 
     Ok(Command::Run {
         file: positionals.remove(0),
+        input_paths,
         json,
         package_paths,
     })
@@ -275,6 +335,7 @@ fn parse_run_args(args: &[String], json: bool) -> Result<Command, CliUsageError>
 fn parse_audit_args(args: &[String], json: bool) -> Result<Command, CliUsageError> {
     let mut positionals = Vec::new();
     let mut package_paths = Vec::new();
+    let mut input_paths = Vec::new();
     let mut bundle_out: Option<PathBuf> = None;
     let mut force = false;
     let mut i = 0;
@@ -297,6 +358,8 @@ fn parse_audit_args(args: &[String], json: bool) -> Result<Command, CliUsageErro
             bundle_out = Some(PathBuf::from(&args[i]));
         } else if let Some(stripped) = arg.strip_prefix("--bundle=") {
             bundle_out = Some(PathBuf::from(stripped));
+        } else if try_parse_input_flag(arg, args, &mut i, &mut input_paths, "audit", json)? {
+            // Handled
         } else if arg == "--package-path" {
             i += 1;
             if i >= args.len() {
@@ -350,6 +413,7 @@ fn parse_audit_args(args: &[String], json: bool) -> Result<Command, CliUsageErro
     Ok(Command::Audit {
         file: positionals.remove(0),
         bundle_out,
+        input_paths,
         force,
         json,
         package_paths,
@@ -359,6 +423,7 @@ fn parse_audit_args(args: &[String], json: bool) -> Result<Command, CliUsageErro
 fn parse_verify_args(args: &[String], json: bool) -> Result<Command, CliUsageError> {
     let mut positionals = Vec::new();
     let mut package_paths = Vec::new();
+    let mut input_paths = Vec::new();
     let mut expect_program: Option<String> = None;
     let mut profile = VerifyProfile::FiniteDecision;
     let mut i = 0;
@@ -415,6 +480,8 @@ fn parse_verify_args(args: &[String], json: bool) -> Result<Command, CliUsageErr
                     ));
                 }
             }
+        } else if try_parse_input_flag(arg, args, &mut i, &mut input_paths, "verify", json)? {
+            // Handled
         } else if arg == "--package-path" {
             i += 1;
             if i >= args.len() {
@@ -437,6 +504,14 @@ fn parse_verify_args(args: &[String], json: bool) -> Result<Command, CliUsageErr
             positionals.push(PathBuf::from(arg));
         }
         i += 1;
+    }
+
+    if profile == VerifyProfile::L3V1 && !input_paths.is_empty() {
+        return Err(CliUsageError::usage(
+            "--input is not supported for profile 'l3-v1'",
+            json,
+            Some("verify".to_string()),
+        ));
     }
 
     let expect_program = match expect_program {
@@ -482,6 +557,7 @@ fn parse_verify_args(args: &[String], json: bool) -> Result<Command, CliUsageErr
         file,
         bundle,
         profile,
+        input_paths,
         json,
         package_paths,
     })
@@ -491,6 +567,7 @@ fn parse_why_args(args: &[String], json: bool, is_whynot: bool) -> Result<Comman
     let cmd_name = if is_whynot { "whynot" } else { "why" };
     let mut positionals = Vec::new();
     let mut package_paths = Vec::new();
+    let mut input_paths = Vec::new();
     let mut candidate: Option<String> = None;
     let mut i = 0;
 
@@ -510,6 +587,8 @@ fn parse_why_args(args: &[String], json: bool, is_whynot: bool) -> Result<Comman
             candidate = Some(args[i].clone());
         } else if let Some(stripped) = arg.strip_prefix("--candidate=") {
             candidate = Some(stripped.to_string());
+        } else if try_parse_input_flag(arg, args, &mut i, &mut input_paths, cmd_name, json)? {
+            // Handled
         } else if arg == "--package-path" {
             i += 1;
             if i >= args.len() {
@@ -565,6 +644,7 @@ fn parse_why_args(args: &[String], json: bool, is_whynot: bool) -> Result<Comman
         Ok(Command::WhyNot {
             file,
             candidate,
+            input_paths,
             json,
             package_paths,
         })
@@ -572,6 +652,7 @@ fn parse_why_args(args: &[String], json: bool, is_whynot: bool) -> Result<Comman
         Ok(Command::Why {
             file,
             candidate,
+            input_paths,
             json,
             package_paths,
         })
@@ -586,23 +667,27 @@ brix — the Brix toolchain command-line driver
 Usage: brix <command> [options] [operands]
 
 Commands:
-  check <file.brix> [--json] [--package-path <dir>...]
+  check <file.brix> [--input <path>...] [--json] [--package-path <dir>...]
       Parse, resolve imports, and check a Brix module. Runs profile preflight for finite-decision.
 
-  run <file.brix> [--json] [--package-path <dir>...]
+  run <file.brix> [--input <path>...] [--json] [--package-path <dir>...]
       Execute a finite-decision deliberation plan to completion.
 
-  audit <file.brix> --bundle <out> [--force] [--json] [--package-path <dir>...]
+  audit <file.brix> --bundle <out> [--input <path>...] [--force] [--json] [--package-path <dir>...]
       Run and audit a finite-decision plan, producing an audit input bundle on success.
 
-  verify --expect-program <hex> <file.brix> <bundle> [--profile <finite-decision|l3-v1>] [--json] [--package-path <dir>...]
+  verify --expect-program <hex> <file.brix> <bundle> [--profile <finite-decision|l3-v1>] [--input <path>...] [--json] [--package-path <dir>...]
       Verify an audit input bundle against source and external expected program pin.
 
-  why <file.brix> --candidate <name> [--json] [--package-path <dir>...]
+  why <file.brix> --candidate <name> [--input <path>...] [--json] [--package-path <dir>...]
       Explain why a candidate was admitted or selected in deliberation.
 
-  whynot <file.brix> --candidate <name> [--json] [--package-path <dir>...]
+  whynot <file.brix> --candidate <name> [--input <path>...] [--json] [--package-path <dir>...]
       Explain why a candidate was not admitted or not selected in deliberation.
+
+Input Format:
+  External inputs are supplied via repeatable '--input <path>' files conforming to
+  the strict 'brix.input@1' JSON schema.
 
 Global Options:
   --help       Print help information
@@ -661,6 +746,7 @@ mod tests {
                 file: PathBuf::from("program.brix"),
                 json: false,
                 package_paths: vec![],
+                input_paths: vec![],
             }
         );
 
@@ -672,6 +758,7 @@ mod tests {
                 file: PathBuf::from("program.brix"),
                 json: true,
                 package_paths: vec![],
+                input_paths: vec![],
             }
         );
 
@@ -683,6 +770,7 @@ mod tests {
                 file: PathBuf::from("program.brix"),
                 json: true,
                 package_paths: vec![],
+                input_paths: vec![],
             }
         );
 
@@ -701,6 +789,26 @@ mod tests {
                 file: PathBuf::from("program.brix"),
                 json: false,
                 package_paths: vec![PathBuf::from("/dir1"), PathBuf::from("/dir2")],
+                input_paths: vec![],
+            }
+        );
+
+        // Check with repeatable input
+        let cmd = parse_args([
+            "check",
+            "program.brix",
+            "--input",
+            "shard1.json",
+            "--input=shard2.json",
+        ])
+        .unwrap();
+        assert_eq!(
+            cmd,
+            Command::Check {
+                file: PathBuf::from("program.brix"),
+                json: false,
+                package_paths: vec![],
+                input_paths: vec![PathBuf::from("shard1.json"), PathBuf::from("shard2.json")],
             }
         );
     }
@@ -714,6 +822,7 @@ mod tests {
                 file: PathBuf::from("plan.brix"),
                 json: false,
                 package_paths: vec![],
+                input_paths: vec![],
             }
         );
 
@@ -724,6 +833,26 @@ mod tests {
                 file: PathBuf::from("plan.brix"),
                 json: true,
                 package_paths: vec![PathBuf::from("pkgs")],
+                input_paths: vec![],
+            }
+        );
+
+        let cmd = parse_args([
+            "run",
+            "--input=in.json",
+            "plan.brix",
+            "--json",
+            "--input",
+            "in2.json",
+        ])
+        .unwrap();
+        assert_eq!(
+            cmd,
+            Command::Run {
+                file: PathBuf::from("plan.brix"),
+                json: true,
+                package_paths: vec![],
+                input_paths: vec![PathBuf::from("in.json"), PathBuf::from("in2.json")],
             }
         );
     }
@@ -740,6 +869,7 @@ mod tests {
                 force: false,
                 json: false,
                 package_paths: vec![],
+                input_paths: vec![],
             }
         );
 
@@ -753,6 +883,8 @@ mod tests {
             "--json",
             "--package-path",
             "p1",
+            "--input",
+            "in.json",
         ])
         .unwrap();
         assert_eq!(
@@ -763,6 +895,7 @@ mod tests {
                 force: true,
                 json: true,
                 package_paths: vec![PathBuf::from("p1")],
+                input_paths: vec![PathBuf::from("in.json")],
             }
         );
 
@@ -776,6 +909,7 @@ mod tests {
                 force: true,
                 json: false,
                 package_paths: vec![],
+                input_paths: vec![],
             }
         );
 
@@ -804,6 +938,7 @@ mod tests {
                 profile: VerifyProfile::FiniteDecision,
                 json: false,
                 package_paths: vec![],
+                input_paths: vec![],
             }
         );
 
@@ -830,16 +965,19 @@ mod tests {
                 profile: VerifyProfile::L3V1,
                 json: true,
                 package_paths: vec![PathBuf::from("root_dir")],
+                input_paths: vec![],
             }
         );
 
-        // Verify with --profile=finite-decision
+        // Verify with --profile=finite-decision and --input
         let cmd = parse_args([
             "verify",
             &format!("--expect-program={VALID_PIN}"),
             "--profile=finite-decision",
             "source.brix",
             "input.bundle",
+            "--input",
+            "in.json",
         ])
         .unwrap();
         assert_eq!(
@@ -851,6 +989,7 @@ mod tests {
                 profile: VerifyProfile::FiniteDecision,
                 json: false,
                 package_paths: vec![],
+                input_paths: vec![PathBuf::from("in.json")],
             }
         );
 
@@ -869,10 +1008,11 @@ mod tests {
                 candidate: "step_one".to_string(),
                 json: false,
                 package_paths: vec![],
+                input_paths: vec![],
             }
         );
 
-        // why with --json
+        // why with --json and --input
         let cmd = parse_args([
             "why",
             "module.brix",
@@ -881,6 +1021,8 @@ mod tests {
             "--json",
             "--package-path",
             "pkgs",
+            "--input",
+            "snap.json",
         ])
         .unwrap();
         assert_eq!(
@@ -890,14 +1032,21 @@ mod tests {
                 candidate: "step_one".to_string(),
                 json: true,
                 package_paths: vec![PathBuf::from("pkgs")],
+                input_paths: vec![PathBuf::from("snap.json")],
             }
         );
 
         // Short flag -c rejected
         assert!(parse_args(["why", "module.brix", "-c", "step_one"]).is_err());
 
-        // whynot
-        let cmd = parse_args(["whynot", "module.brix", "--candidate=step_two"]).unwrap();
+        // whynot with --input
+        let cmd = parse_args([
+            "whynot",
+            "module.brix",
+            "--candidate=step_two",
+            "--input=val.json",
+        ])
+        .unwrap();
         assert_eq!(
             cmd,
             Command::WhyNot {
@@ -905,8 +1054,149 @@ mod tests {
                 candidate: "step_two".to_string(),
                 json: false,
                 package_paths: vec![],
+                input_paths: vec![PathBuf::from("val.json")],
             }
         );
+    }
+
+    #[test]
+    fn test_input_argument_validation() {
+        // Empty --input value rejected
+        assert!(parse_args(["check", "p.brix", "--input", ""]).is_err());
+        assert!(parse_args(["check", "p.brix", "--input="]).is_err());
+        assert!(parse_args(["run", "p.brix", "--input="]).is_err());
+        assert!(parse_args(["audit", "p.brix", "--bundle", "b.bin", "--input="]).is_err());
+        assert!(parse_args([
+            "verify",
+            "--expect-program",
+            VALID_PIN,
+            "p.brix",
+            "b.bin",
+            "--input="
+        ])
+        .is_err());
+        assert!(parse_args(["why", "p.brix", "--candidate", "c", "--input="]).is_err());
+        assert!(parse_args(["whynot", "p.brix", "--candidate", "c", "--input="]).is_err());
+
+        // Missing --input argument at end of args or followed by another flag
+        for cmd in ["check", "run", "why", "whynot"] {
+            let extra = if cmd.starts_with("why") {
+                vec!["--candidate", "c"]
+            } else {
+                vec![]
+            };
+            let mut args = vec![cmd, "p.brix"];
+            args.extend(extra.clone());
+            args.push("--input");
+            let err = parse_args(args).unwrap_err();
+            assert!(
+                err.message.contains("missing argument for '--input'"),
+                "expected missing argument error for {cmd} with trailing --input: {err:?}"
+            );
+
+            let mut args_flag = vec![cmd, "p.brix"];
+            args_flag.extend(extra.clone());
+            args_flag.extend(["--input", "--json"]);
+            let err_flag = parse_args(args_flag).unwrap_err();
+            assert!(
+                err_flag.message.contains("missing argument for '--input'"),
+                "expected missing argument error for {cmd} with --input --json: {err_flag:?}"
+            );
+        }
+
+        // audit with trailing or separated flag
+        let err = parse_args(["audit", "p.brix", "--bundle", "b.bin", "--input"]).unwrap_err();
+        assert!(err.message.contains("missing argument for '--input'"));
+        let err =
+            parse_args(["audit", "p.brix", "--bundle", "b.bin", "--input", "--json"]).unwrap_err();
+        assert!(err.message.contains("missing argument for '--input'"));
+
+        // verify with trailing or separated flag
+        let err = parse_args([
+            "verify",
+            "--expect-program",
+            VALID_PIN,
+            "p.brix",
+            "b.bin",
+            "--input",
+        ])
+        .unwrap_err();
+        assert!(err.message.contains("missing argument for '--input'"));
+        let err = parse_args([
+            "verify",
+            "--expect-program",
+            VALID_PIN,
+            "p.brix",
+            "b.bin",
+            "--input",
+            "--json",
+        ])
+        .unwrap_err();
+        assert!(err.message.contains("missing argument for '--input'"));
+
+        // Joined --input=-name succeeds and treats value as path
+        match parse_args(["check", "p.brix", "--input=-name"]).unwrap() {
+            Command::Check { input_paths, .. } => {
+                assert_eq!(input_paths, vec![PathBuf::from("-name")])
+            }
+            _ => unreachable!(),
+        }
+        match parse_args(["run", "p.brix", "--input=-name"]).unwrap() {
+            Command::Run { input_paths, .. } => {
+                assert_eq!(input_paths, vec![PathBuf::from("-name")])
+            }
+            _ => unreachable!(),
+        }
+        match parse_args(["audit", "p.brix", "--bundle", "b.bin", "--input=-name"]).unwrap() {
+            Command::Audit { input_paths, .. } => {
+                assert_eq!(input_paths, vec![PathBuf::from("-name")])
+            }
+            _ => unreachable!(),
+        }
+        match parse_args([
+            "verify",
+            "--expect-program",
+            VALID_PIN,
+            "p.brix",
+            "b.bin",
+            "--input=-name",
+        ])
+        .unwrap()
+        {
+            Command::Verify { input_paths, .. } => {
+                assert_eq!(input_paths, vec![PathBuf::from("-name")])
+            }
+            _ => unreachable!(),
+        }
+        match parse_args(["why", "p.brix", "--candidate", "c", "--input=-name"]).unwrap() {
+            Command::Why { input_paths, .. } => {
+                assert_eq!(input_paths, vec![PathBuf::from("-name")])
+            }
+            _ => unreachable!(),
+        }
+        match parse_args(["whynot", "p.brix", "--candidate", "c", "--input=-name"]).unwrap() {
+            Command::WhyNot { input_paths, .. } => {
+                assert_eq!(input_paths, vec![PathBuf::from("-name")])
+            }
+            _ => unreachable!(),
+        }
+
+        // Verify with --profile l3-v1 rejects --input
+        let err = parse_args([
+            "verify",
+            "--expect-program",
+            VALID_PIN,
+            "p.brix",
+            "b.bin",
+            "--profile",
+            "l3-v1",
+            "--input",
+            "in.json",
+        ])
+        .unwrap_err();
+        assert!(err
+            .message
+            .contains("--input is not supported for profile 'l3-v1'"));
     }
 
     #[test]

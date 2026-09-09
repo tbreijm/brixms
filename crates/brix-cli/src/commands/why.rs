@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use brix_lower::finite_decision::{
-    lower_finite_decision_plan, FiniteDecisionRuntime, FINITE_DECISION_PROFILE,
+    finite_decision_program_id, lower_finite_decision_plan, FiniteDecisionRuntime,
+    FINITE_DECISION_PROFILE,
 };
 use brix_syntax::parse_bounded;
 use soc_regimes::finite_frontier::{WhyExplanation, WhyNotExplanation};
@@ -22,6 +23,7 @@ pub fn execute_why_or_whynot(
     candidate: &str,
     json: bool,
     package_paths: &[PathBuf],
+    input_paths: &[PathBuf],
     is_whynot: bool,
 ) -> u8 {
     let cmd_name = if is_whynot { "whynot" } else { "why" };
@@ -85,16 +87,78 @@ pub fn execute_why_or_whynot(
         }
     };
 
-    let runtime = FiniteDecisionRuntime::build(&plan);
+    let snapshot = match crate::commands::load_cli_input_snapshot(input_paths) {
+        Ok(s) => s,
+        Err(err) => {
+            if json {
+                let res = CliResultJson::failure(
+                    cmd_name,
+                    Some(FINITE_DECISION_PROFILE.to_string()),
+                    Some(finite_decision_program_id(&plan).0.to_hex()),
+                    None,
+                    err.status(),
+                    vec![err.diagnostic()],
+                );
+                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            } else {
+                eprintln!("{}", err.render_human(cmd_name));
+            }
+            return err.exit_code();
+        }
+    };
+
+    let runtime = match FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot) {
+        Ok(r) => r,
+        Err(err) => {
+            let cli_err = crate::commands::CliInputError::from(err);
+            let snapshot_hex = if !snapshot.is_empty() {
+                Some(snapshot.id().0.to_hex())
+            } else {
+                None
+            };
+            if json {
+                let res = CliResultJson::failure(
+                    cmd_name,
+                    Some(FINITE_DECISION_PROFILE.to_string()),
+                    Some(finite_decision_program_id(&plan).0.to_hex()),
+                    None,
+                    cli_err.status(),
+                    vec![cli_err.diagnostic()],
+                )
+                .with_inputs(snapshot_hex, None);
+                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            } else {
+                eprintln!("{}", cli_err.render_human(cmd_name));
+            }
+            return cli_err.exit_code();
+        }
+    };
     let context_hex = runtime.context.digest().to_hex();
     let run = runtime.run();
+
+    let (input_snapshot, inputs_json) = if !snapshot.is_empty() {
+        (
+            Some(snapshot.id().0.to_hex()),
+            Some(
+                run.inputs
+                    .iter()
+                    .map(crate::commands::bound_input_to_json)
+                    .collect(),
+            ),
+        )
+    } else {
+        (None, None)
+    };
 
     if run.is_unknown() {
         let (code, detail) = match &run.stop {
             brix_lower::finite_decision::FiniteDecisionStop::Unknown(reason) => {
                 unknown_reason_to_code_and_detail(reason)
             }
-            _ => unreachable!(),
+            _ => (
+                "unknown-stop",
+                "unexpected deliberation stop condition in failure path".to_string(),
+            ),
         };
         let status_str = "unknown";
         let diag = format!("{code}: {detail}");
@@ -106,7 +170,8 @@ pub fn execute_why_or_whynot(
                 Some(context_hex),
                 status_str,
                 vec![diag],
-            );
+            )
+            .with_inputs(input_snapshot, inputs_json);
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
         } else {
             eprintln!("brix {cmd_name}: deliberation resulted in Unknown: {diag}");
@@ -145,7 +210,8 @@ pub fn execute_why_or_whynot(
                         Some(context_hex),
                         "candidate-not-found",
                         vec![msg],
-                    );
+                    )
+                    .with_inputs(input_snapshot, inputs_json);
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
@@ -162,7 +228,8 @@ pub fn execute_why_or_whynot(
                         Some(context_hex),
                         "unknown",
                         vec![msg],
-                    );
+                    )
+                    .with_inputs(input_snapshot, inputs_json);
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
@@ -182,7 +249,8 @@ pub fn execute_why_or_whynot(
                         Some(context_hex),
                         "unknown",
                         vec![msg],
-                    );
+                    )
+                    .with_inputs(input_snapshot, inputs_json);
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
@@ -221,7 +289,8 @@ pub fn execute_why_or_whynot(
                         Some(context_hex),
                         "candidate-not-found",
                         vec![msg],
-                    );
+                    )
+                    .with_inputs(input_snapshot, inputs_json);
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
@@ -238,7 +307,8 @@ pub fn execute_why_or_whynot(
                         Some(context_hex),
                         "unknown",
                         vec![msg],
-                    );
+                    )
+                    .with_inputs(input_snapshot, inputs_json);
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
@@ -258,7 +328,8 @@ pub fn execute_why_or_whynot(
                         Some(context_hex),
                         "unknown",
                         vec![msg],
-                    );
+                    )
+                    .with_inputs(input_snapshot, inputs_json);
                     println!("{}", serde_json::to_string_pretty(&res).unwrap());
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
@@ -285,7 +356,9 @@ pub fn execute_why_or_whynot(
             profile: Some(FINITE_DECISION_PROFILE.to_string()),
             program: Some(run.program.0.to_hex()),
             context: Some(context_hex),
+            input_snapshot,
             status: "explained".to_string(),
+            inputs: inputs_json,
             facts: facts_json,
             candidates: candidates_json,
             decision: decision_json,
@@ -295,7 +368,8 @@ pub fn execute_why_or_whynot(
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {
         println!("{explanation_text}");
-        let human = format_finite_decision_human(&run, Some(&context_hex));
+        let human =
+            format_finite_decision_human(&run, Some(&context_hex), input_snapshot.as_deref());
         print!("{human}");
     }
 

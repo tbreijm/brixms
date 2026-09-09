@@ -8,12 +8,14 @@ pub mod runtime;
 
 pub use plan::{
     finite_decision_program_id, finite_decision_program_preimage, lower_finite_decision_plan,
-    FiniteDecisionCommit, FiniteDecisionLowerError, FiniteDecisionPlan, FiniteDecisionProgramId,
-    FiniteDecisionProposal, FiniteDecisionRule, FINITE_DECISION_PROFILE,
+    FiniteDecisionCommit, FiniteDecisionInput, FiniteDecisionLowerError, FiniteDecisionPlan,
+    FiniteDecisionProgramId, FiniteDecisionProposal, FiniteDecisionRule, FINITE_DECISION_PROFILE,
 };
 pub use runtime::{
-    finite_decision_audit_environment_from_plan, run_finite_decision_plan, type_of_value,
-    CandidateDisposition, DerivedFact, FiniteDecisionRun, FiniteDecisionRuntime,
+    finite_decision_audit_environment_from_plan,
+    finite_decision_audit_environment_from_plan_with_inputs, run_finite_decision_plan,
+    run_finite_decision_plan_with_inputs, type_of_value, BoundInput, CandidateDisposition,
+    DerivedFact, FiniteDecisionBuildError, FiniteDecisionRun, FiniteDecisionRuntime,
     FiniteDecisionStop, FiniteDecisionUnknownReason, L3ValueType, SelectedDecision,
 };
 pub use soc_core::saturate::QuiescenceCertificateId;

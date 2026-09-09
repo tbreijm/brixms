@@ -31,6 +31,7 @@ pub enum TokenKind {
     When,
     Commit,
     From,
+    Input,
 
     // Identifiers & Literals
     Ident(String),
@@ -254,6 +255,7 @@ pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token
                     "when" => TokenKind::When,
                     "commit" => TokenKind::Commit,
                     "from" => TokenKind::From,
+                    "input" => TokenKind::Input,
                     // `Derived`/`Audited`/`Proven` are deliberately NOT
                     // keywords. They are grade names only in grade position
                     // (after `@`), which the parser recognizes; everywhere

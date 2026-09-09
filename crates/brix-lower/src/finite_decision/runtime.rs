@@ -31,12 +31,51 @@ use soc_regimes::{explain_why, explain_why_not};
 use crate::finite_decision::plan::{
     finite_decision_program_id, FiniteDecisionPlan, FiniteDecisionProgramId,
 };
+use crate::input::{input_context_id, InputSnapshot, InputValidationError};
 use crate::l3_v2::{eval, EvalEnv, EvalFault, L3ValueV2};
 
 const WORLD_MARKER: &[u8] = b"brix.l3.finite-decision.world";
 const POLICY_MARKER: &[u8] = b"brix.l3.finite-decision.adm-all";
-const CONTEXT_MARKER: &[u8] = b"brix.l3.finite-decision.context";
 const GENERATOR_TAG: &str = "brix.l3.finite-decision.generator@1";
+
+/// A bound external input, published strictly at [`Outcome::Derived`] (ADR-0031).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundInput {
+    pub ordinal: u64,
+    pub name: String,
+    pub ty: L3ValueType,
+    pub value: L3ValueV2,
+    pub grade: Outcome,
+}
+
+/// Error encountered during finite-decision runtime construction (ADR-0031).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FiniteDecisionBuildError {
+    InputValidation(InputValidationError),
+    MissingProposal { candidate: String },
+}
+
+impl fmt::Display for FiniteDecisionBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InputValidation(err) => write!(f, "input validation failed: {err}"),
+            Self::MissingProposal { candidate } => {
+                write!(
+                    f,
+                    "candidate '{candidate}' in commit was not found in declared proposals"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for FiniteDecisionBuildError {}
+
+impl From<InputValidationError> for FiniteDecisionBuildError {
+    fn from(err: InputValidationError) -> Self {
+        Self::InputValidation(err)
+    }
+}
 
 /// Type category of an [`L3ValueV2`] for contract uniformity checking.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -231,6 +270,8 @@ pub enum FiniteDecisionStop {
 #[derive(Clone, Debug)]
 pub struct FiniteDecisionRun {
     pub program: FiniteDecisionProgramId,
+    pub context: ContextId,
+    pub inputs: Vec<BoundInput>,
     pub facts: Vec<DerivedFact>,
     pub decision: Option<SelectedDecision>,
     pub dispositions: Vec<CandidateDisposition>,
@@ -262,6 +303,11 @@ impl FiniteDecisionRun {
             .find(|d| d.name == name)
             .map(|d| d.status.clone())
     }
+
+    /// Look up a bound input record by name.
+    pub fn input(&self, name: &str) -> Option<&BoundInput> {
+        self.inputs.iter().find(|i| i.name == name)
+    }
 }
 
 fn destination_world(program: FiniteDecisionProgramId, proposal: Option<Digest>) -> ConfigId {
@@ -292,14 +338,13 @@ fn policy_id(program: FiniteDecisionProgramId) -> ConfigId {
     ConfigId::from_canon(&w.finish())
 }
 
-fn context_id(program: FiniteDecisionProgramId, initial: ConfigId, policy: ConfigId) -> ContextId {
-    let mut w = CanonWriter::new();
-    w.write_bytes(CONTEXT_MARKER);
-    w.write_uint(1);
-    w.write_bytes(program.digest().as_bytes());
-    w.write_bytes(initial.digest().as_bytes());
-    w.write_bytes(policy.digest().as_bytes());
-    ContextId::from_canon(&w.finish())
+fn context_id(
+    program: FiniteDecisionProgramId,
+    initial: ConfigId,
+    policy: ConfigId,
+    snapshot: Option<&InputSnapshot>,
+) -> ContextId {
+    input_context_id(program, initial, policy, snapshot)
 }
 
 fn generator_id(
@@ -374,65 +419,98 @@ pub struct FiniteDecisionRuntime {
     policy_handle: Handle,
     entries: Vec<PresenterEntry>,
     plan: FiniteDecisionPlan,
+    snapshot: InputSnapshot,
+    bound_inputs: Vec<BoundInput>,
 }
 
 impl FiniteDecisionRuntime {
-    /// Construct a new runtime from a lowered [`FiniteDecisionPlan`].
-    pub fn build(plan: &FiniteDecisionPlan) -> Self {
+    /// Construct a new runtime from a lowered [`FiniteDecisionPlan`] with no external inputs.
+    ///
+    /// Fails with [`FiniteDecisionBuildError::InputValidation`] if the plan declares any inputs.
+    pub fn build(plan: &FiniteDecisionPlan) -> Result<Self, FiniteDecisionBuildError> {
+        Self::build_with_inputs(plan, &InputSnapshot::empty())
+    }
+
+    /// Construct a new runtime from a lowered [`FiniteDecisionPlan`] and an [`InputSnapshot`].
+    ///
+    /// Validates completeness and type agreement against plan input declarations before
+    /// computing context identity or initializing the runtime.
+    pub fn build_with_inputs(
+        plan: &FiniteDecisionPlan,
+        snapshot: &InputSnapshot,
+    ) -> Result<Self, FiniteDecisionBuildError> {
+        snapshot.validate_completeness(plan)?;
+
         let program = finite_decision_program_id(plan);
         let initial_world = destination_world(program, None);
         let policy = policy_id(program);
-        let context = context_id(program, initial_world, policy);
+        let context = context_id(program, initial_world, policy, Some(snapshot));
 
         let mut interner = Interner::new();
         let initial = interner.intern(initial_world.digest());
         let policy_handle = interner.intern(policy.digest());
 
         let regime_id = RegimeId::named(FINITE_FRONTIER_REGIME_NAME);
-        let entries = plan
-            .commit
-            .candidates
-            .iter()
-            .map(|cand_name| {
-                let proposal = plan
-                    .find_proposal(cand_name)
-                    .expect("candidate in commit was validated against proposals");
-                let prop_digest = proposal_digest(program, cand_name);
-                let dst = destination_world(program, Some(prop_digest));
-                let generator = generator_id(program, cand_name, initial_world, dst);
-                let successor = interner.intern(dst.digest());
-
-                let witness = Witness::new(initial_world, dst, regime_id);
-                let witness_handle = interner.intern(witness.id().digest());
-
-                let named = NamedCandidate::with_handles(
-                    cand_name.clone(),
-                    regime_id,
-                    initial_world,
-                    dst,
-                    initial,
-                    witness_handle,
-                    successor,
-                    proposal.priority,
-                );
-                let tiebreak = named.canonical_tiebreak(&interner);
-
-                PresenterEntry {
-                    name: cand_name.clone(),
-                    candidate: Candidate {
-                        witness: witness_handle,
-                        successor,
-                    },
-                    generator,
-                    src: initial_world,
-                    dst,
-                    priority: proposal.priority,
-                    tiebreak,
+        let mut entries = Vec::with_capacity(plan.commit.candidates.len());
+        for cand_name in &plan.commit.candidates {
+            let proposal = plan.find_proposal(cand_name).ok_or_else(|| {
+                FiniteDecisionBuildError::MissingProposal {
+                    candidate: cand_name.clone(),
                 }
-            })
-            .collect();
+            })?;
+            let prop_digest = proposal_digest(program, cand_name);
+            let dst = destination_world(program, Some(prop_digest));
+            let generator = generator_id(program, cand_name, initial_world, dst);
+            let successor = interner.intern(dst.digest());
 
-        Self {
+            let witness = Witness::new(initial_world, dst, regime_id);
+            let witness_handle = interner.intern(witness.id().digest());
+
+            let named = NamedCandidate::with_handles(
+                cand_name.clone(),
+                regime_id,
+                initial_world,
+                dst,
+                initial,
+                witness_handle,
+                successor,
+                proposal.priority,
+            );
+            let tiebreak = named.canonical_tiebreak(&interner);
+
+            entries.push(PresenterEntry {
+                name: cand_name.clone(),
+                candidate: Candidate {
+                    witness: witness_handle,
+                    successor,
+                },
+                generator,
+                src: initial_world,
+                dst,
+                priority: proposal.priority,
+                tiebreak,
+            });
+        }
+
+        let mut bound_inputs = Vec::with_capacity(plan.inputs.len());
+        for decl in &plan.inputs {
+            let val =
+                snapshot
+                    .get(&decl.name)
+                    .ok_or_else(|| InputValidationError::MissingInput {
+                        name: decl.name.clone(),
+                        declared: decl.ty.clone(),
+                    })?;
+            bound_inputs.push(BoundInput {
+                ordinal: decl.ordinal,
+                name: decl.name.clone(),
+                ty: decl.ty.clone(),
+                value: val.to_l3_value(),
+                grade: Outcome::Derived,
+            });
+        }
+
+        Ok(Self {
             program,
             context,
             initial_world,
@@ -442,7 +520,19 @@ impl FiniteDecisionRuntime {
             policy_handle,
             entries,
             plan: plan.clone(),
-        }
+            snapshot: snapshot.clone(),
+            bound_inputs,
+        })
+    }
+
+    /// The validated input snapshot bound into this runtime.
+    pub fn snapshot(&self) -> &InputSnapshot {
+        &self.snapshot
+    }
+
+    /// The bound input records in declaration order.
+    pub fn bound_inputs(&self) -> &[BoundInput] {
+        &self.bound_inputs
     }
 
     /// Initial execution configuration for this runtime.
@@ -477,14 +567,21 @@ impl FiniteDecisionRuntime {
 
     /// Execute the complete finite-decision deliberation cycle.
     pub fn run(&self) -> FiniteDecisionRun {
-        // Step 1: Evaluate closed let bindings.
+        // Step 0: Inject bound inputs into evaluation environment before lets/rules/proposals.
         let mut env = EvalEnv::new();
+        for input in &self.bound_inputs {
+            env = env.with_input(input.name.clone(), input.value.clone());
+        }
+
+        // Step 1: Evaluate closed let bindings.
         for (name, expr) in &self.plan.lets {
             match eval(expr, &env) {
                 Ok(v) => env = env.with_let(name.clone(), v),
                 Err(fault) => {
                     return FiniteDecisionRun {
                         program: self.program,
+                        context: self.context,
+                        inputs: self.bound_inputs.clone(),
                         facts: Vec::new(),
                         decision: None,
                         dispositions: Vec::new(),
@@ -517,6 +614,8 @@ impl FiniteDecisionRuntime {
                 Err(fault) => {
                     return FiniteDecisionRun {
                         program: self.program,
+                        context: self.context,
+                        inputs: self.bound_inputs.clone(),
                         facts,
                         decision: None,
                         dispositions: Vec::new(),
@@ -541,6 +640,8 @@ impl FiniteDecisionRuntime {
             let Some(proposal) = self.plan.find_proposal(cand_name) else {
                 return FiniteDecisionRun {
                     program: self.program,
+                    context: self.context,
+                    inputs: self.bound_inputs.clone(),
                     facts,
                     decision: None,
                     dispositions: Vec::new(),
@@ -564,6 +665,8 @@ impl FiniteDecisionRuntime {
                 Ok(other) => {
                     return FiniteDecisionRun {
                         program: self.program,
+                        context: self.context,
+                        inputs: self.bound_inputs.clone(),
                         facts,
                         decision: None,
                         dispositions: Vec::new(),
@@ -581,6 +684,8 @@ impl FiniteDecisionRuntime {
                 Err(fault) => {
                     return FiniteDecisionRun {
                         program: self.program,
+                        context: self.context,
+                        inputs: self.bound_inputs.clone(),
                         facts,
                         decision: None,
                         dispositions: Vec::new(),
@@ -602,6 +707,8 @@ impl FiniteDecisionRuntime {
                 Err(fault) => {
                     return FiniteDecisionRun {
                         program: self.program,
+                        context: self.context,
+                        inputs: self.bound_inputs.clone(),
                         facts,
                         decision: None,
                         dispositions: Vec::new(),
@@ -626,6 +733,8 @@ impl FiniteDecisionRuntime {
                 if actual_type != expected_type {
                     return FiniteDecisionRun {
                         program: self.program,
+                        context: self.context,
+                        inputs: self.bound_inputs.clone(),
                         facts,
                         decision: None,
                         dispositions: Vec::new(),
@@ -681,6 +790,8 @@ impl FiniteDecisionRuntime {
         if let Some(fault) = evaluated.fault() {
             return FiniteDecisionRun {
                 program: self.program,
+                context: self.context,
+                inputs: self.bound_inputs.clone(),
                 facts,
                 decision: None,
                 dispositions: Vec::new(),
@@ -696,6 +807,8 @@ impl FiniteDecisionRuntime {
             let Some(nc) = named_candidates.iter().find(|c| &c.name == cand_name) else {
                 return FiniteDecisionRun {
                     program: self.program,
+                    context: self.context,
+                    inputs: self.bound_inputs.clone(),
                     facts,
                     decision: None,
                     dispositions: Vec::new(),
@@ -713,6 +826,8 @@ impl FiniteDecisionRuntime {
             let Some(status) = evaluated.status_of(nc) else {
                 return FiniteDecisionRun {
                     program: self.program,
+                    context: self.context,
+                    inputs: self.bound_inputs.clone(),
                     facts,
                     decision: None,
                     dispositions: Vec::new(),
@@ -748,6 +863,8 @@ impl FiniteDecisionRuntime {
                 Err(err) => {
                     return FiniteDecisionRun {
                         program: self.program,
+                        context: self.context,
+                        inputs: self.bound_inputs.clone(),
                         facts,
                         decision: None,
                         dispositions,
@@ -791,6 +908,8 @@ impl FiniteDecisionRuntime {
                     if !matches!(check, CertificateCheck::Verified { .. }) {
                         return FiniteDecisionRun {
                             program: self.program,
+                            context: self.context,
+                            inputs: self.bound_inputs.clone(),
                             facts,
                             decision: None,
                             dispositions,
@@ -810,6 +929,8 @@ impl FiniteDecisionRuntime {
                 other => {
                     return FiniteDecisionRun {
                         program: self.program,
+                        context: self.context,
+                        inputs: self.bound_inputs.clone(),
                         facts,
                         decision: None,
                         dispositions,
@@ -828,6 +949,8 @@ impl FiniteDecisionRuntime {
 
             FiniteDecisionRun {
                 program: self.program,
+                context: self.context,
+                inputs: self.bound_inputs.clone(),
                 facts,
                 decision: None,
                 dispositions,
@@ -840,6 +963,8 @@ impl FiniteDecisionRuntime {
             let Some((_, winning_cand)) = evaluated.selected.as_ref() else {
                 return FiniteDecisionRun {
                     program: self.program,
+                    context: self.context,
+                    inputs: self.bound_inputs.clone(),
                     facts,
                     decision: None,
                     dispositions,
@@ -888,6 +1013,8 @@ impl FiniteDecisionRuntime {
                 Err(err) => {
                     return FiniteDecisionRun {
                         program: self.program,
+                        context: self.context,
+                        inputs: self.bound_inputs.clone(),
                         facts,
                         decision: None,
                         dispositions,
@@ -905,6 +1032,8 @@ impl FiniteDecisionRuntime {
             let Committed::Step { observation, .. } = committed else {
                 return FiniteDecisionRun {
                     program: self.program,
+                    context: self.context,
+                    inputs: self.bound_inputs.clone(),
                     facts,
                     decision: None,
                     dispositions,
@@ -922,6 +1051,8 @@ impl FiniteDecisionRuntime {
             if observation.outcome_class != Outcome::Derived {
                 return FiniteDecisionRun {
                     program: self.program,
+                    context: self.context,
+                    inputs: self.bound_inputs.clone(),
                     facts,
                     decision: None,
                     dispositions,
@@ -941,6 +1072,8 @@ impl FiniteDecisionRuntime {
             let Some(step) = step else {
                 return FiniteDecisionRun {
                     program: self.program,
+                    context: self.context,
+                    inputs: self.bound_inputs.clone(),
                     facts,
                     decision: None,
                     dispositions,
@@ -964,6 +1097,8 @@ impl FiniteDecisionRuntime {
                 None => {
                     return FiniteDecisionRun {
                         program: self.program,
+                        context: self.context,
+                        inputs: self.bound_inputs.clone(),
                         facts,
                         decision: None,
                         dispositions,
@@ -990,6 +1125,8 @@ impl FiniteDecisionRuntime {
 
             FiniteDecisionRun {
                 program: self.program,
+                context: self.context,
+                inputs: self.bound_inputs.clone(),
                 facts,
                 decision: Some(decision.clone()),
                 dispositions,
@@ -1115,28 +1252,128 @@ impl FiniteDecisionRuntime {
         }
         Ok(explanation)
     }
+    /// Re-evaluate all declared show expressions against the runtime's bound inputs, lets, and derived facts.
+    pub fn evaluate_shows(
+        &self,
+        run: &FiniteDecisionRun,
+    ) -> Result<Vec<L3ValueV2>, FiniteDecisionUnknownReason> {
+        if run.program != self.program {
+            return Err(FiniteDecisionUnknownReason::InvariantViolation {
+                detail: format!(
+                    "program mismatch in evaluate_shows: expected {:?}, found {:?}",
+                    self.program, run.program
+                ),
+            });
+        }
+        if run.context != self.context {
+            return Err(FiniteDecisionUnknownReason::InvariantViolation {
+                detail: format!(
+                    "context mismatch in evaluate_shows: expected {}, found {}",
+                    self.context.digest().to_hex(),
+                    run.context.digest().to_hex()
+                ),
+            });
+        }
+        if run.inputs != self.bound_inputs {
+            return Err(FiniteDecisionUnknownReason::InvariantViolation {
+                detail: "bound inputs mismatch in evaluate_shows".to_string(),
+            });
+        }
+
+        // Strict integrity check: re-derive deliberation facts from the runtime and assert caller run integrity.
+        let fresh_run = self.run();
+        if run.facts != fresh_run.facts {
+            return Err(FiniteDecisionUnknownReason::InvariantViolation {
+                detail: "derived facts mismatch in evaluate_shows: supplied run facts do not match deterministic evaluation".to_string(),
+            });
+        }
+        if run.stop != fresh_run.stop {
+            return Err(FiniteDecisionUnknownReason::InvariantViolation {
+                detail: "deliberation stop mismatch in evaluate_shows: supplied run stop condition does not match deterministic evaluation".to_string(),
+            });
+        }
+
+        let mut env = EvalEnv::new();
+        for input in &self.bound_inputs {
+            env = env.with_input(input.name.clone(), input.value.clone());
+        }
+        for (name, expr) in &self.plan.lets {
+            match eval(expr, &env) {
+                Ok(v) => env = env.with_let(name.clone(), v),
+                Err(fault) => {
+                    return Err(FiniteDecisionUnknownReason::ExpressionEvaluationFault {
+                        context: format!("let {name}"),
+                        fault,
+                    });
+                }
+            }
+        }
+        for fact in &fresh_run.facts {
+            env = env.with_fact(fact.rule.clone(), fact.value.clone());
+        }
+        let mut results = Vec::with_capacity(self.plan.shows.len());
+        for (idx, show_expr) in self.plan.shows.iter().enumerate() {
+            match eval(show_expr, &env) {
+                Ok(v) => results.push(v),
+                Err(fault) => {
+                    return Err(FiniteDecisionUnknownReason::ExpressionEvaluationFault {
+                        context: format!("show[{idx}]"),
+                        fault,
+                    });
+                }
+            }
+        }
+        Ok(results)
+    }
 }
 
-/// Run a finite-decision plan through deliberation to completion.
-pub fn run_finite_decision_plan(plan: &FiniteDecisionPlan) -> FiniteDecisionRun {
-    let runtime = FiniteDecisionRuntime::build(plan);
-    runtime.run()
+/// Run a finite-decision plan with no external inputs through deliberation to completion.
+///
+/// Fails if the plan declares any inputs (ADR-0031).
+pub fn run_finite_decision_plan(
+    plan: &FiniteDecisionPlan,
+) -> Result<FiniteDecisionRun, FiniteDecisionBuildError> {
+    let runtime = FiniteDecisionRuntime::build(plan)?;
+    Ok(runtime.run())
 }
 
-/// Derive the run context, generator registry, and generator semantics for a finite-decision plan.
+/// Run a finite-decision plan with an external input snapshot through deliberation to completion.
+pub fn run_finite_decision_plan_with_inputs(
+    plan: &FiniteDecisionPlan,
+    snapshot: &InputSnapshot,
+) -> Result<FiniteDecisionRun, FiniteDecisionBuildError> {
+    let runtime = FiniteDecisionRuntime::build_with_inputs(plan, snapshot)?;
+    Ok(runtime.run())
+}
+
+/// Derive the run context, generator registry, and generator semantics for a finite-decision plan with no inputs.
+///
+/// Refuses input-declaring plans fail-closed (ADR-0031).
 pub fn finite_decision_audit_environment_from_plan(
     plan: &FiniteDecisionPlan,
-) -> Result<(ContextId, GeneratorRegistry, GeneratorSemanticsV1), String> {
+) -> Result<(ContextId, GeneratorRegistry, GeneratorSemanticsV1), FiniteDecisionBuildError> {
+    finite_decision_audit_environment_from_plan_with_inputs(plan, &InputSnapshot::empty())
+}
+
+/// Derive the run context, generator registry, and generator semantics for a finite-decision plan with an input snapshot.
+pub fn finite_decision_audit_environment_from_plan_with_inputs(
+    plan: &FiniteDecisionPlan,
+    snapshot: &InputSnapshot,
+) -> Result<(ContextId, GeneratorRegistry, GeneratorSemanticsV1), FiniteDecisionBuildError> {
+    snapshot.validate_completeness(plan)?;
+
     let program = finite_decision_program_id(plan);
     let initial_world = destination_world(program, None);
     let policy = policy_id(program);
-    let context = context_id(program, initial_world, policy);
+    let context = context_id(program, initial_world, policy, Some(snapshot));
 
     let mut registry = GeneratorRegistry::new();
     let mut semantics = GeneratorSemanticsV1::new();
     for cand_name in &plan.commit.candidates {
         let _proposal = plan.find_proposal(cand_name).ok_or_else(|| {
-            format!("candidate '{cand_name}' in commit was not found in declared proposals")
+            FiniteDecisionBuildError::MissingProposal {
+                candidate: cand_name.clone(),
+            }
         })?;
         let prop_digest = proposal_digest(program, cand_name);
         let dst = destination_world(program, Some(prop_digest));

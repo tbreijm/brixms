@@ -46,7 +46,7 @@ fn plan(source: &str) -> FiniteDecisionPlan {
 
 #[test]
 fn candidates_coexist_before_selection() {
-    let runtime = FiniteDecisionRuntime::build(&plan(TWO_CANDIDATES));
+    let runtime = FiniteDecisionRuntime::build(&plan(TWO_CANDIDATES)).expect("runtime builds");
     let candidates = runtime.candidates_at_initial();
     assert_eq!(candidates.len(), 2);
     assert_eq!(candidates[0].0, "opt_a");
@@ -58,7 +58,7 @@ fn candidates_coexist_before_selection() {
 
 #[test]
 fn keyed_frontier_commits_exactly_one_decision() {
-    let runtime = FiniteDecisionRuntime::build(&plan(TWO_CANDIDATES));
+    let runtime = FiniteDecisionRuntime::build(&plan(TWO_CANDIDATES)).expect("runtime builds");
     let run = runtime.run();
     assert!(run.is_selected(), "expected clean selection");
     let decision = run.decision.expect("decision selected");
@@ -74,11 +74,11 @@ fn keyed_frontier_commits_exactly_one_decision() {
 #[test]
 fn repeated_runs_have_identical_selection_journal_and_world() {
     let p = plan(TWO_CANDIDATES);
-    let first_runtime = FiniteDecisionRuntime::build(&p);
+    let first_runtime = FiniteDecisionRuntime::build(&p).expect("runtime builds");
     let first = first_runtime.run();
 
     for _ in 0..8 {
-        let runtime = FiniteDecisionRuntime::build(&p);
+        let runtime = FiniteDecisionRuntime::build(&p).expect("runtime builds");
         let run = runtime.run();
         assert_eq!(run.decision, first.decision);
         assert_eq!(run.final_world, first.final_world);
@@ -88,7 +88,7 @@ fn repeated_runs_have_identical_selection_journal_and_world() {
 
 #[test]
 fn audit_is_explicit_and_rederives_the_selected_decision() {
-    let runtime = FiniteDecisionRuntime::build(&plan(TWO_CANDIDATES));
+    let runtime = FiniteDecisionRuntime::build(&plan(TWO_CANDIDATES)).expect("runtime builds");
     let run = runtime.run();
     assert_eq!(run.journal.len(), 1);
     let audit_results = runtime.audit(&run.journal);
@@ -141,7 +141,7 @@ fn v1_remains_the_serial_rule_agenda() {
 #[test]
 fn shipping_example_deliberation_and_dispositions() {
     let p = plan(SHIPPING_EXAMPLE);
-    let runtime = FiniteDecisionRuntime::build(&p);
+    let runtime = FiniteDecisionRuntime::build(&p).expect("runtime builds");
     let run = runtime.run();
 
     // 1. Facts are Derived.
@@ -228,7 +228,7 @@ propose opt_b(limit) priority 20 when limit > 200 = Off
 commit pick from (opt_a, opt_b)
 "#;
     let p = plan(source);
-    let run = run_finite_decision_plan(&p);
+    let run = run_finite_decision_plan(&p).expect("runs successfully");
 
     assert!(run.is_quiescent());
     assert_eq!(run.decision, None, "decision None upon quiescence");
@@ -268,8 +268,8 @@ propose b(seed) priority 10 when seed == 0 = Right
 commit pick from (a, b)
 "#;
     let p = plan(source);
-    let run1 = run_finite_decision_plan(&p);
-    let run2 = run_finite_decision_plan(&p);
+    let run1 = run_finite_decision_plan(&p).expect("run 1 succeeds");
+    let run2 = run_finite_decision_plan(&p).expect("run 2 succeeds");
 
     assert!(run1.is_selected());
     assert_eq!(run1.decision, run2.decision);
@@ -432,7 +432,7 @@ propose p(overflow) priority 1 when true = Num
 commit pick from (p)
 "#;
     let p = plan(source);
-    let run = run_finite_decision_plan(&p);
+    let run = run_finite_decision_plan(&p).expect("runtime builds successfully");
     assert!(run.is_unknown(), "arithmetic overflow must halt at Unknown");
     assert_eq!(run.decision, None, "publishes no decision");
     assert_eq!(run.journal.len(), 0);
@@ -450,7 +450,7 @@ propose p(number) priority 1 when number = Num
 commit pick from (p)
 "#;
     let p = plan(source);
-    let run = run_finite_decision_plan(&p);
+    let run = run_finite_decision_plan(&p).expect("runtime builds successfully");
     assert!(run.is_unknown(), "non-Bool guard must halt at Unknown");
     assert_eq!(run.decision, None, "publishes no decision");
     match run.stop {
@@ -472,7 +472,7 @@ propose p2(seed) priority 2 when seed == 1 = "string_value"
 commit pick from (p1, p2)
 "#;
     let p = plan(source);
-    let run = run_finite_decision_plan(&p);
+    let run = run_finite_decision_plan(&p).expect("runtime builds successfully");
     assert!(
         run.is_unknown(),
         "differing proposal value types must halt at Unknown"
@@ -500,7 +500,7 @@ propose p(overflow) priority 1 when true = Num
 commit pick from (p)
 "#;
     let p = plan(source);
-    let runtime = FiniteDecisionRuntime::build(&p);
+    let runtime = FiniteDecisionRuntime::build(&p).expect("runtime builds");
     let run = runtime.run();
     assert!(run.is_unknown(), "arithmetic overflow must halt at Unknown");
     assert_eq!(run.decision, None);
@@ -558,7 +558,7 @@ propose p(number) priority 1 when number = Num
 commit pick from (p)
 "#;
     let p = plan(source);
-    let runtime = FiniteDecisionRuntime::build(&p);
+    let runtime = FiniteDecisionRuntime::build(&p).expect("runtime builds");
     let run = runtime.run();
     assert!(run.is_unknown());
     assert_eq!(run.decision, None);
@@ -606,7 +606,7 @@ propose p2(seed) priority 2 when seed == 1 = "string_value"
 commit pick from (p1, p2)
 "#;
     let p_mismatch = plan(source_mismatch);
-    let runtime_mismatch = FiniteDecisionRuntime::build(&p_mismatch);
+    let runtime_mismatch = FiniteDecisionRuntime::build(&p_mismatch).expect("runtime builds");
     let run_mismatch = runtime_mismatch.run();
     assert!(run_mismatch.is_unknown());
     let why_mismatch = runtime_mismatch.explain_why("p1");
@@ -625,7 +625,7 @@ commit pick from (p1, p2)
 #[test]
 fn explain_why_successful_run_reports_candidate_not_found_when_absent() {
     let p = plan(SHIPPING_EXAMPLE);
-    let runtime = FiniteDecisionRuntime::build(&p);
+    let runtime = FiniteDecisionRuntime::build(&p).expect("runtime builds");
     let run = runtime.run();
     assert!(run.is_selected());
 
@@ -732,7 +732,7 @@ propose opt_b(limit) priority 20 when limit > 200 = Off
 commit pick from (opt_a, opt_b)
 "#;
     let p = plan(source);
-    let runtime = FiniteDecisionRuntime::build(&p);
+    let runtime = FiniteDecisionRuntime::build(&p).expect("runtime builds");
     let run = runtime.run();
 
     assert!(run.is_quiescent());

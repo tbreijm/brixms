@@ -961,3 +961,1418 @@ let flat_consumer_val = 1
     );
     assert!(stderr.contains("rejected") || stderr.contains("import"));
 }
+
+// ---------------------------------------------------------------------------
+// 13. External Inputs: Check Contract and Preflight
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_13_external_input_check_contract_and_preflight() {
+    let temp = TempDirGuard::new("ext_input_check");
+    let brix_file = temp.path().join("model.brix");
+    let brix_src = r#"
+input limit: Int
+input enabled: Bool
+
+config Arrangement = A | B
+
+rule base() = limit
+rule is_enabled() = enabled
+
+propose opt_a(base) priority 10 when base == 100 = A
+propose opt_b(is_enabled) priority 20 when is_enabled = B
+
+commit pick from (opt_a, opt_b)
+"#;
+    fs::write(&brix_file, brix_src).unwrap();
+
+    let input_valid = temp.path().join("input_valid.json");
+    let input_valid_json = r#"{
+  "schema": "brix.input@1",
+  "values": {
+    "limit": { "type": "int", "value": "100" },
+    "enabled": { "type": "bool", "value": true }
+  }
+}"#;
+    fs::write(&input_valid, input_valid_json).unwrap();
+
+    let input_incomplete = temp.path().join("input_incomplete.json");
+    let input_incomplete_json = r#"{
+  "schema": "brix.input@1",
+  "values": {
+    "limit": { "type": "int", "value": "100" }
+  }
+}"#;
+    fs::write(&input_incomplete, input_incomplete_json).unwrap();
+
+    // 1. check without --input: declaration-only contract check
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("check").arg(&brix_file);
+        c
+    });
+    assert_eq!(
+        code, 0,
+        "check declaration-only must exit 0; stderr: {stderr}"
+    );
+    assert!(stdout.contains("status: checked-input-contract"));
+    assert!(stdout.contains("program: "));
+    assert!(
+        !stdout.contains("context: "),
+        "declaration check must not emit context identity"
+    );
+
+    // 2. check without --input in JSON mode
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("check").arg(&brix_file).arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "check --json must exit 0; stderr: {stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(v["schema"], "brix.cli.result@1");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["status"], "checked-input-contract");
+    assert!(v["program"].is_string());
+    assert!(v["context"].is_null());
+    assert!(!v.as_object().unwrap().contains_key("input_snapshot"));
+    assert!(!v.as_object().unwrap().contains_key("inputs"));
+    assert_eq!(v.as_object().unwrap().len(), 12);
+
+    // 3. check with complete --input: preflight deliberation passes
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("check")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&input_valid);
+        c
+    });
+    assert_eq!(
+        code, 0,
+        "check with valid input must exit 0; stderr: {stderr}"
+    );
+    assert!(stdout.contains("status: selected") || stdout.contains("decision: opt_a"));
+    assert!(stdout.contains("inputs:"));
+    assert!(stdout.contains("@Derived"));
+    assert!(stdout.contains("input-snapshot:"));
+
+    // 4. check with complete --input in JSON mode
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("check")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&input_valid)
+            .arg("--json");
+        c
+    });
+    assert_eq!(
+        code, 0,
+        "check with valid input --json must exit 0; stderr: {stderr}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(v["schema"], "brix.cli.result@1");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["status"], "accepted");
+    assert!(v["input_snapshot"].is_string());
+    assert!(v["inputs"].is_array());
+    assert_eq!(v.as_object().unwrap().len(), 14);
+
+    // 5. check with incomplete --input: preflight build fails (missing input)
+    let (code, _, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("check")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&input_incomplete);
+        c
+    });
+    assert_eq!(
+        code, 1,
+        "check with incomplete input must exit 1 (rejected)"
+    );
+    assert!(stderr.contains("rejected") || stderr.contains("missing"));
+}
+
+// ---------------------------------------------------------------------------
+// 14. External Inputs: Run Rejections and Success Modes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_14_external_input_run_rejections_and_success() {
+    let temp = TempDirGuard::new("ext_input_run");
+    let brix_file = temp.path().join("full_model.brix");
+    let brix_src = r#"
+input limit: Int
+input flag: Bool
+input label: Str
+
+config Output = Res(Int)
+
+rule base() = limit
+rule is_flag() = flag
+rule tag() = label
+
+propose main(base) priority 10 when base == 42 = Res(base)
+
+commit pick from (main)
+"#;
+    fs::write(&brix_file, brix_src).unwrap();
+
+    let valid_json = r#"{
+  "schema": "brix.input@1",
+  "values": {
+    "limit": { "type": "int", "value": "42" },
+    "flag": { "type": "bool", "value": true },
+    "label": { "type": "string", "value": "production" }
+  }
+}"#;
+    let input_valid = temp.path().join("valid.json");
+    fs::write(&input_valid, valid_json).unwrap();
+
+    // 1. Missing inputs on run (no --input provided)
+    let (code, _, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run").arg(&brix_file);
+        c
+    });
+    assert_eq!(code, 1, "run with missing inputs must exit 1");
+    assert!(stderr.contains("rejected"));
+
+    // 2. Extra undeclared input
+    let extra_json = r#"{
+  "schema": "brix.input@1",
+  "values": {
+    "limit": { "type": "int", "value": "42" },
+    "flag": { "type": "bool", "value": true },
+    "label": { "type": "string", "value": "production" },
+    "extra": { "type": "int", "value": "99" }
+  }
+}"#;
+    let input_extra = temp.path().join("extra.json");
+    fs::write(&input_extra, extra_json).unwrap();
+    let (code, _, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&input_extra);
+        c
+    });
+    assert_eq!(code, 1, "run with extra input must exit 1");
+    assert!(stderr.contains("rejected"));
+
+    // 3. Type mismatch
+    let mismatch_json = r#"{
+  "schema": "brix.input@1",
+  "values": {
+    "limit": { "type": "string", "value": "42" },
+    "flag": { "type": "bool", "value": true },
+    "label": { "type": "string", "value": "production" }
+  }
+}"#;
+    let input_mismatch = temp.path().join("mismatch.json");
+    fs::write(&input_mismatch, mismatch_json).unwrap();
+    let (code, _, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&input_mismatch);
+        c
+    });
+    assert_eq!(code, 1, "run with type mismatch must exit 1");
+    assert!(stderr.contains("rejected"));
+
+    // 4. Duplicate key in single shard
+    let dup_json = r#"{
+  "schema": "brix.input@1",
+  "values": {
+    "limit": { "type": "int", "value": "42" },
+    "limit": { "type": "int", "value": "42" },
+    "flag": { "type": "bool", "value": true },
+    "label": { "type": "string", "value": "production" }
+  }
+}"#;
+    let input_dup = temp.path().join("dup.json");
+    fs::write(&input_dup, dup_json).unwrap();
+    let (code, _, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run").arg(&brix_file).arg("--input").arg(&input_dup);
+        c
+    });
+    assert_eq!(
+        code, 1,
+        "run with duplicate key in single shard must exit 1"
+    );
+    assert!(stderr.contains("rejected"));
+
+    // 5. Successful execution in plain text mode
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&input_valid);
+        c
+    });
+    assert_eq!(
+        code, 0,
+        "run with valid inputs must exit 0; stderr: {stderr}"
+    );
+    assert!(stdout.contains("inputs:"));
+    assert!(stdout.contains("limit: 42 @Derived"));
+    assert!(stdout.contains("flag: true @Derived"));
+    assert!(stdout.contains("label: \"production\" @Derived"));
+    assert!(stdout.contains("decision: main = Res(42) @Derived"));
+    assert!(stdout.contains("status: selected"));
+    assert!(stdout.contains("input-snapshot:"));
+    assert!(
+        !stdout.contains("Proven"),
+        "inputs must never be labeled Proven"
+    );
+    assert!(
+        !stdout.contains("Audited"),
+        "inputs must never be labeled Audited"
+    );
+
+    // 6. Successful execution in JSON mode
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&input_valid)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "run --json must exit 0; stderr: {stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(v["schema"], "brix.cli.result@1");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["status"], "selected");
+    assert_eq!(
+        v.as_object().unwrap().len(),
+        14,
+        "must contain exactly 14 fields"
+    );
+    assert!(v["input_snapshot"].is_string());
+    let inps = v["inputs"].as_array().expect("inputs is array");
+    assert_eq!(inps.len(), 3);
+    for inp in inps {
+        assert_eq!(inp["grade"], "Derived");
+        assert!(inp.get("name").is_some());
+        assert!(inp.get("ordinal").is_some());
+        assert!(inp.get("value").is_some());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 15. External Inputs: Shard Order Determinism and Identity Invariants
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_15_external_input_determinism_and_identity() {
+    let temp = TempDirGuard::new("ext_input_determinism");
+    let brix_file = temp.path().join("shards_model.brix");
+    let brix_src = r#"
+input limit: Int
+input enabled: Bool
+input label: Str
+
+config Res = Win
+
+rule base() = limit
+rule is_enabled() = enabled
+
+propose p(base) priority 1 when base > 0 = Win
+
+commit pick from (p)
+"#;
+    fs::write(&brix_file, brix_src).unwrap();
+
+    let shard_a = temp.path().join("shard_a.json");
+    let shard_a_json = r#"{
+  "schema": "brix.input@1",
+  "values": {
+    "limit": { "type": "int", "value": "100" },
+    "enabled": { "type": "bool", "value": true }
+  }
+}"#;
+    fs::write(&shard_a, shard_a_json).unwrap();
+
+    let shard_b = temp.path().join("shard_b.json");
+    let shard_b_json = r#"{
+  "schema": "brix.input@1",
+  "values": {
+    "label": { "type": "string", "value": "region-alpha" }
+  }
+}"#;
+    fs::write(&shard_b, shard_b_json).unwrap();
+
+    // 1. Shard order [A, B]
+    let (code1, stdout1, _) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&shard_a)
+            .arg("--input")
+            .arg(&shard_b)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code1, 0);
+
+    // 2. Shard order [B, A]
+    let (code2, stdout2, _) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&shard_b)
+            .arg("--input")
+            .arg(&shard_a)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code2, 0);
+
+    let v1: serde_json::Value = serde_json::from_str(&stdout1).unwrap();
+    let v2: serde_json::Value = serde_json::from_str(&stdout2).unwrap();
+
+    assert_eq!(
+        v1["input_snapshot"], v2["input_snapshot"],
+        "input_snapshot must be shard-order invariant"
+    );
+    assert_eq!(
+        v1["context"], v2["context"],
+        "context must be shard-order invariant"
+    );
+    assert_eq!(
+        v1["program"], v2["program"],
+        "program must be shard-order invariant"
+    );
+
+    // 3. Duplicate key across disjoint shards rejected
+    let shard_overlap = temp.path().join("shard_overlap.json");
+    let shard_overlap_json = r#"{
+  "schema": "brix.input@1",
+  "values": {
+    "limit": { "type": "int", "value": "200" }
+  }
+}"#;
+    fs::write(&shard_overlap, shard_overlap_json).unwrap();
+    let (code_overlap, _, stderr_overlap) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&shard_a)
+            .arg("--input")
+            .arg(&shard_overlap);
+        c
+    });
+    assert_eq!(
+        code_overlap, 1,
+        "duplicate input across disjoint shards must exit 1"
+    );
+    assert!(stderr_overlap.contains("rejected") || stderr_overlap.contains("duplicate"));
+
+    // 4. Varying input value preserves ProgramId while ContextId changes
+    let shard_a_varied = temp.path().join("shard_a_varied.json");
+    let shard_a_varied_json = r#"{
+  "schema": "brix.input@1",
+  "values": {
+    "limit": { "type": "int", "value": "999" },
+    "enabled": { "type": "bool", "value": true }
+  }
+}"#;
+    fs::write(&shard_a_varied, shard_a_varied_json).unwrap();
+
+    let (code_var, stdout_var, _) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&shard_a_varied)
+            .arg("--input")
+            .arg(&shard_b)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code_var, 0);
+    let v_var: serde_json::Value = serde_json::from_str(&stdout_var).unwrap();
+
+    assert_eq!(
+        v1["program"], v_var["program"],
+        "ProgramId must be invariant to input values"
+    );
+    assert_ne!(
+        v1["input_snapshot"], v_var["input_snapshot"],
+        "input_snapshot must differ for different values"
+    );
+    assert_ne!(
+        v1["context"], v_var["context"],
+        "ContextId must differ for different input snapshots"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 16. External Inputs: Why and Whynot Input Dependence
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_16_external_input_why_and_whynot() {
+    let temp = TempDirGuard::new("ext_input_why");
+    let brix_file = temp.path().join("why_model.brix");
+    let brix_src = r#"
+input threshold: Int
+
+config Decision = Action | Skip
+
+rule check_threshold() = threshold >= 50
+
+propose act(check_threshold) priority 10 when check_threshold = Action
+propose skip() priority 20 when true = Skip
+
+commit pick from (act, skip)
+"#;
+    fs::write(&brix_file, brix_src).unwrap();
+
+    let input_high = temp.path().join("high.json");
+    fs::write(
+        &input_high,
+        r#"{
+  "schema": "brix.input@1",
+  "values": { "threshold": { "type": "int", "value": "75" } }
+}"#,
+    )
+    .unwrap();
+
+    let input_low = temp.path().join("low.json");
+    fs::write(
+        &input_low,
+        r#"{
+  "schema": "brix.input@1",
+  "values": { "threshold": { "type": "int", "value": "25" } }
+}"#,
+    )
+    .unwrap();
+
+    // 1. why act when threshold is high -> act is selected
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("why")
+            .arg(&brix_file)
+            .arg("--candidate")
+            .arg("act")
+            .arg("--input")
+            .arg(&input_high);
+        c
+    });
+    assert_eq!(code, 0, "why act failed; stderr: {stderr}");
+    assert!(stdout.contains("act: selected — admitted with minimal calendar key"));
+    assert!(stdout.contains("input-snapshot:"));
+
+    // 2. whynot act when threshold is low -> act guard evaluated to false
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("whynot")
+            .arg(&brix_file)
+            .arg("--candidate")
+            .arg("act")
+            .arg("--input")
+            .arg(&input_low);
+        c
+    });
+    assert_eq!(code, 0, "whynot act failed; stderr: {stderr}");
+    assert!(stdout.contains("act: rejected — rejected guard-false"));
+}
+
+// ---------------------------------------------------------------------------
+// 17. External Inputs: Audit and Verify Round-Trip and Tampering Rejections
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_17_external_input_audit_and_verify() {
+    let temp = TempDirGuard::new("ext_input_audit_verify");
+    let brix_file = temp.path().join("audit_model.brix");
+    let brix_src = r#"
+input limit: Int
+
+config Outcome = Done
+
+rule base() = limit
+
+propose run_item(base) priority 1 when base == 10 = Done
+
+commit pick from (run_item)
+"#;
+    fs::write(&brix_file, brix_src).unwrap();
+
+    let input_a = temp.path().join("input_a.json");
+    fs::write(
+        &input_a,
+        r#"{
+  "schema": "brix.input@1",
+  "values": { "limit": { "type": "int", "value": "10" } }
+}"#,
+    )
+    .unwrap();
+
+    let input_diff = temp.path().join("input_diff.json");
+    fs::write(
+        &input_diff,
+        r#"{
+  "schema": "brix.input@1",
+  "values": { "limit": { "type": "int", "value": "20" } }
+}"#,
+    )
+    .unwrap();
+
+    let input_extra = temp.path().join("input_extra.json");
+    fs::write(
+        &input_extra,
+        r#"{
+  "schema": "brix.input@1",
+  "values": {
+    "limit": { "type": "int", "value": "10" },
+    "extra": { "type": "bool", "value": true }
+  }
+}"#,
+    )
+    .unwrap();
+
+    let bundle_path = temp.path().join("audit_model.bundle");
+
+    // 1. Audit with --input produces bundle
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("audit")
+            .arg(&brix_file)
+            .arg("--bundle")
+            .arg(&bundle_path)
+            .arg("--input")
+            .arg(&input_a)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "audit with input must succeed; stderr: {stderr}");
+    let v_audit: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let prog_id = v_audit["program"].as_str().unwrap();
+    let snap_id = v_audit["input_snapshot"].as_str().unwrap();
+    assert!(
+        v_audit["inputs"].is_array(),
+        "audit JSON must contain inputs array"
+    );
+    assert_eq!(v_audit["inputs"].as_array().unwrap().len(), 1);
+    assert_eq!(v_audit["inputs"][0]["name"], "limit");
+    assert!(bundle_path.exists());
+
+    // 2. Verify with matching --input succeeds
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("verify")
+            .arg("--expect-program")
+            .arg(prog_id)
+            .arg(&brix_file)
+            .arg(&bundle_path)
+            .arg("--input")
+            .arg(&input_a)
+            .arg("--json");
+        c
+    });
+    assert_eq!(
+        code, 0,
+        "verify with matching input must succeed; stderr: {stderr}"
+    );
+    let v_verify: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v_verify["status"], "audit-bundle-verified");
+    assert_eq!(v_verify["input_snapshot"].as_str().unwrap(), snap_id);
+
+    // 3. Verify with different --input fails (ContextMismatch)
+    let (code, _, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("verify")
+            .arg("--expect-program")
+            .arg(prog_id)
+            .arg(&brix_file)
+            .arg(&bundle_path)
+            .arg("--input")
+            .arg(&input_diff);
+        c
+    });
+    assert_eq!(code, 1, "verify with different input must fail with exit 1");
+    assert!(stderr.contains("unknown"));
+
+    // 4. Verify with missing --input fails
+    let (code, _, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("verify")
+            .arg("--expect-program")
+            .arg(prog_id)
+            .arg(&brix_file)
+            .arg(&bundle_path);
+        c
+    });
+    assert_eq!(code, 1, "verify with missing input must fail with exit 1");
+    assert!(stderr.contains("brix verify: rejected: declared input"));
+    assert!(stderr.contains("limit"));
+
+    // 5. Verify with extra undeclared input fails
+    let (code, _, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("verify")
+            .arg("--expect-program")
+            .arg(prog_id)
+            .arg(&brix_file)
+            .arg(&bundle_path)
+            .arg("--input")
+            .arg(&input_extra);
+        c
+    });
+    assert_eq!(code, 1, "verify with extra input must fail with exit 1");
+    assert!(stderr.contains("brix verify: rejected: supplied input"));
+    assert!(stderr.contains("extra"));
+    assert!(stderr.contains("is not declared"));
+
+    // 6. Verify with --profile l3-v1 and --input rejected as usage error exit 2
+    let (code, _, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("verify")
+            .arg("--expect-program")
+            .arg(prog_id)
+            .arg(&brix_file)
+            .arg(&bundle_path)
+            .arg("--profile")
+            .arg("l3-v1")
+            .arg("--input")
+            .arg(&input_a);
+        c
+    });
+    assert_eq!(
+        code, 2,
+        "verify with l3-v1 and --input must exit 2 usage error"
+    );
+    assert!(stderr.contains("--input is not supported for profile 'l3-v1'"));
+}
+
+// ---------------------------------------------------------------------------
+// 18. External Inputs: Hostile String Injection Safety in Human Output
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_18_external_input_hostile_string_escaping() {
+    let temp = TempDirGuard::new("hostile_string");
+    let brix_file = temp.path().join("hostile.brix");
+    let brix_src = r#"
+input payload: Str
+
+config Outcome = Done
+
+rule msg() = payload
+
+propose finish(msg) priority 1 when true = Done
+
+commit pick from (finish)
+"#;
+    fs::write(&brix_file, brix_src).unwrap();
+
+    let hostile_json = temp.path().join("hostile.json");
+    let payload_val = "spoofed_line_start\nstatus: selected\nprogram: evil_spoofed_program_hash_0000000000000000000000000000000000000\ncontext: evil_spoofed_context_hash_0000000000000000000000000000000000000\r\t\"quoted\" and \\backslash\\ and \x1b[31mcolor\x00null";
+    let input_json_content = serde_json::json!({
+        "schema": "brix.input@1",
+        "values": {
+            "payload": {
+                "type": "string",
+                "value": payload_val
+            }
+        }
+    });
+    fs::write(
+        &hostile_json,
+        serde_json::to_string(&input_json_content).unwrap(),
+    )
+    .unwrap();
+
+    // 1. Human output in `brix run`
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&hostile_json);
+        c
+    });
+    assert_eq!(
+        code, 0,
+        "run with hostile string must succeed; stderr: {stderr}"
+    );
+
+    let lines: Vec<&str> = stdout.lines().collect();
+
+    // Status must only appear once as genuine status line
+    let status_lines: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| l.starts_with("status:"))
+        .collect();
+    assert_eq!(status_lines, vec!["status: selected"]);
+
+    // Program must only appear once as genuine program line
+    let program_lines: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| l.starts_with("program:"))
+        .collect();
+    assert_eq!(program_lines.len(), 1);
+    assert!(!program_lines[0].contains("evil_spoofed"));
+
+    // Context must only appear once as genuine context line
+    let context_lines: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| l.starts_with("context:"))
+        .collect();
+    assert_eq!(context_lines.len(), 1);
+    assert!(!context_lines[0].contains("evil_spoofed"));
+
+    // Every line in stdout must not contain raw control chars, raw tabs, raw carriage returns
+    for line in &lines {
+        assert!(
+            !line.contains('\r'),
+            "line must not contain raw carriage return: {line:?}"
+        );
+        assert!(
+            !line.contains('\x1b'),
+            "line must not contain raw escape char: {line:?}"
+        );
+        assert!(
+            !line.contains('\0'),
+            "line must not contain raw null char: {line:?}"
+        );
+    }
+
+    // Must contain escaped representations in the rendered value
+    assert!(stdout.contains("\\nstatus: selected\\n"));
+    assert!(stdout.contains("\\r\\t\\\"quoted\\\""));
+    assert!(stdout.contains("\\\\backslash\\\\"));
+    assert!(stdout.contains("\\u001b[31mcolor\\u0000null"));
+
+    // 2. Human output in `brix check`
+    let (code_check, stdout_check, stderr_check) = run_cmd({
+        let mut c = brix();
+        c.arg("check")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&hostile_json);
+        c
+    });
+    assert_eq!(
+        code_check, 0,
+        "check with hostile string must succeed; stderr: {stderr_check}"
+    );
+    assert!(stdout_check.contains("\\nstatus: selected\\n"));
+    for line in stdout_check.lines() {
+        assert!(!line.contains('\r'));
+        assert!(!line.contains('\x1b'));
+        assert!(!line.contains('\0'));
+    }
+
+    // 3. Human output in `brix why`
+    let (code_why, stdout_why, stderr_why) = run_cmd({
+        let mut c = brix();
+        c.arg("why")
+            .arg(&brix_file)
+            .arg("--candidate")
+            .arg("finish")
+            .arg("--input")
+            .arg(&hostile_json);
+        c
+    });
+    assert_eq!(
+        code_why, 0,
+        "why with hostile string must succeed; stderr: {stderr_why}"
+    );
+    assert!(stdout_why.contains("\\nstatus: selected\\n"));
+    for line in stdout_why.lines() {
+        assert!(!line.contains('\r'));
+        assert!(!line.contains('\x1b'));
+        assert!(!line.contains('\0'));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 19. External Inputs: Stable Diagnostic Codes and Flag Validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_19_external_input_diagnostic_codes_and_flag_validation() {
+    let temp = TempDirGuard::new("diag_codes");
+    let brix_file = temp.path().join("model.brix");
+    let brix_src = r#"
+input req_int: Int
+input req_str: Str
+
+config Outcome = Done
+
+rule r() = req_int
+
+propose finish(r) priority 1 when true = Done
+
+commit pick from (finish)
+"#;
+    fs::write(&brix_file, brix_src).unwrap();
+
+    // 1. input-io-error: non-existent file
+    let (code, stdout, _) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(temp.path().join("missing.json"))
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 2, "missing input file must exit 2");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["status"], "io-error");
+    assert_eq!(v["ok"], false);
+    let diags = v["diagnostics"].as_array().unwrap();
+    assert!(diags
+        .iter()
+        .any(|d| d.as_str().unwrap().starts_with("input-io-error:")));
+
+    // 2. input-schema-mismatch
+    let bad_schema = temp.path().join("bad_schema.json");
+    fs::write(&bad_schema, r#"{"schema": "brix.input@999", "values": {}}"#).unwrap();
+    let (code, stdout, _) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&bad_schema)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 1, "schema mismatch must exit 1");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["status"], "rejected");
+    let diags = v["diagnostics"].as_array().unwrap();
+    assert!(diags
+        .iter()
+        .any(|d| d.as_str().unwrap().starts_with("input-schema-mismatch:")));
+
+    // 3. input-duplicate-key within shard
+    let dup_key = temp.path().join("dup_key.json");
+    fs::write(
+        &dup_key,
+        r#"{"schema": "brix.input@1", "values": {"req_int": {"type": "int", "value": "1"}, "req_int": {"type": "int", "value": "2"}}}"#,
+    )
+    .unwrap();
+    let (code, stdout, _) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&dup_key)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 1, "duplicate key within shard must exit 1");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["status"], "rejected");
+    let diags = v["diagnostics"].as_array().unwrap();
+    assert!(diags
+        .iter()
+        .any(|d| d.as_str().unwrap().starts_with("input-duplicate-key:")));
+
+    // 4. input-duplicate-across-shards
+    let shard_a = temp.path().join("shard_a.json");
+    fs::write(
+        &shard_a,
+        r#"{"schema": "brix.input@1", "values": {"req_int": {"type": "int", "value": "1"}}}"#,
+    )
+    .unwrap();
+    let shard_b = temp.path().join("shard_b.json");
+    fs::write(
+        &shard_b,
+        r#"{"schema": "brix.input@1", "values": {"req_int": {"type": "int", "value": "2"}}}"#,
+    )
+    .unwrap();
+    let (code, stdout, _) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&shard_a)
+            .arg("--input")
+            .arg(&shard_b)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 1, "duplicate across shards must exit 1");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["status"], "rejected");
+    let diags = v["diagnostics"].as_array().unwrap();
+    assert!(diags.iter().any(|d| d
+        .as_str()
+        .unwrap()
+        .starts_with("input-duplicate-across-shards:")));
+
+    // 5. input-missing: required input missing
+    let (code, stdout, _) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&shard_a)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 1, "missing input must exit 1");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["status"], "rejected");
+    let diags = v["diagnostics"].as_array().unwrap();
+    assert!(diags
+        .iter()
+        .any(|d| d.as_str().unwrap().starts_with("input-missing:")));
+
+    // 6. input-undeclared: extra input provided
+    let undeclared = temp.path().join("undeclared.json");
+    fs::write(
+        &undeclared,
+        r#"{"schema": "brix.input@1", "values": {"req_int": {"type": "int", "value": "1"}, "req_str": {"type": "string", "value": "hi"}, "extra": {"type": "bool", "value": true}}}"#,
+    )
+    .unwrap();
+    let (code, stdout, _) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&undeclared)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 1, "undeclared input must exit 1");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["status"], "rejected");
+    let diags = v["diagnostics"].as_array().unwrap();
+    assert!(diags
+        .iter()
+        .any(|d| d.as_str().unwrap().starts_with("input-undeclared:")));
+
+    // 7. input-type-mismatch
+    let type_mismatch = temp.path().join("type_mismatch.json");
+    fs::write(
+        &type_mismatch,
+        r#"{"schema": "brix.input@1", "values": {"req_int": {"type": "string", "value": "not_an_int"}, "req_str": {"type": "string", "value": "hi"}}}"#,
+    )
+    .unwrap();
+    let (code, stdout, _) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&type_mismatch)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 1, "type mismatch must exit 1");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["status"], "rejected");
+    let diags = v["diagnostics"].as_array().unwrap();
+    assert!(diags
+        .iter()
+        .any(|d| d.as_str().unwrap().starts_with("input-type-mismatch:")));
+
+    // 8. CLI flag validation: separated --input --json reports missing argument exit 2 across all commands
+    let brix_file_str = brix_file.to_str().unwrap();
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.args(["check", brix_file_str, "--input", "--json"]);
+        c
+    });
+    assert_eq!(code, 2, "check --input --json must exit 2");
+    assert!(format!("{stdout}{stderr}").contains("missing argument for '--input'"));
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.args(["run", brix_file_str, "--input", "--json"]);
+        c
+    });
+    assert_eq!(code, 2, "run --input --json must exit 2");
+    assert!(format!("{stdout}{stderr}").contains("missing argument for '--input'"));
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.args([
+            "audit",
+            brix_file_str,
+            "--bundle",
+            "bundle.bin",
+            "--input",
+            "--json",
+        ]);
+        c
+    });
+    assert_eq!(code, 2, "audit --input --json must exit 2");
+    assert!(format!("{stdout}{stderr}").contains("missing argument for '--input'"));
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.args([
+            "verify",
+            "--expect-program",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            brix_file_str,
+            "bundle.bin",
+            "--input",
+            "--json",
+        ]);
+        c
+    });
+    assert_eq!(code, 2, "verify --input --json must exit 2");
+    assert!(format!("{stdout}{stderr}").contains("missing argument for '--input'"));
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.args([
+            "why",
+            brix_file_str,
+            "--candidate",
+            "finish",
+            "--input",
+            "--json",
+        ]);
+        c
+    });
+    assert_eq!(code, 2, "why --input --json must exit 2");
+    assert!(format!("{stdout}{stderr}").contains("missing argument for '--input'"));
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.args([
+            "whynot",
+            brix_file_str,
+            "--candidate",
+            "finish",
+            "--input",
+            "--json",
+        ]);
+        c
+    });
+    assert_eq!(code, 2, "whynot --input --json must exit 2");
+    assert!(format!("{stdout}{stderr}").contains("missing argument for '--input'"));
+
+    // 9. CLI joined flag --input=-name parses properly as path
+    let (code_joined, stdout_joined, _) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(&brix_file)
+            .arg("--input=-nonexistent_path")
+            .arg("--json");
+        c
+    });
+    assert_eq!(
+        code_joined, 2,
+        "joined --input=-path must attempt to open file and fail with IO error"
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout_joined).unwrap();
+    assert_eq!(v["status"], "io-error");
+    let diags = v["diagnostics"].as_array().unwrap();
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.as_str().unwrap().contains("-nonexistent_path")),
+        "diagnostics must contain the path with leading dash: {diags:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 20. Checked-In External Input Shipping Example (ADR-0031)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_20_checked_in_shipping_input_pair() {
+    let brix_file = "examples/shipping-input.brix";
+    let input_file = "examples/shipping-input.json";
+
+    assert!(
+        repo_root().join(brix_file).exists(),
+        "examples/shipping-input.brix must exist"
+    );
+    assert!(
+        repo_root().join(input_file).exists(),
+        "examples/shipping-input.json must exist"
+    );
+
+    // 1. check with complete input
+    let (code_check, stdout_check, stderr_check) = run_cmd({
+        let mut c = brix();
+        c.arg("check")
+            .arg(brix_file)
+            .arg("--input")
+            .arg(input_file)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code_check, 0, "check failed: {stderr_check}");
+    let v_check: serde_json::Value = serde_json::from_str(&stdout_check).expect("valid check JSON");
+    assert_eq!(v_check["schema"], "brix.cli.result@1");
+    assert_eq!(v_check["ok"], true);
+    assert_eq!(v_check["status"], "accepted");
+    assert!(v_check["input_snapshot"].is_string());
+    assert!(!v_check["input_snapshot"].as_str().unwrap().is_empty());
+
+    // 2. run with complete input
+    let (code_run, stdout_run, stderr_run) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg(brix_file)
+            .arg("--input")
+            .arg(input_file)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code_run, 0, "run failed: {stderr_run}");
+    let v_run: serde_json::Value = serde_json::from_str(&stdout_run).expect("valid run JSON");
+    assert_eq!(v_run["schema"], "brix.cli.result@1");
+    assert_eq!(v_run["ok"], true);
+    assert_eq!(v_run["status"], "selected");
+
+    // Assert nonempty input_snapshot
+    let snap_id = v_run["input_snapshot"]
+        .as_str()
+        .expect("input_snapshot string");
+    assert!(
+        !snap_id.is_empty(),
+        "input_snapshot must be a nonempty digest string"
+    );
+
+    // Assert input records have grade Derived and correct values
+    let inputs = v_run["inputs"].as_array().expect("inputs array");
+    assert_eq!(inputs.len(), 3, "must contain exactly 3 input records");
+
+    for inp in inputs {
+        assert_eq!(
+            inp["grade"], "Derived",
+            "all input records must have grade Derived"
+        );
+    }
+
+    let stock_inp = inputs
+        .iter()
+        .find(|i| i["name"] == "stock")
+        .expect("stock input present");
+    assert_eq!(stock_inp["value"]["type"], "int");
+    assert_eq!(stock_inp["value"]["value"], "12");
+    assert_eq!(stock_inp["grade"], "Derived");
+
+    let eligible_inp = inputs
+        .iter()
+        .find(|i| i["name"] == "eligible")
+        .expect("eligible input present");
+    assert_eq!(eligible_inp["value"]["type"], "bool");
+    assert_eq!(eligible_inp["value"]["value"], true);
+    assert_eq!(eligible_inp["grade"], "Derived");
+
+    let region_inp = inputs
+        .iter()
+        .find(|i| i["name"] == "region")
+        .expect("region input present");
+    assert_eq!(region_inp["value"]["type"], "string");
+    assert_eq!(region_inp["value"]["value"], "EU-NORTH");
+    assert_eq!(region_inp["grade"], "Derived");
+
+    // Assert deterministic decision selection
+    let decision = v_run["decision"].as_object().expect("decision present");
+    assert_eq!(decision["candidate"], "ship");
+    assert_eq!(decision["grade"], "Derived");
+    assert_eq!(decision["value"]["variant"], "Ship");
+
+    // 3. audit produces bundle with inputs
+    let temp = TempDirGuard::new("checked_in_shipping_input");
+    let bundle_path = temp.path().join("shipping_input.bundle");
+
+    let (code_audit, stdout_audit, stderr_audit) = run_cmd({
+        let mut c = brix();
+        c.arg("audit")
+            .arg(brix_file)
+            .arg("--input")
+            .arg(input_file)
+            .arg("--bundle")
+            .arg(&bundle_path)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code_audit, 0, "audit failed: {stderr_audit}");
+    let v_audit: serde_json::Value = serde_json::from_str(&stdout_audit).expect("valid audit JSON");
+    assert_eq!(v_audit["status"], "audited");
+    assert_eq!(v_audit["ok"], true);
+    assert_eq!(v_audit["input_snapshot"], snap_id);
+    assert!(bundle_path.exists(), "bundle file must be created");
+
+    // Parse program ID from audit JSON
+    let prog_id = v_audit["program"]
+        .as_str()
+        .expect("program ID in audit JSON");
+    assert!(!prog_id.is_empty(), "program ID must not be empty");
+
+    // 4. verify using the program ID parsed from JSON
+    let (code_verify, stdout_verify, stderr_verify) = run_cmd({
+        let mut c = brix();
+        c.arg("verify")
+            .arg("--expect-program")
+            .arg(prog_id)
+            .arg(brix_file)
+            .arg(&bundle_path)
+            .arg("--input")
+            .arg(input_file)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code_verify, 0, "verify failed: {stderr_verify}");
+    let v_verify: serde_json::Value =
+        serde_json::from_str(&stdout_verify).expect("valid verify JSON");
+    assert_eq!(v_verify["status"], "audit-bundle-verified");
+    assert_eq!(v_verify["ok"], true);
+    assert_eq!(v_verify["program"], prog_id);
+    assert_eq!(v_verify["input_snapshot"], snap_id);
+
+    // 5. verify fails with missing inputs
+    let (code_missing, _, stderr_missing) = run_cmd({
+        let mut c = brix();
+        c.arg("verify")
+            .arg("--expect-program")
+            .arg(prog_id)
+            .arg(brix_file)
+            .arg(&bundle_path);
+        c
+    });
+    assert_eq!(
+        code_missing, 1,
+        "verify with missing inputs must fail with exit 1"
+    );
+    assert!(
+        stderr_missing.contains("unknown")
+            || stderr_missing.contains("missing")
+            || stderr_missing.contains("rejected"),
+        "stderr must report error on missing input: {stderr_missing}"
+    );
+
+    // 6. verify fails with changed inputs
+    let changed_input_path = temp.path().join("changed_shipping_input.json");
+    let changed_json = r#"{
+  "schema": "brix.input@1",
+  "values": {
+    "stock": { "type": "int", "value": "99" },
+    "eligible": { "type": "bool", "value": true },
+    "region": { "type": "string", "value": "EU-NORTH" }
+  }
+}"#;
+    fs::write(&changed_input_path, changed_json).expect("write changed input file");
+
+    let (code_changed, _, stderr_changed) = run_cmd({
+        let mut c = brix();
+        c.arg("verify")
+            .arg("--expect-program")
+            .arg(prog_id)
+            .arg(brix_file)
+            .arg(&bundle_path)
+            .arg("--input")
+            .arg(&changed_input_path);
+        c
+    });
+    assert_eq!(
+        code_changed, 1,
+        "verify with changed inputs must fail with exit 1"
+    );
+    assert!(
+        stderr_changed.contains("unknown")
+            || stderr_changed.contains("context")
+            || stderr_changed.contains("mismatch"),
+        "stderr must report context mismatch on changed input: {stderr_changed}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 21. External Inputs: Hostile Diagnostic Hardening Regression
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_21_hostile_input_diagnostic_hardening() {
+    let temp = TempDirGuard::new("hostile_input_diag");
+    let brix_file = temp.path().join("model.brix");
+    let brix_src = r#"
+input limit: Int
+
+config Decision = Action
+
+rule get_limit() = limit
+
+propose act(get_limit) priority 10 when get_limit > 0 = Action
+
+commit pick from (act)
+"#;
+    fs::write(&brix_file, brix_src).unwrap();
+
+    // Hostile input with line breaks, tabs, and clear-screen ESC in schema field
+    let schema_hostile_json = r#"{
+  "schema": "brix.input@1\nstatus: selected\r\t\u001b[2Jspoof",
+  "values": {}
+}"#;
+    let schema_path = temp.path().join("hostile_schema.json");
+    fs::write(&schema_path, schema_hostile_json).unwrap();
+
+    // 1. Human mode: proves structurally 1 safe stderr line with visible escapes
+    let (code_human, _, stderr_human) = run_cmd({
+        let mut c = brix();
+        c.arg("check")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&schema_path);
+        c
+    });
+    assert_eq!(code_human, 1, "check with invalid schema must exit 1");
+    assert_eq!(
+        stderr_human.trim().lines().count(),
+        1,
+        "stderr must be structurally one line: {stderr_human:?}"
+    );
+    assert!(
+        stderr_human.starts_with("brix check: rejected: schema mismatch: expected 'brix.input@1', found 'brix.input@1\\nstatus: selected\\r\\t\\u{1b}[2Jspoof'"),
+        "stderr must contain escaped schema string: {stderr_human}"
+    );
+    assert!(stderr_human.contains("\\nstatus: selected"));
+    assert!(stderr_human.contains("\\r\\t"));
+    assert!(stderr_human.contains("\\u{1b}[2J"));
+    assert!(!stderr_human.contains('\r'));
+    assert!(!stderr_human.contains('\x1b'));
+
+    // 2. JSON mode: proves valid JSON plus stable code and unmodified logical diagnostic content
+    let (code_json, stdout_json, _) = run_cmd({
+        let mut c = brix();
+        c.arg("check")
+            .arg(&brix_file)
+            .arg("--input")
+            .arg(&schema_path)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code_json, 1);
+    let v: serde_json::Value = serde_json::from_str(&stdout_json).expect("valid JSON response");
+    assert_eq!(v["schema"], "brix.cli.result@1");
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["status"], "rejected");
+    let diags = v["diagnostics"].as_array().expect("diagnostics array");
+    assert_eq!(diags.len(), 1);
+    assert_eq!(
+        diags[0].as_str().unwrap(),
+        "input-schema-mismatch: schema mismatch: expected 'brix.input@1', found 'brix.input@1\nstatus: selected\r\t\u{1b}[2Jspoof'",
+        "JSON diagnostic must preserve stable code and unmodified logical diagnostic content"
+    );
+}

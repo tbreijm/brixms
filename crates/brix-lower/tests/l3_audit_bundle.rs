@@ -3,14 +3,16 @@
 use std::path::{Path, PathBuf};
 
 use brix_canon::{Canonical, Digest, Domain};
+use brix_lower::l3_v2::L3ValueV2;
 use brix_lower::{
-    check_finite_decision_audit_input_bundle_from_source_v1,
-    check_l3_audit_input_bundle_from_source_v1, decode_audit_input_bundle_v1,
+    canonicalize_input_shards, check_finite_decision_audit_input_bundle_from_source_v1,
+    check_finite_decision_audit_input_bundle_from_source_with_inputs_v1,
+    check_l3_audit_input_bundle_from_source_v1, decode_audit_input_bundle_v1, decode_input_shard,
     finite_decision_program_id, lower_finite_decision_plan, lower_l3_plan,
     produce_finite_decision_audit_input_bundle_v1, produce_l3_audit_input_bundle_v1, program_id,
     run_l3_plan, AuditDecodeLimits, BundleCheckError, ContextId, FiniteDecisionPlan,
-    FiniteDecisionProgramId, FiniteDecisionRuntime, FiniteDecisionStop, L3AdmChoice, PlanLimitsV1,
-    ProgramIdV1, SettlementAuditInputBundleV1, SettlementStopV1, SourceBundleError,
+    FiniteDecisionProgramId, FiniteDecisionRuntime, FiniteDecisionStop, InputLimits, L3AdmChoice,
+    PlanLimitsV1, ProgramIdV1, SettlementAuditInputBundleV1, SettlementStopV1, SourceBundleError,
     SourceBundleProducerError, FINITE_DECISION_PROFILE, L3_PROFILE_MARKER_V1,
 };
 use brix_syntax::{parse, ParseLimits};
@@ -105,7 +107,7 @@ fn honest_cross_instance_produce_and_verify_finite_decision_selected() {
     let plan = fd_plan(FD_SELECTED_SRC);
     let expected_prog = finite_decision_program_id(&plan);
 
-    let runtime = FiniteDecisionRuntime::build(&plan);
+    let runtime = FiniteDecisionRuntime::build(&plan).expect("runtime builds");
     let run = runtime.run();
     assert!(run.is_selected());
     assert_eq!(run.journal.len(), 1);
@@ -141,7 +143,7 @@ fn honest_cross_instance_produce_and_verify_finite_decision_quiescent() {
     let plan = fd_plan(FD_QUIESCENT_SRC);
     let expected_prog = finite_decision_program_id(&plan);
 
-    let runtime = FiniteDecisionRuntime::build(&plan);
+    let runtime = FiniteDecisionRuntime::build(&plan).expect("runtime builds");
     let run = runtime.run();
     assert!(run.is_quiescent());
     assert_eq!(run.journal.len(), 0);
@@ -203,7 +205,7 @@ fn target_mismatch_is_rejected_for_both_profiles() {
     let true_fd_prog = finite_decision_program_id(&fd_p);
     let foreign_fd_prog =
         FiniteDecisionProgramId(Digest::of(Domain::Value, b"different-fd-prog-id"));
-    let runtime = FiniteDecisionRuntime::build(&fd_p);
+    let runtime = FiniteDecisionRuntime::build(&fd_p).expect("runtime builds");
     let run = runtime.run();
     let fd_bundle = produce_finite_decision_audit_input_bundle_v1(&runtime, &run).expect("bundle");
 
@@ -257,7 +259,7 @@ fn source_mismatch_is_rejected_for_both_profiles() {
     // Finite-decision
     let plan_fd_a = fd_plan(FD_SELECTED_SRC);
     let prog_fd_a = finite_decision_program_id(&plan_fd_a);
-    let runtime_a = FiniteDecisionRuntime::build(&plan_fd_a);
+    let runtime_a = FiniteDecisionRuntime::build(&plan_fd_a).expect("runtime builds");
     let run_a = runtime_a.run();
     let bundle_fd_a =
         produce_finite_decision_audit_input_bundle_v1(&runtime_a, &run_a).expect("bundle");
@@ -312,7 +314,7 @@ fn context_mismatch_is_rejected_for_both_profiles() {
     // Finite-decision
     let fd_p = fd_plan(FD_SELECTED_SRC);
     let fd_prog = finite_decision_program_id(&fd_p);
-    let runtime = FiniteDecisionRuntime::build(&fd_p);
+    let runtime = FiniteDecisionRuntime::build(&fd_p).expect("runtime builds");
     let run = runtime.run();
     let mut fd_bundle =
         produce_finite_decision_audit_input_bundle_v1(&runtime, &run).expect("bundle");
@@ -417,7 +419,7 @@ fn unknown_producer_refusal_for_both_profiles() {
 
     // Finite-decision: program with type fault halts with Unknown
     let plan_fault = fd_plan(FD_FAULT_SRC);
-    let runtime_fault = FiniteDecisionRuntime::build(&plan_fault);
+    let runtime_fault = FiniteDecisionRuntime::build(&plan_fault).expect("runtime builds");
     let run_fault = runtime_fault.run();
     assert!(run_fault.is_unknown());
     assert!(matches!(run_fault.stop, FiniteDecisionStop::Unknown(_)));
@@ -446,15 +448,83 @@ fn producer_refuses_mismatched_runtime_and_run() {
 
     // Finite-decision: cross-pair runtime A with run B
     let plan_fd_a = fd_plan(FD_SELECTED_SRC);
-    let runtime_fd_a = FiniteDecisionRuntime::build(&plan_fd_a);
+    let runtime_fd_a = FiniteDecisionRuntime::build(&plan_fd_a).expect("runtime builds");
 
     let plan_fd_b = fd_plan(FD_QUIESCENT_SRC);
-    let runtime_fd_b = FiniteDecisionRuntime::build(&plan_fd_b);
+    let runtime_fd_b = FiniteDecisionRuntime::build(&plan_fd_b).expect("runtime builds");
     let run_fd_b = runtime_fd_b.run();
 
     let err_fd =
         produce_finite_decision_audit_input_bundle_v1(&runtime_fd_a, &run_fd_b).unwrap_err();
     assert!(matches!(err_fd, SourceBundleProducerError::RunMismatch(_)));
+}
+
+#[test]
+fn producer_refuses_tampered_run_bound_inputs() {
+    let source = r#"
+input limit: Int
+
+config Arrangement = A | B
+
+rule base() = limit
+
+propose opt_a(base) priority 10 when base == 100 = A
+propose opt_b(base) priority 20 when base == 100 = B
+
+commit pick from (opt_a, opt_b)
+"#;
+    let p = fd_plan(source);
+    let json = r#"{
+        "schema": "brix.input@1",
+        "values": {
+            "limit": {"type": "int", "value": "100"}
+        }
+    }"#;
+    let shard =
+        decode_input_shard(json.as_bytes(), &InputLimits::default()).expect("shard decodes");
+    let snapshot =
+        canonicalize_input_shards(vec![shard], &InputLimits::default()).expect("snapshot forms");
+
+    let runtime = FiniteDecisionRuntime::build_with_inputs(&p, &snapshot).expect("runtime builds");
+    let run = runtime.run();
+    assert!(run.is_selected());
+
+    // Honest run produces bundle successfully
+    let honest_bundle = produce_finite_decision_audit_input_bundle_v1(&runtime, &run);
+    assert!(
+        honest_bundle.is_ok(),
+        "honest bundle production must succeed"
+    );
+
+    // Case 1: Tampered input value in public run report
+    let mut tampered_run_val = run.clone();
+    tampered_run_val.inputs[0].value = L3ValueV2::Int(999);
+    let err_val =
+        produce_finite_decision_audit_input_bundle_v1(&runtime, &tampered_run_val).unwrap_err();
+    match err_val {
+        SourceBundleProducerError::RunMismatch(msg) => {
+            assert!(
+                msg.contains("bound inputs mismatch"),
+                "expected bound inputs mismatch message, got: {msg}"
+            );
+        }
+        other => panic!("expected RunMismatch, got: {other:?}"),
+    }
+
+    // Case 2: Tampered input list in public run report (e.g. cleared inputs)
+    let mut tampered_run_empty = run.clone();
+    tampered_run_empty.inputs.clear();
+    let err_empty =
+        produce_finite_decision_audit_input_bundle_v1(&runtime, &tampered_run_empty).unwrap_err();
+    match err_empty {
+        SourceBundleProducerError::RunMismatch(msg) => {
+            assert!(
+                msg.contains("bound inputs mismatch"),
+                "expected bound inputs mismatch message, got: {msg}"
+            );
+        }
+        other => panic!("expected RunMismatch, got: {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -574,4 +644,159 @@ fn settlement_audit_input_bundle_v1_vectors_are_unchanged() {
     assert_eq!(decoded.final_chain_digest.to_hex(), final_chain_hex);
     assert_eq!(decoded.id().to_hex(), bundle_id_hex);
     assert_eq!(decoded.entries.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// 7. Input-aware finite-decision bundle verification tests
+// ---------------------------------------------------------------------------
+
+const FD_INPUT_SRC: &str = r#"
+input limit: Int
+input enabled: Bool
+
+config Arrangement = A | B
+
+rule base() = limit
+rule is_enabled() = enabled
+
+propose opt_a(base) priority 10 when base == 100 = A
+propose opt_b(is_enabled) priority 20 when is_enabled = B
+
+commit pick from (opt_a, opt_b)
+"#;
+
+fn make_input_snapshot(limit: i64, enabled: bool) -> brix_lower::InputSnapshot {
+    let json = format!(
+        r#"{{
+        "schema": "brix.input@1",
+        "values": {{
+            "limit": {{"type": "int", "value": "{limit}"}},
+            "enabled": {{"type": "bool", "value": {enabled}}}
+        }}
+    }}"#
+    );
+    let shard =
+        decode_input_shard(json.as_bytes(), &InputLimits::default()).expect("shard decodes");
+    canonicalize_input_shards(vec![shard], &InputLimits::default()).expect("snapshot canonicalizes")
+}
+
+#[test]
+fn honest_cross_instance_produce_and_verify_finite_decision_with_inputs() {
+    let plan = fd_plan(FD_INPUT_SRC);
+    let snapshot = make_input_snapshot(100, true);
+
+    let runtime =
+        FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot).expect("runtime builds");
+    let run = runtime.run();
+    assert!(run.is_selected());
+
+    let bundle =
+        produce_finite_decision_audit_input_bundle_v1(&runtime, &run).expect("bundle produced");
+    let prog_id = finite_decision_program_id(&plan);
+
+    let report = check_finite_decision_audit_input_bundle_from_source_with_inputs_v1(
+        FD_INPUT_SRC.as_bytes(),
+        prog_id,
+        ParseLimits::strict(),
+        &PlanLimitsV1::generous(),
+        &bundle,
+        &AuditDecodeLimits::strict(),
+        &snapshot,
+    )
+    .expect("verification succeeds with matching snapshot");
+
+    assert_eq!(report.program, prog_id);
+    assert_eq!(report.context, runtime.context);
+    assert_eq!(report.bundle_id, bundle.id());
+    assert_eq!(report.count, 1);
+}
+
+#[test]
+fn verify_finite_decision_with_inputs_fails_on_missing_or_tampered_snapshot() {
+    let plan = fd_plan(FD_INPUT_SRC);
+    let snapshot_honest = make_input_snapshot(100, true);
+
+    let runtime =
+        FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot_honest).expect("runtime builds");
+    let run = runtime.run();
+    assert!(run.is_selected());
+
+    let bundle =
+        produce_finite_decision_audit_input_bundle_v1(&runtime, &run).expect("bundle produced");
+    let prog_id = finite_decision_program_id(&plan);
+
+    // 1. Missing input snapshot (empty snapshot against program declaring inputs)
+    let empty_snapshot = brix_lower::InputSnapshot::empty();
+    let err_missing = check_finite_decision_audit_input_bundle_from_source_with_inputs_v1(
+        FD_INPUT_SRC.as_bytes(),
+        prog_id,
+        ParseLimits::strict(),
+        &PlanLimitsV1::generous(),
+        &bundle,
+        &AuditDecodeLimits::strict(),
+        &empty_snapshot,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            err_missing,
+            SourceBundleError::InputValidation(
+                brix_lower::InputValidationError::MissingInput { .. }
+            )
+        ),
+        "expected InputValidation(MissingInput), got: {err_missing:?}"
+    );
+
+    // 2. Changed input value (limit=200 instead of 100): ProgramId holds constant, ContextId changes, fails ContextMismatch
+    let snapshot_tampered = make_input_snapshot(200, true);
+    let err_mismatch = check_finite_decision_audit_input_bundle_from_source_with_inputs_v1(
+        FD_INPUT_SRC.as_bytes(),
+        prog_id,
+        ParseLimits::strict(),
+        &PlanLimitsV1::generous(),
+        &bundle,
+        &AuditDecodeLimits::strict(),
+        &snapshot_tampered,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err_mismatch, SourceBundleError::ContextMismatch { .. }),
+        "expected ContextMismatch due to changed input value, got: {err_mismatch:?}"
+    );
+
+    // 3. Extra undeclared input supplied
+    let json_extra = r#"{
+        "schema": "brix.input@1",
+        "values": {
+            "limit": {"type": "int", "value": "100"},
+            "enabled": {"type": "bool", "value": true},
+            "unrelated": {"type": "string", "value": "extra"}
+        }
+    }"#;
+    let shard_extra = decode_input_shard(json_extra.as_bytes(), &InputLimits::default()).unwrap();
+    let snapshot_extra =
+        canonicalize_input_shards(vec![shard_extra], &InputLimits::default()).unwrap();
+
+    let err_extra = check_finite_decision_audit_input_bundle_from_source_with_inputs_v1(
+        FD_INPUT_SRC.as_bytes(),
+        prog_id,
+        ParseLimits::strict(),
+        &PlanLimitsV1::generous(),
+        &bundle,
+        &AuditDecodeLimits::strict(),
+        &snapshot_extra,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            err_extra,
+            SourceBundleError::InputValidation(
+                brix_lower::InputValidationError::UndeclaredInput { .. }
+            )
+        ),
+        "expected InputValidation(UndeclaredInput), got: {err_extra:?}"
+    );
 }

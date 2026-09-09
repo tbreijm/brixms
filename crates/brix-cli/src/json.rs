@@ -11,6 +11,8 @@ pub const BRIX_CLI_SCHEMA: &str = "brix.cli.result@1";
 /// Contains the exact required fields starting with schema:
 /// `schema`, `command`, `ok`, `profile`, `program`, `context`, `status`, `facts`, `candidates`,
 /// `decision`, `artifacts`, `diagnostics`.
+/// For input-bearing executions/checks, the optional additive fields `input_snapshot` and `inputs`
+/// are populated under schema `brix.cli.result@1`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CliResultJson {
     pub schema: String,
@@ -19,7 +21,11 @@ pub struct CliResultJson {
     pub profile: Option<String>,
     pub program: Option<String>,
     pub context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_snapshot: Option<String>,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<Vec<InputJson>>,
     pub facts: Vec<FactJson>,
     pub candidates: Vec<CandidateJson>,
     pub decision: Option<DecisionJson>,
@@ -49,7 +55,9 @@ impl CliResultJson {
             profile,
             program,
             context,
+            input_snapshot: None,
             status: status.into(),
+            inputs: None,
             facts,
             candidates,
             decision,
@@ -74,7 +82,9 @@ impl CliResultJson {
             profile,
             program,
             context,
+            input_snapshot: None,
             status: status.into(),
+            inputs: None,
             facts: Vec::new(),
             candidates: Vec::new(),
             decision: None,
@@ -83,10 +93,46 @@ impl CliResultJson {
         }
     }
 
+    /// Explicitly attach input snapshot and inputs collection.
+    pub fn with_inputs(
+        mut self,
+        input_snapshot: Option<String>,
+        inputs: Option<Vec<InputJson>>,
+    ) -> Self {
+        self.input_snapshot = input_snapshot;
+        self.inputs = inputs;
+        self
+    }
+
     /// Explicitly attach the versioned schema identifier.
     pub fn with_schema(mut self) -> Self {
         self.schema = BRIX_CLI_SCHEMA.to_string();
         self
+    }
+}
+
+/// An admitted external input record carrying name, tagged value, ordinal string, and grade.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct InputJson {
+    pub name: String,
+    pub value: TaggedValue,
+    pub ordinal: String,
+    pub grade: String,
+}
+
+impl InputJson {
+    pub fn new(
+        name: impl Into<String>,
+        value: TaggedValue,
+        ordinal: impl ToString,
+        grade: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            value,
+            ordinal: ordinal.to_string(),
+            grade: grade.into(),
+        }
     }
 }
 
@@ -561,5 +607,55 @@ mod tests {
         let res: CliResultJson = serde_json::from_str(raw).unwrap();
         assert_eq!(res.schema, "brix.cli.result@1");
         assert_eq!(res.command, "check");
+    }
+
+    #[test]
+    fn test_input_json_serialization_and_additive_fields() {
+        let input_entry = InputJson::new("limit", TaggedValue::int(100), 0, "Derived");
+        assert_eq!(input_entry.name, "limit");
+        assert_eq!(input_entry.ordinal, "0");
+        assert_eq!(input_entry.grade, "Derived");
+
+        let res_with_inputs = CliResultJson::success(
+            "run",
+            Some("brix.l3.finite-decision@1".to_string()),
+            Some("1234abcd".to_string()),
+            Some("5678ef01".to_string()),
+            "selected",
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec![],
+        )
+        .with_inputs(
+            Some("snap_id_999".to_string()),
+            Some(vec![input_entry.clone()]),
+        );
+
+        let json_str = serde_json::to_string(&res_with_inputs).expect("serialization failed");
+        let val: serde_json::Value = serde_json::from_str(&json_str).expect("json parse failed");
+        let obj = val.as_object().expect("expected json object");
+
+        // Exactly 14 fields when input_snapshot and inputs are present
+        assert_eq!(
+            obj.len(),
+            14,
+            "expected exactly 14 top-level fields with inputs, found: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(obj["input_snapshot"], "snap_id_999");
+        let inputs_arr = obj["inputs"].as_array().expect("inputs is array");
+        assert_eq!(inputs_arr.len(), 1);
+        assert_eq!(inputs_arr[0]["name"], "limit");
+        assert_eq!(inputs_arr[0]["ordinal"], "0");
+        assert_eq!(inputs_arr[0]["grade"], "Derived");
+        assert_eq!(inputs_arr[0]["value"]["type"], "int");
+        assert_eq!(inputs_arr[0]["value"]["value"], "100");
+
+        // Roundtrip deserialization
+        let roundtrip: CliResultJson = serde_json::from_str(&json_str).expect("roundtrip");
+        assert_eq!(roundtrip.input_snapshot, Some("snap_id_999".to_string()));
+        assert_eq!(roundtrip.inputs, Some(vec![input_entry]));
     }
 }

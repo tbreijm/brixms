@@ -4,7 +4,7 @@ name: Release
 # release must never ship red), builds cross-platform release archives for
 # aarch64-apple-darwin and x86_64-unknown-linux-gnu with SHA256 checksums,
 # then publishes a GitHub Release for the tag with attached assets.
-# Tags carrying a semver pre-release suffix (e.g. `v0.1.0-alpha.2`) are marked
+# Tags carrying a semver pre-release suffix (e.g. `v0.1.0-alpha.3`) are marked
 # as pre-releases so they are not surfaced as "latest".
 on:
   push:
@@ -34,7 +34,7 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           if [[ "${TAG}" != v* ]]; then
-            echo "ERROR: Release tag '${TAG}' must start with 'v' (e.g. v0.1.0-alpha.2)" >&2
+            echo "ERROR: Release tag '${TAG}' must start with 'v' (e.g. v0.1.0-alpha.3)" >&2
             exit 1
           fi
           TAG_VER="${TAG#v}"
@@ -81,7 +81,17 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           ARCHIVE="brix-${TAG}-${{ matrix.target }}.tar.gz"
-          tar -czf "${ARCHIVE}" -C "target/${{ matrix.target }}/release" brix
+          PKG_DIR=$(mktemp -d)
+          trap 'rm -rf "${PKG_DIR}"' EXIT
+          STAGE_DIR="${PKG_DIR}/brix-${TAG}-${{ matrix.target }}"
+          mkdir -p "${STAGE_DIR}/examples"
+          cp "target/${{ matrix.target }}/release/brix" "${STAGE_DIR}/brix"
+          cp "README.md" "${STAGE_DIR}/README.md"
+          cp "LICENSE" "${STAGE_DIR}/LICENSE"
+          cp "examples/shipping.brix" "${STAGE_DIR}/examples/shipping.brix"
+          cp "examples/shipping-input.brix" "${STAGE_DIR}/examples/shipping-input.brix"
+          cp "examples/shipping-input.json" "${STAGE_DIR}/examples/shipping-input.json"
+          tar -czf "${ARCHIVE}" -C "${PKG_DIR}" "brix-${TAG}-${{ matrix.target }}"
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
           else
@@ -95,16 +105,22 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           ARCHIVE="brix-${TAG}-${{ matrix.target }}.tar.gz"
           SMOKE_DIR=$(mktemp -d)
+          trap 'rm -rf "${SMOKE_DIR}"' EXIT
           tar -xzf "${ARCHIVE}" -C "${SMOKE_DIR}"
-          VERSION_OUTPUT=$("${SMOKE_DIR}/brix" --version)
+          TOP_DIR="${SMOKE_DIR}/brix-${TAG}-${{ matrix.target }}"
+          if [[ ! -d "${TOP_DIR}" ]]; then
+            echo "ERROR: Expected top-level directory '${TOP_DIR}' not found in archive" >&2
+            exit 1
+          fi
+          VERSION_OUTPUT=$("${TOP_DIR}/brix" --version)
           echo "Smoke check output: ${VERSION_OUTPUT}"
           TAG_VER="${TAG#v}"
           if [[ "${VERSION_OUTPUT}" != "brix ${TAG_VER}" ]]; then
             echo "ERROR: Smoke check version '${VERSION_OUTPUT}' does not match expected 'brix ${TAG_VER}'" >&2
-            rm -rf "${SMOKE_DIR}"
             exit 1
           fi
-          rm -rf "${SMOKE_DIR}"
+          "${TOP_DIR}/brix" check "${TOP_DIR}/examples/shipping-input.brix" --input "${TOP_DIR}/examples/shipping-input.json"
+          "${TOP_DIR}/brix" run "${TOP_DIR}/examples/shipping-input.brix" --input "${TOP_DIR}/examples/shipping-input.json"
           echo "Smoke check passed for ${{ matrix.target }}"
       - name: Upload asset artifacts
         uses: actions/upload-artifact@v7

@@ -16,8 +16,7 @@ use crate::finite_decision::plan::{
     finite_decision_program_id, FiniteDecisionProgramId, FINITE_DECISION_PROFILE,
 };
 use crate::finite_decision::runtime::{
-    finite_decision_audit_environment_from_plan, FiniteDecisionRun, FiniteDecisionRuntime,
-    FiniteDecisionStop,
+    FiniteDecisionRun, FiniteDecisionRuntime, FiniteDecisionStop,
 };
 use crate::l3::{lower_l3_plan, L3PlanV1, PlanLimitsV1, L3_PROFILE_MARKER_V1};
 use crate::l3_audit::{l3_generator_registry, l3_generator_semantics};
@@ -101,6 +100,8 @@ pub enum SourceBundleError<P> {
         /// Observed bundle context identity.
         found: ContextId,
     },
+    /// Input validation failed against declared inputs.
+    InputValidation(crate::input::InputValidationError),
     /// Bundle validation or receipt verification failed.
     BundleCheck(BundleCheckError),
 }
@@ -129,6 +130,7 @@ impl<P: fmt::Debug> fmt::Display for SourceBundleError<P> {
                     "context identity mismatch: expected {expected:?}, found {found:?}"
                 )
             }
+            Self::InputValidation(err) => write!(f, "input validation failed: {err}"),
             Self::BundleCheck(err) => write!(f, "bundle verification failed: {err:?}"),
         }
     }
@@ -331,13 +333,14 @@ pub fn produce_l3_audit_input_bundle_v1(
     produce_l3_audit_input_bundle_with_limits_v1(report, run, &AuditDecodeLimits::strict())
 }
 
-/// Verify a finite-decision audit input bundle against an already parsed and resolved module.
-pub fn check_finite_decision_audit_input_bundle_from_module_v1(
+/// Verify a finite-decision audit input bundle against an already parsed and resolved module under an input snapshot.
+pub fn check_finite_decision_audit_input_bundle_from_module_with_inputs_v1(
     module: &brix_syntax::ast::Module,
     expected_program: FiniteDecisionProgramId,
     plan_limits: &PlanLimitsV1,
     bundle: &SettlementAuditInputBundleV1,
     decode_limits: &AuditDecodeLimits,
+    snapshot: &crate::input::InputSnapshot,
 ) -> Result<FiniteDecisionAuditBundleVerificationReport, FiniteDecisionSourceBundleError> {
     let plan = crate::finite_decision::lower_finite_decision_plan(module, FINITE_DECISION_PROFILE)
         .map_err(|e| SourceBundleError::Lower(format!("{e:?}")))?;
@@ -359,7 +362,19 @@ pub fn check_finite_decision_audit_input_bundle_from_module_v1(
     }
 
     let (context, registry, semantics) =
-        finite_decision_audit_environment_from_plan(&plan).map_err(SourceBundleError::Lower)?;
+        crate::finite_decision::runtime::finite_decision_audit_environment_from_plan_with_inputs(
+            &plan, snapshot,
+        )
+        .map_err(|e| match e {
+            crate::finite_decision::runtime::FiniteDecisionBuildError::InputValidation(err) => {
+                SourceBundleError::InputValidation(err)
+            }
+            crate::finite_decision::runtime::FiniteDecisionBuildError::MissingProposal {
+                candidate,
+            } => SourceBundleError::Lower(format!(
+                "candidate '{candidate}' in commit was not found in declared proposals"
+            )),
+        })?;
 
     if bundle.context != context {
         return Err(SourceBundleError::ContextMismatch {
@@ -382,14 +397,33 @@ pub fn check_finite_decision_audit_input_bundle_from_module_v1(
     })
 }
 
-/// Verify a finite-decision audit input bundle against source.
-pub fn check_finite_decision_audit_input_bundle_from_source_v1(
+/// Verify a finite-decision audit input bundle against an already parsed and resolved module with no external inputs.
+pub fn check_finite_decision_audit_input_bundle_from_module_v1(
+    module: &brix_syntax::ast::Module,
+    expected_program: FiniteDecisionProgramId,
+    plan_limits: &PlanLimitsV1,
+    bundle: &SettlementAuditInputBundleV1,
+    decode_limits: &AuditDecodeLimits,
+) -> Result<FiniteDecisionAuditBundleVerificationReport, FiniteDecisionSourceBundleError> {
+    check_finite_decision_audit_input_bundle_from_module_with_inputs_v1(
+        module,
+        expected_program,
+        plan_limits,
+        bundle,
+        decode_limits,
+        &crate::input::InputSnapshot::empty(),
+    )
+}
+
+/// Verify a finite-decision audit input bundle against source under an input snapshot.
+pub fn check_finite_decision_audit_input_bundle_from_source_with_inputs_v1(
     source: &[u8],
     expected_program: FiniteDecisionProgramId,
     parse_limits: ParseLimits,
     plan_limits: &PlanLimitsV1,
     bundle: &SettlementAuditInputBundleV1,
     decode_limits: &AuditDecodeLimits,
+    snapshot: &crate::input::InputSnapshot,
 ) -> Result<FiniteDecisionAuditBundleVerificationReport, FiniteDecisionSourceBundleError> {
     if source.len() > parse_limits.max_source_bytes {
         return Err(SourceBundleError::SourceTooLarge {
@@ -403,12 +437,33 @@ pub fn check_finite_decision_audit_input_bundle_from_source_v1(
     let module = brix_syntax::parse_bounded(text, parse_limits)
         .map_err(|e| SourceBundleError::Parse(e.to_string()))?;
 
-    check_finite_decision_audit_input_bundle_from_module_v1(
+    check_finite_decision_audit_input_bundle_from_module_with_inputs_v1(
         &module,
         expected_program,
         plan_limits,
         bundle,
         decode_limits,
+        snapshot,
+    )
+}
+
+/// Verify a finite-decision audit input bundle against source with no external inputs.
+pub fn check_finite_decision_audit_input_bundle_from_source_v1(
+    source: &[u8],
+    expected_program: FiniteDecisionProgramId,
+    parse_limits: ParseLimits,
+    plan_limits: &PlanLimitsV1,
+    bundle: &SettlementAuditInputBundleV1,
+    decode_limits: &AuditDecodeLimits,
+) -> Result<FiniteDecisionAuditBundleVerificationReport, FiniteDecisionSourceBundleError> {
+    check_finite_decision_audit_input_bundle_from_source_with_inputs_v1(
+        source,
+        expected_program,
+        parse_limits,
+        plan_limits,
+        bundle,
+        decode_limits,
+        &crate::input::InputSnapshot::empty(),
     )
 }
 
@@ -429,6 +484,18 @@ pub fn produce_finite_decision_audit_input_bundle_with_limits_v1(
     if run.program != runtime.program {
         return Err(SourceBundleProducerError::RunMismatch(
             "program mismatch between runtime and run".to_string(),
+        ));
+    }
+
+    if run.context != runtime.context {
+        return Err(SourceBundleProducerError::RunMismatch(
+            "context mismatch between runtime and run".to_string(),
+        ));
+    }
+
+    if run.inputs != runtime.bound_inputs() {
+        return Err(SourceBundleProducerError::RunMismatch(
+            "bound inputs mismatch between runtime and run".to_string(),
         ));
     }
 

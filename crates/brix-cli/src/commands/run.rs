@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use brix_lower::finite_decision::{
-    lower_finite_decision_plan, FiniteDecisionRuntime, FiniteDecisionStop, FINITE_DECISION_PROFILE,
+    finite_decision_program_id, lower_finite_decision_plan, FiniteDecisionRuntime,
+    FiniteDecisionStop, FINITE_DECISION_PROFILE,
 };
 use brix_syntax::parse_bounded;
 
@@ -15,8 +16,13 @@ use crate::commands::{
 use crate::json::{CliResultJson, BRIX_CLI_SCHEMA};
 use crate::packages::{make_package_loader, read_source_bounded};
 
-/// Execute `brix run <file.brix>`.
-pub fn execute_run(file: &Path, json: bool, package_paths: &[PathBuf]) -> u8 {
+/// Execute `brix run <file.brix> [--input <path>...]`.
+pub fn execute_run(
+    file: &Path,
+    json: bool,
+    package_paths: &[PathBuf],
+    input_paths: &[PathBuf],
+) -> u8 {
     let source = match read_source_bounded(file) {
         Ok(s) => s,
         Err(err) => {
@@ -75,7 +81,52 @@ pub fn execute_run(file: &Path, json: bool, package_paths: &[PathBuf]) -> u8 {
         }
     };
 
-    let runtime = FiniteDecisionRuntime::build(&plan);
+    let snapshot = match crate::commands::load_cli_input_snapshot(input_paths) {
+        Ok(s) => s,
+        Err(err) => {
+            if json {
+                let res = CliResultJson::failure(
+                    "run",
+                    Some(FINITE_DECISION_PROFILE.to_string()),
+                    Some(finite_decision_program_id(&plan).0.to_hex()),
+                    None,
+                    err.status(),
+                    vec![err.diagnostic()],
+                );
+                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            } else {
+                eprintln!("{}", err.render_human("run"));
+            }
+            return err.exit_code();
+        }
+    };
+
+    let runtime = match FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot) {
+        Ok(r) => r,
+        Err(err) => {
+            let cli_err = crate::commands::CliInputError::from(err);
+            let snapshot_hex = if !snapshot.is_empty() {
+                Some(snapshot.id().0.to_hex())
+            } else {
+                None
+            };
+            if json {
+                let res = CliResultJson::failure(
+                    "run",
+                    Some(FINITE_DECISION_PROFILE.to_string()),
+                    Some(finite_decision_program_id(&plan).0.to_hex()),
+                    None,
+                    cli_err.status(),
+                    vec![cli_err.diagnostic()],
+                )
+                .with_inputs(snapshot_hex, None);
+                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            } else {
+                eprintln!("{}", cli_err.render_human("run"));
+            }
+            return cli_err.exit_code();
+        }
+    };
     let context_hex = runtime.context.digest().to_hex();
     let run = runtime.run();
 
@@ -87,6 +138,20 @@ pub fn execute_run(file: &Path, json: bool, package_paths: &[PathBuf]) -> u8 {
             let (code, detail) = unknown_reason_to_code_and_detail(reason);
             ("unknown".to_string(), vec![format!("{code}: {detail}")])
         }
+    };
+
+    let (input_snapshot, inputs_json) = if !snapshot.is_empty() {
+        (
+            Some(snapshot.id().0.to_hex()),
+            Some(
+                run.inputs
+                    .iter()
+                    .map(crate::commands::bound_input_to_json)
+                    .collect(),
+            ),
+        )
+    } else {
+        (None, None)
     };
 
     if json {
@@ -106,7 +171,9 @@ pub fn execute_run(file: &Path, json: bool, package_paths: &[PathBuf]) -> u8 {
             profile: Some(FINITE_DECISION_PROFILE.to_string()),
             program: Some(run.program.0.to_hex()),
             context: Some(context_hex),
+            input_snapshot,
             status: status_str,
+            inputs: inputs_json,
             facts: facts_json,
             candidates: candidates_json,
             decision: decision_json,
@@ -115,7 +182,8 @@ pub fn execute_run(file: &Path, json: bool, package_paths: &[PathBuf]) -> u8 {
         };
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {
-        let human = format_finite_decision_human(&run, Some(&context_hex));
+        let human =
+            format_finite_decision_human(&run, Some(&context_hex), input_snapshot.as_deref());
         print!("{human}");
     }
 

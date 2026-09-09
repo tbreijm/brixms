@@ -6,12 +6,21 @@ use std::fmt;
 use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_syntax::ast;
 
+use crate::finite_decision::runtime::L3ValueType;
 use crate::l3_v2::{
     lower_expr_v2, L3ConfigBodyV2, L3ConfigDeclV2, L3ExprV2, L3PatternV2, L3V2LowerError,
 };
 
 /// The profile marker for finite-decision alpha (ADR-0030 ⟨D-PROFILE⟩).
 pub const FINITE_DECISION_PROFILE: &str = "brix.l3.finite-decision@1";
+
+/// A declared external input in a finite-decision plan (ADR-0031).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FiniteDecisionInput {
+    pub ordinal: u64,
+    pub name: String,
+    pub ty: L3ValueType,
+}
 
 /// A normalized rule in a finite-decision plan.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,11 +49,12 @@ pub struct FiniteDecisionCommit {
     pub candidates: Vec<String>,
 }
 
-/// A lowered finite-decision plan (ADR-0030).
+/// A lowered finite-decision plan (ADR-0030, ADR-0031).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FiniteDecisionPlan {
     pub profile: String,
     pub configs: Vec<L3ConfigDeclV2>,
+    pub inputs: Vec<FiniteDecisionInput>,
     pub lets: Vec<(String, L3ExprV2)>,
     pub rules: Vec<FiniteDecisionRule>,
     pub proposals: Vec<FiniteDecisionProposal>,
@@ -53,6 +63,11 @@ pub struct FiniteDecisionPlan {
 }
 
 impl FiniteDecisionPlan {
+    /// Look up an input by declared name.
+    pub fn find_input(&self, name: &str) -> Option<&FiniteDecisionInput> {
+        self.inputs.iter().find(|i| i.name == name)
+    }
+
     /// Look up a proposal by candidate name.
     pub fn find_proposal(&self, name: &str) -> Option<&FiniteDecisionProposal> {
         self.proposals.iter().find(|p| p.name == name)
@@ -68,7 +83,10 @@ pub enum FiniteDecisionLowerError {
     MultipleCommits(usize),
     EmptyCommit(String),
     DuplicateProposalName(String),
+    DuplicateInputName(String),
     DuplicateItemName(String),
+    InputNameTooLong { limit: usize },
+    UnsupportedInputType { name: String, ty: String },
     UnknownCandidateInCommit { commit: String, candidate: String },
     DuplicateCandidateInCommit { commit: String, candidate: String },
     UndeclaredDependency { proposal: String, dep: String },
@@ -101,7 +119,14 @@ impl fmt::Display for FiniteDecisionLowerError {
                 write!(f, "commit declaration '{name}' has no candidate members")
             }
             Self::DuplicateProposalName(name) => write!(f, "duplicate proposal name: '{name}'"),
+            Self::DuplicateInputName(name) => write!(f, "duplicate input name: '{name}'"),
             Self::DuplicateItemName(name) => write!(f, "duplicate top-level item name: '{name}'"),
+            Self::InputNameTooLong { limit } => {
+                write!(f, "input name exceeds length limit ({limit} bytes)")
+            }
+            Self::UnsupportedInputType { name, ty } => {
+                write!(f, "unsupported input type for '{name}': '{ty}' (only Int, Bool, Str are supported)")
+            }
             Self::UnknownCandidateInCommit { commit, candidate } => {
                 write!(
                     f,
@@ -155,7 +180,8 @@ pub fn lower_finite_decision_plan(
             | ast::Item::Let(_)
             | ast::Item::Rule(_)
             | ast::Item::Propose(_)
-            | ast::Item::Show(_) => {}
+            | ast::Item::Show(_)
+            | ast::Item::Input(_) => {}
             ast::Item::Commit(c) => {
                 commit_items.push(c);
             }
@@ -208,6 +234,7 @@ pub fn lower_finite_decision_plan(
     }
 
     // Scopes for lowering.
+    let mut input_names: BTreeSet<String> = BTreeSet::new();
     let mut let_names: BTreeSet<String> = BTreeSet::new();
     let mut rule_names: BTreeSet<String> = BTreeSet::new();
     let mut proposal_names: BTreeSet<String> = BTreeSet::new();
@@ -216,6 +243,7 @@ pub fn lower_finite_decision_plan(
     let mut nullary: BTreeMap<String, String> = BTreeMap::new();
 
     let mut configs = Vec::new();
+    let mut inputs = Vec::new();
     let mut lets = Vec::new();
     let mut rules = Vec::new();
     let mut proposals = Vec::new();
@@ -223,6 +251,47 @@ pub fn lower_finite_decision_plan(
 
     for item in &module.items {
         match item {
+            ast::Item::Input(inp) => {
+                if inp.name.len() > crate::input::MAX_INPUT_NAME_BYTES {
+                    return Err(FiniteDecisionLowerError::InputNameTooLong {
+                        limit: crate::input::MAX_INPUT_NAME_BYTES,
+                    });
+                }
+                if !input_names.insert(inp.name.clone()) {
+                    return Err(FiniteDecisionLowerError::DuplicateInputName(
+                        inp.name.clone(),
+                    ));
+                }
+                if !all_top_level_names.insert(inp.name.clone()) {
+                    return Err(FiniteDecisionLowerError::DuplicateItemName(
+                        inp.name.clone(),
+                    ));
+                }
+                let ty = match &inp.ty {
+                    ast::Ty::Named(n) => match n.as_str() {
+                        "Int" => L3ValueType::Int,
+                        "Bool" => L3ValueType::Bool,
+                        "Str" => L3ValueType::Str,
+                        other => {
+                            return Err(FiniteDecisionLowerError::UnsupportedInputType {
+                                name: inp.name.clone(),
+                                ty: other.to_string(),
+                            });
+                        }
+                    },
+                    other => {
+                        return Err(FiniteDecisionLowerError::UnsupportedInputType {
+                            name: inp.name.clone(),
+                            ty: format!("{other:?}"),
+                        });
+                    }
+                };
+                inputs.push(FiniteDecisionInput {
+                    ordinal: inputs.len() as u64,
+                    name: inp.name.clone(),
+                    ty,
+                });
+            }
             ast::Item::Config(c) => {
                 if !all_top_level_names.insert(c.name.clone()) {
                     return Err(FiniteDecisionLowerError::DuplicateItemName(c.name.clone()));
@@ -255,9 +324,11 @@ pub fn lower_finite_decision_plan(
                 if !all_top_level_names.insert(l.name.clone()) {
                     return Err(FiniteDecisionLowerError::DuplicateItemName(l.name.clone()));
                 }
+                let mut visible_bindings = let_names.clone();
+                visible_bindings.extend(input_names.iter().cloned());
                 let value = lower_expr_v2(
                     &l.value,
-                    &let_names,
+                    &visible_bindings,
                     &BTreeSet::new(),
                     &nullary,
                     &variants_of,
@@ -294,19 +365,27 @@ pub fn lower_finite_decision_plan(
                     }
                 }
                 let readable: BTreeSet<String> = depends_on.iter().cloned().collect();
-                let body =
-                    lower_expr_v2(&r.body, &let_names, &readable, &nullary, &variants_of, true)
-                        .map_err(|e| match e {
-                            L3V2LowerError::UnresolvedReference(n) if rule_names.contains(&n) => {
-                                FiniteDecisionLowerError::RuleDependencyError(
-                                    L3V2LowerError::UndeclaredFactRead {
-                                        rule: r.name.clone(),
-                                        fact: n,
-                                    },
-                                )
-                            }
-                            other => FiniteDecisionLowerError::ExprError(other),
-                        })?;
+                let mut visible_bindings = let_names.clone();
+                visible_bindings.extend(input_names.iter().cloned());
+                let body = lower_expr_v2(
+                    &r.body,
+                    &visible_bindings,
+                    &readable,
+                    &nullary,
+                    &variants_of,
+                    true,
+                )
+                .map_err(|e| match e {
+                    L3V2LowerError::UnresolvedReference(n) if rule_names.contains(&n) => {
+                        FiniteDecisionLowerError::RuleDependencyError(
+                            L3V2LowerError::UndeclaredFactRead {
+                                rule: r.name.clone(),
+                                fact: n,
+                            },
+                        )
+                    }
+                    other => FiniteDecisionLowerError::ExprError(other),
+                })?;
                 rule_names.insert(r.name.clone());
                 rules.push(FiniteDecisionRule {
                     ordinal: rules.len() as u64,
@@ -343,9 +422,11 @@ pub fn lower_finite_decision_plan(
                     }
                 }
                 let readable: BTreeSet<String> = deps.iter().cloned().collect();
+                let mut visible_bindings = let_names.clone();
+                visible_bindings.extend(input_names.iter().cloned());
                 let guard = lower_expr_v2(
                     &p.guard,
-                    &let_names,
+                    &visible_bindings,
                     &readable,
                     &nullary,
                     &variants_of,
@@ -362,7 +443,7 @@ pub fn lower_finite_decision_plan(
                 })?;
                 let value = lower_expr_v2(
                     &p.value,
-                    &let_names,
+                    &visible_bindings,
                     &readable,
                     &nullary,
                     &variants_of,
@@ -387,9 +468,17 @@ pub fn lower_finite_decision_plan(
                 });
             }
             ast::Item::Show(expr) => {
-                let show =
-                    lower_expr_v2(expr, &let_names, &rule_names, &nullary, &variants_of, true)
-                        .map_err(FiniteDecisionLowerError::ExprError)?;
+                let mut visible_bindings = let_names.clone();
+                visible_bindings.extend(input_names.iter().cloned());
+                let show = lower_expr_v2(
+                    expr,
+                    &visible_bindings,
+                    &rule_names,
+                    &nullary,
+                    &variants_of,
+                    true,
+                )
+                .map_err(FiniteDecisionLowerError::ExprError)?;
                 shows.push(show);
             }
             ast::Item::Commit(_) => {
@@ -417,6 +506,7 @@ pub fn lower_finite_decision_plan(
     Ok(FiniteDecisionPlan {
         profile: FINITE_DECISION_PROFILE.to_string(),
         configs,
+        inputs,
         lets,
         rules,
         proposals,
@@ -551,9 +641,18 @@ fn encode_expr_v2(w: &mut CanonWriter, e: &L3ExprV2) {
     }
 }
 
+fn encode_input_type(w: &mut CanonWriter, ty: &L3ValueType) {
+    match ty {
+        L3ValueType::Int => w.write_enum(0, |_| {}),
+        L3ValueType::Bool => w.write_enum(1, |_| {}),
+        L3ValueType::Str => w.write_enum(2, |_| {}),
+        other => panic!("non-scalar input type in plan: {other:?}"),
+    }
+}
+
 /// The canonical program preimage uniquely binding normalized rules, proposals,
 /// guards, values, priorities, commit membership and order, show directives,
-/// and profile marker (ADR-0030 ⟨D-PROGID⟩).
+/// and profile marker (ADR-0030 ⟨D-PROGID⟩, ADR-0031 ⟨D-IDENTITY⟩).
 pub fn finite_decision_program_preimage(plan: &FiniteDecisionPlan) -> Vec<u8> {
     let mut w = CanonWriter::new();
     w.write_tag("brix.l3.finite-decision.program@1");
@@ -564,6 +663,19 @@ pub fn finite_decision_program_preimage(plan: &FiniteDecisionPlan) -> Vec<u8> {
     for c in &plan.configs {
         w.write_ident(&c.name);
         encode_config_body_v2(&mut w, &c.body);
+    }
+
+    // Inputs (ADR-0031):
+    // Bound into program identity when present. When empty, omitted to maintain
+    // byte-for-byte preimage and ProgramId compatibility with alpha.2 programs.
+    if !plan.inputs.is_empty() {
+        w.write_tag("brix.l3.finite-decision.inputs@1");
+        w.write_uint(plan.inputs.len() as u64);
+        for inp in &plan.inputs {
+            w.write_uint(inp.ordinal);
+            w.write_ident(&inp.name);
+            encode_input_type(&mut w, &inp.ty);
+        }
     }
 
     // Lets
