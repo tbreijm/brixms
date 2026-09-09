@@ -112,15 +112,8 @@ jobs:
             echo "ERROR: Expected top-level directory '${TOP_DIR}' not found in archive" >&2
             exit 1
           fi
-          VERSION_OUTPUT=$("${TOP_DIR}/brix" --version)
-          echo "Smoke check output: ${VERSION_OUTPUT}"
           TAG_VER="${TAG#v}"
-          if [[ "${VERSION_OUTPUT}" != "brix ${TAG_VER}" ]]; then
-            echo "ERROR: Smoke check version '${VERSION_OUTPUT}' does not match expected 'brix ${TAG_VER}'" >&2
-            exit 1
-          fi
-          "${TOP_DIR}/brix" check "${TOP_DIR}/examples/shipping-input.brix" --input "${TOP_DIR}/examples/shipping-input.json"
-          "${TOP_DIR}/brix" run "${TOP_DIR}/examples/shipping-input.brix" --input "${TOP_DIR}/examples/shipping-input.json"
+          python3 scripts/smoke_release_package.py "${TOP_DIR}" "${TAG_VER}"
           echo "Smoke check passed for ${{ matrix.target }}"
       - name: Upload asset artifacts
         uses: actions/upload-artifact@v7
