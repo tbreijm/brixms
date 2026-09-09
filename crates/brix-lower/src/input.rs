@@ -593,10 +593,27 @@ pub fn decode_input_shard(
     parser.parse_input_shard()
 }
 
+#[cfg(unix)]
+fn open_input_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_input_file(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().read(true).open(path)
+}
+
 /// Decode a single input artifact shard from a regular file using a bounded reader (ADR-0031 ⟨D-BOUNDS⟩).
 ///
 /// Security properties:
-/// - Rejects non-regular files (directories, fifos, sockets, character/block devices).
+/// - Opens files non-blocking on Unix (`O_NONBLOCK`) to prevent indefinite blocking on named pipes/FIFOs
+///   that have no active writer, and to harden against TOCTOU swap races between preflight and open.
+/// - Validates the opened file handle's metadata (`fstat`) before reading, rejecting non-regular files
+///   (directories, fifos, sockets, character/block devices).
 /// - Validates file size from the opened file handle before reading.
 /// - Reads at most `max_file_bytes + 1` using [`std::io::Read::take`], ensuring that an unbounded read
 ///   or memory amplification is physically impossible even under concurrent truncation/expansion.
@@ -607,7 +624,7 @@ pub fn decode_input_shard_from_file<P: AsRef<Path>>(
 ) -> Result<InputShard, InputDecodeError> {
     let p = path.as_ref();
     let safe_path = p.display().to_string();
-    let file = std::fs::File::open(p).map_err(|e| InputDecodeError::IoError {
+    let file = open_input_file(p).map_err(|e| InputDecodeError::IoError {
         path: safe_path.clone(),
         message: e.to_string(),
     })?;
