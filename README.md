@@ -717,6 +717,12 @@ python3 scripts/check_soc_law_map.py
 scripts/test_law_map_provisional_gate.sh
 ```
 
+An extracted release package directory can be smoke-validated end-to-end against an expected version:
+
+```bash
+python3 scripts/smoke_release_package.py <extracted_package_dir> <expected_version>
+```
+
 The required CI merge gates protecting `main` (defined in [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)) are:
 
 1. **`lint`**: formatting (`cargo fmt`), TCB dependency policy (`check_tcb_dependencies.py`), law-map traceability (`check_soc_law_map.py`), canon vector cross-check (`canon_crosscheck.py`), and Clippy warnings-as-errors;
