@@ -52,6 +52,15 @@ pub enum Item {
     Propose(ProposeDecl),
     /// `commit NAME from (CANDIDATE, ...)` — finite-decision commitment.
     Commit(CommitDecl),
+    /// `input NAME: TYPE` — external input declaration (ADR-0031).
+    Input(InputDecl),
+}
+
+/// `input NAME: TYPE`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputDecl {
+    pub name: String,
+    pub ty: Ty,
 }
 
 /// `config Name = <body>`.

@@ -30,6 +30,8 @@ For example, checking a file with literal bindings yields:
   s : Str @Proven
 ```
 
+For finite-decision modules declaring external inputs (`input <name>: <type>`), `brix check <file.brix>` without `--input` performs a declaration-only contract check (`status: checked-input-contract`), validating syntax, imports, and plan lowering without requiring inputs. Supplying `--input <path>...` performs complete preflight validation against the provided input shards.
+
 ---
 
 ## 2. What Type-Checks Today (The L2 Fragment)
@@ -83,7 +85,68 @@ Output of `brix check`:
 
 ---
 
-## 3. Epistemic Grades and Honest Status
+## 3. External Inputs (`input` Declarations & Schemas)
+
+Finite-decision modules under `brix.l3.finite-decision@1` ([ADR-0031](../spec/adr/ADR-0031_External_Input_Alpha.md)) support declaring external operational parameters at top level:
+
+```brix
+input stock: Int
+input threshold: Int
+input urgent: Bool
+```
+
+### Syntax and Declaration Rules
+
+- **Syntax:** `input <name>: <type>` at top level; newline-delimited without trailing semicolons.
+- **Scope:** Declared inputs are bound into expression scope for subsequent rule bodies, candidate proposal guards (`when`), proposal values, and `show` expressions.
+- **Exact Scalar Types:** Supported input types are strictly limited to scalars:
+  - `Int`: signed 64-bit integer (`i64`)
+  - `Bool`: boolean (`true` or `false`)
+  - `Str`: UTF-8 string scalar sequence
+  Non-scalar types (records, sum variants) and floating-point numbers (`Float`) are rejected fail-closed; no lossy coercions are permitted.
+- **Identifier Collision Discipline:** Input names participate in top-level collision checks and must not shadow or duplicate other inputs, `let` bindings, rules, or proposals.
+
+### Artifact Schema: `brix.input@1`
+
+External inputs are transported in strict JSON files conforming to schema `brix.input@1`:
+
+```json
+{
+  "schema": "brix.input@1",
+  "values": {
+    "stock": {
+      "type": "int",
+      "value": "12"
+    },
+    "urgent": {
+      "type": "bool",
+      "value": true
+    }
+  }
+}
+```
+
+- **Strict Envelope:** The root JSON object must contain exactly `"schema": "brix.input@1"` and `"values"`. Any unrecognized key causes fail-closed rejection.
+- **Tagged Scalar Values:**
+  - `int`: `{"type": "int", "value": "<decimal-string>"}` (string-encoded decimal representation avoiding IEEE 754 precision loss; leading zeros and overflow are rejected).
+  - `bool`: `{"type": "bool", "value": true | false}` (native JSON boolean).
+  - `string`: `{"type": "string", "value": "<string>"}` (native JSON string).
+- **Zero-Tolerance Duplicate Key Rejection:** Duplicate keys anywhere in the JSON artifact (in the root envelope, inside `values`, or within tagged scalar objects) are strictly rejected without applying last-write-wins.
+- **Bounded Resource Limits:** File size is bounded to 1 MiB per file, an aggregate limit of 4 MiB across at most 16 shard files, at most 256 inputs, 64-byte identifier length limit, and 64 KiB string value limit.
+
+### CLI Behavior & Epistemic Status
+
+- **Separable Declaration and Completeness Validation:**
+  - `brix check <file.brix>` without `--input` validates syntax, imports, and input declarations (`status: checked-input-contract`), establishing a stable `ProgramId` that binds declarations without values.
+  - `brix check <file.brix> --input <path>...` performs complete preflight validation, asserting type alignment, total coverage (no missing or unexpected inputs), and dry-run deliberation.
+- **Repeatable Disjoint Shards:** Multiple `--input <path>` (or `--input=<path>`) flags supply disjoint input shards. Shards must declare mutually exclusive keys; duplicate keys across shards fail closed. Snapshot canonicalization sorts keys lexicographically by NFC name, ensuring order-independent identity.
+- **Snapshot & Context Identity:** `FiniteDecisionProgramId` binds input declarations (name, type, ordinal), never input values. Supplied values are canonicalized into an `InputSnapshotId` (`Domain::Snapshot`). Deliberation `ContextId` incorporates both `ProgramId` and `InputSnapshotId`.
+- **Epistemic Grade `@Derived`:** External input values enter deliberation strictly at epistemic grade `@Derived` (unverified external claims). They never ambiently upgrade to `@Audited` or `@Proven`. Deliberated outcomes commit as `@Derived`.
+- **Offline Audit Verification:** `brix verify` re-derives the input snapshot and deliberation context directly from caller-supplied input files, refusing to trust unverified snapshot claims. Verification under `--profile l3-v1` rejects `--input`.
+
+---
+
+## 4. Epistemic Grades and Honest Status
 
 Brix categorizes statement outcomes using three epistemic grades:
 
@@ -97,7 +160,7 @@ The proof kernel certifies the *composition* theorem — GIVEN the primitive typ
 
 ---
 
-## 4. Type Normalization & Coercion Lattices
+## 5. Type Normalization & Coercion Lattices
 
 Type normalization in Brix is governed by `CoercionLattice` — a declared category of witnessed coercions over type sorts, executing on a single unified code path.
 
@@ -128,7 +191,7 @@ Output of `brix check`:
 
 ---
 
-## 5. Not Yet Supported
+## 6. Not Yet Supported
 
 The following surface features are not yet in the L2 lowering fragment:
 
@@ -141,10 +204,10 @@ The following surface features are not yet in the L2 lowering fragment:
 
 ---
 
-## 6. Roadmap & Execution Profiles
+## 7. Roadmap & Execution Profiles
 
-- **Finite-Decision Alpha (`0.1.0-alpha.2`):** The `brix.l3.finite-decision@1` candidate deliberation profile ([ADR-0030](../spec/adr/ADR-0030_Finite_Decision_Alpha.md)) is implemented across `brix-syntax`, `soc-regimes`, `brix-lower`, and `brix-cli`. It evaluates complete candidate frontiers, structured rejection reasons, and deterministic calendar selection at phase zero. Decisions are committed as `@Derived` at runtime; the runtime decision remains `@Derived`, while successful independent replay issues and verifies separate `@Audited` audit receipts via `brix verify` ([ADR-0026](../spec/adr/ADR-0026_Audit_Input_Transport_Bundle.md)).
-- **CLI Driver:** The live toolchain provides six file-oriented subcommands: `check`, `run`, `audit`, `verify`, `why`, and `whynot`.
+- **Finite-Decision Alpha (`0.1.0-alpha.3`):** The `brix.l3.finite-decision@1` candidate deliberation profile ([ADR-0030](../spec/adr/ADR-0030_Finite_Decision_Alpha.md)) is implemented across `brix-syntax`, `soc-regimes`, `brix-lower`, and `brix-cli`. In `0.1.0-alpha.3`, external operational inputs ([ADR-0031](../spec/adr/ADR-0031_External_Input_Alpha.md)) are integrated via `input <name>: <type>` declarations, strict `brix.input@1` schema decoding, bounded disjoint shards, and deterministic context identity binding. It evaluates complete candidate frontiers, structured rejection reasons, and deterministic calendar selection at phase zero. Decisions are committed as `@Derived` at runtime; the runtime decision remains `@Derived`, while successful independent replay issues and verifies separate `@Audited` audit receipts via `brix verify` ([ADR-0026](../spec/adr/ADR-0026_Audit_Input_Transport_Bundle.md)).
+- **CLI Driver:** The live toolchain provides six file-oriented subcommands: `check`, `run`, `audit`, `verify`, `why`, and `whynot`. All six subcommands support repeatable `--input <path>` (or `--input=<path>`) flags for finite-decision workflows; `verify --profile l3-v1` rejects `--input`.
 - **L3 v2 Derivation:** Stages A–C ([ADR-0027](../spec/adr/ADR-0027_L3_V2_Derivation.md)) are landed in `brix-lower`, defining the derivation evaluator and eligibility rules on committed dependencies.
 - **Generator Discharge:** Add unit/nullary and catch-all proof schemas, then discharge arithmetic and numeric coercion semantics when value execution exists.
 - **Fragment Expansion:** Add recursive/custom sum payloads and witness composition (`then`/`and`).

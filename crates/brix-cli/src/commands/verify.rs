@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use brix_canon::Digest;
 use brix_lower::audit_bundle::{
-    check_finite_decision_audit_input_bundle_from_module_v1,
+    check_finite_decision_audit_input_bundle_from_module_with_inputs_v1,
     check_l3_audit_input_bundle_from_module_v1,
 };
 use brix_lower::finite_decision::FiniteDecisionProgramId;
@@ -18,7 +18,7 @@ use crate::cli::{VerifyProfile, EXIT_REJECTED_OR_UNKNOWN, EXIT_SUCCESS, EXIT_USA
 use crate::json::{ArtifactJson, CliResultJson, BRIX_CLI_SCHEMA};
 use crate::packages::{make_package_loader, read_source_bounded};
 
-/// Execute `brix verify --expect-program <hex> <file.brix> <bundle> [--profile <finite-decision|l3-v1>]`.
+/// Execute `brix verify --expect-program <hex> <file.brix> <bundle> [--profile <finite-decision|l3-v1>] [--input <path>...]`.
 pub fn execute_verify(
     expect_program_hex: &str,
     file: &Path,
@@ -26,6 +26,7 @@ pub fn execute_verify(
     profile: VerifyProfile,
     json: bool,
     package_paths: &[PathBuf],
+    input_paths: &[PathBuf],
 ) -> u8 {
     let profile_str = match profile {
         VerifyProfile::FiniteDecision => brix_lower::FINITE_DECISION_PROFILE,
@@ -254,11 +255,30 @@ pub fn execute_verify(
         }
     };
 
+    if matches!(profile, VerifyProfile::L3V1) && !input_paths.is_empty() {
+        let msg = "--input is not supported for profile 'l3-v1'".to_string();
+        if json {
+            let res = CliResultJson::failure(
+                "verify",
+                Some(profile_str.to_string()),
+                Some(expect_program_hex.to_string()),
+                None,
+                "usage-error",
+                vec![msg],
+            );
+            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+        } else {
+            eprintln!("brix verify: usage error: {msg}");
+        }
+        return EXIT_USAGE_OR_IO;
+    }
+
     // 6. Call the correct source/module verifier.
     let plan_limits = PlanLimitsV1::generous();
 
     let (
         context_hex,
+        input_snapshot_hex,
         bundle_id_hex,
         final_chain_hex,
         receipts_count,
@@ -266,15 +286,40 @@ pub fn execute_verify(
         receipt_ids_hex,
     ) = match profile {
         VerifyProfile::FiniteDecision => {
+            let snapshot = match crate::commands::load_cli_input_snapshot(input_paths) {
+                Ok(s) => s,
+                Err(err) => {
+                    if json {
+                        let res = CliResultJson::failure(
+                            "verify",
+                            Some(profile_str.to_string()),
+                            Some(expect_program_hex.to_string()),
+                            None,
+                            err.status(),
+                            vec![err.diagnostic()],
+                        );
+                        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                    } else {
+                        eprintln!("{}", err.render_human("verify"));
+                    }
+                    return err.exit_code();
+                }
+            };
+            let input_snapshot_hex = if !snapshot.is_empty() {
+                Some(snapshot.id().0.to_hex())
+            } else {
+                None
+            };
             let mut resolved_module = resolved_module;
             crate::commands::prepare_finite_decision_module(&mut resolved_module);
             let expected_program = FiniteDecisionProgramId(Digest::from_bytes(pin_bytes));
-            match check_finite_decision_audit_input_bundle_from_module_v1(
+            match check_finite_decision_audit_input_bundle_from_module_with_inputs_v1(
                 &resolved_module,
                 expected_program,
                 &plan_limits,
                 &decoded_bundle,
                 &decode_limits,
+                &snapshot,
             ) {
                 Ok(report) => {
                     let rlines: Vec<String> = report
@@ -290,6 +335,7 @@ pub fn execute_verify(
                         .collect();
                     (
                         report.context.digest().to_hex(),
+                        input_snapshot_hex,
                         report.bundle_id.digest().to_hex(),
                         report.final_chain.to_hex(),
                         report.count,
@@ -298,19 +344,34 @@ pub fn execute_verify(
                     )
                 }
                 Err(err) => {
-                    let msg = format!("{err}");
+                    let (status, diag) = match &err {
+                        brix_lower::audit_bundle::SourceBundleError::InputValidation(iv) => {
+                            let cli_err = crate::commands::CliInputError::from(iv.clone());
+                            (cli_err.status(), cli_err.diagnostic())
+                        }
+                        other => ("unknown", format!("verification-error: {other}")),
+                    };
                     if json {
                         let res = CliResultJson::failure(
                             "verify",
                             Some(profile_str.to_string()),
                             Some(expect_program_hex.to_string()),
                             None,
-                            "unknown",
-                            vec![format!("verification-error: {err}")],
-                        );
+                            status,
+                            vec![diag.clone()],
+                        )
+                        .with_inputs(input_snapshot_hex, None);
                         println!("{}", serde_json::to_string_pretty(&res).unwrap());
                     } else {
-                        eprintln!("brix verify: unknown ({msg})");
+                        match &err {
+                            brix_lower::audit_bundle::SourceBundleError::InputValidation(iv) => {
+                                let cli_err = crate::commands::CliInputError::from(iv.clone());
+                                eprintln!("{}", cli_err.render_human("verify"));
+                            }
+                            _ => {
+                                eprintln!("brix verify: unknown ({diag})");
+                            }
+                        }
                     }
                     return EXIT_REJECTED_OR_UNKNOWN;
                 }
@@ -339,6 +400,7 @@ pub fn execute_verify(
                         .collect();
                     (
                         report.context.digest().to_hex(),
+                        None,
                         report.bundle_id.digest().to_hex(),
                         report.final_chain.to_hex(),
                         report.count,
@@ -384,7 +446,9 @@ pub fn execute_verify(
             profile: Some(profile_str.to_string()),
             program: Some(expect_program_hex.to_string()),
             context: Some(context_hex),
+            input_snapshot: input_snapshot_hex,
             status: "audit-bundle-verified".to_string(),
+            inputs: None,
             facts: Vec::new(),
             candidates: Vec::new(),
             decision: None,
@@ -399,6 +463,9 @@ pub fn execute_verify(
         println!("status: audit-bundle-verified");
         println!("program: {expect_program_hex}");
         println!("context: {context_hex}");
+        if let Some(snap) = &input_snapshot_hex {
+            println!("input-snapshot: {snap}");
+        }
         println!("bundle_id: {bundle_id_hex}");
         println!("final_chain: {final_chain_hex}");
         println!("receipts: {receipts_count}");

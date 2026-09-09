@@ -262,6 +262,10 @@ impl Parser {
                 self.advance();
                 self.parse_commit_decl().map(Item::Commit)
             }
+            TokenKind::Input => {
+                self.advance();
+                self.parse_input_decl().map(Item::Input)
+            }
             other => Err(self.error(format!("Unexpected token {:?} at top-level item", other))),
         }
     }
@@ -479,6 +483,13 @@ impl Parser {
             ));
         }
         Ok(CommitDecl { name, candidates })
+    }
+
+    fn parse_input_decl(&mut self) -> Result<InputDecl, ParseError> {
+        let name = self.expect_ident("input declaration name")?.0;
+        self.consume(TokenKind::Colon, "input declaration ':'")?;
+        let ty = self.parse_ty()?;
+        Ok(InputDecl { name, ty })
     }
 
     fn parse_ty(&mut self) -> Result<Ty, ParseError> {

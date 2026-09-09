@@ -1,0 +1,24 @@
+config Decision = Expedite | Ship | Hold
+
+input stock: Int
+input eligible: Bool
+input region: Str
+
+rule threshold() = 10
+rule destination() = region
+rule valid_destination(destination) = destination == "EU-NORTH"
+
+rule can_ship(threshold, valid_destination) = match eligible {
+  true => match valid_destination {
+    true => stock >= threshold
+    false => false
+  }
+  false => false
+}
+
+propose expedite() priority 5 when stock >= 50 = Expedite
+propose ship(can_ship) priority 10 when can_ship == true = Ship
+propose hold() priority 100 when true = Hold
+
+commit shipping from (expedite, ship, hold)
+show shipping

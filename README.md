@@ -282,13 +282,15 @@ Execution profiles currently in the workspace:
 
 - `brix check` exercises native type-realization over top-level bindings (`soc-regimes`)
   or runs preflight verification on finite-decision modules;
-- `brix.l3.finite-decision@1` ([ADR-0030](./spec/adr/ADR-0030_Finite_Decision_Alpha.md))
+- `brix.l3.finite-decision@1` ([ADR-0030](./spec/adr/ADR-0030_Finite_Decision_Alpha.md),
+  [ADR-0031](./spec/adr/ADR-0031_External_Input_Alpha.md))
   implements the finite-decision alpha deliberation profile across `crates/soc-regimes` and `crates/brix-lower`,
-  evaluating complete candidate frontiers, structured rejection reasons, and
+  evaluating complete candidate frontiers, structured rejection reasons,
+  external operational inputs with strict schema validation and bounded disjoint shards (alpha.3), and
   deterministic calendar selection at phase zero. Deliberated outcomes are committed as `@Derived`
   at runtime; the runtime decision remains `@Derived`, while successful independent replay issues and
   verifies separate `@Audited` audit receipts via audit bundle verification;
-- `brix run`, `audit`, `verify`, `why`, and `whynot` drive the finite-decision alpha workflow;
+- `brix run`, `audit`, `verify`, `why`, and `whynot` drive the finite-decision alpha workflow (with repeatable `--input` support);
 - `crates/brix-lower` additionally contains Stages A–C of L3 v2 derivation
   ([ADR-0027](./spec/adr/ADR-0027_L3_V2_Derivation.md)).
 
@@ -297,6 +299,72 @@ yet implement. Those constructs are refused before execution; they do not
 become guessed results.
 
 ## Try it
+
+Prebuilt release archives are published for **`aarch64-apple-darwin`** (macOS Apple Silicon) and **`x86_64-unknown-linux-gnu`** (Linux x86_64) on GitHub Releases.
+
+### Prebuilt archive installation
+
+#### macOS (Apple Silicon: `aarch64-apple-darwin`)
+
+1. Download the release archive and SHA256 checksum file:
+   ```bash
+   curl -LO https://github.com/tbreijm/brixms/releases/download/v0.1.0-alpha.3/brix-v0.1.0-alpha.3-aarch64-apple-darwin.tar.gz
+   curl -LO https://github.com/tbreijm/brixms/releases/download/v0.1.0-alpha.3/brix-v0.1.0-alpha.3-aarch64-apple-darwin.tar.gz.sha256
+   ```
+2. Verify the checksum:
+   ```bash
+   shasum -a 256 -c brix-v0.1.0-alpha.3-aarch64-apple-darwin.tar.gz.sha256
+   ```
+3. Extract the archive (extracting the predictable top-level directory `brix-v0.1.0-alpha.3-aarch64-apple-darwin`):
+   ```bash
+   tar -xzf brix-v0.1.0-alpha.3-aarch64-apple-darwin.tar.gz
+   ```
+4. Enter the extracted top-level directory and verify the executable:
+   ```bash
+   cd brix-v0.1.0-alpha.3-aarch64-apple-darwin
+   ./brix --version
+   ```
+   Outputs:
+   ```text
+   brix 0.1.0-alpha.3
+   ```
+5. Run preflight check and deliberation on the bundled external-input example:
+   ```bash
+   ./brix check examples/shipping-input.brix --input examples/shipping-input.json
+   ./brix run examples/shipping-input.brix --input examples/shipping-input.json
+   ```
+
+#### Linux (`x86_64-unknown-linux-gnu`)
+
+1. Download the release archive and SHA256 checksum file:
+   ```bash
+   curl -LO https://github.com/tbreijm/brixms/releases/download/v0.1.0-alpha.3/brix-v0.1.0-alpha.3-x86_64-unknown-linux-gnu.tar.gz
+   curl -LO https://github.com/tbreijm/brixms/releases/download/v0.1.0-alpha.3/brix-v0.1.0-alpha.3-x86_64-unknown-linux-gnu.tar.gz.sha256
+   ```
+2. Verify the checksum:
+   ```bash
+   sha256sum -c brix-v0.1.0-alpha.3-x86_64-unknown-linux-gnu.tar.gz.sha256
+   ```
+3. Extract the archive (extracting the predictable top-level directory `brix-v0.1.0-alpha.3-x86_64-unknown-linux-gnu`):
+   ```bash
+   tar -xzf brix-v0.1.0-alpha.3-x86_64-unknown-linux-gnu.tar.gz
+   ```
+4. Enter the extracted top-level directory and verify the executable:
+   ```bash
+   cd brix-v0.1.0-alpha.3-x86_64-unknown-linux-gnu
+   ./brix --version
+   ```
+   Outputs:
+   ```text
+   brix 0.1.0-alpha.3
+   ```
+5. Run preflight check and deliberation on the bundled external-input example:
+   ```bash
+   ./brix check examples/shipping-input.brix --input examples/shipping-input.json
+   ./brix run examples/shipping-input.brix --input examples/shipping-input.json
+   ```
+
+### Building from source (alternative)
 
 Install Rust through [rustup](https://rustup.rs/). The repository pins Rust
 **1.96.1** in [`rust-toolchain.toml`](./rust-toolchain.toml), so the matching
@@ -377,34 +445,147 @@ cargo run -p brix-cli -- whynot examples/shipping.brix --candidate expedite
 
 In finite-decision deliberation, candidate selection commits at evidence grade **`@Derived`** during runtime execution, and the runtime decision remains **`@Derived`**. Successful independent replay issues and verifies separate **`@Audited`** audit receipts via `brix verify`.
 
+### Quickstart: External-input decision workflow (`examples/shipping-input.brix`)
+
+In `0.1.0-alpha.3`, BrixMS supports external operational inputs under the finite-decision profile ([ADR-0031](./spec/adr/ADR-0031_External_Input_Alpha.md)). In [`examples/shipping-input.brix`](./examples/shipping-input.brix), parameters previously hard-coded are declared as external inputs:
+
+```brix
+config Decision = Expedite | Ship | Hold
+
+input stock: Int
+input eligible: Bool
+input region: Str
+
+rule threshold() = 10
+rule destination() = region
+rule valid_destination(destination) = destination == "EU-NORTH"
+
+rule can_ship(threshold, valid_destination) = match eligible {
+  true => match valid_destination {
+    true => stock >= threshold
+    false => false
+  }
+  false => false
+}
+
+propose expedite() priority 5 when stock >= 50 = Expedite
+propose ship(can_ship) priority 10 when can_ship == true = Ship
+propose hold() priority 100 when true = Hold
+
+commit shipping from (expedite, ship, hold)
+show shipping
+```
+
+External values are supplied via strict JSON files conforming to schema `brix.input@1`, using unambiguous tagged scalar representations ([`examples/shipping-input.json`](./examples/shipping-input.json)):
+
+```json
+{
+  "schema": "brix.input@1",
+  "values": {
+    "stock": {
+      "type": "int",
+      "value": "12"
+    },
+    "eligible": {
+      "type": "bool",
+      "value": true
+    },
+    "region": {
+      "type": "string",
+      "value": "EU-NORTH"
+    }
+  }
+}
+```
+
+Key external input properties:
+- **Strict Tagged JSON Scalars:** Schema `brix.input@1` requires explicit tagged scalar objects (`int` with decimal strings, `bool` with booleans, `string` with strings). Floats and lossy coercions are rejected. Any duplicate JSON key in the envelope, values, or objects is strictly rejected fail-closed.
+- **Repeatable Disjoint Shards:** Multiple `--input` flags (e.g. `--input base.json --input overrides.json`) compose disjoint shards. Keys across shards must be mutually exclusive; overlapping keys fail closed with duplicate shard errors. Shard ordering does not affect canonical snapshot identity.
+- **Snapshot & Context Identity:** Static program identity (`FiniteDecisionProgramId`) binds input declarations (name, type, ordinal), never input values. Supplied values are canonicalized into an `InputSnapshotId` (`Domain::Snapshot`). Deliberation `ContextId` binds both program identity and the active snapshot identity under `"brix.l3.finite-decision.context.input@1"`.
+- **Derived Evidence:** External inputs enter execution strictly at epistemic grade **`@Derived`** (unverified external claims cannot ambiently upgrade to `@Audited` or `@Proven`). Candidate deliberation commits at **`@Derived`**, and the runtime decision remains **`@Derived`**.
+
+Execute the full external-input lifecycle:
+
+- **Prebuilt archive:** run `./brix <subcommand> ...` from the extracted directory.
+- **Source workspace:** run `cargo run -p brix-cli -- <subcommand> ...` from the repository root.
+
+The sequence below is shown with `./brix` (substitute `cargo run -p brix-cli --` if running from a source workspace):
+
+```bash
+# 1. Declaration-only check: validates syntax, imports, and plan contract without inputs
+./brix check examples/shipping-input.brix
+# (or from source workspace: cargo run -p brix-cli -- check examples/shipping-input.brix)
+# Outputs: status: checked-input-contract, program: 44a5c10083cf9ebd7e948f2e4934087f39b4959bc2b32f085e98d20085ec7943
+
+# 2. Preflight check with input: validates type matching, completeness, and dry-run deliberation
+./brix check examples/shipping-input.brix --input examples/shipping-input.json
+
+# 3. Deliberate to completion with input (@Derived)
+./brix run examples/shipping-input.brix --input examples/shipping-input.json
+
+# 4. Deliberate, commit, and emit an audit input bundle with bound input records
+./brix audit examples/shipping-input.brix \
+  --input examples/shipping-input.json \
+  --bundle /tmp/shipping-input.brixaudit --force
+
+# 5. Verify the bundle independently against source and caller-supplied inputs
+# Offline replay re-derives the input snapshot and context, issuing and verifying separate @Audited receipts
+./brix verify \
+  --expect-program 44a5c10083cf9ebd7e948f2e4934087f39b4959bc2b32f085e98d20085ec7943 \
+  examples/shipping-input.brix /tmp/shipping-input.brixaudit \
+  --input examples/shipping-input.json
+
+# 6. Inspect why the winning candidate was selected with external inputs
+./brix why examples/shipping-input.brix \
+  --input examples/shipping-input.json --candidate ship
+
+# 7. Inspect why another candidate was rejected with external inputs
+./brix whynot examples/shipping-input.brix \
+  --input examples/shipping-input.json --candidate expedite
+```
+
+Multiple disjoint shards can be passed repeatably by specifying `--input` multiple times with non-overlapping keys (schematic example using non-repository placeholder paths):
+
+```bash
+# Schematic placeholder paths (disjoint shards composing the full input contract):
+./brix run examples/shipping-input.brix \
+  --input /path/to/shard-stock.json \
+  --input /path/to/shard-region.json
+```
+
 ### CLI guide
 
 The `brix` CLI driver provides six file-oriented subcommands:
 
 ```text
-brix check   <file.brix> [--json] [--package-path <dir>...]
-             check a module; runs profile preflight for finite-decision
+brix check   <file.brix> [--input <path>...] [--json] [--package-path <dir>...]
+             check a module; runs declaration-only check or preflight with --input
 
-brix run     <file.brix> [--json] [--package-path <dir>...]
+brix run     <file.brix> [--input <path>...] [--json] [--package-path <dir>...]
              execute a finite-decision deliberation plan to completion (@Derived)
 
-brix audit   <file.brix> --bundle <out> [--force] [--json] [--package-path <dir>...]
+brix audit   <file.brix> --bundle <out> [--input <path>...] [--force] [--json] [--package-path <dir>...]
              run and audit a finite-decision plan, emitting an audit input bundle on success
 
-brix verify  --expect-program <hex> <file.brix> <bundle> [--profile <finite-decision|l3-v1>] [--json] [--package-path <dir>...]
+brix verify  --expect-program <hex> <file.brix> <bundle> [--profile <finite-decision|l3-v1>] [--input <path>...] [--json] [--package-path <dir>...]
              verify an audit input bundle against source and expected program pin (@Audited)
 
-brix why     <file.brix> --candidate <name> [--json] [--package-path <dir>...]
+brix why     <file.brix> --candidate <name> [--input <path>...] [--json] [--package-path <dir>...]
              explain why a candidate was admitted or selected in deliberation
 
-brix whynot  <file.brix> --candidate <name> [--json] [--package-path <dir>...]
+brix whynot  <file.brix> --candidate <name> [--input <path>...] [--json] [--package-path <dir>...]
              explain why a candidate was not admitted or not selected in deliberation
 ```
 
 Global options: `--help` and `--version`.
 
-From the workspace, prefix a command with `cargo run -p brix-cli --`, or build
-the executable once with `cargo build -p brix-cli`.
+Input options:
+- `--input <path>` (or `--input=<path>`) can be repeated to supply disjoint input shards conforming to the strict `brix.input@1` JSON schema.
+- `brix verify --profile l3-v1` rejects `--input` (exiting with usage error code 2), as external input shards apply to the `finite-decision` profile.
+
+From a source workspace, prefix a command with `cargo run -p brix-cli --`, or build
+the executable once with `cargo build -p brix-cli`. When using a prebuilt archive,
+invoke `./brix` directly from the extracted directory.
 
 **CLI target surface & status:**
 - `brix` implements exactly the six subcommands above.

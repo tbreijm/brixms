@@ -16,6 +16,6 @@ pub mod lexer;
 pub mod limits;
 pub mod parser;
 
-pub use ast::{CommitDecl, Module, ProposeDecl};
+pub use ast::{CommitDecl, InputDecl, Module, ProposeDecl};
 pub use limits::{LimitExceeded, ParseLimits};
 pub use parser::{parse, parse_bounded, ParseError};

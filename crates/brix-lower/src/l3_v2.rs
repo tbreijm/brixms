@@ -317,6 +317,9 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
             ast::Item::Commit(c) => {
                 return Err(L3V2LowerError::ItemNotAllowed(format!("commit {}", c.name)))
             }
+            ast::Item::Input(i) => {
+                return Err(L3V2LowerError::ItemNotAllowed(format!("input {}", i.name)))
+            }
         }
     }
 
@@ -696,6 +699,7 @@ pub enum EvalFault {
 /// reading one is precisely what ⟨D-DERIVE⟩ admits.
 #[derive(Clone, Debug, Default)]
 pub struct EvalEnv {
+    inputs: BTreeMap<String, L3ValueV2>,
     lets: BTreeMap<String, L3ValueV2>,
     facts: BTreeMap<String, L3ValueV2>,
     locals: BTreeMap<String, L3ValueV2>,
@@ -706,6 +710,11 @@ impl EvalEnv {
         Self::default()
     }
 
+    pub fn with_input(mut self, name: impl Into<String>, v: L3ValueV2) -> Self {
+        self.inputs.insert(name.into(), v);
+        self
+    }
+
     pub fn with_let(mut self, name: impl Into<String>, v: L3ValueV2) -> Self {
         self.lets.insert(name.into(), v);
         self
@@ -714,6 +723,11 @@ impl EvalEnv {
     pub fn with_fact(mut self, rule: impl Into<String>, v: L3ValueV2) -> Self {
         self.facts.insert(rule.into(), v);
         self
+    }
+
+    /// Bound external inputs in the environment.
+    pub fn inputs(&self) -> &BTreeMap<String, L3ValueV2> {
+        &self.inputs
     }
 
     /// Whether every rule in `deps` has committed a fact — the eligibility
@@ -743,6 +757,7 @@ pub fn eval(e: &L3ExprV2, env: &EvalEnv) -> Result<L3ValueV2, EvalFault> {
             .locals
             .get(name)
             .or_else(|| env.lets.get(name))
+            .or_else(|| env.inputs.get(name))
             .cloned()
             .ok_or_else(|| EvalFault::Unbound(name.clone())),
         L3ExprV2::RuleFact(rule) => env

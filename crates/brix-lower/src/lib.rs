@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub mod audit_bundle;
 pub mod finite_decision;
 pub mod imports;
+pub mod input;
 pub mod l3;
 pub mod l3_audit;
 pub mod l3_canon;
@@ -31,7 +32,9 @@ pub mod l3_run;
 pub mod l3_v2;
 pub use audit_bundle::{
     check_finite_decision_audit_input_bundle_from_module_v1,
+    check_finite_decision_audit_input_bundle_from_module_with_inputs_v1,
     check_finite_decision_audit_input_bundle_from_source_v1,
+    check_finite_decision_audit_input_bundle_from_source_with_inputs_v1,
     check_l3_audit_input_bundle_from_module_v1, check_l3_audit_input_bundle_from_source_v1,
     produce_finite_decision_audit_input_bundle_v1,
     produce_finite_decision_audit_input_bundle_with_limits_v1, produce_l3_audit_input_bundle_v1,
@@ -42,13 +45,21 @@ pub use audit_bundle::{
 };
 pub use brix_semantic::{ContextId, Outcome};
 pub use finite_decision::{
-    finite_decision_audit_environment_from_plan, finite_decision_program_id,
+    finite_decision_audit_environment_from_plan,
+    finite_decision_audit_environment_from_plan_with_inputs, finite_decision_program_id,
     finite_decision_program_preimage, lower_finite_decision_plan, run_finite_decision_plan,
-    type_of_value, CandidateDisposition, CandidateStatus, DerivedFact, FiniteDecisionCommit,
-    FiniteDecisionLowerError, FiniteDecisionPlan, FiniteDecisionProgramId, FiniteDecisionProposal,
-    FiniteDecisionRule, FiniteDecisionRun, FiniteDecisionRuntime, FiniteDecisionStop,
-    FiniteDecisionUnknownReason, L3ValueType, QuiescenceCertificateId, SelectedDecision,
-    WhyExplanation, WhyNotExplanation, FINITE_DECISION_PROFILE,
+    run_finite_decision_plan_with_inputs, type_of_value, BoundInput, CandidateDisposition,
+    CandidateStatus, DerivedFact, FiniteDecisionBuildError, FiniteDecisionCommit,
+    FiniteDecisionInput, FiniteDecisionLowerError, FiniteDecisionPlan, FiniteDecisionProgramId,
+    FiniteDecisionProposal, FiniteDecisionRule, FiniteDecisionRun, FiniteDecisionRuntime,
+    FiniteDecisionStop, FiniteDecisionUnknownReason, L3ValueType, QuiescenceCertificateId,
+    SelectedDecision, WhyExplanation, WhyNotExplanation, FINITE_DECISION_PROFILE,
+};
+pub use input::{
+    canonicalize_input_shards, decode_input_shard, decode_input_shard_from_file, input_context_id,
+    input_snapshot_id, load_input_snapshot_from_paths, validate_against_declarations,
+    validate_completeness, InputDecodeError, InputError, InputLimits, InputScalarValue, InputShard,
+    InputSnapshot, InputSnapshotId, InputValidationError, MAX_INPUT_NAME_BYTES,
 };
 pub use l3::{
     lower_l3_plan, L3ConfigBody, L3ConfigDecl, L3LowerError, L3PlanItem, L3PlanV1, L3TypeRef,

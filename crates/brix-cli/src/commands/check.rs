@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 
 use brix_lower::check_module;
 use brix_lower::finite_decision::{
-    lower_finite_decision_plan, FiniteDecisionRuntime, FiniteDecisionStop, FINITE_DECISION_PROFILE,
+    finite_decision_program_id, lower_finite_decision_plan, FiniteDecisionRuntime,
+    FiniteDecisionStop, FINITE_DECISION_PROFILE,
 };
 use brix_syntax::ast::Item;
 use brix_syntax::parse_bounded;
@@ -17,8 +18,13 @@ use crate::commands::{
 use crate::json::{CliResultJson, BRIX_CLI_SCHEMA};
 use crate::packages::{make_package_loader, read_source_bounded};
 
-/// Execute `brix check <file.brix>`.
-pub fn execute_check(file: &Path, json: bool, package_paths: &[PathBuf]) -> u8 {
+/// Execute `brix check <file.brix> [--input <path>...]`.
+pub fn execute_check(
+    file: &Path,
+    json: bool,
+    package_paths: &[PathBuf],
+    input_paths: &[PathBuf],
+) -> u8 {
     let source = match read_source_bounded(file) {
         Ok(s) => s,
         Err(err) => {
@@ -65,7 +71,7 @@ pub fn execute_check(file: &Path, json: bool, package_paths: &[PathBuf]) -> u8 {
     let has_finite_decision_items = resolved_module
         .items
         .iter()
-        .any(|i| matches!(i, Item::Commit(_) | Item::Propose(_)));
+        .any(|i| matches!(i, Item::Commit(_) | Item::Propose(_) | Item::Input(_)));
 
     if has_finite_decision_items {
         let mut resolved_module = resolved_module;
@@ -92,15 +98,107 @@ pub fn execute_check(file: &Path, json: bool, package_paths: &[PathBuf]) -> u8 {
             }
         };
 
-        // Preflight: run the plan so check cannot exit success when run would return Unknown.
-        let runtime = FiniteDecisionRuntime::build(&plan);
+        // If source declares inputs and NO --input was supplied:
+        // Validate syntax and lowering/declarations only, do NOT build runtime or run preflight.
+        if !plan.inputs.is_empty() && input_paths.is_empty() {
+            let prog_id = finite_decision_program_id(&plan).0.to_hex();
+            if json {
+                let res = CliResultJson {
+                    schema: BRIX_CLI_SCHEMA.to_string(),
+                    command: "check".to_string(),
+                    ok: true,
+                    profile: Some(FINITE_DECISION_PROFILE.to_string()),
+                    program: Some(prog_id),
+                    context: None,
+                    input_snapshot: None,
+                    status: "checked-input-contract".to_string(),
+                    inputs: None,
+                    facts: Vec::new(),
+                    candidates: Vec::new(),
+                    decision: None,
+                    artifacts: Vec::new(),
+                    diagnostics: Vec::new(),
+                };
+                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            } else {
+                println!("status: checked-input-contract");
+                println!("program: {prog_id}");
+            }
+            return EXIT_SUCCESS;
+        }
+
+        // Load input snapshot from provided paths (or empty snapshot if none).
+        let snapshot = match crate::commands::load_cli_input_snapshot(input_paths) {
+            Ok(s) => s,
+            Err(err) => {
+                if json {
+                    let res = CliResultJson::failure(
+                        "check",
+                        Some(FINITE_DECISION_PROFILE.to_string()),
+                        Some(finite_decision_program_id(&plan).0.to_hex()),
+                        None,
+                        err.status(),
+                        vec![err.diagnostic()],
+                    );
+                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                } else {
+                    eprintln!("{}", err.render_human("check"));
+                }
+                return err.exit_code();
+            }
+        };
+
+        // Preflight: build runtime with inputs and run the plan so check cannot exit success when run would return Unknown.
+        let runtime = match FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot) {
+            Ok(r) => r,
+            Err(err) => {
+                let cli_err = crate::commands::CliInputError::from(err);
+                let snapshot_hex = if !snapshot.is_empty() {
+                    Some(snapshot.id().0.to_hex())
+                } else {
+                    None
+                };
+                if json {
+                    let res = CliResultJson::failure(
+                        "check",
+                        Some(FINITE_DECISION_PROFILE.to_string()),
+                        Some(finite_decision_program_id(&plan).0.to_hex()),
+                        None,
+                        cli_err.status(),
+                        vec![cli_err.diagnostic()],
+                    )
+                    .with_inputs(snapshot_hex, None);
+                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                } else {
+                    eprintln!("{}", cli_err.render_human("check"));
+                }
+                return cli_err.exit_code();
+            }
+        };
         let context_hex = runtime.context.digest().to_hex();
         let run = runtime.run();
+
+        let (input_snapshot, inputs_json) = if !snapshot.is_empty() {
+            (
+                Some(snapshot.id().0.to_hex()),
+                Some(
+                    run.inputs
+                        .iter()
+                        .map(crate::commands::bound_input_to_json)
+                        .collect(),
+                ),
+            )
+        } else {
+            (None, None)
+        };
 
         if run.is_unknown() {
             let (code, detail) = match &run.stop {
                 FiniteDecisionStop::Unknown(reason) => unknown_reason_to_code_and_detail(reason),
-                _ => unreachable!(),
+                _ => (
+                    "unknown-stop",
+                    "unexpected deliberation stop condition in failure path".to_string(),
+                ),
             };
             let status_str = "unknown";
             let diag = format!("{code}: {detail}");
@@ -112,7 +210,8 @@ pub fn execute_check(file: &Path, json: bool, package_paths: &[PathBuf]) -> u8 {
                     Some(context_hex),
                     status_str,
                     vec![diag],
-                );
+                )
+                .with_inputs(input_snapshot, inputs_json);
                 println!("{}", serde_json::to_string_pretty(&res).unwrap());
             } else {
                 eprintln!("brix check: preflight returned Unknown: {diag}");
@@ -138,7 +237,9 @@ pub fn execute_check(file: &Path, json: bool, package_paths: &[PathBuf]) -> u8 {
                 profile: Some(FINITE_DECISION_PROFILE.to_string()),
                 program: Some(run.program.0.to_hex()),
                 context: Some(context_hex),
+                input_snapshot,
                 status: "accepted".to_string(),
+                inputs: inputs_json,
                 facts: facts_json,
                 candidates: candidates_json,
                 decision: decision_json,
@@ -147,11 +248,23 @@ pub fn execute_check(file: &Path, json: bool, package_paths: &[PathBuf]) -> u8 {
             };
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
         } else {
-            let human = format_finite_decision_human(&run, Some(&context_hex));
+            let human =
+                format_finite_decision_human(&run, Some(&context_hex), input_snapshot.as_deref());
             print!("{human}");
         }
 
         return EXIT_SUCCESS;
+    }
+
+    if !input_paths.is_empty() {
+        let msg = "--input is only supported for finite-decision modules".to_string();
+        if json {
+            let res = CliResultJson::failure("check", None, None, None, "usage-error", vec![msg]);
+            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+        } else {
+            eprintln!("brix check: {msg}");
+        }
+        return EXIT_USAGE_OR_IO;
     }
 
     // Classic L1/L2 module check path (check_module)
@@ -186,11 +299,13 @@ pub fn execute_check(file: &Path, json: bool, package_paths: &[PathBuf]) -> u8 {
             profile: None,
             program: None,
             context: None,
+            input_snapshot: None,
             status: if had_error {
                 "rejected".to_string()
             } else {
                 "accepted".to_string()
             },
+            inputs: None,
             facts: Vec::new(),
             candidates: Vec::new(),
             decision: None,
