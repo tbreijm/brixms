@@ -38,6 +38,7 @@ prettyplease = "0.2"
 indexmap = "2"
 camino = { version = "1", features = ["serde1"] }
 unicode-normalization = "0.1"
+libc = "0.2"
 # Internal Ring 0 crates, centralized here like the external deps above so every
 # lane pins through `{ workspace = true }` rather than an ad hoc path string.
 brix-canon = { path = "crates/brix-canon" }

@@ -15,5 +15,8 @@ brix-canon = { workspace = true }
 brix-semantic = { workspace = true }
 brix-kernel = { path = "../brix-kernel" }
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [lints]
 workspace = true

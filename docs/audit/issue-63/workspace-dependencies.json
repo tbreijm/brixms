@@ -15,6 +15,7 @@
       "brix-semantic",
       "brix-syntax",
       "indexmap",
+      "libc",
       "serde",
       "serde_json",
       "soc-core",
@@ -44,6 +45,7 @@
       "brix-semantic",
       "brix-syntax",
       "indexmap",
+      "libc",
       "soc-core",
       "soc-regimes",
       "unicode-normalization"

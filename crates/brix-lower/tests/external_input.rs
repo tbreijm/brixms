@@ -1069,6 +1069,211 @@ fn test_bounded_reads_and_toctou_prevention() {
     }
 }
 
+#[cfg(unix)]
+struct TempFifoGuard {
+    path: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl TempFifoGuard {
+    fn new(name: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "brix_test_fifo_{}_{}_{}.pipe",
+            std::process::id(),
+            id,
+            name
+        ));
+        let _ = std::fs::remove_file(&path);
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("mkfifo command succeeds");
+        assert!(status.success(), "mkfifo exited successfully");
+        Self { path }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TempFifoGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(unix)]
+struct TempSymlinkGuard {
+    path: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl TempSymlinkGuard {
+    fn new(target: &std::path::Path, name: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "brix_test_symlink_{}_{}_{}.lnk",
+            std::process::id(),
+            id,
+            name
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::os::unix::fs::symlink(target, &path).expect("create symlink");
+        Self { path }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TempSymlinkGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_fifo_without_writer_fails_nonblocking() {
+    let fifo = TempFifoGuard::new("nowriter");
+    let limits = InputLimits::default();
+    let path = fifo.path().to_path_buf();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let thread_handle = std::thread::spawn(move || {
+        let res = decode_input_shard_from_file(&path, &limits);
+        let _ = tx.send(res);
+    });
+
+    let res = rx.recv_timeout(std::time::Duration::from_secs(2)).expect(
+        "decode_input_shard_from_file on FIFO must return within bounded time without hanging",
+    );
+
+    thread_handle.join().expect("thread terminates cleanly");
+
+    match res {
+        Err(InputDecodeError::NotARegularFile(ref p)) => {
+            assert_eq!(p, &fifo.path().display().to_string());
+        }
+        other => panic!("expected NotARegularFile, got: {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_symlink_to_fifo_without_writer_fails_nonblocking() {
+    let fifo = TempFifoGuard::new("symlink_fifo_target");
+    let link = TempSymlinkGuard::new(fifo.path(), "symlink_fifo");
+    let limits = InputLimits::default();
+    let path = link.path().to_path_buf();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let thread_handle = std::thread::spawn(move || {
+        let res = decode_input_shard_from_file(&path, &limits);
+        let _ = tx.send(res);
+    });
+
+    let res = rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("symlink to FIFO must fail within bounded time without hanging");
+
+    thread_handle.join().expect("thread terminates cleanly");
+
+    match res {
+        Err(InputDecodeError::NotARegularFile(ref p)) => {
+            assert_eq!(p, &link.path().display().to_string());
+        }
+        other => panic!("expected NotARegularFile, got: {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_symlink_to_regular_file_succeeds() {
+    let valid_json = r#"{"schema":"brix.input@1","values":{"val":{"type":"int","value":"123"}}}"#;
+    let target = TempFileGuard::new("symlink_target", valid_json.as_bytes());
+    let link = TempSymlinkGuard::new(target.path(), "symlink_file");
+    let limits = InputLimits::default();
+
+    // decode_input_shard_from_file follows symlink to regular file
+    let shard = decode_input_shard_from_file(link.path(), &limits)
+        .expect("symlink to regular file must decode successfully");
+    assert_eq!(shard.get("val"), Some(&InputScalarValue::Int(123)));
+
+    // load_input_snapshot_from_paths succeeds on symlink to regular file
+    let snapshot = load_input_snapshot_from_paths(&[link.path()], &limits)
+        .expect("load_input_snapshot_from_paths must succeed on symlink to regular file");
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot.get("val"), Some(&InputScalarValue::Int(123)));
+}
+
+#[cfg(unix)]
+#[test]
+fn test_load_input_snapshot_direct_fifo_fails_closed() {
+    let fifo = TempFifoGuard::new("direct_fifo");
+    let limits = InputLimits::default();
+    let err = load_input_snapshot_from_paths(&[fifo.path()], &limits).unwrap_err();
+    match err {
+        InputError::Decode(InputDecodeError::NotARegularFile(ref p)) => {
+            assert_eq!(p, &fifo.path().display().to_string());
+        }
+        other => panic!("expected InputError::Decode(NotARegularFile), got: {other:?}"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_swap_race_between_preflight_and_open_fails_closed_in_bounded_time() {
+    let valid_json = r#"{"schema":"brix.input@1","values":{"val":{"type":"int","value":"1"}}}"#;
+    let temp_guard = TempFileGuard::new("swap_race", valid_json.as_bytes());
+    let path = temp_guard.path().to_path_buf();
+    let limits = InputLimits::default();
+
+    // 1. Preflight step: metadata confirms it is a regular file
+    let preflight_meta = std::fs::metadata(&path).expect("preflight metadata succeeds");
+    assert!(preflight_meta.file_type().is_file());
+
+    // 2. Swap race: before decode opens the file, it is swapped for a FIFO with no writer
+    std::fs::remove_file(&path).expect("remove regular file");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .expect("mkfifo succeeds");
+    assert!(status.success());
+
+    // 3. Decode step: must open non-blocking, detect non-regular file, and return NotARegularFile
+    let path_clone = path.clone();
+    let limits_copy = limits;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let thread_handle = std::thread::spawn(move || {
+        let res = decode_input_shard_from_file(&path_clone, &limits_copy);
+        let _ = tx.send(res);
+    });
+
+    let res = rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("swapped FIFO open must complete within bounded time");
+    thread_handle.join().expect("thread terminates cleanly");
+
+    match res {
+        Err(InputDecodeError::NotARegularFile(ref p)) => {
+            assert_eq!(p, &path.display().to_string());
+        }
+        other => panic!("expected NotARegularFile, got: {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 12. Whole-Set Preflight and Loading API (ADR-0031 ⟨D-SHARDS⟩, ⟨D-BOUNDS⟩)
 // ---------------------------------------------------------------------------
