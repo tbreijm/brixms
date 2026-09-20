@@ -8,8 +8,10 @@ pub mod runtime;
 
 pub use plan::{
     finite_decision_program_id, finite_decision_program_preimage, lower_finite_decision_plan,
-    FiniteDecisionCommit, FiniteDecisionInput, FiniteDecisionLowerError, FiniteDecisionPlan,
-    FiniteDecisionProgramId, FiniteDecisionProposal, FiniteDecisionRule, FINITE_DECISION_PROFILE,
+    FiniteDecisionCommit, FiniteDecisionContract, FiniteDecisionFnParam, FiniteDecisionFunction,
+    FiniteDecisionInput, FiniteDecisionLowerError, FiniteDecisionPlan, FiniteDecisionProgramId,
+    FiniteDecisionProposal, FiniteDecisionRule, FINITE_DECISION_PROFILE, MAX_EXPR_DEPTH,
+    MAX_EXPR_NODES, MAX_FUNCTION_COUNT, MAX_FUNCTION_PARAMS,
 };
 pub use runtime::{
     finite_decision_audit_environment_from_plan,

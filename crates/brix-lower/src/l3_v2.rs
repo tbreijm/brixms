@@ -28,6 +28,8 @@
 //! mint a certificate or move a grade.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::sync::Arc;
 
 use brix_syntax::ast;
 
@@ -116,6 +118,61 @@ pub enum L3ExprV2 {
         scrutinee: Box<L3ExprV2>,
         arms: Vec<(L3PatternV2, L3ExprV2)>,
     },
+    /// A pure function invocation: `func(args...)` (ADR-0032).
+    Call {
+        func: String,
+        args: Vec<L3ExprV2>,
+    },
+}
+
+/// Type category of an [`L3ValueV2`] for contract uniformity checking.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum L3ValueType {
+    Int,
+    Str,
+    Bool,
+    Sum(String),
+    Record(String),
+}
+
+impl fmt::Display for L3ValueType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Int => write!(f, "Int"),
+            Self::Str => write!(f, "Str"),
+            Self::Bool => write!(f, "Bool"),
+            Self::Sum(s) => write!(f, "Sum({s})"),
+            Self::Record(r) => write!(f, "Record({r})"),
+        }
+    }
+}
+
+/// Compute the nominal/primitive type category of an evaluated value.
+pub fn type_of_value(v: &L3ValueV2) -> L3ValueType {
+    match v {
+        L3ValueV2::Int(_) => L3ValueType::Int,
+        L3ValueV2::Str(_) => L3ValueType::Str,
+        L3ValueV2::Bool(_) => L3ValueType::Bool,
+        L3ValueV2::Ctor { nominal_sum, .. } => L3ValueType::Sum(nominal_sum.clone()),
+        L3ValueV2::Record { nominal_config, .. } => L3ValueType::Record(nominal_config.clone()),
+    }
+}
+
+/// Evaluation bounds (ADR-0032).
+pub const MAX_CALL_DEPTH: usize = 64;
+pub const MAX_EVAL_RECURSION_DEPTH: usize = 64;
+pub const MAX_CALL_STEPS: usize = 10_000;
+pub const MAX_VALUE_DEPTH: usize = 128;
+pub const MAX_EVAL_VALUE_NODES: usize = 10_000;
+pub const MAX_EVAL_VALUE_BYTES: usize = 1_000_000;
+
+/// Normalized pure function definition in L3.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct L3FunctionDef {
+    pub name: String,
+    pub params: Vec<(String, Option<L3ValueType>)>,
+    pub ret_contract: Option<L3ValueType>,
+    pub body: L3ExprV2,
 }
 
 /// The arithmetic operators v2 admits. **No division** — see [`L3ExprV2`].
@@ -273,7 +330,66 @@ pub enum L3V2LowerError {
     /// A surface form with no v2 lowering (`prove`, `why`, `audit`, `then`,
     /// `and`).
     Unsupported(String),
+    /// A function was invoked with the wrong number of arguments.
+    FunctionArityMismatch {
+        func: String,
+        expected: usize,
+        found: usize,
+    },
+    /// A pattern contains duplicate match variable binders.
+    DuplicateMatchBinder(String),
 }
+
+impl fmt::Display for L3V2LowerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ProfileMismatch { expected, found } => {
+                write!(
+                    f,
+                    "profile mismatch: expected '{expected}', found '{found}'"
+                )
+            }
+            Self::ItemNotAllowed(item) => write!(f, "item not allowed in v2: {item}"),
+            Self::UndeclaredDependency { rule, param } => {
+                write!(f, "rule '{rule}' has undeclared dependency '{param}'")
+            }
+            Self::UndeclaredFactRead { rule, fact } => {
+                write!(f, "rule '{rule}' reads undeclared fact '{fact}'")
+            }
+            Self::ForwardOrSelfDependency { rule, depends_on } => {
+                write!(
+                    f,
+                    "rule '{rule}' has forward or self dependency on '{depends_on}'"
+                )
+            }
+            Self::UnresolvedReference(name) => write!(f, "unresolved reference: {name}"),
+            Self::NonExhaustiveMatch { sum, missing } => {
+                write!(f, "non-exhaustive match on '{sum}', missing: {missing:?}")
+            }
+            Self::DefaultArmNotAllowed => write!(f, "default arm not allowed in match"),
+            Self::NestedPatternNotAllowed => write!(f, "nested pattern not allowed in match"),
+            Self::DivisionNotAllowed => write!(f, "division operator not allowed in v2"),
+            Self::FloatLiteralNotAllowed(lit) => write!(f, "float literal not allowed: {lit}"),
+            Self::IntegerOverflow(lit) => write!(f, "integer literal overflow: {lit}"),
+            Self::Unsupported(feature) => write!(f, "unsupported feature: {feature}"),
+            Self::FunctionArityMismatch {
+                func,
+                expected,
+                found,
+            } => {
+                write!(
+                    f,
+                    "function '{func}' expected {expected} argument(s), found {found}"
+                )
+            }
+            Self::DuplicateMatchBinder(name) => {
+                write!(f, "duplicate match pattern binder: '{name}'")
+            }
+        }
+    }
+}
+
+impl std::error::Error for L3V2LowerError {}
 
 /// Lower a module into a v2 plan, or reject it with the reason it falls
 /// outside the fragment.
@@ -374,9 +490,12 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
                 let value = lower_expr_v2(
                     &l.value,
                     &lets,
+                    &BTreeSet::new(),
                     &rules_so_far,
                     &nullary,
                     &variants_of,
+                    &BTreeMap::new(),
+                    false,
                     false,
                 )?;
                 lets.insert(l.name.clone());
@@ -416,8 +535,18 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
                 }
                 // Only the declared dependencies are readable in the body.
                 let readable: BTreeSet<String> = depends_on.iter().cloned().collect();
-                let body = lower_expr_v2(&r.body, &lets, &readable, &nullary, &variants_of, true)
-                    .map_err(|e| match e {
+                let body = lower_expr_v2(
+                    &r.body,
+                    &lets,
+                    &BTreeSet::new(),
+                    &readable,
+                    &nullary,
+                    &variants_of,
+                    &BTreeMap::new(),
+                    true,
+                    false,
+                )
+                .map_err(|e| match e {
                     // A bare reference to a rule that exists but was not
                     // declared as a parameter: named as the undeclared
                     // read it is, rather than as an unresolved name.
@@ -453,13 +582,17 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
 /// from a `let` value, which may not: a `let` is a closed static binding, and
 /// letting it depend on a committed fact would make plan construction depend
 /// on run order.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn lower_expr_v2(
     e: &ast::Expr,
     lets: &BTreeSet<String>,
+    locals: &BTreeSet<String>,
     rules: &BTreeSet<String>,
     nullary: &BTreeMap<String, String>,
     variants_of: &BTreeMap<String, String>,
+    functions: &BTreeMap<String, usize>,
     in_rule: bool,
+    helper_enabled: bool,
 ) -> Result<L3ExprV2, L3V2LowerError> {
     match e {
         ast::Expr::Num(s) => {
@@ -474,14 +607,31 @@ pub(crate) fn lower_expr_v2(
         ast::Expr::Str(s) => Ok(L3ExprV2::Str(s.clone())),
         ast::Expr::Bool(b) => Ok(L3ExprV2::Bool(*b)),
         ast::Expr::Var(name) => {
-            if let Some(sum) = nullary.get(name) {
-                return Ok(L3ExprV2::NullaryVariant {
-                    nominal_sum: sum.clone(),
-                    variant: name.clone(),
-                });
-            }
-            if lets.contains(name) {
-                return Ok(L3ExprV2::LetRef(name.clone()));
+            if helper_enabled {
+                // In helper-enabled lowering, parameters and match binders take lexical precedence.
+                if locals.contains(name) {
+                    return Ok(L3ExprV2::LetRef(name.clone()));
+                }
+                if let Some(sum) = nullary.get(name) {
+                    return Ok(L3ExprV2::NullaryVariant {
+                        nominal_sum: sum.clone(),
+                        variant: name.clone(),
+                    });
+                }
+                if lets.contains(name) {
+                    return Ok(L3ExprV2::LetRef(name.clone()));
+                }
+            } else {
+                // Function-free profiles retain prior precedence: nullary constructors resolve first.
+                if let Some(sum) = nullary.get(name) {
+                    return Ok(L3ExprV2::NullaryVariant {
+                        nominal_sum: sum.clone(),
+                        variant: name.clone(),
+                    });
+                }
+                if locals.contains(name) || lets.contains(name) {
+                    return Ok(L3ExprV2::LetRef(name.clone()));
+                }
             }
             // The derivation form. Only a rule body may read a fact, and only
             // from a rule declared before it — so the dependency graph is
@@ -499,10 +649,13 @@ pub(crate) fn lower_expr_v2(
             Box::new(lower_expr_v2(
                 base,
                 lets,
+                locals,
                 rules,
                 nullary,
                 variants_of,
+                functions,
                 in_rule,
+                helper_enabled,
             )?),
             field.clone(),
         )),
@@ -511,7 +664,17 @@ pub(crate) fn lower_expr_v2(
             for (name, value) in fields {
                 out.push((
                     name.clone(),
-                    lower_expr_v2(value, lets, rules, nullary, variants_of, in_rule)?,
+                    lower_expr_v2(
+                        value,
+                        lets,
+                        locals,
+                        rules,
+                        nullary,
+                        variants_of,
+                        functions,
+                        in_rule,
+                        helper_enabled,
+                    )?,
                 ));
             }
             out.sort_by(|a, b| a.0.cmp(&b.0));
@@ -521,42 +684,78 @@ pub(crate) fn lower_expr_v2(
             })
         }
         ast::Expr::Call { func, args } => {
-            let Some(sum) = variants_of.get(func).cloned() else {
-                return Err(L3V2LowerError::UnresolvedReference(func.clone()));
-            };
-            let mut out = Vec::new();
-            for a in args {
-                out.push(lower_expr_v2(
-                    a,
-                    lets,
-                    rules,
-                    nullary,
-                    variants_of,
-                    in_rule,
-                )?);
+            if let Some(sum) = variants_of.get(func).cloned() {
+                let mut out = Vec::new();
+                for a in args {
+                    out.push(lower_expr_v2(
+                        a,
+                        lets,
+                        locals,
+                        rules,
+                        nullary,
+                        variants_of,
+                        functions,
+                        in_rule,
+                        helper_enabled,
+                    )?);
+                }
+                Ok(L3ExprV2::Ctor {
+                    nominal_sum: sum,
+                    variant: func.clone(),
+                    args: out,
+                })
+            } else if let Some(&expected_arity) = functions.get(func) {
+                if args.len() != expected_arity {
+                    return Err(L3V2LowerError::FunctionArityMismatch {
+                        func: func.clone(),
+                        expected: expected_arity,
+                        found: args.len(),
+                    });
+                }
+                let mut out = Vec::new();
+                for a in args {
+                    out.push(lower_expr_v2(
+                        a,
+                        lets,
+                        locals,
+                        rules,
+                        nullary,
+                        variants_of,
+                        functions,
+                        in_rule,
+                        helper_enabled,
+                    )?);
+                }
+                Ok(L3ExprV2::Call {
+                    func: func.clone(),
+                    args: out,
+                })
+            } else {
+                Err(L3V2LowerError::UnresolvedReference(func.clone()))
             }
-            Ok(L3ExprV2::Ctor {
-                nominal_sum: sum,
-                variant: func.clone(),
-                args: out,
-            })
         }
         ast::Expr::Bin { op, lhs, rhs } => {
             let l = Box::new(lower_expr_v2(
                 lhs,
                 lets,
+                locals,
                 rules,
                 nullary,
                 variants_of,
+                functions,
                 in_rule,
+                helper_enabled,
             )?);
             let r = Box::new(lower_expr_v2(
                 rhs,
                 lets,
+                locals,
                 rules,
                 nullary,
                 variants_of,
+                functions,
                 in_rule,
+                helper_enabled,
             )?);
             match op {
                 ast::BinOp::Add => Ok(L3ExprV2::Arith(ArithOpV2::Add, l, r)),
@@ -580,22 +779,33 @@ pub(crate) fn lower_expr_v2(
             let s = Box::new(lower_expr_v2(
                 scrutinee,
                 lets,
+                locals,
                 rules,
                 nullary,
                 variants_of,
+                functions,
                 in_rule,
+                helper_enabled,
             )?);
             let mut out = Vec::new();
             for arm in arms {
                 let pat = match &arm.pattern {
                     ast::Pattern::Ctor { name, args } => {
                         let mut binders = Vec::new();
+                        let mut seen_binders = BTreeSet::new();
                         for a in args {
                             match a {
                                 ast::Pattern::Wildcard => binders.push(None),
-                                ast::Pattern::Var(x) => binders.push(Some(x.clone())),
+                                ast::Pattern::Var(x) => {
+                                    if helper_enabled && !seen_binders.insert(x.clone()) {
+                                        return Err(L3V2LowerError::DuplicateMatchBinder(
+                                            x.clone(),
+                                        ));
+                                    }
+                                    binders.push(Some(x.clone()));
+                                }
                                 ast::Pattern::Ctor { .. } => {
-                                    return Err(L3V2LowerError::NestedPatternNotAllowed)
+                                    return Err(L3V2LowerError::NestedPatternNotAllowed);
                                 }
                             }
                         }
@@ -607,20 +817,30 @@ pub(crate) fn lower_expr_v2(
                     // A top-level wildcard or binder is a default arm. Refused
                     // so malformed input cannot be swallowed by a catch-all.
                     ast::Pattern::Wildcard | ast::Pattern::Var(_) => {
-                        return Err(L3V2LowerError::DefaultArmNotAllowed)
+                        return Err(L3V2LowerError::DefaultArmNotAllowed);
                     }
                 };
                 // The arm's binders are in scope in its body. Without this,
                 // `match b { MkBox(v) => v }` reports `v` unresolved — the
                 // pattern binds it and the body could not see it.
-                let mut arm_lets = lets.clone();
+                let mut arm_locals = locals.clone();
                 let L3PatternV2::Ctor { binders, .. } = &pat;
                 for b in binders.iter().flatten() {
-                    arm_lets.insert(b.clone());
+                    arm_locals.insert(b.clone());
                 }
                 out.push((
                     pat,
-                    lower_expr_v2(&arm.body, &arm_lets, rules, nullary, variants_of, in_rule)?,
+                    lower_expr_v2(
+                        &arm.body,
+                        lets,
+                        &arm_locals,
+                        rules,
+                        nullary,
+                        variants_of,
+                        functions,
+                        in_rule,
+                        helper_enabled,
+                    )?,
                 ));
             }
             Ok(L3ExprV2::Match {
@@ -689,7 +909,56 @@ pub enum EvalFault {
     /// Total rather than a panic: the evaluator must stay total on any plan it
     /// is handed, including one whose types were never checked.
     OperandShape(&'static str),
+    /// A function call exceeded the maximum call stack depth.
+    CallDepthExceeded { limit: usize, func: String },
+    /// Evaluation exceeded maximum allowed computational steps.
+    ResourceExhausted { limit: usize, detail: String },
+    /// A contract violation at function call boundary.
+    ContractViolation {
+        func: String,
+        param: Option<String>,
+        expected: String,
+        found: String,
+    },
 }
+
+impl fmt::Display for EvalFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Overflow(op) => write!(f, "arithmetic overflow ({op:?})"),
+            Self::Unbound(name) => write!(f, "unbound identifier: {name}"),
+            Self::NoSuchField(field) => write!(f, "no such field: {field}"),
+            Self::NoMatchingArm => write!(f, "no matching arm in match expression"),
+            Self::OperandShape(detail) => write!(f, "operand shape error: {detail}"),
+            Self::CallDepthExceeded { limit, func } => {
+                write!(f, "call depth limit ({limit}) exceeded calling '{func}'")
+            }
+            Self::ResourceExhausted { limit, detail } => {
+                write!(f, "resource limit ({limit}) exhausted: {detail}")
+            }
+            Self::ContractViolation {
+                func,
+                param,
+                expected,
+                found,
+            } => {
+                if let Some(p) = param {
+                    write!(
+                        f,
+                        "contract violation in function '{func}' for parameter '{p}': expected {expected}, found {found}"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "return contract violation in function '{func}': expected {expected}, found {found}"
+                    )
+                }
+            }
+        }
+    }
+}
+
+impl std::error::Error for EvalFault {}
 
 /// The bindings an evaluation runs under: prior `let` values, and the facts
 /// earlier rules have committed.
@@ -703,6 +972,7 @@ pub struct EvalEnv {
     lets: BTreeMap<String, L3ValueV2>,
     facts: BTreeMap<String, L3ValueV2>,
     locals: BTreeMap<String, L3ValueV2>,
+    functions: Arc<BTreeMap<String, L3FunctionDef>>,
 }
 
 impl EvalEnv {
@@ -725,9 +995,26 @@ impl EvalEnv {
         self
     }
 
+    pub fn with_function(mut self, name: impl Into<String>, def: L3FunctionDef) -> Self {
+        let mut map = (*self.functions).clone();
+        map.insert(name.into(), def);
+        self.functions = Arc::new(map);
+        self
+    }
+
+    pub fn with_functions(mut self, functions: Arc<BTreeMap<String, L3FunctionDef>>) -> Self {
+        self.functions = functions;
+        self
+    }
+
     /// Bound external inputs in the environment.
     pub fn inputs(&self) -> &BTreeMap<String, L3ValueV2> {
         &self.inputs
+    }
+
+    /// Registered functions in the environment.
+    pub fn functions(&self) -> &Arc<BTreeMap<String, L3FunctionDef>> {
+        &self.functions
     }
 
     /// Whether every rule in `deps` has committed a fact — the eligibility
@@ -748,39 +1035,273 @@ impl EvalEnv {
 ///
 /// Operands evaluate **left to right**, which is ABI: it fixes which fault a
 /// program with two faulty operands reports.
+/// Execution bounds tracker for function-enabled evaluations (ADR-0032).
+#[derive(Clone, Debug)]
+struct EvalBudget {
+    pub steps: usize,
+    pub max_steps: usize,
+    pub recursion_depth: usize,
+    pub max_recursion_depth: usize,
+    pub call_depth: usize,
+    pub max_call_depth: usize,
+    pub allocated_nodes: usize,
+    pub max_nodes: usize,
+    pub allocated_bytes: usize,
+    pub max_bytes: usize,
+    pub max_value_depth: usize,
+}
+
+impl Default for EvalBudget {
+    fn default() -> Self {
+        Self {
+            steps: 0,
+            max_steps: MAX_CALL_STEPS,
+            recursion_depth: 0,
+            max_recursion_depth: MAX_EVAL_RECURSION_DEPTH,
+            call_depth: 0,
+            max_call_depth: MAX_CALL_DEPTH,
+            allocated_nodes: 0,
+            max_nodes: MAX_EVAL_VALUE_NODES,
+            allocated_bytes: 0,
+            max_bytes: MAX_EVAL_VALUE_BYTES,
+            max_value_depth: MAX_VALUE_DEPTH,
+        }
+    }
+}
+
+impl EvalBudget {
+    /// Iteratively inspect a value before cloning to check and charge its node count, byte size,
+    /// and tree depth against the pre-allocation limits without risking stack overflow.
+    fn charge_clone(&mut self, val: &L3ValueV2) -> Result<(), EvalFault> {
+        self.charge_value(val, 1)
+    }
+
+    fn charge_allocation(&mut self, nodes: usize, bytes: usize) -> Result<(), EvalFault> {
+        if nodes > self.max_nodes.saturating_sub(self.allocated_nodes) {
+            return Err(EvalFault::ResourceExhausted {
+                limit: self.max_nodes,
+                detail: "value node budget exhausted".into(),
+            });
+        }
+        if bytes > self.max_bytes.saturating_sub(self.allocated_bytes) {
+            return Err(EvalFault::ResourceExhausted {
+                limit: self.max_bytes,
+                detail: "value byte budget exhausted".into(),
+            });
+        }
+        self.allocated_nodes += nodes;
+        self.allocated_bytes += bytes;
+        Ok(())
+    }
+
+    fn charge_value(&mut self, val: &L3ValueV2, depth: usize) -> Result<(), EvalFault> {
+        let mut stack: Vec<(&L3ValueV2, usize)> = vec![(val, depth)];
+        let mut count = 0usize;
+        let mut bytes = 0usize;
+        let mut max_depth_seen = 1usize;
+
+        while let Some((node, depth)) = stack.pop() {
+            if depth > max_depth_seen {
+                max_depth_seen = depth;
+            }
+            if max_depth_seen > self.max_value_depth {
+                return Err(EvalFault::ResourceExhausted {
+                    limit: self.max_value_depth,
+                    detail: format!(
+                        "value nesting depth limit exceeded ({max_depth_seen} > {})",
+                        self.max_value_depth
+                    ),
+                });
+            }
+            count += 1;
+            if self.allocated_nodes + count > self.max_nodes {
+                return Err(EvalFault::ResourceExhausted {
+                    limit: self.max_nodes,
+                    detail: format!(
+                        "value node allocation limit exceeded ({} > {})",
+                        self.allocated_nodes + count,
+                        self.max_nodes
+                    ),
+                });
+            }
+
+            match node {
+                L3ValueV2::Int(_) | L3ValueV2::Bool(_) => {
+                    bytes += 8;
+                }
+                L3ValueV2::Str(s) => {
+                    bytes += 8 + s.len();
+                }
+                L3ValueV2::Ctor {
+                    args,
+                    nominal_sum,
+                    variant,
+                } => {
+                    bytes += 16 + nominal_sum.len() + variant.len();
+                    for a in args {
+                        stack.push((a, depth + 1));
+                    }
+                }
+                L3ValueV2::Record {
+                    fields,
+                    nominal_config,
+                } => {
+                    bytes += 16 + nominal_config.len();
+                    for (f, v) in fields {
+                        bytes += f.len();
+                        stack.push((v, depth + 1));
+                    }
+                }
+            }
+
+            if self.allocated_bytes + bytes > self.max_bytes {
+                return Err(EvalFault::ResourceExhausted {
+                    limit: self.max_bytes,
+                    detail: format!(
+                        "value byte allocation limit exceeded ({} > {})",
+                        self.allocated_bytes + bytes,
+                        self.max_bytes
+                    ),
+                });
+            }
+        }
+
+        self.allocated_nodes += count;
+        self.allocated_bytes += bytes;
+        Ok(())
+    }
+
+    pub fn tick_step(&mut self) -> Result<(), EvalFault> {
+        self.steps += 1;
+        if self.steps > self.max_steps {
+            return Err(EvalFault::ResourceExhausted {
+                limit: self.max_steps,
+                detail: "evaluation step limit exceeded".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Evaluate a v2 expression to a value.
+///
+/// **Big-step, and deliberately so.** A rule body evaluates atomically inside
+/// one commit, which is what keeps every committed step *realizing* and leaves
+/// `𝒢_τ = ∅` — so ⟨D-TAUZERO⟩ and the O(Δ) gate carry over from v1 unchanged
+/// (ADR-0027 §2 erratum). A small-step machine would put administrative steps
+/// in the journal and forfeit both, to guard a non-termination case
+/// ⟨D-DERIVE⟩ has already made unreachable.
+///
+/// Operands evaluate **left to right**, which is ABI: it fixes which fault a
+/// program with two faulty operands reports.
 pub fn eval(e: &L3ExprV2, env: &EvalEnv) -> Result<L3ValueV2, EvalFault> {
+    let mut budget = if env.functions.is_empty() {
+        None
+    } else {
+        Some(EvalBudget::default())
+    };
+    eval_internal(e, env, &mut budget, None)
+}
+
+fn eval_internal(
+    e: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    if let Some(b) = budget.as_mut() {
+        b.tick_step()?;
+        b.recursion_depth += 1;
+        if b.recursion_depth > b.max_recursion_depth {
+            b.recursion_depth -= 1;
+            return Err(EvalFault::CallDepthExceeded {
+                limit: b.max_recursion_depth,
+                func: current_func
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "<eval>".to_string()),
+            });
+        }
+    }
+
+    let res = eval_internal_body(e, env, budget, current_func);
+
+    if let Some(b) = budget.as_mut() {
+        b.recursion_depth = b.recursion_depth.saturating_sub(1);
+    }
+
+    res
+}
+
+fn eval_internal_body(
+    e: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
     match e {
         L3ExprV2::Int(n) => Ok(L3ValueV2::Int(*n)),
-        L3ExprV2::Str(s) => Ok(L3ValueV2::Str(s.clone())),
+        L3ExprV2::Str(s) => {
+            if let Some(b) = budget.as_mut() {
+                b.charge_allocation(1, s.len())?;
+            }
+            Ok(L3ValueV2::Str(s.clone()))
+        }
         L3ExprV2::Bool(b) => Ok(L3ValueV2::Bool(*b)),
-        L3ExprV2::LetRef(name) => env
-            .locals
-            .get(name)
-            .or_else(|| env.lets.get(name))
-            .or_else(|| env.inputs.get(name))
-            .cloned()
-            .ok_or_else(|| EvalFault::Unbound(name.clone())),
-        L3ExprV2::RuleFact(rule) => env
-            .facts
-            .get(rule)
-            .cloned()
-            .ok_or_else(|| EvalFault::Unbound(rule.clone())),
+        L3ExprV2::LetRef(name) => {
+            let val = env
+                .locals
+                .get(name)
+                .or_else(|| env.lets.get(name))
+                .or_else(|| env.inputs.get(name))
+                .ok_or_else(|| EvalFault::Unbound(name.clone()))?;
+            if let Some(b) = budget.as_mut() {
+                b.charge_clone(val)?;
+            }
+            Ok(val.clone())
+        }
+        L3ExprV2::RuleFact(rule) => {
+            let val = env
+                .facts
+                .get(rule)
+                .ok_or_else(|| EvalFault::Unbound(rule.clone()))?;
+            if let Some(b) = budget.as_mut() {
+                b.charge_clone(val)?;
+            }
+            Ok(val.clone())
+        }
         L3ExprV2::NullaryVariant {
             nominal_sum,
             variant,
-        } => Ok(L3ValueV2::Ctor {
-            nominal_sum: nominal_sum.clone(),
-            variant: variant.clone(),
-            args: Vec::new(),
-        }),
+        } => {
+            if let Some(b) = budget.as_mut() {
+                b.charge_allocation(1, nominal_sum.len() + variant.len())?;
+            }
+            Ok(L3ValueV2::Ctor {
+                nominal_sum: nominal_sum.clone(),
+                variant: variant.clone(),
+                args: Vec::new(),
+            })
+        }
         L3ExprV2::Ctor {
             nominal_sum,
             variant,
             args,
         } => {
-            let mut out = Vec::new();
+            if let Some(b) = budget.as_mut() {
+                b.charge_allocation(
+                    1,
+                    nominal_sum.len()
+                        + variant.len()
+                        + args.len().saturating_mul(std::mem::size_of::<L3ValueV2>()),
+                )?;
+            }
+            let mut out = Vec::with_capacity(args.len());
             for a in args {
-                out.push(eval(a, env)?);
+                let value = eval_internal(a, env, budget, current_func)?;
+                if let Some(b) = budget.as_mut() {
+                    b.charge_value(&value, 2)?;
+                }
+                out.push(value);
             }
             Ok(L3ValueV2::Ctor {
                 nominal_sum: nominal_sum.clone(),
@@ -792,16 +1313,32 @@ pub fn eval(e: &L3ExprV2, env: &EvalEnv) -> Result<L3ValueV2, EvalFault> {
             nominal_config,
             fields,
         } => {
-            let mut out = Vec::new();
-            for (name, value) in fields {
-                out.push((name.clone(), eval(value, env)?));
+            if let Some(b) = budget.as_mut() {
+                b.charge_allocation(
+                    1,
+                    nominal_config.len()
+                        + fields
+                            .len()
+                            .saturating_mul(std::mem::size_of::<(String, L3ValueV2)>()),
+                )?;
+            }
+            let mut out = Vec::with_capacity(fields.len());
+            for (name, expr) in fields {
+                if let Some(b) = budget.as_mut() {
+                    b.charge_allocation(0, name.len())?;
+                }
+                let value = eval_internal(expr, env, budget, current_func)?;
+                if let Some(b) = budget.as_mut() {
+                    b.charge_value(&value, 2)?;
+                }
+                out.push((name.clone(), value));
             }
             Ok(L3ValueV2::Record {
                 nominal_config: nominal_config.clone(),
                 fields: out,
             })
         }
-        L3ExprV2::Field(base, field) => match eval(base, env)? {
+        L3ExprV2::Field(base, field) => match eval_internal(base, env, budget, current_func)? {
             L3ValueV2::Record { fields, .. } => fields
                 .into_iter()
                 .find(|(n, _)| n == field)
@@ -810,7 +1347,10 @@ pub fn eval(e: &L3ExprV2, env: &EvalEnv) -> Result<L3ValueV2, EvalFault> {
             _ => Err(EvalFault::NoSuchField(field.clone())),
         },
         L3ExprV2::Arith(op, a, b) => {
-            let (x, y) = (eval(a, env)?, eval(b, env)?);
+            let (x, y) = (
+                eval_internal(a, env, budget, current_func)?,
+                eval_internal(b, env, budget, current_func)?,
+            );
             let (L3ValueV2::Int(x), L3ValueV2::Int(y)) = (x, y) else {
                 return Err(EvalFault::OperandShape("arithmetic requires Int operands"));
             };
@@ -824,7 +1364,10 @@ pub fn eval(e: &L3ExprV2, env: &EvalEnv) -> Result<L3ValueV2, EvalFault> {
             r.map(L3ValueV2::Int).ok_or(EvalFault::Overflow(*op))
         }
         L3ExprV2::Cmp(op, a, b) => {
-            let (x, y) = (eval(a, env)?, eval(b, env)?);
+            let (x, y) = (
+                eval_internal(a, env, budget, current_func)?,
+                eval_internal(b, env, budget, current_func)?,
+            );
             // Ordering comparisons are numeric; equality is structural, so it
             // works for any two values of the same shape.
             let out = match op {
@@ -848,12 +1391,12 @@ pub fn eval(e: &L3ExprV2, env: &EvalEnv) -> Result<L3ValueV2, EvalFault> {
             Ok(L3ValueV2::Bool(out))
         }
         L3ExprV2::Match { scrutinee, arms } => {
-            let v = eval(scrutinee, env)?;
+            let v = eval_internal(scrutinee, env, budget, current_func)?;
             let (variant, args) = match &v {
-                L3ValueV2::Ctor { variant, args, .. } => (variant.clone(), args.clone()),
+                L3ValueV2::Ctor { variant, args, .. } => (variant.as_str(), args.as_slice()),
                 // A boolean scrutinee matches the `true`/`false` constructors,
                 // which is how `Bool` is spelled as a two-variant sum.
-                L3ValueV2::Bool(b) => (if *b { "true" } else { "false" }.to_string(), Vec::new()),
+                L3ValueV2::Bool(b) => (if *b { "true" } else { "false" }, [].as_slice()),
                 _ => return Err(EvalFault::OperandShape("match requires a sum value")),
             };
             for (pat, body) in arms {
@@ -861,21 +1404,139 @@ pub fn eval(e: &L3ExprV2, env: &EvalEnv) -> Result<L3ValueV2, EvalFault> {
                     variant: pv,
                     binders,
                 } = pat;
-                if pv != &variant {
+                if pv != variant {
                     continue;
                 }
                 if binders.len() != args.len() {
                     return Err(EvalFault::OperandShape("constructor arity mismatch"));
                 }
+                if let Some(b) = budget.as_mut() {
+                    for (name, value) in env
+                        .locals
+                        .iter()
+                        .chain(env.lets.iter())
+                        .chain(env.inputs.iter())
+                        .chain(env.facts.iter())
+                    {
+                        b.charge_allocation(0, name.len())?;
+                        b.charge_clone(value)?;
+                    }
+                }
                 let mut arm_env = env.clone();
                 for (b, a) in binders.iter().zip(args.iter()) {
                     if let Some(name) = b {
+                        if let Some(b_budget) = budget.as_mut() {
+                            b_budget.charge_clone(a)?;
+                        }
                         arm_env.locals.insert(name.clone(), a.clone());
                     }
                 }
-                return eval(body, &arm_env);
+                return eval_internal(body, &arm_env, budget, current_func);
             }
             Err(EvalFault::NoMatchingArm)
+        }
+        L3ExprV2::Call { func, args } => {
+            // Borrow def directly without cloning from functions map.
+            let def = match env.functions.get(func) {
+                Some(d) => d,
+                None => return Err(EvalFault::Unbound(func.clone())),
+            };
+            if def.params.len() != args.len() {
+                return Err(EvalFault::OperandShape("function arity mismatch"));
+            }
+
+            // Eager call-by-value argument evaluation in caller's environment.
+            // Charge the result slots before reserving the vector so a large
+            // arity cannot bypass the value-growth limits through container
+            // capacity alone.
+            if let Some(b) = budget.as_mut() {
+                b.charge_allocation(
+                    args.len(),
+                    args.len().saturating_mul(std::mem::size_of::<L3ValueV2>()),
+                )?;
+            }
+            let mut evaluated_args = Vec::with_capacity(args.len());
+            for a in args {
+                evaluated_args.push(eval_internal(a, env, budget, current_func)?);
+            }
+
+            // Parameter contract checks.
+            for (val, (param_name, contract)) in evaluated_args.iter().zip(def.params.iter()) {
+                if let Some(expected_ty) = contract {
+                    let actual_ty = type_of_value(val);
+                    if actual_ty != *expected_ty {
+                        return Err(EvalFault::ContractViolation {
+                            func: func.clone(),
+                            param: Some(param_name.clone()),
+                            expected: expected_ty.to_string(),
+                            found: actual_ty.to_string(),
+                        });
+                    }
+                }
+            }
+
+            if let Some(b) = budget.as_mut() {
+                b.call_depth += 1;
+                if b.call_depth > b.max_call_depth {
+                    b.call_depth -= 1;
+                    return Err(EvalFault::CallDepthExceeded {
+                        limit: b.max_call_depth,
+                        func: func.clone(),
+                    });
+                }
+            }
+
+            // Closed execution environment for function body:
+            // only binds parameters into locals, with access to functions.
+            // Caller locals, lets, facts, and inputs are not accessible.
+            if let Some(b) = budget.as_mut() {
+                let key_bytes = def
+                    .params
+                    .iter()
+                    .fold(0usize, |total, (name, _)| total.saturating_add(name.len()));
+                b.charge_allocation(
+                    def.params.len(),
+                    key_bytes.saturating_add(
+                        def.params
+                            .len()
+                            .saturating_mul(std::mem::size_of::<(String, L3ValueV2)>()),
+                    ),
+                )?;
+            }
+            let mut fn_locals = BTreeMap::new();
+            for ((param_name, _), val) in def.params.iter().zip(evaluated_args) {
+                fn_locals.insert(param_name.clone(), val);
+            }
+            let fn_env = EvalEnv {
+                inputs: BTreeMap::new(),
+                lets: BTreeMap::new(),
+                facts: BTreeMap::new(),
+                locals: fn_locals,
+                functions: env.functions.clone(),
+            };
+
+            let ret_res = eval_internal(&def.body, &fn_env, budget, Some(func.as_str()));
+
+            if let Some(b) = budget.as_mut() {
+                b.call_depth -= 1;
+            }
+
+            let ret_val = ret_res?;
+
+            // Return contract check.
+            if let Some(expected_ret_ty) = &def.ret_contract {
+                let actual_ret_ty = type_of_value(&ret_val);
+                if actual_ret_ty != *expected_ret_ty {
+                    return Err(EvalFault::ContractViolation {
+                        func: func.clone(),
+                        param: None,
+                        expected: expected_ret_ty.to_string(),
+                        found: actual_ret_ty.to_string(),
+                    });
+                }
+            }
+
+            Ok(ret_val)
         }
     }
 }
@@ -922,7 +1583,7 @@ pub fn check_exhaustive(plan: &L3PlanV2) -> Result<(), L3V2LowerError> {
     Ok(())
 }
 
-fn check_exhaustive_expr(
+pub(crate) fn check_exhaustive_expr(
     e: &L3ExprV2,
     sum_of_variant: &BTreeMap<String, String>,
     variants_of_sum: &BTreeMap<String, Vec<String>>,
@@ -967,7 +1628,7 @@ fn check_exhaustive_expr(
                 })
             }
         }
-        L3ExprV2::Ctor { args, .. } => {
+        L3ExprV2::Ctor { args, .. } | L3ExprV2::Call { args, .. } => {
             for a in args {
                 check_exhaustive_expr(a, sum_of_variant, variants_of_sum)?;
             }

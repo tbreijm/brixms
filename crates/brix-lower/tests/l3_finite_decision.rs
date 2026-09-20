@@ -401,8 +401,8 @@ fn negative_lowering_undeclared_fact_read_in_guard() {
 
 #[test]
 fn negative_lowering_disallowed_items() {
-    let source_fn = "config A = X\nfn helper() = X\ncommit c from (p)";
-    let module = parse(source_fn).expect("parses");
+    let source_witness = "witness W = 1\ncommit c from (p)";
+    let module = parse(source_witness).expect("parses");
     assert!(matches!(
         lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE),
         Err(FiniteDecisionLowerError::ItemNotAllowed(_))

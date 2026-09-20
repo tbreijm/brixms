@@ -1,0 +1,30 @@
+config Decision = Expedite | Ship | Hold
+
+input stock: Int
+input region: Str
+input expedited: Bool
+
+fn calc_threshold(base: Int, markup: Int): Int = base + markup
+
+fn is_valid_region(reg: Str): Bool = match reg == "EU-NORTH" {
+  true => true
+  false => reg == "EU-WEST"
+}
+
+fn can_fulfill(available: Int, needed: Int): Bool = available >= needed
+
+fn both(a: Bool, b: Bool): Bool = match a {
+  true => b
+  false => false
+}
+
+rule threshold() = calc_threshold(10, 5)
+rule valid_dest() = is_valid_region(region)
+rule has_stock(threshold) = can_fulfill(stock, threshold)
+
+propose expedite(valid_dest) priority 5 when both(expedited, valid_dest) = Expedite
+propose ship(has_stock, valid_dest) priority 10 when both(has_stock, valid_dest) = Ship
+propose hold() priority 100 when true = Hold
+
+commit shipping from (expedite, ship, hold)
+show shipping

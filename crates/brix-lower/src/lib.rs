@@ -50,10 +50,12 @@ pub use finite_decision::{
     finite_decision_program_preimage, lower_finite_decision_plan, run_finite_decision_plan,
     run_finite_decision_plan_with_inputs, type_of_value, BoundInput, CandidateDisposition,
     CandidateStatus, DerivedFact, FiniteDecisionBuildError, FiniteDecisionCommit,
-    FiniteDecisionInput, FiniteDecisionLowerError, FiniteDecisionPlan, FiniteDecisionProgramId,
-    FiniteDecisionProposal, FiniteDecisionRule, FiniteDecisionRun, FiniteDecisionRuntime,
-    FiniteDecisionStop, FiniteDecisionUnknownReason, L3ValueType, QuiescenceCertificateId,
-    SelectedDecision, WhyExplanation, WhyNotExplanation, FINITE_DECISION_PROFILE,
+    FiniteDecisionContract, FiniteDecisionFnParam, FiniteDecisionFunction, FiniteDecisionInput,
+    FiniteDecisionLowerError, FiniteDecisionPlan, FiniteDecisionProgramId, FiniteDecisionProposal,
+    FiniteDecisionRule, FiniteDecisionRun, FiniteDecisionRuntime, FiniteDecisionStop,
+    FiniteDecisionUnknownReason, L3ValueType, QuiescenceCertificateId, SelectedDecision,
+    WhyExplanation, WhyNotExplanation, FINITE_DECISION_PROFILE, MAX_EXPR_DEPTH, MAX_EXPR_NODES,
+    MAX_FUNCTION_COUNT, MAX_FUNCTION_PARAMS,
 };
 pub use input::{
     canonicalize_input_shards, decode_input_shard, decode_input_shard_from_file, input_context_id,

@@ -587,6 +587,51 @@ From a source workspace, prefix a command with `cargo run -p brix-cli --`, or bu
 the executable once with `cargo build -p brix-cli`. When using a prebuilt archive,
 invoke `./brix` directly from the extracted directory.
 
+### Reusable functions in decision programs (source build)
+
+The working source adds pure, nonrecursive helpers to finite-decision programs
+([ADR-0032](./spec/adr/ADR-0032_Finite_Decision_Functions.md)). This extension is
+not included in the previously published alpha.3 archives.
+
+```brix
+fn enough(available: Int, needed: Int): Bool = available >= needed
+
+input stock: Int
+rule threshold() = 15
+rule eligible(threshold) = enough(stock, threshold)
+
+propose ship(eligible) priority 10 when eligible = stock
+commit shipping from (ship)
+```
+
+Helpers can call other helpers and appear in lets, rules, and proposal guards
+or values. They take their data explicitly as arguments: inputs, global lets,
+and rule facts are not captured from the surrounding module. Arguments evaluate
+once, left to right, including unused arguments; an arithmetic fault still
+stops the decision.
+
+Optional parameter and return annotations support `Int`, `Bool`, and `Str`,
+with optional `@Derived`. These are checked against values at the call boundary.
+Records and sum values can pass through unannotated parameters; composite type
+annotations are not yet supported. Recursive calls and unsupported contracts
+are rejected. Evaluation has nesting, work, and value-growth limits.
+
+Run the full shipping example from this checkout:
+
+```bash
+cargo run -p brix-cli -- run examples/shipping-functions.brix \
+  --input examples/shipping-functions.json
+```
+
+It selects `ship = Ship @Derived`. The same source and inputs work with
+`check`, `why`, `whynot`, `audit`, and `verify` using the command forms above.
+Helper bodies and contracts are included in the program pin; changing one
+invalidates verification against the old pin. Successful replay produces
+separate `Audited` receipts.
+
+The library can also evaluate helper calls in `show` expressions. The CLI
+currently removes `show` directives and prints its fixed decision report.
+
 **CLI target surface & status:**
 - `brix` implements exactly the six subcommands above.
 - `brix verify` implements offline verification of ADR-0026 audit input transport bundles.
