@@ -2376,3 +2376,149 @@ commit pick from (act)
         "JSON diagnostic must preserve stable code and unmodified logical diagnostic content"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 22. Functions Language Slice CLI Integration (ADR-0032)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_22_shipping_functions_cli_workflow() {
+    let temp = TempDirGuard::new("shipping_functions");
+    let bundle_path = temp.path().join("shipping_functions.bundle");
+
+    // 1. check with functions and input
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("check")
+            .arg("examples/shipping-functions.brix")
+            .arg("--input")
+            .arg("examples/shipping-functions.json")
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "check failed: {stderr}");
+    let check_json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(check_json["ok"], true);
+    assert_eq!(check_json["status"], "accepted");
+    assert_eq!(check_json["decision"]["candidate"], "ship");
+    let program_pin = check_json["program"].as_str().unwrap().to_string();
+
+    // 2. run with functions and input
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg("examples/shipping-functions.brix")
+            .arg("--input")
+            .arg("examples/shipping-functions.json")
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "run failed: {stderr}");
+    let run_json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(run_json["program"], program_pin);
+    assert_eq!(run_json["decision"]["candidate"], "ship");
+
+    // 3. why ship
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("why")
+            .arg("examples/shipping-functions.brix")
+            .arg("--candidate")
+            .arg("ship")
+            .arg("--input")
+            .arg("examples/shipping-functions.json")
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "why ship failed: {stderr}");
+    let why_json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(why_json["ok"], true);
+    assert_eq!(why_json["status"], "explained");
+
+    // 4. whynot expedite
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("whynot")
+            .arg("examples/shipping-functions.brix")
+            .arg("--candidate")
+            .arg("expedite")
+            .arg("--input")
+            .arg("examples/shipping-functions.json")
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "whynot expedite failed: {stderr}");
+    let whynot_json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(whynot_json["ok"], true);
+    assert_eq!(whynot_json["status"], "explained");
+
+    // 5. audit produce bundle
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("audit")
+            .arg("examples/shipping-functions.brix")
+            .arg("--input")
+            .arg("examples/shipping-functions.json")
+            .arg("--bundle")
+            .arg(&bundle_path)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "audit failed: {stderr}");
+    let audit_json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(audit_json["status"], "audited");
+    assert_eq!(audit_json["program"], program_pin);
+
+    // 6. verify bundle with correct program pin
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("verify")
+            .arg("examples/shipping-functions.brix")
+            .arg(&bundle_path)
+            .arg("--input")
+            .arg("examples/shipping-functions.json")
+            .arg("--expect-program")
+            .arg(&program_pin)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "verify failed: {stderr}");
+    let verify_json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(verify_json["status"], "audit-bundle-verified");
+    assert_eq!(verify_json["program"], program_pin);
+
+    // 7. verify with tampered program pin fails
+    let bogus_pin = "0000000000000000000000000000000000000000000000000000000000000000";
+    let (code, _, _) = run_cmd({
+        let mut c = brix();
+        c.arg("verify")
+            .arg("examples/shipping-functions.brix")
+            .arg(&bundle_path)
+            .arg("--input")
+            .arg("examples/shipping-functions.json")
+            .arg("--expect-program")
+            .arg(bogus_pin);
+        c
+    });
+    assert_eq!(code, 1, "tampered program pin must fail");
+
+    // 8. verify with tampered function source fails
+    let tampered_src = fs::read_to_string(repo_root().join("examples/shipping-functions.brix"))
+        .unwrap()
+        .replace("base + markup", "base + markup + 1");
+    let tampered_path = temp.path().join("tampered_shipping_functions.brix");
+    fs::write(&tampered_path, tampered_src).unwrap();
+
+    let (code, _, _) = run_cmd({
+        let mut c = brix();
+        c.arg("verify")
+            .arg(&tampered_path)
+            .arg(&bundle_path)
+            .arg("--input")
+            .arg("examples/shipping-functions.json")
+            .arg("--expect-program")
+            .arg(&program_pin);
+        c
+    });
+    assert_eq!(code, 1, "tampered function source must fail verification");
+}
