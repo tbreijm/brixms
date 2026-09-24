@@ -53,15 +53,18 @@ pub use finite_decision::{
     FiniteDecisionContract, FiniteDecisionFnParam, FiniteDecisionFunction, FiniteDecisionInput,
     FiniteDecisionLowerError, FiniteDecisionPlan, FiniteDecisionProgramId, FiniteDecisionProposal,
     FiniteDecisionRule, FiniteDecisionRun, FiniteDecisionRuntime, FiniteDecisionStop,
-    FiniteDecisionUnknownReason, L3ValueType, QuiescenceCertificateId, SelectedDecision,
-    WhyExplanation, WhyNotExplanation, FINITE_DECISION_PROFILE, MAX_EXPR_DEPTH, MAX_EXPR_NODES,
-    MAX_FUNCTION_COUNT, MAX_FUNCTION_PARAMS,
+    FiniteDecisionUnknownReason, L3Schema, L3SchemaBody, L3SchemaType, L3ValueType,
+    QuiescenceCertificateId, SelectedDecision, WhyExplanation, WhyNotExplanation,
+    FINITE_DECISION_PROFILE, MAX_EXPR_DEPTH, MAX_EXPR_NODES, MAX_FUNCTION_COUNT,
+    MAX_FUNCTION_PARAMS, MAX_SCHEMA_COUNT, MAX_SCHEMA_DEPTH, MAX_SCHEMA_EDGES,
 };
 pub use input::{
     canonicalize_input_shards, decode_input_shard, decode_input_shard_from_file, input_context_id,
     input_snapshot_id, load_input_snapshot_from_paths, validate_against_declarations,
     validate_completeness, InputDecodeError, InputError, InputLimits, InputScalarValue, InputShard,
-    InputSnapshot, InputSnapshotId, InputValidationError, MAX_INPUT_NAME_BYTES,
+    InputSnapshot, InputSnapshotId, InputValidationError, InputValue, INPUT_SCHEMA_V1,
+    INPUT_SCHEMA_V2, MAX_INPUT_CONTAINER_WIDTH, MAX_INPUT_NAME_BYTES, MAX_INPUT_VALUE_DEPTH,
+    MAX_INPUT_VALUE_NODES,
 };
 pub use l3::{
     lower_l3_plan, L3ConfigBody, L3ConfigDecl, L3LowerError, L3PlanItem, L3PlanV1, L3TypeRef,

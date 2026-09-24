@@ -2522,3 +2522,92 @@ fn test_22_shipping_functions_cli_workflow() {
     });
     assert_eq!(code, 1, "tampered function source must fail verification");
 }
+
+// ---------------------------------------------------------------------------
+// 23. Structured inputs and composite contracts CLI workflow (ADR-0033)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_23_order_policy_structured_input_workflow() {
+    let temp = TempDirGuard::new("order_policy");
+    let bundle_path = temp.path().join("order_policy.bundle");
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("check")
+            .arg("examples/order-policy.brix")
+            .arg("--input")
+            .arg("examples/order-policy.json")
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "check failed: {stderr}");
+    let check: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(check["ok"], true);
+    assert_eq!(check["decision"]["candidate"], "accept");
+    let program = check["program"].as_str().unwrap().to_string();
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg("examples/order-policy.brix")
+            .arg("--input")
+            .arg("examples/order-policy.json")
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "run failed: {stderr}");
+    let run: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(run["program"], program);
+    assert_eq!(run["inputs"][0]["value"]["type"], "record");
+
+    for (command, candidate) in [("why", "accept"), ("whynot", "hold")] {
+        let (code, stdout, stderr) = run_cmd({
+            let mut c = brix();
+            c.arg(command)
+                .arg("examples/order-policy.brix")
+                .arg("--candidate")
+                .arg(candidate)
+                .arg("--input")
+                .arg("examples/order-policy.json")
+                .arg("--json");
+            c
+        });
+        assert_eq!(code, 0, "{command} failed: {stderr}");
+        let explained: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(explained["ok"], true);
+        assert_eq!(explained["status"], "explained");
+    }
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("audit")
+            .arg("examples/order-policy.brix")
+            .arg("--input")
+            .arg("examples/order-policy.json")
+            .arg("--bundle")
+            .arg(&bundle_path)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "audit failed: {stderr}");
+    let audit: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(audit["program"], program);
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("verify")
+            .arg("examples/order-policy.brix")
+            .arg(&bundle_path)
+            .arg("--input")
+            .arg("examples/order-policy.json")
+            .arg("--expect-program")
+            .arg(&program)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "verify failed: {stderr}");
+    let verify: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(verify["ok"], true);
+    assert_eq!(verify["status"], "audit-bundle-verified");
+}

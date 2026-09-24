@@ -1,0 +1,11 @@
+config Destination = Domestic | Export(Str)
+config Order = { units: Int, destination: Destination }
+config Decision = Ship | Hold
+
+input order: Order
+
+fn eligible(o: Order): Bool = o.units >= 10
+
+propose accept() priority 10 when eligible(order) = Ship
+propose hold() priority 100 when true = Hold
+commit decision from (accept, hold)

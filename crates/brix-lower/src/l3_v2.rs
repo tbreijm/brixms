@@ -135,6 +135,147 @@ pub enum L3ValueType {
     Record(String),
 }
 
+/// A recursively checked schema type used by structured inputs and helper
+/// contracts. `Named` refers to a closed config definition in the plan schema
+/// table; builtin leaves retain their scalar identity.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum L3SchemaType {
+    Int,
+    Bool,
+    Str,
+    Named(String),
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum L3SchemaBody {
+    Sum(Vec<(String, Vec<L3SchemaType>)>),
+    Record(BTreeMap<String, L3SchemaType>),
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct L3Schema {
+    pub name: String,
+    pub body: L3SchemaBody,
+}
+
+impl L3SchemaType {
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::Int => "Int".to_string(),
+            Self::Bool => "Bool".to_string(),
+            Self::Str => "Str".to_string(),
+            Self::Named(name) => name.clone(),
+        }
+    }
+}
+
+/// Validate a runtime value against a closed schema, retaining a precise
+/// nested path for contract and external-input diagnostics.
+pub fn validate_l3_value(
+    value: &L3ValueV2,
+    expected: &L3SchemaType,
+    schemas: &BTreeMap<String, L3Schema>,
+    path: &str,
+) -> Result<(), String> {
+    match (value, expected) {
+        (L3ValueV2::Int(_), L3SchemaType::Int)
+        | (L3ValueV2::Bool(_), L3SchemaType::Bool)
+        | (L3ValueV2::Str(_), L3SchemaType::Str) => Ok(()),
+        (L3ValueV2::Int(_), _) | (L3ValueV2::Bool(_), _) | (L3ValueV2::Str(_), _) => Err(format!(
+            "{path}: expected {}, found primitive",
+            expected.display_name()
+        )),
+        (
+            L3ValueV2::Ctor {
+                nominal_sum,
+                variant,
+                args,
+            },
+            L3SchemaType::Named(name),
+        ) => {
+            let Some(schema) = schemas.get(name) else {
+                return Err(format!("{path}: unknown schema '{name}'"));
+            };
+            let L3SchemaBody::Sum(variants) = &schema.body else {
+                return Err(format!("{path}: expected record '{name}', found sum"));
+            };
+            if nominal_sum != name {
+                return Err(format!(
+                    "{path}: expected nominal '{name}', found '{nominal_sum}'"
+                ));
+            }
+            let Some((_, payloads)) = variants.iter().find(|(candidate, _)| candidate == variant)
+            else {
+                return Err(format!("{path}: unknown variant '{variant}' of '{name}'"));
+            };
+            if payloads.len() != args.len() {
+                return Err(format!(
+                    "{path}: variant '{variant}' expects {} payload(s), found {}",
+                    payloads.len(),
+                    args.len()
+                ));
+            }
+            for (index, (arg, arg_ty)) in args.iter().zip(payloads).enumerate() {
+                validate_l3_value(arg, arg_ty, schemas, &format!("{path}.args[{index}]"))?;
+            }
+            Ok(())
+        }
+        (
+            L3ValueV2::Record {
+                nominal_config,
+                fields,
+            },
+            L3SchemaType::Named(name),
+        ) => {
+            let Some(schema) = schemas.get(name) else {
+                return Err(format!("{path}: unknown schema '{name}'"));
+            };
+            let L3SchemaBody::Record(expected_fields) = &schema.body else {
+                return Err(format!("{path}: expected sum '{name}', found record"));
+            };
+            if nominal_config != name {
+                return Err(format!(
+                    "{path}: expected nominal '{name}', found '{nominal_config}'"
+                ));
+            }
+            if fields.len() != expected_fields.len() {
+                return Err(format!(
+                    "{path}: record '{name}' expects {} field(s), found {}",
+                    expected_fields.len(),
+                    fields.len()
+                ));
+            }
+            for (field, field_ty) in expected_fields {
+                let Some(actual) = fields
+                    .iter()
+                    .find(|(candidate, _)| candidate == field)
+                    .map(|(_, value)| value)
+                else {
+                    return Err(format!("{path}.{field}: missing field"));
+                };
+                validate_l3_value(actual, field_ty, schemas, &format!("{path}.{field}"))?;
+            }
+            for (field, _) in fields {
+                if !expected_fields.contains_key(field) {
+                    return Err(format!("{path}.{field}: unknown field"));
+                }
+            }
+            Ok(())
+        }
+        (L3ValueV2::Ctor { nominal_sum, .. }, expected)
+        | (
+            L3ValueV2::Record {
+                nominal_config: nominal_sum,
+                ..
+            },
+            expected,
+        ) => Err(format!(
+            "{path}: expected {}, found '{nominal_sum}'",
+            expected.display_name()
+        )),
+    }
+}
+
 impl fmt::Display for L3ValueType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -170,8 +311,9 @@ pub const MAX_EVAL_VALUE_BYTES: usize = 1_000_000;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct L3FunctionDef {
     pub name: String,
-    pub params: Vec<(String, Option<L3ValueType>)>,
-    pub ret_contract: Option<L3ValueType>,
+    pub params: Vec<(String, Option<L3SchemaType>)>,
+    pub ret_contract: Option<L3SchemaType>,
+    pub schemas: Arc<BTreeMap<String, L3Schema>>,
     pub body: L3ExprV2,
 }
 
@@ -917,8 +1059,9 @@ pub enum EvalFault {
     ContractViolation {
         func: String,
         param: Option<String>,
-        expected: String,
-        found: String,
+        expected: Box<str>,
+        found: Box<str>,
+        path: Option<Box<str>>,
     },
 }
 
@@ -941,16 +1084,21 @@ impl fmt::Display for EvalFault {
                 param,
                 expected,
                 found,
+                path,
             } => {
+                let location = path
+                    .as_deref()
+                    .map(|p| format!(" at {p}"))
+                    .unwrap_or_default();
                 if let Some(p) = param {
                     write!(
                         f,
-                        "contract violation in function '{func}' for parameter '{p}': expected {expected}, found {found}"
+                        "contract violation in function '{func}' for parameter '{p}'{location}: expected {expected}, found {found}"
                     )
                 } else {
                     write!(
                         f,
-                        "return contract violation in function '{func}': expected {expected}, found {found}"
+                        "return contract violation in function '{func}'{location}: expected {expected}, found {found}"
                     )
                 }
             }
@@ -973,6 +1121,7 @@ pub struct EvalEnv {
     facts: BTreeMap<String, L3ValueV2>,
     locals: BTreeMap<String, L3ValueV2>,
     functions: Arc<BTreeMap<String, L3FunctionDef>>,
+    schemas: Arc<BTreeMap<String, L3Schema>>,
 }
 
 impl EvalEnv {
@@ -1007,6 +1156,11 @@ impl EvalEnv {
         self
     }
 
+    pub fn with_schemas(mut self, schemas: Arc<BTreeMap<String, L3Schema>>) -> Self {
+        self.schemas = schemas;
+        self
+    }
+
     /// Bound external inputs in the environment.
     pub fn inputs(&self) -> &BTreeMap<String, L3ValueV2> {
         &self.inputs
@@ -1015,6 +1169,10 @@ impl EvalEnv {
     /// Registered functions in the environment.
     pub fn functions(&self) -> &Arc<BTreeMap<String, L3FunctionDef>> {
         &self.functions
+    }
+
+    pub fn schemas(&self) -> &Arc<BTreeMap<String, L3Schema>> {
+        &self.schemas
     }
 
     /// Whether every rule in `deps` has committed a fact — the eligibility
@@ -1195,7 +1353,7 @@ impl EvalBudget {
 /// Operands evaluate **left to right**, which is ABI: it fixes which fault a
 /// program with two faulty operands reports.
 pub fn eval(e: &L3ExprV2, env: &EvalEnv) -> Result<L3ValueV2, EvalFault> {
-    let mut budget = if env.functions.is_empty() {
+    let mut budget = if env.functions.is_empty() && env.schemas.is_empty() {
         None
     } else {
         Some(EvalBudget::default())
@@ -1463,13 +1621,22 @@ fn eval_internal_body(
             // Parameter contract checks.
             for (val, (param_name, contract)) in evaluated_args.iter().zip(def.params.iter()) {
                 if let Some(expected_ty) = contract {
-                    let actual_ty = type_of_value(val);
-                    if actual_ty != *expected_ty {
+                    if let Err(detail) = validate_l3_value(val, expected_ty, &def.schemas, "<root>")
+                    {
+                        let path = if matches!(
+                            expected_ty,
+                            L3SchemaType::Int | L3SchemaType::Bool | L3SchemaType::Str
+                        ) {
+                            None
+                        } else {
+                            Some(detail.into_boxed_str())
+                        };
                         return Err(EvalFault::ContractViolation {
                             func: func.clone(),
                             param: Some(param_name.clone()),
-                            expected: expected_ty.to_string(),
-                            found: actual_ty.to_string(),
+                            expected: expected_ty.display_name().into_boxed_str(),
+                            found: type_of_value(val).to_string().into_boxed_str(),
+                            path,
                         });
                     }
                 }
@@ -1513,6 +1680,7 @@ fn eval_internal_body(
                 facts: BTreeMap::new(),
                 locals: fn_locals,
                 functions: env.functions.clone(),
+                schemas: def.schemas.clone(),
             };
 
             let ret_res = eval_internal(&def.body, &fn_env, budget, Some(func.as_str()));
@@ -1525,13 +1693,23 @@ fn eval_internal_body(
 
             // Return contract check.
             if let Some(expected_ret_ty) = &def.ret_contract {
-                let actual_ret_ty = type_of_value(&ret_val);
-                if actual_ret_ty != *expected_ret_ty {
+                if let Err(detail) =
+                    validate_l3_value(&ret_val, expected_ret_ty, &def.schemas, "<root>")
+                {
+                    let path = if matches!(
+                        expected_ret_ty,
+                        L3SchemaType::Int | L3SchemaType::Bool | L3SchemaType::Str
+                    ) {
+                        None
+                    } else {
+                        Some(detail.into_boxed_str())
+                    };
                     return Err(EvalFault::ContractViolation {
                         func: func.clone(),
                         param: None,
-                        expected: expected_ret_ty.to_string(),
-                        found: actual_ret_ty.to_string(),
+                        expected: expected_ret_ty.display_name().into_boxed_str(),
+                        found: type_of_value(&ret_val).to_string().into_boxed_str(),
+                        path,
                     });
                 }
             }

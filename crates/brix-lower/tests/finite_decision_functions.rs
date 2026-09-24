@@ -10,7 +10,7 @@ use brix_lower::{
     produce_finite_decision_audit_input_bundle_v1, AuditDecodeLimits, FiniteDecisionLowerError,
     FiniteDecisionPlan, FiniteDecisionRuntime, FiniteDecisionStop, FiniteDecisionUnknownReason,
     InputLimits, PlanLimitsV1, FINITE_DECISION_PROFILE, MAX_EXPR_DEPTH, MAX_EXPR_NODES,
-    MAX_FUNCTION_COUNT, MAX_FUNCTION_PARAMS,
+    MAX_FUNCTION_COUNT, MAX_FUNCTION_PARAMS, MAX_SCHEMA_DEPTH, MAX_SCHEMA_EDGES,
 };
 use brix_syntax::{parse, ParseLimits};
 use soc_regimes::finite_frontier::{WhyExplanation, WhyNotExplanation};
@@ -372,7 +372,7 @@ commit c from (p)
                     expected,
                     found,
                     ..
-                } if p == "x" && expected == "Int" && found == "Bool"
+                } if p == "x" && expected.as_ref() == "Int" && found.as_ref() == "Bool"
             ));
         }
         other => panic!("expected parameter contract violation, found {other:?}"),
@@ -408,7 +408,7 @@ commit c from (p)
                     expected,
                     found,
                     ..
-                } if expected == "Bool" && found == "Int"
+                } if expected.as_ref() == "Bool" && found.as_ref() == "Int"
             ));
         }
         other => panic!("expected return contract violation, found {other:?}"),
@@ -444,23 +444,20 @@ commit c from (p)
 }
 
 #[test]
-fn test_reject_nominal_composite_contracts() {
+fn test_accept_nominal_composite_contracts() {
     let src1 = r#"
 config Status = Active | Inactive
 config Decision = Done
 
 fn check_status(s: Status): Bool = true
 
-rule r() = 1
+rule r() = check_status(Active)
 propose p(r) priority 10 when true = Done
 commit c from (p)
 "#;
-    let module1 = parse(src1).expect("parses");
-    let err1 = lower_finite_decision_plan(&module1, FINITE_DECISION_PROFILE).unwrap_err();
-    assert!(matches!(
-        err1,
-        FiniteDecisionLowerError::UnsupportedContractType { ref ty, .. } if ty == "Status"
-    ));
+    let p1 = plan(src1);
+    let run1 = FiniteDecisionRuntime::build(&p1).unwrap().run();
+    assert!(run1.is_selected());
 
     let src2 = r#"
 config User = { name: Str, age: Int }
@@ -468,15 +465,172 @@ config Decision = Done
 
 fn check_user(u: User): Str = "ok"
 
-rule r() = 1
+rule r() = check_user(User { name: "Alice", age: 30 })
 propose p(r) priority 10 when true = Done
 commit c from (p)
 "#;
-    let module2 = parse(src2).expect("parses");
-    let err2 = lower_finite_decision_plan(&module2, FINITE_DECISION_PROFILE).unwrap_err();
+    let p2 = plan(src2);
+    let run2 = FiniteDecisionRuntime::build(&p2).unwrap().run();
+    assert!(run2.is_selected());
+}
+
+#[test]
+fn test_composite_contract_rejects_malformed_source_value() {
+    let source = r#"
+config Expected = Good(Int)
+config Other = Wrong(Int)
+config Decision = Done
+
+fn check(value: Expected): Bool = true
+
+rule r() = check(Wrong(7))
+propose p(r) priority 10 when true = Done
+commit c from (p)
+"#;
+    let runtime = FiniteDecisionRuntime::build(&plan(source)).expect("runtime builds");
+    let run = runtime.run();
+    assert!(run.is_unknown());
     assert!(matches!(
-        err2,
-        FiniteDecisionLowerError::UnsupportedContractType { ref ty, .. } if ty == "User"
+        run.stop,
+        FiniteDecisionStop::Unknown(FiniteDecisionUnknownReason::ExpressionEvaluationFault {
+            fault: EvalFault::ContractViolation { ref expected, .. }, ..
+        }) if expected.as_ref() == "Expected"
+    ));
+
+    let wrong_payload = r#"
+config Expected = Good(Int)
+config Decision = Done
+fn check(value: Expected): Bool = true
+rule r() = check(Good("bad"))
+propose p(r) priority 10 when true = Done
+commit c from (p)
+"#;
+    let run = FiniteDecisionRuntime::build(&plan(wrong_payload))
+        .expect("runtime builds")
+        .run();
+    assert!(run.is_unknown());
+
+    let wrong_return = r#"
+config Expected = Good(Int)
+config Other = Wrong(Int)
+config Decision = Done
+fn make(): Expected = Wrong(7)
+rule r() = make()
+propose p(r) priority 10 when true = Done
+commit c from (p)
+"#;
+    let run = FiniteDecisionRuntime::build(&plan(wrong_return))
+        .expect("runtime builds")
+        .run();
+    assert!(run.is_unknown());
+
+    let wrong_record_param = r#"
+config Expected = { name: Str, age: Int }
+config Decision = Done
+fn check(value: Expected): Bool = true
+rule r() = check(Expected { name: "Alice", age: "bad" })
+propose p(r) priority 10 when true = Done
+commit c from (p)
+"#;
+    let run = FiniteDecisionRuntime::build(&plan(wrong_record_param))
+        .expect("runtime builds")
+        .run();
+    assert!(run.is_unknown());
+
+    let wrong_record_return = r#"
+config Expected = { name: Str, age: Int }
+config Decision = Done
+fn make(): Expected = Expected { name: "Alice", age: "bad" }
+rule r() = make()
+propose p(r) priority 10 when true = Done
+commit c from (p)
+"#;
+    let run = FiniteDecisionRuntime::build(&plan(wrong_record_return))
+        .expect("runtime builds")
+        .run();
+    assert!(run.is_unknown());
+}
+
+#[test]
+fn test_reachable_schema_depth_is_bounded_exactly() {
+    fn source(hops: usize) -> String {
+        let mut out = String::new();
+        for index in 0..hops {
+            out.push_str(&format!("config C{index} = Next{index}(C{})\n", index + 1));
+        }
+        out.push_str(&format!("config C{hops} = End\n"));
+        out.push_str("config Decision = Done\ninput value: C0\npropose p() priority 1 when true = Done\ncommit c from (p)\n");
+        out
+    }
+    assert!(plan(&source(MAX_SCHEMA_DEPTH - 1)).schemas.len() == MAX_SCHEMA_DEPTH);
+    let module = parse(&source(MAX_SCHEMA_DEPTH)).expect("deep source parses");
+    let err = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE).unwrap_err();
+    assert!(matches!(
+        err,
+        FiniteDecisionLowerError::SchemaDepthExceeded { .. }
+    ));
+
+    fn shared_source(hops: usize) -> String {
+        let mut out = String::from("config Leaf = End\nconfig A = Alias(Leaf)\n");
+        for index in 0..hops {
+            out.push_str(&format!("config D{index} = Next{index}(D{})\n", index + 1));
+        }
+        out.push_str(&format!("config D{hops} = Tail(Leaf)\n"));
+        out.push_str("config Decision = Done\ninput shallow: A\ninput deep: D0\npropose p() priority 1 when true = Done\ncommit c from (p)\n");
+        out
+    }
+    assert_eq!(
+        plan(&shared_source(MAX_SCHEMA_DEPTH - 2)).schemas.len(),
+        MAX_SCHEMA_DEPTH + 1
+    );
+    let module = parse(&shared_source(MAX_SCHEMA_DEPTH - 1)).expect("shared source parses");
+    let err = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE).unwrap_err();
+    assert!(matches!(
+        err,
+        FiniteDecisionLowerError::SchemaDepthExceeded { .. }
+    ));
+}
+
+#[test]
+fn test_reachable_schema_rejects_cycles_generics_and_graded_components() {
+    for (source, expected) in [
+        (
+            "config A = Next(B)\nconfig B = Next(A)\nconfig Decision = Done\ninput value: A\npropose p() priority 1 when true = Done\ncommit c from (p)",
+            "recursive",
+        ),
+        (
+            "config Box<T> = Value(T)\nconfig Decision = Done\ninput value: Box<Int>\npropose p() priority 1 when true = Done\ncommit c from (p)",
+            "generic",
+        ),
+        (
+            "config Wrapped = Value(Int @Derived)\nconfig Decision = Done\ninput value: Wrapped\npropose p() priority 1 when true = Done\ncommit c from (p)",
+            "graded",
+        ),
+    ] {
+        let module = parse(source).expect("schema source parses");
+        let err = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE).unwrap_err();
+        assert!(matches!(err, FiniteDecisionLowerError::InvalidSchema { ref detail, .. } if detail.contains(expected)));
+    }
+}
+
+#[test]
+fn test_reachable_schema_component_bound_counts_scalar_fields() {
+    let mut fields = String::new();
+    for index in 0..=MAX_SCHEMA_EDGES {
+        if index != 0 {
+            fields.push_str(", ");
+        }
+        fields.push_str(&format!("field{index}: Int"));
+    }
+    let source = format!(
+        "config Wide = {{ {fields} }}\nconfig Decision = Done\ninput value: Wide\npropose p() priority 1 when true = Done\ncommit c from (p)"
+    );
+    let module = parse(&source).expect("wide schema parses");
+    let err = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE).unwrap_err();
+    assert!(matches!(
+        err,
+        FiniteDecisionLowerError::SchemaLimitExceeded { limit, kind }
+            if limit == MAX_SCHEMA_EDGES && kind == "edges"
     ));
 }
 

@@ -8,8 +8,12 @@ use brix_syntax::ast;
 
 use crate::l3_v2::{
     check_exhaustive_expr, lower_expr_v2, L3ConfigBodyV2, L3ConfigDeclV2, L3ExprV2, L3PatternV2,
-    L3V2LowerError, L3ValueType,
+    L3Schema, L3SchemaBody, L3SchemaType, L3V2LowerError, L3ValueType,
 };
+
+pub const MAX_SCHEMA_COUNT: usize = 128;
+pub const MAX_SCHEMA_DEPTH: usize = 32;
+pub const MAX_SCHEMA_EDGES: usize = 1024;
 
 /// The profile marker for finite-decision alpha (ADR-0030 ⟨D-PROFILE⟩).
 pub const FINITE_DECISION_PROFILE: &str = "brix.l3.finite-decision@1";
@@ -39,6 +43,7 @@ pub struct FiniteDecisionInput {
 pub struct FiniteDecisionContract {
     pub ty: L3ValueType,
     pub grade: Option<ast::Grade>,
+    pub schema_ty: Option<L3SchemaType>,
 }
 
 /// A parameter in a finite-decision function definition.
@@ -97,6 +102,7 @@ pub struct FiniteDecisionPlan {
     pub proposals: Vec<FiniteDecisionProposal>,
     pub commit: FiniteDecisionCommit,
     pub shows: Vec<L3ExprV2>,
+    pub schemas: BTreeMap<String, L3Schema>,
 }
 
 impl FiniteDecisionPlan {
@@ -175,6 +181,17 @@ pub enum FiniteDecisionLowerError {
     },
     UnknownContractType {
         name: String,
+    },
+    InvalidSchema {
+        name: String,
+        detail: String,
+    },
+    SchemaDepthExceeded {
+        limit: usize,
+    },
+    SchemaLimitExceeded {
+        limit: usize,
+        kind: &'static str,
     },
     ExpressionDepthExceeded {
         limit: usize,
@@ -300,6 +317,13 @@ impl fmt::Display for FiniteDecisionLowerError {
             Self::UnknownContractType { name } => {
                 write!(f, "unknown contract type '{name}'")
             }
+            Self::InvalidSchema { name, detail } => write!(f, "invalid schema '{name}': {detail}"),
+            Self::SchemaDepthExceeded { limit } => {
+                write!(f, "schema dependency depth exceeds limit ({limit})")
+            }
+            Self::SchemaLimitExceeded { limit, kind } => {
+                write!(f, "schema {kind} exceeds limit ({limit})")
+            }
             Self::ExpressionDepthExceeded { limit } => {
                 write!(f, "expression nesting depth exceeds limit ({limit})")
             }
@@ -405,11 +429,247 @@ fn check_expr_bounds(
     }
 }
 
+fn schema_root_name(ty: &ast::Ty) -> Option<&str> {
+    match ty {
+        ast::Ty::Named(name) => (!matches!(name.as_str(), "Int" | "Bool" | "Str")).then_some(name),
+        ast::Ty::Graded(inner, _) => schema_root_name(inner),
+        ast::Ty::App(name, _) => Some(name),
+        _ => None,
+    }
+}
+
+fn schema_type_from_ast(
+    ty: &ast::Ty,
+    owner: &str,
+    configs: &BTreeMap<String, &ast::ConfigDecl>,
+) -> Result<L3SchemaType, FiniteDecisionLowerError> {
+    match ty {
+        ast::Ty::Named(name) => match name.as_str() {
+            "Int" => Ok(L3SchemaType::Int),
+            "Bool" => Ok(L3SchemaType::Bool),
+            "Str" => Ok(L3SchemaType::Str),
+            other if configs.contains_key(other) => Ok(L3SchemaType::Named(other.to_string())),
+            other => Err(FiniteDecisionLowerError::InvalidSchema {
+                name: owner.to_string(),
+                detail: format!("unknown field or payload type '{other}'"),
+            }),
+        },
+        ast::Ty::Graded(_, grade) => Err(FiniteDecisionLowerError::InvalidSchema {
+            name: owner.to_string(),
+            detail: format!("graded schema component is unsupported ({grade:?})"),
+        }),
+        ast::Ty::App(name, _) => Err(FiniteDecisionLowerError::InvalidSchema {
+            name: owner.to_string(),
+            detail: format!("generic schema component '{name}<...>' is unsupported"),
+        }),
+        ast::Ty::Record(_) => Err(FiniteDecisionLowerError::InvalidSchema {
+            name: owner.to_string(),
+            detail: "anonymous record schema components are unsupported".to_string(),
+        }),
+    }
+}
+
+fn collect_schema(
+    name: &str,
+    depth: usize,
+    configs: &BTreeMap<String, &ast::ConfigDecl>,
+    schemas: &mut BTreeMap<String, L3Schema>,
+    heights: &mut BTreeMap<String, usize>,
+    visiting: &mut BTreeSet<String>,
+    edges: &mut usize,
+) -> Result<(), FiniteDecisionLowerError> {
+    if depth > MAX_SCHEMA_DEPTH {
+        return Err(FiniteDecisionLowerError::SchemaDepthExceeded {
+            limit: MAX_SCHEMA_DEPTH,
+        });
+    }
+    if let Some(height) = heights.get(name) {
+        if depth.saturating_add(*height).saturating_sub(1) > MAX_SCHEMA_DEPTH {
+            return Err(FiniteDecisionLowerError::SchemaDepthExceeded {
+                limit: MAX_SCHEMA_DEPTH,
+            });
+        }
+        return Ok(());
+    }
+    let Some(config) = configs.get(name) else {
+        return Err(FiniteDecisionLowerError::InvalidSchema {
+            name: name.to_string(),
+            detail: "unknown config definition".to_string(),
+        });
+    };
+    if !visiting.insert(name.to_string()) {
+        return Err(FiniteDecisionLowerError::InvalidSchema {
+            name: name.to_string(),
+            detail: "recursive schemas are unsupported".to_string(),
+        });
+    }
+    if !config.params.is_empty() {
+        return Err(FiniteDecisionLowerError::InvalidSchema {
+            name: name.to_string(),
+            detail: "generic configs are unsupported".to_string(),
+        });
+    }
+    let body = match &config.body {
+        ast::ConfigBody::Sum(variants) => {
+            let mut out = Vec::with_capacity(variants.len());
+            for variant in variants {
+                let mut payloads = Vec::with_capacity(variant.params.len());
+                for ty in &variant.params {
+                    *edges = edges.saturating_add(1);
+                    if *edges > MAX_SCHEMA_EDGES {
+                        return Err(FiniteDecisionLowerError::SchemaLimitExceeded {
+                            limit: MAX_SCHEMA_EDGES,
+                            kind: "edges",
+                        });
+                    }
+                    let payload = schema_type_from_ast(ty, name, configs)?;
+                    if let L3SchemaType::Named(child) = &payload {
+                        collect_schema(
+                            child,
+                            depth + 1,
+                            configs,
+                            schemas,
+                            heights,
+                            visiting,
+                            edges,
+                        )?;
+                    }
+                    payloads.push(payload);
+                }
+                out.push((variant.name.clone(), payloads));
+            }
+            L3SchemaBody::Sum(out)
+        }
+        ast::ConfigBody::Record(fields) => {
+            let mut out = BTreeMap::new();
+            for field in fields {
+                let field_type = schema_type_from_ast(&field.ty, name, configs)?;
+                *edges = edges.saturating_add(1);
+                if *edges > MAX_SCHEMA_EDGES {
+                    return Err(FiniteDecisionLowerError::SchemaLimitExceeded {
+                        limit: MAX_SCHEMA_EDGES,
+                        kind: "edges",
+                    });
+                }
+                if out.insert(field.name.clone(), field_type).is_some() {
+                    return Err(FiniteDecisionLowerError::InvalidSchema {
+                        name: name.to_string(),
+                        detail: format!("duplicate field '{}'", field.name),
+                    });
+                }
+                if let L3SchemaType::Named(child) = out.get(&field.name).expect("inserted field") {
+                    collect_schema(child, depth + 1, configs, schemas, heights, visiting, edges)?;
+                }
+            }
+            L3SchemaBody::Record(out)
+        }
+    };
+    visiting.remove(name);
+    let height = match &body {
+        L3SchemaBody::Sum(variants) => variants
+            .iter()
+            .flat_map(|(_, payloads)| payloads)
+            .filter_map(|ty| match ty {
+                L3SchemaType::Named(child) => heights.get(child).copied(),
+                _ => None,
+            })
+            .map(|child_height| child_height.saturating_add(1))
+            .max()
+            .unwrap_or(1),
+        L3SchemaBody::Record(fields) => fields
+            .values()
+            .filter_map(|ty| match ty {
+                L3SchemaType::Named(child) => heights.get(child).copied(),
+                _ => None,
+            })
+            .map(|child_height| child_height.saturating_add(1))
+            .max()
+            .unwrap_or(1),
+    };
+    schemas.insert(
+        name.to_string(),
+        L3Schema {
+            name: name.to_string(),
+            body,
+        },
+    );
+    heights.insert(name.to_string(), height);
+    if schemas.len() > MAX_SCHEMA_COUNT {
+        return Err(FiniteDecisionLowerError::SchemaLimitExceeded {
+            limit: MAX_SCHEMA_COUNT,
+            kind: "count",
+        });
+    }
+    Ok(())
+}
+
+fn collect_reachable_schemas(
+    module: &ast::Module,
+) -> Result<BTreeMap<String, L3Schema>, FiniteDecisionLowerError> {
+    let configs: BTreeMap<String, &ast::ConfigDecl> = module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ast::Item::Config(config) => Some((config.name.clone(), config)),
+            _ => None,
+        })
+        .collect();
+    let mut roots = BTreeSet::new();
+    for item in &module.items {
+        match item {
+            ast::Item::Input(input) => {
+                if let Some(name) = schema_root_name(&input.ty) {
+                    if configs.contains_key(name) {
+                        roots.insert(name.to_string());
+                    }
+                }
+            }
+            ast::Item::Fn(function) => {
+                for parameter in &function.params {
+                    if let Some(ty) = &parameter.ty {
+                        if let Some(name) = schema_root_name(ty) {
+                            if configs.contains_key(name) {
+                                roots.insert(name.to_string());
+                            }
+                        }
+                    }
+                }
+                if let Some(ty) = &function.ret {
+                    if let Some(name) = schema_root_name(ty) {
+                        if configs.contains_key(name) {
+                            roots.insert(name.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut schemas = BTreeMap::new();
+    let mut heights = BTreeMap::new();
+    let mut visiting = BTreeSet::new();
+    let mut edges = 0;
+    for root in roots {
+        collect_schema(
+            &root,
+            1,
+            &configs,
+            &mut schemas,
+            &mut heights,
+            &mut visiting,
+            &mut edges,
+        )?;
+    }
+    Ok(schemas)
+}
+
 /// Parse and validate a contract type and optional grade annotation (ADR-0032).
 fn parse_contract(
     ty: &ast::Ty,
     declared_sum_configs: &BTreeSet<String>,
     declared_record_configs: &BTreeSet<String>,
+    schemas: &BTreeMap<String, L3Schema>,
 ) -> Result<FiniteDecisionContract, FiniteDecisionLowerError> {
     let (inner_ty, grade) = match ty {
         ast::Ty::Graded(inner, g) => match g {
@@ -436,10 +696,16 @@ fn parse_contract(
                 });
             }
             n if declared_sum_configs.contains(n) || declared_record_configs.contains(n) => {
-                return Err(FiniteDecisionLowerError::UnsupportedContractType {
-                    ty: n.to_string(),
-                    detail: "sum and record contract annotations are not supported in finite-decision alpha (only Int, Bool, Str are supported)".to_string(),
-                });
+                if !schemas.contains_key(n) {
+                    return Err(FiniteDecisionLowerError::UnknownContractType {
+                        name: n.to_string(),
+                    });
+                }
+                if declared_sum_configs.contains(n) {
+                    L3ValueType::Sum(n.to_string())
+                } else {
+                    L3ValueType::Record(n.to_string())
+                }
             }
             n => {
                 return Err(FiniteDecisionLowerError::UnknownContractType {
@@ -450,7 +716,7 @@ fn parse_contract(
         ast::Ty::Record(_) => {
             return Err(FiniteDecisionLowerError::UnsupportedContractType {
                 ty: "anonymous record".to_string(),
-                detail: "composite types are not supported in function contracts in this slice"
+                detail: "anonymous record types are not supported in function contracts"
                     .to_string(),
             });
         }
@@ -469,9 +735,18 @@ fn parse_contract(
         }
     };
 
+    let schema_ty = match &value_type {
+        L3ValueType::Int => None,
+        L3ValueType::Bool => None,
+        L3ValueType::Str => None,
+        L3ValueType::Sum(name) | L3ValueType::Record(name) => {
+            Some(L3SchemaType::Named(name.clone()))
+        }
+    };
     Ok(FiniteDecisionContract {
         ty: value_type,
         grade,
+        schema_ty,
     })
 }
 
@@ -694,6 +969,9 @@ pub fn lower_finite_decision_plan(
         }
     }
 
+    let schemas = collect_reachable_schemas(module)?;
+    let bounded = has_functions || !schemas.is_empty();
+
     // Builtin Bool sum for exhaustiveness checking.
     variants_of_sum.insert("Bool".to_string(), vec!["false".into(), "true".into()]);
     sum_of_variant.insert("true".to_string(), "Bool".to_string());
@@ -737,7 +1015,7 @@ pub fn lower_finite_decision_plan(
                     });
                 }
                 let contract = if let Some(ty) = &p.ty {
-                    Some(parse_contract(ty, &sum_configs, &record_configs)?)
+                    Some(parse_contract(ty, &sum_configs, &record_configs, &schemas)?)
                 } else {
                     None
                 };
@@ -748,7 +1026,12 @@ pub fn lower_finite_decision_plan(
             }
 
             let ret_contract = if let Some(ret_ty) = &f.ret {
-                Some(parse_contract(ret_ty, &sum_configs, &record_configs)?)
+                Some(parse_contract(
+                    ret_ty,
+                    &sum_configs,
+                    &record_configs,
+                    &schemas,
+                )?)
             } else {
                 None
             };
@@ -819,6 +1102,18 @@ pub fn lower_finite_decision_plan(
                         "Int" => L3ValueType::Int,
                         "Bool" => L3ValueType::Bool,
                         "Str" => L3ValueType::Str,
+                        name if schemas
+                            .get(name)
+                            .is_some_and(|schema| matches!(&schema.body, L3SchemaBody::Sum(_))) =>
+                        {
+                            L3ValueType::Sum(name.to_string())
+                        }
+                        name if schemas.get(name).is_some_and(|schema| {
+                            matches!(&schema.body, L3SchemaBody::Record(_))
+                        }) =>
+                        {
+                            L3ValueType::Record(name.to_string())
+                        }
                         other => {
                             return Err(FiniteDecisionLowerError::UnsupportedInputType {
                                 name: inp.name.clone(),
@@ -935,7 +1230,7 @@ pub fn lower_finite_decision_plan(
                 if !all_top_level_names.insert(l.name.clone()) {
                     return Err(FiniteDecisionLowerError::DuplicateItemName(l.name.clone()));
                 }
-                if has_functions {
+                if bounded {
                     let mut node_count = 0;
                     check_expr_bounds(&l.value, 0, &mut node_count)?;
                 }
@@ -955,7 +1250,7 @@ pub fn lower_finite_decision_plan(
                 )
                 .map_err(map_lower_err)?;
 
-                if has_functions {
+                if bounded {
                     check_exhaustive_expr(&value, &sum_of_variant, &variants_of_sum)
                         .map_err(FiniteDecisionLowerError::ExprError)?;
                 }
@@ -967,7 +1262,7 @@ pub fn lower_finite_decision_plan(
                 if !all_top_level_names.insert(r.name.clone()) {
                     return Err(FiniteDecisionLowerError::DuplicateItemName(r.name.clone()));
                 }
-                if has_functions {
+                if bounded {
                     let mut node_count = 0;
                     check_expr_bounds(&r.body, 0, &mut node_count)?;
                 }
@@ -1032,7 +1327,7 @@ pub fn lower_finite_decision_plan(
                     other => FiniteDecisionLowerError::ExprError(other),
                 })?;
 
-                if has_functions {
+                if bounded {
                     check_exhaustive_expr(&body, &sum_of_variant, &variants_of_sum)
                         .map_err(FiniteDecisionLowerError::ExprError)?;
                 }
@@ -1054,7 +1349,7 @@ pub fn lower_finite_decision_plan(
                 if !all_top_level_names.insert(p.name.clone()) {
                     return Err(FiniteDecisionLowerError::DuplicateItemName(p.name.clone()));
                 }
-                if has_functions {
+                if bounded {
                     let mut node_count = 0;
                     check_expr_bounds(&p.guard, 0, &mut node_count)?;
                     node_count = 0;
@@ -1115,7 +1410,7 @@ pub fn lower_finite_decision_plan(
                     other => FiniteDecisionLowerError::ExprError(other),
                 })?;
 
-                if has_functions {
+                if bounded {
                     check_exhaustive_expr(&guard, &sum_of_variant, &variants_of_sum)
                         .map_err(FiniteDecisionLowerError::ExprError)?;
                 }
@@ -1153,7 +1448,7 @@ pub fn lower_finite_decision_plan(
                     other => FiniteDecisionLowerError::ExprError(other),
                 })?;
 
-                if has_functions {
+                if bounded {
                     check_exhaustive_expr(&value, &sum_of_variant, &variants_of_sum)
                         .map_err(FiniteDecisionLowerError::ExprError)?;
                 }
@@ -1168,7 +1463,7 @@ pub fn lower_finite_decision_plan(
                 });
             }
             ast::Item::Show(expr) => {
-                if has_functions {
+                if bounded {
                     let mut node_count = 0;
                     check_expr_bounds(expr, 0, &mut node_count)?;
                 }
@@ -1188,7 +1483,7 @@ pub fn lower_finite_decision_plan(
                 )
                 .map_err(map_lower_err)?;
 
-                if has_functions {
+                if bounded {
                     check_exhaustive_expr(&show, &sum_of_variant, &variants_of_sum)
                         .map_err(FiniteDecisionLowerError::ExprError)?;
                 }
@@ -1242,6 +1537,7 @@ pub fn lower_finite_decision_plan(
         proposals,
         commit,
         shows,
+        schemas,
     })
 }
 
@@ -1383,7 +1679,39 @@ fn encode_input_type(w: &mut CanonWriter, ty: &L3ValueType) {
         L3ValueType::Int => w.write_enum(0, |_| {}),
         L3ValueType::Bool => w.write_enum(1, |_| {}),
         L3ValueType::Str => w.write_enum(2, |_| {}),
-        other => panic!("non-scalar input type in plan: {other:?}"),
+        L3ValueType::Sum(nominal) => w.write_enum(3, |w| w.write_ident(nominal)),
+        L3ValueType::Record(nominal) => w.write_enum(4, |w| w.write_ident(nominal)),
+    }
+}
+
+fn encode_schema_type(w: &mut CanonWriter, ty: &L3SchemaType) {
+    match ty {
+        L3SchemaType::Int => w.write_enum(0, |_| {}),
+        L3SchemaType::Bool => w.write_enum(1, |_| {}),
+        L3SchemaType::Str => w.write_enum(2, |_| {}),
+        L3SchemaType::Named(name) => w.write_enum(3, |w| w.write_ident(name)),
+    }
+}
+
+fn encode_schema_body(w: &mut CanonWriter, body: &L3SchemaBody) {
+    match body {
+        L3SchemaBody::Sum(variants) => w.write_enum(0, |w| {
+            w.write_uint(variants.len() as u64);
+            for (variant, payloads) in variants {
+                w.write_ident(variant);
+                w.write_uint(payloads.len() as u64);
+                for payload in payloads {
+                    encode_schema_type(w, payload);
+                }
+            }
+        }),
+        L3SchemaBody::Record(fields) => w.write_enum(1, |w| {
+            w.write_uint(fields.len() as u64);
+            for (field, ty) in fields {
+                w.write_ident(field);
+                encode_schema_type(w, ty);
+            }
+        }),
     }
 }
 
@@ -1433,6 +1761,15 @@ pub fn finite_decision_program_preimage(plan: &FiniteDecisionPlan) -> Vec<u8> {
     for c in &plan.configs {
         w.write_ident(&c.name);
         encode_config_body_v2(&mut w, &c.body);
+    }
+
+    if !plan.schemas.is_empty() {
+        w.write_tag("brix.l3.finite-decision.schemas@1");
+        w.write_uint(plan.schemas.len() as u64);
+        for (name, schema) in &plan.schemas {
+            w.write_ident(name);
+            encode_schema_body(&mut w, &schema.body);
+        }
     }
 
     // Inputs (ADR-0031):
