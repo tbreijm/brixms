@@ -1,7 +1,8 @@
 //! Finite-decision alpha deliberation runtime and settlement integration (ADR-0030).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::Arc;
 
 use brix_canon::{CanonWriter, Digest, Domain};
 use brix_semantic::{
@@ -32,7 +33,7 @@ use crate::finite_decision::plan::{
     finite_decision_program_id, FiniteDecisionPlan, FiniteDecisionProgramId,
 };
 use crate::input::{input_context_id, InputSnapshot, InputValidationError};
-use crate::l3_v2::{eval, EvalEnv, EvalFault, L3ValueV2};
+use crate::l3_v2::{eval, EvalEnv, EvalFault, L3FunctionDef, L3SchemaType, L3ValueV2};
 
 const WORLD_MARKER: &[u8] = b"brix.l3.finite-decision.world";
 const POLICY_MARKER: &[u8] = b"brix.l3.finite-decision.adm-all";
@@ -77,38 +78,7 @@ impl From<InputValidationError> for FiniteDecisionBuildError {
     }
 }
 
-/// Type category of an [`L3ValueV2`] for contract uniformity checking.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum L3ValueType {
-    Int,
-    Str,
-    Bool,
-    Sum(String),
-    Record(String),
-}
-
-impl fmt::Display for L3ValueType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Int => write!(f, "Int"),
-            Self::Str => write!(f, "Str"),
-            Self::Bool => write!(f, "Bool"),
-            Self::Sum(s) => write!(f, "Sum({s})"),
-            Self::Record(r) => write!(f, "Record({r})"),
-        }
-    }
-}
-
-/// Compute the nominal/primitive type category of an evaluated value.
-pub fn type_of_value(v: &L3ValueV2) -> L3ValueType {
-    match v {
-        L3ValueV2::Int(_) => L3ValueType::Int,
-        L3ValueV2::Str(_) => L3ValueType::Str,
-        L3ValueV2::Bool(_) => L3ValueType::Bool,
-        L3ValueV2::Ctor { nominal_sum, .. } => L3ValueType::Sum(nominal_sum.clone()),
-        L3ValueV2::Record { nominal_config, .. } => L3ValueType::Record(nominal_config.clone()),
-    }
-}
+pub use crate::l3_v2::{type_of_value, L3ValueType};
 
 /// A fact committed by rule derivation, published strictly at [`Outcome::Derived`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -421,6 +391,7 @@ pub struct FiniteDecisionRuntime {
     plan: FiniteDecisionPlan,
     snapshot: InputSnapshot,
     bound_inputs: Vec<BoundInput>,
+    functions: Arc<BTreeMap<String, L3FunctionDef>>,
 }
 
 impl FiniteDecisionRuntime {
@@ -510,6 +481,51 @@ impl FiniteDecisionRuntime {
             });
         }
 
+        let schema_table = Arc::new(plan.schemas.clone());
+        let mut functions_map = BTreeMap::new();
+        for f in &plan.functions {
+            let params = f
+                .params
+                .iter()
+                .map(|p| {
+                    (
+                        p.name.clone(),
+                        p.contract.as_ref().map(|c| {
+                            c.schema_ty.clone().unwrap_or_else(|| match c.ty {
+                                L3ValueType::Int => L3SchemaType::Int,
+                                L3ValueType::Bool => L3SchemaType::Bool,
+                                L3ValueType::Str => L3SchemaType::Str,
+                                L3ValueType::Sum(ref name) | L3ValueType::Record(ref name) => {
+                                    L3SchemaType::Named(name.clone())
+                                }
+                            })
+                        }),
+                    )
+                })
+                .collect();
+            let ret_contract = f.ret_contract.as_ref().map(|c| {
+                c.schema_ty.clone().unwrap_or_else(|| match c.ty {
+                    L3ValueType::Int => L3SchemaType::Int,
+                    L3ValueType::Bool => L3SchemaType::Bool,
+                    L3ValueType::Str => L3SchemaType::Str,
+                    L3ValueType::Sum(ref name) | L3ValueType::Record(ref name) => {
+                        L3SchemaType::Named(name.clone())
+                    }
+                })
+            });
+            functions_map.insert(
+                f.name.clone(),
+                L3FunctionDef {
+                    name: f.name.clone(),
+                    params,
+                    ret_contract,
+                    body: f.body.clone(),
+                    schemas: schema_table.clone(),
+                },
+            );
+        }
+        let functions = Arc::new(functions_map);
+
         Ok(Self {
             program,
             context,
@@ -522,6 +538,7 @@ impl FiniteDecisionRuntime {
             plan: plan.clone(),
             snapshot: snapshot.clone(),
             bound_inputs,
+            functions,
         })
     }
 
@@ -533,6 +550,11 @@ impl FiniteDecisionRuntime {
     /// The bound input records in declaration order.
     pub fn bound_inputs(&self) -> &[BoundInput] {
         &self.bound_inputs
+    }
+
+    /// The helper function table bound into this runtime.
+    pub fn functions(&self) -> &Arc<BTreeMap<String, L3FunctionDef>> {
+        &self.functions
     }
 
     /// Initial execution configuration for this runtime.
@@ -567,8 +589,10 @@ impl FiniteDecisionRuntime {
 
     /// Execute the complete finite-decision deliberation cycle.
     pub fn run(&self) -> FiniteDecisionRun {
-        // Step 0: Inject bound inputs into evaluation environment before lets/rules/proposals.
-        let mut env = EvalEnv::new();
+        // Step 0: Inject functions and bound inputs into evaluation environment before lets/rules/proposals.
+        let mut env = EvalEnv::new()
+            .with_functions(self.functions.clone())
+            .with_schemas(Arc::new(self.plan.schemas.clone()));
         for input in &self.bound_inputs {
             env = env.with_input(input.name.clone(), input.value.clone());
         }
@@ -1293,7 +1317,9 @@ impl FiniteDecisionRuntime {
             });
         }
 
-        let mut env = EvalEnv::new();
+        let mut env = EvalEnv::new()
+            .with_functions(self.functions.clone())
+            .with_schemas(Arc::new(self.plan.schemas.clone()));
         for input in &self.bound_inputs {
             env = env.with_input(input.name.clone(), input.value.clone());
         }

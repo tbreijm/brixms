@@ -587,6 +587,85 @@ From a source workspace, prefix a command with `cargo run -p brix-cli --`, or bu
 the executable once with `cargo build -p brix-cli`. When using a prebuilt archive,
 invoke `./brix` directly from the extracted directory.
 
+### Reusable functions in decision programs (source build)
+
+The working source adds pure, nonrecursive helpers to finite-decision programs
+([ADR-0032](./spec/adr/ADR-0032_Finite_Decision_Functions.md)). This extension is
+not included in the previously published alpha.3 archives.
+
+```brix
+fn enough(available: Int, needed: Int): Bool = available >= needed
+
+input stock: Int
+rule threshold() = 15
+rule eligible(threshold) = enough(stock, threshold)
+
+propose ship(eligible) priority 10 when eligible = stock
+commit shipping from (ship)
+```
+
+Helpers can call other helpers and appear in lets, rules, and proposal guards
+or values. They take their data explicitly as arguments: inputs, global lets,
+and rule facts are not captured from the surrounding module. Arguments evaluate
+once, left to right, including unused arguments; an arithmetic fault still
+stops the decision.
+
+Optional parameter and return annotations support `Int`, `Bool`, `Str`, and
+closed, acyclic nominal records and sums, with optional `@Derived`. Contracts
+check the entire value at the call boundary, including nested fields and sum
+payloads. Recursive calls and unsupported contracts are rejected. Evaluation
+has nesting, work, and value-growth limits.
+
+Run the full shipping example from this checkout:
+
+```bash
+cargo run -p brix-cli -- run examples/shipping-functions.brix \
+  --input examples/shipping-functions.json
+```
+
+It selects `ship = Ship @Derived`. The same source and inputs work with
+`check`, `why`, `whynot`, `audit`, and `verify` using the command forms above.
+Helper bodies and contracts are included in the program pin; changing one
+invalidates verification against the old pin. Successful replay produces
+separate `Audited` receipts.
+
+The library can also evaluate helper calls in `show` expressions. The CLI
+currently removes `show` directives and prints its fixed decision report.
+
+### Structured inputs and typed policies (source build)
+
+The source extension in [ADR-0033](./spec/adr/ADR-0033_Structured_Input_Contracts.md)
+lets a program accept an entire domain value and pass it to a checked helper:
+
+```brix
+config Destination = Domestic | Export(Str)
+config Order = { units: Int, destination: Destination }
+
+input order: Order
+fn enough(o: Order): Bool = o.units >= 10
+
+propose accept() priority 10 when enough(order) = true
+propose hold() priority 100 when true = false
+commit decision from (accept, hold)
+```
+
+Use `brix.input@2` JSON artifacts for tagged record and sum values; the ADR
+includes the full input format. Existing `brix.input@1` scalar artifacts remain
+supported. The decoder rejects duplicate keys and fields, while schema checks
+reject missing or extra fields, wrong payload types, and unknown variants.
+Nested records and sums are supported; recursive and generic schemas are not
+part of this slice.
+
+```bash
+cargo run -p brix-cli -- run examples/order-policy.brix \
+  --input examples/order-policy.json
+```
+
+The same program and inputs work across the six commands above. A changed
+schema changes the program pin; a changed input value changes the snapshot
+and context. Old audit bundles must still verify against the exact source,
+program pin, and inputs that produced them.
+
 **CLI target surface & status:**
 - `brix` implements exactly the six subcommands above.
 - `brix verify` implements offline verification of ADR-0026 audit input transport bundles.
@@ -623,7 +702,7 @@ The precise status is intentionally explicit:
 - arithmetic and comparison currently top out at `Audited` where primitive
   leaves remain undischarged;
 - catch-all matching is also deliberately capped;
-- recursive functions are refused because functions are currently inlined;
+- the finite-decision profile admits only nonrecursive pure helper calls;
 - certified refutation does not exist yet, so negative results are conflicts or
   `Unknown`, never `Refuted`;
 - context confinement and several durable artifact obligations remain partial.

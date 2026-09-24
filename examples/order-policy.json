@@ -1,0 +1,18 @@
+{
+  "schema": "brix.input@2",
+  "values": {
+    "order": {
+      "type": "record",
+      "nominal": "Order",
+      "fields": [
+        {"name": "units", "value": {"type": "int", "value": "12"}},
+        {"name": "destination", "value": {
+          "type": "sum",
+          "nominal": "Destination",
+          "variant": "Export",
+          "args": [{"type": "string", "value": "EU"}]
+        }}
+      ]
+    }
+  }
+}

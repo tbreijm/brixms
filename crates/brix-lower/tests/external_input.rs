@@ -139,11 +139,124 @@ fn test_reject_unsupported_or_missing_schema() {
     let err = decode_input_shard(missing_schema.as_bytes(), &limits).unwrap_err();
     assert!(matches!(err, InputDecodeError::MissingField("schema")));
 
-    let wrong_schema = r#"{"schema": "brix.input@2", "values": {}}"#;
+    let v2_schema = r#"{"schema": "brix.input@2", "values": {}}"#;
+    assert!(decode_input_shard(v2_schema.as_bytes(), &limits).is_ok());
+
+    let wrong_schema = r#"{"schema": "brix.input@999", "values": {}}"#;
     let err = decode_input_shard(wrong_schema.as_bytes(), &limits).unwrap_err();
     assert!(
-        matches!(err, InputDecodeError::InvalidSchema { ref found, .. } if found == "brix.input@2")
+        matches!(err, InputDecodeError::InvalidSchema { ref found, .. } if found == "brix.input@999")
     );
+}
+
+#[test]
+fn test_structured_v2_values_are_recursive_and_canonical() {
+    let limits = InputLimits::default();
+    let first = r#"{"schema":"brix.input@2","values":{"order":{"type":"record","nominal":"Order","fields":[{"name":"destination","value":{"type":"sum","nominal":"Region","variant":"Export","args":[{"type":"string","value":"EU"}]}},{"name":"units","value":{"type":"int","value":"12"}}]}}}"#;
+    let second = r#"{"values":{"order":{"fields":[{"value":{"type":"int","value":"12"},"name":"units"},{"value":{"args":[{"value":"EU","type":"string"}],"variant":"Export","nominal":"Region","type":"sum"},"name":"destination"}],"nominal":"Order","type":"record"}},"schema":"brix.input@2"}"#;
+    let a = canonicalize_input_shards(
+        vec![decode_input_shard(first.as_bytes(), &limits).unwrap()],
+        &limits,
+    )
+    .unwrap();
+    let b = canonicalize_input_shards(
+        vec![decode_input_shard(second.as_bytes(), &limits).unwrap()],
+        &limits,
+    )
+    .unwrap();
+    assert_eq!(a.id(), b.id());
+    assert!(matches!(
+        a.get("order"),
+        Some(InputScalarValue::Record { .. })
+    ));
+}
+
+#[test]
+fn test_v1_rejects_composites_and_composite_objects_are_exact() {
+    let limits = InputLimits::default();
+    let v1 =
+        r#"{"schema":"brix.input@1","values":{"x":{"type":"record","nominal":"X","fields":[]}}}"#;
+    assert!(matches!(
+        decode_input_shard(v1.as_bytes(), &limits),
+        Err(InputDecodeError::InvalidType { .. })
+    ));
+    let cross_kind = r#"{"schema":"brix.input@2","values":{"x":{"type":"record","nominal":"X","fields":[],"value":1}}}"#;
+    assert!(matches!(
+        decode_input_shard(cross_kind.as_bytes(), &limits),
+        Err(InputDecodeError::UnknownField { ref field, .. }) if field == "value"
+    ));
+    let duplicate_field = r#"{"schema":"brix.input@2","values":{"x":{"type":"record","nominal":"X","fields":[{"name":"a","value":{"type":"int","value":"1"}},{"name":"a","value":{"type":"int","value":"2"}}]}}}"#;
+    assert!(matches!(
+        decode_input_shard(duplicate_field.as_bytes(), &limits),
+        Err(InputDecodeError::DuplicateKey { ref key, .. }) if key == "a"
+    ));
+}
+
+#[test]
+fn test_structured_value_limits_are_checked_before_growth() {
+    let limits = InputLimits {
+        max_value_nodes: 2,
+        ..InputLimits::default()
+    };
+    let too_many = r#"{"schema":"brix.input@2","values":{"x":{"type":"sum","nominal":"S","variant":"V","args":[{"type":"int","value":"1"},{"type":"int","value":"2"}]}}}"#;
+    assert!(matches!(
+        decode_input_shard(too_many.as_bytes(), &limits),
+        Err(InputDecodeError::LimitExceeded(
+            "structured value node limit"
+        ))
+    ));
+}
+
+#[test]
+fn test_structured_depth_and_container_boundaries() {
+    let limits = InputLimits {
+        max_value_depth: 32,
+        max_value_nodes: 4096,
+        max_container_width: 256,
+        ..InputLimits::default()
+    };
+    let mut nested = r#"{"type":"int","value":"1"}"#.to_string();
+    for _ in 0..31 {
+        nested = format!(
+            r#"{{"type":"sum","nominal":"S","variant":"V","args":[{}]}}"#,
+            nested
+        );
+    }
+    let accepted = format!(r#"{{"schema":"brix.input@2","values":{{"x":{nested}}}}}"#);
+    assert!(decode_input_shard(accepted.as_bytes(), &limits).is_ok());
+    let too_deep = format!(
+        r#"{{"type":"sum","nominal":"S","variant":"V","args":[{}]}}"#,
+        nested
+    );
+    let too_deep = format!(r#"{{"schema":"brix.input@2","values":{{"x":{too_deep}}}}}"#);
+    assert!(matches!(
+        decode_input_shard(too_deep.as_bytes(), &limits),
+        Err(InputDecodeError::LimitExceeded(
+            "structured value depth limit"
+        ))
+    ));
+
+    let args = (0..256)
+        .map(|_| r#"{"type":"int","value":"1"}"#)
+        .collect::<Vec<_>>()
+        .join(",");
+    let width_ok = format!(
+        r#"{{"schema":"brix.input@2","values":{{"x":{{"type":"sum","nominal":"S","variant":"V","args":[{args}]}}}}}}"#
+    );
+    assert!(decode_input_shard(width_ok.as_bytes(), &limits).is_ok());
+    let args = (0..257)
+        .map(|_| r#"{"type":"int","value":"1"}"#)
+        .collect::<Vec<_>>()
+        .join(",");
+    let width_bad = format!(
+        r#"{{"schema":"brix.input@2","values":{{"x":{{"type":"sum","nominal":"S","variant":"V","args":[{args}]}}}}}}"#
+    );
+    assert!(matches!(
+        decode_input_shard(width_bad.as_bytes(), &limits),
+        Err(InputDecodeError::LimitExceeded(
+            "structured container width"
+        ))
+    ));
 }
 
 #[test]
@@ -293,6 +406,9 @@ fn test_enforce_shard_limits() {
         max_name_bytes: 10,
         max_string_value_bytes: 50,
         max_depth: 4,
+        max_value_depth: 32,
+        max_value_nodes: 4096,
+        max_container_width: 256,
     };
 
     // 1. Shard exceeds max_file_bytes
