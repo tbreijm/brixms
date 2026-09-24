@@ -33,7 +33,7 @@ use crate::finite_decision::plan::{
     finite_decision_program_id, FiniteDecisionPlan, FiniteDecisionProgramId,
 };
 use crate::input::{input_context_id, InputSnapshot, InputValidationError};
-use crate::l3_v2::{eval, EvalEnv, EvalFault, L3FunctionDef, L3ValueV2};
+use crate::l3_v2::{eval, EvalEnv, EvalFault, L3FunctionDef, L3SchemaType, L3ValueV2};
 
 const WORLD_MARKER: &[u8] = b"brix.l3.finite-decision.world";
 const POLICY_MARKER: &[u8] = b"brix.l3.finite-decision.adm-all";
@@ -481,14 +481,38 @@ impl FiniteDecisionRuntime {
             });
         }
 
+        let schema_table = Arc::new(plan.schemas.clone());
         let mut functions_map = BTreeMap::new();
         for f in &plan.functions {
             let params = f
                 .params
                 .iter()
-                .map(|p| (p.name.clone(), p.contract.as_ref().map(|c| c.ty.clone())))
+                .map(|p| {
+                    (
+                        p.name.clone(),
+                        p.contract.as_ref().map(|c| {
+                            c.schema_ty.clone().unwrap_or_else(|| match c.ty {
+                                L3ValueType::Int => L3SchemaType::Int,
+                                L3ValueType::Bool => L3SchemaType::Bool,
+                                L3ValueType::Str => L3SchemaType::Str,
+                                L3ValueType::Sum(ref name) | L3ValueType::Record(ref name) => {
+                                    L3SchemaType::Named(name.clone())
+                                }
+                            })
+                        }),
+                    )
+                })
                 .collect();
-            let ret_contract = f.ret_contract.as_ref().map(|c| c.ty.clone());
+            let ret_contract = f.ret_contract.as_ref().map(|c| {
+                c.schema_ty.clone().unwrap_or_else(|| match c.ty {
+                    L3ValueType::Int => L3SchemaType::Int,
+                    L3ValueType::Bool => L3SchemaType::Bool,
+                    L3ValueType::Str => L3SchemaType::Str,
+                    L3ValueType::Sum(ref name) | L3ValueType::Record(ref name) => {
+                        L3SchemaType::Named(name.clone())
+                    }
+                })
+            });
             functions_map.insert(
                 f.name.clone(),
                 L3FunctionDef {
@@ -496,6 +520,7 @@ impl FiniteDecisionRuntime {
                     params,
                     ret_contract,
                     body: f.body.clone(),
+                    schemas: schema_table.clone(),
                 },
             );
         }
@@ -565,7 +590,9 @@ impl FiniteDecisionRuntime {
     /// Execute the complete finite-decision deliberation cycle.
     pub fn run(&self) -> FiniteDecisionRun {
         // Step 0: Inject functions and bound inputs into evaluation environment before lets/rules/proposals.
-        let mut env = EvalEnv::new().with_functions(self.functions.clone());
+        let mut env = EvalEnv::new()
+            .with_functions(self.functions.clone())
+            .with_schemas(Arc::new(self.plan.schemas.clone()));
         for input in &self.bound_inputs {
             env = env.with_input(input.name.clone(), input.value.clone());
         }
@@ -1290,7 +1317,9 @@ impl FiniteDecisionRuntime {
             });
         }
 
-        let mut env = EvalEnv::new().with_functions(self.functions.clone());
+        let mut env = EvalEnv::new()
+            .with_functions(self.functions.clone())
+            .with_schemas(Arc::new(self.plan.schemas.clone()));
         for input in &self.bound_inputs {
             env = env.with_input(input.name.clone(), input.value.clone());
         }

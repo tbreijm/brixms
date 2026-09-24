@@ -162,6 +162,12 @@ impl From<InputValidationError> for CliInputError {
                 status: "rejected",
                 exit_code: crate::cli::EXIT_REJECTED_OR_UNKNOWN,
             },
+            InputValidationError::InvalidValue { name, detail } => Self {
+                code: "input-value-invalid",
+                message: format!("invalid value for input '{name}': {detail}"),
+                status: "rejected",
+                exit_code: crate::cli::EXIT_REJECTED_OR_UNKNOWN,
+            },
         }
     }
 }

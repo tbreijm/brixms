@@ -7,6 +7,11 @@ implementation proposal for review, not a claim of separate ratification.
 Extends ADR-0030 and ADR-0031 under `brix.l3.finite-decision@1`. It does not
 widen either rule-agenda profile or change the SOC authority boundary.
 
+The structured-input extension in [ADR-0033](ADR-0033_Structured_Input_Contracts.md)
+supersedes this slice's refusal of nominal record and sum annotations with
+full schema validation. The original scalar contract below records the
+boundary of the function-only milestone.
+
 ## Motivation
 
 The frontend already parses pure `fn` helpers, but finite-decision lowering

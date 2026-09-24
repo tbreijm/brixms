@@ -25,10 +25,11 @@ use brix_semantic::{ConfigId, ContextId};
 
 use crate::finite_decision::plan::{FiniteDecisionPlan, FiniteDecisionProgramId};
 use crate::finite_decision::runtime::L3ValueType;
-use crate::l3_v2::L3ValueV2;
+use crate::l3_v2::{validate_l3_value, L3SchemaType, L3ValueV2};
 
 /// The canonical schema identifier for external input artifacts (ADR-0031 ⟨D-SCHEMA⟩).
 pub const INPUT_SCHEMA_V1: &str = "brix.input@1";
+pub const INPUT_SCHEMA_V2: &str = "brix.input@2";
 
 /// The canonical domain tag for input snapshot identity (ADR-0031 ⟨D-IDENTITY⟩).
 pub const INPUT_SNAPSHOT_TAG: &str = "brix.input.snapshot@1";
@@ -56,6 +57,12 @@ pub const MAX_STRING_VALUE_BYTES: usize = 65536;
 
 /// Maximum allowed JSON parser nesting depth.
 pub const MAX_JSON_DEPTH: usize = 8;
+/// Maximum nesting depth of admitted structured values.
+pub const MAX_INPUT_VALUE_DEPTH: usize = 32;
+/// Maximum total tagged value nodes in one shard.
+pub const MAX_INPUT_VALUE_NODES: usize = 4096;
+/// Maximum fields or positional arguments in one composite value.
+pub const MAX_INPUT_CONTAINER_WIDTH: usize = 256;
 
 /// Resource limits governing external input artifact decoding and shard aggregation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +74,9 @@ pub struct InputLimits {
     pub max_name_bytes: usize,
     pub max_string_value_bytes: usize,
     pub max_depth: usize,
+    pub max_value_depth: usize,
+    pub max_value_nodes: usize,
+    pub max_container_width: usize,
 }
 
 impl Default for InputLimits {
@@ -79,17 +89,34 @@ impl Default for InputLimits {
             max_name_bytes: MAX_INPUT_NAME_BYTES,
             max_string_value_bytes: MAX_STRING_VALUE_BYTES,
             max_depth: MAX_JSON_DEPTH,
+            max_value_depth: MAX_INPUT_VALUE_DEPTH,
+            max_value_nodes: MAX_INPUT_VALUE_NODES,
+            max_container_width: MAX_INPUT_CONTAINER_WIDTH,
         }
     }
 }
 
-/// An admitted scalar value from an external input artifact (ADR-0031 ⟨D-TYPES⟩).
+/// An admitted value from an external input artifact (ADR-0031, ADR-0033).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum InputScalarValue {
+pub enum InputValue {
     Int(i64),
     Bool(bool),
     Str(String),
+    Sum {
+        nominal: String,
+        variant: String,
+        args: Vec<InputValue>,
+    },
+    Record {
+        nominal: String,
+        fields: BTreeMap<String, InputValue>,
+    },
 }
+
+/// Backward-compatible name for the scalar transport value type. `brix.input@1`
+/// still admits only the first three variants; structured variants are appended
+/// for `brix.input@2` without changing their canonical ordinals.
+pub type InputScalarValue = InputValue;
 
 impl InputScalarValue {
     /// Return the corresponding [`L3ValueType`].
@@ -98,6 +125,8 @@ impl InputScalarValue {
             Self::Int(_) => L3ValueType::Int,
             Self::Bool(_) => L3ValueType::Bool,
             Self::Str(_) => L3ValueType::Str,
+            Self::Sum { nominal, .. } => L3ValueType::Sum(nominal.clone()),
+            Self::Record { nominal, .. } => L3ValueType::Record(nominal.clone()),
         }
     }
 
@@ -107,26 +136,83 @@ impl InputScalarValue {
             Self::Int(n) => L3ValueV2::Int(*n),
             Self::Bool(b) => L3ValueV2::Bool(*b),
             Self::Str(s) => L3ValueV2::Str(s.clone()),
+            Self::Sum {
+                nominal,
+                variant,
+                args,
+            } => L3ValueV2::Ctor {
+                nominal_sum: nominal.clone(),
+                variant: variant.clone(),
+                args: args.iter().map(Self::to_l3_value).collect(),
+            },
+            Self::Record { nominal, fields } => L3ValueV2::Record {
+                nominal_config: nominal.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.to_l3_value()))
+                    .collect(),
+            },
         }
     }
 
-    /// Attempt conversion from a runtime [`L3ValueV2`]. Returns `None` for non-scalar types.
+    /// Convert a runtime value into the transport representation.
     pub fn from_l3_value(val: &L3ValueV2) -> Option<Self> {
         match val {
             L3ValueV2::Int(n) => Some(Self::Int(*n)),
             L3ValueV2::Bool(b) => Some(Self::Bool(*b)),
             L3ValueV2::Str(s) => Some(Self::Str(s.clone())),
-            L3ValueV2::Ctor { .. } | L3ValueV2::Record { .. } => None,
+            L3ValueV2::Ctor {
+                nominal_sum,
+                variant,
+                args,
+            } => Some(Self::Sum {
+                nominal: nominal_sum.clone(),
+                variant: variant.clone(),
+                args: args
+                    .iter()
+                    .map(Self::from_l3_value)
+                    .collect::<Option<Vec<_>>>()?,
+            }),
+            L3ValueV2::Record {
+                nominal_config,
+                fields,
+            } => Some(Self::Record {
+                nominal: nominal_config.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(name, value)| Some((name.clone(), Self::from_l3_value(value)?)))
+                    .collect::<Option<BTreeMap<_, _>>>()?,
+            }),
         }
     }
 }
 
-impl Canonical for InputScalarValue {
+impl Canonical for InputValue {
     fn canon_write(&self, w: &mut CanonWriter) {
         match self {
             Self::Int(n) => w.write_enum(0, |w| w.write_int(*n)),
             Self::Bool(b) => w.write_enum(1, |w| w.write_bool(*b)),
             Self::Str(s) => w.write_enum(2, |w| w.write_str(s)),
+            Self::Sum {
+                nominal,
+                variant,
+                args,
+            } => w.write_enum(3, |w| {
+                w.write_ident(nominal);
+                w.write_ident(variant);
+                w.write_uint(args.len() as u64);
+                for arg in args {
+                    arg.canon_write(w);
+                }
+            }),
+            Self::Record { nominal, fields } => w.write_enum(4, |w| {
+                w.write_ident(nominal);
+                w.write_uint(fields.len() as u64);
+                for (name, value) in fields {
+                    w.write_ident(name);
+                    value.canon_write(w);
+                }
+            }),
         }
     }
 }
@@ -135,7 +221,7 @@ impl Canonical for InputScalarValue {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputShard {
     schema: String,
-    values: BTreeMap<String, InputScalarValue>,
+    values: BTreeMap<String, InputValue>,
     byte_count: usize,
 }
 
@@ -146,7 +232,7 @@ impl InputShard {
     }
 
     /// The decoded values map.
-    pub fn values(&self) -> &BTreeMap<String, InputScalarValue> {
+    pub fn values(&self) -> &BTreeMap<String, InputValue> {
         &self.values
     }
 
@@ -156,7 +242,7 @@ impl InputShard {
     }
 
     /// Look up an input value by name.
-    pub fn get(&self, name: &str) -> Option<&InputScalarValue> {
+    pub fn get(&self, name: &str) -> Option<&InputValue> {
         self.values.get(name)
     }
 }
@@ -188,7 +274,7 @@ impl Canonical for InputSnapshotId {
 /// Canonical, disjoint, lexicographically sorted input snapshot (ADR-0031 ⟨D-IDENTITY⟩, ⟨D-SHARDS⟩).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputSnapshot {
-    values: BTreeMap<String, InputScalarValue>,
+    values: BTreeMap<String, InputValue>,
     total_bytes: usize,
     shard_count: usize,
 }
@@ -204,7 +290,7 @@ impl InputSnapshot {
     }
 
     /// The sorted values map.
-    pub fn values(&self) -> &BTreeMap<String, InputScalarValue> {
+    pub fn values(&self) -> &BTreeMap<String, InputValue> {
         &self.values
     }
 
@@ -219,7 +305,7 @@ impl InputSnapshot {
     }
 
     /// Look up an input value by name.
-    pub fn get(&self, name: &str) -> Option<&InputScalarValue> {
+    pub fn get(&self, name: &str) -> Option<&InputValue> {
         self.values.get(name)
     }
 
@@ -260,6 +346,17 @@ impl InputSnapshot {
                     declared: decl.ty.clone(),
                     supplied: val.value_type(),
                 });
+            }
+            if let L3ValueType::Sum(nominal) | L3ValueType::Record(nominal) = &decl.ty {
+                let expected = L3SchemaType::Named(nominal.clone());
+                if let Err(detail) =
+                    validate_l3_value(&val.to_l3_value(), &expected, &plan.schemas, name)
+                {
+                    return Err(InputValidationError::InvalidValue {
+                        name: name.clone(),
+                        detail,
+                    });
+                }
             }
         }
         Ok(())
@@ -538,6 +635,10 @@ pub enum InputValidationError {
         declared: L3ValueType,
         supplied: L3ValueType,
     },
+    InvalidValue {
+        name: String,
+        detail: String,
+    },
 }
 
 impl fmt::Display for InputValidationError {
@@ -561,6 +662,9 @@ impl fmt::Display for InputValidationError {
                     f,
                     "type mismatch for input '{name}': declared {declared}, supplied {supplied}"
                 )
+            }
+            Self::InvalidValue { name, detail } => {
+                write!(f, "invalid value for input '{name}': {detail}")
             }
         }
     }
@@ -824,6 +928,8 @@ struct StrictJsonParser<'a> {
     pos: usize,
     limits: &'a InputLimits,
     depth: usize,
+    value_depth: usize,
+    value_nodes: usize,
 }
 
 impl<'a> StrictJsonParser<'a> {
@@ -834,6 +940,8 @@ impl<'a> StrictJsonParser<'a> {
             pos: 0,
             limits,
             depth: 0,
+            value_depth: 0,
+            value_nodes: 0,
         }
     }
 
@@ -848,7 +956,21 @@ impl<'a> StrictJsonParser<'a> {
     }
 
     fn enter_depth(&mut self) -> Result<(), InputDecodeError> {
-        if self.depth >= self.limits.max_depth {
+        // The legacy JSON envelope limit remains strict for the v1 shape. Once
+        // a tagged structured value is being decoded, its own bounded depth
+        // governs nested arrays/objects so ordinary nested records do not get
+        // rejected merely because the transport envelope is shallow.
+        let limit = if self.value_depth > 0 {
+            self.limits.max_depth.max(
+                self.limits
+                    .max_value_depth
+                    .saturating_mul(3)
+                    .saturating_add(2),
+            )
+        } else {
+            self.limits.max_depth
+        };
+        if self.depth >= limit {
             return Err(InputDecodeError::LimitExceeded("JSON nesting depth limit"));
         }
         self.depth += 1;
@@ -1100,7 +1222,7 @@ impl<'a> StrictJsonParser<'a> {
 
         let mut seen_keys = BTreeSet::new();
         let mut schema: Option<String> = None;
-        let mut values: Option<BTreeMap<String, InputScalarValue>> = None;
+        let mut values: Option<BTreeMap<String, InputValue>> = None;
 
         self.skip_whitespace();
         if self.peek() == Some(b'}') {
@@ -1125,7 +1247,7 @@ impl<'a> StrictJsonParser<'a> {
             match key.as_str() {
                 "schema" => {
                     let schema_val = self.parse_string(64)?;
-                    if schema_val != INPUT_SCHEMA_V1 {
+                    if schema_val != INPUT_SCHEMA_V1 && schema_val != INPUT_SCHEMA_V2 {
                         return Err(InputDecodeError::InvalidSchema {
                             expected: INPUT_SCHEMA_V1,
                             found: schema_val,
@@ -1173,6 +1295,18 @@ impl<'a> StrictJsonParser<'a> {
         let schema = schema.ok_or(InputDecodeError::MissingField("schema"))?;
         let values = values.ok_or(InputDecodeError::MissingField("values"))?;
 
+        if schema == INPUT_SCHEMA_V1
+            && values
+                .values()
+                .any(|value| matches!(value, InputValue::Sum { .. } | InputValue::Record { .. }))
+        {
+            return Err(InputDecodeError::InvalidType {
+                expected: "scalar tagged value for brix.input@1",
+                found: "composite value".to_string(),
+                offset: 0,
+            });
+        }
+
         Ok(InputShard {
             schema,
             values,
@@ -1180,9 +1314,7 @@ impl<'a> StrictJsonParser<'a> {
         })
     }
 
-    fn parse_values_object(
-        &mut self,
-    ) -> Result<BTreeMap<String, InputScalarValue>, InputDecodeError> {
+    fn parse_values_object(&mut self) -> Result<BTreeMap<String, InputValue>, InputDecodeError> {
         self.enter_depth()?;
         self.consume(b'{', "values object")?;
 
@@ -1214,8 +1346,8 @@ impl<'a> StrictJsonParser<'a> {
 
             self.consume(b':', "input value separator")?;
 
-            let scalar = self.parse_tagged_value()?;
-            map.insert(name, scalar);
+            let value = self.parse_tagged_value()?;
+            map.insert(name, value);
 
             self.skip_whitespace();
             match self.peek() {
@@ -1244,17 +1376,38 @@ impl<'a> StrictJsonParser<'a> {
         Ok(map)
     }
 
-    fn parse_tagged_value(&mut self) -> Result<InputScalarValue, InputDecodeError> {
+    fn parse_tagged_value(&mut self) -> Result<InputValue, InputDecodeError> {
         self.enter_depth()?;
+        self.value_depth = self.value_depth.saturating_add(1);
+        if self.value_depth > self.limits.max_value_depth {
+            self.value_depth = self.value_depth.saturating_sub(1);
+            self.leave_depth();
+            return Err(InputDecodeError::LimitExceeded(
+                "structured value depth limit",
+            ));
+        }
+        self.value_nodes = self.value_nodes.saturating_add(1);
+        if self.value_nodes > self.limits.max_value_nodes {
+            self.value_depth = self.value_depth.saturating_sub(1);
+            self.leave_depth();
+            return Err(InputDecodeError::LimitExceeded(
+                "structured value node limit",
+            ));
+        }
         self.consume(b'{', "tagged value object")?;
 
         let mut seen_fields = BTreeSet::new();
         let mut raw_type: Option<(String, usize)> = None;
         let mut raw_value: Option<RawValue> = None;
+        let mut nominal: Option<String> = None;
+        let mut variant: Option<String> = None;
+        let mut args: Option<Vec<InputValue>> = None;
+        let mut fields: Option<BTreeMap<String, InputValue>> = None;
 
         self.skip_whitespace();
         if self.peek() == Some(b'}') {
             self.pos += 1;
+            self.value_depth = self.value_depth.saturating_sub(1);
             self.leave_depth();
             return Err(InputDecodeError::MissingField("type"));
         }
@@ -1263,40 +1416,33 @@ impl<'a> StrictJsonParser<'a> {
             self.skip_whitespace();
             let field_offset = self.pos;
             let field = self.parse_string(64)?;
-
             if !seen_fields.insert(field.clone()) {
                 return Err(InputDecodeError::DuplicateKey {
                     key: field,
                     offset: field_offset,
                 });
             }
-
             self.consume(b':', "tagged value field separator")?;
-
             match field.as_str() {
                 "type" => {
                     let t_offset = self.pos;
-                    let t_str = self.parse_string(32)?;
-                    raw_type = Some((t_str, t_offset));
+                    raw_type = Some((self.parse_string(32)?, t_offset));
                 }
-                "value" => {
-                    let val = self.parse_raw_scalar_field()?;
-                    raw_value = Some(val);
-                }
+                "value" => raw_value = Some(self.parse_raw_scalar_field()?),
+                "nominal" => nominal = Some(self.parse_input_name()?),
+                "variant" => variant = Some(self.parse_input_name()?),
+                "args" => args = Some(self.parse_value_array()?),
+                "fields" => fields = Some(self.parse_record_fields()?),
                 _ => {
                     return Err(InputDecodeError::UnknownField {
                         field,
                         offset: field_offset,
-                    });
+                    })
                 }
             }
-
             self.skip_whitespace();
             match self.peek() {
-                Some(b',') => {
-                    self.pos += 1;
-                    continue;
-                }
+                Some(b',') => self.pos += 1,
                 Some(b'}') => {
                     self.pos += 1;
                     break;
@@ -1314,47 +1460,192 @@ impl<'a> StrictJsonParser<'a> {
             }
         }
 
+        self.value_depth = self.value_depth.saturating_sub(1);
         self.leave_depth();
-
         let (type_name, type_offset) = raw_type.ok_or(InputDecodeError::MissingField("type"))?;
-        let value = raw_value.ok_or(InputDecodeError::MissingField("value"))?;
-
+        let allowed: &[&str] = match type_name.as_str() {
+            "int" | "bool" | "string" => &["type", "value"],
+            "sum" => &["type", "nominal", "variant", "args"],
+            "record" => &["type", "nominal", "fields"],
+            _ => &["type", "value", "nominal", "variant", "args", "fields"],
+        };
+        if let Some(field) = seen_fields
+            .iter()
+            .find(|field| !allowed.iter().any(|candidate| candidate == field))
+        {
+            return Err(InputDecodeError::UnknownField {
+                field: field.clone(),
+                offset: type_offset,
+            });
+        }
         match type_name.as_str() {
-            "int" => match value {
+            "int" => match raw_value.ok_or(InputDecodeError::MissingField("value"))? {
                 RawValue::String(s) => {
                     validate_decimal_int(&s)?;
                     let n = s
                         .parse::<i64>()
                         .map_err(|_| InputDecodeError::IntegerOverflow { raw: s })?;
-                    Ok(InputScalarValue::Int(n))
+                    Ok(InputValue::Int(n))
                 }
-                _ => Err(InputDecodeError::InvalidType {
+                value => Err(InputDecodeError::InvalidType {
                     expected: "decimal string for int value",
                     found: value.type_name().to_string(),
                     offset: type_offset,
                 }),
             },
-            "bool" => match value {
-                RawValue::Bool(b) => Ok(InputScalarValue::Bool(b)),
-                _ => Err(InputDecodeError::InvalidType {
+            "bool" => match raw_value.ok_or(InputDecodeError::MissingField("value"))? {
+                RawValue::Bool(b) => Ok(InputValue::Bool(b)),
+                value => Err(InputDecodeError::InvalidType {
                     expected: "boolean (true or false) for bool value",
                     found: value.type_name().to_string(),
                     offset: type_offset,
                 }),
             },
-            "string" => match value {
-                RawValue::String(s) => Ok(InputScalarValue::Str(s)),
-                _ => Err(InputDecodeError::InvalidType {
+            "string" => match raw_value.ok_or(InputDecodeError::MissingField("value"))? {
+                RawValue::String(s) => Ok(InputValue::Str(s)),
+                value => Err(InputDecodeError::InvalidType {
                     expected: "string for string value",
                     found: value.type_name().to_string(),
                     offset: type_offset,
                 }),
             },
+            "sum" => Ok(InputValue::Sum {
+                nominal: nominal.ok_or(InputDecodeError::MissingField("nominal"))?,
+                variant: variant.ok_or(InputDecodeError::MissingField("variant"))?,
+                args: args.ok_or(InputDecodeError::MissingField("args"))?,
+            }),
+            "record" => Ok(InputValue::Record {
+                nominal: nominal.ok_or(InputDecodeError::MissingField("nominal"))?,
+                fields: fields.ok_or(InputDecodeError::MissingField("fields"))?,
+            }),
             other => Err(InputDecodeError::InvalidType {
-                expected: "one of ['int', 'bool', 'string']",
+                expected: "one of ['int', 'bool', 'string', 'sum', 'record']",
                 found: other.to_string(),
                 offset: type_offset,
             }),
+        }
+    }
+
+    fn parse_value_array(&mut self) -> Result<Vec<InputValue>, InputDecodeError> {
+        self.enter_depth()?;
+        self.consume(b'[', "sum args array")?;
+        let mut values = Vec::new();
+        self.skip_whitespace();
+        if self.peek() == Some(b']') {
+            self.pos += 1;
+            self.leave_depth();
+            return Ok(values);
+        }
+        loop {
+            if values.len() >= self.limits.max_container_width {
+                return Err(InputDecodeError::LimitExceeded(
+                    "structured container width",
+                ));
+            }
+            values.push(self.parse_tagged_value()?);
+            self.skip_whitespace();
+            match self.peek() {
+                Some(b',') => self.pos += 1,
+                Some(b']') => {
+                    self.pos += 1;
+                    self.leave_depth();
+                    return Ok(values);
+                }
+                Some(other) => {
+                    return Err(InputDecodeError::SyntaxError {
+                        message: format!(
+                            "expected ',' or ']' in sum args, found '{}'",
+                            other as char
+                        ),
+                        offset: self.pos,
+                    })
+                }
+                None => return Err(InputDecodeError::UnexpectedEof),
+            }
+        }
+    }
+
+    fn parse_record_fields(&mut self) -> Result<BTreeMap<String, InputValue>, InputDecodeError> {
+        self.enter_depth()?;
+        self.consume(b'[', "record fields array")?;
+        let mut values = BTreeMap::new();
+        self.skip_whitespace();
+        if self.peek() == Some(b']') {
+            self.pos += 1;
+            self.leave_depth();
+            return Ok(values);
+        }
+        loop {
+            if values.len() >= self.limits.max_container_width {
+                return Err(InputDecodeError::LimitExceeded(
+                    "structured container width",
+                ));
+            }
+            self.enter_depth()?;
+            self.consume(b'{', "record field object")?;
+            let mut seen = BTreeSet::new();
+            let mut name = None;
+            let mut value = None;
+            loop {
+                self.skip_whitespace();
+                let offset = self.pos;
+                let key = self.parse_string(64)?;
+                if !seen.insert(key.clone()) {
+                    return Err(InputDecodeError::DuplicateKey { key, offset });
+                }
+                self.consume(b':', "record field separator")?;
+                match key.as_str() {
+                    "name" => name = Some(self.parse_input_name()?),
+                    "value" => value = Some(self.parse_tagged_value()?),
+                    _ => return Err(InputDecodeError::UnknownField { field: key, offset }),
+                }
+                self.skip_whitespace();
+                match self.peek() {
+                    Some(b',') => self.pos += 1,
+                    Some(b'}') => {
+                        self.pos += 1;
+                        break;
+                    }
+                    Some(other) => {
+                        return Err(InputDecodeError::SyntaxError {
+                            message: format!(
+                                "expected ',' or '}}' in record field, found '{}'",
+                                other as char
+                            ),
+                            offset: self.pos,
+                        })
+                    }
+                    None => return Err(InputDecodeError::UnexpectedEof),
+                }
+            }
+            self.leave_depth();
+            let name = name.ok_or(InputDecodeError::MissingField("name"))?;
+            let value = value.ok_or(InputDecodeError::MissingField("value"))?;
+            if values.insert(name.clone(), value).is_some() {
+                return Err(InputDecodeError::DuplicateKey {
+                    key: name,
+                    offset: self.pos,
+                });
+            }
+            self.skip_whitespace();
+            match self.peek() {
+                Some(b',') => self.pos += 1,
+                Some(b']') => {
+                    self.pos += 1;
+                    self.leave_depth();
+                    return Ok(values);
+                }
+                Some(other) => {
+                    return Err(InputDecodeError::SyntaxError {
+                        message: format!(
+                            "expected ',' or ']' in record fields, found '{}'",
+                            other as char
+                        ),
+                        offset: self.pos,
+                    })
+                }
+                None => return Err(InputDecodeError::UnexpectedEof),
+            }
         }
     }
 
