@@ -550,70 +550,60 @@ impl Parser {
     }
 
     fn parse_expr_inner(&mut self) -> Result<Expr, ParseError> {
-        self.parse_expr_bin1()
+        self.parse_expr_bp(0)
     }
 
-    fn parse_expr_bin1(&mut self) -> Result<Expr, ParseError> {
-        let mut lhs = self.parse_expr_cmp()?;
-        while let Some(op) = self.match_bin1() {
-            let rhs = self.parse_expr_cmp()?;
+    /// Precedence climbing for binary operators.
+    ///
+    /// Precedence levels (lowest to highest):
+    /// 1. `then`, `and` (witness composition)
+    /// 2. `||` (logical OR)
+    /// 3. `&&` (logical AND)
+    /// 4. `<`, `<=`, `>`, `>=`, `==`, `!=` (non-associative comparison)
+    /// 5. `+`, `-` (additive)
+    /// 6. `*`, `/` (multiplicative)
+    fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_expr_prefix()?;
+
+        loop {
+            let (left_bp, right_bp, op, is_cmp) = match self.peek() {
+                TokenKind::Then => (1, 2, BinOp::Then, false),
+                TokenKind::And => (1, 2, BinOp::And, false),
+                TokenKind::PipePipe => (3, 4, BinOp::OrOr, false),
+                TokenKind::AmpAmp => (5, 6, BinOp::AndAnd, false),
+                TokenKind::Lt => (7, 8, BinOp::Lt, true),
+                TokenKind::Le => (7, 8, BinOp::Le, true),
+                TokenKind::Gt => (7, 8, BinOp::Gt, true),
+                TokenKind::Ge => (7, 8, BinOp::Ge, true),
+                TokenKind::EqEq => (7, 8, BinOp::Eq, true),
+                TokenKind::Ne => (7, 8, BinOp::Ne, true),
+                TokenKind::Plus => (9, 10, BinOp::Add, false),
+                TokenKind::Minus => (9, 10, BinOp::Sub, false),
+                TokenKind::Star => (11, 12, BinOp::Mul, false),
+                TokenKind::Slash => (11, 12, BinOp::Div, false),
+                _ => break,
+            };
+
+            if left_bp < min_bp {
+                break;
+            }
+
+            self.advance();
+
+            let rhs = self.parse_expr_bp(right_bp)?;
+
+            if is_cmp && self.peek_cmp() {
+                return Err(self.error("comparison operators do not chain; parenthesise instead"));
+            }
+
             lhs = Expr::Bin {
                 op,
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
             };
         }
+
         Ok(lhs)
-    }
-
-    fn match_bin1(&mut self) -> Option<BinOp> {
-        if self.check(&TokenKind::Then) {
-            self.advance();
-            Some(BinOp::Then)
-        } else if self.check(&TokenKind::And) {
-            self.advance();
-            Some(BinOp::And)
-        } else {
-            None
-        }
-    }
-
-    /// Comparison — binds looser than `+`/`-` and tighter than `then`/`and`.
-    ///
-    /// **Non-associative on purpose.** `a < b < c` is a mistake in every
-    /// language that reads it as `(a < b) < c`, and here it would surface as a
-    /// confusing type error about comparing a `Bool`. Rejected by name instead.
-    fn parse_expr_cmp(&mut self) -> Result<Expr, ParseError> {
-        let lhs = self.parse_expr_bin2()?;
-        let Some(op) = self.match_cmp() else {
-            return Ok(lhs);
-        };
-        let rhs = self.parse_expr_bin2()?;
-        if self.peek_cmp() {
-            // Deliberately refused rather than read as `(a < b) < c`, which is
-            // a mistake wherever it type-checks, and refused *now* so that
-            // chaining can be defined later without breaking a program that
-            // exists today.
-            //
-            // What it will mean is already settled, and it is not conjunction:
-            // under ADR-0010 ⟨D-OPARROW⟩ an operation is an arrow, so `a < b`
-            // and `b < c` share the object `b` and chaining is exactly their
-            // **composition** — the existing `then` (∘, `RealizesComp`), not
-            // the parallel `and` (⊗). "The chain holds" is then just "the
-            // composite exists", since composing requires both links.
-            //
-            // It is not available yet because this comparison is an arrow in
-            // the *typing* regime (`Prod(Type, Type) -> Type(Bool)`), and two
-            // of those do not compose. Chaining needs the order arrow between
-            // the compared values (`Expr(a) -> Expr(b)`), which is a
-            // value-level regime this fragment does not have.
-            return Err(self.error("comparison operators do not chain; parenthesise instead"));
-        }
-        Ok(Expr::Bin {
-            op,
-            lhs: Box::new(lhs),
-            rhs: Box::new(rhs),
-        })
     }
 
     fn peek_cmp(&self) -> bool {
@@ -628,80 +618,36 @@ impl Parser {
         )
     }
 
-    fn match_cmp(&mut self) -> Option<BinOp> {
-        let op = match self.peek() {
-            TokenKind::Lt => BinOp::Lt,
-            TokenKind::Le => BinOp::Le,
-            TokenKind::Gt => BinOp::Gt,
-            TokenKind::Ge => BinOp::Ge,
-            TokenKind::EqEq => BinOp::Eq,
-            TokenKind::Ne => BinOp::Ne,
-            _ => return None,
-        };
-        self.advance();
-        Some(op)
-    }
-
-    fn parse_expr_bin2(&mut self) -> Result<Expr, ParseError> {
-        let mut lhs = self.parse_expr_bin3()?;
-        while let Some(op) = self.match_bin2() {
-            let rhs = self.parse_expr_bin3()?;
-            lhs = Expr::Bin {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
-        }
-        Ok(lhs)
-    }
-
-    fn match_bin2(&mut self) -> Option<BinOp> {
-        if self.check(&TokenKind::Plus) {
-            self.advance();
-            Some(BinOp::Add)
-        } else if self.check(&TokenKind::Minus) {
-            self.advance();
-            Some(BinOp::Sub)
-        } else {
-            None
-        }
-    }
-
-    fn parse_expr_bin3(&mut self) -> Result<Expr, ParseError> {
-        let mut lhs = self.parse_expr_prefix()?;
-        while let Some(op) = self.match_bin3() {
-            let rhs = self.parse_expr_prefix()?;
-            lhs = Expr::Bin {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
-        }
-        Ok(lhs)
-    }
-
-    fn match_bin3(&mut self) -> Option<BinOp> {
-        if self.check(&TokenKind::Star) {
-            self.advance();
-            Some(BinOp::Mul)
-        } else if self.check(&TokenKind::Slash) {
-            self.advance();
-            Some(BinOp::Div)
-        } else {
-            None
-        }
+    /// Operand of a self-recursive prefix operator (`!`, `prove`, `audit`).
+    ///
+    /// These arms recurse into [`Self::parse_expr_prefix`] directly rather than
+    /// going back through [`Self::parse_expr`], so without this they descend
+    /// **uncharged**: `!!!!…true` is one expression at depth 1 and one stack
+    /// frame per `!`. That contradicts `ParseLimits::max_nesting_depth`, whose
+    /// whole contract is that a deep input is "refused before descending, so
+    /// the stack is never at risk" (ADR-0022 D6). Charging here restores it.
+    fn parse_prefix_operand(&mut self) -> Result<Expr, ParseError> {
+        self.enter()?;
+        let out = self.parse_expr_prefix();
+        self.leave();
+        out
     }
 
     fn parse_expr_prefix(&mut self) -> Result<Expr, ParseError> {
         match self.peek() {
+            TokenKind::Bang => {
+                self.advance();
+                let inner = self.parse_prefix_operand()?;
+                Ok(Expr::Not(Box::new(inner)))
+            }
             TokenKind::Prove => {
                 self.advance();
-                let inner = self.parse_expr_prefix()?;
+                let inner = self.parse_prefix_operand()?;
                 Ok(Expr::Prove(Box::new(inner)))
             }
             TokenKind::Audit => {
                 self.advance();
-                let inner = self.parse_expr_prefix()?;
+                let inner = self.parse_prefix_operand()?;
                 Ok(Expr::Audit(Box::new(inner)))
             }
             TokenKind::Why => {

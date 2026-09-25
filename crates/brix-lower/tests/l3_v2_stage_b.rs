@@ -205,3 +205,141 @@ fn evaluation_is_deterministic() {
     }
     assert_eq!(first, Ok(L3ValueV2::Int(10)));
 }
+
+#[test]
+fn boolean_operators_truth_table_and_not() {
+    let p = plan(
+        "rule tt() = true && true\n\
+         rule tf() = true && false\n\
+         rule ft() = false && true\n\
+         rule ff() = false && false\n\
+         rule or_tt() = true || true\n\
+         rule or_tf() = true || false\n\
+         rule or_ft() = false || true\n\
+         rule or_ff() = false || false\n\
+         rule not_t() = !true\n\
+         rule not_f() = !false\n\
+         rule not_not_t() = !(!true)\n",
+    );
+    let env = EvalEnv::new();
+    assert_eq!(eval(rule_body(&p, "tt"), &env), Ok(L3ValueV2::Bool(true)));
+    assert_eq!(eval(rule_body(&p, "tf"), &env), Ok(L3ValueV2::Bool(false)));
+    assert_eq!(eval(rule_body(&p, "ft"), &env), Ok(L3ValueV2::Bool(false)));
+    assert_eq!(eval(rule_body(&p, "ff"), &env), Ok(L3ValueV2::Bool(false)));
+    assert_eq!(
+        eval(rule_body(&p, "or_tt"), &env),
+        Ok(L3ValueV2::Bool(true))
+    );
+    assert_eq!(
+        eval(rule_body(&p, "or_tf"), &env),
+        Ok(L3ValueV2::Bool(true))
+    );
+    assert_eq!(
+        eval(rule_body(&p, "or_ft"), &env),
+        Ok(L3ValueV2::Bool(true))
+    );
+    assert_eq!(
+        eval(rule_body(&p, "or_ff"), &env),
+        Ok(L3ValueV2::Bool(false))
+    );
+    assert_eq!(
+        eval(rule_body(&p, "not_t"), &env),
+        Ok(L3ValueV2::Bool(false))
+    );
+    assert_eq!(
+        eval(rule_body(&p, "not_f"), &env),
+        Ok(L3ValueV2::Bool(true))
+    );
+    assert_eq!(
+        eval(rule_body(&p, "not_not_t"), &env),
+        Ok(L3ValueV2::Bool(true))
+    );
+}
+
+#[test]
+fn boolean_operators_short_circuit_on_faults() {
+    let p = plan(
+        "let big = 9223372036854775807\n\
+         rule and_short() = false && (big + big > 0)\n\
+         rule or_short() = true || (big + big > 0)\n\
+         rule and_no_short() = true && (big + big > 0)\n\
+         rule or_no_short() = false || (big + big > 0)\n",
+    );
+    let env = EvalEnv::new().with_let("big", L3ValueV2::Int(i64::MAX));
+
+    // false && <fault> does NOT evaluate RHS
+    assert_eq!(
+        eval(rule_body(&p, "and_short"), &env),
+        Ok(L3ValueV2::Bool(false))
+    );
+    // true || <fault> does NOT evaluate RHS
+    assert_eq!(
+        eval(rule_body(&p, "or_short"), &env),
+        Ok(L3ValueV2::Bool(true))
+    );
+
+    // true && <fault> evaluates RHS and faults
+    assert_eq!(
+        eval(rule_body(&p, "and_no_short"), &env),
+        Err(EvalFault::Overflow(ArithOpV2::Add))
+    );
+    // false || <fault> evaluates RHS and faults
+    assert_eq!(
+        eval(rule_body(&p, "or_no_short"), &env),
+        Err(EvalFault::Overflow(ArithOpV2::Add))
+    );
+}
+
+#[test]
+fn boolean_operators_require_boolean_operands() {
+    let p = plan(
+        "rule bad_and_left() = 1 && true\n\
+         rule bad_and_right() = true && 1\n\
+         rule bad_or_left() = 1 || false\n\
+         rule bad_or_right() = false || 1\n\
+         rule bad_not() = !1\n",
+    );
+    let env = EvalEnv::new();
+
+    assert_eq!(
+        eval(rule_body(&p, "bad_and_left"), &env),
+        Err(EvalFault::OperandShape(
+            "logical AND requires Bool operands"
+        ))
+    );
+    assert_eq!(
+        eval(rule_body(&p, "bad_and_right"), &env),
+        Err(EvalFault::OperandShape(
+            "logical AND requires Bool operands"
+        ))
+    );
+    assert_eq!(
+        eval(rule_body(&p, "bad_or_left"), &env),
+        Err(EvalFault::OperandShape("logical OR requires Bool operands"))
+    );
+    assert_eq!(
+        eval(rule_body(&p, "bad_or_right"), &env),
+        Err(EvalFault::OperandShape("logical OR requires Bool operands"))
+    );
+    assert_eq!(
+        eval(rule_body(&p, "bad_not"), &env),
+        Err(EvalFault::OperandShape("logical NOT requires Bool operand"))
+    );
+}
+
+#[test]
+fn boolean_operators_precedence_in_evaluator() {
+    let p = plan(
+        "rule p1() = 1 < 2 && 3 < 4\n\
+         rule p2() = false && false || true\n\
+         rule p3() = true || false && false\n\
+         rule p4() = !false && true\n\
+         rule p5() = !(false && true)\n",
+    );
+    let env = EvalEnv::new();
+    assert_eq!(eval(rule_body(&p, "p1"), &env), Ok(L3ValueV2::Bool(true)));
+    assert_eq!(eval(rule_body(&p, "p2"), &env), Ok(L3ValueV2::Bool(true)));
+    assert_eq!(eval(rule_body(&p, "p3"), &env), Ok(L3ValueV2::Bool(true)));
+    assert_eq!(eval(rule_body(&p, "p4"), &env), Ok(L3ValueV2::Bool(true)));
+    assert_eq!(eval(rule_body(&p, "p5"), &env), Ok(L3ValueV2::Bool(true)));
+}

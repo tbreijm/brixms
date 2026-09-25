@@ -123,6 +123,12 @@ pub enum L3ExprV2 {
         func: String,
         args: Vec<L3ExprV2>,
     },
+    /// Short-circuiting logical AND: `lhs && rhs`.
+    And(Box<L3ExprV2>, Box<L3ExprV2>),
+    /// Short-circuiting logical OR: `lhs || rhs`.
+    Or(Box<L3ExprV2>, Box<L3ExprV2>),
+    /// Logical NOT: `!expr`.
+    Not(Box<L3ExprV2>),
 }
 
 /// Type category of an [`L3ValueV2`] for contract uniformity checking.
@@ -910,6 +916,8 @@ pub(crate) fn lower_expr_v2(
                 ast::BinOp::Ge => Ok(L3ExprV2::Cmp(CmpOpV2::Ge, l, r)),
                 ast::BinOp::Eq => Ok(L3ExprV2::Cmp(CmpOpV2::Eq, l, r)),
                 ast::BinOp::Ne => Ok(L3ExprV2::Cmp(CmpOpV2::Ne, l, r)),
+                ast::BinOp::AndAnd => Ok(L3ExprV2::And(l, r)),
+                ast::BinOp::OrOr => Ok(L3ExprV2::Or(l, r)),
                 ast::BinOp::Then | ast::BinOp::And => Err(L3V2LowerError::Unsupported(
                     "witness composition has no executable meaning in v2".to_string(),
                 )),
@@ -989,6 +997,20 @@ pub(crate) fn lower_expr_v2(
                 scrutinee: s,
                 arms: out,
             })
+        }
+        ast::Expr::Not(inner) => {
+            let expr = Box::new(lower_expr_v2(
+                inner,
+                lets,
+                locals,
+                rules,
+                nullary,
+                variants_of,
+                functions,
+                in_rule,
+                helper_enabled,
+            )?);
+            Ok(L3ExprV2::Not(expr))
         }
         ast::Expr::Prove(_) => Err(L3V2LowerError::Unsupported("prove".to_string())),
         ast::Expr::Why(_) => Err(L3V2LowerError::Unsupported("why".to_string())),
@@ -1548,6 +1570,45 @@ fn eval_internal_body(
             };
             Ok(L3ValueV2::Bool(out))
         }
+        L3ExprV2::And(a, b) => {
+            let val_a = eval_internal(a, env, budget, current_func)?;
+            let L3ValueV2::Bool(bool_a) = val_a else {
+                return Err(EvalFault::OperandShape(
+                    "logical AND requires Bool operands",
+                ));
+            };
+            if !bool_a {
+                return Ok(L3ValueV2::Bool(false));
+            }
+            let val_b = eval_internal(b, env, budget, current_func)?;
+            let L3ValueV2::Bool(bool_b) = val_b else {
+                return Err(EvalFault::OperandShape(
+                    "logical AND requires Bool operands",
+                ));
+            };
+            Ok(L3ValueV2::Bool(bool_b))
+        }
+        L3ExprV2::Or(a, b) => {
+            let val_a = eval_internal(a, env, budget, current_func)?;
+            let L3ValueV2::Bool(bool_a) = val_a else {
+                return Err(EvalFault::OperandShape("logical OR requires Bool operands"));
+            };
+            if bool_a {
+                return Ok(L3ValueV2::Bool(true));
+            }
+            let val_b = eval_internal(b, env, budget, current_func)?;
+            let L3ValueV2::Bool(bool_b) = val_b else {
+                return Err(EvalFault::OperandShape("logical OR requires Bool operands"));
+            };
+            Ok(L3ValueV2::Bool(bool_b))
+        }
+        L3ExprV2::Not(a) => {
+            let val_a = eval_internal(a, env, budget, current_func)?;
+            let L3ValueV2::Bool(bool_a) = val_a else {
+                return Err(EvalFault::OperandShape("logical NOT requires Bool operand"));
+            };
+            Ok(L3ValueV2::Bool(!bool_a))
+        }
         L3ExprV2::Match { scrutinee, arms } => {
             let v = eval_internal(scrutinee, env, budget, current_func)?;
             let (variant, args) = match &v {
@@ -1819,10 +1880,14 @@ pub(crate) fn check_exhaustive_expr(
             Ok(())
         }
         L3ExprV2::Field(b, _) => check_exhaustive_expr(b, sum_of_variant, variants_of_sum),
-        L3ExprV2::Arith(_, a, b) | L3ExprV2::Cmp(_, a, b) => {
+        L3ExprV2::Arith(_, a, b)
+        | L3ExprV2::Cmp(_, a, b)
+        | L3ExprV2::And(a, b)
+        | L3ExprV2::Or(a, b) => {
             check_exhaustive_expr(a, sum_of_variant, variants_of_sum)?;
             check_exhaustive_expr(b, sum_of_variant, variants_of_sum)
         }
+        L3ExprV2::Not(a) => check_exhaustive_expr(a, sum_of_variant, variants_of_sum),
         L3ExprV2::Int(_)
         | L3ExprV2::Str(_)
         | L3ExprV2::Bool(_)

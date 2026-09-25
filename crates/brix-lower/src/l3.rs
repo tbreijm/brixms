@@ -812,8 +812,11 @@ fn normalize_static_value(expr: &ast::Expr, env: &NormEnv) -> Result<L3ValueV1, 
             | ast::BinOp::Gt
             | ast::BinOp::Ge
             | ast::BinOp::Eq
-            | ast::BinOp::Ne => Err(L3LowerError::ComparisonNotAllowed),
+            | ast::BinOp::Ne
+            | ast::BinOp::AndAnd
+            | ast::BinOp::OrOr => Err(L3LowerError::ComparisonNotAllowed),
         },
+        ast::Expr::Not(_) => Err(L3LowerError::ComparisonNotAllowed),
         ast::Expr::Bool(_) => Err(L3LowerError::BooleanLiteralNotAllowed),
         ast::Expr::Match { .. } => Err(L3LowerError::MatchNotAllowed),
         ast::Expr::Prove(_) => Err(L3LowerError::ProveNotAllowed),

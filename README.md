@@ -666,6 +666,46 @@ schema changes the program pin; a changed input value changes the snapshot
 and context. Old audit bundles must still verify against the exact source,
 program pin, and inputs that produced them.
 
+### Boolean operators in conditions (source build)
+
+The working source adds short-circuiting `&&`, `||`, and prefix `!`
+([ADR-0034](./spec/adr/ADR-0034_Boolean_Operators.md)), so a policy that is a
+conjunction of conditions can be written as one:
+
+```brix
+config Decision = Approved | Rejected
+
+fn eligible(score: Int, flagged: Bool): Bool = score >= 700 && !flagged
+
+rule credit_score() = 750
+rule fraud_flag() = false
+rule is_eligible(credit_score, fraud_flag) = eligible(credit_score, fraud_flag)
+
+propose approve(is_eligible) priority 1 when is_eligible = Approved
+propose reject() priority 10 when true = Rejected
+commit c from (approve, reject)
+```
+
+They work anywhere an expression does: lets, rule bodies, helper bodies, and
+proposal guards and values. `&&` binds tighter than `||`, both bind looser than
+comparison, and `!` binds tighter than every binary operator — so
+`a || b && !c` reads as `a || (b && (!c))`. Comparison remains
+non-associative: `a < b < c` is still refused by name rather than read as a
+conjunction.
+
+`&&` and `||` short-circuit, and that is part of the semantics rather than an
+optimization: `false && e` does not evaluate `e`, so an arithmetic fault in `e`
+does not stop the decision. Replay short-circuits identically, which is what
+makes the behavior reproducible under `audit` and `verify`.
+
+Operands must be `Bool`. There is no truthiness and no coercion from `Int`; a
+non-Boolean operand is a typed evaluation fault that fails closed and surfaces
+at `check`, not only at `run`. Note that `and` is unrelated — it is witness
+tensor composition, not Boolean conjunction.
+
+Programs that do not use the new operators keep their existing program pins:
+the canonical expression encoding appends ordinals rather than renumbering.
+
 **CLI target surface & status:**
 - `brix` implements exactly the six subcommands above.
 - `brix verify` implements offline verification of ADR-0026 audit input transport bundles.

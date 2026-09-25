@@ -400,7 +400,8 @@ fn check_expr_bounds(
         ast::Expr::Field(base, _)
         | ast::Expr::Prove(base)
         | ast::Expr::Why(base)
-        | ast::Expr::Audit(base) => check_expr_bounds(base, depth + 1, node_count),
+        | ast::Expr::Audit(base)
+        | ast::Expr::Not(base) => check_expr_bounds(base, depth + 1, node_count),
         ast::Expr::Record { fields, .. } => {
             for (_, val) in fields {
                 check_expr_bounds(val, depth + 1, node_count)?;
@@ -770,9 +771,15 @@ fn collect_function_calls(e: &L3ExprV2, calls: &mut BTreeSet<String>) {
             }
         }
         L3ExprV2::Field(base, _) => collect_function_calls(base, calls),
-        L3ExprV2::Arith(_, a, b) | L3ExprV2::Cmp(_, a, b) => {
+        L3ExprV2::Arith(_, a, b)
+        | L3ExprV2::Cmp(_, a, b)
+        | L3ExprV2::And(a, b)
+        | L3ExprV2::Or(a, b) => {
             collect_function_calls(a, calls);
             collect_function_calls(b, calls);
+        }
+        L3ExprV2::Not(a) => {
+            collect_function_calls(a, calls);
         }
         L3ExprV2::Match { scrutinee, arms } => {
             collect_function_calls(scrutinee, calls);
@@ -1670,6 +1677,17 @@ fn encode_expr_v2(w: &mut CanonWriter, e: &L3ExprV2) {
             for a in args {
                 encode_expr_v2(w, a);
             }
+        }),
+        L3ExprV2::And(a, b) => w.write_enum(13, |w| {
+            encode_expr_v2(w, a);
+            encode_expr_v2(w, b);
+        }),
+        L3ExprV2::Or(a, b) => w.write_enum(14, |w| {
+            encode_expr_v2(w, a);
+            encode_expr_v2(w, b);
+        }),
+        L3ExprV2::Not(a) => w.write_enum(15, |w| {
+            encode_expr_v2(w, a);
         }),
     }
 }

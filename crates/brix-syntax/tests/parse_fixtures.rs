@@ -510,3 +510,74 @@ fn grade_names_are_contextual_not_reserved() {
         Some(Ty::Graded(Box::new(Ty::Named("Int".into())), Grade::Proven))
     );
 }
+
+#[test]
+fn boolean_operators_precedence_and_associativity() {
+    // `!a && b > 3 || c == true` must parse as `((!a) && (b > 3)) || (c == true)`
+    let module = parse("let x = !a && b > 3 || c == true").expect("parse boolean expression");
+    let Item::Let(LetDecl { value, .. }) = &module.items[0] else {
+        panic!("expected a let");
+    };
+    let Expr::Bin { op, lhs, rhs } = value else {
+        panic!("expected binary op at root");
+    };
+    assert_eq!(*op, BinOp::OrOr);
+
+    // LHS of || is `!a && b > 3`
+    let Expr::Bin {
+        op: lhs_op,
+        lhs: and_lhs,
+        rhs: and_rhs,
+    } = &**lhs
+    else {
+        panic!("expected && on lhs of ||");
+    };
+    assert_eq!(*lhs_op, BinOp::AndAnd);
+    assert!(matches!(&**and_lhs, Expr::Not(inner) if matches!(&**inner, Expr::Var(v) if v == "a")));
+    assert!(matches!(&**and_rhs, Expr::Bin { op: BinOp::Gt, .. }));
+
+    // RHS of || is `c == true`
+    assert!(matches!(&**rhs, Expr::Bin { op: BinOp::Eq, .. }));
+
+    // Left associativity of &&: `a && b && c` -> `(a && b) && c`
+    let module = parse("let x = a && b && c").expect("parse left-assoc &&");
+    let Item::Let(LetDecl { value, .. }) = &module.items[0] else {
+        panic!("expected a let");
+    };
+    let Expr::Bin { op, lhs, rhs } = value else {
+        panic!("expected binary op");
+    };
+    assert_eq!(*op, BinOp::AndAnd);
+    assert!(matches!(&**rhs, Expr::Var(v) if v == "c"));
+    assert!(matches!(
+        &**lhs,
+        Expr::Bin {
+            op: BinOp::AndAnd,
+            ..
+        }
+    ));
+
+    // Left associativity of ||: `a || b || c` -> `(a || b) || c`
+    let module = parse("let x = a || b || c").expect("parse left-assoc ||");
+    let Item::Let(LetDecl { value, .. }) = &module.items[0] else {
+        panic!("expected a let");
+    };
+    let Expr::Bin { op, lhs, rhs } = value else {
+        panic!("expected binary op");
+    };
+    assert_eq!(*op, BinOp::OrOr);
+    assert!(matches!(&**rhs, Expr::Var(v) if v == "c"));
+    assert!(matches!(
+        &**lhs,
+        Expr::Bin {
+            op: BinOp::OrOr,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn single_ampersand_is_rejected_with_suggestion() {
+    let err = parse("let x = a & b").expect_err("single & must be rejected");
+    assert!(err.to_string().contains("did you mean '&&' ?"));
+}
