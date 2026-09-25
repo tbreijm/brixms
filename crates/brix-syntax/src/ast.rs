@@ -232,6 +232,8 @@ pub enum Expr {
     Why(Box<Expr>),
     /// `audit e` — power-user: force replay-verification → `@Audited`.
     Audit(Box<Expr>),
+    /// `!e` — logical NOT.
+    Not(Box<Expr>),
 }
 
 /// Binary operators. Arithmetic ops are ordinary; `Then`/`And` are the witness
@@ -259,6 +261,10 @@ pub enum BinOp {
     Eq,
     /// `!=`
     Ne,
+    /// `&&` — logical AND (short-circuiting).
+    AndAnd,
+    /// `||` — logical OR (short-circuiting).
+    OrOr,
 }
 
 impl BinOp {
@@ -269,6 +275,11 @@ impl BinOp {
             self,
             BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne
         )
+    }
+
+    /// Whether this is a boolean logical operator (`&&` or `||`).
+    pub const fn is_logical(self) -> bool {
+        matches!(self, BinOp::AndAnd | BinOp::OrOr)
     }
 }
 

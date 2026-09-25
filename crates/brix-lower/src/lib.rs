@@ -854,6 +854,14 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
             ))
         }
         ast::Expr::Bool(b) => Ok(TrExpr::BoolLit(*b)),
+        // `&&`/`||` are Boolean operators over *values*; `TrExpr` has no
+        // Boolean connective, and `TrExpr::And` is witness tensor (the `and`
+        // above), not conjunction. Refused by name at the same level as the
+        // comparison arm rather than falling through to arithmetic, where the
+        // diagnostic would blame the wrong thing.
+        ast::Expr::Bin { op, .. } if op.is_logical() => Err(LowerError::Unsupported(format!(
+            "'{op:?}' not in L2-first fragment"
+        ))),
         ast::Expr::Bin { op, lhs, rhs } => {
             let arith_op = match op {
                 ast::BinOp::Add => ArithOp::Add,
@@ -898,6 +906,9 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
                 .collect::<Result<Vec<_>, LowerError>>()?;
             Ok(TrExpr::Match(Box::new(scrutinee_tr), arms_tr))
         }
+        ast::Expr::Not(..) => Err(LowerError::Unsupported(
+            "logical NOT not in L2-first fragment".to_string(),
+        )),
         ast::Expr::Prove(..) => Err(LowerError::Unsupported(
             "Prove not in L2-first fragment".to_string(),
         )),
@@ -1296,9 +1307,10 @@ fn check_declared_field_types(
             }
             Ok(())
         }
-        ast::Expr::Prove(inner) | ast::Expr::Why(inner) | ast::Expr::Audit(inner) => {
-            check_declared_field_types(inner, ctx, ty_ctx)
-        }
+        ast::Expr::Prove(inner)
+        | ast::Expr::Why(inner)
+        | ast::Expr::Audit(inner)
+        | ast::Expr::Not(inner) => check_declared_field_types(inner, ctx, ty_ctx),
         ast::Expr::Num(_) | ast::Expr::Str(_) | ast::Expr::Bool(_) | ast::Expr::Var(_) => Ok(()),
     }
 }

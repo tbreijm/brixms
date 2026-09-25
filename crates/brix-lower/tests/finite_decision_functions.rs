@@ -1490,3 +1490,31 @@ commit c from (p)
         finite_decision_program_preimage(&p2)
     );
 }
+
+#[test]
+fn test_boolean_operators_in_finite_decision() {
+    let src = r#"
+config Decision = Approved | Rejected
+
+fn eligible(score: Int, flagged: Bool): Bool = score >= 700 && !flagged
+
+rule credit_score() = 750
+rule fraud_flag() = false
+rule is_eligible(credit_score, fraud_flag) = eligible(credit_score, fraud_flag)
+
+propose approve(is_eligible) priority 1 when is_eligible = Approved
+propose reject() priority 10 when true = Rejected
+commit c from (approve, reject)
+"#;
+    let p = plan(src);
+    let runtime = FiniteDecisionRuntime::build(&p).expect("runtime builds");
+    let run = runtime.run();
+    assert!(run.is_selected());
+    let dec = run.decision.as_ref().unwrap();
+    assert_eq!(dec.candidate, "approve");
+
+    // Canonical encoding is reproducible
+    let id1 = finite_decision_program_id(&p);
+    let id2 = finite_decision_program_id(&p);
+    assert_eq!(id1, id2);
+}

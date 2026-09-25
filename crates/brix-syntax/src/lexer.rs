@@ -60,6 +60,9 @@ pub enum TokenKind {
     Ge,         // >=
     EqEq,       // ==
     Ne,         // !=
+    AmpAmp,     // &&
+    PipePipe,   // ||
+    Bang,       // !
     Underscore, // _
 
     Eof,
@@ -322,9 +325,28 @@ pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token
                 }
             }
             '|' => {
-                i += 1;
-                col += 1;
-                TokenKind::Pipe
+                if i + 1 < len && chars[i + 1] == '|' {
+                    i += 2;
+                    col += 2;
+                    TokenKind::PipePipe
+                } else {
+                    i += 1;
+                    col += 1;
+                    TokenKind::Pipe
+                }
+            }
+            '&' => {
+                if i + 1 < len && chars[i + 1] == '&' {
+                    i += 2;
+                    col += 2;
+                    TokenKind::AmpAmp
+                } else {
+                    return Err(ParseError::at(
+                        "Unexpected character '&' (did you mean '&&' ?)".to_string(),
+                        start_line,
+                        start_col,
+                    ));
+                }
             }
             ',' => {
                 i += 1;
@@ -364,18 +386,14 @@ pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token
                 }
             }
             '!' => {
-                i += 1;
-                col += 1;
-                if chars.get(i) == Some(&'=') {
-                    i += 1;
-                    col += 1;
+                if i + 1 < len && chars[i + 1] == '=' {
+                    i += 2;
+                    col += 2;
                     TokenKind::Ne
                 } else {
-                    return Err(ParseError::at(
-                        "Unexpected character '!' (did you mean '!=' ?)".to_string(),
-                        start_line,
-                        start_col,
-                    ));
+                    i += 1;
+                    col += 1;
+                    TokenKind::Bang
                 }
             }
             '+' => {
