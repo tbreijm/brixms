@@ -339,6 +339,19 @@ pub fn execute_why_or_whynot(
         }
     };
 
+    // Structured derivation explanation (ADR-0030): purely additive, never
+    // changes the status line, exit code, or any field above. A fault or
+    // "not found" here is unreachable at this point (both already returned
+    // above via `explain_why`/`explain_why_not`), so a failure is swallowed
+    // rather than surfaced as a second, redundant error path.
+    let explanation = runtime
+        .explain_candidate(candidate)
+        .ok()
+        .and_then(|outcome| match outcome {
+            brix_lower::finite_decision::ExplainOutcome::Explained(expl) => Some(*expl),
+            brix_lower::finite_decision::ExplainOutcome::CandidateNotFound => None,
+        });
+
     if json {
         let winning_name = run.decision.as_ref().map(|d| d.candidate.as_str());
         let facts_json = run.facts.iter().map(fact_to_json).collect();
@@ -348,6 +361,9 @@ pub fn execute_why_or_whynot(
             .map(|d| candidate_disposition_to_json(d, winning_name))
             .collect();
         let decision_json = run.decision.as_ref().map(decision_to_json);
+        let explanation_json = explanation
+            .as_ref()
+            .map(crate::commands::explain_render::explanation_to_json);
 
         let res = CliResultJson {
             schema: BRIX_CLI_SCHEMA.to_string(),
@@ -364,6 +380,7 @@ pub fn execute_why_or_whynot(
             decision: decision_json,
             artifacts: Vec::new(),
             diagnostics: vec![explanation_text],
+            explanation: explanation_json,
         };
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {
@@ -371,6 +388,12 @@ pub fn execute_why_or_whynot(
         let human =
             format_finite_decision_human(&run, Some(&context_hex), input_snapshot.as_deref());
         print!("{human}");
+        if let Some(expl) = &explanation {
+            print!(
+                "{}",
+                crate::commands::explain_render::render_explanation_human(expl)
+            );
+        }
     }
 
     EXIT_SUCCESS
