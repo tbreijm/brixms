@@ -8,6 +8,8 @@
 //! - `brix why <file.brix> --candidate <name> [--json] [--package-path <dir>...]`
 //! - `brix whynot <file.brix> --candidate <name> [--json] [--package-path <dir>...]`
 //! - `brix test <file.test.json>... [--json]`
+//! - `brix kb <init|assert|retract|program|log|show|diff|audit|verify> ...` —
+//!   the persistent, revisable knowledge base (ADR-0041); see `brix --help`.
 //! - `brix help` / `brix --help` / `brix -h`
 //! - `brix version` / `brix --version` / `brix -V` / `brix -v`
 //!
@@ -119,6 +121,7 @@ where
             true,
         ),
         Ok(cli::Command::Test { files, json }) => commands::test::execute_test(&files, json),
+        Ok(cli::Command::Kb { op, json }) => commands::kb::execute_kb(&op, json),
         Err(err) => {
             if err.is_json {
                 let cmd_name = err.command.unwrap_or_else(|| "brix".to_string());

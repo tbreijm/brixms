@@ -13,6 +13,7 @@ members = [
     "crates/brix-elaborate",
     "crates/brix-syntax",
     "crates/brix-lower",
+    "crates/brix-kb",
     "crates/brix-cli",
 ]
 
