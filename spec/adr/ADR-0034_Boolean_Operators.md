@@ -100,10 +100,25 @@ specified rather than left to the evaluator.
 We specify the short-circuiting reading: the left operand decides, and an
 unreached right operand contributes nothing, including nothing that can fail.
 
-Operands must be `Bool`. A non-`Bool` operand raises the existing
-`EvalFault::OperandShape`, which fails closed: no decision is committed, and
-the fault surfaces at `brix check` preflight rather than only at `run`. There
-is no truthiness, no coercion from `Int`, and no null.
+Operands must be `Bool`. Finite-decision lowering checks operand types on
+both sides, including skipped operands, unused helper bodies, and unselected
+match arms. Thus `false && 1` and `true || 1` are lowering errors, while
+`false && (div_floor(1, 0) == 0)` remains valid and does not divide at runtime.
+The analysis follows input/parameter/return contracts, bindings, fields,
+constructor payloads and every match result. Unannotated helpers are also
+checked with each syntactic call's argument shapes; `false && identity(1)`
+cannot hide behind an unannotated identity helper. Abstract parameters in an
+uncalled unannotated helper remain unknown until a call supplies their shapes.
+This pass checks Boolean operands, not every possible runtime fault.
+
+The analysis has a separate local resource policy: at most 100,000 expression
+and shape visits and depth 128, refusing with a lowering resource error before
+further descent. Shared abstract shapes are released iteratively. No evaluation
+budget is spent and no arithmetic or helper values are executed. Programs
+without Boolean operators bypass this pass. The analysis adds no canonical
+bytes or ordinals. The evaluator retains `EvalFault::OperandShape` checks on
+every reached operand as a defensive boundary. There is no truthiness, no
+coercion from `Int`, and no null.
 
 `!` evaluates its operand and negates it, with the same `Bool` requirement.
 

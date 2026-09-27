@@ -2703,3 +2703,54 @@ fn test_24_allocation_integer_division_workflow() {
     assert_eq!(verify["ok"], true);
     assert_eq!(verify["status"], "audit-bundle-verified");
 }
+
+#[test]
+fn test_25_check_refuses_non_bool_short_circuit_operands() {
+    let temp = TempDirGuard::new("short_circuit_bool_types");
+    for (index, expression) in ["false && 1", "true || 1"].into_iter().enumerate() {
+        let source_path = temp.path().join(format!("invalid_{index}.brix"));
+        fs::write(
+            &source_path,
+            format!(
+                "config Decision = Done\nrule r() = {expression}\npropose p(r) priority 1 when true = Done\ncommit c from (p)\n"
+            ),
+        )
+        .expect("write source");
+
+        let (code, stdout, stderr) = run_cmd({
+            let mut c = brix();
+            c.arg("check").arg(&source_path).arg("--json");
+            c
+        });
+        assert_eq!(
+            code, 1,
+            "invalid operand should be rejected: {stdout} {stderr}"
+        );
+        let result: serde_json::Value = serde_json::from_str(&stdout).expect("check JSON");
+        assert_eq!(result["ok"], false);
+        assert!(
+            result.to_string().contains("Bool"),
+            "diagnostic should identify the Bool requirement: {result}"
+        );
+    }
+
+    // A valid Bool RHS containing a runtime fault still obeys short-circuit
+    // semantics during preflight.
+    let valid_path = temp.path().join("valid_short_circuit.brix");
+    fs::write(
+        &valid_path,
+        "config Decision = Done\nrule r() = false && (div_floor(1, 0) == 0)\npropose p(r) priority 1 when true = Done\ncommit c from (p)\n",
+    )
+    .expect("write valid source");
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("check").arg(&valid_path).arg("--json");
+        c
+    });
+    assert_eq!(
+        code, 0,
+        "valid short-circuit expression rejected: {stdout} {stderr}"
+    );
+    let result: serde_json::Value = serde_json::from_str(&stdout).expect("check JSON");
+    assert_eq!(result["ok"], true);
+}

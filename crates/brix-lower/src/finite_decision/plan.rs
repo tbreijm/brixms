@@ -125,6 +125,11 @@ impl FiniteDecisionPlan {
 /// Errors occurring during finite-decision lowering.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FiniteDecisionLowerError {
+    BooleanOperandType {
+        operator: &'static str,
+        found: String,
+    },
+    BooleanTypeAnalysisLimit,
     ProfileMismatch {
         expected: String,
         found: String,
@@ -246,6 +251,18 @@ pub enum FiniteDecisionLowerError {
 impl fmt::Display for FiniteDecisionLowerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::BooleanOperandType { operator, found } => {
+                write!(
+                    f,
+                    "logical {operator} requires Bool operands, found {found}"
+                )
+            }
+            Self::BooleanTypeAnalysisLimit => {
+                write!(
+                    f,
+                    "resource limit exceeded during Boolean operand type analysis"
+                )
+            }
             Self::ProfileMismatch { expected, found } => {
                 write!(
                     f,
@@ -1564,7 +1581,7 @@ pub fn lower_finite_decision_plan(
         candidates: commit_decl.candidates.clone(),
     };
 
-    Ok(FiniteDecisionPlan {
+    let plan = FiniteDecisionPlan {
         profile: FINITE_DECISION_PROFILE.to_string(),
         configs,
         inputs,
@@ -1575,7 +1592,9 @@ pub fn lower_finite_decision_plan(
         commit,
         shows,
         schemas,
-    })
+    };
+    super::boolean_types::check(&plan, module)?;
+    Ok(plan)
 }
 
 // ---------------------------------------------------------------------------

@@ -1519,6 +1519,61 @@ commit c from (approve, reject)
     assert_eq!(id1, id2);
 }
 
+#[test]
+fn test_boolean_operands_are_checked_even_when_short_circuited() {
+    // Runtime short-circuiting must not hide a statically known non-Bool
+    // operand. Check both the direct expression and expressions the runtime
+    // would never reach (unused helpers and an unselected match arm).
+    let invalid_sources = [
+        "config Decision = Done\nrule r() = false && 1\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
+        "config Decision = Done\nrule r() = true || 1\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
+        "config Decision = Done\nfn unused(): Bool = false && 1\nrule r() = true\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
+        "config Decision = Done\nfn choose(): Bool = match true {\ntrue => true\nfalse => false && 1\n}\nrule r() = choose()\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
+        "config Decision = Done\ninput count: Int\nrule r() = false && count\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
+        "config Decision = Done\nfn unused(count: Int): Bool = false && count\nrule r() = true\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
+        "config Decision = Done\nfn count(): Int = 1\nrule r() = false && count()\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
+        "config User = { age: Int }\nconfig Decision = Done\ninput user: User\nrule r() = false && user.age\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
+        "config Decision = Done\nfn identity(x) = x\nrule r() = false && identity(1)\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
+        "config Decision = Done\nfn negate(x) = !x\nrule r() = false && negate(1)\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
+        "config Box = Val(Int) | None\nconfig Decision = Done\ninput box: Box\nrule r() = false && match box {\nVal(x) => x\nNone => 0\n}\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
+        "config S = A(Bool) | B(Int)\nconfig Decision = Done\nrule r() = match A(true) {\nA(x) => true\nB(x) => false && x\n}\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
+    ];
+
+    for source in invalid_sources {
+        let module = parse(source).expect("fixture parses");
+        let err = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE)
+            .expect_err("statically known non-Bool operands are refused");
+        assert!(
+            err.to_string().contains("Bool"),
+            "diagnostic should explain the required Bool operand: {err}"
+        );
+    }
+
+    // A valid Bool RHS remains semantically short-circuited, including its
+    // division-by-zero fault.
+    let valid = plan(
+        "config Decision = Done\nrule r() = false && (div_floor(1, 0) == 0)\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
+    );
+    let runtime = FiniteDecisionRuntime::build(&valid).expect("runtime builds");
+    assert!(runtime.run().is_selected());
+
+    let generic_bool = plan(
+        "config Decision = Done\nfn identity(x) = x\nrule r() = false && identity(true)\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
+    );
+    assert!(FiniteDecisionRuntime::build(&generic_bool)
+        .unwrap()
+        .run()
+        .is_selected());
+
+    let generic_both = plan(
+        "config Decision = Done\nfn identity(x) = x\nrule b() = identity(true) && true\nrule n() = identity(1)\npropose p(b, n) priority 1 when b = Done\ncommit c from (p)",
+    );
+    assert!(FiniteDecisionRuntime::build(&generic_both)
+        .unwrap()
+        .run()
+        .is_selected());
+}
+
 /// A program that never mentions unary minus must keep its exact program id
 /// (ADR-0032 canonical identity). This hash was captured *before* unary minus
 /// landed and is pinned here so that adding it can never silently renumber an
