@@ -581,3 +581,120 @@ fn single_ampersand_is_rejected_with_suggestion() {
     let err = parse("let x = a & b").expect_err("single & must be rejected");
     assert!(err.to_string().contains("did you mean '&&' ?"));
 }
+
+#[test]
+fn unary_minus_precedence_and_associativity() {
+    // `-a * b` must parse as `(-a) * b`: unary minus binds tighter than every
+    // binary operator, but a numeral would fold directly into a literal, so
+    // use a variable operand to force the general `0 - e` desugaring.
+    let module = parse("let x = -a * b").expect("parse unary minus with *");
+    let Item::Let(LetDecl { value, .. }) = &module.items[0] else {
+        panic!("expected a let");
+    };
+    let Expr::Bin { op, lhs, rhs } = value else {
+        panic!("expected binary op at root");
+    };
+    assert_eq!(*op, BinOp::Mul);
+    assert!(matches!(&**rhs, Expr::Var(v) if v == "b"));
+    // The negated operand desugars to `0 - a`.
+    let Expr::Bin {
+        op: neg_op,
+        lhs: neg_lhs,
+        rhs: neg_rhs,
+    } = &**lhs
+    else {
+        panic!("expected unary minus to desugar to a Sub node");
+    };
+    assert_eq!(*neg_op, BinOp::Sub);
+    assert_eq!(**neg_lhs, Expr::Num("0".into()));
+    assert!(matches!(&**neg_rhs, Expr::Var(v) if v == "a"));
+
+    // `-a + b` must parse as `(-a) + b`.
+    let module = parse("let x = -a + b").expect("parse unary minus with +");
+    let Item::Let(LetDecl { value, .. }) = &module.items[0] else {
+        panic!("expected a let");
+    };
+    let Expr::Bin { op, lhs, rhs } = value else {
+        panic!("expected binary op at root");
+    };
+    assert_eq!(*op, BinOp::Add);
+    assert!(matches!(&**rhs, Expr::Var(v) if v == "b"));
+    assert!(matches!(&**lhs, Expr::Bin { op: BinOp::Sub, .. }));
+}
+
+#[test]
+fn unary_minus_binds_tighter_than_postfix_field_access() {
+    // `-a.field` must parse as `-(a.field)`: postfix `.field` binds tighter
+    // than the prefix `-`, so the field projection is the operand being
+    // negated, not the other way around.
+    let module = parse("let x = -a.field").expect("parse -a.field");
+    let Item::Let(LetDecl { value, .. }) = &module.items[0] else {
+        panic!("expected a let");
+    };
+    let Expr::Bin {
+        op,
+        lhs: zero,
+        rhs: operand,
+    } = value
+    else {
+        panic!("expected unary minus to desugar to a Sub node");
+    };
+    assert_eq!(*op, BinOp::Sub);
+    assert_eq!(**zero, Expr::Num("0".into()));
+    match &**operand {
+        Expr::Field(base, field) => {
+            assert!(matches!(&**base, Expr::Var(v) if v == "a"));
+            assert_eq!(field, "field");
+        }
+        other => panic!("expected -(a.field), got {other:?}"),
+    }
+}
+
+#[test]
+fn unary_minus_on_a_numeral_folds_to_a_negative_literal() {
+    // `-7` must be `Expr::Num("-7")`, not `Sub(0, 7)` — this is what makes
+    // `i64::MIN` (`-9223372036854775808`) representable at all: its positive
+    // magnitude alone overflows `i64::MAX` and cannot be built via `0 - n`.
+    let module = parse("let x = -7").expect("parse -7");
+    let Item::Let(LetDecl { value, .. }) = &module.items[0] else {
+        panic!("expected a let");
+    };
+    assert_eq!(*value, Expr::Num("-7".into()));
+
+    let module = parse("let x = -9223372036854775808").expect("parse i64::MIN literal");
+    let Item::Let(LetDecl { value, .. }) = &module.items[0] else {
+        panic!("expected a let");
+    };
+    assert_eq!(*value, Expr::Num("-9223372036854775808".into()));
+
+    // Double negation does NOT fold across the intervening Sub: `--7` is
+    // `0 - (-7)`, one recursive `0 - e` desugaring wrapping a folded literal.
+    let module = parse("let x = --7").expect("parse --7");
+    let Item::Let(LetDecl { value, .. }) = &module.items[0] else {
+        panic!("expected a let");
+    };
+    let Expr::Bin { op, lhs, rhs } = value else {
+        panic!("expected binary op at root");
+    };
+    assert_eq!(*op, BinOp::Sub);
+    assert_eq!(**lhs, Expr::Num("0".into()));
+    assert_eq!(**rhs, Expr::Num("-7".into()));
+}
+
+#[test]
+fn unary_minus_on_parenthesised_i64_min_still_faults_to_desugaring() {
+    // `-(-9223372036854775808)` cannot fold (the operand is parenthesised,
+    // not a bare numeral immediately after `-`), so it desugars to
+    // `0 - (-9223372036854775808)` — a value only the *evaluator's* checked
+    // arithmetic can refuse (see l3_v2_stage_b.rs for the fault test).
+    let module = parse("let x = -(-9223372036854775808)").expect("parse -(i64::MIN)");
+    let Item::Let(LetDecl { value, .. }) = &module.items[0] else {
+        panic!("expected a let");
+    };
+    let Expr::Bin { op, lhs, rhs } = value else {
+        panic!("expected binary op at root");
+    };
+    assert_eq!(*op, BinOp::Sub);
+    assert_eq!(**lhs, Expr::Num("0".into()));
+    assert_eq!(**rhs, Expr::Num("-9223372036854775808".into()));
+}

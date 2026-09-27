@@ -1518,3 +1518,25 @@ commit c from (approve, reject)
     let id2 = finite_decision_program_id(&p);
     assert_eq!(id1, id2);
 }
+
+/// A program that never mentions unary minus must keep its exact program id
+/// (ADR-0032 canonical identity). This hash was captured *before* unary minus
+/// landed and is pinned here so that adding it can never silently renumber an
+/// existing `encode_expr_v2` ordinal or otherwise perturb the encoding of
+/// programs that do not use the new operator.
+#[test]
+fn test_program_id_unchanged_for_program_without_unary_minus() {
+    let src = r#"
+config Decision = Done
+fn calc(a: Int, b: Int): Int = a - b + 3 * 2
+rule r() = calc(10, 4)
+propose p(r) priority 10 when r == 15 = Done
+commit c from (p)
+"#;
+    let p = plan(src);
+    let id = finite_decision_program_id(&p);
+    assert_eq!(
+        id.to_hex(),
+        "d19907a409ca9096b9cd514b996c38cb2ff08b679924a42f771b3b051b3004a3"
+    );
+}

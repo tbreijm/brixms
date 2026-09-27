@@ -300,6 +300,13 @@ pub enum L3LowerError {
     /// executable fragment, for the same reason arithmetic is not: the profile
     /// assigns no evaluation semantics to rule bodies (ADR-0012 §3.2).
     ComparisonNotAllowed,
+    /// A logical operator (`&&`, `||`, `!`) in a rule/let body (ADR-0034).
+    ///
+    /// Distinct from [`Self::ComparisonNotAllowed`]: these are refused for the
+    /// same underlying reason — v1 assigns rule bodies no evaluation semantics
+    /// — but reporting a `!` as a *comparison* misnames what the author wrote,
+    /// and this error is the only thing they see.
+    LogicalOperatorNotAllowed,
     /// A boolean literal in a rule/let body. v1's value grammar is
     /// `Int`/`Str`/nullary-constructor/record only (ADR-0012 §3.2).
     BooleanLiteralNotAllowed,
@@ -812,11 +819,10 @@ fn normalize_static_value(expr: &ast::Expr, env: &NormEnv) -> Result<L3ValueV1, 
             | ast::BinOp::Gt
             | ast::BinOp::Ge
             | ast::BinOp::Eq
-            | ast::BinOp::Ne
-            | ast::BinOp::AndAnd
-            | ast::BinOp::OrOr => Err(L3LowerError::ComparisonNotAllowed),
+            | ast::BinOp::Ne => Err(L3LowerError::ComparisonNotAllowed),
+            ast::BinOp::AndAnd | ast::BinOp::OrOr => Err(L3LowerError::LogicalOperatorNotAllowed),
         },
-        ast::Expr::Not(_) => Err(L3LowerError::ComparisonNotAllowed),
+        ast::Expr::Not(_) => Err(L3LowerError::LogicalOperatorNotAllowed),
         ast::Expr::Bool(_) => Err(L3LowerError::BooleanLiteralNotAllowed),
         ast::Expr::Match { .. } => Err(L3LowerError::MatchNotAllowed),
         ast::Expr::Prove(_) => Err(L3LowerError::ProveNotAllowed),

@@ -34,6 +34,17 @@ fn deep_not_prefix_is_refused_before_descending() {
     assert_refused_for_depth(&src, "! prefix");
 }
 
+/// Unary minus desugars to `0 - e` for anything but a bare numeral, and that
+/// desugaring recurses through `parse_prefix_operand` exactly like `!` does.
+/// A run of minuses ending in a non-numeral operand (`true`, not a digit)
+/// never hits the O(1) literal-folding shortcut, so every `-` here is one
+/// charged level of `max_nesting_depth`.
+#[test]
+fn deep_unary_minus_prefix_is_refused_before_descending() {
+    let src = format!("let x = {}true", "-".repeat(100_000));
+    assert_refused_for_depth(&src, "unary minus prefix");
+}
+
 #[test]
 fn deep_prove_prefix_is_refused_before_descending() {
     let src = format!("let x = {}true", "prove ".repeat(100_000));

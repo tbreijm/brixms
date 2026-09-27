@@ -343,3 +343,77 @@ fn boolean_operators_precedence_in_evaluator() {
     assert_eq!(eval(rule_body(&p, "p4"), &env), Ok(L3ValueV2::Bool(true)));
     assert_eq!(eval(rule_body(&p, "p5"), &env), Ok(L3ValueV2::Bool(true)));
 }
+
+/// Unary minus (`-e`) has no dedicated `L3ExprV2` variant: for any operand
+/// that is not a bare numeral, the parser desugars it to `0 - e` (`ast::
+/// BinOp::Sub`), so at this layer it is just `L3ExprV2::Arith(ArithOpV2::Sub,
+/// Int(0), e)` — proven here by matching the lowered shape directly, not only
+/// its evaluated result. (A bare numeral like `-5` instead folds straight to
+/// `L3ExprV2::Int(-5)`, covered separately below.)
+#[test]
+fn unary_minus_desugars_to_arith_sub_of_zero() {
+    let p = plan("rule x() = 5\nrule r(x) = -x\n");
+    match rule_body(&p, "r") {
+        L3ExprV2::Arith(ArithOpV2::Sub, a, b) => {
+            assert_eq!(**a, L3ExprV2::Int(0));
+            assert_eq!(**b, L3ExprV2::RuleFact("x".to_string()));
+        }
+        other => panic!("expected Arith(Sub, 0, RuleFact(x)), got {other:?}"),
+    }
+}
+
+/// `-a * b` is `(-a) * b`: unary minus binds tighter than every binary
+/// operator, evaluated end to end here (the parser-level shape is pinned
+/// separately in brix-syntax's `parse_fixtures.rs`).
+#[test]
+fn unary_minus_precedence_evaluates_tighter_than_multiplication() {
+    let p = plan("rule a() = 3\nrule b() = 4\nrule r(a, b) = -a * b\n");
+    let env = EvalEnv::new()
+        .with_fact("a", L3ValueV2::Int(3))
+        .with_fact("b", L3ValueV2::Int(4));
+    // (-3) * 4 = -12, not -(3 * 4) which would coincidentally also be -12 —
+    // use asymmetric operands to make the parenthesisation load-bearing.
+    assert_eq!(eval(rule_body(&p, "r"), &env), Ok(L3ValueV2::Int(-12)));
+
+    let p2 = plan("rule a() = 3\nrule b() = 4\nrule r(a, b) = -(a * b)\n");
+    assert_eq!(eval(rule_body(&p2, "r"), &env), Ok(L3ValueV2::Int(-12)));
+}
+
+/// A literal at `i64::MIN` is directly representable (`-9223372036854775808`
+/// folds to a literal at parse time, never going through `0 - n`), and
+/// evaluates without faulting.
+#[test]
+fn unary_minus_on_i64_min_literal_evaluates_without_faulting() {
+    let p = plan("rule r() = -9223372036854775808\n");
+    assert_eq!(
+        eval(rule_body(&p, "r"), &EvalEnv::new()),
+        Ok(L3ValueV2::Int(i64::MIN))
+    );
+}
+
+/// Negating `i64::MIN` itself is NOT representable: `0 - i64::MIN` overflows
+/// `i64::MAX` by one, and checked arithmetic refuses it rather than wrapping
+/// (ADR-0027 §9.7). `-(Int::MIN)` reaches exactly this path because the
+/// literal is parenthesised, so it cannot take the literal-folding shortcut —
+/// it desugars to `0 - e` and the fold happens one level down, on `e` alone.
+#[test]
+fn negating_i64_min_faults_instead_of_wrapping() {
+    let p = plan("rule r() = -(-9223372036854775808)\n");
+    assert_eq!(
+        eval(rule_body(&p, "r"), &EvalEnv::new()),
+        Err(EvalFault::Overflow(ArithOpV2::Sub))
+    );
+}
+
+/// The same fault reachable through a bound fact, not just a literal: an
+/// ordinary program computing `-x` for `x = i64::MIN` must fault, never wrap
+/// to `i64::MIN` again or produce some other value.
+#[test]
+fn negating_a_fact_bound_to_i64_min_faults() {
+    let p = plan("rule x() = 1\nrule r(x) = -x\n");
+    let env = EvalEnv::new().with_fact("x", L3ValueV2::Int(i64::MIN));
+    assert_eq!(
+        eval(rule_body(&p, "r"), &env),
+        Err(EvalFault::Overflow(ArithOpV2::Sub))
+    );
+}
