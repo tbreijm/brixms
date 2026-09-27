@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod check;
+pub mod kb;
 pub mod run;
 pub mod verify;
 pub mod why;

@@ -289,6 +289,25 @@ impl InputSnapshot {
         }
     }
 
+    /// Construct a snapshot directly from an already-validated set of values,
+    /// bypassing shard decoding.
+    ///
+    /// For a caller (such as `brix-kb`, ADR-0041) that maintains its own
+    /// on-disk snapshot as canonical values rather than re-decoding a shard
+    /// file for every edit — e.g. building a corrected snapshot by upserting
+    /// or removing named values from one already loaded. `total_bytes` and
+    /// `shard_count` become `0`: they describe the *decoded artifact* a
+    /// snapshot came from (diagnostics only), never its canonical identity —
+    /// [`input_snapshot_preimage`] reads only `values` — so a programmatically
+    /// constructed snapshot has no artifact history to report.
+    pub fn from_values(values: BTreeMap<String, InputValue>) -> Self {
+        Self {
+            values,
+            total_bytes: 0,
+            shard_count: 0,
+        }
+    }
+
     /// The sorted values map.
     pub fn values(&self) -> &BTreeMap<String, InputValue> {
         &self.values

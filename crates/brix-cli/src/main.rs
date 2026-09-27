@@ -7,6 +7,8 @@
 //! - `brix verify --expect-program <hex> <file.brix> <bundle> [--profile <finite-decision|l3-v1>] [--json] [--package-path <dir>...]`
 //! - `brix why <file.brix> --candidate <name> [--json] [--package-path <dir>...]`
 //! - `brix whynot <file.brix> --candidate <name> [--json] [--package-path <dir>...]`
+//! - `brix kb <init|assert|retract|program|log|show|diff|audit|verify> ...` —
+//!   the persistent, revisable knowledge base (ADR-0041); see `brix --help`.
 //! - `brix help` / `brix --help` / `brix -h`
 //! - `brix version` / `brix --version` / `brix -V` / `brix -v`
 //!
@@ -115,6 +117,7 @@ where
             &input_paths,
             true,
         ),
+        Ok(cli::Command::Kb { op, json }) => commands::kb::execute_kb(&op, json),
         Err(err) => {
             if err.is_json {
                 let cmd_name = err.command.unwrap_or_else(|| "brix".to_string());

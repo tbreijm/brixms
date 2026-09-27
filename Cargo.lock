@@ -65,6 +65,7 @@ version = "0.1.0-alpha.3"
 dependencies = [
  "brix-canon",
  "brix-elaborate",
+ "brix-kb",
  "brix-kernel",
  "brix-lower",
  "brix-semantic",
@@ -83,6 +84,17 @@ dependencies = [
  "brix-kernel",
  "brix-semantic",
  "soc-core",
+]
+
+[[package]]
+name = "brix-kb"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "brix-canon",
+ "brix-lower",
+ "brix-semantic",
+ "brix-syntax",
+ "serde_json",
 ]
 
 [[package]]
