@@ -129,6 +129,133 @@ pub enum L3ExprV2 {
     Or(Box<L3ExprV2>, Box<L3ExprV2>),
     /// Logical NOT: `!expr`.
     Not(Box<L3ExprV2>),
+    /// Exact signed integer division or modulo with a **named** rounding rule
+    /// (ADR-0035): `div_floor`, `div_ceil`, `div_half_even`, `mod_euclid`.
+    ///
+    /// A distinct node rather than a [`Self::Call`] to a well-known name, so
+    /// the operation is pinned structurally in the canonical encoding and
+    /// cannot be reached, shadowed, or renamed through the helper table.
+    IntDivMod(DivModOpV2, Box<L3ExprV2>, Box<L3ExprV2>),
+}
+
+/// Exact signed integer division and modulo operations (ADR-0035).
+///
+/// `/` itself stays refused. Every operation here names the rounding it
+/// performs, because the rounding is the part a policy author has to get
+/// right and the part a reader has to be able to check.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum DivModOpV2 {
+    /// Round the exact quotient toward negative infinity.
+    DivFloor,
+    /// Round the exact quotient toward positive infinity.
+    DivCeil,
+    /// Round the exact quotient to the nearest integer, ties to even.
+    DivHalfEven,
+    /// Euclidean remainder: the `r` in `a = b*q + r` with `0 <= r < |b|`.
+    ModEuclid,
+}
+
+impl DivModOpV2 {
+    /// Every operation, in canonical-ordinal order.
+    pub const ALL: [DivModOpV2; 4] = [
+        DivModOpV2::DivFloor,
+        DivModOpV2::DivCeil,
+        DivModOpV2::DivHalfEven,
+        DivModOpV2::ModEuclid,
+    ];
+
+    /// The source name that calls this operation. These names are reserved:
+    /// a module may not declare a helper or constructor that shadows one.
+    pub const fn name(self) -> &'static str {
+        match self {
+            DivModOpV2::DivFloor => "div_floor",
+            DivModOpV2::DivCeil => "div_ceil",
+            DivModOpV2::DivHalfEven => "div_half_even",
+            DivModOpV2::ModEuclid => "mod_euclid",
+        }
+    }
+
+    /// Resolve a source name to its operation, if it is one of the reserved
+    /// names.
+    pub fn from_name(name: &str) -> Option<DivModOpV2> {
+        DivModOpV2::ALL.into_iter().find(|op| op.name() == name)
+    }
+
+    /// Canonical ordinal, appended and never renumbered.
+    pub(crate) const fn ordinal(self) -> u64 {
+        match self {
+            DivModOpV2::DivFloor => 0,
+            DivModOpV2::DivCeil => 1,
+            DivModOpV2::DivHalfEven => 2,
+            DivModOpV2::ModEuclid => 3,
+        }
+    }
+}
+
+/// Apply an exact integer division or modulo.
+///
+/// Computed in `i128` throughout, so no intermediate can overflow before the
+/// single range check at the end: the operands are `i64`, and `|a| + |b|` and
+/// `2*|r|` all fit in `i128` comfortably. That is what lets the result be
+/// judged on its own rather than on whether a temporary happened to fit.
+pub(crate) fn eval_div_mod(op: DivModOpV2, a: i64, b: i64) -> Result<i64, EvalFault> {
+    if b == 0 {
+        return Err(EvalFault::DivisionByZero(op));
+    }
+    let (a, b) = (i128::from(a), i128::from(b));
+    // Truncating quotient and remainder: `r` carries the sign of `a`.
+    let q = a / b;
+    let r = a % b;
+
+    let out: i128 = match op {
+        // `mod_euclid` is defined by `a = b*q + r` with `0 <= r < |b|`, and is
+        // deliberately **not** paired with any one quotient here: for negative
+        // `b` the Euclidean quotient is not the floor one. Normalising `r`
+        // directly keeps the identity true for every sign combination.
+        DivModOpV2::ModEuclid => {
+            if r < 0 {
+                r + b.abs()
+            } else {
+                r
+            }
+        }
+        DivModOpV2::DivFloor => {
+            if r != 0 && ((a < 0) != (b < 0)) {
+                q - 1
+            } else {
+                q
+            }
+        }
+        DivModOpV2::DivCeil => {
+            if r != 0 && ((a < 0) == (b < 0)) {
+                q + 1
+            } else {
+                q
+            }
+        }
+        DivModOpV2::DivHalfEven => {
+            if r == 0 {
+                q
+            } else {
+                // Away-from-zero neighbour of the truncated quotient.
+                let step = if (a < 0) != (b < 0) { -1 } else { 1 };
+                let twice = 2 * r.abs();
+                let mag = b.abs();
+                if twice > mag {
+                    q + step
+                } else if twice < mag {
+                    q
+                } else if q % 2 == 0 {
+                    // Exactly halfway: take whichever neighbour is even.
+                    q
+                } else {
+                    q + step
+                }
+            }
+        }
+    };
+
+    i64::try_from(out).map_err(|_| EvalFault::DivisionOverflow(op))
 }
 
 /// Type category of an [`L3ValueV2`] for contract uniformity checking.
@@ -516,7 +643,10 @@ impl fmt::Display for L3V2LowerError {
             }
             Self::DefaultArmNotAllowed => write!(f, "default arm not allowed in match"),
             Self::NestedPatternNotAllowed => write!(f, "nested pattern not allowed in match"),
-            Self::DivisionNotAllowed => write!(f, "division operator not allowed in v2"),
+            Self::DivisionNotAllowed => write!(
+                f,
+                "the '/' operator has no meaning here because it does not say                  which rounding it performs; use div_floor, div_ceil,                  div_half_even, or mod_euclid (ADR-0035)"
+            ),
             Self::FloatLiteralNotAllowed(lit) => write!(f, "float literal not allowed: {lit}"),
             Self::IntegerOverflow(lit) => write!(f, "integer literal overflow: {lit}"),
             Self::Unsupported(feature) => write!(f, "unsupported feature: {feature}"),
@@ -832,6 +962,37 @@ pub(crate) fn lower_expr_v2(
             })
         }
         ast::Expr::Call { func, args } => {
+            // Reserved names resolve first and unconditionally. Nothing can
+            // shadow them: a helper or constructor claiming one of these names
+            // is refused where it is declared, so this branch is never a
+            // silent override of something the author wrote.
+            if let Some(op) = DivModOpV2::from_name(func) {
+                if args.len() != 2 {
+                    return Err(L3V2LowerError::FunctionArityMismatch {
+                        func: func.clone(),
+                        expected: 2,
+                        found: args.len(),
+                    });
+                }
+                let mut out = Vec::new();
+                for a in args {
+                    out.push(lower_expr_v2(
+                        a,
+                        lets,
+                        locals,
+                        rules,
+                        nullary,
+                        variants_of,
+                        functions,
+                        in_rule,
+                        helper_enabled,
+                    )?);
+                }
+                let mut it = out.into_iter();
+                let lhs = it.next().expect("arity checked above");
+                let rhs = it.next().expect("arity checked above");
+                return Ok(L3ExprV2::IntDivMod(op, Box::new(lhs), Box::new(rhs)));
+            }
             if let Some(sum) = variants_of.get(func).cloned() {
                 let mut out = Vec::new();
                 for a in args {
@@ -1073,6 +1234,18 @@ pub enum EvalFault {
     /// Total rather than a panic: the evaluator must stay total on any plan it
     /// is handed, including one whose types were never checked.
     OperandShape(&'static str),
+    /// A division or modulo by zero (ADR-0035).
+    ///
+    /// Its own variant rather than an `Overflow`: the quotient does not exist
+    /// at all, which is a different fact from one that exists and does not
+    /// fit.
+    DivisionByZero(DivModOpV2),
+    /// A quotient that is mathematically defined but does not fit in `i64`
+    /// (ADR-0035) — reachable only at `i64::MIN / -1`.
+    ///
+    /// `mod_euclid` never raises this: its result is bounded by `|b|`, so
+    /// `mod_euclid(i64::MIN, -1)` is `0` rather than a fault.
+    DivisionOverflow(DivModOpV2),
     /// A function call exceeded the maximum call stack depth.
     CallDepthExceeded { limit: usize, func: String },
     /// Evaluation exceeded maximum allowed computational steps.
@@ -1095,6 +1268,12 @@ impl fmt::Display for EvalFault {
             Self::NoSuchField(field) => write!(f, "no such field: {field}"),
             Self::NoMatchingArm => write!(f, "no matching arm in match expression"),
             Self::OperandShape(detail) => write!(f, "operand shape error: {detail}"),
+            Self::DivisionByZero(op) => {
+                write!(f, "division by zero in {}", op.name())
+            }
+            Self::DivisionOverflow(op) => {
+                write!(f, "quotient does not fit in Int in {}", op.name())
+            }
             Self::CallDepthExceeded { limit, func } => {
                 write!(f, "call depth limit ({limit}) exceeded calling '{func}'")
             }
@@ -1602,6 +1781,18 @@ fn eval_internal_body(
             };
             Ok(L3ValueV2::Bool(bool_b))
         }
+        L3ExprV2::IntDivMod(op, a, b) => {
+            let (x, y) = (
+                eval_internal(a, env, budget, current_func)?,
+                eval_internal(b, env, budget, current_func)?,
+            );
+            let (L3ValueV2::Int(x), L3ValueV2::Int(y)) = (x, y) else {
+                return Err(EvalFault::OperandShape(
+                    "integer division requires Int operands",
+                ));
+            };
+            eval_div_mod(*op, x, y).map(L3ValueV2::Int)
+        }
         L3ExprV2::Not(a) => {
             let val_a = eval_internal(a, env, budget, current_func)?;
             let L3ValueV2::Bool(bool_a) = val_a else {
@@ -1882,6 +2073,7 @@ pub(crate) fn check_exhaustive_expr(
         L3ExprV2::Field(b, _) => check_exhaustive_expr(b, sum_of_variant, variants_of_sum),
         L3ExprV2::Arith(_, a, b)
         | L3ExprV2::Cmp(_, a, b)
+        | L3ExprV2::IntDivMod(_, a, b)
         | L3ExprV2::And(a, b)
         | L3ExprV2::Or(a, b) => {
             check_exhaustive_expr(a, sum_of_variant, variants_of_sum)?;

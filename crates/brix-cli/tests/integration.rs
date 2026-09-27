@@ -2611,3 +2611,95 @@ fn test_23_order_policy_structured_input_workflow() {
     assert_eq!(verify["ok"], true);
     assert_eq!(verify["status"], "audit-bundle-verified");
 }
+
+// ---------------------------------------------------------------------------
+// 24. Exact integer division and rounding CLI workflow (ADR-0035)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_24_allocation_integer_division_workflow() {
+    let temp = TempDirGuard::new("allocation");
+    let bundle_path = temp.path().join("allocation.bundle");
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("check")
+            .arg("examples/allocation.brix")
+            .arg("--input")
+            .arg("examples/allocation.json")
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "check failed: {stderr}");
+    let check: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(check["ok"], true);
+    assert_eq!(check["decision"]["candidate"], "balanced");
+    let program = check["program"].as_str().unwrap().to_string();
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg("examples/allocation.brix")
+            .arg("--input")
+            .arg("examples/allocation.json")
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "run failed: {stderr}");
+    let run: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(run["program"], program);
+    assert_eq!(run["facts"][0]["name"], "share");
+    assert_eq!(run["facts"][0]["value"]["value"], "2400");
+    assert_eq!(run["facts"][1]["name"], "leftover");
+    assert_eq!(run["facts"][1]["value"]["value"], "0");
+
+    for (command, candidate) in [("why", "balanced"), ("whynot", "uneven")] {
+        let (code, stdout, stderr) = run_cmd({
+            let mut c = brix();
+            c.arg(command)
+                .arg("examples/allocation.brix")
+                .arg("--candidate")
+                .arg(candidate)
+                .arg("--input")
+                .arg("examples/allocation.json")
+                .arg("--json");
+            c
+        });
+        assert_eq!(code, 0, "{command} failed: {stderr}");
+        let explained: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(explained["ok"], true);
+        assert_eq!(explained["status"], "explained");
+    }
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("audit")
+            .arg("examples/allocation.brix")
+            .arg("--input")
+            .arg("examples/allocation.json")
+            .arg("--bundle")
+            .arg(&bundle_path)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "audit failed: {stderr}");
+    let audit: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(audit["program"], program);
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("verify")
+            .arg("examples/allocation.brix")
+            .arg(&bundle_path)
+            .arg("--input")
+            .arg("examples/allocation.json")
+            .arg("--expect-program")
+            .arg(&program)
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "verify failed: {stderr}");
+    let verify: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(verify["ok"], true);
+    assert_eq!(verify["status"], "audit-bundle-verified");
+}

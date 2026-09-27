@@ -7,8 +7,8 @@ use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_syntax::ast;
 
 use crate::l3_v2::{
-    check_exhaustive_expr, lower_expr_v2, L3ConfigBodyV2, L3ConfigDeclV2, L3ExprV2, L3PatternV2,
-    L3Schema, L3SchemaBody, L3SchemaType, L3V2LowerError, L3ValueType,
+    check_exhaustive_expr, lower_expr_v2, DivModOpV2, L3ConfigBodyV2, L3ConfigDeclV2, L3ExprV2,
+    L3PatternV2, L3Schema, L3SchemaBody, L3SchemaType, L3V2LowerError, L3ValueType,
 };
 
 pub const MAX_SCHEMA_COUNT: usize = 128;
@@ -136,6 +136,13 @@ pub enum FiniteDecisionLowerError {
     DuplicateProposalName(String),
     DuplicateInputName(String),
     DuplicateFunctionName(String),
+    /// A declaration claimed a name reserved for a built-in operation
+    /// (ADR-0035). Refused where it is declared rather than silently losing
+    /// to the built-in at every call site.
+    ReservedOperationName {
+        name: String,
+        kind: &'static str,
+    },
     DuplicateItemName(String),
     DuplicateFunctionParameter {
         func: String,
@@ -260,6 +267,10 @@ impl fmt::Display for FiniteDecisionLowerError {
             Self::DuplicateProposalName(name) => write!(f, "duplicate proposal name: '{name}'"),
             Self::DuplicateInputName(name) => write!(f, "duplicate input name: '{name}'"),
             Self::DuplicateFunctionName(name) => write!(f, "duplicate function name: '{name}'"),
+            Self::ReservedOperationName { name, kind } => write!(
+                f,
+                "{kind} '{name}' uses a name reserved for a built-in integer operation"
+            ),
             Self::DuplicateItemName(name) => write!(f, "duplicate top-level item name: '{name}'"),
             Self::DuplicateFunctionParameter { func, param } => {
                 write!(f, "duplicate parameter '{param}' in function '{func}'")
@@ -369,8 +380,12 @@ impl fmt::Display for FiniteDecisionLowerError {
             Self::DuplicateMatchBinder(binder) => {
                 write!(f, "duplicate binder '{binder}' in match pattern")
             }
-            Self::RuleDependencyError(err) => write!(f, "rule dependency error: {err:?}"),
-            Self::ExprError(err) => write!(f, "expression lowering error: {err:?}"),
+            // `{err}`, not `{err:?}`: the inner error's `Display` is where the
+            // explanation lives (which operator, which replacement, which
+            // name), and rendering the Debug form discarded all of it at the
+            // one boundary a user actually reads.
+            Self::RuleDependencyError(err) => write!(f, "rule dependency error: {err}"),
+            Self::ExprError(err) => write!(f, "expression lowering error: {err}"),
             Self::UnresolvedImport(path) => write!(f, "unresolved import: {path}"),
         }
     }
@@ -771,8 +786,11 @@ fn collect_function_calls(e: &L3ExprV2, calls: &mut BTreeSet<String>) {
             }
         }
         L3ExprV2::Field(base, _) => collect_function_calls(base, calls),
+        // `IntDivMod` is a reserved operation, not a helper call, so it
+        // contributes no name here — only its operands are walked.
         L3ExprV2::Arith(_, a, b)
         | L3ExprV2::Cmp(_, a, b)
+        | L3ExprV2::IntDivMod(_, a, b)
         | L3ExprV2::And(a, b)
         | L3ExprV2::Or(a, b) => {
             collect_function_calls(a, calls);
@@ -959,6 +977,12 @@ pub fn lower_finite_decision_plan(
                     sum_configs.insert(c.name.clone());
                     let mut var_names = Vec::new();
                     for v in variants {
+                        if DivModOpV2::from_name(&v.name).is_some() {
+                            return Err(FiniteDecisionLowerError::ReservedOperationName {
+                                name: v.name.clone(),
+                                kind: "constructor",
+                            });
+                        }
                         variants_of.insert(v.name.clone(), c.name.clone());
                         sum_of_variant.insert(v.name.clone(), c.name.clone());
                         var_names.push(v.name.clone());
@@ -994,6 +1018,12 @@ pub fn lower_finite_decision_plan(
 
     for item in &module.items {
         if let ast::Item::Fn(f) = item {
+            if DivModOpV2::from_name(&f.name).is_some() {
+                return Err(FiniteDecisionLowerError::ReservedOperationName {
+                    name: f.name.clone(),
+                    kind: "function",
+                });
+            }
             if variants_of.contains_key(&f.name) || f.name == "true" || f.name == "false" {
                 return Err(FiniteDecisionLowerError::FunctionConstructorCollision {
                     func: f.name.clone(),
@@ -1688,6 +1718,11 @@ fn encode_expr_v2(w: &mut CanonWriter, e: &L3ExprV2) {
         }),
         L3ExprV2::Not(a) => w.write_enum(15, |w| {
             encode_expr_v2(w, a);
+        }),
+        L3ExprV2::IntDivMod(op, a, b) => w.write_enum(16, |w| {
+            w.write_uint(op.ordinal());
+            encode_expr_v2(w, a);
+            encode_expr_v2(w, b);
         }),
     }
 }

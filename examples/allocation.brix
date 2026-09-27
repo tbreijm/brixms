@@ -1,0 +1,19 @@
+config Decision = Balanced | Insufficient | Uneven
+
+config Allocation = { price_cents: Int, car_count: Int }
+
+input batch: Allocation
+
+fn per_car_cents(a: Allocation): Int = div_floor(a.price_cents, a.car_count)
+fn leftover_cents(a: Allocation): Int = mod_euclid(a.price_cents, a.car_count)
+
+rule share() = per_car_cents(batch)
+rule leftover() = leftover_cents(batch)
+rule evenly_split(leftover) = leftover == 0
+rule meets_minimum(share) = share >= 500
+
+propose balanced(evenly_split, meets_minimum) priority 10 when evenly_split && meets_minimum = Balanced
+propose insufficient(evenly_split, meets_minimum) priority 20 when evenly_split && !meets_minimum = Insufficient
+propose uneven() priority 100 when true = Uneven
+
+commit decision from (balanced, insufficient, uneven)

@@ -706,6 +706,56 @@ tensor composition, not Boolean conjunction.
 Programs that do not use the new operators keep their existing program pins:
 the canonical expression encoding appends ordinals rather than renumbering.
 
+### Exact integer division and rounding (source build)
+
+The working source adds four reserved built-in operations for signed integer
+division ([ADR-0035](./spec/adr/ADR-0035_Integer_Division.md)), so a decision
+that needs a ratio, a per-unit allocation, or a remainder can compute it in the
+audited expression instead of taking an already-divided value as input.
+
+```brix
+let per_car_cents = div_floor(price_cents, car_count)
+let leftover_cents = mod_euclid(price_cents, car_count)
+```
+
+| Operation | Rounds toward |
+|---|---|
+| `div_floor(a, b)` | negative infinity |
+| `div_ceil(a, b)` | positive infinity |
+| `div_half_even(a, b)` | nearest, ties to even |
+| `mod_euclid(a, b)` | not a rounding; the remainder `r` with `0 <= r < \|b\|` |
+
+`/` stays refused, and its diagnostic now names these four as the
+replacement: integer division has no single correct rounding — `-7 / 2` is
+`-3` in Rust and `-4` in Python, both defensible — so the language does not
+pick one silently. Each of the four names the rounding it performs instead.
+A negative dividend is written `-7`
+([ADR-0036](./spec/adr/ADR-0036_Unary_Minus.md)).
+
+Both operands must be `Int`. `b == 0` raises `DivisionByZero` for all four
+operations; the one operand pair that is mathematically defined but does not
+fit in `Int` (`Int::MIN` divided by `-1`) raises `DivisionOverflow` for the
+three division operations — `mod_euclid` never overflows, since its result is
+always bounded by `|b|`. Every fault fails closed: no decision is committed,
+and it surfaces at `brix check` preflight rather than only at `run`.
+
+Run the full allocation example from this checkout:
+
+```bash
+cargo run -p brix-cli -- run examples/allocation.brix \
+  --input examples/allocation.json
+```
+
+It splits a price across a car count with `div_floor` and checks the
+remainder with `mod_euclid`, selecting `decision = balanced = Balanced
+@Derived`. The same source and inputs work with `check`, `why`, `whynot`,
+`audit`, and `verify` using the command forms above.
+
+Programs that do not use these operations keep their existing program pins:
+ordinals `0`-`15` of the canonical expression encoding keep their existing
+meanings and bytes, and the new operation is a distinct ordinal appended after
+them.
+
 **CLI target surface & status:**
 - `brix` implements exactly the six subcommands above.
 - `brix verify` implements offline verification of ADR-0026 audit input transport bundles.

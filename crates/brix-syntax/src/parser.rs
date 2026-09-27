@@ -562,6 +562,13 @@ impl Parser {
     /// 4. `<`, `<=`, `>`, `>=`, `==`, `!=` (non-associative comparison)
     /// 5. `+`, `-` (additive)
     /// 6. `*`, `/` (multiplicative)
+    ///
+    /// Higher still, outside this ladder entirely, are the prefix operators
+    /// (`!`, unary `-`, `prove`, `audit`) handled by [`Self::parse_expr_prefix`]
+    /// before this function's loop ever runs, and postfix `.field` handled by
+    /// [`Self::parse_expr_postfix`] before that. So `-a * b` is `(-a) * b`
+    /// (unary minus binds tighter than every binary operator here), and `-a.field`
+    /// is `-(a.field)` (postfix binds tighter than prefix).
     fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_expr_prefix()?;
 
@@ -618,7 +625,8 @@ impl Parser {
         )
     }
 
-    /// Operand of a self-recursive prefix operator (`!`, `prove`, `audit`).
+    /// Operand of a self-recursive prefix operator (`!`, unary `-`, `prove`,
+    /// `audit`).
     ///
     /// These arms recurse into [`Self::parse_expr_prefix`] directly rather than
     /// going back through [`Self::parse_expr`], so without this they descend
@@ -626,6 +634,11 @@ impl Parser {
     /// frame per `!`. That contradicts `ParseLimits::max_nesting_depth`, whose
     /// whole contract is that a deep input is "refused before descending, so
     /// the stack is never at risk" (ADR-0022 D6). Charging here restores it.
+    ///
+    /// Unary minus takes this path only for its general `0 - e` desugaring
+    /// (`-a`, `-(e)`, …); the numeral-folding shortcut for `-<digits>` returns
+    /// straight out of [`Self::parse_expr_prefix`] without recursing at all,
+    /// so it needs no charge — see the `Minus` arm there.
     fn parse_prefix_operand(&mut self) -> Result<Expr, ParseError> {
         self.enter()?;
         let out = self.parse_expr_prefix();
@@ -639,6 +652,37 @@ impl Parser {
                 self.advance();
                 let inner = self.parse_prefix_operand()?;
                 Ok(Expr::Not(Box::new(inner)))
+            }
+            TokenKind::Minus => {
+                self.advance();
+                // A numeral immediately following `-` folds into a negative
+                // numeric literal rather than desugaring to `0 - n`. This is
+                // not merely cosmetic: `i64::MIN` (`-9223372036854775808`) has
+                // no positive counterpart representable in `i64`, so `0 -
+                // 9223372036854775808` can never be built (the positive
+                // magnitude alone already overflows `i64::MAX` and would fall
+                // through to a float literal). Folding the sign directly into
+                // the literal text lets `s.parse::<i64>()` succeed on the
+                // *negative* string, which is the only representable form.
+                if let TokenKind::Num(n) = self.peek().clone() {
+                    self.advance();
+                    return Ok(Expr::Num(format!("-{n}")));
+                }
+                // Every other operand (`-a`, `-a.field`, `-f(x)`, `-(e)`, a
+                // nested `--e`, …) desugars to `0 - e`, which is exactly
+                // `BinOp::Sub` and therefore needs no new AST or `L3ExprV2`
+                // variant, no new `encode_expr_v2` ordinal, and gets checked
+                // (never wrapping) overflow for free from the existing
+                // `Arith` evaluation path. The operand is parsed through
+                // `parse_prefix_operand`, not `parse_expr`, so a chain of
+                // unary minuses is charged against `max_nesting_depth` exactly
+                // like `!`/`prove`/`audit` — see that function's doc comment.
+                let inner = self.parse_prefix_operand()?;
+                Ok(Expr::Bin {
+                    op: BinOp::Sub,
+                    lhs: Box::new(Expr::Num("0".to_string())),
+                    rhs: Box::new(inner),
+                })
             }
             TokenKind::Prove => {
                 self.advance();

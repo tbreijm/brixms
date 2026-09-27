@@ -1,0 +1,13 @@
+{
+  "schema": "brix.input@2",
+  "values": {
+    "batch": {
+      "type": "record",
+      "nominal": "Allocation",
+      "fields": [
+        {"name": "price_cents", "value": {"type": "int", "value": "12000"}},
+        {"name": "car_count", "value": {"type": "int", "value": "5"}}
+      ]
+    }
+  }
+}
