@@ -4,11 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use brix_lower::audit_bundle::produce_finite_decision_audit_input_bundle_v1;
-use brix_lower::finite_decision::{
-    finite_decision_program_id, lower_finite_decision_plan, FiniteDecisionRuntime,
-    FiniteDecisionStop, FINITE_DECISION_PROFILE,
-};
-use brix_syntax::parse_bounded;
+use brix_lower::finite_decision::{FiniteDecisionStop, FINITE_DECISION_PROFILE};
 use soc_core::audit::AuditResult;
 use soc_core::audit_bundle::AuditDecodeLimits;
 
@@ -18,7 +14,7 @@ use crate::commands::{
     unknown_reason_to_code_and_detail,
 };
 use crate::json::{ArtifactJson, CliResultJson, BRIX_CLI_SCHEMA};
-use crate::packages::{make_package_loader, read_source_bounded};
+use crate::pipeline;
 
 /// Execute `brix audit <file.brix> --bundle <out> [--force] [--input <path>...]`.
 pub fn execute_audit(
@@ -44,110 +40,61 @@ pub fn execute_audit(
         return EXIT_USAGE_OR_IO;
     }
 
-    let source = match read_source_bounded(file) {
+    let file_display = file.display().to_string();
+
+    let source = match pipeline::stage_read_source("audit", file, json) {
         Ok(s) => s,
-        Err(err) => {
-            if json {
-                let res = CliResultJson::failure("audit", None, None, None, "io-error", vec![err]);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("brix audit: {err}");
-            }
-            return EXIT_USAGE_OR_IO;
-        }
+        Err(code) => return code,
     };
-
-    let module = match parse_bounded(&source, brix_syntax::ParseLimits::strict()) {
-        Ok(m) => m,
-        Err(err) => {
-            let msg = format!("parse error: {err}");
-            if json {
-                let res = CliResultJson::failure("audit", None, None, None, "rejected", vec![msg]);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("brix audit: rejected: {msg}");
-            }
-            return EXIT_REJECTED_OR_UNKNOWN;
-        }
+    let parsed = match pipeline::stage_parse("audit", &file_display, &source, json) {
+        Ok(p) => p,
+        Err(code) => return code,
     };
-
-    let loader = make_package_loader(package_paths);
-    let resolved_module = match brix_lower::imports::resolve_imports(&module, &loader) {
-        Ok(m) => m,
-        Err(err) => {
-            let msg = format!("import error: {err:?}");
-            if json {
-                let res = CliResultJson::failure("audit", None, None, None, "rejected", vec![msg]);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("brix audit: rejected: {msg}");
-            }
-            return EXIT_REJECTED_OR_UNKNOWN;
-        }
-    };
+    let resolved_module =
+        match pipeline::stage_resolve_imports("audit", &parsed.module, package_paths, json) {
+            Ok(m) => m,
+            Err(code) => return code,
+        };
 
     let mut resolved_module = resolved_module;
     crate::commands::prepare_finite_decision_module(&mut resolved_module);
 
-    let plan = match lower_finite_decision_plan(&resolved_module, FINITE_DECISION_PROFILE) {
+    let plan = match pipeline::stage_lower_plan(
+        "audit",
+        None,
+        &file_display,
+        &source,
+        &parsed.source_map,
+        &resolved_module,
+        json,
+    ) {
         Ok(p) => p,
-        Err(err) => {
-            let msg = format!("lowering error: {err}");
-            if json {
-                let res = CliResultJson::failure("audit", None, None, None, "rejected", vec![msg]);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("brix audit: rejected: {msg}");
-            }
-            return EXIT_REJECTED_OR_UNKNOWN;
-        }
+        Err(code) => return code,
     };
+    let program_hex = pipeline::program_id_hex(&plan);
+    let profile = Some(FINITE_DECISION_PROFILE.to_string());
 
-    let snapshot = match crate::commands::load_cli_input_snapshot(input_paths) {
+    let snapshot = match pipeline::stage_load_snapshot(
+        "audit",
+        profile.clone(),
+        Some(program_hex.clone()),
+        input_paths,
+        json,
+    ) {
         Ok(s) => s,
-        Err(err) => {
-            if json {
-                let res = CliResultJson::failure(
-                    "audit",
-                    Some(FINITE_DECISION_PROFILE.to_string()),
-                    Some(finite_decision_program_id(&plan).0.to_hex()),
-                    None,
-                    err.status(),
-                    vec![err.diagnostic()],
-                );
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("{}", err.render_human("audit"));
-            }
-            return err.exit_code();
-        }
+        Err(code) => return code,
     };
 
-    let runtime = match FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot) {
+    let runtime = match pipeline::stage_build_runtime(
+        "audit",
+        profile,
+        Some(program_hex),
+        &plan,
+        &snapshot,
+        json,
+    ) {
         Ok(r) => r,
-        Err(err) => {
-            let cli_err = crate::commands::CliInputError::from(err);
-            let snapshot_hex = if !snapshot.is_empty() {
-                Some(snapshot.id().0.to_hex())
-            } else {
-                None
-            };
-            if json {
-                let res = CliResultJson::failure(
-                    "audit",
-                    Some(FINITE_DECISION_PROFILE.to_string()),
-                    Some(finite_decision_program_id(&plan).0.to_hex()),
-                    None,
-                    cli_err.status(),
-                    vec![cli_err.diagnostic()],
-                )
-                .with_inputs(snapshot_hex, None);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("{}", cli_err.render_human("audit"));
-            }
-            return cli_err.exit_code();
-        }
+        Err(code) => return code,
     };
     let context_hex = runtime.context.digest().to_hex();
     let run = runtime.run();
@@ -446,6 +393,8 @@ pub fn execute_audit(
             artifacts: vec![artifact],
             diagnostics: Vec::new(),
             explanation: None,
+            locations: None,
+            shows: None,
         };
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {

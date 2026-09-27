@@ -3,18 +3,96 @@
 use std::path::{Path, PathBuf};
 
 use brix_lower::finite_decision::{
-    finite_decision_program_id, lower_finite_decision_plan, FiniteDecisionRuntime,
-    FiniteDecisionStop, FINITE_DECISION_PROFILE,
+    lower_finite_decision_plan, FiniteDecisionRuntime, FiniteDecisionStop, FINITE_DECISION_PROFILE,
 };
-use brix_syntax::parse_bounded;
+use brix_syntax::ast::{Expr, Item};
 
-use crate::cli::{EXIT_REJECTED_OR_UNKNOWN, EXIT_SUCCESS, EXIT_USAGE_OR_IO};
+use crate::cli::{EXIT_REJECTED_OR_UNKNOWN, EXIT_SUCCESS};
 use crate::commands::{
-    candidate_disposition_to_json, decision_to_json, fact_to_json, format_finite_decision_human,
-    unknown_reason_to_code_and_detail,
+    candidate_disposition_to_json, decision_to_json, fact_to_json, fmt_value_human,
+    format_finite_decision_human, unknown_reason_to_code_and_detail,
 };
-use crate::json::{CliResultJson, BRIX_CLI_SCHEMA};
-use crate::packages::{make_package_loader, read_source_bounded};
+use crate::json::{to_tagged_value, CliResultJson, TaggedValue, BRIX_CLI_SCHEMA};
+use crate::pipeline;
+
+/// The label and evaluated value of one `show` expression, ready for
+/// human/JSON rendering.
+struct ShowResult {
+    label: String,
+    value: TaggedValue,
+    human_value: String,
+}
+
+/// The outcome of attempting to evaluate a module's `show` expressions.
+enum ShowsOutcome {
+    /// No `show` items were declared: nothing to print.
+    None,
+    /// Every `show` expression evaluated without fault.
+    Values(Vec<ShowResult>),
+    /// Lowering or evaluating a `show` expression faulted. Carries a
+    /// diagnostic string; the already-committed decision is unaffected.
+    Fault(String),
+}
+
+/// The label under which a `show` expression's value is printed: its bare
+/// variable name when it is exactly `show <name>` (the common case — showing
+/// a rule fact or the commit's own committed value), else a positional
+/// fallback for a more general expression.
+fn show_label(expr: &Expr, idx: usize) -> String {
+    match expr {
+        Expr::Var(name) => name.clone(),
+        _ => format!("show[{idx}]"),
+    }
+}
+
+/// Lower and evaluate every `show` item in `module_with_shows` against the
+/// already-built `runtime`/`run` (see `FiniteDecisionLowerError`'s and
+/// `FiniteDecisionRuntime::evaluate_shows_exprs`'s doc comments for why this
+/// is a second, separate lowering rather than reusing the identity-bearing
+/// `plan`).
+fn evaluate_module_shows(
+    module_with_shows: &brix_syntax::ast::Module,
+    runtime: &FiniteDecisionRuntime,
+    run: &brix_lower::finite_decision::FiniteDecisionRun,
+) -> ShowsOutcome {
+    let labels: Vec<String> = module_with_shows
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Show(expr) => Some(expr),
+            _ => None,
+        })
+        .enumerate()
+        .map(|(idx, expr)| show_label(expr, idx))
+        .collect();
+    if labels.is_empty() {
+        return ShowsOutcome::None;
+    }
+
+    let shows_plan = match lower_finite_decision_plan(module_with_shows, FINITE_DECISION_PROFILE) {
+        Ok(p) => p,
+        Err(err) => return ShowsOutcome::Fault(format!("lowering error: {err}")),
+    };
+
+    match runtime.evaluate_shows_exprs(run, &shows_plan.shows) {
+        Ok(values) => {
+            let results = labels
+                .into_iter()
+                .zip(values)
+                .map(|(label, v)| ShowResult {
+                    label,
+                    value: to_tagged_value(&v),
+                    human_value: fmt_value_human(&v),
+                })
+                .collect();
+            ShowsOutcome::Values(results)
+        }
+        Err(reason) => {
+            let (code, detail) = unknown_reason_to_code_and_detail(&reason);
+            ShowsOutcome::Fault(format!("{code}: {detail}"))
+        }
+    }
+}
 
 /// Execute `brix run <file.brix> [--input <path>...]`.
 pub fn execute_run(
@@ -23,115 +101,72 @@ pub fn execute_run(
     package_paths: &[PathBuf],
     input_paths: &[PathBuf],
 ) -> u8 {
-    let source = match read_source_bounded(file) {
+    let file_display = file.display().to_string();
+
+    let source = match pipeline::stage_read_source("run", file, json) {
         Ok(s) => s,
-        Err(err) => {
-            if json {
-                let res = CliResultJson::failure("run", None, None, None, "io-error", vec![err]);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("brix run: {err}");
-            }
-            return EXIT_USAGE_OR_IO;
-        }
+        Err(code) => return code,
     };
-
-    let module = match parse_bounded(&source, brix_syntax::ParseLimits::strict()) {
-        Ok(m) => m,
-        Err(err) => {
-            let msg = format!("parse error: {err}");
-            if json {
-                let res = CliResultJson::failure("run", None, None, None, "rejected", vec![msg]);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("brix run: rejected: {msg}");
-            }
-            return EXIT_REJECTED_OR_UNKNOWN;
-        }
-    };
-
-    let loader = make_package_loader(package_paths);
-    let mut resolved_module = match brix_lower::imports::resolve_imports(&module, &loader) {
-        Ok(m) => m,
-        Err(err) => {
-            let msg = format!("import error: {err:?}");
-            if json {
-                let res = CliResultJson::failure("run", None, None, None, "rejected", vec![msg]);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("brix run: rejected: {msg}");
-            }
-            return EXIT_REJECTED_OR_UNKNOWN;
-        }
-    };
-
-    crate::commands::prepare_finite_decision_module(&mut resolved_module);
-
-    let plan = match lower_finite_decision_plan(&resolved_module, FINITE_DECISION_PROFILE) {
+    let parsed = match pipeline::stage_parse("run", &file_display, &source, json) {
         Ok(p) => p,
-        Err(err) => {
-            let msg = format!("lowering error: {err}");
-            if json {
-                let res = CliResultJson::failure("run", None, None, None, "rejected", vec![msg]);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("brix run: rejected: {msg}");
-            }
-            return EXIT_REJECTED_OR_UNKNOWN;
-        }
+        Err(code) => return code,
     };
+    let resolved_module =
+        match pipeline::stage_resolve_imports("run", &parsed.module, package_paths, json) {
+            Ok(m) => m,
+            Err(code) => return code,
+        };
 
-    let snapshot = match crate::commands::load_cli_input_snapshot(input_paths) {
+    // Kept *before* `show` items are stripped, so declared `show` expressions
+    // can be lowered/evaluated separately without ever feeding the plan whose
+    // canonical program identity is computed below (see `evaluate_module_shows`).
+    let module_with_shows = resolved_module.clone();
+
+    let mut show_free_module = resolved_module;
+    crate::commands::prepare_finite_decision_module(&mut show_free_module);
+
+    let plan = match pipeline::stage_lower_plan(
+        "run",
+        None,
+        &file_display,
+        &source,
+        &parsed.source_map,
+        &show_free_module,
+        json,
+    ) {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let program_hex = pipeline::program_id_hex(&plan);
+    let profile = Some(FINITE_DECISION_PROFILE.to_string());
+
+    let snapshot = match pipeline::stage_load_snapshot(
+        "run",
+        profile.clone(),
+        Some(program_hex.clone()),
+        input_paths,
+        json,
+    ) {
         Ok(s) => s,
-        Err(err) => {
-            if json {
-                let res = CliResultJson::failure(
-                    "run",
-                    Some(FINITE_DECISION_PROFILE.to_string()),
-                    Some(finite_decision_program_id(&plan).0.to_hex()),
-                    None,
-                    err.status(),
-                    vec![err.diagnostic()],
-                );
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("{}", err.render_human("run"));
-            }
-            return err.exit_code();
-        }
+        Err(code) => return code,
     };
 
-    let runtime = match FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot) {
+    let runtime = match pipeline::stage_build_runtime(
+        "run",
+        profile.clone(),
+        Some(program_hex),
+        &plan,
+        &snapshot,
+        json,
+    ) {
         Ok(r) => r,
-        Err(err) => {
-            let cli_err = crate::commands::CliInputError::from(err);
-            let snapshot_hex = if !snapshot.is_empty() {
-                Some(snapshot.id().0.to_hex())
-            } else {
-                None
-            };
-            if json {
-                let res = CliResultJson::failure(
-                    "run",
-                    Some(FINITE_DECISION_PROFILE.to_string()),
-                    Some(finite_decision_program_id(&plan).0.to_hex()),
-                    None,
-                    cli_err.status(),
-                    vec![cli_err.diagnostic()],
-                )
-                .with_inputs(snapshot_hex, None);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("{}", cli_err.render_human("run"));
-            }
-            return cli_err.exit_code();
-        }
+        Err(code) => return code,
     };
     let context_hex = runtime.context.digest().to_hex();
     let run = runtime.run();
 
     let is_ok = !run.is_unknown();
-    let (status_str, diagnostics) = match &run.stop {
+    let (status_str, mut diagnostics) = match &run.stop {
         FiniteDecisionStop::Selected(_) => ("selected".to_string(), Vec::new()),
         FiniteDecisionStop::Quiescent { .. } => ("quiescent".to_string(), Vec::new()),
         FiniteDecisionStop::Unknown(reason) => {
@@ -154,6 +189,32 @@ pub fn execute_run(
         (None, None)
     };
 
+    let mut human =
+        format_finite_decision_human(&run, Some(&context_hex), input_snapshot.as_deref());
+
+    // `show` results, evaluated after the decision so a fault there can never
+    // alter what was already committed (ADR-0030): the decision above is
+    // final regardless of what follows.
+    let mut ok = is_ok;
+    let mut shows_json: Option<Vec<TaggedValue>> = None;
+    match evaluate_module_shows(&module_with_shows, &runtime, &run) {
+        ShowsOutcome::None => {}
+        ShowsOutcome::Values(results) => {
+            if !results.is_empty() {
+                human.push_str("shows:\n");
+                for r in &results {
+                    human.push_str(&format!("  {} = {} @Derived\n", r.label, r.human_value));
+                }
+            }
+            shows_json = Some(results.into_iter().map(|r| r.value).collect());
+        }
+        ShowsOutcome::Fault(detail) => {
+            human.push_str(&format!("shows: unknown ({detail})\n"));
+            diagnostics.push(format!("show-fault: {detail}"));
+            ok = false;
+        }
+    }
+
     if json {
         let winning_name = run.decision.as_ref().map(|d| d.candidate.as_str());
         let facts_json = run.facts.iter().map(fact_to_json).collect();
@@ -167,7 +228,7 @@ pub fn execute_run(
         let res = CliResultJson {
             schema: BRIX_CLI_SCHEMA.to_string(),
             command: "run".to_string(),
-            ok: is_ok,
+            ok,
             profile: Some(FINITE_DECISION_PROFILE.to_string()),
             program: Some(run.program.0.to_hex()),
             context: Some(context_hex),
@@ -180,15 +241,15 @@ pub fn execute_run(
             artifacts: Vec::new(),
             diagnostics,
             explanation: None,
+            locations: None,
+            shows: shows_json,
         };
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {
-        let human =
-            format_finite_decision_human(&run, Some(&context_hex), input_snapshot.as_deref());
         print!("{human}");
     }
 
-    if is_ok {
+    if ok {
         EXIT_SUCCESS
     } else {
         EXIT_REJECTED_OR_UNKNOWN

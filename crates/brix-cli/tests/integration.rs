@@ -195,7 +195,14 @@ fn test_02_exact_json_field_schema_and_tag_shapes() {
     for key in expected_keys {
         assert!(obj.contains_key(key), "missing required JSON field: {key}");
     }
-    assert_eq!(obj.len(), 12, "must contain exactly 12 top-level fields");
+    // examples/shipping.brix declares `show shipping`, which now (additively)
+    // surfaces as a `shows` field alongside the 12 required fields — so this
+    // fixture reports 13, not 12. `shows` itself is checked below.
+    assert_eq!(
+        obj.len(),
+        13,
+        "must contain exactly the 12 required top-level fields plus the additive `shows` field"
+    );
 
     assert_eq!(obj["schema"], "brix.cli.result@1");
     assert_eq!(obj["command"], "run");
@@ -259,6 +266,12 @@ fn test_02_exact_json_field_schema_and_tag_shapes() {
     assert_eq!(dec_val["variant"], "Ship");
     assert_eq!(dec_val["args"].as_array().unwrap().len(), 0);
     assert!(!dec_val.contains_key("nominal_sum"));
+
+    // Validate the additive `shows` field: `show shipping` reads the
+    // committed decision, so it matches `decision.value` exactly.
+    let shows = obj["shows"].as_array().expect("shows must be an array");
+    assert_eq!(shows.len(), 1);
+    assert_eq!(shows[0], decision["value"]);
 
     // Also test failure JSON: must also have 12 fields and schema first
     let (code_err, stdout_err, _) = run_cmd({
@@ -370,13 +383,16 @@ fn test_04_shipping_expected_facts_statuses_and_decision() {
 fn test_05_quiescence_and_unknown_rejection() {
     let temp = TempDirGuard::new("quiescence_unknown");
 
-    // A. Quiescent program: base is 2, guard checks base == 1 -> no candidate admitted
+    // A. Quiescent program: base is 2, guard checks base == 1 -> no candidate admitted.
+    // Deliberately no `show pick` here: `show <commit name>` now evaluates the
+    // committed decision (see test_14_show_output_and_show_fault), and a
+    // quiescent run has none — this fixture is about quiescence exiting 0,
+    // not about a `show` fault, so it stays free of `show` entirely.
     let quiescent_src = r#"
 config Decision = Hold
 rule base() = 2
 propose hold(base) priority 10 when base == 1 = Hold
 commit pick from (hold)
-show pick
 "#;
     let quiescent_path = temp.path().join("quiescent.brix");
     fs::write(&quiescent_path, quiescent_src).unwrap();
@@ -2753,4 +2769,339 @@ fn test_25_check_refuses_non_bool_short_circuit_operands() {
     );
     let result: serde_json::Value = serde_json::from_str(&stdout).expect("check JSON");
     assert_eq!(result["ok"], true);
+}
+
+// ---------------------------------------------------------------------------
+// 26. Consolidated Pipeline Error Paths (exit codes + JSON), Shared Across Commands
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_26_consolidated_pipeline_error_paths() {
+    let temp = TempDirGuard::new("pipeline_errors");
+
+    // io-error: nonexistent file, same shape for every command that reads source.
+    let io_error_cases: Vec<Vec<&str>> = vec![
+        vec!["check", "nope.brix"],
+        vec!["run", "nope.brix"],
+        vec!["why", "nope.brix", "--candidate", "c"],
+        vec!["whynot", "nope.brix", "--candidate", "c"],
+    ];
+    for args in io_error_cases {
+        let (code, stdout, stderr) = run_cmd({
+            let mut c = brix();
+            c.args(&args).arg("--json");
+            c
+        });
+        assert_eq!(code, 2, "{args:?}: {stdout} {stderr}");
+        let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(val["ok"], false);
+        assert_eq!(val["status"], "io-error");
+        assert_eq!(val.as_object().unwrap().len(), 12);
+
+        let (code_h, _, stderr_h) = run_cmd({
+            let mut c = brix();
+            c.args(&args);
+            c
+        });
+        assert_eq!(code_h, 2);
+        let cmd_name = args[0];
+        assert!(
+            stderr_h.starts_with(&format!("brix {cmd_name}: ")),
+            "human io-error line: {stderr_h}"
+        );
+    }
+
+    // rejected: parse error, same shape for check/run/why/whynot.
+    let bad_parse = temp.path().join("bad_parse.brix");
+    fs::write(&bad_parse, "config Decision = A\n\nrule x() = 1 +\n").unwrap();
+    for cmd in ["check", "run"] {
+        let (code, stdout, stderr) = run_cmd({
+            let mut c = brix();
+            c.arg(cmd).arg(&bad_parse).arg("--json");
+            c
+        });
+        assert_eq!(code, 1, "{cmd}: {stdout} {stderr}");
+        let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(val["ok"], false);
+        assert_eq!(val["status"], "rejected");
+        assert!(val["diagnostics"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("parse error: "));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 27. Source-Located Diagnostics: Human Snippet and JSON `locations`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_27_location_diagnostics_parse_error() {
+    let temp = TempDirGuard::new("loc_parse");
+    let path = temp.path().join("bad.brix");
+    fs::write(&path, "config Decision = A\n\npropose bad syntax here\n").unwrap();
+
+    let (code, _, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run").arg(&path);
+        c
+    });
+    assert_eq!(code, 1);
+    assert!(stderr.starts_with("brix run: rejected: parse error: "));
+    assert!(stderr.contains(&format!("--> {}:3:", path.display())));
+    assert!(stderr.contains(" 3 | propose bad syntax here"));
+    assert!(stderr.contains('^'));
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run").arg(&path).arg("--json");
+        c
+    });
+    assert_eq!(code, 1, "stderr: {stderr}");
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(val["status"], "rejected");
+    let locations = val["locations"].as_array().expect("locations present");
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0]["line"], 3);
+    assert_eq!(locations[0]["file"], path.display().to_string());
+}
+
+#[test]
+fn test_28_location_diagnostics_unknown_dependency() {
+    let temp = TempDirGuard::new("loc_dep");
+    let path = temp.path().join("bad_dep.brix");
+    fs::write(
+        &path,
+        "config Decision = A\n\nrule x() = 1\n\npropose a(y) priority 1 when x > 0 = A\n\ncommit shipping from (a)\n",
+    )
+    .unwrap();
+
+    let (code, _, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run").arg(&path);
+        c
+    });
+    assert_eq!(code, 1);
+    assert!(stderr.contains("proposal 'a' declares dependency 'y' which is not an earlier rule"));
+    assert!(stderr.contains(&format!("--> {}:5:11", path.display())));
+    assert!(stderr.contains(" 5 | propose a(y) priority 1 when x > 0 = A"));
+
+    let (_, stdout, _) = run_cmd({
+        let mut c = brix();
+        c.arg("run").arg(&path).arg("--json");
+        c
+    });
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let locations = val["locations"].as_array().expect("locations present");
+    assert_eq!(locations[0]["line"], 5);
+    assert_eq!(locations[0]["column"], 11);
+}
+
+#[test]
+fn test_29_location_diagnostics_duplicate_names() {
+    let temp = TempDirGuard::new("loc_dup");
+    let path = temp.path().join("bad_dup.brix");
+    fs::write(
+        &path,
+        "config Decision = A\n\npropose a() priority 1 when true = A\npropose a() priority 2 when true = A\n\ncommit c from (a)\n",
+    )
+    .unwrap();
+
+    let (code, stdout, _) = run_cmd({
+        let mut c = brix();
+        c.arg("run").arg(&path).arg("--json");
+        c
+    });
+    assert_eq!(code, 1);
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(val["diagnostics"][0]
+        .as_str()
+        .unwrap()
+        .contains("duplicate proposal name: 'a'"));
+    let locations = val["locations"].as_array().expect("locations present");
+    // Points at the *second* (duplicate) declaration, not the first.
+    assert_eq!(locations[0]["line"], 4);
+}
+
+#[test]
+fn test_30_location_diagnostics_unknown_candidate_in_commit() {
+    let temp = TempDirGuard::new("loc_commit");
+    let path = temp.path().join("bad_commit.brix");
+    fs::write(
+        &path,
+        "config Decision = A\n\npropose a() priority 1 when true = A\n\ncommit shipping from (a, zzz)\n",
+    )
+    .unwrap();
+
+    let (code, _, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run").arg(&path);
+        c
+    });
+    assert_eq!(code, 1);
+    assert!(stderr.contains("commit 'shipping' references undeclared proposal 'zzz'"));
+    assert!(stderr.contains(&format!("--> {}:5:26", path.display())));
+}
+
+#[test]
+fn test_31_location_diagnostics_let_type_error() {
+    let temp = TempDirGuard::new("loc_let");
+    let path = temp.path().join("bad_let.brix");
+    fs::write(&path, "let x: Str = 42\n").unwrap();
+
+    let (code, stdout, _) = run_cmd({
+        let mut c = brix();
+        c.arg("check").arg(&path);
+        c
+    });
+    assert_eq!(code, 1);
+    // The classic L1/L2 `check_module` path reports on stdout, one line per
+    // binding, unlike the finite-decision pipeline's stderr diagnostics.
+    assert!(stdout.contains("x: not checked: TypeAnnotationMismatch"));
+    assert!(stdout.contains(&format!("--> {}:1:1", path.display())));
+    assert!(stdout.contains(" 1 | let x: Str = 42"));
+
+    let (_, stdout, _) = run_cmd({
+        let mut c = brix();
+        c.arg("check").arg(&path).arg("--json");
+        c
+    });
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let locations = val["locations"].as_array().expect("locations present");
+    assert_eq!(locations[0]["line"], 1);
+    assert_eq!(locations[0]["column"], 1);
+}
+
+// ---------------------------------------------------------------------------
+// 32. Readable Import Error Display (not Debug)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_32_import_error_readable_display() {
+    let temp = TempDirGuard::new("import_error_display");
+    let path = temp.path().join("bad_import.brix");
+    fs::write(&path, "use some.nonexistent.pkg\n\nrule x() = 1\n").unwrap();
+
+    let (code, _, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run").arg(&path);
+        c
+    });
+    assert_eq!(code, 1);
+    assert!(stderr.starts_with("brix run: rejected: import error: "));
+    // Readable Display, not the old `{err:?}` Debug form.
+    assert!(!stderr.contains("NotFound("));
+    assert!(stderr.contains("was not found"));
+    assert!(stderr.contains("some.nonexistent.pkg"));
+}
+
+// ---------------------------------------------------------------------------
+// 33. `show` Output for `brix run`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_33_show_output_for_shipping_examples() {
+    // examples/shipping.brix: `show shipping` reads the committed decision.
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run").arg("examples/shipping.brix");
+        c
+    });
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("decision: ship = Ship @Derived"));
+    assert!(stdout.contains("shows:\n  shipping = Ship @Derived\n"));
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run").arg("examples/shipping.brix").arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(val["ok"], true);
+    let shows = val["shows"].as_array().expect("shows present");
+    assert_eq!(shows.len(), 1);
+    assert_eq!(shows[0]["type"], "sum");
+    assert_eq!(shows[0]["variant"], "Ship");
+
+    // examples/shipping-functions.brix: same `show shipping`, with --input.
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg("examples/shipping-functions.brix")
+            .arg("--input")
+            .arg("examples/shipping-functions.json");
+        c
+    });
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("decision: ship = Ship @Derived"));
+    assert!(stdout.contains("shows:\n  shipping = Ship @Derived\n"));
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run")
+            .arg("examples/shipping-functions.brix")
+            .arg("--input")
+            .arg("examples/shipping-functions.json")
+            .arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let shows = val["shows"].as_array().expect("shows present");
+    assert_eq!(shows.len(), 1);
+    assert_eq!(shows[0]["variant"], "Ship");
+
+    // `check`/`audit`/`why` never evaluate `show` — additive means these
+    // commands are unaffected (no `shows` field at all).
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("check").arg("examples/shipping.brix").arg("--json");
+        c
+    });
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(val.as_object().unwrap().get("shows").is_none());
+}
+
+#[test]
+fn test_34_show_fault_reports_diagnostic_and_exits_1_without_altering_decision() {
+    let temp = TempDirGuard::new("show_fault");
+    let path = temp.path().join("show_fault.brix");
+    // Quiescent: no candidate admitted, so `shipping` (the commit's name) has
+    // no committed value — `show shipping` must fault rather than fabricate one.
+    fs::write(
+        &path,
+        "config Decision = A\n\npropose a() priority 1 when false = A\n\ncommit shipping from (a)\nshow shipping\n",
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run").arg(&path);
+        c
+    });
+    assert_eq!(code, 1, "a faulted show must exit 1: {stdout} {stderr}");
+    // The (quiescent) decision is still printed in full.
+    assert!(stdout.contains("decision: none (quiescent)"));
+    assert!(stdout.contains("status: quiescent"));
+    assert!(stdout.contains("shows: unknown ("));
+
+    let (code, stdout, stderr) = run_cmd({
+        let mut c = brix();
+        c.arg("run").arg(&path).arg("--json");
+        c
+    });
+    assert_eq!(code, 1, "stderr: {stderr}");
+    let val: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(val["ok"], false);
+    // `status` still reports the (unaltered) deliberation outcome.
+    assert_eq!(val["status"], "quiescent");
+    assert!(val["decision"].is_null());
+    let diags = val["diagnostics"].as_array().unwrap();
+    assert!(diags
+        .iter()
+        .any(|d| d.as_str().unwrap().starts_with("show-fault: ")));
+    // No fabricated show value on fault.
+    assert!(val.as_object().unwrap().get("shows").is_none());
 }

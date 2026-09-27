@@ -33,7 +33,7 @@ use crate::finite_decision::plan::{
     finite_decision_program_id, FiniteDecisionPlan, FiniteDecisionProgramId,
 };
 use crate::input::{input_context_id, InputSnapshot, InputValidationError};
-use crate::l3_v2::{eval, EvalEnv, EvalFault, L3FunctionDef, L3SchemaType, L3ValueV2};
+use crate::l3_v2::{eval, EvalEnv, EvalFault, L3ExprV2, L3FunctionDef, L3SchemaType, L3ValueV2};
 
 const WORLD_MARKER: &[u8] = b"brix.l3.finite-decision.world";
 const POLICY_MARKER: &[u8] = b"brix.l3.finite-decision.adm-all";
@@ -71,6 +71,21 @@ impl fmt::Display for FiniteDecisionBuildError {
 }
 
 impl std::error::Error for FiniteDecisionBuildError {}
+
+impl FiniteDecisionBuildError {
+    /// The declared item this error is about (see
+    /// [`FiniteDecisionLowerError::location_subject`] for the shared design):
+    /// the `input` declaration for a wrapped [`InputValidationError`], or the
+    /// `commit` declaration for a missing proposal (the candidate name itself
+    /// is a `propose`, not the commit, but it is the commit's candidate list
+    /// that names it, so that is the more useful line to point at).
+    pub fn location_subject(&self) -> Option<(&str, Option<&str>)> {
+        match self {
+            Self::InputValidation(err) => err.location_subject(),
+            Self::MissingProposal { candidate } => Some((candidate, None)),
+        }
+    }
+}
 
 impl From<InputValidationError> for FiniteDecisionBuildError {
     fn from(err: InputValidationError) -> Self {
@@ -1345,6 +1360,25 @@ impl FiniteDecisionRuntime {
         &self,
         run: &FiniteDecisionRun,
     ) -> Result<Vec<L3ValueV2>, FiniteDecisionUnknownReason> {
+        self.evaluate_shows_exprs(run, &self.plan.shows)
+    }
+
+    /// Re-evaluate an explicit list of lowered show expressions against this
+    /// runtime's bound inputs, lets, and derived facts.
+    ///
+    /// This runtime's own `plan` is used only for its lets/facts/functions —
+    /// `shows` need not be `self.plan.shows` (see [`Self::evaluate_shows`]).
+    /// This is how `brix run` prints `show` results without `show` items
+    /// feeding the canonical program identity: the plan a runtime is *built*
+    /// from is lowered from a `show`-free module (so `self.program` never
+    /// depends on whether the source declares any `show`), while the show
+    /// expressions actually printed are lowered separately, from the full
+    /// module, and passed here.
+    pub fn evaluate_shows_exprs(
+        &self,
+        run: &FiniteDecisionRun,
+        shows: &[L3ExprV2],
+    ) -> Result<Vec<L3ValueV2>, FiniteDecisionUnknownReason> {
         if run.program != self.program {
             return Err(FiniteDecisionUnknownReason::InvariantViolation {
                 detail: format!(
@@ -1401,8 +1435,15 @@ impl FiniteDecisionRuntime {
         for fact in &fresh_run.facts {
             env = env.with_fact(fact.rule.clone(), fact.value.clone());
         }
-        let mut results = Vec::with_capacity(self.plan.shows.len());
-        for (idx, show_expr) in self.plan.shows.iter().enumerate() {
+        // The commit's own name is a "committed fact" too (ast::Item::Show's
+        // doc comment: "surfaces a committed fact") — bound only when a
+        // candidate was actually selected, so a quiescent run leaves a
+        // `show <commit name>` unbound (a fault, not a fabricated value).
+        if let Some(decision) = &fresh_run.decision {
+            env = env.with_fact(self.plan.commit.name.clone(), decision.value.clone());
+        }
+        let mut results = Vec::with_capacity(shows.len());
+        for (idx, show_expr) in shows.iter().enumerate() {
             match eval(show_expr, &env) {
                 Ok(v) => results.push(v),
                 Err(fault) => {
