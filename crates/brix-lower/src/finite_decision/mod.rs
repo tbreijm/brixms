@@ -3,6 +3,7 @@
 //! Reuses L3 v2 expression lowering, evaluation, and types alongside
 //! the `soc-regimes` finite deliberation frontier.
 
+mod boolean_types;
 pub mod plan;
 pub mod runtime;
 

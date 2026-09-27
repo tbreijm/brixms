@@ -698,10 +698,12 @@ optimization: `false && e` does not evaluate `e`, so an arithmetic fault in `e`
 does not stop the decision. Replay short-circuits identically, which is what
 makes the behavior reproducible under `audit` and `verify`.
 
-Operands must be `Bool`. There is no truthiness and no coercion from `Int`; a
-non-Boolean operand is a typed evaluation fault that fails closed and surfaces
-at `check`, not only at `run`. Note that `and` is unrelated — it is witness
-tensor composition, not Boolean conjunction.
+Operands must be `Bool`. There is no truthiness or coercion from `Int`.
+Static checks reject known non-Boolean operands even when skipped:
+`false && 1` and `true || 1` are errors at `check`. These checks follow helper
+arguments, bindings, fields, and match arms without evaluating their values;
+`false && (div_floor(1, 0) == 0)` still succeeds. Reached operands also retain
+runtime type checks. The `and` spelling remains witness tensor composition.
 
 Programs that do not use the new operators keep their existing program pins:
 the canonical expression encoding appends ordinals rather than renumbering.
