@@ -18,5 +18,16 @@ brix-kernel = { path = "../brix-kernel" }
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+[dev-dependencies]
+proptest = { workspace = true }
+
+[[bench]]
+name = "finite_decision_end_to_end"
+harness = false
+
+[[bench]]
+name = "audit_verify"
+harness = false
+
 [lints]
 workspace = true

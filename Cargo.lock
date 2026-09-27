@@ -103,6 +103,7 @@ dependencies = [
  "brix-semantic",
  "brix-syntax",
  "libc",
+ "proptest",
  "soc-core",
  "soc-regimes",
 ]
@@ -118,6 +119,9 @@ dependencies = [
 [[package]]
 name = "brix-syntax"
 version = "0.1.0-alpha.3"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "cc"
