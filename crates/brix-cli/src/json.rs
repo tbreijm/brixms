@@ -31,6 +31,19 @@ pub struct CliResultJson {
     pub decision: Option<DecisionJson>,
     pub artifacts: Vec<ArtifactJson>,
     pub diagnostics: Vec<String>,
+    /// Source locations for entries in `diagnostics`, additive under schema
+    /// `brix.cli.result@1` (parallel to `input_snapshot`/`inputs`). Not
+    /// necessarily one-to-one with `diagnostics`: only diagnostics a
+    /// [`brix_syntax::SourceMap`] or a parse error could resolve to a
+    /// position contribute an entry here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locations: Option<Vec<LocationJson>>,
+    /// Evaluated `show` results for `brix run`, additive under schema
+    /// `brix.cli.result@1`. `None` when the program declares no `show`
+    /// expressions (or for commands other than `run`); an empty vec is never
+    /// produced instead of `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shows: Option<Vec<TaggedValue>>,
 }
 
 impl CliResultJson {
@@ -63,6 +76,8 @@ impl CliResultJson {
             decision,
             artifacts,
             diagnostics,
+            locations: None,
+            shows: None,
         }
     }
 
@@ -90,6 +105,8 @@ impl CliResultJson {
             decision: None,
             artifacts: Vec::new(),
             diagnostics,
+            locations: None,
+            shows: None,
         }
     }
 
@@ -101,6 +118,18 @@ impl CliResultJson {
     ) -> Self {
         self.input_snapshot = input_snapshot;
         self.inputs = inputs;
+        self
+    }
+
+    /// Explicitly attach source locations for `diagnostics` entries.
+    pub fn with_locations(mut self, locations: Option<Vec<LocationJson>>) -> Self {
+        self.locations = locations;
+        self
+    }
+
+    /// Explicitly attach evaluated `show` results.
+    pub fn with_shows(mut self, shows: Option<Vec<TaggedValue>>) -> Self {
+        self.shows = shows;
         self
     }
 
@@ -132,6 +161,25 @@ impl InputJson {
             value,
             ordinal: ordinal.to_string(),
             grade: grade.into(),
+        }
+    }
+}
+
+/// A source location (1-based line/column) for a diagnostic, additive under
+/// schema `brix.cli.result@1`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LocationJson {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl LocationJson {
+    pub fn new(file: impl Into<String>, line: usize, column: usize) -> Self {
+        Self {
+            file: file.into(),
+            line,
+            column,
         }
     }
 }

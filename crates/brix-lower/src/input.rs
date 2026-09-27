@@ -672,6 +672,21 @@ impl fmt::Display for InputValidationError {
 
 impl std::error::Error for InputValidationError {}
 
+impl InputValidationError {
+    /// The declared `input` item this error is about, as an item-name subject
+    /// (see [`crate::finite_decision::FiniteDecisionLowerError::location_subject`]
+    /// for the shared design) — every variant here names exactly the input
+    /// declaration, never a more specific token inside it.
+    pub fn location_subject(&self) -> Option<(&str, Option<&str>)> {
+        match self {
+            Self::UndeclaredInput { name }
+            | Self::MissingInput { name, .. }
+            | Self::TypeMismatch { name, .. }
+            | Self::InvalidValue { name, .. } => Some((name, None)),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Decoder and Shard Helpers
 // ---------------------------------------------------------------------------

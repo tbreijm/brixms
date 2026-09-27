@@ -263,6 +263,36 @@ impl From<TypeError> for LowerError {
     }
 }
 
+impl LowerError {
+    /// What this error is about, as `(item name, specific identifier)` — see
+    /// [`crate::finite_decision::FiniteDecisionLowerError::location_subject`]
+    /// for the shared design. Several `LowerError` variants (e.g.
+    /// `TypeAnnotationMismatch`) name only the types in conflict, not the
+    /// binding — [`check_module`]'s caller already has that name paired
+    /// alongside the error, so it is not duplicated here.
+    pub fn location_subject(&self) -> Option<(&str, Option<&str>)> {
+        match self {
+            Self::Unresolved(name) => Some((name, None)),
+            Self::MissingField { config, field } => Some((config, Some(field))),
+            Self::UnknownField { config, field } => Some((config, Some(field))),
+            Self::UnknownVariantType {
+                config, variant, ..
+            } => Some((config, Some(variant))),
+            Self::UnknownDeclaredType(name) => Some((name, None)),
+            Self::RecordFieldTypeMismatch { config, field, .. } => Some((config, Some(field))),
+            Self::ParamTypeMismatch {
+                function, param, ..
+            } => Some((function, Some(param))),
+            Self::ReturnTypeMismatch { function, .. } => Some((function, None)),
+            Self::ConfigArityMismatch { config, .. } => Some((config, None)),
+            Self::RecursiveFunctionNeedsAnnotation { function, .. } => Some((function, None)),
+            Self::RecursiveFunction { function, .. } => Some((function, None)),
+            Self::MutuallyRecursiveConfig { config, .. } => Some((config, None)),
+            _ => None,
+        }
+    }
+}
+
 /// A category of "no proof yet" for `brix whynot` (ADR-0010 L4, issue #43).
 /// ADR-0002 §5.3: "a search that has not terminated has proved nothing" —
 /// none of these variants is, or may be rendered as, a refutation. Only an
