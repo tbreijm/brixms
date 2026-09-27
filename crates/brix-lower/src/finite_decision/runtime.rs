@@ -1276,6 +1276,70 @@ impl FiniteDecisionRuntime {
         }
         Ok(explanation)
     }
+
+    /// Build a structured, bounded derivation explanation for `target_name`:
+    /// the admission guard's evaluation trace, every rule/`let`/input it
+    /// transitively reads, the proposal's value trace, and — for an admitted
+    /// candidate — the calendar comparison against the actual winner.
+    ///
+    /// Purely informational (ADR-0030): this reuses [`Self::explain_why`]'s
+    /// own `Key` comparison rather than restating the calendar's ordering,
+    /// and every value in the trace comes from re-evaluating the exact
+    /// subexpression with [`crate::l3_v2::eval`] over the same environment
+    /// `run()` folded inputs, lets, and facts into — so it cannot disagree
+    /// with `run()`'s own result, and never changes it, the run's
+    /// program/context/snapshot identity, or any grade.
+    pub fn explain_candidate(
+        &self,
+        target_name: &str,
+    ) -> Result<crate::finite_decision::explain::ExplainOutcome, FiniteDecisionUnknownReason> {
+        use crate::finite_decision::explain;
+
+        let run = self.run();
+        if let FiniteDecisionStop::Unknown(reason) = &run.stop {
+            return Err(reason.clone());
+        }
+
+        let why = self.explain_why(target_name)?;
+        if matches!(why, WhyExplanation::CandidateNotFound) {
+            return Ok(explain::ExplainOutcome::CandidateNotFound);
+        }
+        let selection = explain::selection_from_why(&why);
+
+        let mut env = EvalEnv::new()
+            .with_functions(self.functions.clone())
+            .with_schemas(Arc::new(self.plan.schemas.clone()));
+        for input in &self.bound_inputs {
+            env = env.with_input(input.name.clone(), input.value.clone());
+        }
+        for (name, expr) in &self.plan.lets {
+            match eval(expr, &env) {
+                Ok(v) => env = env.with_let(name.clone(), v),
+                Err(fault) => {
+                    // `run` already succeeded above, so every `let` already
+                    // evaluated cleanly over this same construction; this is
+                    // unreachable on a consistent plan, and failing closed
+                    // here is strictly safer than assuming it never happens.
+                    return Err(FiniteDecisionUnknownReason::ExpressionEvaluationFault {
+                        context: format!("let {name}"),
+                        fault,
+                    });
+                }
+            }
+        }
+        for fact in &run.facts {
+            env = env.with_fact(fact.rule.clone(), fact.value.clone());
+        }
+
+        Ok(explain::explain_candidate(
+            &self.plan,
+            &run,
+            &env,
+            target_name,
+            selection,
+        ))
+    }
+
     /// Re-evaluate all declared show expressions against the runtime's bound inputs, lets, and derived facts.
     pub fn evaluate_shows(
         &self,

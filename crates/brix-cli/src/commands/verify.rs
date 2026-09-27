@@ -454,6 +454,7 @@ pub fn execute_verify(
             decision: None,
             artifacts: vec![artifact],
             diagnostics: Vec::new(),
+            explanation: None,
         };
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {

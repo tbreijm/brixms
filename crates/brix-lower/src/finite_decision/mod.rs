@@ -4,10 +4,15 @@
 //! the `soc-regimes` finite deliberation frontier.
 
 mod boolean_types;
+pub mod explain;
 pub mod plan;
 pub mod runtime;
 
 pub use crate::l3_v2::{L3Schema, L3SchemaBody, L3SchemaType};
+pub use explain::{
+    selection_from_why, CandidateExplanation, ExplainOutcome, FactExplain, FactOrigin, NodeRef,
+    SelectionComparison, TraceNode, TraceOutcome, MAX_EXPLAIN_NODES,
+};
 pub use plan::{
     finite_decision_program_id, finite_decision_program_preimage, lower_finite_decision_plan,
     FiniteDecisionCommit, FiniteDecisionContract, FiniteDecisionFnParam, FiniteDecisionFunction,

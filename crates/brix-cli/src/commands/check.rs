@@ -118,6 +118,7 @@ pub fn execute_check(
                     decision: None,
                     artifacts: Vec::new(),
                     diagnostics: Vec::new(),
+                    explanation: None,
                 };
                 println!("{}", serde_json::to_string_pretty(&res).unwrap());
             } else {
@@ -245,6 +246,7 @@ pub fn execute_check(
                 decision: decision_json,
                 artifacts: Vec::new(),
                 diagnostics: Vec::new(),
+                explanation: None,
             };
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
         } else {
@@ -311,6 +313,7 @@ pub fn execute_check(
             decision: None,
             artifacts: Vec::new(),
             diagnostics,
+            explanation: None,
         };
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {
