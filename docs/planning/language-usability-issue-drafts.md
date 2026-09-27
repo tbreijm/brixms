@@ -4,17 +4,19 @@ These are local issue drafts for review. The examples marked **proposed syntax**
 
 ## 1. Bounded list inputs and folds
 
+**Status/version:** Proposed design in [ADR-0037](../../spec/adr/ADR-0037_Bounded_Lists_And_Folds.md), not implemented or shipped. The first slice proposes a new `brix.input@3`; frozen scalar `@1` and proposed record/sum `@2` retain their meanings. ADR-0037 specifies the JSON wrapper, appended canonical ordinals, and declaration-bound maximum; new vectors remain implementation work.
+
 **Title:** Add bounded list inputs and deterministic collection folds
 
 **Problem**
 
-The accepted external-input contract `brix.input@1` is scalar-only. ADR-0033 is a pending, uncommitted implementation proposal for records and sums with `brix.input@2`; local implementation work is in progress, so this support should not be described as shipped. Neither the published `@1` contract nor pending `@2` defines list transport or collection folds. Modules therefore cannot yet receive a bounded collection of vehicles, modifiers, corrections, or bids and compute over it in Brix. This is separate from rule-schema quantification: folding a supplied finite list computes a value; it does not instantiate rules over facts or establish a rule-level search policy.
+The accepted external-input contract `brix.input@1` is scalar-only. ADR-0033 proposes records and sums with `brix.input@2`; it is not described as shipped here. Neither `@1` nor proposed `@2` defines list transport or collection folds. Modules therefore cannot yet receive a bounded collection of vehicles, modifiers, corrections, or bids and compute over it in Brix. This is separate from rule-schema quantification: folding a supplied finite list computes a value; it does not instantiate rules over facts or establish a rule-level search policy.
 
 **Requested behavior**
 
-Extend structured input types with bounded `List<T>` values, where `T` is an admitted scalar or nominal schema type. A declaration must state or inherit a finite maximum length, enforced during transport decoding before unbounded allocation. Preserve strict decoding, canonical identity, and fail-closed behavior. Do not retrofit composite values into published `brix.input@1`. Settle the transport version and encoding for structured lists before this feature lands: ADR-0033's `brix.input@2` remains pending, so decide whether bounded lists belong in that proposal or require a later version. This draft does not decide that version boundary.
+Add bounded `List<T>` as `brix.input@3`, preserving published scalar `@1` and proposed record/sum `@2`. The first slice allows lists only as top-level inputs; `T` is an admitted scalar or closed nominal schema type, with nested lists and lists in nominal/helper annotations deferred. Every declaration states a mandatory finite maximum (at most 256), checked before sequence allocation, in addition to existing node, depth, file, and aggregate limits. Preserve strict decoding, canonical identity, and fail-closed behavior. Bind length bounds into the program contract and ordered values into snapshot/context identity. Use the wrapper and appended canonical encodings specified in ADR-0037; preserve existing vectors.
 
-Provide bounded, deterministic folds over a list whose length is fixed by the validated input snapshot: integer `sum`, predicate `count`, `all`, and `any`. Specify empty-list behavior (`sum` and `count` are zero; `all` is true; `any` is false), evaluation order, checked integer overflow, and evaluator work accounting. Each element is evaluated at most once per fold unless a construct explicitly says otherwise.
+Provide bounded, deterministic folds `sum`, `count`, `all`, and `any`, with hygienic lexical binders and no escaping first-class functions. Visit elements left to right; check `i64` sum after each addition, require strict `Bool` for predicates, and short-circuit `all`/`any`. Empty results are 0, 0, true, and false. Static checking covers all body paths even for empty lists or short-circuited runtime paths. Charge reached elements and helper calls to the shared evaluator work budget. A fault or exhaustion fails closed.
 
 **Proposed syntax (illustrative, not runnable today)**
 
@@ -27,7 +29,7 @@ let all_priced = all(vehicles, v => v.price_cents > 0)
 let priced_count = count(vehicles, v => v.price_cents > 0)
 ```
 
-The precise list declaration and lambda syntax are open design points. The contract is a finite list with an enforced width bound and folds that cannot outlive or grow their input domain.
+The syntax above is illustrative. The design contract and first-slice restrictions are recorded in ADR-0037; rule-schema grounding, witness claims, and quantified rule properties remain outside its scope.
 
 **Roadmap contracts this may unblock**
 
@@ -41,20 +43,24 @@ The precise list declaration and lambda syntax are open design points. The contr
 
 **Acceptance criteria**
 
-- List values have a versioned canonical input representation; list order is preserved and bound into snapshot/context identity.
-- Maximum length is checked before allocation and is included in the input contract. Nested list/record bounds compose with ADR-0033 depth, node, and width limits.
-- Invalid element types, oversized lists, duplicate object keys, and malformed nested values fail closed.
+- `brix.input@1` scalar and proposed `@2` record/sum vectors remain frozen; implement the ADR-0037 `@3` transport and canonical layouts with new cross-version identity vectors.
+- Maximum length is checked before allocation and bound into the program contract; ordered element values affect snapshot/context identity. Existing depth 32, node 4,096, per-file 1 MiB, and aggregate limits still apply.
+- Invalid element types, unsupported nested-list/list-annotation forms, oversized lists, duplicate object keys, and malformed values fail closed.
 - Fold semantics define empty inputs, overflow, ordering, evaluation faults, and work limits.
 - A fold over a list is documented as expression-level computation only. It does not claim rule-schema quantification, strict-first matching, or witness composition.
-- Published `brix.input@1` retains its scalar meaning and identity. Resolve the pending ADR-0033 `@2` record/sum contract before assigning list encoding a transport version.
+- Published `brix.input@1` retains its scalar meaning and identity; ADR-0033 `@2` retains record/sum meaning. Follow ADR-0037 for the `@3` wrapper and canonical encoding.
+- Track [issue #53](https://github.com/tbreijm/brixms/issues/53) and [Type Realization Contract §5.5](../../spec/Type_Realization_Contract.md) as local kernel context: lambda-spine recursion has already been peeled iteratively; `RealizesComp` recursion remains. Do not claim the kernel residual is fixed or fold support implemented.
 
 **Local references**
 
 - [ADR-0033: structured inputs and composite function contracts](../../spec/adr/ADR-0033_Structured_Input_Contracts.md) proposes `brix.input@2` for records and sums and defines structured resource limits; it is not yet shipped.
 - [ADR-0031: external inputs](../../spec/adr/ADR-0031_External_Input_Alpha.md) defines the frozen scalar `brix.input@1` contract and strict bounded shard transport.
 - [ADR-0032: pure functions](../../spec/adr/ADR-0032_Finite_Decision_Functions.md) describes bounded helper evaluation and checked runtime faults.
+- [ADR-0037: bounded lists and folds](../../spec/adr/ADR-0037_Bounded_Lists_And_Folds.md) records the proposed first slice and proposed canonical encodings.
 
 ## 2. Exact integer division and rounding
+
+**Status:** Implemented for review in ADR-0035; unary minus follows in ADR-0036. The original request below is retained as planning history.
 
 **Title:** Add explicit signed integer division, rounding, and modulo operations
 
@@ -192,6 +198,8 @@ This is notation for the requested contract only. It is not a current grammar pr
 
 ## Alongside lists: Boolean expression operators
 
+**Status:** Implemented for review in ADR-0034, including static checks of skipped Boolean operands. The original request below is retained as planning history.
+
 **Title:** Add short-circuit Boolean `&&`, `||`, and `!` expressions
 
 Boolean operators do not add suite-world contract coverage by themselves, but they substantially shorten policy expressions. The supplied roadmap reports current modules encode conjunction through nested `match`; that suite-world behavior is not independently verified here. Add ordinary expression operators with a defined precedence table, type errors for non-Boolean operands, and short-circuit semantics. Lazy evaluation may skip dynamic faults in an unevaluated branch, as with an unselected `match` arm, while static checking still validates the whole expression. Use `&&`, `||`, and `!` so the existing `and` spelling remains available for witness composition.
@@ -226,4 +234,4 @@ The estimate that bounded list folds plus division/rounding would move coverage 
 
 ## Requested roadmap order
 
-Keep the requested delivery order: bounded list inputs/folds first, division/rounding second, witness composition third, and finite schemas fourth. Deliver Boolean operators alongside the list milestone. The order is a planning preference; each milestone still needs its own profile, identity, resource, and evidence review. In particular, a finite pre-grounding design can preserve acyclic rule derivation, while ordered first-success choice must be specified in deliberation.
+Current order: Boolean operators and division/rounding are implemented for review; bounded list inputs/folds under ADR-0037 are next, followed by witness composition and finite schemas. The order is a planning preference; each milestone still needs its own profile, identity, resource, and evidence review. In particular, a finite pre-grounding design can preserve acyclic rule derivation, while ordered first-success choice must be specified in deliberation.
