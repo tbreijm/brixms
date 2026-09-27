@@ -4,7 +4,7 @@ Status: **Accepted** (2026-08-02, ratified by user) (refines [ADR-0003](./ADR-00
 
 Date: 2026-08-02.
 
-Foundation documents: [ADR-0002: SOC Constitution](./ADR-0002_SOC_Constitution.md) (§3 D1, §5.2), [ADR-0003: Proof Kernel Profile](./ADR-0003_Proof_Kernel_Profile.md) (§6, the kernel-agnostic certificate contract), [ADR-0004: Kernel Profile 1.1](./ADR-0004_Kernel_Profile_1_1.md), [ADR-0006: Kernel Profile 1.2](./ADR-0006_Kernel_Profile_1_2.md), `spec/BrixMS_v9_0.md` Appendix G (canonical encoding), and the trusted-boundary audit in `docs/audit/issue-63/tcb-proof.md`.
+Foundation documents: [ADR-0002: SOC Constitution](./ADR-0002_SOC_Constitution.md) (§3 D1, §5.2), [ADR-0003: Proof Kernel Profile](./ADR-0003_Proof_Kernel_Profile.md) (§6, the kernel-agnostic certificate contract), [ADR-0004: Kernel Profile 1.1](./ADR-0004_Kernel_Profile_1_1.md), [ADR-0006: Kernel Profile 1.2](./ADR-0006_Kernel_Profile_1_2.md), `spec/archive/BrixMS_v9_0.md` Appendix G (canonical encoding), and the trusted-boundary audit in `docs/audit/issue-63/tcb-proof.md`.
 
 This ADR pins the byte layout that gives a **native** accepted proof certificate its identity. It defines no proof rules and changes no calculus.
 

@@ -1,7 +1,11 @@
 # `spec/` — BrixMS specification, decisions, and plan
 
-This directory holds the **governing decisions** (ADRs), the **master plan**, the
-**language specification**, and the **archive** of superseded plans.
+This directory holds the **governing decisions** (ADRs), the **master plan**,
+the **normative contracts** (`SOC_Semantic_Laws.md`,
+`Type_Realization_Contract.md`), and the **archive** of superseded plans and
+specifications. There is no single current language-specification document —
+the language surface is defined by the accepted ADRs (see "Reading order"
+below and ADR-0030 through ADR-0037).
 
 ## Reading order (start here)
 
@@ -76,38 +80,74 @@ spec/
   adr/
     ADR-0001_Proof_Substrate.md ← superseded-in-part (frozen §§4–5–7 survive)
     ADR-0002_SOC_Constitution.md← CURRENT constitution
+    ADR-0030 .. ADR-0037        ← the current language-surface ADRs (finite-
+                                   decision alpha, external inputs, functions,
+                                   structured inputs, Boolean ops, integer
+                                   division, unary minus, bounded lists —
+                                   check each one's own Status line)
   Build_Plan_v3_SOC.md          ← CURRENT master plan
   Next_Steps.md                 ← immediate actions
   Issue_Disposition_2026-07.md  ← issue re-classification + new issues
-  BrixMS_v9_0.md                ← the language specification (reference; the
-                                   finite-presentation frontend's source material
-                                   and the brix.type structural-regime corpus)
-  BrixMS_Complexity_Profile.md  ← complexity profile (reference)
   errata/                       ← spec errata (append-only rulings)
-  archive/                      ← superseded build plans (see below)
+  archive/                      ← superseded specs and build plans (see below)
 ```
 
-### Archived (superseded) plans
+### Archived (superseded) documents
 
 Each carries a one-line header pointing at its successor. Retained for historical
 reference and for design content that survives (the `brix-oracle` reference
 design, the determinism discipline, the ring-model orchestration and gate
 vocabulary).
 
+- `archive/BrixMS_v9_0.md` — the pre-SOC "Living Model" v9 language and
+  platform specification. Superseded by the SOC constitution
+  ([`ADR-0002`](./adr/ADR-0002_SOC_Constitution.md)),
+  [`SOC_Semantic_Laws.md`](./SOC_Semantic_Laws.md), and
+  [`Type_Realization_Contract.md`](./Type_Realization_Contract.md). Retained
+  as the finite-presentation frontend's source material, the `brix.type`
+  structural-regime corpus, and (Appendix G) the normative sketch for
+  canonical encoding. `archive/BrixMS_Language_Specification_v9_0.md` is a
+  near-duplicate, pre-erratum fork of this file (moved here from `docs/`; see
+  its own header for the diff).
 - `archive/Ring0_Build_Plan.md` and its byte-identical duplicate
   `archive/BrixMS_Toolchain_Build_Plan_Ring0.md`
 - `archive/Build_Plan_v2.md` and its byte-identical duplicate
   `archive/BrixMS_Build_Plan_v2_Toolchain_First.md`
 
-All four are **superseded by `Build_Plan_v3_SOC.md`.** Under ADR-0002 the
-toolchain is demoted from the semantic center to a *finite `F_O`-presentation
-frontend*.
+The build-plan quartet is **superseded by `Build_Plan_v3_SOC.md`.** Under
+ADR-0002 the toolchain is demoted from the semantic center to a *finite
+`F_O`-presentation frontend*.
+
+### A note on ADR-0028
+
+There are two documents numbered ADR-0028 — a drafting-order collision, not a
+correction of one by the other. Both are accepted and both stay under their
+current filenames because too much else already links to them by full name:
+
+- [`ADR-0028_Typing_Over_Context_Expression_Pairs.md`](./adr/ADR-0028_Typing_Over_Context_Expression_Pairs.md)
+  — the native typing regime judges `(Γ, e)` pairs, not bare expressions
+  (`Type_Realization_Contract.md`'s ⟨D-CTXENDPOINT⟩/⟨D-CTXPUBLISH⟩).
+- [`ADR-0028_Witness_Provider_Ontology.md`](./adr/ADR-0028_Witness_Provider_Ontology.md)
+  — witness providers present candidates without becoming a separate semantic
+  entity (referenced by `ADR-0029`, `ADR-0030`, and SOC-LAW-07's governance
+  monotonicity).
+
+A bare "ADR-0028" elsewhere in the repo, with no filename or link, almost
+always means whichever of the two its surrounding sentence is actually about
+— check the topic, not just the number.
 
 ## Related, elsewhere in the repo
 
-- **`docs/`** — the SOC foundation `.tex`, the language specification long form,
-  and the scientific-article materials (draft `.md`/`.tex`/`.pdf` and outline).
-  The article materials are left in place (active LaTeX build artifacts).
+- **`docs/`** — the SOC foundation `.tex`
+  ([`SOC_core_foundations_revised.tex`](../docs/SOC_core_foundations_revised.tex)),
+  the scientific-article outline
+  ([`BrixMS_Scientific_Article_Outline.md`](../docs/BrixMS_Scientific_Article_Outline.md)),
+  the conceptual language overview
+  ([`brix-language.md`](../docs/brix-language.md)), the trusted-boundary audit
+  record (`audit/`), and forward-looking design notes (`planning/`, which
+  documents proposed syntax on purpose — it is not a description of shipped
+  behavior). There is no separate article `.tex`/`.pdf` draft beyond the
+  outline and the foundation document itself.
 - **`crates/brix-semantic/`** — the substrate implementation (ADR-0002 §6): the
   outcome lattice, `ContextId` root anchor, and the artifact identities, being
   extended with the SOC artifacts (`Witness`, `RegimeId`, `𝒢`, `Decomposition`,

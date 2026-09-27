@@ -12,7 +12,7 @@
 //!    **cannot** cross-check the corpus: `Spec::encode` drives a real
 //!    `CanonWriter`, so it is the production encoder checking itself;
 //! 2. `scripts/canon_crosscheck.py` — a genuinely independent implementation, in
-//!    another language, written from `spec/BrixMS_v9_0.md` Appendix G plus the
+//!    another language, written from `spec/archive/BrixMS_v9_0.md` Appendix G plus the
 //!    canon-lane errata 0001, 0002, and 0003 in `spec/errata/`. It replays the
 //!    same declarative specs and must
 //!    reproduce the same bytes, and it never reads this crate. CI runs it beside
