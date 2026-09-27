@@ -56,6 +56,10 @@ pub enum Command {
         json: bool,
         package_paths: Vec<PathBuf>,
     },
+    Test {
+        files: Vec<PathBuf>,
+        json: bool,
+    },
     Help,
     Version,
 }
@@ -160,6 +164,7 @@ where
         "verify" => parse_verify_args(subcmd_args, json_requested),
         "why" => parse_why_args(subcmd_args, json_requested, false),
         "whynot" => parse_why_args(subcmd_args, json_requested, true),
+        "test" => parse_test_args(subcmd_args, json_requested),
         _ => Err(CliUsageError::usage(
             format!("unknown command: '{subcmd}'\nRun 'brix --help' for usage details."),
             json_requested,
@@ -659,6 +664,42 @@ fn parse_why_args(args: &[String], json: bool, is_whynot: bool) -> Result<Comman
     }
 }
 
+/// Parse `brix test <file.test.json>... [--json]` arguments.
+///
+/// Unlike the other subcommands, `test` accepts one or more positional suite file operands
+/// (a suite carries its own `program` and `package_paths`, resolved relative to itself), and
+/// takes no `--input` or `--package-path` options of its own.
+fn parse_test_args(args: &[String], json: bool) -> Result<Command, CliUsageError> {
+    let mut files = Vec::new();
+    let mut i = 0;
+
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json" {
+            // Handled
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some("test".to_string()),
+            ));
+        } else {
+            files.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+
+    if files.is_empty() {
+        return Err(CliUsageError::usage(
+            "missing required file operand for 'brix test'",
+            json,
+            Some("test".to_string()),
+        ));
+    }
+
+    Ok(Command::Test { files, json })
+}
+
 pub fn print_help() {
     println!(
         "\
@@ -684,6 +725,12 @@ Commands:
 
   whynot <file.brix> --candidate <name> [--input <path>...] [--json] [--package-path <dir>...]
       Explain why a candidate was not admitted or not selected in deliberation.
+
+  test <file.test.json>... [--json]
+      Run one or more regression test suites of the form \"these inputs -> this decision\".
+      Each suite is a strict 'brix.test@1' JSON file naming a program, optional package
+      paths, and cases with input files and expected status/decision/value/candidates/facts.
+      Paths inside a suite resolve relative to the suite file's own directory.
 
 Input Format:
   External inputs are supplied via repeatable '--input <path>' files conforming to
@@ -1057,6 +1104,48 @@ mod tests {
                 input_paths: vec![PathBuf::from("val.json")],
             }
         );
+    }
+
+    #[test]
+    fn test_test_command_shapes() {
+        // Single suite file
+        let cmd = parse_args(["test", "suite.test.json"]).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Test {
+                files: vec![PathBuf::from("suite.test.json")],
+                json: false,
+            }
+        );
+
+        // Multiple suite files, with --json interspersed
+        let cmd = parse_args(["test", "a.test.json", "--json", "b.test.json"]).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Test {
+                files: vec![PathBuf::from("a.test.json"), PathBuf::from("b.test.json")],
+                json: true,
+            }
+        );
+
+        // Missing file operand
+        let err = parse_args(["test"]).unwrap_err();
+        assert!(err
+            .message
+            .contains("missing required file operand for 'brix test'"));
+
+        // Unknown option rejected
+        let err = parse_args(["test", "suite.test.json", "--bogus"]).unwrap_err();
+        assert!(err.message.contains("unknown option: '--bogus'"));
+
+        // Subcommand help/version rejected like other subcommands
+        assert!(parse_args(["test", "--help"]).is_err());
+        assert!(parse_args(["test", "-h"]).is_err());
+
+        // --json usage error is reported as JSON-capable
+        let err = parse_args(["test", "--json"]).unwrap_err();
+        assert!(err.is_json);
+        assert_eq!(err.command, Some("test".to_string()));
     }
 
     #[test]
