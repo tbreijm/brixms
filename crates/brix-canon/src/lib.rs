@@ -8,7 +8,7 @@
 //!
 //! # Appendix G, implemented
 //!
-//! This crate implements the byte-level rules of `spec/BrixMS_v9_0.md`
+//! This crate implements the byte-level rules of `spec/archive/BrixMS_v9_0.md`
 //! Appendix G. The one non-obvious cross-cutting property is that **canonical
 //! byte order equals value order** ("`Ord` = Appendix G byte order", spec
 //! §"Numerics and ordering"). That forces the integer, decimal, and string
@@ -46,7 +46,7 @@
 //! - floats — excluded from key positions; [`total_order_key_f64`] provides the
 //!   totalOrder tiebreak bytes used only for aggregation ordering.
 //!
-//! Normative reference: `spec/BrixMS_v9_0.md` Appendix G (canonical encoding).
+//! Normative reference: `spec/archive/BrixMS_v9_0.md` Appendix G (canonical encoding).
 
 mod decimal;
 mod float;

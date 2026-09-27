@@ -1,3 +1,11 @@
+> **ARCHIVED — superseded by the SOC constitution.** This describes the
+> pre-SOC "Living Model" v9 language and platform design. It is not
+> normative; see [`ADR-0002`](../adr/ADR-0002_SOC_Constitution.md),
+> [`SOC_Semantic_Laws.md`](../SOC_Semantic_Laws.md), and
+> [`Type_Realization_Contract.md`](../Type_Realization_Contract.md) for the
+> current governing documents. Retained for historical reference and as the
+> finite-presentation frontend's source material (see `spec/README.md`).
+
 # BrixMS Language Specification v9.0
 
 **The Living Model Edition — complete, unified with the execution line**

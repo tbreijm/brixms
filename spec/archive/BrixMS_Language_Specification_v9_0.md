@@ -1,3 +1,12 @@
+> **ARCHIVED — moved from `docs/`, and not normative.** A near-duplicate,
+> pre-erratum fork of [`BrixMS_v9_0.md`](./BrixMS_v9_0.md) in this same
+> directory: it describes the same pre-SOC "Living Model" v9 language but
+> predates the Erratum 0001/0002 amendments folded into that copy (compare
+> the two `EdgeId`/`MatchDigest`/entity-`ensure` passages). Treat
+> `BrixMS_v9_0.md` as the more complete historical copy; see
+> [`ADR-0002`](../adr/ADR-0002_SOC_Constitution.md) for the current governing
+> constitution.
+
 # BrixMS Language Specification v9.0
 
 **The Living Model Edition — complete, unified with the execution line**
