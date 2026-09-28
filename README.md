@@ -270,7 +270,7 @@ covered by executable gates:
 | --- | --- |
 | Brix language | Hand-written lexer/parser; functions and bindings; records and algebraic sums; directly recursive and parameterized configurations; matching; arithmetic and comparison; grade annotations |
 | Type realization | Tree-shaped derivations, conflict reporting, declared function contracts, certified match coverage, and honest per-result grade caps |
-| Command line | `check`, `run`, `audit`, `verify`, `why`, and `whynot` |
+| Command line | `check`, `run`, `audit`, `verify`, `why`, `whynot`, `test`, `kb`, and `serve --stdio` (JSON-lines protocol, with a Python client) |
 | Settlement runtime | Admission policies, deterministic keyed selection, transactional candidate deltas, persistent state, append-only journals, and deterministic replay |
 | Incremental engine | Materialized candidate views, footprint indexing, differential agreement with the naïve oracle, and the green O(Δ) gate |
 | Audit | Replay-verified decompositions, authority-checked `Audited` publication, oracle-bound receipts, and source-re-derived L3 manifests |
@@ -291,6 +291,13 @@ Execution profiles currently in the workspace:
   at runtime; the runtime decision remains `@Derived`, while successful independent replay issues and
   verifies separate `@Audited` audit receipts via audit bundle verification;
 - `brix run`, `audit`, `verify`, `why`, and `whynot` drive the finite-decision alpha workflow (with repeatable `--input` support);
+- decision programs can also use recursive pure helpers, bounded lists and
+  finite relations over them, inferred rule dependencies with an `otherwise`
+  fallback, several independent `commit` decisions, and per-entity `decide`
+  blocks (see [Beyond the alpha](#beyond-the-alpha-source-build) below);
+- `brix test` runs "these inputs → this decision" regression suites, `brix kb`
+  keeps a persistent, revisable knowledge base with replay-verified history,
+  and `brix serve --stdio` embeds the engine in another process;
 - `crates/brix-lower` additionally contains Stages A–C of L3 v2 derivation
   ([ADR-0027](./spec/adr/ADR-0027_L3_V2_Derivation.md)).
 
@@ -324,11 +331,12 @@ cargo run -p brix-cli -- check crates/brix-lower/tests/fixtures/id.brix
 The final command prints:
 
 ```text
-r : — @Proven
+r : Int @Proven = 42
 ```
 
-(`brix check` reports each `let` binding's name and the evidence grade it
-earned; it does not print the inferred type on this line today — see
+(`brix check` reports each `let` binding's name, its inferred type, the
+evidence grade it earned, and, when the expression lies in the fragment the
+shared evaluator runs, its value; see
 [`docs/brix-language.md`](./docs/brix-language.md).)
 
 ### Prebuilt archive installation (published releases lag behind source)
@@ -376,6 +384,8 @@ fn head_or(xs: List<Int>, fallback: Int): Int = match xs {
 
 let answer: Int @Proven = head_or(Cons(42, Nil), 0)
 ```
+
+`brix check` prints `answer : Int @Proven = 42`.
 
 The annotation is a contract, not documentation: the checker must establish
 both the declared type and the requested evidence grade.
@@ -534,7 +544,7 @@ Multiple disjoint shards can be passed repeatably by specifying `--input` multip
 
 ### CLI guide
 
-The `brix` CLI driver provides six file-oriented subcommands:
+The `brix` CLI driver provides these subcommands:
 
 ```text
 brix check   <file.brix> [--input <path>...] [--json] [--package-path <dir>...]
@@ -549,17 +559,26 @@ brix audit   <file.brix> --bundle <out> [--input <path>...] [--force] [--json] [
 brix verify  --expect-program <hex> <file.brix> <bundle> [--profile <finite-decision|l3-v1>] [--input <path>...] [--json] [--package-path <dir>...]
              verify an audit input bundle against source and expected program pin (@Audited)
 
-brix why     <file.brix> --candidate <name> [--input <path>...] [--json] [--package-path <dir>...]
+brix why     <file.brix> --candidate <name> [--entity <index>] [--input <path>...] [--json] [--package-path <dir>...]
              explain why a candidate was admitted or selected in deliberation
 
-brix whynot  <file.brix> --candidate <name> [--input <path>...] [--json] [--package-path <dir>...]
+brix whynot  <file.brix> --candidate <name> [--entity <index>] [--input <path>...] [--json] [--package-path <dir>...]
              explain why a candidate was not admitted or not selected in deliberation
+
+brix test    <file.test.json>... [--json]
+             run "these inputs -> this decision" regression suites (brix.test@1)
+
+brix kb      init|assert|retract|program|log|show|diff|audit|verify <dir> ...
+             keep a persistent, revisable knowledge base (ADR-0041); `brix --help` lists each form
+
+brix serve   --stdio
+             serve the same commands over a JSON-lines protocol (brix.serve@1, ADR-0044)
 ```
 
 Global options: `--help` and `--version`.
 
 Input options:
-- `--input <path>` (or `--input=<path>`) can be repeated to supply disjoint input shards conforming to the strict `brix.input@1` JSON schema.
+- `--input <path>` (or `--input=<path>`) can be repeated to supply disjoint input shards conforming to the strict `brix.input@N` JSON schemas: `@1` scalars, `@2` records and variants, `@3` bounded lists.
 - `brix verify --profile l3-v1` rejects `--input` (exiting with usage error code 2), as external input shards apply to the `finite-decision` profile.
 
 From a source workspace, prefix a command with `cargo run -p brix-cli --`, or build
@@ -739,10 +758,73 @@ ordinals `0`-`15` of the canonical expression encoding keep their existing
 meanings and bytes, and the new operation is a distinct ordinal appended after
 them.
 
+### Beyond the alpha (source build)
+
+These extensions are implemented in the source tree and covered by the same
+gates. Each keeps the program ids of programs that do not use it; the
+examples below are pinned by frozen identity tests. The full reference, with
+checked snippets, is [`docs/brix-language.md`](./docs/brix-language.md).
+
+- **Recursion** ([ADR-0042](./spec/adr/ADR-0042_One_Evaluator.md)): helpers
+  may call themselves or each other. Evaluation is bounded by call depth and a
+  step budget; a program that runs out fails closed to `Unknown` instead of
+  being rejected up front. The `let` lane and the decision lane now share one
+  evaluator, so `brix check` prints values too.
+- **Bounded lists and relations**
+  ([ADR-0037](./spec/adr/ADR-0037_Bounded_Lists_And_Folds.md),
+  [ADR-0040](./spec/adr/ADR-0040_Finite_Relations.md)): `input orders:
+  List<Order> max 64`, list literals, `sum`/`count`/`all`/`any`/`min`/`max`,
+  `filter`, `map`, `distinct`, `len`, `in`, and joins written as
+  `for o in orders, s in stock where o.sku == s.sku yield …`. Inputs use
+  `brix.input@3`. See [`examples/fulfillment.brix`](./examples/fulfillment.brix).
+- **Less ceremony** ([ADR-0038](./spec/adr/ADR-0038_Inferred_Dependencies_And_Otherwise.md)):
+  dependency lists are inferred from what a rule or proposal reads, and
+  `propose hold otherwise = Hold` declares the fallback.
+- **Several decisions per program**
+  ([ADR-0039](./spec/adr/ADR-0039_Multiple_Commit_Pools.md)): each `commit`
+  block is an independent decision; see
+  [`examples/order-desk.brix`](./examples/order-desk.brix).
+- **Per-entity decisions**
+  ([ADR-0043](./spec/adr/ADR-0043_Per_Entity_Decisions.md)): one decision
+  for each element of a list.
+
+```brix
+decide status for o in orders {
+  propose ship priority 1 when any(stock, s => s.sku == o.sku && s.on_hand >= o.units) = Ship
+  propose backorder priority 2 when any(stock, s => s.sku == o.sku) = Backorder
+  propose hold otherwise = Hold
+}
+```
+
+```bash
+cargo run -p brix-cli -- run examples/order-book.brix --input examples/order-book.json
+```
+
+prints one line per order (`[0] Order { id: 1, sku: 100, units: 5 }: ship =
+Ship @Derived`, …), and `brix why examples/order-book.brix --candidate
+backorder --entity 1 --input examples/order-book.json` explains one of them.
+
+- **Regression suites**: `brix test examples/*.test.json` checks every example
+  against its expected decisions.
+- **Knowledge base** ([ADR-0041](./spec/adr/ADR-0041_Persistent_Knowledge_Base.md)):
+  `brix kb init`, then `assert`/`retract` facts or change the program; each
+  revision is replayed and verifiable, and `brix kb diff` explains what changed.
+- **Embedding** ([ADR-0044](./spec/adr/ADR-0044_Serve_Protocol.md)):
+  `brix serve --stdio` answers one JSON request per line with the same result
+  objects `--json` prints. A standard-library Python client lives in
+  [`bindings/python/`](./bindings/python/) (`pip install -e bindings/python`):
+
+```python
+from brix import BrixClient, path
+
+with BrixClient() as client:
+    result = client.run(program=path("examples/shipping.brix"))
+    print(result["status"], result["decision"])
+```
+
 **CLI target surface & status:**
-- `brix` implements exactly the six subcommands above.
 - `brix verify` implements offline verification of ADR-0026 audit input transport bundles.
-- `brix test`, `brix sim`, and interactive REPLs are deliberately out of scope and not implemented.
+- `brix sim` and interactive REPLs are not implemented.
 
 ## What is coming
 
@@ -778,7 +860,7 @@ The precise status is intentionally explicit:
 - arithmetic and comparison currently top out at `Audited` where primitive
   leaves remain undischarged;
 - catch-all matching is also deliberately capped;
-- the finite-decision profile admits only nonrecursive pure helper calls;
+- recursion in either lane is bounded by call depth and a step budget and fails closed to `Unknown`; termination is never claimed;
 - certified refutation does not exist yet, so negative results are conflicts or
   `Unknown`, never `Refuted`;
 - context confinement and several durable artifact obligations remain partial.

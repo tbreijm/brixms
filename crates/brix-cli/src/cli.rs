@@ -1385,10 +1385,11 @@ Commands:
   verify --expect-program <hex> <file.brix> <bundle> [--profile <finite-decision|l3-v1>] [--input <path>...] [--json] [--package-path <dir>...]
       Verify an audit input bundle against source and external expected program pin.
 
-  why <file.brix> --candidate <name> [--input <path>...] [--json] [--package-path <dir>...]
-      Explain why a candidate was admitted or selected in deliberation.
+  why <file.brix> --candidate <name> [--entity <index>] [--input <path>...] [--json] [--package-path <dir>...]
+      Explain why a candidate was admitted or selected in deliberation. For a
+      candidate inside a per-entity 'decide' block, --entity names the list element.
 
-  whynot <file.brix> --candidate <name> [--input <path>...] [--json] [--package-path <dir>...]
+  whynot <file.brix> --candidate <name> [--entity <index>] [--input <path>...] [--json] [--package-path <dir>...]
       Explain why a candidate was not admitted or not selected in deliberation.
 
   test <file.test.json>... [--json]
@@ -1435,7 +1436,8 @@ Commands:
 
 Input Format:
   External inputs are supplied via repeatable '--input <path>' files conforming to
-  the strict 'brix.input@1' JSON schema.
+  the strict 'brix.input@N' JSON schemas (@1 scalars, @2 records and variants,
+  @3 bounded lists).
 
 Global Options:
   --help       Print help information

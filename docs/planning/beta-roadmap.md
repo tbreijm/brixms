@@ -36,31 +36,23 @@ sign the foundation is weak:
 
 ## The core gap
 
-The user-reachable product today is **one program, one decision, over at
-most 256 inputs.** There is no knowledge *base*:
+When this roadmap was written, the product was **one program, one decision,
+over at most 256 scalar inputs**, with nothing persisted between runs. Most
+of that gap has since closed:
 
-- `rule threshold() = 10` is a named scalar, not a relation — there is no way
-  to say "for every order, its threshold is..." and have that range over a
-  set of orders.
-- A finite-decision module may contain only **one** `commit`
-  (`FiniteDecisionLowerError::MultipleCommits`); there is no way to decide
-  once per entity in a batch.
-- Nothing persists between runs. Every invocation of `brix run` starts from
-  the source and the `--input` files given on that command line; there is no
-  on-disk fact store and nothing to revise.
-- The incremental engine (`soc_core::engine::IncrementalEngine`) exists and
-  is proven to hold the O(Δ) invariant, but it is wired into only the L3 v1
-  rule-agenda path (`crates/brix-lower/src/l3_run.rs`) — which `brix run`
-  does not call. The path a user actually exercises re-derives everything,
-  every time.
-- Correction/retraction non-erasure (SOC-LAW-09) is **Partial**: the
-  evidence-durability taxonomy exists, but there is no invalidation engine
-  that makes "what changed, and what does that invalidate" a real,
-  user-visible operation (tracked as #59, #178).
+- **Relations.** Bounded list inputs (`brix.input@3`), folds, `filter`/`map`,
+  and multi-generator joins (ADR-0037, ADR-0040).
+- **More than one decision.** Several independent `commit` blocks (ADR-0039)
+  and per-entity `decide … for o in orders` blocks (ADR-0043).
+- **Persistence.** `brix kb` keeps revisions as a hash-chained, replayable
+  history with assert, retract, program change, diff, audit and verify
+  (ADR-0041).
+- **Integration.** `brix serve --stdio` and a Python client (ADR-0044).
 
-Put together: BrixMS can settle one bounded decision honestly and prove it
-stayed honest. It cannot yet model a domain of things, hold facts about them,
-or tell you what changed when a fact does. That is the beta gap.
+What remains is below each milestone. The largest open items are quantified
+rule schemas with per-tuple witnesses, incremental re-derivation (`brix kb`
+replays each revision in full; `IncrementalEngine` is still wired only into
+the L3 v1 path), CSV loading, and the explanation features at the end.
 
 ---
 
@@ -159,9 +151,12 @@ expression can name), list literals, `in`, `len`, and `distinct` — see
 [`examples/fulfillment.brix`](../../examples/fulfillment.brix). What remains
 open from this milestone: a **rule schema** (quantifying a `rule` itself over
 a bounded domain, rather than joining lists an expression already holds),
-per-tuple witness composition, and multiple/per-entity commits — none of
-which ADR-0040 attempts (its own scope note says so explicitly). The open
-design questions below are unchanged by this progress.
+per-tuple witness composition — neither of which ADR-0040 attempts (its own
+scope note says so explicitly). Multiple commits landed in ADR-0039 and
+per-entity commits in ADR-0043: each instance of a `decide` block deliberates
+with its own calendar phase, all instances append to one journal in a fixed
+order, and `brix audit`/`verify` replay them all. The first three open design
+questions below remain open; the fourth is answered by ADR-0043.
 
 **Open design questions.**
 
@@ -212,6 +207,14 @@ long-lived command exposes (today it sits unused behind `l3_run.rs`). A
 this is what would make both the O(Δ) cost invariant and SOC-LAW-09
 *user-visible*, not just true of an internal benchmark.
 
+**Progress.** ADR-0041 landed `brix kb`: a directory holding hash-chained
+revisions, each a full input snapshot under one program. Every read replays
+from scratch, `brix kb diff` reports which inputs, facts and decisions
+changed and why, `brix kb audit` emits a standard audit bundle for any
+revision, and `brix kb verify` re-checks the whole chain. Still open: CSV
+loading and incremental re-derivation. `brix kb` is honest about cost but
+does not yet make the O(Δ) story user-visible.
+
 **Open design questions.**
 
 - What is the journal's on-disk format, and how does it relate to the
@@ -242,6 +245,10 @@ this is what would make both the O(Δ) cost invariant and SOC-LAW-09
 ---
 
 ## Surface ergonomics needing ADRs
+
+*Both items below landed in ADR-0038: dependency lists are inferred when
+omitted (an explicit list is still checked), and `otherwise` declares the
+fallback. Programs that use neither keep their identities.*
 
 Small in surface area, but each can move program identity or change what an
 existing declaration means — so each needs a real design decision, not a
@@ -281,6 +288,10 @@ through an ADR, not a silent parser change.
   exists.
 
 ## Integration
+
+*The server and the Python binding landed in ADR-0044 as `brix serve --stdio`
+(JSON lines) and a standard-library client in `bindings/python/`. The stable
+Rust facade is still open.*
 
 - **A stable Rust facade.** Something a host application links against
   directly, with a compatibility contract, rather than the current
