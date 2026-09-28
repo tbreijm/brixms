@@ -26,6 +26,7 @@ pub mod commands;
 pub mod json;
 pub mod packages;
 pub mod pipeline;
+pub mod serve;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -122,6 +123,7 @@ where
         ),
         Ok(cli::Command::Test { files, json }) => commands::test::execute_test(&files, json),
         Ok(cli::Command::Kb { op, json }) => commands::kb::execute_kb(&op, json),
+        Ok(cli::Command::Serve) => serve::run_stdio(),
         Err(err) => {
             if err.is_json {
                 let cmd_name = err.command.unwrap_or_else(|| "brix".to_string());

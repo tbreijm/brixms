@@ -65,6 +65,8 @@ pub enum Command {
         op: KbOp,
         json: bool,
     },
+    /// `brix serve --stdio` — the embeddable JSON-lines protocol (ADR-0044).
+    Serve,
     Help,
     Version,
 }
@@ -223,6 +225,7 @@ where
         "whynot" => parse_why_args(subcmd_args, json_requested, true),
         "test" => parse_test_args(subcmd_args, json_requested),
         "kb" => parse_kb_args(subcmd_args, json_requested),
+        "serve" => parse_serve_args(subcmd_args),
         _ => Err(CliUsageError::usage(
             format!("unknown command: '{subcmd}'\nRun 'brix --help' for usage details."),
             json_requested,
@@ -756,6 +759,28 @@ fn parse_test_args(args: &[String], json: bool) -> Result<Command, CliUsageError
     }
 
     Ok(Command::Test { files, json })
+}
+
+/// Parse `brix serve --stdio` arguments. `--stdio` is required (the only
+/// transport ADR-0044 defines so far) and no other flags or operands are
+/// accepted; `--json` has no effect on `serve` (every response is already
+/// JSON), so it is deliberately not recognized here.
+fn parse_serve_args(args: &[String]) -> Result<Command, CliUsageError> {
+    if args == ["--stdio"] {
+        return Ok(Command::Serve);
+    }
+    if args.is_empty() {
+        return Err(CliUsageError::usage(
+            "usage: brix serve --stdio",
+            false,
+            Some("serve".to_string()),
+        ));
+    }
+    Err(CliUsageError::usage(
+        format!("unknown option(s) for 'brix serve': '{}'", args.join(" ")),
+        false,
+        Some("serve".to_string()),
+    ))
 }
 
 /// Parse `--package-path <dir>` / `--package-path=<dir>`, matching
@@ -1369,6 +1394,12 @@ Commands:
   kb verify <dir> [--package-path <dir>...] [--json]
       Verify the whole knowledge base: every revision's digest, parent chain,
       recomputed program/snapshot identities, and a fresh replay of its result.
+
+  serve --stdio
+      Run a long-running JSON-lines protocol (schema 'brix.serve@1') over
+      stdin/stdout: one request per line, one response per line, for
+      embedding the engine in another process instead of spawning a CLI
+      invocation per call. See spec/adr/ADR-0044_Serve_Protocol.md.
 
 Input Format:
   External inputs are supplied via repeatable '--input <path>' files conforming to
