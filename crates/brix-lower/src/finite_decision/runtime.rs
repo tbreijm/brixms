@@ -286,6 +286,93 @@ impl FiniteDecisionCommitRun {
     }
 }
 
+/// One element's own settlement outcome within a `decide` block's per-entity
+/// deliberation (ADR-0043). Every instance deliberates independently among
+/// its block's own candidates, exactly like a top-level commit pool; `index`
+/// is the element's position in the block's list, and `binder` is the
+/// element value itself, bound under the block's binder name while this
+/// instance's guards/values were evaluated.
+#[derive(Clone, Debug)]
+pub struct FiniteDecisionEntityRun {
+    pub index: usize,
+    pub binder: L3ValueV2,
+    pub decision: Option<SelectedDecision>,
+    pub dispositions: Vec<CandidateDisposition>,
+    /// Always [`FiniteDecisionStop::Selected`] or
+    /// [`FiniteDecisionStop::Quiescent`] — never `Unknown`: a fault in any
+    /// one instance fails the whole block closed
+    /// ([`FiniteDecisionDecideRun::stop`]) rather than reporting a partial,
+    /// per-instance fault (ADR-0043, following ADR-0039's per-pool
+    /// all-or-nothing discipline one level down, to the block's own
+    /// instances).
+    pub stop: FiniteDecisionStop,
+    /// This instance's own committed step, if it selected a candidate.
+    pub step: Option<CommittedStep>,
+}
+
+impl FiniteDecisionEntityRun {
+    pub fn is_selected(&self) -> bool {
+        matches!(self.stop, FiniteDecisionStop::Selected(_))
+    }
+
+    pub fn is_quiescent(&self) -> bool {
+        matches!(self.stop, FiniteDecisionStop::Quiescent { .. })
+    }
+}
+
+/// A `decide` block's own outcome (ADR-0043): all-or-nothing across its own
+/// instances — either every element settled (selection or quiescence) and
+/// [`Self::instances`] holds one [`FiniteDecisionEntityRun`] per element, in
+/// list order, or any single instance's fault (or the block's list
+/// expression itself faulting, or the program-wide instance cap being
+/// exceeded) makes the *whole block* [`FiniteDecisionDecideStop::Unknown`]
+/// with `instances` empty. A fault in one `decide` block never affects a
+/// sibling `decide` block or any `commit` pool, exactly as ADR-0039 already
+/// establishes between independent commit pools.
+#[derive(Clone, Debug)]
+pub struct FiniteDecisionDecideRun {
+    pub decide: String,
+    pub instances: Vec<FiniteDecisionEntityRun>,
+    pub stop: FiniteDecisionDecideStop,
+}
+
+impl FiniteDecisionDecideRun {
+    pub fn is_unknown(&self) -> bool {
+        matches!(self.stop, FiniteDecisionDecideStop::Unknown(_))
+    }
+
+    /// The decided values, in element order — what `show <decide name>`
+    /// evaluates to (ADR-0043). `None` when the block itself is Unknown, or
+    /// an instance is quiescent and so contributes no value.
+    pub fn decided_values(&self) -> Option<Vec<L3ValueV2>> {
+        if self.is_unknown() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(self.instances.len());
+        for inst in &self.instances {
+            let decision = inst.decision.as_ref()?;
+            out.push(decision.value.clone());
+        }
+        Some(out)
+    }
+}
+
+/// Termination status of one `decide` block's per-entity deliberation
+/// (ADR-0043) — block-level, distinct from [`FiniteDecisionStop`], which
+/// describes a single pool's or a single instance's own outcome.
+#[derive(Clone, Debug)]
+pub enum FiniteDecisionDecideStop {
+    /// Every instance settled (selected or quiescent); see
+    /// [`FiniteDecisionDecideRun::instances`].
+    Settled,
+    /// The block's list expression faulted, an instance's guard/value
+    /// faulted, an instance's deliberation faulted, or the program-wide
+    /// instance cap ([`crate::finite_decision::plan::MAX_TOTAL_DECIDE_INSTANCES`])
+    /// was exceeded. All-or-nothing: no instance in this block published a
+    /// decision.
+    Unknown(FiniteDecisionUnknownReason),
+}
+
 /// The complete report of a finite-decision deliberation run.
 ///
 /// `decision`, `dispositions`, `final_world`, and `stop` mirror the *first*
@@ -310,6 +397,9 @@ pub struct FiniteDecisionRun {
     /// `commits[0]` is exactly what `decision`/`dispositions`/`final_world`/
     /// `stop` above report.
     pub commits: Vec<FiniteDecisionCommitRun>,
+    /// Every `decide` block's own outcome, in declaration order (ADR-0043).
+    /// Empty for a module that declares none.
+    pub decides: Vec<FiniteDecisionDecideRun>,
 }
 
 impl FiniteDecisionRun {
@@ -346,6 +436,11 @@ impl FiniteDecisionRun {
     /// Look up a commit pool's own outcome by its declared name.
     pub fn commit_run(&self, name: &str) -> Option<&FiniteDecisionCommitRun> {
         self.commits.iter().find(|c| c.commit == name)
+    }
+
+    /// Look up a `decide` block's own outcome by its declared name (ADR-0043).
+    pub fn decide_run(&self, name: &str) -> Option<&FiniteDecisionDecideRun> {
+        self.decides.iter().find(|d| d.decide == name)
     }
 }
 
@@ -758,6 +853,16 @@ impl FiniteDecisionRuntime {
                         step: None,
                     })
                     .collect();
+                let decides: Vec<FiniteDecisionDecideRun> = self
+                    .plan
+                    .decides
+                    .iter()
+                    .map(|decide| FiniteDecisionDecideRun {
+                        decide: decide.name.clone(),
+                        instances: Vec::new(),
+                        stop: FiniteDecisionDecideStop::Unknown(reason.clone()),
+                    })
+                    .collect();
                 FiniteDecisionRun {
                     program: self.program,
                     context: self.context,
@@ -769,6 +874,7 @@ impl FiniteDecisionRuntime {
                     final_world: self.initial_world,
                     stop: FiniteDecisionStop::Unknown(reason),
                     commits,
+                    decides,
                 }
             };
 
@@ -816,18 +922,35 @@ impl FiniteDecisionRuntime {
         // Steps 3-6 deliberate each commit pool independently (ADR-0039): a
         // candidate never competes against a candidate from another pool,
         // but every pool sees the rules/lets/facts computed once above.
+        // Each pool's own calendar phase is its declaration-order index.
         let commits: Vec<FiniteDecisionCommitRun> = self
             .plan
             .commits
             .iter()
-            .map(|pool| self.run_pool(pool, &env))
+            .enumerate()
+            .map(|(i, pool)| self.run_pool(pool, &env, i as u64))
             .collect();
 
-        // Journal every pool's own step (if any), in commit declaration order.
+        // `decide` blocks (ADR-0043) deliberate independently of every
+        // commit pool and of each other; their calendar phases continue
+        // where the commit pools' own left off, so no pool and no instance
+        // ever shares a phase.
+        let decides = self.run_decides(&env, self.plan.commits.len() as u64);
+
+        // Journal every pool's own step (if any), in commit declaration
+        // order, then every decide block's own instances' steps, in block
+        // declaration order and then element index (ADR-0043).
         let mut journal = Journal::new();
         for c in &commits {
             if let Some(step) = c.step.clone() {
                 journal.append(step);
+            }
+        }
+        for d in &decides {
+            for inst in &d.instances {
+                if let Some(step) = inst.step.clone() {
+                    journal.append(step);
+                }
             }
         }
 
@@ -853,6 +976,209 @@ impl FiniteDecisionRuntime {
             final_world,
             stop,
             commits,
+            decides,
+        }
+    }
+
+    /// Instantiate and deliberate every `decide` block (ADR-0043): evaluate
+    /// each block's list expression once against `env` (already carrying
+    /// bound inputs/lets/facts), enforce the program-wide instance cap
+    /// across every block together, then deliberate each element
+    /// independently — all-or-nothing per block, exactly like
+    /// [`FiniteDecisionDecideRun`]'s own docs describe. `phase_offset` is
+    /// where this call's calendar phases start counting from (continuing
+    /// after every commit pool's own phase).
+    fn run_decides(&self, env: &EvalEnv, phase_offset: u64) -> Vec<FiniteDecisionDecideRun> {
+        if self.plan.decides.is_empty() {
+            return Vec::new();
+        }
+
+        // Evaluate every block's list once, up front, so the program-wide
+        // instance cap can be checked over every block's length together
+        // before any block's per-entity deliberation runs.
+        let mut lists: Vec<Result<Vec<L3ValueV2>, FiniteDecisionUnknownReason>> =
+            Vec::with_capacity(self.plan.decides.len());
+        let mut total: usize = 0;
+        for decide in &self.plan.decides {
+            let outcome = match eval(&decide.list, env) {
+                Ok(L3ValueV2::List(items)) => {
+                    total = total.saturating_add(items.len());
+                    Ok(items)
+                }
+                Ok(other) => Err(FiniteDecisionUnknownReason::TypeFault {
+                    context: format!("decide {} list", decide.name),
+                    detail: format!(
+                        "decide list expression must evaluate to a List, found {}",
+                        type_of_value(&other)
+                    ),
+                }),
+                Err(fault) => Err(FiniteDecisionUnknownReason::ExpressionEvaluationFault {
+                    context: format!("decide {} list", decide.name),
+                    fault,
+                }),
+            };
+            lists.push(outcome);
+        }
+
+        let cap_exceeded = total > crate::finite_decision::plan::MAX_TOTAL_DECIDE_INSTANCES;
+        let mut phase = phase_offset;
+
+        self.plan
+            .decides
+            .iter()
+            .zip(lists)
+            .map(|(decide, items_result)| {
+                let items = match items_result {
+                    Ok(items) => items,
+                    Err(reason) => {
+                        return FiniteDecisionDecideRun {
+                            decide: decide.name.clone(),
+                            instances: Vec::new(),
+                            stop: FiniteDecisionDecideStop::Unknown(reason),
+                        };
+                    }
+                };
+                if cap_exceeded {
+                    return FiniteDecisionDecideRun {
+                        decide: decide.name.clone(),
+                        instances: Vec::new(),
+                        stop: FiniteDecisionDecideStop::Unknown(
+                            FiniteDecisionUnknownReason::DependencyFault {
+                                context: format!("decide {}", decide.name),
+                                detail: format!(
+                                    "program-wide per-entity instance cap exceeded ({total} > {})",
+                                    crate::finite_decision::plan::MAX_TOTAL_DECIDE_INSTANCES
+                                ),
+                            },
+                        ),
+                    };
+                }
+                self.run_decide_block(decide, &items, env, &mut phase)
+            })
+            .collect()
+    }
+
+    /// Deliberate every element of one `decide` block, all-or-nothing
+    /// (ADR-0043): a fault at any point for any element makes the whole
+    /// block `Unknown` with no partial instance results. `phase` is
+    /// advanced by one for every instance actually deliberated (even one
+    /// that reports its own fault), so two calls never reuse a phase.
+    fn run_decide_block(
+        &self,
+        decide: &crate::finite_decision::plan::FiniteDecisionDecide,
+        items: &[L3ValueV2],
+        env: &EvalEnv,
+        phase: &mut u64,
+    ) -> FiniteDecisionDecideRun {
+        let unknown = |reason: FiniteDecisionUnknownReason| FiniteDecisionDecideRun {
+            decide: decide.name.clone(),
+            instances: Vec::new(),
+            stop: FiniteDecisionDecideStop::Unknown(reason),
+        };
+
+        let mut instances = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            let inst_env = env.clone().with_local(decide.binder.clone(), item.clone());
+            let this_phase = *phase;
+            *phase = phase.wrapping_add(1);
+
+            let mut admitted_names = BTreeSet::new();
+            let mut candidate_values = Vec::new();
+            let mut faulted: Option<FiniteDecisionUnknownReason> = None;
+
+            for proposal in &decide.proposals {
+                match eval(&proposal.guard, &inst_env) {
+                    Ok(L3ValueV2::Bool(true)) => {
+                        admitted_names.insert(proposal.name.clone());
+                    }
+                    Ok(L3ValueV2::Bool(false)) => {}
+                    Ok(other) => {
+                        faulted = Some(FiniteDecisionUnknownReason::TypeFault {
+                            context: format!(
+                                "decide {} [{index}] proposal {} guard",
+                                decide.name, proposal.name
+                            ),
+                            detail: format!(
+                                "guard must evaluate to Bool, found {}",
+                                type_of_value(&other)
+                            ),
+                        });
+                        break;
+                    }
+                    Err(eval_fault) => {
+                        faulted = Some(FiniteDecisionUnknownReason::ExpressionEvaluationFault {
+                            context: format!(
+                                "decide {} [{index}] proposal {} guard",
+                                decide.name, proposal.name
+                            ),
+                            fault: eval_fault,
+                        });
+                        break;
+                    }
+                }
+
+                match eval(&proposal.value, &inst_env) {
+                    Ok(v) => candidate_values.push((proposal.name.clone(), v)),
+                    Err(eval_fault) => {
+                        faulted = Some(FiniteDecisionUnknownReason::ExpressionEvaluationFault {
+                            context: format!(
+                                "decide {} [{index}] proposal {} value",
+                                decide.name, proposal.name
+                            ),
+                            fault: eval_fault,
+                        });
+                        break;
+                    }
+                }
+            }
+
+            if let Some(reason) = faulted {
+                return unknown(reason);
+            }
+
+            if candidate_values.len() > 1 {
+                let expected_type = type_of_value(&candidate_values[0].1);
+                for (name, val) in &candidate_values[1..] {
+                    let actual_type = type_of_value(val);
+                    if actual_type != expected_type {
+                        return unknown(FiniteDecisionUnknownReason::TypeFault {
+                            context: format!("decide {} [{index}] proposal values", decide.name),
+                            detail: format!(
+                                "proposal '{name}' value type {actual_type} does not match expected {expected_type}"
+                            ),
+                        });
+                    }
+                }
+            }
+
+            let candidate_names: Vec<String> =
+                decide.proposals.iter().map(|p| p.name.clone()).collect();
+            let entries = self.entity_entries(&decide.name, index, &decide.proposals);
+
+            let outcome = self.deliberate(
+                &candidate_names,
+                &entries,
+                &admitted_names,
+                candidate_values,
+                this_phase,
+            );
+            match outcome {
+                Ok(out) => instances.push(FiniteDecisionEntityRun {
+                    index,
+                    binder: item.clone(),
+                    decision: out.decision,
+                    dispositions: out.dispositions,
+                    stop: out.stop,
+                    step: out.step,
+                }),
+                Err((reason, _dispositions)) => return unknown(reason),
+            }
+        }
+
+        FiniteDecisionDecideRun {
+            decide: decide.name.clone(),
+            instances,
+            stop: FiniteDecisionDecideStop::Settled,
         }
     }
 
@@ -861,7 +1187,12 @@ impl FiniteDecisionRuntime {
     /// entries, and settle its own commit tick or certified quiescence. This
     /// is exactly what `run()` did for the (formerly sole) commit pool
     /// before ADR-0039; it is now called once per declared pool.
-    fn run_pool(&self, pool: &FiniteDecisionCommit, env: &EvalEnv) -> FiniteDecisionCommitRun {
+    fn run_pool(
+        &self,
+        pool: &FiniteDecisionCommit,
+        env: &EvalEnv,
+        phase: u64,
+    ) -> FiniteDecisionCommitRun {
         let fault = |reason: FiniteDecisionUnknownReason,
                      dispositions: Vec<CandidateDisposition>|
          -> FiniteDecisionCommitRun {
@@ -961,7 +1292,13 @@ impl FiniteDecisionRuntime {
             .filter(|e| pool.candidates.iter().any(|c| c == &e.name))
             .cloned()
             .collect();
-        match self.deliberate(&pool.candidates, &pool_entries, &admitted_names, candidate_values, 0) {
+        match self.deliberate(
+            &pool.candidates,
+            &pool_entries,
+            &admitted_names,
+            candidate_values,
+            phase,
+        ) {
             Ok(out) => FiniteDecisionCommitRun {
                 commit: pool.name.clone(),
                 decision: out.decision,
@@ -1042,6 +1379,7 @@ impl FiniteDecisionRuntime {
     /// already differs — see [`entity_proposal_digest`]), so it carries no
     /// correctness weight, but every pool and every entity instance gets its
     /// own value regardless.
+    #[allow(clippy::result_large_err)]
     fn deliberate(
         &self,
         candidate_names: &[String],
@@ -1608,6 +1946,15 @@ impl FiniteDecisionRuntime {
         for commit_run in &fresh_run.commits {
             if let Some(decision) = &commit_run.decision {
                 env = env.with_fact(commit_run.commit.clone(), decision.value.clone());
+            }
+        }
+        // A settled `decide` block's own name binds to the list of decided
+        // values, in element order (ADR-0043); an Unknown block (any
+        // instance faulted, or the block never settled) leaves its name
+        // unbound, exactly like a quiescent commit pool.
+        for decide_run in &fresh_run.decides {
+            if let Some(values) = decide_run.decided_values() {
+                env = env.with_fact(decide_run.decide.clone(), L3ValueV2::List(values));
             }
         }
         let mut results = Vec::with_capacity(shows.len());

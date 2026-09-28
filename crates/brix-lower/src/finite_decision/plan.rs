@@ -2357,9 +2357,14 @@ pub fn lower_finite_decision_plan(
                 // fact reference (`RuleFact`). It resolves once evaluation
                 // binds a fact under the commit's name; a quiescent run
                 // (no candidate selected) leaves that name unbound, which
-                // faults the show rather than the committed decision.
+                // faults the show rather than the committed decision. A
+                // `decide` block's own name is readable the same way
+                // (ADR-0043): `show status` for `decide status for o in
+                // orders {...}` reads the list of decided values in element
+                // order, bound once every instance has settled.
                 let mut show_readable = rule_names.clone();
                 show_readable.extend(commit_items.iter().map(|c| c.name.clone()));
+                show_readable.extend(decide_items.iter().map(|d| d.name.clone()));
                 let show = lower_expr_v2(
                     expr,
                     &visible_bindings,
