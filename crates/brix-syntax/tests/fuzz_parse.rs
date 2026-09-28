@@ -75,11 +75,26 @@ const KEYWORDS: &[&str] = &[
     "false",
     "proving",
     "exhaustive",
+    "for",
+    "in",
+    "where",
+    "yield",
+    "filter",
+    "map",
+    "sum",
+    "count",
+    "all",
+    "any",
+    "min",
+    "max",
+    "len",
+    "distinct",
+    "List",
 ];
 
 const SYMBOLS: &[&str] = &[
     "{", "}", "(", ")", ":", "=", "|", ",", ".", "@", "=>", "+", "-", "*", "/", "<", "<=", ">",
-    ">=", "==", "!=", "&&", "||", "!", "_", "&",
+    ">=", "==", "!=", "&&", "||", "!", "_", "&", "[", "]",
 ];
 
 const IDENTS: &[&str] = &[
@@ -154,6 +169,7 @@ const FIXTURES: &[&str] = &[
     include_str!("../../../examples/shipping-functions.brix"),
     include_str!("../../../examples/shipping-input.brix"),
     include_str!("../../../examples/shipping.brix"),
+    include_str!("../../../examples/fulfillment.brix"),
     include_str!("../../../packages/brix.soc/src/soc.brix"),
 ];
 

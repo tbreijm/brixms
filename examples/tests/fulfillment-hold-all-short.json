@@ -1,0 +1,20 @@
+{
+  "schema": "brix.input@3",
+  "values": {
+    "orders": {
+      "type": "list",
+      "items": [
+        {
+          "type": "record",
+          "nominal": "Order",
+          "fields": [
+            { "name": "id", "value": { "type": "int", "value": "1" } },
+            { "name": "sku", "value": { "type": "int", "value": "100" } },
+            { "name": "units", "value": { "type": "int", "value": "5" } }
+          ]
+        }
+      ]
+    },
+    "stock": { "type": "list", "items": [] }
+  }
+}

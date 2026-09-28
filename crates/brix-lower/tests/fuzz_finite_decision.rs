@@ -57,6 +57,11 @@ const FIXTURES: &[(&str, &str, Option<&str>)] = &[
         include_str!("../../../examples/shipping.brix"),
         None,
     ),
+    (
+        "fulfillment.brix",
+        include_str!("../../../examples/fulfillment.brix"),
+        Some(include_str!("../../../examples/fulfillment.json")),
+    ),
 ];
 
 /// A small vocabulary of real Brix tokens, so a mutated program has some
@@ -64,7 +69,9 @@ const FIXTURES: &[(&str, &str, Option<&str>)] = &[
 const TOKEN_VOCAB: &[&str] = &[
     "config", "rule", "propose", "commit", "input", "fn", "when", "priority", "from", "let",
     "show", "true", "false", "match", "{", "}", "(", ")", ":", "=", "|", ",", ".", "+", "-", "*",
-    "==", "!=", "<", "<=", ">", ">=", "&&", "||", "!", "0", "1", "42", "A", "B", "x",
+    "==", "!=", "<", "<=", ">", ">=", "&&", "||", "!", "0", "1", "42", "A", "B", "x", "[", "]",
+    "=>", "for", "in", "where", "yield", "filter", "map", "sum", "count", "len", "distinct", "min",
+    "max", "List", "max",
 ];
 
 #[derive(Clone, Debug)]
@@ -498,6 +505,97 @@ proptest! {
         );
 
         let runtime2 = FiniteDecisionRuntime::build(&plan).expect("rebuilds identically");
+        let run2 = runtime2.run();
+        prop_assert_eq!(run.program, run2.program, "program id must be deterministic");
+        prop_assert_eq!(run.context, run2.context, "context id must be deterministic");
+        prop_assert_eq!(&run.decision, &run2.decision, "decision must be deterministic");
+        prop_assert_eq!(
+            &run.dispositions,
+            &run2.dispositions,
+            "candidate dispositions must be deterministic"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (3) A fixed program exercising every list/relational form (ADR-0037,
+//     ADR-0040) over a random `List<Int> max 8` snapshot: sum/count/all/any/
+//     min/max, filter/map, `in`, `len`, `distinct`. `min`/`max` fault on an
+//     empty list (`EmptyAggregate`), which this property allows — it is a
+//     typed `Unknown`, not a panic.
+// ---------------------------------------------------------------------------
+
+const LIST_PROGRAM: &str = r#"
+config Decision = A | B | C
+
+input xs: List<Int> max 8
+
+rule total() = sum(xs, x => x)
+rule cnt() = len(xs)
+rule biggest() = max(xs, x => x)
+rule smallest() = min(xs, x => x)
+rule positives() = filter(xs, x => x > 0)
+rule doubled() = map(xs, x => x * 2)
+rule uniq() = distinct(xs)
+rule has_zero() = 0 in xs
+rule any_neg() = any(xs, x => x < 0)
+rule all_pos() = all(xs, x => x > 0)
+
+propose take_a(cnt) priority 10 when cnt > 0 = A
+propose take_b(cnt) priority 20 when cnt == 0 = B
+propose fallback() priority 30 when true = C
+
+commit decision from (take_a, take_b, fallback)
+"#;
+
+fn list_snapshot(values: &[i64]) -> InputSnapshot {
+    let items = values
+        .iter()
+        .map(|v| format!(r#"{{"type": "int", "value": "{v}"}}"#))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let json = format!(
+        r#"{{"schema": "brix.input@3", "values": {{"xs": {{"type": "list", "items": [{items}]}}}}}}"#
+    );
+    let limits = InputLimits::default();
+    let shard = decode_input_shard(json.as_bytes(), &limits).expect("generated @3 shard decodes");
+    canonicalize_input_shards(vec![shard], &limits).expect("generated @3 shard canonicalizes")
+}
+
+proptest! {
+    /// Every list/relational form over a random-length, random-valued
+    /// `List<Int> max 8`: lowering and building are asserted to succeed (the
+    /// program is well-formed by construction); `run()` must never panic and
+    /// must land in one of the three defined stop states — including
+    /// `Unknown` from `min`/`max`'s empty-list fault — and, as above,
+    /// running the identical plan+snapshot twice must be exactly
+    /// deterministic.
+    #[test]
+    fn list_program_lowers_and_runs_deterministically(
+        values in proptest::collection::vec(-1000i64..=1000, 0..=8),
+    ) {
+        let module = parse(LIST_PROGRAM)
+            .unwrap_or_else(|e| panic!("list fixture program must parse: {e}"));
+        let plan = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE)
+            .unwrap_or_else(|e| panic!("list fixture program must lower: {e}"));
+
+        let snapshot = list_snapshot(&values);
+        let runtime = FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot)
+            .unwrap_or_else(|e| panic!("list fixture program must build with any valid List<Int> max 8 snapshot: {e}"));
+        let run = runtime.run(); // must not panic, even when xs is empty
+
+        prop_assert!(
+            matches!(
+                run.stop,
+                FiniteDecisionStop::Selected(_)
+                    | FiniteDecisionStop::Quiescent { .. }
+                    | FiniteDecisionStop::Unknown(_)
+            ),
+            "run must terminate in one of the three defined stop states for xs = {values:?}"
+        );
+
+        let runtime2 = FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot)
+            .expect("rebuilds identically");
         let run2 = runtime2.run();
         prop_assert_eq!(run.program, run2.program, "program id must be deterministic");
         prop_assert_eq!(run.context, run2.context, "context id must be deterministic");

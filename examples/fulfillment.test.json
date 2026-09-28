@@ -1,0 +1,72 @@
+{
+  "schema": "brix.test@1",
+  "program": "fulfillment.brix",
+  "cases": [
+    {
+      "name": "ships what it can when some orders exceed stock or name no SKU on hand",
+      "inputs": ["fulfillment.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "ship_partial",
+        "value": "ShipPartial",
+        "candidates": {
+          "ship_all": "rejected-guard-false",
+          "hold": "rejected-guard-false"
+        },
+        "facts": {
+          "order_count": "4",
+          "total_units": "60",
+          "coverable_ids": "[1, 2]",
+          "short_count": "2",
+          "max_order_size": "50"
+        }
+      }
+    },
+    {
+      "name": "ships everything when every order's SKU has enough stock",
+      "inputs": ["tests/fulfillment-ship-all.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "ship_all",
+        "value": "ShipAll",
+        "candidates": {
+          "ship_partial": "rejected-guard-false",
+          "hold": "rejected-guard-false"
+        },
+        "facts": {
+          "order_count": "2",
+          "short_count": "0",
+          "coverable_ids": "[1, 2]"
+        }
+      }
+    },
+    {
+      "name": "holds on an empty order list",
+      "inputs": ["tests/fulfillment-hold-empty.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "hold",
+        "value": "Hold",
+        "facts": {
+          "order_count": "0",
+          "max_order_size": "0",
+          "coverable_ids": "[]"
+        }
+      }
+    },
+    {
+      "name": "holds when every order is short",
+      "inputs": ["tests/fulfillment-hold-all-short.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "hold",
+        "value": "Hold",
+        "facts": {
+          "order_count": "1",
+          "short_count": "1",
+          "coverable_ids": "[]"
+        }
+      }
+    }
+  ]
+}

@@ -27,14 +27,18 @@ In order, ahead of the milestones above:
    **Acceptance:** each ADR's Status line reads "Accepted" (or is explicitly
    superseded), matching its code's presence in `crates/brix-lower`.
 
-2. **Decide ADR-0037 (bounded lists and folds).** It is "Proposed design"
-   only — no `List<T>` input, `sum`/`count`/`all`/`any` fold, or `max`-bound
-   syntax exists in the finite-decision lane yet. Review it against the
-   "Relations & per-entity decisions" milestone in the beta roadmap before
-   implementing, since a rule-schema design there may subsume it.
-   **Acceptance:** ADR-0037 is either accepted and implemented, or explicitly
-   superseded by whichever ADR the "finite relations" roadmap milestone
-   produces.
+2. **Ratify ADR-0037 and ADR-0040 (bounded lists, and finite relations).**
+   Both are marked "Implemented" and landed in `crates/brix-lower`/
+   `brix-syntax`/`brix-cli`/`brix-kb`: `List<T> max N` inputs,
+   `brix.input@3`, `sum`/`count`/`all`/`any`/`min`/`max` folds,
+   `filter`/`map`, comprehensions (a bounded join), list literals, `in`,
+   `len`, and `distinct` — see [`docs/brix-language.md`](../docs/brix-language.md)
+   §4 and [`examples/fulfillment.brix`](../examples/fulfillment.brix). This
+   does not yet subsume the beta roadmap's full "Relations & per-entity
+   decisions" milestone (no rule-schema quantification, witness claims, or
+   rule-level search policy) — that remains open.
+   **Acceptance:** both ADRs' Status lines read "Accepted" (or are explicitly
+   superseded), matching their code's presence in the source tree.
 
 3. **Reconcile the two-lane split documented in
    [`docs/brix-language.md`](../docs/brix-language.md#the-two-lanes).**

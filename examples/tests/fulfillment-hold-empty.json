@@ -1,0 +1,7 @@
+{
+  "schema": "brix.input@3",
+  "values": {
+    "orders": { "type": "list", "items": [] },
+    "stock": { "type": "list", "items": [] }
+  }
+}

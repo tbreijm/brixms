@@ -427,16 +427,84 @@ Unary minus (`let below = -7`, `-a * b` parses as `(-a) * b`) is a grammar
 addition only — no new evaluator operation, no new canonical ordinal — added
 alongside ADR-0035 so a negative dividend could be written at all.
 
-Recursive or generic schemas for `List<T>`-shaped inputs, bounded folds
-(`sum`, `count`, `all`, `any` over a `max`-bounded list), and a rule-level
-search or query surface are sketched in
-[ADR-0037](../spec/adr/ADR-0037_Bounded_Lists_And_Folds.md), whose own status
-line reads **"Proposed design"** — none of it is implemented, and no example
-above uses it.
+---
+
+## 4. Bounded lists and finite relations (ADR-0037, ADR-0040)
+
+A finite-decision program can declare a bounded, homogeneous list as a
+top-level input, and combine two of them the way a real settlement policy
+usually needs to: a join, not just a summary.
+
+<!-- brix-snippet: fragment -->
+```brix
+config Order = { id: Int, sku: Int, units: Int }
+config Stock = { sku: Int, on_hand: Int }
+
+input orders: List<Order> max 32
+input stock: List<Stock> max 32
+
+rule coverable_ids() =
+  for o in orders, s in stock where s.sku == o.sku && s.on_hand >= o.units yield o.id
+rule short_orders(coverable_ids) = filter(orders, o => !(o.id in coverable_ids))
+rule short_count(short_orders) = len(short_orders)
+```
+
+[`examples/fulfillment.brix`](../examples/fulfillment.brix) is a complete,
+verified program built from this: it joins a bounded list of orders against a
+bounded list of stock rows and decides whether to ship everything, ship what
+it can, or hold, with [`examples/fulfillment.test.json`](../examples/fulfillment.test.json)
+covering all three outcomes plus the empty-list case.
+
+- **`input <name>: List<T> max N`** declares a bounded list input, `T` a
+  scalar, record, or sum type reachable the same way ADR-0033's `brix.input@2`
+  reaches one, and `N` a compile-time bound (`1..=256`). The matching artifact
+  schema is **`brix.input@3`**, a strict superset of `@2` that additionally
+  admits a `{"type": "list", "items": [...]}` value at the top level only — a
+  list nested inside a record field or a sum's argument is still refused,
+  fail-closed, on every schema version. `@1`/`@2` continue to refuse a list
+  value outright, so an existing input artifact is unaffected.
+- **Folds** — `sum`, `count`, `all`, `any`, `min`, `max` — reduce a list to a
+  scalar: `sum(xs, x => e)`, `count(xs, x => cond)`, and so on. `min`/`max` of
+  an empty list is a typed fault (`EmptyAggregate`), never a default value —
+  guard with a `count`/`len` check first, exactly as `max_order_size` does
+  above via `match order_count > 0 { true => ..., false => 0 }`.
+- **`filter(xs, x => cond)`** and **`map(xs, x => e)`** produce a new list,
+  each element visited left to right.
+- **A comprehension**, `for x in xs, y in ys where cond yield e`, nests one
+  generator per list left to right — a later generator (and `where`) may
+  reference an earlier one's binder, which is what makes it a join rather
+  than two independent loops. `where` is optional.
+- **`[e1, e2, ...]`** is a list literal; **`e in xs`** is structural-equality
+  membership, at comparison precedence and equally non-associative (`a in xs
+  in ys` is refused by name, like `a < b < c`); **`len(xs)`** and
+  **`distinct(xs)`** (first occurrence kept) round out the surface.
+- A lambda (`x => expr`) is recognized structurally as a call argument, not
+  a keyword — `filter`/`map`/`sum`/`count`/`all`/`any`/`min`/`max`/`len`/
+  `distinct` are reserved *operation names* (a module cannot declare a helper
+  or constructor with one of them), the same discipline ADR-0035 uses for
+  `div_floor`/`mod_euclid`/etc. `for`/`in`/`where`/`yield` **are** new
+  keywords, since a comprehension's grammar cannot be spelled as an ordinary
+  call. A lambda is never a first-class value — it cannot be bound, returned,
+  or passed anywhere but one of those ten call sites.
+- Every derived list (a fold/filter/map/comprehension/literal's result) is
+  capped at 4,096 elements regardless of any input's own `max`, and every
+  element visited is charged to the same bounded evaluator work budget every
+  other expression in this lane already runs under (ADR-0032) — a large join
+  fails closed with a typed fault rather than exhausting memory.
+- `brix why`/`whynot`'s derivation trace, `brix kb`'s persistent storage, and
+  `brix test`'s fact assertions all understand list values, rendered the same
+  way `brix run` prints them (`[1, 2, 3]`); a fold/filter/map/comprehension's
+  trace shows a bounded sample of its elements rather than one node per
+  element, since the source list can be as large as 4,096 entries.
+
+See [ADR-0037](../spec/adr/ADR-0037_Bounded_Lists_And_Folds.md) (lists and the
+first four folds) and [ADR-0040](../spec/adr/ADR-0040_Finite_Relations.md)
+(`filter`/`map`/comprehensions/`in`/`len`/`distinct`/`min`/`max`) for the full
+semantics, canonical encoding, and acceptance checklist.
 
 ---
 
-## 4. Epistemic grades and honest status
+## 5. Epistemic grades and honest status
 
 Brix does not collapse every outcome into `true`/`false`:
 
@@ -462,7 +530,7 @@ kernel rules are not yet available or fully discharged.
 
 ---
 
-## 5. Type normalization and coercion lattices
+## 6. Type normalization and coercion lattices
 
 Type normalization runs on one declared, witnessed-coercion mechanism,
 `CoercionLattice`, with two live instances:
@@ -590,11 +658,19 @@ error. `spec/Next_Steps.md` tracks reconciling them.
 - **Unary minus** (landed and tested; ADR status "Proposed implementation",
   [ADR-0036](../spec/adr/ADR-0036_Unary_Minus.md)): negative literals and
   prefix `-`.
-- **Bounded lists and folds** (design only, not implemented; ADR status
-  "Proposed design", [ADR-0037](../spec/adr/ADR-0037_Bounded_Lists_And_Folds.md)):
-  `List<T> max N` inputs and deterministic `sum`/`count`/`all`/`any` folds.
-- **CLI driver:** six file-oriented subcommands — `check`, `run`, `audit`,
-  `verify`, `why`, `whynot` — all six accepting repeatable `--input`.
+- **Bounded lists and folds** (landed and tested; ADR status "Implemented",
+  [ADR-0037](../spec/adr/ADR-0037_Bounded_Lists_And_Folds.md)):
+  `List<T> max N` inputs, `brix.input@3`, and deterministic `sum`/`count`/
+  `all`/`any` folds.
+- **Finite relations** (landed and tested; ADR status "Implemented",
+  [ADR-0040](../spec/adr/ADR-0040_Finite_Relations.md)): `filter`, `map`,
+  comprehensions (joins), list literals, `in`, `len`, `distinct`, and `min`/
+  `max` folds over the same bounded lists — see §4 above.
+- **CLI driver:** `check`, `run`, `audit`, `verify`, `why`, `whynot`, and
+  `test` (regression suites), all accepting repeatable `--input`, plus the
+  `kb` family (`init`/`assert`/`retract`/`program`/`log`/`show`/`diff`/
+  `audit`/`verify`) for a persistent, revisable knowledge base
+  ([ADR-0041](../spec/adr/ADR-0041_Persistent_Knowledge_Base.md)).
   `verify --profile l3-v1` rejects `--input`.
 - **L3 v2 derivation** ([ADR-0027](../spec/adr/ADR-0027_L3_V2_Derivation.md)):
   Stages A–C landed in `brix-lower`, defining the derivation evaluator and

@@ -219,6 +219,30 @@ fn test_differential_order_policy() {
     );
 }
 
+#[test]
+fn test_differential_fulfillment() {
+    // Exercises the differential property over every list/relational form
+    // (ADR-0037, ADR-0040): fold, filter, comprehension, `in`, `len`, and a
+    // `match`-guarded `max` — across all four decision outcomes the example
+    // suite covers.
+    check_example(
+        "examples/fulfillment.brix",
+        Some("examples/fulfillment.json"),
+    );
+    check_example(
+        "examples/fulfillment.brix",
+        Some("examples/tests/fulfillment-ship-all.json"),
+    );
+    check_example(
+        "examples/fulfillment.brix",
+        Some("examples/tests/fulfillment-hold-empty.json"),
+    );
+    check_example(
+        "examples/fulfillment.brix",
+        Some("examples/tests/fulfillment-hold-all-short.json"),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Hand-written fixtures: short-circuit, match arm selection, nested helpers,
 // and truncation.
@@ -477,5 +501,64 @@ commit c from (p, q)
     assert!(
         contains_truncated(trace),
         "the oversized rule body's trace must contain an explicit truncation marker"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bounded list-form summaries (ADR-0040).
+// ---------------------------------------------------------------------------
+
+fn contains_summarized(node: &TraceNode) -> bool {
+    matches!(node.outcome, TraceOutcome::Summarized { .. })
+        || node.children.iter().any(contains_summarized)
+}
+
+const LIST_FOLD_OVER_CAP: &str = r#"
+config Decision = Yes | No
+
+input xs: List<Int> max 16
+
+rule total() = sum(xs, x => x)
+
+propose p(total) priority 10 when total >= 0 = Yes
+propose q() priority 100 when true = No
+
+commit c from (p, q)
+"#;
+
+#[test]
+fn test_fold_over_trace_cap_reports_summarized_marker() {
+    // 10 elements: over `MAX_LIST_TRACE_ELEMENTS` (5), under `max 16`.
+    let items = (1..=10)
+        .map(|n| format!(r#"{{"type":"int","value":"{n}"}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let json = format!(
+        r#"{{"schema":"brix.input@3","values":{{"xs":{{"type":"list","items":[{items}]}}}}}}"#
+    );
+
+    let plan = load_plan_from_source(LIST_FOLD_OVER_CAP);
+    let snapshot = load_snapshot_from_source(&json);
+    let runtime = FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot).expect("builds");
+    let run = runtime.run();
+    assert!(!run.is_unknown());
+    for candidate in plan.commit.candidates.clone() {
+        check_candidate(&runtime, &run, &candidate);
+    }
+
+    let ExplainOutcome::Explained(p) = runtime.explain_candidate("p").unwrap() else {
+        panic!("p not found");
+    };
+    let total_fact = p
+        .facts
+        .iter()
+        .find(|f| f.name == "total")
+        .expect("total read");
+    assert_eq!(total_fact.value, L3ValueV2::Int(55));
+    let trace = total_fact.trace.as_ref().expect("rule trace present");
+    assert!(
+        contains_summarized(trace),
+        "a fold over more elements than the trace cap must report an explicit Summarized marker, \
+         even though `total`'s own value (55) is the real evaluator's sum over all 10 elements"
     );
 }

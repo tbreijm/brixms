@@ -146,6 +146,20 @@ mechanism relations need anyway. Landing them separately risks landing three
 incompatible partial answers to the same underlying question (how does a
 rule range over more than one fact?).
 
+**Progress.** ADR-0037 and ADR-0040 landed the *value-level* slice of this:
+`List<T> max N` inputs (`brix.input@3`), `sum`/`count`/`all`/`any`/`min`/`max`
+folds, `filter`/`map`, a comprehension (a bounded multi-generator join, so
+`for o in orders, s in stock where s.sku == o.sku yield ...` already answers
+"how does an expression range over more than one list" for a *list value* an
+expression can name), list literals, `in`, `len`, and `distinct` — see
+[`docs/brix-language.md`](../brix-language.md) §4 and
+[`examples/fulfillment.brix`](../../examples/fulfillment.brix). What remains
+open from this milestone: a **rule schema** (quantifying a `rule` itself over
+a bounded domain, rather than joining lists an expression already holds),
+per-tuple witness composition, and multiple/per-entity commits — none of
+which ADR-0040 attempts (its own scope note says so explicitly). The open
+design questions below are unchanged by this progress.
+
 **Open design questions.**
 
 - What is the grounding discipline for a quantified rule — finite

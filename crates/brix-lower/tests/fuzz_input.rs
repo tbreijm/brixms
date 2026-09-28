@@ -1,6 +1,7 @@
 //! Property-based robustness ("fuzz") tests for the external input decoder
 //! (ADR-0031, `crates/brix-lower/src/input.rs`): the strict, bounded
-//! `brix.input@1`/`@2` shard decoder and canonical snapshot builder.
+//! `brix.input@1`/`@2`/`@3` shard decoder and canonical snapshot builder.
+//! `@3` additionally admits a top-level list value (ADR-0037).
 //!
 //! `crates/brix-lower/tests/external_input.rs` already pins the decoder's
 //! contract by hand (duplicate-key rejection, strict schema/type checking,
@@ -271,6 +272,77 @@ proptest! {
             .expect("runtime builds over a complete, declaration-matching snapshot");
         let run = runtime.run();
         prop_assert!(run.is_selected(), "the fixture program always selects 'Yes'");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `brix.input@3` list values (ADR-0037): valid generated lists decode.
+// ---------------------------------------------------------------------------
+
+const LIST_DECLARED_INPUTS_SOURCE: &str = r#"
+input xs: List<Int> max 16
+config D = Yes
+propose p() priority 1 when true = Yes
+commit outcome from (p)
+"#;
+
+proptest! {
+    /// Any `Vec<i64>` of length 0..=16, encoded as a strict `brix.input@3`
+    /// list value matching `LIST_DECLARED_INPUTS_SOURCE`'s declared
+    /// `List<Int> max 16`, must decode, canonicalize, and validate
+    /// successfully — and building/running the runtime over it must not
+    /// panic (the program is a single always-`true`-guarded proposal, so it
+    /// always selects `Yes`, regardless of `xs`'s length or contents).
+    #[test]
+    fn valid_generated_list_input_for_declared_schema_decodes(
+        values in proptest::collection::vec(any::<i64>(), 0..=16),
+    ) {
+        let items = values
+            .iter()
+            .map(|n| format!(r#"{{"type":"int","value":"{n}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let json = format!(
+            r#"{{"schema":"brix.input@3","values":{{"xs":{{"type":"list","items":[{items}]}}}}}}"#
+        );
+
+        let limits = InputLimits::default();
+        let shard = decode_input_shard(json.as_bytes(), &limits)
+            .unwrap_or_else(|e| panic!("generated valid @3 list shard must decode: {e} (json={json})"));
+        let snapshot = canonicalize_input_shards(vec![shard], &limits)
+            .expect("generated valid @3 list shard must canonicalize");
+
+        let module = parse(LIST_DECLARED_INPUTS_SOURCE).expect("fixture parses");
+        let plan = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE)
+            .expect("fixture lowers");
+
+        prop_assert!(validate_against_declarations(&snapshot, &plan).is_ok());
+        prop_assert!(validate_completeness(&snapshot, &plan).is_ok());
+
+        let runtime = FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot)
+            .expect("runtime builds over a complete, declaration-matching snapshot");
+        let run = runtime.run();
+        prop_assert!(run.is_selected(), "the fixture program always selects 'Yes'");
+    }
+
+    /// A list value nested inside a `sum`'s argument is refused on `@3` at
+    /// any depth other than the top level (ADR-0037): decoding must return a
+    /// typed error, never panic, and never silently accept it.
+    #[test]
+    fn nested_list_inside_sum_is_refused_on_v3_never_panics(
+        values in proptest::collection::vec(any::<i64>(), 0..=4),
+    ) {
+        let items = values
+            .iter()
+            .map(|n| format!(r#"{{"type":"int","value":"{n}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let json = format!(
+            r#"{{"schema":"brix.input@3","values":{{"x":{{"type":"sum","nominal":"Wrap","variant":"Some","args":[{{"type":"list","items":[{items}]}}]}}}}}}"#
+        );
+        let limits = InputLimits::default();
+        let result = decode_input_shard(json.as_bytes(), &limits);
+        prop_assert!(result.is_err(), "a list nested inside a sum's args must be refused on @3");
     }
 }
 
