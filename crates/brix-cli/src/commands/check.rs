@@ -86,6 +86,7 @@ pub fn execute_check(
                     explanation: None,
                     locations: None,
                     shows: None,
+                    commits: None,
                 };
                 println!("{}", serde_json::to_string_pretty(&res).unwrap());
             } else {
@@ -136,8 +137,12 @@ pub fn execute_check(
             (None, None)
         };
 
-        if run.is_unknown() {
-            let (code, detail) = match &run.stop {
+        // ADR-0039: preflight fails if *any* commit pool is Unknown, not
+        // just the first — every pool must clear preflight independently.
+        let first_unknown_pool = run.commits.iter().find(|c| c.is_unknown());
+        if run.is_unknown() || first_unknown_pool.is_some() {
+            let stop = first_unknown_pool.map_or(&run.stop, |c| &c.stop);
+            let (code, detail) = match stop {
                 FiniteDecisionStop::Unknown(reason) => unknown_reason_to_code_and_detail(reason),
                 _ => (
                     "unknown-stop",
@@ -173,6 +178,32 @@ pub fn execute_check(
                 .map(|d| candidate_disposition_to_json(d, winning_name))
                 .collect();
             let decision_json = run.decision.as_ref().map(decision_to_json);
+            let commits_json = if run.commits.len() > 1 {
+                Some(
+                    run.commits
+                        .iter()
+                        .map(|c| {
+                            let win = c.decision.as_ref().map(|d| d.candidate.as_str());
+                            let status = match &c.stop {
+                                FiniteDecisionStop::Selected(_) => "selected",
+                                FiniteDecisionStop::Quiescent { .. } => "quiescent",
+                                FiniteDecisionStop::Unknown(_) => "unknown",
+                            };
+                            crate::json::CommitPoolJson::new(
+                                c.commit.clone(),
+                                status,
+                                c.dispositions
+                                    .iter()
+                                    .map(|d| candidate_disposition_to_json(d, win))
+                                    .collect(),
+                                c.decision.as_ref().map(decision_to_json),
+                            )
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            };
 
             let res = CliResultJson {
                 schema: BRIX_CLI_SCHEMA.to_string(),
@@ -192,6 +223,7 @@ pub fn execute_check(
                 explanation: None,
                 locations: None,
                 shows: None,
+                commits: commits_json,
             };
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
         } else {
@@ -275,6 +307,7 @@ pub fn execute_check(
             explanation: None,
             locations: (!locations.is_empty()).then_some(locations),
             shows: None,
+            commits: None,
         };
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {

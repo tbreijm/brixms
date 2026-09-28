@@ -396,12 +396,38 @@ fn diff_declarations(a: &FiniteDecisionPlan, b: &FiniteDecisionPlan) -> Vec<Decl
         }
     }
 
-    if commit_signature(&a.commit) != commit_signature(&b.commit) {
-        out.push(DeclChange {
-            kind: "commit",
-            name: b.commit.name.clone(),
-            change: "changed",
-        });
+    let a_commits: std::collections::BTreeMap<&String, _> = a
+        .commits
+        .iter()
+        .map(|c| (&c.name, commit_signature(c)))
+        .collect();
+    let b_commits: std::collections::BTreeMap<&String, _> = b
+        .commits
+        .iter()
+        .map(|c| (&c.name, commit_signature(c)))
+        .collect();
+    let mut commit_names: std::collections::BTreeSet<&String> = std::collections::BTreeSet::new();
+    commit_names.extend(a_commits.keys().copied());
+    commit_names.extend(b_commits.keys().copied());
+    for name in commit_names {
+        match (a_commits.get(name), b_commits.get(name)) {
+            (Some(_), None) => out.push(DeclChange {
+                kind: "commit",
+                name: name.to_string(),
+                change: "removed",
+            }),
+            (None, Some(_)) => out.push(DeclChange {
+                kind: "commit",
+                name: name.to_string(),
+                change: "added",
+            }),
+            (Some(x), Some(y)) if x != y => out.push(DeclChange {
+                kind: "commit",
+                name: name.to_string(),
+                change: "changed",
+            }),
+            _ => {}
+        }
     }
 
     out

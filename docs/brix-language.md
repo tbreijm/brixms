@@ -323,6 +323,12 @@ remain accepted unchanged. Recursive and generic input schemas are **not**
 part of this slice — the "generic configs are unsupported" refusal in the
 two-lanes table above applies here too.
 
+A module may declare more than one `commit` (ADR-0039): each is its own
+independent deliberation pool over its own candidates, sharing the same
+rules/inputs but never competing against a sibling pool's candidates. See
+[`examples/order-desk.brix`](../examples/order-desk.brix) for a shipping
+decision and a billing decision made from the same order in one module.
+
 ### CLI behavior and epistemic status
 
 - `brix check <file.brix>` with no `--input` validates syntax, imports, and

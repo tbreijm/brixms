@@ -292,7 +292,6 @@ fn run_case(prepared: &PreparedFile, case: &TestCaseSpec) -> CaseOutcome {
 /// same status/candidate/value rendering `brix run` uses so expectations read like transcripts.
 fn compare_case(expect: &ExpectSpec, run: &FiniteDecisionRun) -> Vec<Mismatch> {
     let mut mismatches = Vec::new();
-    let winning_name = run.decision.as_ref().map(|d| d.candidate.as_str());
 
     let actual_status = match &run.stop {
         FiniteDecisionStop::Selected(_) => "selected",
@@ -351,9 +350,18 @@ fn compare_case(expect: &ExpectSpec, run: &FiniteDecisionRun) -> Vec<Mismatch> {
 
     for (name, expected_status) in &expect.candidates {
         let field = format!("candidates.{name}");
-        match run.dispositions.iter().find(|d| &d.name == name) {
+        // Search every commit pool (ADR-0039): a candidate belongs to
+        // exactly one, which may not be the first.
+        let owning_pool = run
+            .commits
+            .iter()
+            .find(|c| c.dispositions.iter().any(|d| &d.name == name));
+        match owning_pool.and_then(|c| c.dispositions.iter().find(|d| &d.name == name)) {
             Some(d) => {
-                let cj = candidate_disposition_to_json(d, winning_name);
+                let pool_winning_name = owning_pool
+                    .and_then(|c| c.decision.as_ref())
+                    .map(|d| d.candidate.as_str());
+                let cj = candidate_disposition_to_json(d, pool_winning_name);
                 if &cj.status != expected_status {
                     mismatches.push(Mismatch::new(field, expected_status.clone(), cj.status));
                 }
@@ -362,6 +370,27 @@ fn compare_case(expect: &ExpectSpec, run: &FiniteDecisionRun) -> Vec<Mismatch> {
                 field,
                 expected_status.clone(),
                 "(no such candidate)",
+            )),
+        }
+    }
+
+    for (commit_name, expected_candidate) in &expect.decisions {
+        let field = format!("decisions.{commit_name}");
+        match run.commit_run(commit_name) {
+            Some(pool_run) => {
+                let actual = pool_run
+                    .decision
+                    .as_ref()
+                    .map(|d| d.candidate.clone())
+                    .unwrap_or_else(|| "(none)".to_string());
+                if &actual != expected_candidate {
+                    mismatches.push(Mismatch::new(field, expected_candidate.clone(), actual));
+                }
+            }
+            None => mismatches.push(Mismatch::new(
+                field,
+                expected_candidate.clone(),
+                "(no such commit)",
             )),
         }
     }
@@ -574,6 +603,11 @@ struct ExpectSpec {
     unknown_code: Option<String>,
     candidates: Vec<(String, String)>,
     facts: Vec<(String, String)>,
+    /// Per commit pool (ADR-0039): commit name -> expected winning
+    /// candidate, or `"(none)"` for that pool's own quiescence, exactly
+    /// matching `decision`'s own `"(none)"` convention. Checked in addition
+    /// to `status`/`decision` (which only speak of the first commit pool).
+    decisions: Vec<(String, String)>,
 }
 
 /// A parse/validation failure for a `.test.json` suite file. Always fatal (exit 2): see
@@ -701,6 +735,7 @@ fn parse_expect(v: &JsonVal) -> Result<ExpectSpec, TestFileError> {
     let mut unknown_code: Option<String> = None;
     let mut candidates: Vec<(String, String)> = Vec::new();
     let mut facts: Vec<(String, String)> = Vec::new();
+    let mut decisions: Vec<(String, String)> = Vec::new();
 
     for (key, val) in entries {
         match key.as_str() {
@@ -735,6 +770,15 @@ fn parse_expect(v: &JsonVal) -> Result<ExpectSpec, TestFileError> {
                     facts.push((name.clone(), as_string(fact_val, "'expect.facts[]'")?));
                 }
             }
+            "decisions" => {
+                let obj = as_object(val, "'expect.decisions'")?;
+                for (name, decision_val) in obj {
+                    decisions.push((
+                        name.clone(),
+                        as_string(decision_val, "'expect.decisions[]'")?,
+                    ));
+                }
+            }
             other => {
                 return Err(TestFileError::new(format!(
                     "unknown field '{other}' in 'expect'"
@@ -753,6 +797,7 @@ fn parse_expect(v: &JsonVal) -> Result<ExpectSpec, TestFileError> {
         unknown_code,
         candidates,
         facts,
+        decisions,
     })
 }
 

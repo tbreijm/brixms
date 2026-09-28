@@ -47,6 +47,13 @@ pub struct CliResultJson {
     /// produced instead of `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shows: Option<Vec<TaggedValue>>,
+    /// Every commit pool's own outcome (ADR-0039), additive under schema
+    /// `brix.cli.result@1`. `top-level `status`/`candidates`/`decision`
+    /// already mirror the first pool (declaration order), so this is
+    /// populated only when the module declares more than one commit pool —
+    /// a single-commit module's JSON is byte-identical to before ADR-0039.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commits: Option<Vec<CommitPoolJson>>,
 }
 
 impl CliResultJson {
@@ -82,6 +89,7 @@ impl CliResultJson {
             explanation: None,
             locations: None,
             shows: None,
+            commits: None,
         }
     }
 
@@ -112,6 +120,7 @@ impl CliResultJson {
             explanation: None,
             locations: None,
             shows: None,
+            commits: None,
         }
     }
 
@@ -141,6 +150,12 @@ impl CliResultJson {
     /// Explicitly attach evaluated `show` results.
     pub fn with_shows(mut self, shows: Option<Vec<TaggedValue>>) -> Self {
         self.shows = shows;
+        self
+    }
+
+    /// Explicitly attach every commit pool's own outcome (ADR-0039).
+    pub fn with_commits(mut self, commits: Option<Vec<CommitPoolJson>>) -> Self {
+        self.commits = commits;
         self
     }
 
@@ -314,6 +329,31 @@ impl DecisionJson {
             priority: priority.to_string(),
             value,
             grade: grade.into(),
+        }
+    }
+}
+
+/// One commit pool's own outcome (ADR-0039), listed under `CliResultJson::commits`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CommitPoolJson {
+    pub name: String,
+    pub status: String,
+    pub candidates: Vec<CandidateJson>,
+    pub decision: Option<DecisionJson>,
+}
+
+impl CommitPoolJson {
+    pub fn new(
+        name: impl Into<String>,
+        status: impl Into<String>,
+        candidates: Vec<CandidateJson>,
+        decision: Option<DecisionJson>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            status: status.into(),
+            candidates,
+            decision,
         }
     }
 }

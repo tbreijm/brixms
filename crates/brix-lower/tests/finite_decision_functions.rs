@@ -1456,9 +1456,13 @@ fn test_function_free_frozen_known_shipping_identity() {
         .retain(|item| !matches!(item, brix_syntax::ast::Item::Show(_)));
     let p = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE).unwrap();
     let prog_id = finite_decision_program_id(&p);
+    // ADR-0039 (multiple independent commit pools) prefixed the commit
+    // section with a pool count, self-delimiting it the way the
+    // Rules/Proposals sections already are — a one-time, deliberate
+    // renumbering of every finite-decision program id, this one included.
     assert_eq!(
         prog_id.to_hex(),
-        "3a815590c807a8af7e7756d8f0edef99a4938e15830de282b24949fe88ba0d5e"
+        "3060fb556aead750f2305e8af39f413a30d76e85b7358705afe21b733ea235db"
     );
 }
 
@@ -1590,8 +1594,12 @@ commit c from (p)
 "#;
     let p = plan(src);
     let id = finite_decision_program_id(&p);
+    // ADR-0039 (multiple independent commit pools) prefixed the commit
+    // section with a pool count, self-delimiting it the way the
+    // Rules/Proposals sections already are — a one-time, deliberate
+    // renumbering of every finite-decision program id, this one included.
     assert_eq!(
         id.to_hex(),
-        "d19907a409ca9096b9cd514b996c38cb2ff08b679924a42f771b3b051b3004a3"
+        "36054af13e92735c5deff4ecb34f1d13913339d04a2dcca613f7f0b0e8bb241a"
     );
 }

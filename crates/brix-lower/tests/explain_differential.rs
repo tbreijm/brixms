@@ -180,7 +180,7 @@ fn check_example(brix_path: &str, json_path: Option<&str>) {
         run.stop
     );
 
-    for candidate in plan.commit.candidates.clone() {
+    for candidate in plan.commits[0].candidates.clone() {
         check_candidate(&runtime, &run, &candidate);
     }
 }
@@ -282,7 +282,7 @@ fn test_and_short_circuit_marks_right_operand_not_evaluated() {
     assert!(!run.is_unknown());
 
     // Differential property holds for every candidate here too.
-    for candidate in plan.commit.candidates.clone() {
+    for candidate in plan.commits[0].candidates.clone() {
         check_candidate(&runtime, &run, &candidate);
     }
 
@@ -363,7 +363,7 @@ fn test_match_untaken_arm_marked_not_evaluated() {
     let runtime = FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot).expect("builds");
     let run = runtime.run();
     assert!(!run.is_unknown());
-    for candidate in plan.commit.candidates.clone() {
+    for candidate in plan.commits[0].candidates.clone() {
         check_candidate(&runtime, &run, &candidate);
     }
 
@@ -409,7 +409,7 @@ fn test_helper_body_expands_at_most_one_level() {
     let runtime = FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot).expect("builds");
     let run = runtime.run();
     assert!(!run.is_unknown());
-    for candidate in plan.commit.candidates.clone() {
+    for candidate in plan.commits[0].candidates.clone() {
         check_candidate(&runtime, &run, &candidate);
     }
 

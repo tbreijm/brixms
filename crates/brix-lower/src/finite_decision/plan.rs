@@ -21,6 +21,9 @@ pub const FINITE_DECISION_PROFILE: &str = "brix.l3.finite-decision@1";
 /// Maximum number of functions declared in a finite-decision module.
 pub const MAX_FUNCTION_COUNT: usize = 256;
 
+/// Maximum number of `commit` declarations in a finite-decision module (ADR-0039).
+pub const MAX_COMMIT_COUNT: usize = 64;
+
 /// Maximum number of parameters declared by a single function.
 pub const MAX_FUNCTION_PARAMS: usize = 32;
 
@@ -100,7 +103,10 @@ pub struct FiniteDecisionPlan {
     pub lets: Vec<(String, L3ExprV2)>,
     pub rules: Vec<FiniteDecisionRule>,
     pub proposals: Vec<FiniteDecisionProposal>,
-    pub commit: FiniteDecisionCommit,
+    /// The module's commit pools, in declaration order (ADR-0039). A
+    /// finite-decision module declares at least one; a proposal may be a
+    /// candidate in at most one of them ([`FiniteDecisionLowerError::ProposalInMultipleCommits`]).
+    pub commits: Vec<FiniteDecisionCommit>,
     pub shows: Vec<L3ExprV2>,
     pub schemas: BTreeMap<String, L3Schema>,
 }
@@ -120,6 +126,20 @@ impl FiniteDecisionPlan {
     pub fn find_proposal(&self, name: &str) -> Option<&FiniteDecisionProposal> {
         self.proposals.iter().find(|p| p.name == name)
     }
+
+    /// Look up a commit pool by its declared name.
+    pub fn find_commit(&self, name: &str) -> Option<&FiniteDecisionCommit> {
+        self.commits.iter().find(|c| c.name == name)
+    }
+
+    /// The commit pool that lists `candidate` among its members, if any. A
+    /// candidate is a member of at most one pool ([`FiniteDecisionLowerError::ProposalInMultipleCommits`]
+    /// is rejected during lowering), so this is unambiguous.
+    pub fn commit_of_candidate(&self, candidate: &str) -> Option<&FiniteDecisionCommit> {
+        self.commits
+            .iter()
+            .find(|c| c.candidates.iter().any(|c| c == candidate))
+    }
 }
 
 /// Errors occurring during finite-decision lowering.
@@ -136,7 +156,17 @@ pub enum FiniteDecisionLowerError {
     },
     ItemNotAllowed(String),
     NoCommit,
-    MultipleCommits(usize),
+    /// More `commit` declarations than [`MAX_COMMIT_COUNT`] (ADR-0039). A
+    /// module may declare multiple independent commit pools; this bounds how
+    /// many, the way [`Self::TooManyFunctions`] bounds functions.
+    TooManyCommits {
+        limit: usize,
+        count: usize,
+    },
+    /// Two `commit` declarations shared the same name (ADR-0039). Commit
+    /// pool names must be unique within a module — they are readable facts
+    /// (`show <commit name>`) and CLI/`brix test` selectors.
+    DuplicateCommitName(String),
     EmptyCommit(String),
     DuplicateProposalName(String),
     DuplicateInputName(String),
@@ -304,10 +334,13 @@ impl fmt::Display for FiniteDecisionLowerError {
                 f,
                 "finite-decision module must contain exactly one commit declaration, found none"
             ),
-            Self::MultipleCommits(count) => write!(
+            Self::TooManyCommits { limit, count } => write!(
                 f,
-                "finite-decision module must contain exactly one commit declaration, found {count}"
+                "finite-decision module declares {count} commit pools, exceeding the limit of {limit}"
             ),
+            Self::DuplicateCommitName(name) => {
+                write!(f, "duplicate commit declaration name: '{name}'")
+            }
             Self::EmptyCommit(name) => {
                 write!(f, "commit declaration '{name}' has no candidate members")
             }
@@ -519,6 +552,17 @@ impl FiniteDecisionLowerError {
             Self::UnsupportedInputType { name, .. } => Some((name, None)),
             Self::FunctionConstructorCollision { func, .. } => Some((func, None)),
             Self::ReservedOperationName { name, .. } => Some((name, None)),
+            Self::DuplicateCommitName(name) => Some((name, None)),
+            Self::ForwardRuleRead { reader, dep, .. } => Some((reader, Some(dep))),
+            Self::MultipleOtherwiseInCommit { commit } => Some((commit, None)),
+            Self::AmbiguousFallbackPriority {
+                commit, explicit, ..
+            } => Some((commit, Some(explicit))),
+            Self::ProposalInMultipleCommits {
+                candidate,
+                second_commit,
+                ..
+            } => Some((second_commit, Some(candidate))),
             _ => None,
         }
     }
@@ -1172,28 +1216,49 @@ pub fn lower_finite_decision_plan(
         });
     }
 
-    // Exactly one nonempty commit.
+    // At least one nonempty commit (ADR-0030); ADR-0039 lifts the earlier
+    // "exactly one" restriction to "one or more, up to MAX_COMMIT_COUNT",
+    // each independently nonempty, uniquely named, and — across the whole
+    // module — claiming disjoint sets of candidates.
     if commit_items.is_empty() {
         return Err(FiniteDecisionLowerError::NoCommit);
     }
-    if commit_items.len() > 1 {
-        return Err(FiniteDecisionLowerError::MultipleCommits(
-            commit_items.len(),
-        ));
+    if commit_items.len() > MAX_COMMIT_COUNT {
+        return Err(FiniteDecisionLowerError::TooManyCommits {
+            limit: MAX_COMMIT_COUNT,
+            count: commit_items.len(),
+        });
     }
-    let commit_decl = commit_items[0];
-    if commit_decl.candidates.is_empty() {
-        return Err(FiniteDecisionLowerError::EmptyCommit(
-            commit_decl.name.clone(),
-        ));
-    }
-    let mut commit_candidates_seen = BTreeSet::new();
-    for cand in &commit_decl.candidates {
-        if !commit_candidates_seen.insert(cand.clone()) {
-            return Err(FiniteDecisionLowerError::DuplicateCandidateInCommit {
-                commit: commit_decl.name.clone(),
-                candidate: cand.clone(),
-            });
+    let mut commit_names_seen: BTreeSet<String> = BTreeSet::new();
+    // candidate name -> the (first, in declaration order) commit that claims it.
+    let mut candidate_owner: BTreeMap<String, String> = BTreeMap::new();
+    for commit_decl in &commit_items {
+        if !commit_names_seen.insert(commit_decl.name.clone()) {
+            return Err(FiniteDecisionLowerError::DuplicateCommitName(
+                commit_decl.name.clone(),
+            ));
+        }
+        if commit_decl.candidates.is_empty() {
+            return Err(FiniteDecisionLowerError::EmptyCommit(
+                commit_decl.name.clone(),
+            ));
+        }
+        let mut commit_candidates_seen = BTreeSet::new();
+        for cand in &commit_decl.candidates {
+            if !commit_candidates_seen.insert(cand.clone()) {
+                return Err(FiniteDecisionLowerError::DuplicateCandidateInCommit {
+                    commit: commit_decl.name.clone(),
+                    candidate: cand.clone(),
+                });
+            }
+            if let Some(first_commit) = candidate_owner.get(cand) {
+                return Err(FiniteDecisionLowerError::ProposalInMultipleCommits {
+                    candidate: cand.clone(),
+                    first_commit: first_commit.clone(),
+                    second_commit: commit_decl.name.clone(),
+                });
+            }
+            candidate_owner.insert(cand.clone(), commit_decl.name.clone());
         }
     }
 
@@ -1830,7 +1895,7 @@ pub fn lower_finite_decision_plan(
                 // (no candidate selected) leaves that name unbound, which
                 // faults the show rather than the committed decision.
                 let mut show_readable = rule_names.clone();
-                show_readable.insert(commit_decl.name.clone());
+                show_readable.extend(commit_items.iter().map(|c| c.name.clone()));
                 let show = lower_expr_v2(
                     expr,
                     &visible_bindings,
@@ -1873,26 +1938,34 @@ pub fn lower_finite_decision_plan(
             .map_err(FiniteDecisionLowerError::ExprError)?;
     }
 
-    // Every candidate in commit must reference a declared proposal.
-    for cand in &commit_decl.candidates {
-        if !proposal_names.contains(cand) {
-            return Err(FiniteDecisionLowerError::UnknownCandidateInCommit {
-                commit: commit_decl.name.clone(),
-                candidate: cand.clone(),
-            });
+    // Every candidate in every commit must reference a declared proposal
+    // (ADR-0039: checked per pool, over all pools).
+    for commit_decl in &commit_items {
+        for cand in &commit_decl.candidates {
+            if !proposal_names.contains(cand) {
+                return Err(FiniteDecisionLowerError::UnknownCandidateInCommit {
+                    commit: commit_decl.name.clone(),
+                    candidate: cand.clone(),
+                });
+            }
         }
+
+        // `otherwise` fallback validation (ADR-0038): at most one `otherwise`
+        // proposal per commit pool, and it cannot coexist in the same pool
+        // with an explicit `priority 18446744073709551615` — both would be
+        // that pool's fallback of last resort, so which one applies is
+        // ambiguous. Independent per pool (ADR-0039): each commit pool may
+        // separately have its own `otherwise`.
+        check_otherwise_pool(&commit_decl.name, &commit_decl.candidates, module)?;
     }
 
-    // `otherwise` fallback validation (ADR-0038): at most one `otherwise`
-    // proposal per commit pool, and it cannot coexist in the same pool with
-    // an explicit `priority 18446744073709551615` — both would be that
-    // pool's fallback of last resort, so which one applies is ambiguous.
-    check_otherwise_pool(&commit_decl.name, &commit_decl.candidates, module)?;
-
-    let commit = FiniteDecisionCommit {
-        name: commit_decl.name.clone(),
-        candidates: commit_decl.candidates.clone(),
-    };
+    let commits: Vec<FiniteDecisionCommit> = commit_items
+        .iter()
+        .map(|commit_decl| FiniteDecisionCommit {
+            name: commit_decl.name.clone(),
+            candidates: commit_decl.candidates.clone(),
+        })
+        .collect();
 
     let plan = FiniteDecisionPlan {
         profile: FINITE_DECISION_PROFILE.to_string(),
@@ -1902,7 +1975,7 @@ pub fn lower_finite_decision_plan(
         lets,
         rules,
         proposals,
-        commit,
+        commits,
         shows,
         schemas,
     };
@@ -2222,11 +2295,17 @@ pub fn finite_decision_program_preimage(plan: &FiniteDecisionPlan) -> Vec<u8> {
         encode_expr_v2(&mut w, &p.value);
     }
 
-    // Commit membership and order
-    w.write_ident(&plan.commit.name);
-    w.write_uint(plan.commit.candidates.len() as u64);
-    for cand in &plan.commit.candidates {
-        w.write_ident(cand);
+    // Commit pools, in declaration order (ADR-0039 lifts ADR-0030's single
+    // commit to a self-delimited list of one or more independent pools —
+    // program identity now depends on how many there are and each one's own
+    // membership, exactly like the Rules/Proposals sections above it).
+    w.write_uint(plan.commits.len() as u64);
+    for c in &plan.commits {
+        w.write_ident(&c.name);
+        w.write_uint(c.candidates.len() as u64);
+        for cand in &c.candidates {
+            w.write_ident(cand);
+        }
     }
 
     // Show directives

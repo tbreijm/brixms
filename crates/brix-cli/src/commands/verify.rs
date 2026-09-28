@@ -457,6 +457,7 @@ pub fn execute_verify(
             explanation: None,
             locations: None,
             shows: None,
+            commits: None,
         };
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {

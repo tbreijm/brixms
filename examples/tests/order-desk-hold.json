@@ -1,0 +1,13 @@
+{
+  "schema": "brix.input@2",
+  "values": {
+    "order": {
+      "type": "record",
+      "nominal": "Order",
+      "fields": [
+        {"name": "units", "value": {"type": "int", "value": "3"}},
+        {"name": "priority_customer", "value": {"type": "bool", "value": false}}
+      ]
+    }
+  }
+}
