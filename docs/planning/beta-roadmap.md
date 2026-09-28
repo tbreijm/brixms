@@ -1,5 +1,10 @@
 # Beta roadmap
 
+*The prioritized plan, with the review behind it, is in
+[`beta-plan.md`](./beta-plan.md), and what a beta promises is in
+[`spec/Beta_Contract.md`](../../spec/Beta_Contract.md). This file keeps the
+design questions for each milestone.*
+
 This is a review of the project as it stands, and a plan for what a beta
 needs beyond it. It describes **future work only** — nothing here is a status
 report on what has already shipped. For what currently works, read the

@@ -812,3 +812,25 @@ fn invariant_violations_and_commit_faults_checkability() {
     assert!(!dep_err.is_type_fault());
     assert!(format!("{dep_err}").contains("dependency fault"));
 }
+
+/// `List` is the built-in bounded list type in a decision program
+/// (ADR-0037), so a user `config List` is refused rather than shadowed.
+#[test]
+fn test_user_config_named_list_is_reserved() {
+    let src = "config List = Nil | Cons(Int, List)\nconfig D = A\n\
+               propose a priority 1 when true = A\ncommit d from (a)\n";
+    let module = brix_syntax::parse(src).unwrap();
+    assert_eq!(
+        brix_lower::finite_decision::lower_finite_decision_plan(
+            &module,
+            brix_lower::finite_decision::FINITE_DECISION_PROFILE
+        )
+        .err(),
+        Some(
+            brix_lower::finite_decision::FiniteDecisionLowerError::ReservedOperationName {
+                name: "List".to_string(),
+                kind: "config",
+            }
+        )
+    );
+}

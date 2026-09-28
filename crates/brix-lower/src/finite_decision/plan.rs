@@ -301,8 +301,9 @@ pub enum FiniteDecisionLowerError {
     DuplicateInputName(String),
     DuplicateFunctionName(String),
     /// A declaration claimed a name reserved for a built-in operation
-    /// (ADR-0035). Refused where it is declared rather than silently losing
-    /// to the built-in at every call site.
+    /// (ADR-0035, ADR-0040) or the built-in `List` type (ADR-0037). Refused
+    /// where it is declared rather than silently losing to the built-in at
+    /// every use.
     ReservedOperationName {
         name: String,
         kind: &'static str,
@@ -528,7 +529,7 @@ impl fmt::Display for FiniteDecisionLowerError {
             Self::DuplicateFunctionName(name) => write!(f, "duplicate function name: '{name}'"),
             Self::ReservedOperationName { name, kind } => write!(
                 f,
-                "{kind} '{name}' uses a name reserved for a built-in integer operation"
+                "{kind} '{name}' uses a name reserved for a built-in; rename it"
             ),
             Self::DuplicateItemName(name) => write!(f, "duplicate top-level item name: '{name}'"),
             Self::DuplicateFunctionParameter { func, param } => {
@@ -1558,6 +1559,15 @@ pub fn lower_finite_decision_plan(
             }
             ast::Item::Let(l) => {
                 all_let_names.insert(l.name.clone());
+            }
+            // `List<T> max N` is the built-in bounded list in a decision
+            // program (ADR-0037); a user `config List` would be shadowed at
+            // every use, so it is refused here instead.
+            ast::Item::Config(c) if c.name == "List" => {
+                return Err(FiniteDecisionLowerError::ReservedOperationName {
+                    name: c.name.clone(),
+                    kind: "config",
+                });
             }
             ast::Item::Config(c) => match &c.body {
                 ast::ConfigBody::Sum(variants) => {

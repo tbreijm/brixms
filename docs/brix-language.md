@@ -770,10 +770,9 @@ has to rediscover it by trial and error, and it comes down to what each
   does with `Nat`/`Parity`) and the same program runs to a decision in either
   lane. Note also that `List<T>` itself is no longer a name available for a
   user-declared generic config in the finite-decision lane: `List<T> max N`
-  is now a reserved, built-in bounded-list input type there (§4) — a
-  user config named `List` is a distinct declaration from that built-in,
-  and a type-position `List<...>` always resolves to the built-in, so
-  declaring one is confusing at best. `Stack<T>`/`Tree<T>` (used throughout
+  is now a reserved, built-in bounded-list input type there (§4), and a
+  decision program that declares `config List` is refused with "config
+  'List' uses a name reserved for a built-in; rename it". `Stack<T>`/`Tree<T>` (used throughout
   this document and in `crates/brix-lower/tests/finite_decision_generic_configs.rs`
   and `crates/brix-lower/tests/let_eval.rs`) avoid the clash; the `let` lane
   has no such reserved name.

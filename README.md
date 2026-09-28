@@ -830,9 +830,11 @@ with BrixClient() as client:
 
 The next work is about completing the trust story and widening the useful
 language surface, not replacing the architecture above. For the fuller
-picture — what a beta needs beyond this alpha, organized as milestones with
-open design questions — see
-[`docs/planning/beta-roadmap.md`](./docs/planning/beta-roadmap.md).
+picture, see [`docs/planning/beta-plan.md`](./docs/planning/beta-plan.md)
+(the review and the ranked investment plan),
+[`spec/Beta_Contract.md`](./spec/Beta_Contract.md) (what a beta release
+promises), and [`docs/planning/beta-roadmap.md`](./docs/planning/beta-roadmap.md)
+(the open design questions for each milestone).
 
 ### Near-term engineering
 

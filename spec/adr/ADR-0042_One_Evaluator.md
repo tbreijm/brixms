@@ -136,16 +136,13 @@ parameter/return annotation) now lowers and evaluates in the finite-decision
 lane exactly as it always did in the `let` lane.
 
 **Name clash with `List<T>`.** The finite-decision lane separately gained a
-*built-in* bounded-list type also spelled `List<T>` (ADR-0037). A
-type-position `List<...>` always resolves to that built-in there,
-regardless of whether a module also declares `config List<T> = …`; the two
-features were developed in parallel and this ADR does not attempt to
-reconcile the name collision (a user-declared `config List<T>` is a
-"generic config" as far as this ADR's evaluator support goes, but writing
-one in the finite-decision lane is confusing rather than meaningfully
-useful, since every type-position `List<...>` still means the built-in).
-This ADR's own tests and examples use `Stack<T>`/`Tree<T>` for user-declared
-generic configs to stay clear of it.
+*built-in* bounded-list type also spelled `List<T>` (ADR-0037). Resolved
+for the beta: `List` is a reserved type name in a decision program, and a
+`config List` declaration there is refused at lowering
+(`ReservedOperationName { kind: "config" }`) rather than being silently
+shadowed by the built-in at every use. The `let` lane has no built-in list
+and keeps accepting `config List<T>`. This ADR's own tests and examples use
+`Stack<T>`/`Tree<T>` for user-declared generic configs.
 
 ## Recursion bounds, and why they had to move
 
