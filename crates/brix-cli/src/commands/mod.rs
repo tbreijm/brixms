@@ -505,11 +505,67 @@ pub fn format_finite_decision_human(
         }
     }
 
-    // 2. Candidate dispositions
-    if !run.dispositions.is_empty() {
-        let winning_name = run.decision.as_ref().map(|d| d.candidate.as_str());
+    // 2-3. Candidate dispositions, then decision or quiescence — per commit
+    // pool (ADR-0039). A single-commit module (still the overwhelming
+    // common case) prints exactly the pre-ADR-0039 text: no pool header,
+    // just its one pool's own section below.
+    if run.commits.len() <= 1 {
+        push_commit_pool_human(&mut out, &run.commits.first(), &run.dispositions, &run.stop);
+    } else {
+        for pool_run in &run.commits {
+            out.push_str(&format!("commit {}:\n", pool_run.commit));
+            push_commit_pool_human(
+                &mut out,
+                &Some(pool_run),
+                &pool_run.dispositions,
+                &pool_run.stop,
+            );
+        }
+    }
+
+    // 4. IDs follow
+    out.push_str(&format!("program: {}\n", run.program.0.to_hex()));
+    if let Some(ctx) = context_hex {
+        out.push_str(&format!("context: {}\n", ctx));
+    }
+    if let Some(snap) = input_snapshot_hex {
+        out.push_str(&format!("input-snapshot: {}\n", snap));
+    }
+    for pool_run in &run.commits {
+        if let FiniteDecisionStop::Quiescent { certificate } = &pool_run.stop {
+            if run.commits.len() > 1 {
+                out.push_str(&format!(
+                    "certificate ({}): {}\n",
+                    pool_run.commit,
+                    certificate.digest().to_hex()
+                ));
+            } else {
+                out.push_str(&format!("certificate: {}\n", certificate.digest().to_hex()));
+            }
+        }
+    }
+
+    out
+}
+
+/// Render one commit pool's candidate dispositions and its decision or
+/// quiescence status into `out`. `pool_run` is `None` only when a shared
+/// stage (lets/rules) faulted before any pool was evaluated and the plan
+/// somehow has zero commits (never true for a lowered plan; guarded for
+/// robustness) — `winning_name`/`stop` are still read straight from the
+/// caller's own fields in that case.
+fn push_commit_pool_human(
+    out: &mut String,
+    pool_run: &Option<&brix_lower::finite_decision::FiniteDecisionCommitRun>,
+    dispositions: &[CandidateDisposition],
+    stop: &FiniteDecisionStop,
+) {
+    if !dispositions.is_empty() {
+        let winning_name = pool_run
+            .and_then(|r| r.decision.as_ref())
+            .map(|d| d.candidate.as_str());
         out.push_str("candidates:\n");
-        for d in &run.dispositions {
+        for d in dispositions {
             let candidate_json = candidate_disposition_to_json(d, winning_name);
             out.push_str(&format!(
                 "  {}: {} (priority {}) — {}\n",
@@ -518,8 +574,7 @@ pub fn format_finite_decision_human(
         }
     }
 
-    // 3. Decision or Quiescence
-    match &run.stop {
+    match stop {
         FiniteDecisionStop::Selected(sel) => {
             out.push_str(&format!(
                 "decision: {} = {} @Derived\nstatus: selected\n",
@@ -534,20 +589,6 @@ pub fn format_finite_decision_human(
             out.push_str(&format!("status: unknown ({reason})\n"));
         }
     }
-
-    // 4. IDs follow
-    out.push_str(&format!("program: {}\n", run.program.0.to_hex()));
-    if let Some(ctx) = context_hex {
-        out.push_str(&format!("context: {}\n", ctx));
-    }
-    if let Some(snap) = input_snapshot_hex {
-        out.push_str(&format!("input-snapshot: {}\n", snap));
-    }
-    if let FiniteDecisionStop::Quiescent { certificate } = &run.stop {
-        out.push_str(&format!("certificate: {}\n", certificate.digest().to_hex()));
-    }
-
-    out
 }
 
 #[cfg(test)]

@@ -355,6 +355,24 @@ impl Checker<'_> {
                     .map(|c| known(c.ty.clone()))
                     .unwrap_or(body)
             }
+            Expr::ListLit(_)
+            | Expr::Fold { .. }
+            | Expr::Filter { .. }
+            | Expr::Map { .. }
+            | Expr::Comprehension { .. }
+            | Expr::In(..)
+            | Expr::Len(_)
+            | Expr::Distinct(_) => self.list_expr(expr, env, next)?,
+        })
+    }
+
+    /// The list and relation forms (ADR-0037, ADR-0040), kept out of
+    /// [`Self::expr`] so their locals do not widen its frame: `expr` recurses
+    /// once per nesting level, and a wider frame lowers the depth a default
+    /// thread stack can reach before `MAX_EXPR_DEPTH` is enforced.
+    #[inline(never)]
+    fn list_expr(&mut self, expr: &Expr, env: &Env, next: usize) -> Result<Shape, Error> {
+        Ok(match expr {
             Expr::ListLit(items) => {
                 let mut shapes = Vec::with_capacity(items.len());
                 for item in items {
@@ -442,6 +460,7 @@ impl Checker<'_> {
                 let elem_shape = self.list_element(&list_shape);
                 Arc::new(Type::List(elem_shape))
             }
+            _ => unreachable!("list_expr is only called for list and relation forms"),
         })
     }
 }

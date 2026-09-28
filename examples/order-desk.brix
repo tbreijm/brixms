@@ -1,0 +1,24 @@
+// Two independent decisions over the same order (ADR-0039): a shipping
+// decision and a billing decision. Each `commit` is its own pool — a
+// candidate never competes against a candidate from the other pool — but
+// both read the same `order` input and the same `bulk` rule fact.
+config Order = { units: Int, priority_customer: Bool }
+config Shipping = Expedited | Standard | HoldShipping
+config Billing = Discounted | FullPrice
+
+input order: Order
+
+rule bulk = order.units >= 50
+
+propose expedite priority 5 when order.priority_customer = Expedited
+propose standard priority 10 when order.units >= 10 = Standard
+propose hold_shipping otherwise = HoldShipping
+
+propose discount priority 5 when bulk = Discounted
+propose full_price otherwise = FullPrice
+
+commit shipping from (expedite, standard, hold_shipping)
+commit billing from (discount, full_price)
+
+show shipping
+show billing

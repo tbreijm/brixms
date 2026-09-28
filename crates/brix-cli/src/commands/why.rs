@@ -96,16 +96,21 @@ pub fn execute_why_or_whynot(
         (None, None)
     };
 
-    if run.is_unknown() {
-        let (code, detail) = match &run.stop {
-            brix_lower::finite_decision::FiniteDecisionStop::Unknown(reason) => {
-                unknown_reason_to_code_and_detail(reason)
-            }
-            _ => (
-                "unknown-stop",
-                "unexpected deliberation stop condition in failure path".to_string(),
-            ),
-        };
+    // Fail-closed pre-flight, scoped to `candidate`'s own commit pool
+    // (ADR-0039) — a fault in a different pool must not block explaining a
+    // candidate in a healthy one. Falls back to the first pool's stop when
+    // `candidate` names no candidate in any pool (matching pre-ADR-0039
+    // behavior on a single-commit plan, and `explain_why`/`explain_why_not`
+    // below still report `CandidateNotFound` in that case).
+    let relevant_stop = match plan.commit_of_candidate(candidate) {
+        Some(pool) => run
+            .commit_run(&pool.name)
+            .map(|c| c.stop.clone())
+            .unwrap_or_else(|| run.stop.clone()),
+        None => run.stop.clone(),
+    };
+    if let brix_lower::finite_decision::FiniteDecisionStop::Unknown(reason) = &relevant_stop {
+        let (code, detail) = unknown_reason_to_code_and_detail(reason);
         let status_str = "unknown";
         let diag = format!("{code}: {detail}");
         if json {
@@ -329,6 +334,7 @@ pub fn execute_why_or_whynot(
             explanation: explanation_json,
             locations: None,
             shows: None,
+            commits: None,
         };
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {

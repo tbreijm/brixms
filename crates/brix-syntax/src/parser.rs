@@ -297,7 +297,7 @@ impl Parser {
             }
             TokenKind::Rule => {
                 self.advance();
-                self.parse_callable().map(Item::Rule)
+                self.parse_rule_decl().map(Item::Rule)
             }
             TokenKind::Fn => {
                 self.advance();
@@ -448,6 +448,37 @@ impl Parser {
             params,
             ret,
             body,
+            params_declared: true,
+        })
+    }
+
+    /// `rule name[(deps...)] [: Ty] = body` (ADR-0038: the dependency list is
+    /// optional — omitting it entirely means "infer from the body", distinct
+    /// from an explicit empty `()`).
+    fn parse_rule_decl(&mut self) -> Result<Callable, ParseError> {
+        let name = self.expect_ident("rule declaration name")?.0;
+        let (params, params_declared) = if self.check(&TokenKind::OpenParen) {
+            self.advance();
+            let params = self.parse_comma_separated(TokenKind::CloseParen, |p| p.parse_param())?;
+            self.consume(TokenKind::CloseParen, "rule declaration ')'")?;
+            (params, true)
+        } else {
+            (Vec::new(), false)
+        };
+        let ret = if self.check(&TokenKind::Colon) {
+            self.advance();
+            Some(self.parse_ty()?)
+        } else {
+            None
+        };
+        self.consume(TokenKind::Equals, "rule declaration '='")?;
+        let body = self.parse_expr()?;
+        Ok(Callable {
+            name,
+            params,
+            ret,
+            body,
+            params_declared,
         })
     }
 
@@ -475,13 +506,39 @@ impl Parser {
         Ok(LetDecl { name, ty, value })
     }
 
+    /// `propose NAME[(DEPS...)] priority UINT when GUARD = VALUE`, or the
+    /// `otherwise` fallback sugar `propose NAME[(DEPS...)] otherwise = VALUE`
+    /// (ADR-0038). The dependency list is optional, as for `rule`; omitting
+    /// it means dependencies are inferred from the guard and value.
     fn parse_propose_decl(&mut self) -> Result<ProposeDecl, ParseError> {
         let name = self.expect_ident("propose candidate name")?.0;
-        self.consume(TokenKind::OpenParen, "propose candidate dependencies '('")?;
-        let deps = self.parse_comma_separated(TokenKind::CloseParen, |p| {
-            p.expect_ident("candidate dependency").map(|(id, _)| id)
-        })?;
-        self.consume(TokenKind::CloseParen, "propose candidate dependencies ')'")?;
+        let (deps, deps_declared) = if self.check(&TokenKind::OpenParen) {
+            self.advance();
+            let deps = self.parse_comma_separated(TokenKind::CloseParen, |p| {
+                p.expect_ident("candidate dependency").map(|(id, _)| id)
+            })?;
+            self.consume(TokenKind::CloseParen, "propose candidate dependencies ')'")?;
+            (deps, true)
+        } else {
+            (Vec::new(), false)
+        };
+        if self.check(&TokenKind::Otherwise) {
+            self.advance();
+            self.consume(
+                TokenKind::Equals,
+                "propose declaration '=' after 'otherwise'",
+            )?;
+            let value = self.parse_expr()?;
+            return Ok(ProposeDecl {
+                name,
+                deps,
+                priority: u64::MAX,
+                guard: Expr::Bool(true),
+                value,
+                deps_declared,
+                otherwise: true,
+            });
+        }
         self.consume(TokenKind::Priority, "propose declaration 'priority'")?;
         let priority = self.parse_priority()?;
         self.consume(TokenKind::When, "propose declaration 'when'")?;
@@ -497,6 +554,8 @@ impl Parser {
             priority,
             guard,
             value,
+            deps_declared,
+            otherwise: false,
         })
     }
 

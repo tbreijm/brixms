@@ -110,6 +110,7 @@ fn test_all_example_suites_pass() {
         "examples/shipping-functions.test.json",
         "examples/order-policy.test.json",
         "examples/allocation.test.json",
+        "examples/order-desk.test.json",
     ];
     for suite in &suites {
         assert!(
@@ -141,6 +142,7 @@ fn test_each_example_suite_individually() {
         "examples/shipping-functions.test.json",
         "examples/order-policy.test.json",
         "examples/allocation.test.json",
+        "examples/order-desk.test.json",
     ];
     for suite in &suites {
         let (code, stdout, stderr) = run_cmd({

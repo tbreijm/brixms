@@ -14,9 +14,13 @@ fn test_propose_basic() {
             priority,
             guard,
             value,
+            deps_declared,
+            otherwise,
         }) => {
             assert_eq!(name, "full_discount");
             assert!(deps.is_empty());
+            assert!(deps_declared, "explicit '()' dependency list");
+            assert!(!otherwise);
             assert_eq!(*priority, 0);
             assert_eq!(*guard, Expr::Bool(true));
             assert_eq!(*value, Expr::Num("10".into()));
@@ -38,8 +42,12 @@ fn test_propose_with_dependencies_and_expressions() {
             priority,
             guard,
             value,
+            deps_declared,
+            otherwise,
         }) => {
             assert_eq!(name, "step_a");
+            assert!(deps_declared);
+            assert!(!otherwise);
             assert_eq!(deps, &["cand_x", "cand_y"]);
             assert_eq!(*priority, 10);
             assert_eq!(
@@ -227,6 +235,121 @@ fn test_semicolon_bearing_input_fails() {
     assert!(err.message.contains("Unexpected character ';'"));
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0038: optional dependency lists and the `otherwise` fallback sugar.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_rule_with_omitted_dependencies_parses_as_undeclared() {
+    let module = parse("rule evenly_split = 1").expect("rule without parens should parse");
+    match &module.items[0] {
+        Item::Rule(Callable {
+            name,
+            params,
+            params_declared,
+            ..
+        }) => {
+            assert_eq!(name, "evenly_split");
+            assert!(params.is_empty());
+            assert!(!params_declared, "no parens were written at all");
+        }
+        other => panic!("Expected Item::Rule, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_rule_with_explicit_empty_parens_is_declared() {
+    let module = parse("rule x() = 1").expect("rule with explicit empty parens should parse");
+    match &module.items[0] {
+        Item::Rule(Callable {
+            params,
+            params_declared,
+            ..
+        }) => {
+            assert!(params.is_empty());
+            assert!(params_declared, "an explicit '()' was written");
+        }
+        other => panic!("Expected Item::Rule, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_propose_with_omitted_dependencies() {
+    let module =
+        parse("propose ship priority 10 when can_ship = 1").expect("omitted deps should parse");
+    match &module.items[0] {
+        Item::Propose(ProposeDecl {
+            name,
+            deps,
+            deps_declared,
+            otherwise,
+            ..
+        }) => {
+            assert_eq!(name, "ship");
+            assert!(deps.is_empty());
+            assert!(!deps_declared);
+            assert!(!otherwise);
+        }
+        other => panic!("Expected Item::Propose, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_propose_otherwise_sugar_desugars_to_max_priority_when_true() {
+    let module = parse("propose hold otherwise = 1").expect("otherwise sugar should parse");
+    match &module.items[0] {
+        Item::Propose(ProposeDecl {
+            name,
+            deps,
+            deps_declared,
+            priority,
+            guard,
+            value,
+            otherwise,
+        }) => {
+            assert_eq!(name, "hold");
+            assert!(deps.is_empty());
+            assert!(!deps_declared);
+            assert_eq!(*priority, u64::MAX);
+            assert_eq!(*guard, Expr::Bool(true));
+            assert_eq!(*value, Expr::Num("1".into()));
+            assert!(otherwise);
+        }
+        other => panic!("Expected Item::Propose, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_propose_otherwise_sugar_with_explicit_dependency_list() {
+    let module =
+        parse("propose hold(base) otherwise = base").expect("otherwise with deps should parse");
+    match &module.items[0] {
+        Item::Propose(ProposeDecl {
+            deps,
+            deps_declared,
+            otherwise,
+            ..
+        }) => {
+            assert_eq!(deps, &["base"]);
+            assert!(deps_declared);
+            assert!(otherwise);
+        }
+        other => panic!("Expected Item::Propose, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_otherwise_is_a_reserved_word() {
+    // Cannot be used as a `let` binding name.
+    let err = parse("let otherwise = 1").unwrap_err();
+    assert!(err.message.contains("Expected identifier"));
+
+    // Cannot be used as a rule, propose, or input name either.
+    assert!(parse("rule otherwise = 1").is_err());
+    assert!(parse("propose otherwise priority 0 when true = 1").is_err());
+    assert!(parse("input otherwise: Int").is_err());
+}
+
 #[test]
 fn test_semantic_checks_deferred_to_lowering() {
     // 1. Multiple commit declarations in one module (syntactically permitted)
@@ -285,11 +408,9 @@ fn test_malformed_propose_diagnostics() {
     assert_eq!(err.col, Some(9));
     assert!(err.message.contains("Expected identifier"));
 
-    // Missing open paren for dependencies
-    let err = parse("propose cand priority 0 when true = 1").unwrap_err();
-    assert_eq!(err.line, Some(1));
-    assert_eq!(err.col, Some(14));
-    assert!(err.message.contains("Expected OpenParen"));
+    // An omitted dependency list is now valid (ADR-0038: inferred
+    // dependencies) rather than "Expected OpenParen" — see
+    // `test_propose_with_omitted_dependencies` below.
 
     // Non-identifier in dependencies
     let err = parse("propose cand(123) priority 0 when true = 1").unwrap_err();

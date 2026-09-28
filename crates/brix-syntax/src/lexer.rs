@@ -36,6 +36,7 @@ pub enum TokenKind {
     In,
     Where,
     Yield,
+    Otherwise,
 
     // Identifiers & Literals
     Ident(String),
@@ -269,6 +270,7 @@ pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token
                     "in" => TokenKind::In,
                     "where" => TokenKind::Where,
                     "yield" => TokenKind::Yield,
+                    "otherwise" => TokenKind::Otherwise,
                     // `Derived`/`Audited`/`Proven` are deliberately NOT
                     // keywords. They are grade names only in grade position
                     // (after `@`), which the parser recognizes; everywhere

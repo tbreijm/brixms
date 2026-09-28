@@ -224,6 +224,35 @@ pub fn execute_run(
             .map(|d| candidate_disposition_to_json(d, winning_name))
             .collect();
         let decision_json = run.decision.as_ref().map(decision_to_json);
+        // ADR-0039: every commit pool's own outcome, additive — populated
+        // only when the module declares more than one pool, so a
+        // single-commit module's JSON is unchanged (see the field's doc).
+        let commits_json = if run.commits.len() > 1 {
+            Some(
+                run.commits
+                    .iter()
+                    .map(|c| {
+                        let win = c.decision.as_ref().map(|d| d.candidate.as_str());
+                        let status = match &c.stop {
+                            FiniteDecisionStop::Selected(_) => "selected",
+                            FiniteDecisionStop::Quiescent { .. } => "quiescent",
+                            FiniteDecisionStop::Unknown(_) => "unknown",
+                        };
+                        crate::json::CommitPoolJson::new(
+                            c.commit.clone(),
+                            status,
+                            c.dispositions
+                                .iter()
+                                .map(|d| candidate_disposition_to_json(d, win))
+                                .collect(),
+                            c.decision.as_ref().map(decision_to_json),
+                        )
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
 
         let res = CliResultJson {
             schema: BRIX_CLI_SCHEMA.to_string(),
@@ -243,6 +272,7 @@ pub fn execute_run(
             explanation: None,
             locations: None,
             shows: shows_json,
+            commits: commits_json,
         };
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {

@@ -1,0 +1,49 @@
+{
+  "schema": "brix.test@1",
+  "program": "order-desk.brix",
+  "cases": [
+    {
+      "name": "priority customer with a bulk order is expedited and discounted",
+      "inputs": ["order-desk.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "expedite",
+        "value": "Expedited",
+        "decisions": {
+          "shipping": "expedite",
+          "billing": "discount"
+        }
+      }
+    },
+    {
+      "name": "non-priority order meeting the unit threshold ships standard at full price",
+      "inputs": ["tests/order-desk-standard.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "standard",
+        "value": "Standard",
+        "decisions": {
+          "shipping": "standard",
+          "billing": "full_price"
+        },
+        "candidates": {
+          "expedite": "rejected-guard-false",
+          "discount": "rejected-guard-false"
+        }
+      }
+    },
+    {
+      "name": "a tiny non-priority order falls back to held shipping at full price",
+      "inputs": ["tests/order-desk-hold.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "hold_shipping",
+        "value": "HoldShipping",
+        "decisions": {
+          "shipping": "hold_shipping",
+          "billing": "full_price"
+        }
+      }
+    }
+  ]
+}
