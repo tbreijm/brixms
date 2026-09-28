@@ -306,7 +306,7 @@ can.
 | `init`/`assert`/`retract`/`program`/`log`/`show`/`audit`/`verify`, locking | `crates/brix-kb/src/ops.rs` |
 | `diff` | `crates/brix-kb/src/diff.rs` |
 | Unified operation error (`code`/`message`/`status`/`exit_code`, mirrors `CliInputError`) | `crates/brix-kb/src/error.rs` |
-| Package loading (`use`) independent of `brix-cli` | `crates/brix-kb/src/packages.rs` |
+| Package loading (`use`), shared with `brix-cli` so both resolve imports identically | `crates/brix-lower/src/packages.rs` |
 | Library-level lifecycle tests (init/assert/retract/program/log/show/diff/audit/verify, tamper, lock, non-erasure) | `crates/brix-kb/src/lifecycle_tests.rs` |
 | CLI surface: `Command::Kb`, `KbOp`, argument parsing, help text | `crates/brix-cli/src/cli.rs` |
 | CLI dispatch, module doc comment | `crates/brix-cli/src/main.rs` |

@@ -15,6 +15,7 @@ import queue
 import shutil
 import subprocess
 import threading
+import time
 from typing import Any, Dict, List, Optional, Union
 
 # A program or input source: either a filesystem path (resolved relative to
@@ -141,6 +142,10 @@ class BrixClient:
         self._id_counter = itertools.count(1)
         self._closed = False
         self._lock = threading.Lock()
+        # Ids of requests that timed out. The server answers strictly in
+        # order, so each one's response still arrives, ahead of any later
+        # request's; it is discarded when read.
+        self._abandoned: set = set()
 
         args = [self._bin, "serve", "--stdio"] + (extra_args or [])
         try:
@@ -252,24 +257,34 @@ class BrixClient:
                 raise BrixProcessError(f"failed to write request: {e}") from e
 
             effective_timeout = timeout if timeout is not None else self._default_timeout
-            try:
-                raw = self._out_queue.get(timeout=effective_timeout)
-            except queue.Empty:
-                raise BrixTimeoutError(
-                    f"no response for method '{method}' within {effective_timeout}s"
-                ) from None
-
-        if raw is None:
-            stderr_tail = "\n".join(self._stderr_lines[-20:])
-            raise BrixProcessError(
-                "brix serve --stdio closed stdout unexpectedly"
-                + (f"; stderr:\n{stderr_tail}" if stderr_tail else "")
-            )
-
-        try:
-            response = json.loads(raw)
-        except json.JSONDecodeError as e:
-            raise BrixProcessError(f"server sent a non-JSON response line: {e}: {raw!r}") from e
+            deadline = time.monotonic() + effective_timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                try:
+                    raw = self._out_queue.get(timeout=max(remaining, 0))
+                except queue.Empty:
+                    self._abandoned.add(request_id)
+                    raise BrixTimeoutError(
+                        f"no response for method '{method}' within {effective_timeout}s"
+                    ) from None
+                if raw is None:
+                    stderr_tail = "\n".join(self._stderr_lines[-20:])
+                    raise BrixProcessError(
+                        "brix serve --stdio closed stdout unexpectedly"
+                        + (f"; stderr:\n{stderr_tail}" if stderr_tail else "")
+                    )
+                try:
+                    response = json.loads(raw)
+                except json.JSONDecodeError as e:
+                    raise BrixProcessError(
+                        f"server sent a non-JSON response line: {e}: {raw!r}"
+                    ) from e
+                late_id = response.get("id")
+                if late_id != request_id and late_id in self._abandoned:
+                    # The late answer to an earlier, timed-out request.
+                    self._abandoned.discard(late_id)
+                    continue
+                break
 
         if response.get("id") != request_id:
             raise BrixProtocolError(

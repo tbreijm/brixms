@@ -31,6 +31,7 @@ pub mod l3_regime;
 pub mod l3_run;
 pub mod l3_v2;
 pub mod let_eval;
+pub mod packages;
 pub use audit_bundle::{
     check_finite_decision_audit_input_bundle_from_module_v1,
     check_finite_decision_audit_input_bundle_from_module_with_inputs_v1,

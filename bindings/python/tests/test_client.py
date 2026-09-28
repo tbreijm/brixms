@@ -177,3 +177,25 @@ def test_pipelined_low_level_calls_share_one_process(brix_bin, examples_dir):
             for _ in range(5)
         ]
         assert results == ["ship"] * 5
+
+
+SLOW_PROGRAM = """config D = Go
+rule n() = count([{xs}], a => any([{xs}], b => a + b < 0))
+propose go priority 1 when n == 0 = Go
+commit d from (go)
+"""
+
+
+def test_timeout_does_not_desynchronize_the_session(client):
+    """A request that times out still gets its answer later; the client
+    discards it, so the next call receives its own response."""
+    xs = ", ".join(str(i) for i in range(256))
+    slow = source(SLOW_PROGRAM.format(xs=xs))
+    with pytest.raises(BrixTimeoutError):
+        client.run(program=slow, timeout=0.001)
+
+    result = client.check(program=path("examples/shipping.brix"), timeout=60)
+    assert result["command"] == "check"
+    assert result["ok"] is True
+    # And the session keeps working after that.
+    assert client.run(program=path("examples/shipping.brix"))["decision"]["candidate"] == "ship"
