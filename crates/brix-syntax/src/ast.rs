@@ -118,6 +118,15 @@ pub struct Callable {
     /// Optional declared return type (inferred when absent).
     pub ret: Option<Ty>,
     pub body: Expr,
+    /// Whether a parenthesized parameter list was written in the source.
+    ///
+    /// Always `true` for `fn`/`gen`, which always write `(...)`. For a
+    /// `rule`, `false` means the source wrote `rule name = body` with no
+    /// parentheses at all — distinct from `rule name() = body`, whose empty
+    /// parenthesized list is `true` with zero `params`. Finite-decision
+    /// lowering (ADR-0038) uses this to tell "no declared dependencies,
+    /// infer them from the body" apart from "explicitly zero dependencies".
+    pub params_declared: bool,
 }
 
 /// A parameter `name [: Ty]` (type inferred when absent).
@@ -137,7 +146,9 @@ pub struct LetDecl {
     pub value: Expr,
 }
 
-/// `propose NAME(DEPS...) priority UINT when GUARD = VALUE`.
+/// `propose NAME[(DEPS...)] priority UINT when GUARD = VALUE`, or the
+/// `otherwise` fallback sugar `propose NAME[(DEPS...)] otherwise = VALUE`
+/// (ADR-0038).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProposeDecl {
     pub name: String,
@@ -145,6 +156,20 @@ pub struct ProposeDecl {
     pub priority: u64,
     pub guard: Expr,
     pub value: Expr,
+    /// Whether a parenthesized dependency list was written in the source.
+    /// `false` means dependencies are inferred from what the guard and value
+    /// read (ADR-0038); `true` (including an explicit empty `()`) keeps
+    /// today's declare-everything-you-read meaning.
+    pub deps_declared: bool,
+    /// `true` when this proposal was written with the `otherwise` fallback
+    /// keyword rather than an explicit `priority ... when ...` clause
+    /// (ADR-0038). `priority`/`guard` are already desugared to
+    /// `u64::MAX`/`true` in that case, so every other consumer of this
+    /// struct can ignore the flag; it exists only so lowering can detect and
+    /// reject an ambiguous fallback (two `otherwise`s, or an `otherwise`
+    /// alongside an explicit `priority 18446744073709551615`, in the same
+    /// commit pool).
+    pub otherwise: bool,
 }
 
 /// `commit NAME from (CANDIDATE, ...)`.
