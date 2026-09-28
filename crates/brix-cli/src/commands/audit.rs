@@ -396,6 +396,7 @@ pub fn execute_audit(
             locations: None,
             shows: None,
             commits: None,
+            entity_decisions: None,
         };
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {

@@ -95,12 +95,14 @@ where
         Ok(cli::Command::Why {
             file,
             candidate,
+            entity,
             json,
             package_paths,
             input_paths,
         }) => commands::why::execute_why_or_whynot(
             &file,
             &candidate,
+            entity,
             json,
             &package_paths,
             &input_paths,
@@ -109,12 +111,14 @@ where
         Ok(cli::Command::WhyNot {
             file,
             candidate,
+            entity,
             json,
             package_paths,
             input_paths,
         }) => commands::why::execute_why_or_whynot(
             &file,
             &candidate,
+            entity,
             json,
             &package_paths,
             &input_paths,

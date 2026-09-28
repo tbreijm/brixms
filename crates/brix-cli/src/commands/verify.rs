@@ -458,6 +458,7 @@ pub fn execute_verify(
             locations: None,
             shows: None,
             commits: None,
+            entity_decisions: None,
         };
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {

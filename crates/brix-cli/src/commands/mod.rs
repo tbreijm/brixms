@@ -22,7 +22,8 @@ use brix_lower::l3_v2::L3ValueV2;
 use soc_regimes::finite_frontier::CandidateStatus;
 
 use crate::json::{
-    to_tagged_value, CandidateJson, DecisionJson, FactJson, InputJson, StructuredReasonJson,
+    to_tagged_value, CandidateJson, DecisionJson, EntityDecisionsJson, EntityInstanceJson,
+    FactJson, InputJson, StructuredReasonJson,
 };
 
 /// Errors encountered when resolving, loading, and validating external inputs for CLI commands.
@@ -406,6 +407,50 @@ pub fn decision_to_json(d: &SelectedDecision) -> DecisionJson {
     }
 }
 
+/// Convert one `decide` block's own run into its JSON representation
+/// (ADR-0043).
+pub fn decide_run_to_json(
+    decide_run: &brix_lower::finite_decision::FiniteDecisionDecideRun,
+) -> EntityDecisionsJson {
+    use brix_lower::finite_decision::FiniteDecisionDecideStop;
+
+    match &decide_run.stop {
+        FiniteDecisionDecideStop::Unknown(reason) => EntityDecisionsJson {
+            name: decide_run.decide.clone(),
+            status: "unknown".to_string(),
+            reason: Some(reason.to_string()),
+            instances: Vec::new(),
+        },
+        FiniteDecisionDecideStop::Settled => EntityDecisionsJson {
+            name: decide_run.decide.clone(),
+            status: "settled".to_string(),
+            reason: None,
+            instances: decide_run
+                .instances
+                .iter()
+                .map(|inst| {
+                    let winning_name = inst.decision.as_ref().map(|d| d.candidate.as_str());
+                    EntityInstanceJson {
+                        index: inst.index as u64,
+                        binder: to_tagged_value(&inst.binder),
+                        status: if inst.decision.is_some() {
+                            "selected".to_string()
+                        } else {
+                            "quiescent".to_string()
+                        },
+                        candidates: inst
+                            .dispositions
+                            .iter()
+                            .map(|d| candidate_disposition_to_json(d, winning_name))
+                            .collect(),
+                        decision: inst.decision.as_ref().map(decision_to_json),
+                    }
+                })
+                .collect(),
+        },
+    }
+}
+
 use brix_lower::finite_decision::FiniteDecisionUnknownReason;
 
 /// Map a deliberation unknown reason to a stable reason code and human detail string.
@@ -523,6 +568,14 @@ pub fn format_finite_decision_human(
         }
     }
 
+    // 3b. Per-entity decide blocks (ADR-0043), after every commit pool's own
+    // section and before IDs — one `decide <name>:` section per block, in
+    // declaration order, only when the module declares at least one.
+    for decide_run in &run.decides {
+        out.push_str(&format!("decide {}:\n", decide_run.decide));
+        push_decide_block_human(&mut out, decide_run);
+    }
+
     // 4. IDs follow
     out.push_str(&format!("program: {}\n", run.program.0.to_hex()));
     if let Some(ctx) = context_hex {
@@ -587,6 +640,45 @@ fn push_commit_pool_human(
         }
         FiniteDecisionStop::Unknown(reason) => {
             out.push_str(&format!("status: unknown ({reason})\n"));
+        }
+    }
+}
+
+/// Render one `decide` block's own per-entity outcome (ADR-0043): one line
+/// per settled instance in element order, or a single fault line when the
+/// whole block is Unknown (all-or-nothing — see
+/// `FiniteDecisionDecideRun::stop`'s own docs).
+fn push_decide_block_human(
+    out: &mut String,
+    decide_run: &brix_lower::finite_decision::FiniteDecisionDecideRun,
+) {
+    use brix_lower::finite_decision::FiniteDecisionDecideStop;
+
+    match &decide_run.stop {
+        FiniteDecisionDecideStop::Unknown(reason) => {
+            out.push_str(&format!("  status: unknown ({reason})\n"));
+        }
+        FiniteDecisionDecideStop::Settled => {
+            for inst in &decide_run.instances {
+                let binder_human = fmt_value_human(&inst.binder);
+                match &inst.decision {
+                    Some(sel) => {
+                        out.push_str(&format!(
+                            "  [{}] {}: {} = {} @Derived\n",
+                            inst.index,
+                            binder_human,
+                            sel.candidate,
+                            fmt_value_human(&sel.value)
+                        ));
+                    }
+                    None => {
+                        out.push_str(&format!(
+                            "  [{}] {}: none (quiescent)\n",
+                            inst.index, binder_human
+                        ));
+                    }
+                }
+            }
         }
     }
 }

@@ -45,6 +45,9 @@ pub enum Command {
     Why {
         file: PathBuf,
         candidate: String,
+        /// `--entity INDEX` (ADR-0043): required when `candidate` is a
+        /// `decide`-block candidate, ignored otherwise.
+        entity: Option<usize>,
         input_paths: Vec<PathBuf>,
         json: bool,
         package_paths: Vec<PathBuf>,
@@ -52,6 +55,9 @@ pub enum Command {
     WhyNot {
         file: PathBuf,
         candidate: String,
+        /// `--entity INDEX` (ADR-0043): required when `candidate` is a
+        /// `decide`-block candidate, ignored otherwise.
+        entity: Option<usize>,
         input_paths: Vec<PathBuf>,
         json: bool,
         package_paths: Vec<PathBuf>,
@@ -626,12 +632,24 @@ fn parse_verify_args(args: &[String], json: bool) -> Result<Command, CliUsageErr
     })
 }
 
+/// Parse a `--entity` argument (ADR-0043): a nonnegative decimal index.
+fn parse_entity_index(raw: &str, json: bool, cmd_name: &str) -> Result<usize, CliUsageError> {
+    raw.parse::<usize>().map_err(|_| {
+        CliUsageError::usage(
+            format!("invalid '--entity' value '{raw}': expected a nonnegative integer index"),
+            json,
+            Some(cmd_name.to_string()),
+        )
+    })
+}
+
 fn parse_why_args(args: &[String], json: bool, is_whynot: bool) -> Result<Command, CliUsageError> {
     let cmd_name = if is_whynot { "whynot" } else { "why" };
     let mut positionals = Vec::new();
     let mut package_paths = Vec::new();
     let mut input_paths = Vec::new();
     let mut candidate: Option<String> = None;
+    let mut entity: Option<usize> = None;
     let mut i = 0;
 
     while i < args.len() {
@@ -650,6 +668,18 @@ fn parse_why_args(args: &[String], json: bool, is_whynot: bool) -> Result<Comman
             candidate = Some(args[i].clone());
         } else if let Some(stripped) = arg.strip_prefix("--candidate=") {
             candidate = Some(stripped.to_string());
+        } else if arg == "--entity" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing argument for '--entity'",
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            entity = Some(parse_entity_index(&args[i], json, cmd_name)?);
+        } else if let Some(stripped) = arg.strip_prefix("--entity=") {
+            entity = Some(parse_entity_index(stripped, json, cmd_name)?);
         } else if try_parse_input_flag(arg, args, &mut i, &mut input_paths, cmd_name, json)? {
             // Handled
         } else if arg == "--package-path" {
@@ -707,6 +737,7 @@ fn parse_why_args(args: &[String], json: bool, is_whynot: bool) -> Result<Comman
         Ok(Command::WhyNot {
             file,
             candidate,
+            entity,
             input_paths,
             json,
             package_paths,
@@ -715,6 +746,7 @@ fn parse_why_args(args: &[String], json: bool, is_whynot: bool) -> Result<Comman
         Ok(Command::Why {
             file,
             candidate,
+            entity,
             input_paths,
             json,
             package_paths,
@@ -1691,6 +1723,7 @@ mod tests {
             Command::Why {
                 file: PathBuf::from("module.brix"),
                 candidate: "step_one".to_string(),
+                entity: None,
                 json: false,
                 package_paths: vec![],
                 input_paths: vec![],
@@ -1715,6 +1748,7 @@ mod tests {
             Command::Why {
                 file: PathBuf::from("module.brix"),
                 candidate: "step_one".to_string(),
+                entity: None,
                 json: true,
                 package_paths: vec![PathBuf::from("pkgs")],
                 input_paths: vec![PathBuf::from("snap.json")],
@@ -1737,6 +1771,7 @@ mod tests {
             Command::WhyNot {
                 file: PathBuf::from("module.brix"),
                 candidate: "step_two".to_string(),
+                entity: None,
                 json: false,
                 package_paths: vec![],
                 input_paths: vec![PathBuf::from("val.json")],

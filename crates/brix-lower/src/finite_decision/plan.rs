@@ -1598,11 +1598,14 @@ pub fn lower_finite_decision_plan(
         });
     }
 
-    // At least one nonempty commit (ADR-0030); ADR-0039 lifts the earlier
-    // "exactly one" restriction to "one or more, up to MAX_COMMIT_COUNT",
-    // each independently nonempty, uniquely named, and — across the whole
-    // module — claiming disjoint sets of candidates.
-    if commit_items.is_empty() {
+    // At least one nonempty commit, OR at least one decide block (ADR-0030,
+    // ADR-0043); ADR-0039 lifts the earlier "exactly one" restriction on
+    // `commit` to "one or more, up to MAX_COMMIT_COUNT", each independently
+    // nonempty, uniquely named, and — across the whole module — claiming
+    // disjoint sets of candidates. A module made up entirely of `decide`
+    // blocks (no top-level `commit` at all) is valid: each block is already
+    // its own implicit per-entity commit pool.
+    if commit_items.is_empty() && decide_items.is_empty() {
         return Err(FiniteDecisionLowerError::NoCommit);
     }
     if commit_items.len() > MAX_COMMIT_COUNT {
@@ -3025,12 +3028,17 @@ pub fn finite_decision_program_preimage(plan: &FiniteDecisionPlan) -> Vec<u8> {
 
     // Commit membership and order. The first pool keeps ADR-0030's exact
     // single-commit slot, so every single-commit program's preimage (and
-    // program id) is byte-identical to before ADR-0039.
-    let first = &plan.commits[0];
-    w.write_ident(&first.name);
-    w.write_uint(first.candidates.len() as u64);
-    for cand in &first.candidates {
-        w.write_ident(cand);
+    // program id) is byte-identical to before ADR-0039. A module with no
+    // `commit` at all (ADR-0043: valid when it declares at least one
+    // `decide` block instead) omits this slot entirely — no program lowered
+    // before ADR-0043 could ever have zero commits (`NoCommit` was
+    // unconditional), so there is no prior byte layout to preserve here.
+    if let Some(first) = plan.commits.first() {
+        w.write_ident(&first.name);
+        w.write_uint(first.candidates.len() as u64);
+        for cand in &first.candidates {
+            w.write_ident(cand);
+        }
     }
 
     // Show directives

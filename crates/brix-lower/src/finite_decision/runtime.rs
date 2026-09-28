@@ -955,15 +955,31 @@ impl FiniteDecisionRuntime {
         }
 
         // `decision`/`dispositions`/`final_world`/`stop` mirror the first
-        // commit pool (see the struct docs) — lowering guarantees at least
-        // one commit, so this is always present.
-        let first = commits
-            .first()
-            .expect("finite-decision plan always has at least one commit pool");
-        let decision = first.decision.clone();
-        let dispositions = first.dispositions.clone();
-        let final_world = first.final_world;
-        let stop = first.stop.clone();
+        // commit pool (see the struct docs). Lowering guarantees at least
+        // one commit OR at least one decide block (ADR-0043); a module made
+        // up entirely of `decide` blocks has no commit pool to mirror, so an
+        // honest, zero-candidate deliberation stands in for it — the exact
+        // same `deliberate` machinery every real pool uses, just over no
+        // candidates at all, which settles as certified quiescence rather
+        // than fabricating a decision or a stop this run never actually
+        // reached.
+        let (decision, dispositions, final_world, stop) = match commits.first() {
+            Some(first) => (
+                first.decision.clone(),
+                first.dispositions.clone(),
+                first.final_world,
+                first.stop.clone(),
+            ),
+            None => match self.deliberate(&[], &[], &BTreeSet::new(), Vec::new(), 0) {
+                Ok(out) => (out.decision, out.dispositions, out.final_world, out.stop),
+                Err((reason, dispositions)) => (
+                    None,
+                    dispositions,
+                    self.initial_world,
+                    FiniteDecisionStop::Unknown(reason),
+                ),
+            },
+        };
 
         FiniteDecisionRun {
             program: self.program,

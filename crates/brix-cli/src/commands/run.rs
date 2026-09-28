@@ -254,6 +254,19 @@ pub fn execute_run(
             None
         };
 
+        // ADR-0043: every `decide` block's own per-entity outcome, additive
+        // — populated only when the module declares at least one block.
+        let entity_decisions = if run.decides.is_empty() {
+            None
+        } else {
+            Some(
+                run.decides
+                    .iter()
+                    .map(crate::commands::decide_run_to_json)
+                    .collect(),
+            )
+        };
+
         let res = CliResultJson {
             schema: BRIX_CLI_SCHEMA.to_string(),
             command: "run".to_string(),
@@ -273,6 +286,7 @@ pub fn execute_run(
             locations: None,
             shows: shows_json,
             commits: commits_json,
+            entity_decisions,
         };
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {
