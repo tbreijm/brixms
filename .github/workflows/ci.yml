@@ -191,6 +191,31 @@ jobs:
       - name: Reproducible emit + cache-integrity + deterministic budgets
         run: cargo nextest run --archive-file nextest-archive.tar.zst -E 'package(soc-core)'
 
+  python-bindings:
+    name: python-bindings
+    runs-on: ubuntu-latest
+    # Exercises bindings/python/ (ADR-0044) against a real `brix serve --stdio`
+    # subprocess: the pure-stdlib client spawns the binary built below and
+    # drives it over examples/, so this is an end-to-end check of the
+    # embeddable protocol from the caller's side, not just the Rust-side
+    # `crates/brix-cli/tests/serve_stdio.rs` suite.
+    steps:
+      - uses: actions/checkout@v7
+      - name: Toolchain (pinned via rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Build brix-cli
+        run: cargo build -p brix-cli
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install pytest
+        run: python3 -m pip install pytest
+      - name: Python client tests
+        env:
+          BRIX_BIN: ${{ github.workspace }}/target/debug/brix
+        run: python3 -m pytest bindings/python/tests
+
   cargo-deny:
     name: cargo-deny
     runs-on: ubuntu-latest
