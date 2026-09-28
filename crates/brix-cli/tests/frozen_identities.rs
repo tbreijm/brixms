@@ -8,16 +8,28 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    manifest_dir
         .parent()
         .and_then(|p| p.parent())
         .expect("workspace root")
         .to_path_buf()
 }
 
+/// The `brix` binary, resolved at run time first: CI runs tests from a
+/// nextest archive extracted elsewhere, where the compile-time path is gone.
+fn brix_bin() -> PathBuf {
+    std::env::var_os("CARGO_BIN_EXE_brix")
+        .or_else(|| std::env::var_os("NEXTEST_BIN_EXE_brix"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_brix")))
+}
+
 fn run_json(example: &str) -> serde_json::Value {
     let root = repo_root();
-    let out = Command::new(env!("CARGO_BIN_EXE_brix"))
+    let out = Command::new(brix_bin())
         .current_dir(&root)
         .arg("run")
         .arg(format!("examples/{example}.brix"))
