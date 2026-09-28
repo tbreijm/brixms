@@ -1,0 +1,21 @@
+// A per-entity fulfillment policy (ADR-0043): every order in `orders` gets
+// its own ship/backorder/hold decision, independent of every other order's,
+// by joining against the shared `stock` list inside the `decide` block.
+
+config Order = { id: Int, sku: Int, units: Int }
+config Stock = { sku: Int, on_hand: Int }
+config Decision = Ship | Backorder | Hold
+
+input orders: List<Order> max 32
+input stock: List<Stock> max 32
+
+decide status for o in orders {
+  // Some stock row names this order's SKU with enough on hand to cover it.
+  propose ship priority 1 when any(stock, s => s.sku == o.sku && s.on_hand >= o.units) = Ship
+  // The SKU exists in stock, just not enough of it yet.
+  propose backorder priority 2 when any(stock, s => s.sku == o.sku) = Backorder
+  // No stock row names this SKU at all.
+  propose hold otherwise = Hold
+}
+
+show status

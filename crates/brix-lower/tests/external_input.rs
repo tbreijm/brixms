@@ -2133,6 +2133,7 @@ fn test_build_with_inputs_panic_free_on_hand_built_plan_with_missing_input() {
             ordinal: 0,
             name: "missing_scalar".to_string(),
             ty: L3ValueType::Int,
+            list: None,
         });
     let snap = InputSnapshot::empty();
     let err = match FiniteDecisionRuntime::build_with_inputs(&p, &snap) {

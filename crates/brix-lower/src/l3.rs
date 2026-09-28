@@ -214,6 +214,8 @@ pub enum L3LowerError {
     CommitItemNotAllowed(String),
     /// A top-level `input` declaration is present (ADR-0031).
     InputItemNotAllowed(String),
+    /// A top-level `decide` declaration is present (ADR-0043).
+    DecideItemNotAllowed(String),
     /// A `rule` was declared with one or more parameters (ADR-0012 §1: "every
     /// selected rule has zero parameters").
     ParameterizedRule(String),
@@ -307,6 +309,11 @@ pub enum L3LowerError {
     /// — but reporting a `!` as a *comparison* misnames what the author wrote,
     /// and this error is the only thing they see.
     LogicalOperatorNotAllowed,
+    /// A list or relational form (`List<T>` folds, `filter`/`map`, a
+    /// comprehension, a list literal, or `in`) in a rule/let body. v1's
+    /// closed-static-value fragment predates ADR-0037/ADR-0040 and admits
+    /// none of these forms.
+    ListSyntaxNotAllowed(&'static str),
     /// A boolean literal in a rule/let body. v1's value grammar is
     /// `Int`/`Str`/nullary-constructor/record only (ADR-0012 §3.2).
     BooleanLiteralNotAllowed,
@@ -412,6 +419,7 @@ pub fn lower_l3_plan(
             }
             ast::Item::Commit(c) => return Err(L3LowerError::CommitItemNotAllowed(c.name.clone())),
             ast::Item::Input(i) => return Err(L3LowerError::InputItemNotAllowed(i.name.clone())),
+            ast::Item::Decide(d) => return Err(L3LowerError::DecideItemNotAllowed(d.name.clone())),
             ast::Item::Config(_) | ast::Item::Let(_) | ast::Item::Rule(_) => {}
         }
     }
@@ -821,6 +829,7 @@ fn normalize_static_value(expr: &ast::Expr, env: &NormEnv) -> Result<L3ValueV1, 
             | ast::BinOp::Eq
             | ast::BinOp::Ne => Err(L3LowerError::ComparisonNotAllowed),
             ast::BinOp::AndAnd | ast::BinOp::OrOr => Err(L3LowerError::LogicalOperatorNotAllowed),
+            ast::BinOp::In => Err(L3LowerError::ListSyntaxNotAllowed("in")),
         },
         ast::Expr::Not(_) => Err(L3LowerError::LogicalOperatorNotAllowed),
         ast::Expr::Bool(_) => Err(L3LowerError::BooleanLiteralNotAllowed),
@@ -828,6 +837,9 @@ fn normalize_static_value(expr: &ast::Expr, env: &NormEnv) -> Result<L3ValueV1, 
         ast::Expr::Prove(_) => Err(L3LowerError::ProveNotAllowed),
         ast::Expr::Why(_) => Err(L3LowerError::WhyNotAllowed),
         ast::Expr::Audit(_) => Err(L3LowerError::AuditNotAllowed),
+        ast::Expr::Lambda { .. } => Err(L3LowerError::ListSyntaxNotAllowed("lambda")),
+        ast::Expr::ListLit(_) => Err(L3LowerError::ListSyntaxNotAllowed("list literal")),
+        ast::Expr::Comprehension { .. } => Err(L3LowerError::ListSyntaxNotAllowed("comprehension")),
     }
 }
 

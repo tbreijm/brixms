@@ -15,9 +15,7 @@ use soc_core::audit_receipt::SettlementAuditReceiptIdV1;
 use crate::finite_decision::plan::{
     finite_decision_program_id, FiniteDecisionProgramId, FINITE_DECISION_PROFILE,
 };
-use crate::finite_decision::runtime::{
-    FiniteDecisionRun, FiniteDecisionRuntime, FiniteDecisionStop,
-};
+use crate::finite_decision::runtime::{FiniteDecisionRun, FiniteDecisionRuntime};
 use crate::l3::{lower_l3_plan, L3PlanV1, PlanLimitsV1, L3_PROFILE_MARKER_V1};
 use crate::l3_audit::{l3_generator_registry, l3_generator_semantics};
 use crate::l3_canon::{context_id, policy_id, program_id, ProgramIdV1, RunContextV1};
@@ -473,12 +471,10 @@ pub fn produce_finite_decision_audit_input_bundle_with_limits_v1(
     run: &FiniteDecisionRun,
     limits: &AuditDecodeLimits,
 ) -> Result<SettlementAuditInputBundleV1, SourceBundleProducerError> {
+    // Every commit pool and `decide` block must have settled (ADR-0039,
+    // ADR-0043): a bundle attests to the whole run.
     if run.is_unknown() {
         return Err(SourceBundleProducerError::UnknownRun);
-    }
-    match &run.stop {
-        FiniteDecisionStop::Unknown(_) => return Err(SourceBundleProducerError::UnknownRun),
-        FiniteDecisionStop::Selected(_) | FiniteDecisionStop::Quiescent { .. } => {}
     }
 
     if run.program != runtime.program {
@@ -500,16 +496,37 @@ pub fn produce_finite_decision_audit_input_bundle_with_limits_v1(
     }
 
     if !run.journal.is_empty() {
-        let first_step = &run.journal.steps()[0];
-        if first_step.src != runtime.initial_world {
+        // The journal must be exactly the steps the run reports, in journal
+        // order: each commit pool that selected (ADR-0039, declaration
+        // order), then each `decide` instance that selected (ADR-0043,
+        // block order, then element order). A missing, duplicated, extra,
+        // or reordered step is a mismatch, and every step starts from the
+        // shared initial world.
+        let expected: Vec<_> = run
+            .commits
+            .iter()
+            .filter_map(|c| c.step.as_ref())
+            .chain(
+                run.decides
+                    .iter()
+                    .flat_map(|d| d.instances.iter())
+                    .filter_map(|inst| inst.step.as_ref()),
+            )
+            .collect();
+        let journal = run.journal.steps();
+        if journal.len() != expected.len()
+            || journal
+                .iter()
+                .zip(&expected)
+                .any(|(step, want)| step != *want)
+        {
             return Err(SourceBundleProducerError::RunMismatch(
-                "initial world mismatch between runtime and journal".to_string(),
+                "journal steps do not match the run's committed steps".to_string(),
             ));
         }
-        let last_step = run.journal.steps().last().unwrap();
-        if last_step.dst != run.final_world {
+        if journal.iter().any(|step| step.src != runtime.initial_world) {
             return Err(SourceBundleProducerError::RunMismatch(
-                "final world mismatch between journal and run".to_string(),
+                "initial world mismatch between runtime and journal".to_string(),
             ));
         }
     } else if run.final_world != runtime.initial_world {

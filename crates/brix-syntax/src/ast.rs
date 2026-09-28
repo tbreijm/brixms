@@ -54,13 +54,34 @@ pub enum Item {
     Commit(CommitDecl),
     /// `input NAME: TYPE` — external input declaration (ADR-0031).
     Input(InputDecl),
+    /// `decide NAME for BINDER in LIST_EXPR { propose ... }` — a per-entity
+    /// commit pool, instantiated once per element of `LIST_EXPR` (ADR-0043).
+    Decide(DecideDecl),
 }
 
-/// `input NAME: TYPE`.
+/// `decide NAME for BINDER in LIST_EXPR { propose ... }` (ADR-0043): declares
+/// a commit pool that is instantiated once per element of the list named by
+/// `list`, in list order. Every nested `propose` is scoped to this block —
+/// its guard/value may additionally read `binder`, bound to the current
+/// element — but its *name* is checked for uniqueness program-wide, exactly
+/// like a top-level `propose`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecideDecl {
+    pub name: String,
+    pub binder: String,
+    pub list: Expr,
+    pub proposals: Vec<ProposeDecl>,
+}
+
+/// `input NAME: TYPE` or `input NAME: List<TYPE> max N` (ADR-0037).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputDecl {
     pub name: String,
     pub ty: Ty,
+    /// The declared bound for a `List<T> max N` input (ADR-0037). `None` for
+    /// every non-list input declaration; `Some(n)` only when `ty` is
+    /// `Ty::App("List", _)`, checked by the parser at the point `max` is read.
+    pub list_max: Option<u64>,
 }
 
 /// `config Name = <body>`.
@@ -118,6 +139,15 @@ pub struct Callable {
     /// Optional declared return type (inferred when absent).
     pub ret: Option<Ty>,
     pub body: Expr,
+    /// Whether a parenthesized parameter list was written in the source.
+    ///
+    /// Always `true` for `fn`/`gen`, which always write `(...)`. For a
+    /// `rule`, `false` means the source wrote `rule name = body` with no
+    /// parentheses at all — distinct from `rule name() = body`, whose empty
+    /// parenthesized list is `true` with zero `params`. Finite-decision
+    /// lowering (ADR-0038) uses this to tell "no declared dependencies,
+    /// infer them from the body" apart from "explicitly zero dependencies".
+    pub params_declared: bool,
 }
 
 /// A parameter `name [: Ty]` (type inferred when absent).
@@ -137,7 +167,9 @@ pub struct LetDecl {
     pub value: Expr,
 }
 
-/// `propose NAME(DEPS...) priority UINT when GUARD = VALUE`.
+/// `propose NAME[(DEPS...)] priority UINT when GUARD = VALUE`, or the
+/// `otherwise` fallback sugar `propose NAME[(DEPS...)] otherwise = VALUE`
+/// (ADR-0038).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProposeDecl {
     pub name: String,
@@ -145,6 +177,20 @@ pub struct ProposeDecl {
     pub priority: u64,
     pub guard: Expr,
     pub value: Expr,
+    /// Whether a parenthesized dependency list was written in the source.
+    /// `false` means dependencies are inferred from what the guard and value
+    /// read (ADR-0038); `true` (including an explicit empty `()`) keeps
+    /// today's declare-everything-you-read meaning.
+    pub deps_declared: bool,
+    /// `true` when this proposal was written with the `otherwise` fallback
+    /// keyword rather than an explicit `priority ... when ...` clause
+    /// (ADR-0038). `priority`/`guard` are already desugared to
+    /// `u64::MAX`/`true` in that case, so every other consumer of this
+    /// struct can ignore the flag; it exists only so lowering can detect and
+    /// reject an ambiguous fallback (two `otherwise`s, or an `otherwise`
+    /// alongside an explicit `priority 18446744073709551615`, in the same
+    /// commit pool).
+    pub otherwise: bool,
 }
 
 /// `commit NAME from (CANDIDATE, ...)`.
@@ -234,6 +280,22 @@ pub enum Expr {
     Audit(Box<Expr>),
     /// `!e` — logical NOT.
     Not(Box<Expr>),
+    /// `ident => expr` — a hygienic binder introduced only as the trailing
+    /// argument of a list fold/filter/map call (ADR-0037, ADR-0040). Not a
+    /// first-class value: it cannot appear anywhere else, and lowering
+    /// rejects it outside a recognized builtin call.
+    Lambda { param: String, body: Box<Expr> },
+    /// `[e1, e2, ...]` — a list literal (ADR-0040).
+    ListLit(Vec<Expr>),
+    /// `for x in xs, y in ys where cond yield e` — a relational comprehension
+    /// (ADR-0040). Generators are evaluated left to right; a later generator
+    /// or the `where` clause may reference an earlier binder, which is how a
+    /// join is written.
+    Comprehension {
+        generators: Vec<(String, Expr)>,
+        where_clause: Option<Box<Expr>>,
+        yield_expr: Box<Expr>,
+    },
 }
 
 /// Binary operators. Arithmetic ops are ordinary; `Then`/`And` are the witness
@@ -265,6 +327,9 @@ pub enum BinOp {
     AndAnd,
     /// `||` — logical OR (short-circuiting).
     OrOr,
+    /// `e in xs` — list membership by structural equality (ADR-0040). Same
+    /// precedence and non-associativity as the comparison operators.
+    In,
 }
 
 impl BinOp {

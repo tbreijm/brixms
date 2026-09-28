@@ -1,0 +1,19 @@
+{
+  "schema": "brix.test@1",
+  "program": "order-book.brix",
+  "cases": [
+    {
+      "name": "each order gets its own ship/backorder/hold decision from a shared stock join",
+      "inputs": ["order-book.json"],
+      "expect": {
+        "status": "quiescent",
+        "entities": {
+          "status": ["ship", "backorder", "hold", "backorder"]
+        },
+        "candidates": {
+          "ship": "selected"
+        }
+      }
+    }
+  ]
+}

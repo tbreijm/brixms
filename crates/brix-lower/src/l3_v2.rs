@@ -136,7 +136,119 @@ pub enum L3ExprV2 {
     /// the operation is pinned structurally in the canonical encoding and
     /// cannot be reached, shadowed, or renamed through the helper table.
     IntDivMod(DivModOpV2, Box<L3ExprV2>, Box<L3ExprV2>),
+    /// A deterministic fold over a bounded list (ADR-0037, ADR-0040):
+    /// `sum`/`count`/`all`/`any`/`min`/`max`. `binder` is a hygienic lexical
+    /// variable scoped to `body`; references to it lower to the ordinary
+    /// [`Self::LetRef`] encoding.
+    Fold {
+        op: FoldOpV2,
+        list: Box<L3ExprV2>,
+        binder: String,
+        body: Box<L3ExprV2>,
+    },
+    /// `filter(xs, x => cond)` (ADR-0040): keep elements in sequence order
+    /// for which `cond` evaluates to `true`.
+    Filter {
+        list: Box<L3ExprV2>,
+        binder: String,
+        cond: Box<L3ExprV2>,
+    },
+    /// `map(xs, x => e)` (ADR-0040): the list of `e` evaluated for each
+    /// element, in sequence order.
+    Map {
+        list: Box<L3ExprV2>,
+        binder: String,
+        body: Box<L3ExprV2>,
+    },
+    /// `for x in xs, y in ys where cond yield e` (ADR-0040): nested generator
+    /// loops evaluated left to right, in generator order. A later generator
+    /// and the `where` clause may reference an earlier binder.
+    Comprehension {
+        generators: Vec<(String, L3ExprV2)>,
+        where_clause: Option<Box<L3ExprV2>>,
+        yield_expr: Box<L3ExprV2>,
+    },
+    /// `[e1, e2, ...]` — a list literal (ADR-0040).
+    ListLit(Vec<L3ExprV2>),
+    /// `e in xs` — list membership by structural equality (ADR-0040).
+    In(Box<L3ExprV2>, Box<L3ExprV2>),
+    /// `len(xs)` (ADR-0040).
+    Len(Box<L3ExprV2>),
+    /// `distinct(xs)` (ADR-0040): first occurrence kept, order otherwise
+    /// preserved.
+    Distinct(Box<L3ExprV2>),
 }
+
+/// Deterministic fold operations over a bounded list. `Sum`/`Count`/`All`/
+/// `Any` are ADR-0037's first slice; `Min`/`Max` are ADR-0040's extension.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum FoldOpV2 {
+    Sum,
+    Count,
+    All,
+    Any,
+    Min,
+    Max,
+}
+
+impl FoldOpV2 {
+    /// Every operation, in canonical-ordinal order.
+    pub const ALL: [FoldOpV2; 6] = [
+        FoldOpV2::Sum,
+        FoldOpV2::Count,
+        FoldOpV2::All,
+        FoldOpV2::Any,
+        FoldOpV2::Min,
+        FoldOpV2::Max,
+    ];
+
+    /// The source name that calls this fold. These names are reserved: a
+    /// module may not declare a helper or constructor that shadows one.
+    pub const fn name(self) -> &'static str {
+        match self {
+            FoldOpV2::Sum => "sum",
+            FoldOpV2::Count => "count",
+            FoldOpV2::All => "all",
+            FoldOpV2::Any => "any",
+            FoldOpV2::Min => "min",
+            FoldOpV2::Max => "max",
+        }
+    }
+
+    /// Resolve a source name to its fold operation, if it is one of the
+    /// reserved names.
+    pub fn from_name(name: &str) -> Option<FoldOpV2> {
+        FoldOpV2::ALL.into_iter().find(|op| op.name() == name)
+    }
+
+    /// Canonical ordinal, appended and never renumbered: `sum`=0, `count`=1,
+    /// `all`=2, `any`=3 (ADR-0037), `min`=4, `max`=5 (ADR-0040).
+    pub(crate) const fn ordinal(self) -> u64 {
+        match self {
+            FoldOpV2::Sum => 0,
+            FoldOpV2::Count => 1,
+            FoldOpV2::All => 2,
+            FoldOpV2::Any => 3,
+            FoldOpV2::Min => 4,
+            FoldOpV2::Max => 5,
+        }
+    }
+}
+
+/// Every reserved list/relational operation name (ADR-0037, ADR-0040): a
+/// module may not declare a helper or constructor that shadows one, exactly
+/// as ADR-0035 reserves `div_floor`/`div_ceil`/`div_half_even`/`mod_euclid`.
+pub fn is_reserved_list_operation_name(name: &str) -> bool {
+    FoldOpV2::from_name(name).is_some() || matches!(name, "filter" | "map" | "len" | "distinct")
+}
+
+/// Maximum length of a list produced by `filter`, `map`, a comprehension, a
+/// list literal, or `distinct` (ADR-0040). A declared input's own `max` bound
+/// (ADR-0037) is checked separately and may not exceed 256; this bound guards
+/// every *derived* list a running program can build, including the result of
+/// a large cartesian product, so evaluation fails closed with a typed fault
+/// rather than growing memory without bound.
+pub const MAX_DERIVED_LIST_LEN: usize = 4096;
 
 /// Exact signed integer division and modulo operations (ADR-0035).
 ///
@@ -190,6 +302,25 @@ impl DivModOpV2 {
             DivModOpV2::ModEuclid => 3,
         }
     }
+}
+
+/// Why `/` is refused in a finite-decision program, and by [`crate::let_eval`]
+/// as the reason a `let`-lane binding that uses `/` is not evaluated
+/// (ADR-0042 — the two lanes share one meaning for every operator, so the
+/// executable fragment's exclusion of `/` is explained the same way in both
+/// places rather than by two diagnostics that could drift apart).
+///
+/// `/` is not meaningless: it means exact-to-Float division (`Int / Int →
+/// Float`) in the type-realization (`let`) lane. It is refused here because
+/// `Float` values are not admitted in a finite-decision program at all — not
+/// because the rounding is ambiguous. A program that wants an exact integer
+/// result names the rounding it wants: [`DivModOpV2::name`] lists
+/// `div_floor`, `div_ceil`, `div_half_even`, and `mod_euclid` (ADR-0035).
+pub(crate) fn division_not_admitted_reason() -> &'static str {
+    "'/' means exact-to-Float division (Int / Int -> Float) in the `let` lane; \
+     Float values are not admitted in a finite-decision program, so '/' is not \
+     admitted here either — use div_floor, div_ceil, div_half_even, or \
+     mod_euclid for an exact integer result (ADR-0035, ADR-0042)"
 }
 
 /// Apply an exact integer division or modulo.
@@ -266,6 +397,16 @@ pub enum L3ValueType {
     Bool,
     Sum(String),
     Record(String),
+    /// A bounded list (ADR-0037, ADR-0040). Deliberately flat: unlike `Sum`/
+    /// `Record`, this category carries no element type. Two lists are always
+    /// "the same type" for the shallow contract checks that use this type
+    /// (proposal value uniformity, declared input types); the element type
+    /// and length are enforced separately, by the declared input's element
+    /// schema and `max` (ADR-0037) and by each operation's own runtime
+    /// [`EvalFault::OperandShape`] check. This sidesteps a genuine ambiguity
+    /// a payload-carrying variant would have to resolve for its own sake: an
+    /// empty runtime list has no element it could infer a type from.
+    List,
 }
 
 /// A recursively checked schema type used by structured inputs and helper
@@ -406,6 +547,14 @@ pub fn validate_l3_value(
             "{path}: expected {}, found '{nominal_sum}'",
             expected.display_name()
         )),
+        // Lists are never nested inside a record/sum schema or a helper
+        // contract (ADR-0037 §Scope defers nested lists); reaching here means
+        // a list value was passed where a scalar or nominal schema type was
+        // expected.
+        (L3ValueV2::List(_), expected) => Err(format!(
+            "{path}: expected {}, found list",
+            expected.display_name()
+        )),
     }
 }
 
@@ -417,6 +566,7 @@ impl fmt::Display for L3ValueType {
             Self::Bool => write!(f, "Bool"),
             Self::Sum(s) => write!(f, "Sum({s})"),
             Self::Record(r) => write!(f, "Record({r})"),
+            Self::List => write!(f, "List"),
         }
     }
 }
@@ -429,16 +579,99 @@ pub fn type_of_value(v: &L3ValueV2) -> L3ValueType {
         L3ValueV2::Bool(_) => L3ValueType::Bool,
         L3ValueV2::Ctor { nominal_sum, .. } => L3ValueType::Sum(nominal_sum.clone()),
         L3ValueV2::Record { nominal_config, .. } => L3ValueType::Record(nominal_config.clone()),
+        L3ValueV2::List(_) => L3ValueType::List,
     }
 }
 
-/// Evaluation bounds (ADR-0032).
-pub const MAX_CALL_DEPTH: usize = 64;
-pub const MAX_EVAL_RECURSION_DEPTH: usize = 64;
-pub const MAX_CALL_STEPS: usize = 10_000;
+/// Evaluation bounds (ADR-0032, raised and joined by an evaluation-thread
+/// stack guarantee under ADR-0042 to admit direct and mutual helper
+/// recursion).
+///
+/// `MAX_CALL_DEPTH` is the number of simultaneously outstanding (uncompleted)
+/// [`L3ExprV2::Call`] invocations — the bound a recursive helper actually
+/// hits, e.g. `length` over a list of more than this many elements. It is
+/// the primary, user-meaningful recursion bound.
+pub const MAX_CALL_DEPTH: usize = 1_000;
+/// The bound on total `eval_internal` nesting, counting every expression
+/// form (`match`, arithmetic, field projection, …), not only calls. Each
+/// logical call level costs several of these (evaluating the scrutinee, the
+/// chosen arm, the call's own arguments, then the callee's body), so this is
+/// set well above `MAX_CALL_DEPTH` — it is a backstop against unbounded
+/// native-stack use from *any* expression shape, not the bound a program is
+/// expected to reach through calls alone.
+pub const MAX_EVAL_RECURSION_DEPTH: usize = 20_000;
+/// Total evaluation steps per evaluation (ADR-0032's `tick_step`): the bound
+/// on work. Sized so a helper recursing near `MAX_CALL_DEPTH` can complete,
+/// and so a full join of two maximum-size list inputs (256 x 256 pairs, a
+/// few steps each) fits, while a three-way join of them does not.
+pub const MAX_CALL_STEPS: usize = 2_000_000;
+
+/// Total evaluation steps across one deliberation run, shared by every
+/// evaluation in it (see [`EvalEnv::with_run_work`]). A per-evaluation bound
+/// alone would let a `decide` block multiply it by its instance count; this
+/// keeps the work a whole run may do bounded no matter how it is split.
+pub const MAX_RUN_STEPS: usize = 50_000_000;
+
+/// Steps an evaluation accumulates locally before adding them to the shared
+/// run counter, so the shared atomic is touched rarely.
+const RUN_WORK_FLUSH_STEPS: usize = 4096;
 pub const MAX_VALUE_DEPTH: usize = 128;
 pub const MAX_EVAL_VALUE_NODES: usize = 10_000;
 pub const MAX_EVAL_VALUE_BYTES: usize = 1_000_000;
+
+/// The stack size a bounded evaluation runs on (ADR-0042), independent of the
+/// calling thread's own stack.
+///
+/// **Why a dedicated thread at all.** `MAX_CALL_DEPTH`/`MAX_EVAL_RECURSION_DEPTH`
+/// above bound the *logical* nesting `eval_internal` is willing to reach, but
+/// each logical level costs several *native* stack frames. "Never a stack
+/// overflow" (ADR-0042 — a resource fault must fail closed to `Unknown`, never
+/// crash the process) cannot depend on how much stack the caller's thread
+/// happens to have: the CLI runs on the process main thread (no custom stack
+/// size), a test harness thread's default varies by platform, and an embedder
+/// is free to call in from anywhere. Rather than tune the depth bounds down to
+/// whatever the smallest thread anyone might call from could survive — which
+/// would make ordinary, obviously-terminating recursion (e.g. `length` over a
+/// few hundred elements) fail for a reason with nothing to do with the
+/// program — a bounded evaluation always runs on a freshly spawned thread with
+/// this fixed, generous stack. The budget above, not the caller's thread, is
+/// then what decides whether a program is admitted.
+///
+/// The stack is reserved, not committed: only the pages a deep recursion
+/// actually touches are backed by memory. To avoid paying a thread spawn per
+/// expression, a caller that evaluates many expressions (a whole
+/// deliberation run) enters the evaluation thread once through
+/// [`with_eval_stack`]; `eval` calls inside it run inline.
+const EVAL_THREAD_STACK_BYTES: usize = 256 * 1024 * 1024;
+
+thread_local! {
+    /// Whether this thread is an evaluation thread with the
+    /// [`EVAL_THREAD_STACK_BYTES`] stack.
+    static ON_EVAL_STACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` on an evaluation thread with the [`EVAL_THREAD_STACK_BYTES`]
+/// stack, so every [`eval`] inside it runs inline rather than spawning its
+/// own thread. Runs `f` directly when already on one.
+///
+/// Returns `None` if the operating system refuses to create the thread, or
+/// `f` panics; callers report either as a resource fault.
+pub fn with_eval_stack<R: Send>(f: impl FnOnce() -> R + Send) -> Option<R> {
+    if ON_EVAL_STACK.with(|on| on.get()) {
+        return Some(f());
+    }
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(EVAL_THREAD_STACK_BYTES)
+            .spawn_scoped(scope, move || {
+                ON_EVAL_STACK.with(|on| on.set(true));
+                f()
+            })
+            .ok()?
+            .join()
+            .ok()
+    })
+}
 
 /// Normalized pure function definition in L3.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -596,7 +829,10 @@ pub enum L3V2LowerError {
     DefaultArmNotAllowed,
     /// A nested constructor pattern. Not in Stage A.
     NestedPatternNotAllowed,
-    /// Division, deferred until its fault semantics are pinned.
+    /// `/` (ADR-0042): the operator has an exact meaning — `Int / Int → Float`
+    /// in the type-realization (`let`) lane — but `Float` values are not
+    /// admitted in a finite-decision program, so the operator is refused here
+    /// by name rather than silently rounded or coerced.
     DivisionNotAllowed,
     /// A float literal. v2 inherits v1's exclusion.
     FloatLiteralNotAllowed(String),
@@ -613,6 +849,18 @@ pub enum L3V2LowerError {
     },
     /// A pattern contains duplicate match variable binders.
     DuplicateMatchBinder(String),
+    /// A `sum`/`count`/`all`/`any`/`min`/`max`/`filter`/`map` call site did
+    /// not have the required shape `form(list, x => expr)` (ADR-0037,
+    /// ADR-0040): wrong arity is reported as [`Self::FunctionArityMismatch`]
+    /// instead, so this is specifically a missing or malformed binder.
+    ListFormShape {
+        form: &'static str,
+        detail: &'static str,
+    },
+    /// A lambda (`x => expr`) reached lowering outside the one position that
+    /// admits it: the second argument of a recognized fold/filter/map call
+    /// (ADR-0037, ADR-0040). Lambdas are not first-class values.
+    LambdaNotAllowed,
 }
 
 impl fmt::Display for L3V2LowerError {
@@ -643,10 +891,7 @@ impl fmt::Display for L3V2LowerError {
             }
             Self::DefaultArmNotAllowed => write!(f, "default arm not allowed in match"),
             Self::NestedPatternNotAllowed => write!(f, "nested pattern not allowed in match"),
-            Self::DivisionNotAllowed => write!(
-                f,
-                "the '/' operator has no meaning here because it does not say                  which rounding it performs; use div_floor, div_ceil,                  div_half_even, or mod_euclid (ADR-0035)"
-            ),
+            Self::DivisionNotAllowed => write!(f, "{}", division_not_admitted_reason()),
             Self::FloatLiteralNotAllowed(lit) => write!(f, "float literal not allowed: {lit}"),
             Self::IntegerOverflow(lit) => write!(f, "integer literal overflow: {lit}"),
             Self::Unsupported(feature) => write!(f, "unsupported feature: {feature}"),
@@ -663,6 +908,16 @@ impl fmt::Display for L3V2LowerError {
             Self::DuplicateMatchBinder(name) => {
                 write!(f, "duplicate match pattern binder: '{name}'")
             }
+            Self::ListFormShape { form, detail } => {
+                write!(
+                    f,
+                    "'{form}' requires the form '{form}(list, x => expr)': {detail}"
+                )
+            }
+            Self::LambdaNotAllowed => write!(
+                f,
+                "a lambda 'x => expr' is fold/filter/map syntax only and cannot appear here"
+            ),
         }
     }
 }
@@ -713,6 +968,9 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
             }
             ast::Item::Input(i) => {
                 return Err(L3V2LowerError::ItemNotAllowed(format!("input {}", i.name)))
+            }
+            ast::Item::Decide(d) => {
+                return Err(L3V2LowerError::ItemNotAllowed(format!("decide {}", d.name)))
             }
         }
     }
@@ -854,6 +1112,31 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
     })
 }
 
+/// Validate and destructure a `form(list_expr, binder => body_expr)` call
+/// site shared by `sum`/`count`/`all`/`any`/`min`/`max`/`filter`/`map`
+/// (ADR-0037, ADR-0040). `form` is the reserved name that matched, supplied
+/// by the caller so the diagnostic names it even though the callee is a
+/// runtime `&String`.
+fn expect_list_form<'a>(
+    form: &'static str,
+    args: &'a [ast::Expr],
+) -> Result<(&'a ast::Expr, &'a str, &'a ast::Expr), L3V2LowerError> {
+    if args.len() != 2 {
+        return Err(L3V2LowerError::FunctionArityMismatch {
+            func: form.to_string(),
+            expected: 2,
+            found: args.len(),
+        });
+    }
+    match &args[1] {
+        ast::Expr::Lambda { param, body } => Ok((&args[0], param.as_str(), body.as_ref())),
+        _ => Err(L3V2LowerError::ListFormShape {
+            form,
+            detail: "expected a binder of the form `x => expr` as the second argument",
+        }),
+    }
+}
+
 /// Lower one surface expression into the v2 IR.
 ///
 /// `in_rule` distinguishes a rule body — which may read earlier rules' facts —
@@ -966,6 +1249,145 @@ pub(crate) fn lower_expr_v2(
             // shadow them: a helper or constructor claiming one of these names
             // is refused where it is declared, so this branch is never a
             // silent override of something the author wrote.
+            if let Some(op) = FoldOpV2::from_name(func) {
+                let (list_expr, binder, body_expr) = expect_list_form(op.name(), args)?;
+                let list = Box::new(lower_expr_v2(
+                    list_expr,
+                    lets,
+                    locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?);
+                let mut body_locals = locals.clone();
+                body_locals.insert(binder.to_string());
+                let body = Box::new(lower_expr_v2(
+                    body_expr,
+                    lets,
+                    &body_locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?);
+                return Ok(L3ExprV2::Fold {
+                    op,
+                    list,
+                    binder: binder.to_string(),
+                    body,
+                });
+            }
+            if func == "filter" {
+                let (list_expr, binder, cond_expr) = expect_list_form("filter", args)?;
+                let list = Box::new(lower_expr_v2(
+                    list_expr,
+                    lets,
+                    locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?);
+                let mut body_locals = locals.clone();
+                body_locals.insert(binder.to_string());
+                let cond = Box::new(lower_expr_v2(
+                    cond_expr,
+                    lets,
+                    &body_locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?);
+                return Ok(L3ExprV2::Filter {
+                    list,
+                    binder: binder.to_string(),
+                    cond,
+                });
+            }
+            if func == "map" {
+                let (list_expr, binder, body_expr) = expect_list_form("map", args)?;
+                let list = Box::new(lower_expr_v2(
+                    list_expr,
+                    lets,
+                    locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?);
+                let mut body_locals = locals.clone();
+                body_locals.insert(binder.to_string());
+                let body = Box::new(lower_expr_v2(
+                    body_expr,
+                    lets,
+                    &body_locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?);
+                return Ok(L3ExprV2::Map {
+                    list,
+                    binder: binder.to_string(),
+                    body,
+                });
+            }
+            if func == "len" {
+                if args.len() != 1 {
+                    return Err(L3V2LowerError::FunctionArityMismatch {
+                        func: func.clone(),
+                        expected: 1,
+                        found: args.len(),
+                    });
+                }
+                let inner = lower_expr_v2(
+                    &args[0],
+                    lets,
+                    locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?;
+                return Ok(L3ExprV2::Len(Box::new(inner)));
+            }
+            if func == "distinct" {
+                if args.len() != 1 {
+                    return Err(L3V2LowerError::FunctionArityMismatch {
+                        func: func.clone(),
+                        expected: 1,
+                        found: args.len(),
+                    });
+                }
+                let inner = lower_expr_v2(
+                    &args[0],
+                    lets,
+                    locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?;
+                return Ok(L3ExprV2::Distinct(Box::new(inner)));
+            }
             if let Some(op) = DivModOpV2::from_name(func) {
                 if args.len() != 2 {
                     return Err(L3V2LowerError::FunctionArityMismatch {
@@ -1079,6 +1501,7 @@ pub(crate) fn lower_expr_v2(
                 ast::BinOp::Ne => Ok(L3ExprV2::Cmp(CmpOpV2::Ne, l, r)),
                 ast::BinOp::AndAnd => Ok(L3ExprV2::And(l, r)),
                 ast::BinOp::OrOr => Ok(L3ExprV2::Or(l, r)),
+                ast::BinOp::In => Ok(L3ExprV2::In(l, r)),
                 ast::BinOp::Then | ast::BinOp::And => Err(L3V2LowerError::Unsupported(
                     "witness composition has no executable meaning in v2".to_string(),
                 )),
@@ -1176,6 +1599,86 @@ pub(crate) fn lower_expr_v2(
         ast::Expr::Prove(_) => Err(L3V2LowerError::Unsupported("prove".to_string())),
         ast::Expr::Why(_) => Err(L3V2LowerError::Unsupported("why".to_string())),
         ast::Expr::Audit(_) => Err(L3V2LowerError::Unsupported("audit".to_string())),
+        // A lambda reaches lowering directly only when it appears somewhere
+        // other than the recognized second argument of a fold/filter/map
+        // call — every valid occurrence is consumed structurally above,
+        // before recursing. Lambdas are fold syntax only (ADR-0037): they
+        // cannot escape, be stored, or be passed as ordinary function values.
+        ast::Expr::Lambda { .. } => Err(L3V2LowerError::LambdaNotAllowed),
+        ast::Expr::ListLit(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(lower_expr_v2(
+                    item,
+                    lets,
+                    locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?);
+            }
+            Ok(L3ExprV2::ListLit(out))
+        }
+        ast::Expr::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => {
+            let mut gen_locals = locals.clone();
+            let mut out_generators = Vec::with_capacity(generators.len());
+            for (binder, source) in generators {
+                let source_lowered = lower_expr_v2(
+                    source,
+                    lets,
+                    &gen_locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?;
+                out_generators.push((binder.clone(), source_lowered));
+                // A later generator or the `where` clause may reference an
+                // earlier binder — the join case ADR-0040 names — so each
+                // binder joins scope before the next generator's source is
+                // lowered.
+                gen_locals.insert(binder.clone());
+            }
+            let where_lowered = match where_clause {
+                Some(w) => Some(Box::new(lower_expr_v2(
+                    w,
+                    lets,
+                    &gen_locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?)),
+                None => None,
+            };
+            let yield_lowered = Box::new(lower_expr_v2(
+                yield_expr,
+                lets,
+                &gen_locals,
+                rules,
+                nullary,
+                variants_of,
+                functions,
+                in_rule,
+                helper_enabled,
+            )?);
+            Ok(L3ExprV2::Comprehension {
+                generators: out_generators,
+                where_clause: where_lowered,
+                yield_expr: yield_lowered,
+            })
+        }
     }
 }
 
@@ -1203,6 +1706,15 @@ pub enum L3ValueV2 {
         nominal_config: String,
         fields: Vec<(String, L3ValueV2)>,
     },
+    /// A bounded list value (ADR-0037, ADR-0040). Elements carry their own
+    /// nominal identity as usual; the list itself has none — it is a
+    /// structural sequence, in evaluation order.
+    ///
+    /// Shared, not owned: reading a list input or fact, or binding it in a
+    /// fold, costs a reference-count increment rather than a deep copy.
+    /// Equality, ordering, and every canonical encoding depend only on the
+    /// elements.
+    List(Arc<[L3ValueV2]>),
 }
 
 /// Why an evaluation could not produce a value.
@@ -1258,6 +1770,10 @@ pub enum EvalFault {
         found: Box<str>,
         path: Option<Box<str>>,
     },
+    /// `min`/`max` of an empty list (ADR-0040). Never a default value: an
+    /// empty aggregate has no minimum or maximum to report, so this is a
+    /// typed evaluation fault rather than `0` or any other placeholder.
+    EmptyAggregate(FoldOpV2),
 }
 
 impl fmt::Display for EvalFault {
@@ -1303,6 +1819,9 @@ impl fmt::Display for EvalFault {
                     )
                 }
             }
+            Self::EmptyAggregate(op) => {
+                write!(f, "{}() of an empty list has no value", op.name())
+            }
         }
     }
 }
@@ -1317,10 +1836,16 @@ impl std::error::Error for EvalFault {}
 /// reading one is precisely what ⟨D-DERIVE⟩ admits.
 #[derive(Clone, Debug, Default)]
 pub struct EvalEnv {
-    inputs: BTreeMap<String, L3ValueV2>,
-    lets: BTreeMap<String, L3ValueV2>,
-    facts: BTreeMap<String, L3ValueV2>,
+    // Inputs, lets, and facts are fixed for a whole evaluation and shared
+    // behind `Arc`, so the per-element environment a fold, filter, map, or
+    // match arm builds copies only `locals`, not every value in scope.
+    inputs: Arc<BTreeMap<String, L3ValueV2>>,
+    lets: Arc<BTreeMap<String, L3ValueV2>>,
+    facts: Arc<BTreeMap<String, L3ValueV2>>,
     locals: BTreeMap<String, L3ValueV2>,
+    /// Steps spent so far by every evaluation in the enclosing run, if the
+    /// caller bounds a whole run (see [`MAX_RUN_STEPS`]).
+    run_work: Option<Arc<std::sync::atomic::AtomicUsize>>,
     functions: Arc<BTreeMap<String, L3FunctionDef>>,
     schemas: Arc<BTreeMap<String, L3Schema>>,
 }
@@ -1331,17 +1856,17 @@ impl EvalEnv {
     }
 
     pub fn with_input(mut self, name: impl Into<String>, v: L3ValueV2) -> Self {
-        self.inputs.insert(name.into(), v);
+        Arc::make_mut(&mut self.inputs).insert(name.into(), v);
         self
     }
 
     pub fn with_let(mut self, name: impl Into<String>, v: L3ValueV2) -> Self {
-        self.lets.insert(name.into(), v);
+        Arc::make_mut(&mut self.lets).insert(name.into(), v);
         self
     }
 
     pub fn with_fact(mut self, rule: impl Into<String>, v: L3ValueV2) -> Self {
-        self.facts.insert(rule.into(), v);
+        Arc::make_mut(&mut self.facts).insert(rule.into(), v);
         self
     }
 
@@ -1349,6 +1874,14 @@ impl EvalEnv {
         let mut map = (*self.functions).clone();
         map.insert(name.into(), def);
         self.functions = Arc::new(map);
+        self
+    }
+
+    /// Share one work counter across every evaluation that uses this
+    /// environment (or a clone of it), bounding their total steps by
+    /// [`MAX_RUN_STEPS`].
+    pub fn with_run_work(mut self, counter: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        self.run_work = Some(counter);
         self
     }
 
@@ -1381,6 +1914,44 @@ impl EvalEnv {
     pub fn satisfies(&self, deps: &[String]) -> bool {
         deps.iter().all(|d| self.facts.contains_key(d))
     }
+
+    /// Bind a name into the local scope (function parameters, `match`-arm
+    /// binders). Mirrors exactly what [`eval_internal_body`]'s `Call` and
+    /// `Match` cases already do to `locals` inline; exposed so an
+    /// explanation builder can reconstruct the identical scope a helper
+    /// body or taken arm actually ran under, without duplicating evaluation
+    /// logic. Never consulted by `eval` itself beyond the `locals` map it
+    /// already reads — purely a scope-construction helper.
+    pub(crate) fn with_local(mut self, name: impl Into<String>, v: L3ValueV2) -> Self {
+        self.locals.insert(name.into(), v);
+        self
+    }
+
+    /// Whether `name` resolves through the local scope (a function
+    /// parameter or `match`-arm binder) — never a top-level `let`, rule
+    /// fact, or external input.
+    ///
+    /// Provenance only, for an explanation to decide whether a reference is
+    /// "already shown" via its call/arm site or is a top-level fact worth
+    /// listing on its own. Never used to decide a *value*, so it cannot
+    /// change evaluation semantics.
+    pub(crate) fn is_local(&self, name: &str) -> bool {
+        self.locals.contains_key(name)
+    }
+
+    /// Whether `name` resolves to a top-level `let` binding (and is not
+    /// shadowed by a local). See [`Self::is_local`].
+    pub(crate) fn is_let_binding(&self, name: &str) -> bool {
+        !self.locals.contains_key(name) && self.lets.contains_key(name)
+    }
+
+    /// Whether `name` resolves to a bound external input (and is not
+    /// shadowed by a local). See [`Self::is_local`].
+    pub(crate) fn is_bound_input(&self, name: &str) -> bool {
+        !self.locals.contains_key(name)
+            && !self.lets.contains_key(name)
+            && self.inputs.contains_key(name)
+    }
 }
 
 /// Evaluate a v2 expression to a value.
@@ -1408,6 +1979,8 @@ struct EvalBudget {
     pub allocated_bytes: usize,
     pub max_bytes: usize,
     pub max_value_depth: usize,
+    run_work: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    unflushed_steps: usize,
 }
 
 impl Default for EvalBudget {
@@ -1424,15 +1997,21 @@ impl Default for EvalBudget {
             allocated_bytes: 0,
             max_bytes: MAX_EVAL_VALUE_BYTES,
             max_value_depth: MAX_VALUE_DEPTH,
+            run_work: None,
+            unflushed_steps: 0,
         }
     }
 }
 
 impl EvalBudget {
-    /// Iteratively inspect a value before cloning to check and charge its node count, byte size,
-    /// and tree depth against the pre-allocation limits without risking stack overflow.
-    fn charge_clone(&mut self, val: &L3ValueV2) -> Result<(), EvalFault> {
-        self.charge_value(val, 1)
+    /// Charge reading or binding a value the evaluation already holds: one
+    /// step of work, and nothing against the allocation budgets. Lists are
+    /// shared ([`L3ValueV2::List`]) and any other copy is transient, so
+    /// counting reads as allocation would refuse a join of two list inputs
+    /// on memory it never keeps. Newly built values are charged in full by
+    /// [`Self::charge_value`].
+    fn charge_clone(&mut self, _val: &L3ValueV2) -> Result<(), EvalFault> {
+        self.tick_step()
     }
 
     fn charge_allocation(&mut self, nodes: usize, bytes: usize) -> Result<(), EvalFault> {
@@ -1453,6 +2032,8 @@ impl EvalBudget {
         Ok(())
     }
 
+    /// Charge a newly built value in full: its node count, byte size, and
+    /// depth, walked iteratively so a deep value cannot overflow the stack.
     fn charge_value(&mut self, val: &L3ValueV2, depth: usize) -> Result<(), EvalFault> {
         let mut stack: Vec<(&L3ValueV2, usize)> = vec![(val, depth)];
         let mut count = 0usize;
@@ -1511,6 +2092,12 @@ impl EvalBudget {
                         stack.push((v, depth + 1));
                     }
                 }
+                L3ValueV2::List(items) => {
+                    bytes += 16;
+                    for item in items.iter() {
+                        stack.push((item, depth + 1));
+                    }
+                }
             }
 
             if self.allocated_bytes + bytes > self.max_bytes {
@@ -1538,6 +2125,29 @@ impl EvalBudget {
                 detail: "evaluation step limit exceeded".to_string(),
             });
         }
+        self.unflushed_steps += 1;
+        if self.unflushed_steps >= RUN_WORK_FLUSH_STEPS {
+            self.flush_run_work()?;
+        }
+        Ok(())
+    }
+
+    /// Add this evaluation's unreported steps to the shared run counter and
+    /// fail once the run as a whole passes [`MAX_RUN_STEPS`].
+    fn flush_run_work(&mut self) -> Result<(), EvalFault> {
+        let pending = std::mem::take(&mut self.unflushed_steps);
+        let Some(counter) = &self.run_work else {
+            return Ok(());
+        };
+        let total = counter
+            .fetch_add(pending, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(pending);
+        if total > MAX_RUN_STEPS {
+            return Err(EvalFault::ResourceExhausted {
+                limit: MAX_RUN_STEPS,
+                detail: "run step limit exceeded".to_string(),
+            });
+        }
         Ok(())
     }
 }
@@ -1554,12 +2164,85 @@ impl EvalBudget {
 /// Operands evaluate **left to right**, which is ABI: it fixes which fault a
 /// program with two faulty operands reports.
 pub fn eval(e: &L3ExprV2, env: &EvalEnv) -> Result<L3ValueV2, EvalFault> {
-    let mut budget = if env.functions.is_empty() && env.schemas.is_empty() {
-        None
-    } else {
-        Some(EvalBudget::default())
+    if env.functions.is_empty() && env.schemas.is_empty() && !expr_has_list_form(e) {
+        // No helpers in scope and no list/relational form anywhere in `e`:
+        // nothing here can recurse through a `Call`, and there is no
+        // cartesian-product-shaped multiplier either, so the fast, unbudgeted
+        // path this profile has always used is unchanged.
+        let mut budget = None;
+        return eval_internal(e, env, &mut budget, None);
+    }
+    let budgeted = move || {
+        let mut budget = Some(EvalBudget {
+            run_work: env.run_work.clone(),
+            ..EvalBudget::default()
+        });
+        let value = eval_internal(e, env, &mut budget, None)?;
+        budget.as_mut().map_or(Ok(()), EvalBudget::flush_run_work)?;
+        Ok(value)
     };
-    eval_internal(e, env, &mut budget, None)
+    // Only a helper call can recurse (ADR-0042); without helpers, native
+    // stack depth is bounded by expression nesting, so the budgeted
+    // evaluation runs on the caller's thread.
+    if env.functions.is_empty() {
+        return budgeted();
+    }
+    // See `EVAL_THREAD_STACK_BYTES`: with helpers in scope, evaluation runs
+    // on a dedicated, generously sized stack rather than trusting the
+    // caller's thread — the budget decides admission, not the native stack.
+    // `eval_internal` is total, so a failure here means the OS refused the
+    // thread or a defect panicked; both are reported as a resource fault,
+    // never propagated as a panic.
+    with_eval_stack(budgeted).unwrap_or_else(|| {
+        Err(EvalFault::ResourceExhausted {
+            limit: EVAL_THREAD_STACK_BYTES,
+            detail: "the bounded evaluation thread could not run".to_string(),
+        })
+    })
+}
+
+/// Whether `e` reaches a list/relational form anywhere in its tree
+/// (ADR-0037, ADR-0040).
+///
+/// A finite-decision program without functions or nominal schemas otherwise
+/// runs with no evaluator work budget at all, exactly reproducing its
+/// pre-ADR-0032 behavior. List iteration can multiply the work a *bounded*
+/// expression performs well past its own static node count — a large
+/// cartesian product is the sharpest case — so any expression that reaches
+/// one of these forms must have the shared budget active regardless of
+/// whether it also uses functions or schemas. Programs that use none of these
+/// forms are unaffected: this returns `false` for exactly the expressions
+/// [`eval`] treated as unbounded before this change.
+fn expr_has_list_form(e: &L3ExprV2) -> bool {
+    match e {
+        L3ExprV2::Fold { .. }
+        | L3ExprV2::Filter { .. }
+        | L3ExprV2::Map { .. }
+        | L3ExprV2::Comprehension { .. }
+        | L3ExprV2::ListLit(_)
+        | L3ExprV2::In(..)
+        | L3ExprV2::Len(_)
+        | L3ExprV2::Distinct(_) => true,
+        L3ExprV2::Int(_)
+        | L3ExprV2::Str(_)
+        | L3ExprV2::Bool(_)
+        | L3ExprV2::LetRef(_)
+        | L3ExprV2::RuleFact(_)
+        | L3ExprV2::NullaryVariant { .. } => false,
+        L3ExprV2::Ctor { args, .. } | L3ExprV2::Call { args, .. } => {
+            args.iter().any(expr_has_list_form)
+        }
+        L3ExprV2::Record { fields, .. } => fields.iter().any(|(_, v)| expr_has_list_form(v)),
+        L3ExprV2::Field(base, _) | L3ExprV2::Not(base) => expr_has_list_form(base),
+        L3ExprV2::Arith(_, a, b)
+        | L3ExprV2::Cmp(_, a, b)
+        | L3ExprV2::IntDivMod(_, a, b)
+        | L3ExprV2::And(a, b)
+        | L3ExprV2::Or(a, b) => expr_has_list_form(a) || expr_has_list_form(b),
+        L3ExprV2::Match { scrutinee, arms } => {
+            expr_has_list_form(scrutinee) || arms.iter().any(|(_, body)| expr_has_list_form(body))
+        }
+    }
 }
 
 fn eval_internal(
@@ -1820,14 +2503,10 @@ fn eval_internal_body(
                 if binders.len() != args.len() {
                     return Err(EvalFault::OperandShape("constructor arity mismatch"));
                 }
+                // Cloning the environment copies only `locals`; inputs, lets,
+                // and facts are shared (see `EvalEnv`).
                 if let Some(b) = budget.as_mut() {
-                    for (name, value) in env
-                        .locals
-                        .iter()
-                        .chain(env.lets.iter())
-                        .chain(env.inputs.iter())
-                        .chain(env.facts.iter())
-                    {
+                    for (name, value) in env.locals.iter() {
                         b.charge_allocation(0, name.len())?;
                         b.charge_clone(value)?;
                     }
@@ -1927,10 +2606,11 @@ fn eval_internal_body(
                 fn_locals.insert(param_name.clone(), val);
             }
             let fn_env = EvalEnv {
-                inputs: BTreeMap::new(),
-                lets: BTreeMap::new(),
-                facts: BTreeMap::new(),
+                inputs: Arc::default(),
+                lets: Arc::default(),
+                facts: Arc::default(),
                 locals: fn_locals,
+                run_work: env.run_work.clone(),
                 functions: env.functions.clone(),
                 schemas: def.schemas.clone(),
             };
@@ -1968,7 +2648,421 @@ fn eval_internal_body(
 
             Ok(ret_val)
         }
+        L3ExprV2::Fold {
+            op,
+            list,
+            binder,
+            body,
+        } => eval_fold(*op, list, binder, body, env, budget, current_func),
+        L3ExprV2::Filter { list, binder, cond } => {
+            eval_filter(list, binder, cond, env, budget, current_func)
+        }
+        L3ExprV2::Map { list, binder, body } => {
+            eval_map(list, binder, body, env, budget, current_func)
+        }
+        L3ExprV2::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => eval_comprehension(
+            generators,
+            where_clause,
+            yield_expr,
+            env,
+            budget,
+            current_func,
+        ),
+        L3ExprV2::ListLit(items) => eval_list_lit(items, env, budget, current_func),
+        L3ExprV2::In(needle, haystack) => eval_in(needle, haystack, env, budget, current_func),
+        L3ExprV2::Len(list) => eval_len(list, env, budget, current_func),
+        L3ExprV2::Distinct(list) => eval_distinct(list, env, budget, current_func),
     }
+}
+
+// The list/relational evaluators below are pulled out of `eval_internal_body`
+// (rather than inlined as match arms, as every other form in this evaluator
+// is) so that function's own per-call stack frame — which every recursive
+// evaluation depth is charged against, including deep non-list recursion
+// such as chained helper calls — stays close to its pre-ADR-0037 size. A
+// debug build does not reuse one match arm's stack slots for another, so a
+// large arm here would otherwise widen every recursive call in this
+// evaluator, including ones that never touch a list, and a bound like
+// `MAX_EVAL_RECURSION_DEPTH` is only as tight as the frame size it was
+// chosen against.
+#[inline(never)]
+fn eval_fold(
+    op: FoldOpV2,
+    list: &L3ExprV2,
+    binder: &str,
+    body: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    let list_val = eval_internal(list, env, budget, current_func)?;
+    let L3ValueV2::List(items) = list_val else {
+        return Err(EvalFault::OperandShape("fold requires a List operand"));
+    };
+    match op {
+        FoldOpV2::Sum => {
+            let mut acc: i64 = 0;
+            for item in items.iter().cloned() {
+                if let Some(b) = budget.as_mut() {
+                    b.charge_clone(&item)?;
+                }
+                let mut item_env = env.clone();
+                item_env.locals.insert(binder.to_string(), item);
+                let v = eval_internal(body, &item_env, budget, current_func)?;
+                let L3ValueV2::Int(n) = v else {
+                    return Err(EvalFault::OperandShape("sum body must evaluate to Int"));
+                };
+                acc = acc
+                    .checked_add(n)
+                    .ok_or(EvalFault::Overflow(ArithOpV2::Add))?;
+            }
+            Ok(L3ValueV2::Int(acc))
+        }
+        FoldOpV2::Count => {
+            let mut acc: i64 = 0;
+            for item in items.iter().cloned() {
+                if let Some(b) = budget.as_mut() {
+                    b.charge_clone(&item)?;
+                }
+                let mut item_env = env.clone();
+                item_env.locals.insert(binder.to_string(), item);
+                let v = eval_internal(body, &item_env, budget, current_func)?;
+                let L3ValueV2::Bool(keep) = v else {
+                    return Err(EvalFault::OperandShape("count body must evaluate to Bool"));
+                };
+                if keep {
+                    acc = acc
+                        .checked_add(1)
+                        .ok_or(EvalFault::Overflow(ArithOpV2::Add))?;
+                }
+            }
+            Ok(L3ValueV2::Int(acc))
+        }
+        FoldOpV2::All => {
+            for item in items.iter().cloned() {
+                if let Some(b) = budget.as_mut() {
+                    b.charge_clone(&item)?;
+                }
+                let mut item_env = env.clone();
+                item_env.locals.insert(binder.to_string(), item);
+                let v = eval_internal(body, &item_env, budget, current_func)?;
+                let L3ValueV2::Bool(keep) = v else {
+                    return Err(EvalFault::OperandShape("all body must evaluate to Bool"));
+                };
+                if !keep {
+                    return Ok(L3ValueV2::Bool(false));
+                }
+            }
+            Ok(L3ValueV2::Bool(true))
+        }
+        FoldOpV2::Any => {
+            for item in items.iter().cloned() {
+                if let Some(b) = budget.as_mut() {
+                    b.charge_clone(&item)?;
+                }
+                let mut item_env = env.clone();
+                item_env.locals.insert(binder.to_string(), item);
+                let v = eval_internal(body, &item_env, budget, current_func)?;
+                let L3ValueV2::Bool(keep) = v else {
+                    return Err(EvalFault::OperandShape("any body must evaluate to Bool"));
+                };
+                if keep {
+                    return Ok(L3ValueV2::Bool(true));
+                }
+            }
+            Ok(L3ValueV2::Bool(false))
+        }
+        FoldOpV2::Min | FoldOpV2::Max => {
+            if items.is_empty() {
+                return Err(EvalFault::EmptyAggregate(op));
+            }
+            let mut acc: Option<i64> = None;
+            for item in items.iter().cloned() {
+                if let Some(b) = budget.as_mut() {
+                    b.charge_clone(&item)?;
+                }
+                let mut item_env = env.clone();
+                item_env.locals.insert(binder.to_string(), item);
+                let v = eval_internal(body, &item_env, budget, current_func)?;
+                let L3ValueV2::Int(n) = v else {
+                    return Err(EvalFault::OperandShape("min/max body must evaluate to Int"));
+                };
+                acc = Some(match acc {
+                    None => n,
+                    Some(cur) if op == FoldOpV2::Min => cur.min(n),
+                    Some(cur) => cur.max(n),
+                });
+            }
+            Ok(L3ValueV2::Int(acc.expect("non-empty checked above")))
+        }
+    }
+}
+
+#[inline(never)]
+fn eval_filter(
+    list: &L3ExprV2,
+    binder: &str,
+    cond: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    let list_val = eval_internal(list, env, budget, current_func)?;
+    let L3ValueV2::List(items) = list_val else {
+        return Err(EvalFault::OperandShape("filter requires a List operand"));
+    };
+    let mut out = Vec::new();
+    for item in items.iter().cloned() {
+        if let Some(b) = budget.as_mut() {
+            b.charge_clone(&item)?;
+        }
+        let mut item_env = env.clone();
+        item_env.locals.insert(binder.to_string(), item.clone());
+        let v = eval_internal(cond, &item_env, budget, current_func)?;
+        let L3ValueV2::Bool(keep) = v else {
+            return Err(EvalFault::OperandShape(
+                "filter condition must evaluate to Bool",
+            ));
+        };
+        if keep {
+            if out.len() >= MAX_DERIVED_LIST_LEN {
+                return Err(EvalFault::ResourceExhausted {
+                    limit: MAX_DERIVED_LIST_LEN,
+                    detail: "derived list length limit exceeded".to_string(),
+                });
+            }
+            out.push(item);
+        }
+    }
+    Ok(L3ValueV2::List(out.into()))
+}
+
+#[inline(never)]
+fn eval_map(
+    list: &L3ExprV2,
+    binder: &str,
+    body: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    let list_val = eval_internal(list, env, budget, current_func)?;
+    let L3ValueV2::List(items) = list_val else {
+        return Err(EvalFault::OperandShape("map requires a List operand"));
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items.iter().cloned() {
+        if let Some(b) = budget.as_mut() {
+            b.charge_clone(&item)?;
+        }
+        let mut item_env = env.clone();
+        item_env.locals.insert(binder.to_string(), item);
+        let v = eval_internal(body, &item_env, budget, current_func)?;
+        if out.len() >= MAX_DERIVED_LIST_LEN {
+            return Err(EvalFault::ResourceExhausted {
+                limit: MAX_DERIVED_LIST_LEN,
+                detail: "derived list length limit exceeded".to_string(),
+            });
+        }
+        out.push(v);
+    }
+    Ok(L3ValueV2::List(out.into()))
+}
+
+/// Nested generator loops, left to right, evaluated recursively so a later
+/// generator's environment already carries every earlier binder — the join
+/// case ADR-0040 names. Its own function (not nested inside
+/// [`eval_comprehension`]) for the same stack-frame-size reason the sibling
+/// `eval_*` functions here are pulled out of `eval_internal_body`.
+#[inline(never)]
+fn eval_comprehension_generators(
+    gens: &[(String, L3ExprV2)],
+    where_clause: &Option<Box<L3ExprV2>>,
+    yield_expr: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+    out: &mut Vec<L3ValueV2>,
+) -> Result<(), EvalFault> {
+    match gens.split_first() {
+        None => {
+            let keep = match where_clause {
+                None => true,
+                Some(w) => {
+                    let v = eval_internal(w, env, budget, current_func)?;
+                    let L3ValueV2::Bool(b) = v else {
+                        return Err(EvalFault::OperandShape(
+                            "comprehension 'where' must evaluate to Bool",
+                        ));
+                    };
+                    b
+                }
+            };
+            if keep {
+                let v = eval_internal(yield_expr, env, budget, current_func)?;
+                if out.len() >= MAX_DERIVED_LIST_LEN {
+                    return Err(EvalFault::ResourceExhausted {
+                        limit: MAX_DERIVED_LIST_LEN,
+                        detail: "derived list length limit exceeded".to_string(),
+                    });
+                }
+                out.push(v);
+            }
+            Ok(())
+        }
+        Some(((binder, source), rest)) => {
+            let list_val = eval_internal(source, env, budget, current_func)?;
+            let L3ValueV2::List(items) = list_val else {
+                return Err(EvalFault::OperandShape(
+                    "comprehension generator requires a List operand",
+                ));
+            };
+            for item in items.iter().cloned() {
+                if let Some(b) = budget.as_mut() {
+                    b.charge_clone(&item)?;
+                }
+                let mut next_env = env.clone();
+                next_env.locals.insert(binder.clone(), item);
+                eval_comprehension_generators(
+                    rest,
+                    where_clause,
+                    yield_expr,
+                    &next_env,
+                    budget,
+                    current_func,
+                    out,
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+
+#[inline(never)]
+fn eval_comprehension(
+    generators: &[(String, L3ExprV2)],
+    where_clause: &Option<Box<L3ExprV2>>,
+    yield_expr: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    let mut out = Vec::new();
+    eval_comprehension_generators(
+        generators,
+        where_clause,
+        yield_expr,
+        env,
+        budget,
+        current_func,
+        &mut out,
+    )?;
+    Ok(L3ValueV2::List(out.into()))
+}
+
+#[inline(never)]
+fn eval_list_lit(
+    items: &[L3ExprV2],
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    if items.len() > MAX_DERIVED_LIST_LEN {
+        return Err(EvalFault::ResourceExhausted {
+            limit: MAX_DERIVED_LIST_LEN,
+            detail: "derived list length limit exceeded".to_string(),
+        });
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let v = eval_internal(item, env, budget, current_func)?;
+        if let Some(b) = budget.as_mut() {
+            b.charge_value(&v, 2)?;
+        }
+        out.push(v);
+    }
+    Ok(L3ValueV2::List(out.into()))
+}
+
+#[inline(never)]
+fn eval_in(
+    needle: &L3ExprV2,
+    haystack: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    let needle_val = eval_internal(needle, env, budget, current_func)?;
+    let haystack_val = eval_internal(haystack, env, budget, current_func)?;
+    let L3ValueV2::List(items) = haystack_val else {
+        return Err(EvalFault::OperandShape(
+            "'in' requires a List right operand",
+        ));
+    };
+    let mut found = false;
+    for item in items.iter() {
+        if let Some(b) = budget.as_mut() {
+            b.tick_step()?;
+        }
+        if *item == needle_val {
+            found = true;
+            break;
+        }
+    }
+    Ok(L3ValueV2::Bool(found))
+}
+
+#[inline(never)]
+fn eval_len(
+    list: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    let list_val = eval_internal(list, env, budget, current_func)?;
+    let L3ValueV2::List(items) = list_val else {
+        return Err(EvalFault::OperandShape("len requires a List operand"));
+    };
+    Ok(L3ValueV2::Int(items.len() as i64))
+}
+
+#[inline(never)]
+fn eval_distinct(
+    list: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    let list_val = eval_internal(list, env, budget, current_func)?;
+    let L3ValueV2::List(items) = list_val else {
+        return Err(EvalFault::OperandShape("distinct requires a List operand"));
+    };
+    // First occurrence kept, order otherwise preserved (ADR-0040). A
+    // `BTreeSet` gives an O(log n) membership check without a hash map
+    // (`disallowed_types`); the insertion-ordered `out` is the value this
+    // expression actually produces.
+    let mut seen: BTreeSet<L3ValueV2> = BTreeSet::new();
+    let mut out = Vec::new();
+    for item in items.iter().cloned() {
+        if let Some(b) = budget.as_mut() {
+            b.tick_step()?;
+            b.charge_clone(&item)?;
+        }
+        if seen.insert(item.clone()) {
+            if out.len() >= MAX_DERIVED_LIST_LEN {
+                return Err(EvalFault::ResourceExhausted {
+                    limit: MAX_DERIVED_LIST_LEN,
+                    detail: "derived list length limit exceeded".to_string(),
+                });
+            }
+            out.push(item);
+        }
+    }
+    Ok(L3ValueV2::List(out.into()))
 }
 
 /// Check that every `match` in `plan` is exhaustive over its scrutinee's sum.
@@ -2080,6 +3174,44 @@ pub(crate) fn check_exhaustive_expr(
             check_exhaustive_expr(b, sum_of_variant, variants_of_sum)
         }
         L3ExprV2::Not(a) => check_exhaustive_expr(a, sum_of_variant, variants_of_sum),
+        L3ExprV2::In(a, b) => {
+            check_exhaustive_expr(a, sum_of_variant, variants_of_sum)?;
+            check_exhaustive_expr(b, sum_of_variant, variants_of_sum)
+        }
+        L3ExprV2::Len(a) | L3ExprV2::Distinct(a) => {
+            check_exhaustive_expr(a, sum_of_variant, variants_of_sum)
+        }
+        L3ExprV2::ListLit(items) => {
+            for item in items {
+                check_exhaustive_expr(item, sum_of_variant, variants_of_sum)?;
+            }
+            Ok(())
+        }
+        L3ExprV2::Fold { list, body, .. } => {
+            check_exhaustive_expr(list, sum_of_variant, variants_of_sum)?;
+            check_exhaustive_expr(body, sum_of_variant, variants_of_sum)
+        }
+        L3ExprV2::Filter { list, cond, .. } => {
+            check_exhaustive_expr(list, sum_of_variant, variants_of_sum)?;
+            check_exhaustive_expr(cond, sum_of_variant, variants_of_sum)
+        }
+        L3ExprV2::Map { list, body, .. } => {
+            check_exhaustive_expr(list, sum_of_variant, variants_of_sum)?;
+            check_exhaustive_expr(body, sum_of_variant, variants_of_sum)
+        }
+        L3ExprV2::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => {
+            for (_, source) in generators {
+                check_exhaustive_expr(source, sum_of_variant, variants_of_sum)?;
+            }
+            if let Some(w) = where_clause {
+                check_exhaustive_expr(w, sum_of_variant, variants_of_sum)?;
+            }
+            check_exhaustive_expr(yield_expr, sum_of_variant, variants_of_sum)
+        }
         L3ExprV2::Int(_)
         | L3ExprV2::Str(_)
         | L3ExprV2::Bool(_)

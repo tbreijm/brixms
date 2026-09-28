@@ -710,11 +710,20 @@ commit c from (p)
 }
 
 // ---------------------------------------------------------------------------
-// 7. Cycle Detection
+// 7. Recursion (ADR-0042 — supersedes ADR-0032's cycle refusal)
 // ---------------------------------------------------------------------------
+//
+// Direct and mutual recursion among helpers now lower successfully; a call
+// graph cycle is no longer a lowering error (see `finite_decision_recursion.rs`
+// for terminating recursion and the depth/budget-exhaustion `Unknown` cases).
+// Every helper below never terminates by construction (no base case), so it
+// still cannot commit a decision — but the *reason* moves from "rejected at
+// lowering" to "the evaluator's own call-depth/step budget faults it to
+// `Unknown`", which is the fail-closed behavior ADR-0042 requires instead of
+// a rejection or a stack overflow.
 
 #[test]
-fn test_direct_recursion_rejected() {
+fn test_direct_recursion_admitted_nonterminating_is_unknown() {
     let source = r#"
 config Decision = Done
 
@@ -725,15 +734,35 @@ propose p(r) priority 10 when true = Done
 commit c from (p)
 "#;
     let module = parse(source).expect("parses");
-    let err = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE).unwrap_err();
-    assert!(matches!(
-        err,
-        FiniteDecisionLowerError::FunctionCycle { ref func, ref cycle } if func == "self_loop" && cycle.contains(&"self_loop".to_string())
-    ));
+    let p = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE)
+        .expect("direct recursion is admitted at lowering (ADR-0042)");
+    let runtime = FiniteDecisionRuntime::build(&p).expect("runtime builds");
+    let run = runtime.run();
+    assert!(
+        run.is_unknown(),
+        "non-terminating recursion must not select a decision, and must not crash"
+    );
+    let FiniteDecisionStop::Unknown(FiniteDecisionUnknownReason::ExpressionEvaluationFault {
+        fault,
+        ..
+    }) = &run.stop
+    else {
+        panic!(
+            "expected an expression evaluation fault, got {:?}",
+            run.stop
+        );
+    };
+    assert!(
+        matches!(
+            fault,
+            EvalFault::CallDepthExceeded { .. } | EvalFault::ResourceExhausted { .. }
+        ),
+        "expected a call-depth or resource-budget fault, got {fault:?}"
+    );
 }
 
 #[test]
-fn test_mutual_recursion_rejected() {
+fn test_mutual_recursion_admitted_nonterminating_is_unknown() {
     let source = r#"
 config Decision = Done
 
@@ -745,15 +774,19 @@ propose p(r) priority 10 when true = Done
 commit c from (p)
 "#;
     let module = parse(source).expect("parses");
-    let err = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE).unwrap_err();
+    let p = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE)
+        .expect("mutual recursion is admitted at lowering (ADR-0042)");
+    let runtime = FiniteDecisionRuntime::build(&p).expect("runtime builds");
+    let run = runtime.run();
+    assert!(run.is_unknown());
     assert!(matches!(
-        err,
-        FiniteDecisionLowerError::FunctionCycle { .. }
+        run.stop,
+        FiniteDecisionStop::Unknown(FiniteDecisionUnknownReason::ExpressionEvaluationFault { .. })
     ));
 }
 
 #[test]
-fn test_three_hop_cycle_rejected() {
+fn test_three_hop_cycle_admitted_nonterminating_is_unknown() {
     let source = r#"
 config Decision = Done
 
@@ -766,10 +799,14 @@ propose p(r) priority 10 when true = Done
 commit c from (p)
 "#;
     let module = parse(source).expect("parses");
-    let err = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE).unwrap_err();
+    let p = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE)
+        .expect("a three-hop call cycle is admitted at lowering (ADR-0042)");
+    let runtime = FiniteDecisionRuntime::build(&p).expect("runtime builds");
+    let run = runtime.run();
+    assert!(run.is_unknown());
     assert!(matches!(
-        err,
-        FiniteDecisionLowerError::FunctionCycle { .. }
+        run.stop,
+        FiniteDecisionStop::Unknown(FiniteDecisionUnknownReason::ExpressionEvaluationFault { .. })
     ));
 }
 
@@ -1194,7 +1231,9 @@ commit c from (allow, block)
 
 #[test]
 fn test_unused_invalid_declarations() {
-    // Unused recursive helper must fail lowering
+    // An unused recursive helper is admitted (ADR-0042): recursion is no
+    // longer itself a lowering fault, whether or not the helper is ever
+    // called. It just never terminates if it were.
     let src_cycle = r#"
 config Decision = Done
 fn unused_rec(x: Int): Int = unused_rec(x)
@@ -1203,11 +1242,8 @@ propose p(r) priority 10 when true = Done
 commit c from (p)
 "#;
     let mod_cycle = parse(src_cycle).expect("parses");
-    let err = lower_finite_decision_plan(&mod_cycle, FINITE_DECISION_PROFILE).unwrap_err();
-    assert!(matches!(
-        err,
-        FiniteDecisionLowerError::FunctionCycle { .. }
-    ));
+    lower_finite_decision_plan(&mod_cycle, FINITE_DECISION_PROFILE)
+        .expect("an unused recursive helper still lowers (ADR-0042)");
 
     // Unused helper reading rule fact must fail lowering
     let src_fact = r#"
@@ -1351,20 +1387,27 @@ commit c from (p)
 
 #[test]
 fn test_mixed_expression_and_call_depth_bounded() {
-    let mut fns = String::new();
-    for i in 0..70 {
-        fns.push_str(&format!("fn f{i}(x: Int): Int = f{}(x + 1)\n", i + 1));
-    }
-    fns.push_str("fn f70(x: Int): Int = x\n");
-
+    // A chain of 71 *distinct* non-recursive helpers used to exceed the old
+    // `MAX_CALL_DEPTH` of 64. Recursion is now admitted (ADR-0042) and the
+    // bound is raised to a call-depth budget deep helpers can actually use, so
+    // the depth bound is now exercised through genuine recursion instead —
+    // `MAX_FUNCTION_COUNT` (256 distinct helpers) is in any case too small to
+    // build a non-recursive chain past `MAX_CALL_DEPTH` (1000) by distinct
+    // names alone.
     let source = format!(
         r#"
 config Decision = Done
-{fns}
-rule r() = f0(0)
+
+fn countdown(x: Int): Int = match x == 0 {{
+  true => 0
+  false => countdown(x - 1)
+}}
+
+rule r() = countdown({})
 propose p(r) priority 10 when true = Done
 commit c from (p)
-"#
+"#,
+        brix_lower::l3_v2::MAX_CALL_DEPTH + 200
     );
     let p = plan(&source);
     let runtime = FiniteDecisionRuntime::build(&p).expect("runtime builds");
@@ -1531,7 +1574,7 @@ fn test_boolean_operands_are_checked_even_when_short_circuited() {
         "config Decision = Done\nfn choose(): Bool = match true {\ntrue => true\nfalse => false && 1\n}\nrule r() = choose()\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
         "config Decision = Done\ninput count: Int\nrule r() = false && count\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
         "config Decision = Done\nfn unused(count: Int): Bool = false && count\nrule r() = true\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
-        "config Decision = Done\nfn count(): Int = 1\nrule r() = false && count()\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
+        "config Decision = Done\nfn one(): Int = 1\nrule r() = false && one()\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
         "config User = { age: Int }\nconfig Decision = Done\ninput user: User\nrule r() = false && user.age\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
         "config Decision = Done\nfn identity(x) = x\nrule r() = false && identity(1)\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
         "config Decision = Done\nfn negate(x) = !x\nrule r() = false && negate(1)\npropose p(r) priority 1 when true = Done\ncommit c from (p)",

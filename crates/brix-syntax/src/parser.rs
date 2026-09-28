@@ -2,6 +2,7 @@
 
 use crate::ast::*;
 use crate::lexer::{self, Token, TokenKind};
+use crate::source_map::{self, IdentOccurrence, ItemSourceInfo, SourceMap, SourceSpan};
 
 /// A parse error with a human-readable message and optional source location.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,9 +68,30 @@ pub fn parse(source: &str) -> Result<Module, ParseError> {
 /// each recursive descent. A refusal is a typed error and never a partial
 /// module; there is no permissive retry.
 pub fn parse_bounded(source: &str, limits: crate::ParseLimits) -> Result<Module, ParseError> {
+    let (module, _source_map) = parse_bounded_with_source_map(source, limits)?;
+    Ok(module)
+}
+
+/// Parse under explicit resource bounds (ADR-0022 D6), also returning a sidecar
+/// [`SourceMap`] recording where each top-level item — and each identifier
+/// token inside it — came from.
+///
+/// Runs the *exact same* parse as [`parse_bounded`] (which is defined in terms
+/// of this function and simply discards the map), so the two can never return
+/// different [`Module`]s for the same input.
+pub fn parse_bounded_with_source_map(
+    source: &str,
+    limits: crate::ParseLimits,
+) -> Result<(Module, SourceMap), ParseError> {
     let tokens = lexer::lex_bounded(source, limits)?;
     let mut parser = Parser::new(tokens, limits);
-    parser.parse_module()
+    let module = parser.parse_module()?;
+    Ok((
+        module,
+        SourceMap {
+            items: parser.item_source,
+        },
+    ))
 }
 
 struct Parser {
@@ -80,6 +102,10 @@ struct Parser {
     /// recursive expression rule and decremented on exit, so the bound tracks
     /// live stack rather than total rule applications.
     depth: usize,
+    /// Sidecar per-item source info, recorded as each top-level item is
+    /// parsed (see [`Self::parse_module`]). Never consulted by parsing itself
+    /// — purely an additional recording alongside it.
+    item_source: Vec<ItemSourceInfo>,
 }
 
 impl Parser {
@@ -89,6 +115,7 @@ impl Parser {
             pos: 0,
             limits,
             depth: 0,
+            item_source: Vec::new(),
         }
     }
 
@@ -212,9 +239,46 @@ impl Parser {
     fn parse_module(&mut self) -> Result<Module, ParseError> {
         let mut items = Vec::new();
         while !self.is_at_end() {
-            items.push(self.parse_item()?);
+            let start_pos = self.pos;
+            let item = self.parse_item()?;
+            self.record_item_source(&item, start_pos, self.pos);
+            items.push(item);
         }
         Ok(Module { items })
+    }
+
+    /// Record the span and identifier-token occurrences of the item that was
+    /// just parsed from token range `[start_pos, end_pos)`. Purely additive
+    /// bookkeeping for [`SourceMap`] — never observed by the parse itself.
+    fn record_item_source(&mut self, item: &Item, start_pos: usize, end_pos: usize) {
+        if start_pos >= end_pos || end_pos > self.tokens.len() {
+            return;
+        }
+        let start_tok = &self.tokens[start_pos];
+        let end_tok = &self.tokens[end_pos - 1];
+        let span = SourceSpan {
+            start_line: start_tok.line,
+            start_col: start_tok.col,
+            end_line: end_tok.line,
+            end_col: end_tok.col,
+        };
+        let mut idents = Vec::new();
+        for tok in &self.tokens[start_pos..end_pos] {
+            if let TokenKind::Ident(name) = &tok.kind {
+                idents.push(IdentOccurrence {
+                    name: name.clone(),
+                    line: tok.line,
+                    col: tok.col,
+                });
+            }
+        }
+        let (kind, name) = source_map::item_kind_name(item);
+        self.item_source.push(ItemSourceInfo {
+            kind,
+            name,
+            span,
+            idents,
+        });
     }
 
     fn parse_item(&mut self) -> Result<Item, ParseError> {
@@ -233,7 +297,7 @@ impl Parser {
             }
             TokenKind::Rule => {
                 self.advance();
-                self.parse_callable().map(Item::Rule)
+                self.parse_rule_decl().map(Item::Rule)
             }
             TokenKind::Fn => {
                 self.advance();
@@ -265,6 +329,10 @@ impl Parser {
             TokenKind::Input => {
                 self.advance();
                 self.parse_input_decl().map(Item::Input)
+            }
+            TokenKind::Decide => {
+                self.advance();
+                self.parse_decide_decl().map(Item::Decide)
             }
             other => Err(self.error(format!("Unexpected token {:?} at top-level item", other))),
         }
@@ -384,6 +452,37 @@ impl Parser {
             params,
             ret,
             body,
+            params_declared: true,
+        })
+    }
+
+    /// `rule name[(deps...)] [: Ty] = body` (ADR-0038: the dependency list is
+    /// optional — omitting it entirely means "infer from the body", distinct
+    /// from an explicit empty `()`).
+    fn parse_rule_decl(&mut self) -> Result<Callable, ParseError> {
+        let name = self.expect_ident("rule declaration name")?.0;
+        let (params, params_declared) = if self.check(&TokenKind::OpenParen) {
+            self.advance();
+            let params = self.parse_comma_separated(TokenKind::CloseParen, |p| p.parse_param())?;
+            self.consume(TokenKind::CloseParen, "rule declaration ')'")?;
+            (params, true)
+        } else {
+            (Vec::new(), false)
+        };
+        let ret = if self.check(&TokenKind::Colon) {
+            self.advance();
+            Some(self.parse_ty()?)
+        } else {
+            None
+        };
+        self.consume(TokenKind::Equals, "rule declaration '='")?;
+        let body = self.parse_expr()?;
+        Ok(Callable {
+            name,
+            params,
+            ret,
+            body,
+            params_declared,
         })
     }
 
@@ -411,13 +510,39 @@ impl Parser {
         Ok(LetDecl { name, ty, value })
     }
 
+    /// `propose NAME[(DEPS...)] priority UINT when GUARD = VALUE`, or the
+    /// `otherwise` fallback sugar `propose NAME[(DEPS...)] otherwise = VALUE`
+    /// (ADR-0038). The dependency list is optional, as for `rule`; omitting
+    /// it means dependencies are inferred from the guard and value.
     fn parse_propose_decl(&mut self) -> Result<ProposeDecl, ParseError> {
         let name = self.expect_ident("propose candidate name")?.0;
-        self.consume(TokenKind::OpenParen, "propose candidate dependencies '('")?;
-        let deps = self.parse_comma_separated(TokenKind::CloseParen, |p| {
-            p.expect_ident("candidate dependency").map(|(id, _)| id)
-        })?;
-        self.consume(TokenKind::CloseParen, "propose candidate dependencies ')'")?;
+        let (deps, deps_declared) = if self.check(&TokenKind::OpenParen) {
+            self.advance();
+            let deps = self.parse_comma_separated(TokenKind::CloseParen, |p| {
+                p.expect_ident("candidate dependency").map(|(id, _)| id)
+            })?;
+            self.consume(TokenKind::CloseParen, "propose candidate dependencies ')'")?;
+            (deps, true)
+        } else {
+            (Vec::new(), false)
+        };
+        if self.check(&TokenKind::Otherwise) {
+            self.advance();
+            self.consume(
+                TokenKind::Equals,
+                "propose declaration '=' after 'otherwise'",
+            )?;
+            let value = self.parse_expr()?;
+            return Ok(ProposeDecl {
+                name,
+                deps,
+                priority: u64::MAX,
+                guard: Expr::Bool(true),
+                value,
+                deps_declared,
+                otherwise: true,
+            });
+        }
         self.consume(TokenKind::Priority, "propose declaration 'priority'")?;
         let priority = self.parse_priority()?;
         self.consume(TokenKind::When, "propose declaration 'when'")?;
@@ -433,6 +558,8 @@ impl Parser {
             priority,
             guard,
             value,
+            deps_declared,
+            otherwise: false,
         })
     }
 
@@ -485,11 +612,77 @@ impl Parser {
         Ok(CommitDecl { name, candidates })
     }
 
+    /// `decide NAME for BINDER in LIST_EXPR { propose ... }` (ADR-0043).
+    fn parse_decide_decl(&mut self) -> Result<DecideDecl, ParseError> {
+        let name = self.expect_ident("decide declaration name")?.0;
+        self.consume(TokenKind::For, "decide declaration 'for'")?;
+        let binder = self.expect_ident("decide declaration binder")?.0;
+        self.consume(TokenKind::In, "decide declaration 'in'")?;
+        let list = self.parse_expr()?;
+        self.consume(TokenKind::OpenBrace, "decide block '{'")?;
+        let mut proposals = Vec::new();
+        while !self.check(&TokenKind::CloseBrace) && !self.is_at_end() {
+            self.consume(TokenKind::Propose, "decide block 'propose'")?;
+            proposals.push(self.parse_propose_decl()?);
+        }
+        self.consume(TokenKind::CloseBrace, "decide block '}'")?;
+        Ok(DecideDecl {
+            name,
+            binder,
+            list,
+            proposals,
+        })
+    }
+
     fn parse_input_decl(&mut self) -> Result<InputDecl, ParseError> {
         let name = self.expect_ident("input declaration name")?.0;
         self.consume(TokenKind::Colon, "input declaration ':'")?;
         let ty = self.parse_ty()?;
-        Ok(InputDecl { name, ty })
+        // `List<T> max N` (ADR-0037). `max` is a contextual identifier here,
+        // exactly as `proving`/`exhaustive` are contextual after a `match`:
+        // it is not reserved anywhere else in the grammar.
+        let list_max = if matches!(&ty, Ty::App(name, _) if name == "List") {
+            match self.peek().clone() {
+                TokenKind::Ident(id) if id == "max" => {
+                    self.advance();
+                    let tok = self.current().clone();
+                    match &tok.kind {
+                        TokenKind::Num(s) if !s.contains('.') => match s.parse::<u64>() {
+                            Ok(v) => {
+                                self.advance();
+                                Some(v)
+                            }
+                            Err(_) => {
+                                return Err(ParseError::at(
+                                    format!(
+                                        "expected nonnegative unsigned integer for 'max', found '{s}'"
+                                    ),
+                                    tok.line,
+                                    tok.col,
+                                ));
+                            }
+                        },
+                        other => {
+                            return Err(ParseError::at(
+                                format!(
+                                    "expected nonnegative unsigned integer after 'max', found {other:?}"
+                                ),
+                                tok.line,
+                                tok.col,
+                            ));
+                        }
+                    }
+                }
+                other => {
+                    return Err(self.error(format!(
+                        "expected 'max' bound after 'List<...>' input type, found {other:?}"
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+        Ok(InputDecl { name, ty, list_max })
     }
 
     fn parse_ty(&mut self) -> Result<Ty, ParseError> {
@@ -553,6 +746,28 @@ impl Parser {
         self.parse_expr_bp(0)
     }
 
+    /// One call argument: either an ordinary expression, or a hygienic
+    /// binder `ident => expr` (ADR-0037, ADR-0040). Lambdas are fold/filter/
+    /// map syntax only — recognized here structurally, independent of the
+    /// callee's name, and rejected at lowering wherever the callee is not one
+    /// of the recognized builtin forms.
+    fn parse_call_arg(&mut self) -> Result<Expr, ParseError> {
+        if let TokenKind::Ident(name) = self.peek().clone() {
+            if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::FatArrow) {
+                self.advance(); // binder identifier
+                self.advance(); // '=>'
+                self.enter()?;
+                let body = self.parse_expr_inner();
+                self.leave();
+                return Ok(Expr::Lambda {
+                    param: name,
+                    body: Box::new(body?),
+                });
+            }
+        }
+        self.parse_expr()
+    }
+
     /// Precedence climbing for binary operators.
     ///
     /// Precedence levels (lowest to highest):
@@ -584,6 +799,7 @@ impl Parser {
                 TokenKind::Ge => (7, 8, BinOp::Ge, true),
                 TokenKind::EqEq => (7, 8, BinOp::Eq, true),
                 TokenKind::Ne => (7, 8, BinOp::Ne, true),
+                TokenKind::In => (7, 8, BinOp::In, true),
                 TokenKind::Plus => (9, 10, BinOp::Add, false),
                 TokenKind::Minus => (9, 10, BinOp::Sub, false),
                 TokenKind::Star => (11, 12, BinOp::Mul, false),
@@ -622,6 +838,7 @@ impl Parser {
                 | TokenKind::Ge
                 | TokenKind::EqEq
                 | TokenKind::Ne
+                | TokenKind::In
         )
     }
 
@@ -759,6 +976,41 @@ impl Parser {
                 self.consume(TokenKind::CloseParen, "grouped expression ')'")?;
                 Ok(expr)
             }
+            TokenKind::OpenBracket => {
+                self.advance();
+                let elems =
+                    self.parse_comma_separated(TokenKind::CloseBracket, |p| p.parse_expr())?;
+                self.consume(TokenKind::CloseBracket, "list literal ']'")?;
+                Ok(Expr::ListLit(elems))
+            }
+            TokenKind::For => {
+                self.advance();
+                let mut generators = Vec::new();
+                loop {
+                    let binder = self.expect_ident("comprehension generator binder")?.0;
+                    self.consume(TokenKind::In, "comprehension generator 'in'")?;
+                    let source = self.parse_expr()?;
+                    generators.push((binder, source));
+                    if self.check(&TokenKind::Comma) {
+                        self.advance();
+                        continue;
+                    }
+                    break;
+                }
+                let where_clause = if self.check(&TokenKind::Where) {
+                    self.advance();
+                    Some(Box::new(self.parse_expr()?))
+                } else {
+                    None
+                };
+                self.consume(TokenKind::Yield, "comprehension 'yield'")?;
+                let yield_expr = Box::new(self.parse_expr()?);
+                Ok(Expr::Comprehension {
+                    generators,
+                    where_clause,
+                    yield_expr,
+                })
+            }
             TokenKind::Ident(id) => {
                 if self.is_record_literal_ahead() {
                     self.advance(); // consume config name
@@ -775,8 +1027,8 @@ impl Parser {
                     self.advance();
                     if self.check(&TokenKind::OpenParen) {
                         self.advance();
-                        let args =
-                            self.parse_comma_separated(TokenKind::CloseParen, |p| p.parse_expr())?;
+                        let args = self
+                            .parse_comma_separated(TokenKind::CloseParen, |p| p.parse_call_arg())?;
                         self.consume(TokenKind::CloseParen, "function call ')'")?;
                         Ok(Expr::Call { func: id, args })
                     } else {

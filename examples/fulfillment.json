@@ -1,0 +1,67 @@
+{
+  "schema": "brix.input@3",
+  "values": {
+    "orders": {
+      "type": "list",
+      "items": [
+        {
+          "type": "record",
+          "nominal": "Order",
+          "fields": [
+            { "name": "id", "value": { "type": "int", "value": "1" } },
+            { "name": "sku", "value": { "type": "int", "value": "100" } },
+            { "name": "units", "value": { "type": "int", "value": "5" } }
+          ]
+        },
+        {
+          "type": "record",
+          "nominal": "Order",
+          "fields": [
+            { "name": "id", "value": { "type": "int", "value": "2" } },
+            { "name": "sku", "value": { "type": "int", "value": "200" } },
+            { "name": "units", "value": { "type": "int", "value": "3" } }
+          ]
+        },
+        {
+          "type": "record",
+          "nominal": "Order",
+          "fields": [
+            { "name": "id", "value": { "type": "int", "value": "3" } },
+            { "name": "sku", "value": { "type": "int", "value": "100" } },
+            { "name": "units", "value": { "type": "int", "value": "50" } }
+          ]
+        },
+        {
+          "type": "record",
+          "nominal": "Order",
+          "fields": [
+            { "name": "id", "value": { "type": "int", "value": "4" } },
+            { "name": "sku", "value": { "type": "int", "value": "300" } },
+            { "name": "units", "value": { "type": "int", "value": "2" } }
+          ]
+        }
+      ]
+    },
+    "stock": {
+      "type": "list",
+      "items": [
+        {
+          "type": "record",
+          "nominal": "Stock",
+          "fields": [
+            { "name": "sku", "value": { "type": "int", "value": "100" } },
+            { "name": "on_hand", "value": { "type": "int", "value": "20" } }
+          ]
+        },
+        {
+          "type": "record",
+          "nominal": "Stock",
+          "fields": [
+            { "name": "sku", "value": { "type": "int", "value": "200" } },
+            { "name": "on_hand", "value": { "type": "int", "value": "10" } }
+          ]
+        }
+      ]
+    }
+  }
+}

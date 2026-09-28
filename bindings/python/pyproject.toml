@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brix-client"
+version = "0.1.0"
+description = "Pure standard-library Python client for brix serve --stdio (ADR-0044)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "See repository root LICENSE" }
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+include = ["brix*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

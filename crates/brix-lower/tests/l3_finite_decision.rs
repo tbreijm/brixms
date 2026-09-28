@@ -308,11 +308,44 @@ fn negative_lowering_missing_commit() {
 }
 
 #[test]
-fn negative_lowering_multiple_commits() {
+fn negative_lowering_same_proposal_in_two_commits() {
+    // ADR-0039 lifts the old "exactly one commit" restriction, but a
+    // proposal still cannot be a candidate in two different commit pools.
     let source = "config A = X\nrule r() = X\npropose p(r) priority 1 when true = X\ncommit c1 from (p)\ncommit c2 from (p)";
     let module = parse(source).expect("parses");
     let err = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE).unwrap_err();
-    assert_eq!(err, FiniteDecisionLowerError::MultipleCommits(2));
+    assert_eq!(
+        err,
+        FiniteDecisionLowerError::ProposalInMultipleCommits {
+            candidate: "p".to_string(),
+            first_commit: "c1".to_string(),
+            second_commit: "c2".to_string(),
+        }
+    );
+}
+
+#[test]
+fn positive_lowering_multiple_independent_commits() {
+    // ADR-0039: two commit pools with disjoint candidates now lower fine.
+    let source = "config A = X | Y\nrule r() = X\npropose p(r) priority 1 when true = X\npropose q() priority 1 when true = Y\ncommit c1 from (p)\ncommit c2 from (q)";
+    let module = parse(source).expect("parses");
+    let plan = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE).expect("lowers");
+    assert_eq!(plan.commits.len(), 2);
+    assert_eq!(plan.commits[0].name, "c1");
+    assert_eq!(plan.commits[0].candidates, vec!["p".to_string()]);
+    assert_eq!(plan.commits[1].name, "c2");
+    assert_eq!(plan.commits[1].candidates, vec!["q".to_string()]);
+}
+
+#[test]
+fn negative_lowering_duplicate_commit_name() {
+    let source = "config A = X\nrule r() = X\npropose p(r) priority 1 when true = X\npropose q() priority 1 when true = X\ncommit c from (p)\ncommit c from (q)";
+    let module = parse(source).expect("parses");
+    let err = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE).unwrap_err();
+    assert_eq!(
+        err,
+        FiniteDecisionLowerError::DuplicateCommitName("c".to_string())
+    );
 }
 
 #[test]
@@ -778,4 +811,26 @@ fn invariant_violations_and_commit_faults_checkability() {
     assert!(dep_err.is_dependency_fault());
     assert!(!dep_err.is_type_fault());
     assert!(format!("{dep_err}").contains("dependency fault"));
+}
+
+/// `List` is the built-in bounded list type in a decision program
+/// (ADR-0037), so a user `config List` is refused rather than shadowed.
+#[test]
+fn test_user_config_named_list_is_reserved() {
+    let src = "config List = Nil | Cons(Int, List)\nconfig D = A\n\
+               propose a priority 1 when true = A\ncommit d from (a)\n";
+    let module = brix_syntax::parse(src).unwrap();
+    assert_eq!(
+        brix_lower::finite_decision::lower_finite_decision_plan(
+            &module,
+            brix_lower::finite_decision::FINITE_DECISION_PROFILE
+        )
+        .err(),
+        Some(
+            brix_lower::finite_decision::FiniteDecisionLowerError::ReservedOperationName {
+                name: "List".to_string(),
+                kind: "config",
+            }
+        )
+    );
 }

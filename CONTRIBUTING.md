@@ -3,14 +3,32 @@
 Ring 0 is the only code that may touch engine internals. It is built by a small
 set of lane owners (see each crate's `OWNER.md`) against one shared discipline.
 
-## The spec is the single truth
+## The governing documents are the single truth
 
-`spec/BrixMS_v9_0.md` is normative. When behavior and spec disagree, the spec
-wins — unless the spec is ambiguous, in which case you do **not** guess. Every
-ambiguity becomes a drafted erratum in `spec/errata/` with a proposed ruling and
-the affected conformance IDs; it is ruled by Tony and merged before the lane
-proceeds. The document stays the single truth and every ruling improves the next
-contributor's context.
+`spec/BrixMS_v9_0.md` described the pre-SOC "Living Model" v9 language and is
+**not** normative; it is archived at
+[`spec/archive/BrixMS_v9_0.md`](./spec/archive/BrixMS_v9_0.md) for historical
+reference only. The current normative set is:
+
+- [`spec/adr/ADR-0002_SOC_Constitution.md`](./spec/adr/ADR-0002_SOC_Constitution.md)
+  — the accepted engineering constitution (one category of configurations and
+  witnesses, the epistemic outcome lattice, the O(Δ) invariant);
+- [`spec/SOC_Semantic_Laws.md`](./spec/SOC_Semantic_Laws.md) — the law
+  registry and executable conformance map;
+- [`spec/Type_Realization_Contract.md`](./spec/Type_Realization_Contract.md)
+  — the native typing regime's contract, per-clause evidence status;
+- the accepted ADRs for the current language surface,
+  [`ADR-0030`](./spec/adr/ADR-0030_Finite_Decision_Alpha.md) through
+  [`ADR-0037`](./spec/adr/ADR-0037_Bounded_Lists_And_Folds.md) (check each
+  ADR's own Status line — not all of this range are ratified yet; several are
+  "Proposed implementation" or "Proposed design").
+
+When behavior and one of these disagree, the governing document wins — unless
+it is ambiguous, in which case you do **not** guess. Every ambiguity becomes a
+drafted erratum in `spec/errata/` with a proposed ruling and the affected
+conformance IDs; it is ruled by Tony and merged before the lane proceeds. See
+[`spec/README.md`](./spec/README.md) for the full document map and reading
+order.
 
 ## The feedback protocol (the only coupling)
 

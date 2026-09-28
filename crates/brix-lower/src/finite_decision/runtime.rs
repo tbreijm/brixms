@@ -16,7 +16,7 @@ use soc_core::commit::{try_commit_tick, CommitError, Committed, SettlementWitnes
 use soc_core::exec::ExecConfig;
 use soc_core::history::History;
 use soc_core::intern::{Handle, Interner};
-use soc_core::journal::Journal;
+use soc_core::journal::{CommittedStep, Journal};
 use soc_core::saturate::{
     check_quiescence_certificate, quiescence_certificate_id, sat_step, CertificateCheck,
     DeclaredAssumptions, GeneratorPartitionProfile, PresentationIdV1, PresentationV1,
@@ -30,10 +30,10 @@ use soc_regimes::finite_frontier::{
 use soc_regimes::{explain_why, explain_why_not};
 
 use crate::finite_decision::plan::{
-    finite_decision_program_id, FiniteDecisionPlan, FiniteDecisionProgramId,
+    finite_decision_program_id, FiniteDecisionCommit, FiniteDecisionPlan, FiniteDecisionProgramId,
 };
 use crate::input::{input_context_id, InputSnapshot, InputValidationError};
-use crate::l3_v2::{eval, EvalEnv, EvalFault, L3FunctionDef, L3SchemaType, L3ValueV2};
+use crate::l3_v2::{eval, EvalEnv, EvalFault, L3ExprV2, L3FunctionDef, L3SchemaType, L3ValueV2};
 
 const WORLD_MARKER: &[u8] = b"brix.l3.finite-decision.world";
 const POLICY_MARKER: &[u8] = b"brix.l3.finite-decision.adm-all";
@@ -71,6 +71,21 @@ impl fmt::Display for FiniteDecisionBuildError {
 }
 
 impl std::error::Error for FiniteDecisionBuildError {}
+
+impl FiniteDecisionBuildError {
+    /// The declared item this error is about (see
+    /// [`FiniteDecisionLowerError::location_subject`] for the shared design):
+    /// the `input` declaration for a wrapped [`InputValidationError`], or the
+    /// `commit` declaration for a missing proposal (the candidate name itself
+    /// is a `propose`, not the commit, but it is the commit's candidate list
+    /// that names it, so that is the more useful line to point at).
+    pub fn location_subject(&self) -> Option<(&str, Option<&str>)> {
+        match self {
+            Self::InputValidation(err) => err.location_subject(),
+            Self::MissingProposal { candidate } => Some((candidate, None)),
+        }
+    }
+}
 
 impl From<InputValidationError> for FiniteDecisionBuildError {
     fn from(err: InputValidationError) -> Self {
@@ -236,7 +251,138 @@ pub enum FiniteDecisionStop {
     Unknown(FiniteDecisionUnknownReason),
 }
 
+/// One commit pool's own outcome within a multi-commit deliberation run
+/// (ADR-0039). Every finite-decision module declares one or more commit
+/// pools; each deliberates independently over its own candidates — a
+/// proposal never competes against a candidate from a different pool — but
+/// all pools see the same rules and facts, computed once.
+#[derive(Clone, Debug)]
+pub struct FiniteDecisionCommitRun {
+    pub commit: String,
+    pub decision: Option<SelectedDecision>,
+    pub dispositions: Vec<CandidateDisposition>,
+    pub final_world: ConfigId,
+    pub stop: FiniteDecisionStop,
+    /// This pool's own committed step, if it selected a candidate. `None`
+    /// for certified quiescence or an Unknown fault — nothing is journaled
+    /// for a pool that publishes no decision.
+    pub step: Option<CommittedStep>,
+}
+
+impl FiniteDecisionCommitRun {
+    /// Whether this pool selected a candidate.
+    pub fn is_selected(&self) -> bool {
+        matches!(self.stop, FiniteDecisionStop::Selected(_))
+    }
+
+    /// Whether this pool halted in certified quiescence.
+    pub fn is_quiescent(&self) -> bool {
+        matches!(self.stop, FiniteDecisionStop::Quiescent { .. })
+    }
+
+    /// Whether this pool halted with an Unknown fault.
+    pub fn is_unknown(&self) -> bool {
+        matches!(self.stop, FiniteDecisionStop::Unknown(_))
+    }
+}
+
+/// One element's own settlement outcome within a `decide` block's per-entity
+/// deliberation (ADR-0043). Every instance deliberates independently among
+/// its block's own candidates, exactly like a top-level commit pool; `index`
+/// is the element's position in the block's list, and `binder` is the
+/// element value itself, bound under the block's binder name while this
+/// instance's guards/values were evaluated.
+#[derive(Clone, Debug)]
+pub struct FiniteDecisionEntityRun {
+    pub index: usize,
+    pub binder: L3ValueV2,
+    pub decision: Option<SelectedDecision>,
+    pub dispositions: Vec<CandidateDisposition>,
+    pub final_world: ConfigId,
+    /// Always [`FiniteDecisionStop::Selected`] or
+    /// [`FiniteDecisionStop::Quiescent`] — never `Unknown`: a fault in any
+    /// one instance fails the whole block closed
+    /// ([`FiniteDecisionDecideRun::stop`]) rather than reporting a partial,
+    /// per-instance fault (ADR-0043, following ADR-0039's per-pool
+    /// all-or-nothing discipline one level down, to the block's own
+    /// instances).
+    pub stop: FiniteDecisionStop,
+    /// This instance's own committed step, if it selected a candidate.
+    pub step: Option<CommittedStep>,
+}
+
+impl FiniteDecisionEntityRun {
+    pub fn is_selected(&self) -> bool {
+        matches!(self.stop, FiniteDecisionStop::Selected(_))
+    }
+
+    pub fn is_quiescent(&self) -> bool {
+        matches!(self.stop, FiniteDecisionStop::Quiescent { .. })
+    }
+}
+
+/// A `decide` block's own outcome (ADR-0043): all-or-nothing across its own
+/// instances — either every element settled (selection or quiescence) and
+/// [`Self::instances`] holds one [`FiniteDecisionEntityRun`] per element, in
+/// list order, or any single instance's fault (or the block's list
+/// expression itself faulting, or the program-wide instance cap being
+/// exceeded) makes the *whole block* [`FiniteDecisionDecideStop::Unknown`]
+/// with `instances` empty. A fault in one `decide` block never affects a
+/// sibling `decide` block or any `commit` pool, exactly as ADR-0039 already
+/// establishes between independent commit pools.
+#[derive(Clone, Debug)]
+pub struct FiniteDecisionDecideRun {
+    pub decide: String,
+    pub instances: Vec<FiniteDecisionEntityRun>,
+    pub stop: FiniteDecisionDecideStop,
+}
+
+impl FiniteDecisionDecideRun {
+    pub fn is_unknown(&self) -> bool {
+        matches!(self.stop, FiniteDecisionDecideStop::Unknown(_))
+    }
+
+    /// The decided values, in element order — what `show <decide name>`
+    /// evaluates to (ADR-0043). `None` when the block itself is Unknown, or
+    /// an instance is quiescent and so contributes no value.
+    pub fn decided_values(&self) -> Option<Vec<L3ValueV2>> {
+        if self.is_unknown() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(self.instances.len());
+        for inst in &self.instances {
+            let decision = inst.decision.as_ref()?;
+            out.push(decision.value.clone());
+        }
+        Some(out)
+    }
+}
+
+/// Termination status of one `decide` block's per-entity deliberation
+/// (ADR-0043) — block-level, distinct from [`FiniteDecisionStop`], which
+/// describes a single pool's or a single instance's own outcome.
+#[derive(Clone, Debug)]
+pub enum FiniteDecisionDecideStop {
+    /// Every instance settled (selected or quiescent); see
+    /// [`FiniteDecisionDecideRun::instances`].
+    Settled,
+    /// The block's list expression faulted, an instance's guard/value
+    /// faulted, an instance's deliberation faulted, or the program-wide
+    /// instance cap ([`crate::finite_decision::plan::MAX_TOTAL_DECIDE_INSTANCES`])
+    /// was exceeded. All-or-nothing: no instance in this block published a
+    /// decision.
+    Unknown(FiniteDecisionUnknownReason),
+}
+
 /// The complete report of a finite-decision deliberation run.
+///
+/// `decision`, `dispositions`, `final_world`, and `stop` mirror the *first*
+/// commit pool's own outcome (`commits[0]`, in declaration order) — for the
+/// overwhelmingly common single-commit module this is the run's only
+/// outcome, so these fields keep exactly their pre-ADR-0039 meaning. A
+/// multi-commit module's other pools are reported only in `commits`; use
+/// [`FiniteDecisionRun::commit_run`] to look one up by name rather than by
+/// position.
 #[derive(Clone, Debug)]
 pub struct FiniteDecisionRun {
     pub program: FiniteDecisionProgramId,
@@ -248,28 +394,61 @@ pub struct FiniteDecisionRun {
     pub journal: Journal,
     pub final_world: ConfigId,
     pub stop: FiniteDecisionStop,
+    /// Every commit pool's own outcome, in declaration order (ADR-0039).
+    /// `commits[0]` is exactly what `decision`/`dispositions`/`final_world`/
+    /// `stop` above report.
+    pub commits: Vec<FiniteDecisionCommitRun>,
+    /// Every `decide` block's own outcome, in declaration order (ADR-0043).
+    /// Empty for a module that declares none.
+    pub decides: Vec<FiniteDecisionDecideRun>,
 }
 
 impl FiniteDecisionRun {
-    /// Whether a candidate was selected.
+    /// Whether a candidate was selected (first commit pool — see the struct docs).
     pub fn is_selected(&self) -> bool {
         matches!(self.stop, FiniteDecisionStop::Selected(_))
     }
 
-    /// Whether deliberation halted in certified quiescence.
+    /// Whether deliberation halted in certified quiescence (first commit pool).
     pub fn is_quiescent(&self) -> bool {
         matches!(self.stop, FiniteDecisionStop::Quiescent { .. })
     }
 
-    /// Whether deliberation halted with an Unknown fault.
+    /// Whether the run as a whole failed closed: any commit pool or `decide`
+    /// block ended Unknown (ADR-0039, ADR-0043). A run is only a success when
+    /// every decision it declares settled; see [`Self::first_fault`].
     pub fn is_unknown(&self) -> bool {
-        matches!(self.stop, FiniteDecisionStop::Unknown(_))
+        self.first_fault().is_some()
     }
 
-    /// Retrieve the structured status disposition of candidate `name`.
+    /// The first fault in the run, in journal order: commit pools in
+    /// declaration order, then `decide` blocks in declaration order. `None`
+    /// when every declared decision settled (selected or quiescent).
+    ///
+    /// Callers that report a run's status or exit code must use this (or
+    /// [`Self::is_unknown`]) rather than [`Self::stop`], which describes only
+    /// the first commit pool.
+    pub fn first_fault(&self) -> Option<&FiniteDecisionUnknownReason> {
+        if let FiniteDecisionStop::Unknown(reason) = &self.stop {
+            return Some(reason);
+        }
+        let pools = self.commits.iter().filter_map(|c| match &c.stop {
+            FiniteDecisionStop::Unknown(reason) => Some(reason),
+            _ => None,
+        });
+        let decides = self.decides.iter().filter_map(|d| match &d.stop {
+            FiniteDecisionDecideStop::Unknown(reason) => Some(reason),
+            FiniteDecisionDecideStop::Settled => None,
+        });
+        pools.chain(decides).next()
+    }
+
+    /// Retrieve the structured status disposition of candidate `name`,
+    /// searching every commit pool (a candidate belongs to exactly one).
     pub fn status_of(&self, name: &str) -> Option<CandidateStatus> {
-        self.dispositions
+        self.commits
             .iter()
+            .flat_map(|c| c.dispositions.iter())
             .find(|d| d.name == name)
             .map(|d| d.status.clone())
     }
@@ -277,6 +456,16 @@ impl FiniteDecisionRun {
     /// Look up a bound input record by name.
     pub fn input(&self, name: &str) -> Option<&BoundInput> {
         self.inputs.iter().find(|i| i.name == name)
+    }
+
+    /// Look up a commit pool's own outcome by its declared name.
+    pub fn commit_run(&self, name: &str) -> Option<&FiniteDecisionCommitRun> {
+        self.commits.iter().find(|c| c.commit == name)
+    }
+
+    /// Look up a `decide` block's own outcome by its declared name (ADR-0043).
+    pub fn decide_run(&self, name: &str) -> Option<&FiniteDecisionDecideRun> {
+        self.decides.iter().find(|d| d.decide == name)
     }
 }
 
@@ -296,6 +485,26 @@ fn proposal_digest(program: FiniteDecisionProgramId, name: &str) -> Digest {
     let mut w = CanonWriter::new();
     w.write_tag("brix.l3.finite-decision.proposal@1");
     w.write_bytes(program.digest().as_bytes());
+    w.write_ident(name);
+    w.digest(Domain::Value)
+}
+
+/// The per-instance analogue of [`proposal_digest`] for a `decide` block's
+/// candidate (ADR-0043): namespaced by the block's own name and the
+/// element's index, so the same candidate name reused across two different
+/// entities — or across a `decide` block and an unrelated `commit` pool —
+/// never collides on the same destination world, generator id, or witness.
+fn entity_proposal_digest(
+    program: FiniteDecisionProgramId,
+    decide: &str,
+    index: usize,
+    name: &str,
+) -> Digest {
+    let mut w = CanonWriter::new();
+    w.write_tag("brix.l3.finite-decision.entity-proposal@1");
+    w.write_bytes(program.digest().as_bytes());
+    w.write_ident(decide);
+    w.write_uint(index as u64);
     w.write_ident(name);
     w.digest(Domain::Value)
 }
@@ -330,6 +539,39 @@ fn generator_id(
     w.write_bytes(src.digest().as_bytes());
     w.write_bytes(dst.digest().as_bytes());
     GeneratorId::from_canon(&w.finish())
+}
+
+/// The per-instance analogue of [`generator_id`] for a `decide` block's
+/// candidate (ADR-0043); see [`entity_proposal_digest`] for the namespacing
+/// rationale.
+fn entity_generator_id(
+    program: FiniteDecisionProgramId,
+    decide: &str,
+    index: usize,
+    name: &str,
+    src: ConfigId,
+    dst: ConfigId,
+) -> GeneratorId {
+    let mut w = CanonWriter::new();
+    w.write_tag("brix.l3.finite-decision.entity-generator@1");
+    w.write_bytes(program.digest().as_bytes());
+    w.write_ident(decide);
+    w.write_uint(index as u64);
+    w.write_ident(name);
+    w.write_bytes(src.digest().as_bytes());
+    w.write_bytes(dst.digest().as_bytes());
+    GeneratorId::from_canon(&w.finish())
+}
+
+/// The outcome of one [`FiniteDecisionRuntime::deliberate`] call — a single
+/// pool's or a single per-entity instance's own selection-or-quiescence
+/// settlement (ADR-0030, ADR-0039, ADR-0043).
+struct DeliberationOutcome {
+    decision: Option<SelectedDecision>,
+    dispositions: Vec<CandidateDisposition>,
+    final_world: ConfigId,
+    stop: FiniteDecisionStop,
+    step: Option<CommittedStep>,
 }
 
 #[derive(Clone, Debug)]
@@ -384,7 +626,12 @@ pub struct FiniteDecisionRuntime {
     pub context: ContextId,
     pub initial_world: ConfigId,
     pub policy: ConfigId,
-    interner: Interner,
+    /// Interior-mutable so that per-entity `decide` deliberation (ADR-0043)
+    /// can intern the witness/successor handles for candidates discovered
+    /// only at run time (one element's candidates per list element), which
+    /// a static `commit` pool's candidates never need since every one of
+    /// those handles is already interned once, here, at construction.
+    interner: std::cell::RefCell<Interner>,
     initial: Handle,
     policy_handle: Handle,
     entries: Vec<PresenterEntry>,
@@ -422,8 +669,13 @@ impl FiniteDecisionRuntime {
         let policy_handle = interner.intern(policy.digest());
 
         let regime_id = RegimeId::named(FINITE_FRONTIER_REGIME_NAME);
-        let mut entries = Vec::with_capacity(plan.commit.candidates.len());
-        for cand_name in &plan.commit.candidates {
+        let all_candidates: Vec<&String> = plan
+            .commits
+            .iter()
+            .flat_map(|c| c.candidates.iter())
+            .collect();
+        let mut entries = Vec::with_capacity(all_candidates.len());
+        for cand_name in all_candidates {
             let proposal = plan.find_proposal(cand_name).ok_or_else(|| {
                 FiniteDecisionBuildError::MissingProposal {
                     candidate: cand_name.clone(),
@@ -498,6 +750,14 @@ impl FiniteDecisionRuntime {
                                 L3ValueType::Sum(ref name) | L3ValueType::Record(ref name) => {
                                     L3SchemaType::Named(name.clone())
                                 }
+                                // Helper contracts never carry `List`
+                                // (ADR-0037 §Scope, ADR-0040): `parse_contract`
+                                // rejects `List<T>` as an unsupported contract
+                                // type before a `FiniteDecisionContract` is
+                                // ever built.
+                                L3ValueType::List => {
+                                    unreachable!("helper contracts never carry a List value type")
+                                }
                             })
                         }),
                     )
@@ -510,6 +770,9 @@ impl FiniteDecisionRuntime {
                     L3ValueType::Str => L3SchemaType::Str,
                     L3ValueType::Sum(ref name) | L3ValueType::Record(ref name) => {
                         L3SchemaType::Named(name.clone())
+                    }
+                    L3ValueType::List => {
+                        unreachable!("helper contracts never carry a List value type")
                     }
                 })
             });
@@ -531,7 +794,7 @@ impl FiniteDecisionRuntime {
             context,
             initial_world,
             policy,
-            interner,
+            interner: std::cell::RefCell::new(interner),
             initial,
             policy_handle,
             entries,
@@ -571,12 +834,36 @@ impl FiniteDecisionRuntime {
     }
 
     /// Derive the generator registry and semantics for this runtime.
+    ///
+    /// Includes every top-level `commit` pool's static candidates (known
+    /// without running anything) and, since ADR-0043, every `decide`
+    /// block's every actually-instantiated element's own candidates —
+    /// discovered by running the deliberation once, since an instance count
+    /// depends on runtime input values and cannot be known from the plan
+    /// alone. This is why `audit`/`verify` for a `decide`-using program
+    /// must run before they can audit: the generator universe itself is
+    /// input-dependent.
     pub fn audit_environment(&self) -> (ContextId, GeneratorRegistry, GeneratorSemanticsV1) {
         let mut registry = GeneratorRegistry::new();
         let mut semantics = GeneratorSemanticsV1::new();
         for entry in &self.entries {
             registry.insert(entry.generator);
             semantics.declare_rows(entry.generator, [(entry.src, entry.dst)]);
+        }
+        if !self.plan.decides.is_empty() {
+            let run = self.run();
+            for decide_run in &run.decides {
+                let Some(decide) = self.plan.find_decide(&decide_run.decide) else {
+                    continue;
+                };
+                for inst in &decide_run.instances {
+                    let entries = self.entity_entries(&decide.name, inst.index, &decide.proposals);
+                    for entry in &entries {
+                        registry.insert(entry.generator);
+                        semantics.declare_rows(entry.generator, [(entry.src, entry.dst)]);
+                    }
+                }
+            }
         }
         (self.context, registry, semantics)
     }
@@ -590,34 +877,72 @@ impl FiniteDecisionRuntime {
     /// Execute the complete finite-decision deliberation cycle.
     pub fn run(&self) -> FiniteDecisionRun {
         // Step 0: Inject functions and bound inputs into evaluation environment before lets/rules/proposals.
+        // One work counter for the whole pass: every let, rule, guard,
+        // value, and decide instance evaluated from this environment draws
+        // on it (`l3_v2::MAX_RUN_STEPS`).
         let mut env = EvalEnv::new()
             .with_functions(self.functions.clone())
-            .with_schemas(Arc::new(self.plan.schemas.clone()));
+            .with_schemas(Arc::new(self.plan.schemas.clone()))
+            .with_run_work(Arc::default());
         for input in &self.bound_inputs {
             env = env.with_input(input.name.clone(), input.value.clone());
         }
+
+        // Every declared commit pool faults identically when a shared stage
+        // (lets or rules, below) faults before any pool-specific evaluation
+        // runs — none of them ever got far enough to differ.
+        let shared_stage_fault =
+            |facts: Vec<DerivedFact>, reason: FiniteDecisionUnknownReason| -> FiniteDecisionRun {
+                let commits: Vec<FiniteDecisionCommitRun> = self
+                    .plan
+                    .commits
+                    .iter()
+                    .map(|pool| FiniteDecisionCommitRun {
+                        commit: pool.name.clone(),
+                        decision: None,
+                        dispositions: Vec::new(),
+                        final_world: self.initial_world,
+                        stop: FiniteDecisionStop::Unknown(reason.clone()),
+                        step: None,
+                    })
+                    .collect();
+                let decides: Vec<FiniteDecisionDecideRun> = self
+                    .plan
+                    .decides
+                    .iter()
+                    .map(|decide| FiniteDecisionDecideRun {
+                        decide: decide.name.clone(),
+                        instances: Vec::new(),
+                        stop: FiniteDecisionDecideStop::Unknown(reason.clone()),
+                    })
+                    .collect();
+                FiniteDecisionRun {
+                    program: self.program,
+                    context: self.context,
+                    inputs: self.bound_inputs.clone(),
+                    facts,
+                    decision: None,
+                    dispositions: Vec::new(),
+                    journal: Journal::new(),
+                    final_world: self.initial_world,
+                    stop: FiniteDecisionStop::Unknown(reason),
+                    commits,
+                    decides,
+                }
+            };
 
         // Step 1: Evaluate closed let bindings.
         for (name, expr) in &self.plan.lets {
             match eval(expr, &env) {
                 Ok(v) => env = env.with_let(name.clone(), v),
                 Err(fault) => {
-                    return FiniteDecisionRun {
-                        program: self.program,
-                        context: self.context,
-                        inputs: self.bound_inputs.clone(),
-                        facts: Vec::new(),
-                        decision: None,
-                        dispositions: Vec::new(),
-                        journal: Journal::new(),
-                        final_world: self.initial_world,
-                        stop: FiniteDecisionStop::Unknown(
-                            FiniteDecisionUnknownReason::ExpressionEvaluationFault {
-                                context: format!("let {name}"),
-                                fault,
-                            },
-                        ),
-                    };
+                    return shared_stage_fault(
+                        Vec::new(),
+                        FiniteDecisionUnknownReason::ExpressionEvaluationFault {
+                            context: format!("let {name}"),
+                            fault,
+                        },
+                    );
                 }
             }
         }
@@ -636,149 +961,506 @@ impl FiniteDecisionRuntime {
                     env = env.with_fact(rule.name.clone(), v);
                 }
                 Err(fault) => {
-                    return FiniteDecisionRun {
-                        program: self.program,
-                        context: self.context,
-                        inputs: self.bound_inputs.clone(),
+                    return shared_stage_fault(
                         facts,
-                        decision: None,
-                        dispositions: Vec::new(),
-                        journal: Journal::new(),
-                        final_world: self.initial_world,
-                        stop: FiniteDecisionStop::Unknown(
-                            FiniteDecisionUnknownReason::ExpressionEvaluationFault {
-                                context: format!("rule {}", rule.name),
-                                fault,
-                            },
-                        ),
-                    };
+                        FiniteDecisionUnknownReason::ExpressionEvaluationFault {
+                            context: format!("rule {}", rule.name),
+                            fault,
+                        },
+                    );
                 }
             }
         }
 
-        // Step 3: Evaluate proposal guards and values in the commit pool.
+        // Steps 3-6 deliberate each commit pool independently (ADR-0039): a
+        // candidate never competes against a candidate from another pool,
+        // but every pool sees the rules/lets/facts computed once above.
+        // Each pool's own calendar phase is its declaration-order index.
+        let commits: Vec<FiniteDecisionCommitRun> = self
+            .plan
+            .commits
+            .iter()
+            .enumerate()
+            .map(|(i, pool)| self.run_pool(pool, &env, i as u64))
+            .collect();
+
+        // `decide` blocks (ADR-0043) deliberate independently of every
+        // commit pool and of each other; their calendar phases continue
+        // where the commit pools' own left off, so no pool and no instance
+        // ever shares a phase.
+        let decides = self.run_decides(&env, self.plan.commits.len() as u64);
+
+        // Journal every pool's own step (if any), in commit declaration
+        // order, then every decide block's own instances' steps, in block
+        // declaration order and then element index (ADR-0043).
+        let mut journal = Journal::new();
+        for c in &commits {
+            if let Some(step) = c.step.clone() {
+                journal.append(step);
+            }
+        }
+        for d in &decides {
+            for inst in &d.instances {
+                if let Some(step) = inst.step.clone() {
+                    journal.append(step);
+                }
+            }
+        }
+
+        // `decision`/`dispositions`/`final_world`/`stop` mirror the first
+        // commit pool (see the struct docs). Lowering guarantees at least
+        // one commit OR at least one decide block (ADR-0043); a module made
+        // up entirely of `decide` blocks has no commit pool to mirror, so an
+        // honest, zero-candidate deliberation stands in for it — the exact
+        // same `deliberate` machinery every real pool uses, just over no
+        // candidates at all, which settles as certified quiescence rather
+        // than fabricating a decision or a stop this run never actually
+        // reached.
+        let (decision, dispositions, final_world, stop) = match commits.first() {
+            Some(first) => (
+                first.decision.clone(),
+                first.dispositions.clone(),
+                first.final_world,
+                first.stop.clone(),
+            ),
+            None => match self.deliberate(&[], &[], &BTreeSet::new(), Vec::new(), 0) {
+                Ok(out) => (out.decision, out.dispositions, out.final_world, out.stop),
+                Err((reason, dispositions)) => (
+                    None,
+                    dispositions,
+                    self.initial_world,
+                    FiniteDecisionStop::Unknown(reason),
+                ),
+            },
+        };
+
+        FiniteDecisionRun {
+            program: self.program,
+            context: self.context,
+            inputs: self.bound_inputs.clone(),
+            facts,
+            decision,
+            dispositions,
+            journal,
+            final_world,
+            stop,
+            commits,
+            decides,
+        }
+    }
+
+    /// Instantiate and deliberate every `decide` block (ADR-0043): evaluate
+    /// each block's list expression once against `env` (already carrying
+    /// bound inputs/lets/facts), enforce the program-wide instance cap
+    /// across every block together, then deliberate each element
+    /// independently — all-or-nothing per block, exactly like
+    /// [`FiniteDecisionDecideRun`]'s own docs describe. `phase_offset` is
+    /// where this call's calendar phases start counting from (continuing
+    /// after every commit pool's own phase).
+    fn run_decides(&self, env: &EvalEnv, phase_offset: u64) -> Vec<FiniteDecisionDecideRun> {
+        if self.plan.decides.is_empty() {
+            return Vec::new();
+        }
+
+        // Evaluate every block's list once, up front, so the program-wide
+        // instance cap can be checked over every block's length together
+        // before any block's per-entity deliberation runs.
+        let mut lists: Vec<Result<Arc<[L3ValueV2]>, FiniteDecisionUnknownReason>> =
+            Vec::with_capacity(self.plan.decides.len());
+        let mut total: usize = 0;
+        for decide in &self.plan.decides {
+            let outcome = match eval(&decide.list, env) {
+                Ok(L3ValueV2::List(items)) => {
+                    total = total.saturating_add(items.len());
+                    Ok(items)
+                }
+                Ok(other) => Err(FiniteDecisionUnknownReason::TypeFault {
+                    context: format!("decide {} list", decide.name),
+                    detail: format!(
+                        "decide list expression must evaluate to a List, found {}",
+                        type_of_value(&other)
+                    ),
+                }),
+                Err(fault) => Err(FiniteDecisionUnknownReason::ExpressionEvaluationFault {
+                    context: format!("decide {} list", decide.name),
+                    fault,
+                }),
+            };
+            lists.push(outcome);
+        }
+
+        let cap_exceeded = total > crate::finite_decision::plan::MAX_TOTAL_DECIDE_INSTANCES;
+        let mut phase = phase_offset;
+
+        self.plan
+            .decides
+            .iter()
+            .zip(lists)
+            .map(|(decide, items_result)| {
+                let items = match items_result {
+                    Ok(items) => items,
+                    Err(reason) => {
+                        return FiniteDecisionDecideRun {
+                            decide: decide.name.clone(),
+                            instances: Vec::new(),
+                            stop: FiniteDecisionDecideStop::Unknown(reason),
+                        };
+                    }
+                };
+                if cap_exceeded {
+                    return FiniteDecisionDecideRun {
+                        decide: decide.name.clone(),
+                        instances: Vec::new(),
+                        stop: FiniteDecisionDecideStop::Unknown(
+                            FiniteDecisionUnknownReason::DependencyFault {
+                                context: format!("decide {}", decide.name),
+                                detail: format!(
+                                    "program-wide per-entity instance cap exceeded ({total} > {})",
+                                    crate::finite_decision::plan::MAX_TOTAL_DECIDE_INSTANCES
+                                ),
+                            },
+                        ),
+                    };
+                }
+                self.run_decide_block(decide, &items, env, &mut phase)
+            })
+            .collect()
+    }
+
+    /// Deliberate every element of one `decide` block, all-or-nothing
+    /// (ADR-0043): a fault at any point for any element makes the whole
+    /// block `Unknown` with no partial instance results. `phase` is
+    /// advanced by one for every instance actually deliberated (even one
+    /// that reports its own fault), so two calls never reuse a phase.
+    fn run_decide_block(
+        &self,
+        decide: &crate::finite_decision::plan::FiniteDecisionDecide,
+        items: &[L3ValueV2],
+        env: &EvalEnv,
+        phase: &mut u64,
+    ) -> FiniteDecisionDecideRun {
+        let unknown = |reason: FiniteDecisionUnknownReason| FiniteDecisionDecideRun {
+            decide: decide.name.clone(),
+            instances: Vec::new(),
+            stop: FiniteDecisionDecideStop::Unknown(reason),
+        };
+
+        let mut instances = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            let inst_env = env.clone().with_local(decide.binder.clone(), item.clone());
+            let this_phase = *phase;
+            *phase = phase.wrapping_add(1);
+
+            let mut admitted_names = BTreeSet::new();
+            let mut candidate_values = Vec::new();
+            let mut faulted: Option<FiniteDecisionUnknownReason> = None;
+
+            for proposal in &decide.proposals {
+                match eval(&proposal.guard, &inst_env) {
+                    Ok(L3ValueV2::Bool(true)) => {
+                        admitted_names.insert(proposal.name.clone());
+                    }
+                    Ok(L3ValueV2::Bool(false)) => {}
+                    Ok(other) => {
+                        faulted = Some(FiniteDecisionUnknownReason::TypeFault {
+                            context: format!(
+                                "decide {} [{index}] proposal {} guard",
+                                decide.name, proposal.name
+                            ),
+                            detail: format!(
+                                "guard must evaluate to Bool, found {}",
+                                type_of_value(&other)
+                            ),
+                        });
+                        break;
+                    }
+                    Err(eval_fault) => {
+                        faulted = Some(FiniteDecisionUnknownReason::ExpressionEvaluationFault {
+                            context: format!(
+                                "decide {} [{index}] proposal {} guard",
+                                decide.name, proposal.name
+                            ),
+                            fault: eval_fault,
+                        });
+                        break;
+                    }
+                }
+
+                match eval(&proposal.value, &inst_env) {
+                    Ok(v) => candidate_values.push((proposal.name.clone(), v)),
+                    Err(eval_fault) => {
+                        faulted = Some(FiniteDecisionUnknownReason::ExpressionEvaluationFault {
+                            context: format!(
+                                "decide {} [{index}] proposal {} value",
+                                decide.name, proposal.name
+                            ),
+                            fault: eval_fault,
+                        });
+                        break;
+                    }
+                }
+            }
+
+            if let Some(reason) = faulted {
+                return unknown(reason);
+            }
+
+            if candidate_values.len() > 1 {
+                let expected_type = type_of_value(&candidate_values[0].1);
+                for (name, val) in &candidate_values[1..] {
+                    let actual_type = type_of_value(val);
+                    if actual_type != expected_type {
+                        return unknown(FiniteDecisionUnknownReason::TypeFault {
+                            context: format!("decide {} [{index}] proposal values", decide.name),
+                            detail: format!(
+                                "proposal '{name}' value type {actual_type} does not match expected {expected_type}"
+                            ),
+                        });
+                    }
+                }
+            }
+
+            let candidate_names: Vec<String> =
+                decide.proposals.iter().map(|p| p.name.clone()).collect();
+            let entries = self.entity_entries(&decide.name, index, &decide.proposals);
+
+            let outcome = self.deliberate(
+                &candidate_names,
+                &entries,
+                &admitted_names,
+                candidate_values,
+                this_phase,
+            );
+            match outcome {
+                Ok(out) => instances.push(FiniteDecisionEntityRun {
+                    index,
+                    binder: item.clone(),
+                    decision: out.decision,
+                    dispositions: out.dispositions,
+                    final_world: out.final_world,
+                    stop: out.stop,
+                    step: out.step,
+                }),
+                Err((reason, _dispositions)) => return unknown(reason),
+            }
+        }
+
+        FiniteDecisionDecideRun {
+            decide: decide.name.clone(),
+            instances,
+            stop: FiniteDecisionDecideStop::Settled,
+        }
+    }
+
+    /// Deliberate a single commit pool: evaluate its candidates' guards and
+    /// values, run the deliberation frontier restricted to just this pool's
+    /// entries, and settle its own commit tick or certified quiescence. This
+    /// is exactly what `run()` did for the (formerly sole) commit pool
+    /// before ADR-0039; it is now called once per declared pool.
+    fn run_pool(
+        &self,
+        pool: &FiniteDecisionCommit,
+        env: &EvalEnv,
+        phase: u64,
+    ) -> FiniteDecisionCommitRun {
+        let fault = |reason: FiniteDecisionUnknownReason,
+                     dispositions: Vec<CandidateDisposition>|
+         -> FiniteDecisionCommitRun {
+            FiniteDecisionCommitRun {
+                commit: pool.name.clone(),
+                decision: None,
+                dispositions,
+                final_world: self.initial_world,
+                stop: FiniteDecisionStop::Unknown(reason),
+                step: None,
+            }
+        };
+
+        // Step 3: Evaluate proposal guards and values in this commit pool.
         let mut admitted_names = BTreeSet::new();
         let mut candidate_values = Vec::new();
 
-        for cand_name in &self.plan.commit.candidates {
+        for cand_name in &pool.candidates {
             let Some(proposal) = self.plan.find_proposal(cand_name) else {
-                return FiniteDecisionRun {
-                    program: self.program,
-                    context: self.context,
-                    inputs: self.bound_inputs.clone(),
-                    facts,
-                    decision: None,
-                    dispositions: Vec::new(),
-                    journal: Journal::new(),
-                    final_world: self.initial_world,
-                    stop: FiniteDecisionStop::Unknown(
-                        FiniteDecisionUnknownReason::DependencyFault {
-                            context: format!("candidate proposal {cand_name}"),
-                            detail: "proposal missing from plan".to_string(),
-                        },
-                    ),
-                };
+                return fault(
+                    FiniteDecisionUnknownReason::DependencyFault {
+                        context: format!("candidate proposal {cand_name}"),
+                        detail: "proposal missing from plan".to_string(),
+                    },
+                    Vec::new(),
+                );
             };
 
             // Evaluate guard: must be Bool.
-            match eval(&proposal.guard, &env) {
+            match eval(&proposal.guard, env) {
                 Ok(L3ValueV2::Bool(true)) => {
                     admitted_names.insert(cand_name.clone());
                 }
                 Ok(L3ValueV2::Bool(false)) => {}
                 Ok(other) => {
-                    return FiniteDecisionRun {
-                        program: self.program,
-                        context: self.context,
-                        inputs: self.bound_inputs.clone(),
-                        facts,
-                        decision: None,
-                        dispositions: Vec::new(),
-                        journal: Journal::new(),
-                        final_world: self.initial_world,
-                        stop: FiniteDecisionStop::Unknown(FiniteDecisionUnknownReason::TypeFault {
+                    return fault(
+                        FiniteDecisionUnknownReason::TypeFault {
                             context: format!("proposal {} guard", proposal.name),
                             detail: format!(
                                 "guard must evaluate to Bool, found {}",
                                 type_of_value(&other)
                             ),
-                        }),
-                    };
+                        },
+                        Vec::new(),
+                    );
                 }
-                Err(fault) => {
-                    return FiniteDecisionRun {
-                        program: self.program,
-                        context: self.context,
-                        inputs: self.bound_inputs.clone(),
-                        facts,
-                        decision: None,
-                        dispositions: Vec::new(),
-                        journal: Journal::new(),
-                        final_world: self.initial_world,
-                        stop: FiniteDecisionStop::Unknown(
-                            FiniteDecisionUnknownReason::ExpressionEvaluationFault {
-                                context: format!("proposal {} guard", proposal.name),
-                                fault,
-                            },
-                        ),
-                    };
+                Err(eval_fault) => {
+                    return fault(
+                        FiniteDecisionUnknownReason::ExpressionEvaluationFault {
+                            context: format!("proposal {} guard", proposal.name),
+                            fault: eval_fault,
+                        },
+                        Vec::new(),
+                    );
                 }
             }
 
             // Evaluate value.
-            match eval(&proposal.value, &env) {
+            match eval(&proposal.value, env) {
                 Ok(v) => candidate_values.push((cand_name.clone(), v)),
-                Err(fault) => {
-                    return FiniteDecisionRun {
-                        program: self.program,
-                        context: self.context,
-                        inputs: self.bound_inputs.clone(),
-                        facts,
-                        decision: None,
-                        dispositions: Vec::new(),
-                        journal: Journal::new(),
-                        final_world: self.initial_world,
-                        stop: FiniteDecisionStop::Unknown(
-                            FiniteDecisionUnknownReason::ExpressionEvaluationFault {
-                                context: format!("proposal {} value", proposal.name),
-                                fault,
-                            },
-                        ),
-                    };
+                Err(eval_fault) => {
+                    return fault(
+                        FiniteDecisionUnknownReason::ExpressionEvaluationFault {
+                            context: format!("proposal {} value", proposal.name),
+                            fault: eval_fault,
+                        },
+                        Vec::new(),
+                    );
                 }
             }
         }
 
-        // Step 4: All proposal values must share one type.
+        // Step 4: All proposal values in this pool must share one type.
         if candidate_values.len() > 1 {
             let expected_type = type_of_value(&candidate_values[0].1);
             for (name, val) in &candidate_values[1..] {
                 let actual_type = type_of_value(val);
                 if actual_type != expected_type {
-                    return FiniteDecisionRun {
-                        program: self.program,
-                        context: self.context,
-                        inputs: self.bound_inputs.clone(),
-                        facts,
-                        decision: None,
-                        dispositions: Vec::new(),
-                        journal: Journal::new(),
-                        final_world: self.initial_world,
-                        stop: FiniteDecisionStop::Unknown(FiniteDecisionUnknownReason::TypeFault {
+                    return fault(
+                        FiniteDecisionUnknownReason::TypeFault {
                             context: "proposal values".to_string(),
                             detail: format!(
                                 "proposal '{name}' value type {actual_type} does not match expected {expected_type}"
                             ),
-                        }),
-                    };
+                        },
+                        Vec::new(),
+                    );
                 }
             }
         }
 
-        // Step 5: Build NamedCandidates and evaluate the deliberation frontier.
-        let regime_id = RegimeId::named(FINITE_FRONTIER_REGIME_NAME);
-        let named_candidates: Vec<NamedCandidate> = self
+        // Steps 5-6: shared with per-entity deliberation (ADR-0043) — see
+        // `Self::deliberate`.
+        let pool_entries: Vec<PresenterEntry> = self
             .entries
+            .iter()
+            .filter(|e| pool.candidates.iter().any(|c| c == &e.name))
+            .cloned()
+            .collect();
+        match self.deliberate(
+            &pool.candidates,
+            &pool_entries,
+            &admitted_names,
+            candidate_values,
+            phase,
+        ) {
+            Ok(out) => FiniteDecisionCommitRun {
+                commit: pool.name.clone(),
+                decision: out.decision,
+                dispositions: out.dispositions,
+                final_world: out.final_world,
+                stop: out.stop,
+                step: out.step,
+            },
+            Err((reason, dispositions)) => fault(reason, dispositions),
+        }
+    }
+
+    /// Build the [`PresenterEntry`] set for one per-entity `decide` instance
+    /// (ADR-0043): candidate `name`s are namespaced by `(decide name,
+    /// element index)` in every identity-bearing digest, so two different
+    /// instances — or an instance and a top-level `commit` pool — that
+    /// happen to declare a same-spelled candidate name never collide on the
+    /// same destination world, generator id, or witness.
+    fn entity_entries(
+        &self,
+        decide_name: &str,
+        index: usize,
+        proposals: &[crate::finite_decision::plan::FiniteDecisionProposal],
+    ) -> Vec<PresenterEntry> {
+        let regime_id = RegimeId::named(FINITE_FRONTIER_REGIME_NAME);
+        let mut interner = self.interner.borrow_mut();
+        let mut entries = Vec::with_capacity(proposals.len());
+        for proposal in proposals {
+            let prop_digest =
+                entity_proposal_digest(self.program, decide_name, index, &proposal.name);
+            let dst = destination_world(self.program, Some(prop_digest));
+            let generator = entity_generator_id(
+                self.program,
+                decide_name,
+                index,
+                &proposal.name,
+                self.initial_world,
+                dst,
+            );
+            let successor = interner.intern(dst.digest());
+            let witness = Witness::new(self.initial_world, dst, regime_id);
+            let witness_handle = interner.intern(witness.id().digest());
+            let named = NamedCandidate::with_handles(
+                proposal.name.clone(),
+                regime_id,
+                self.initial_world,
+                dst,
+                self.initial,
+                witness_handle,
+                successor,
+                proposal.priority,
+            );
+            let tiebreak = named.canonical_tiebreak(&interner);
+            entries.push(PresenterEntry {
+                name: proposal.name.clone(),
+                candidate: Candidate {
+                    witness: witness_handle,
+                    successor,
+                },
+                generator,
+                src: self.initial_world,
+                dst,
+                priority: proposal.priority,
+                tiebreak,
+            });
+        }
+        entries
+    }
+
+    /// The shared core of Steps 5-6 (ADR-0030 §Deliberation): build
+    /// [`NamedCandidate`]s from `entries`, evaluate the deliberation
+    /// frontier under `admitted_names`, and settle either a single
+    /// selection or certified quiescence — used identically by a top-level
+    /// `commit` pool ([`Self::run_pool`]) and by one per-entity `decide`
+    /// instance (ADR-0043). `phase` is threaded into every calendar [`Key`]
+    /// this deliberation computes, purely for cross-run traceability: two
+    /// deliberations never share a destination world (every entry's `dst`
+    /// already differs — see [`entity_proposal_digest`]), so it carries no
+    /// correctness weight, but every pool and every entity instance gets its
+    /// own value regardless.
+    #[allow(clippy::result_large_err)]
+    fn deliberate(
+        &self,
+        candidate_names: &[String],
+        entries: &[PresenterEntry],
+        admitted_names: &BTreeSet<String>,
+        candidate_values: Vec<(String, L3ValueV2)>,
+        phase: u64,
+    ) -> Result<DeliberationOutcome, (FiniteDecisionUnknownReason, Vec<CandidateDisposition>)> {
+        let interner = self.interner.borrow();
+        let regime_id = RegimeId::named(FINITE_FRONTIER_REGIME_NAME);
+        let named_candidates: Vec<NamedCandidate> = entries
             .iter()
             .map(|e| {
                 NamedCandidate::with_handles(
@@ -807,62 +1489,35 @@ impl FiniteDecisionRuntime {
             named_candidates.iter().cloned(),
             &policy,
             &exec,
-            &self.interner,
+            &interner,
         );
 
         // Fail-closed on frontier deliberation fault under B^uk discipline.
-        if let Some(fault) = evaluated.fault() {
-            return FiniteDecisionRun {
-                program: self.program,
-                context: self.context,
-                inputs: self.bound_inputs.clone(),
-                facts,
-                decision: None,
-                dispositions: Vec::new(),
-                journal: Journal::new(),
-                final_world: self.initial_world,
-                stop: FiniteDecisionStop::Unknown(FiniteDecisionUnknownReason::from(fault)),
-            };
+        if let Some(frontier_fault) = evaluated.fault() {
+            return Err((
+                FiniteDecisionUnknownReason::from(frontier_fault),
+                Vec::new(),
+            ));
         }
 
-        // Compute structured dispositions for all candidates in the commit pool.
+        // Compute structured dispositions for all candidates.
         let mut dispositions = Vec::new();
-        for cand_name in &self.plan.commit.candidates {
+        for cand_name in candidate_names {
             let Some(nc) = named_candidates.iter().find(|c| &c.name == cand_name) else {
-                return FiniteDecisionRun {
-                    program: self.program,
-                    context: self.context,
-                    inputs: self.bound_inputs.clone(),
-                    facts,
-                    decision: None,
-                    dispositions: Vec::new(),
-                    journal: Journal::new(),
-                    final_world: self.initial_world,
-                    stop: FiniteDecisionStop::Unknown(
-                        FiniteDecisionUnknownReason::EvaluationError {
-                            detail: format!(
-                                "candidate '{cand_name}' missing from named candidates"
-                            ),
-                        },
-                    ),
-                };
+                return Err((
+                    FiniteDecisionUnknownReason::EvaluationError {
+                        detail: format!("candidate '{cand_name}' missing from named candidates"),
+                    },
+                    Vec::new(),
+                ));
             };
             let Some(status) = evaluated.status_of(nc) else {
-                return FiniteDecisionRun {
-                    program: self.program,
-                    context: self.context,
-                    inputs: self.bound_inputs.clone(),
-                    facts,
-                    decision: None,
-                    dispositions: Vec::new(),
-                    journal: Journal::new(),
-                    final_world: self.initial_world,
-                    stop: FiniteDecisionStop::Unknown(
-                        FiniteDecisionUnknownReason::EvaluationError {
-                            detail: format!("candidate status missing for '{cand_name}'"),
-                        },
-                    ),
-                };
+                return Err((
+                    FiniteDecisionUnknownReason::EvaluationError {
+                        detail: format!("candidate status missing for '{cand_name}'"),
+                    },
+                    Vec::new(),
+                ));
             };
             dispositions.push(CandidateDisposition {
                 name: cand_name.clone(),
@@ -873,33 +1528,24 @@ impl FiniteDecisionRuntime {
 
         // Step 6: Selection or Certified Quiescence.
         if evaluated.is_quiescent() {
-            // All candidates rejected is successful certified quiescence with decision None.
+            let entries_owned: Vec<PresenterEntry> = entries.iter().map(|e| (*e).clone()).collect();
             let all_presenter = CandidatePresenter {
                 initial: self.initial,
-                entries: self.entries.clone(),
+                entries: entries_owned.clone(),
             };
             let adm_adapter = PolicyToAdmAdapter::new(&policy, named_candidates.iter().cloned());
             let all_generators: BTreeSet<GeneratorId> =
-                self.entries.iter().map(|e| e.generator).collect();
+                entries.iter().map(|e| e.generator).collect();
             let obs_profile = match GeneratorPartitionProfile::new(all_generators, BTreeSet::new())
             {
                 Ok(p) => p,
                 Err(err) => {
-                    return FiniteDecisionRun {
-                        program: self.program,
-                        context: self.context,
-                        inputs: self.bound_inputs.clone(),
-                        facts,
-                        decision: None,
+                    return Err((
+                        FiniteDecisionUnknownReason::QuiescenceVerificationFault {
+                            detail: format!("invalid observation profile: {err:?}"),
+                        },
                         dispositions,
-                        journal: Journal::new(),
-                        final_world: self.initial_world,
-                        stop: FiniteDecisionStop::Unknown(
-                            FiniteDecisionUnknownReason::QuiescenceVerificationFault {
-                                detail: format!("invalid observation profile: {err:?}"),
-                            },
-                        ),
-                    };
+                    ));
                 }
             };
             let pres = PresentationV1 {
@@ -909,12 +1555,12 @@ impl FiniteDecisionRuntime {
                 adm: &adm_adapter,
                 adm_id: Digest::of(Domain::Value, b"brix.l3.finite-decision.adm@1"),
                 profile: &obs_profile,
-                interner: &self.interner,
+                interner: &interner,
                 context: self.context,
                 assumptions: DeclaredAssumptions::all(),
             };
             let mut k = |c: &Candidate, phase: u64| {
-                if let Some(entry) = self.entries.iter().find(|e| e.candidate == *c) {
+                if let Some(entry) = entries_owned.iter().find(|e| e.candidate == *c) {
                     Key::new(phase, entry.priority, entry.tiebreak)
                 } else {
                     Key::new(
@@ -924,88 +1570,55 @@ impl FiniteDecisionRuntime {
                     )
                 }
             };
-            let (step, _, _) = sat_step(&pres, &exec, 0, &mut k, SaturationBudget::uniform(32));
+            let (step, _, _) = sat_step(&pres, &exec, phase, &mut k, SaturationBudget::uniform(32));
             let certificate = match step {
                 SaturatedStep::Quiescent(cert) => {
                     let cert_id = quiescence_certificate_id(&cert);
                     let check = check_quiescence_certificate(&cert, &pres, &exec, &[]);
                     if !matches!(check, CertificateCheck::Verified { .. }) {
-                        return FiniteDecisionRun {
-                            program: self.program,
-                            context: self.context,
-                            inputs: self.bound_inputs.clone(),
-                            facts,
-                            decision: None,
+                        return Err((
+                            FiniteDecisionUnknownReason::QuiescenceVerificationFault {
+                                detail: format!(
+                                    "quiescence certificate verification failed: {check:?}"
+                                ),
+                            },
                             dispositions,
-                            journal: Journal::new(),
-                            final_world: self.initial_world,
-                            stop: FiniteDecisionStop::Unknown(
-                                FiniteDecisionUnknownReason::QuiescenceVerificationFault {
-                                    detail: format!(
-                                        "quiescence certificate verification failed: {check:?}"
-                                    ),
-                                },
-                            ),
-                        };
+                        ));
                     }
                     cert_id
                 }
                 other => {
-                    return FiniteDecisionRun {
-                        program: self.program,
-                        context: self.context,
-                        inputs: self.bound_inputs.clone(),
-                        facts,
-                        decision: None,
+                    return Err((
+                        FiniteDecisionUnknownReason::QuiescenceVerificationFault {
+                            detail: format!(
+                                "saturation did not return quiescence certificate: {other:?}"
+                            ),
+                        },
                         dispositions,
-                        journal: Journal::new(),
-                        final_world: self.initial_world,
-                        stop: FiniteDecisionStop::Unknown(
-                            FiniteDecisionUnknownReason::QuiescenceVerificationFault {
-                                detail: format!(
-                                    "saturation did not return quiescence certificate: {other:?}"
-                                ),
-                            },
-                        ),
-                    };
+                    ));
                 }
             };
 
-            FiniteDecisionRun {
-                program: self.program,
-                context: self.context,
-                inputs: self.bound_inputs.clone(),
-                facts,
+            Ok(DeliberationOutcome {
                 decision: None,
                 dispositions,
-                journal: Journal::new(),
                 final_world: self.initial_world,
                 stop: FiniteDecisionStop::Quiescent { certificate },
-            }
+                step: None,
+            })
         } else {
-            // Exactly one candidate was selected.
             let Some((_, winning_cand)) = evaluated.selected.as_ref() else {
-                return FiniteDecisionRun {
-                    program: self.program,
-                    context: self.context,
-                    inputs: self.bound_inputs.clone(),
-                    facts,
-                    decision: None,
+                return Err((
+                    FiniteDecisionUnknownReason::EvaluationError {
+                        detail: "expected selected candidate in evaluated frontier".to_string(),
+                    },
                     dispositions,
-                    journal: Journal::new(),
-                    final_world: self.initial_world,
-                    stop: FiniteDecisionStop::Unknown(
-                        FiniteDecisionUnknownReason::EvaluationError {
-                            detail: "expected selected candidate in evaluated frontier".to_string(),
-                        },
-                    ),
-                };
+                ));
             };
-            let admitted_entries: Vec<PresenterEntry> = self
-                .entries
+            let admitted_entries: Vec<PresenterEntry> = entries
                 .iter()
                 .filter(|e| admitted_names.contains(&e.name))
-                .cloned()
+                .map(|e| (*e).clone())
                 .collect();
             let admitted_presenter = CandidatePresenter {
                 initial: self.initial,
@@ -1025,93 +1638,55 @@ impl FiniteDecisionRuntime {
             let tick_res = try_commit_tick(
                 &[&admitted_presenter],
                 &AdmAll,
-                &self.interner,
-                &self.initial_exec(),
+                &interner,
+                &exec,
                 self.context,
-                0,
+                phase,
                 &mut keyer,
             );
 
             let (committed, step, _) = match tick_res {
                 Ok(triple) => triple,
                 Err(err) => {
-                    return FiniteDecisionRun {
-                        program: self.program,
-                        context: self.context,
-                        inputs: self.bound_inputs.clone(),
-                        facts,
-                        decision: None,
+                    return Err((
+                        FiniteDecisionUnknownReason::CommitTickError {
+                            detail: format!("{err:?}"),
+                        },
                         dispositions,
-                        journal: Journal::new(),
-                        final_world: self.initial_world,
-                        stop: FiniteDecisionStop::Unknown(
-                            FiniteDecisionUnknownReason::CommitTickError {
-                                detail: format!("{err:?}"),
-                            },
-                        ),
-                    };
+                    ));
                 }
             };
 
             let Committed::Step { observation, .. } = committed else {
-                return FiniteDecisionRun {
-                    program: self.program,
-                    context: self.context,
-                    inputs: self.bound_inputs.clone(),
-                    facts,
-                    decision: None,
+                return Err((
+                    FiniteDecisionUnknownReason::CommitTickError {
+                        detail: "expected committed step".to_string(),
+                    },
                     dispositions,
-                    journal: Journal::new(),
-                    final_world: self.initial_world,
-                    stop: FiniteDecisionStop::Unknown(
-                        FiniteDecisionUnknownReason::CommitTickError {
-                            detail: "expected committed step".to_string(),
-                        },
-                    ),
-                };
+                ));
             };
 
             // Contract: Results are Derived, never Proven or Refuted.
             if observation.outcome_class != Outcome::Derived {
-                return FiniteDecisionRun {
-                    program: self.program,
-                    context: self.context,
-                    inputs: self.bound_inputs.clone(),
-                    facts,
-                    decision: None,
+                return Err((
+                    FiniteDecisionUnknownReason::CommitTickError {
+                        detail: format!(
+                            "committed observation grade {:?} is not Derived",
+                            observation.outcome_class
+                        ),
+                    },
                     dispositions,
-                    journal: Journal::new(),
-                    final_world: self.initial_world,
-                    stop: FiniteDecisionStop::Unknown(
-                        FiniteDecisionUnknownReason::CommitTickError {
-                            detail: format!(
-                                "committed observation grade {:?} is not Derived",
-                                observation.outcome_class
-                            ),
-                        },
-                    ),
-                };
+                ));
             }
 
             let Some(step) = step else {
-                return FiniteDecisionRun {
-                    program: self.program,
-                    context: self.context,
-                    inputs: self.bound_inputs.clone(),
-                    facts,
-                    decision: None,
+                return Err((
+                    FiniteDecisionUnknownReason::CommitTickError {
+                        detail: "Committed::Step missing journal record".to_string(),
+                    },
                     dispositions,
-                    journal: Journal::new(),
-                    final_world: self.initial_world,
-                    stop: FiniteDecisionStop::Unknown(
-                        FiniteDecisionUnknownReason::CommitTickError {
-                            detail: "Committed::Step missing journal record".to_string(),
-                        },
-                    ),
-                };
+                ));
             };
-            let mut journal = Journal::new();
-            journal.append(step);
 
             let winning_val = match candidate_values
                 .into_iter()
@@ -1119,24 +1694,15 @@ impl FiniteDecisionRuntime {
             {
                 Some((_, val)) => val,
                 None => {
-                    return FiniteDecisionRun {
-                        program: self.program,
-                        context: self.context,
-                        inputs: self.bound_inputs.clone(),
-                        facts,
-                        decision: None,
+                    return Err((
+                        FiniteDecisionUnknownReason::EvaluationError {
+                            detail: format!(
+                                "winning candidate '{}' value missing from evaluated candidate values",
+                                winning_cand.name
+                            ),
+                        },
                         dispositions,
-                        journal: Journal::new(),
-                        final_world: self.initial_world,
-                        stop: FiniteDecisionStop::Unknown(
-                            FiniteDecisionUnknownReason::EvaluationError {
-                                detail: format!(
-                                    "winning candidate '{}' value missing from evaluated candidate values",
-                                    winning_cand.name
-                                ),
-                            },
-                        ),
-                    };
+                    ));
                 }
             };
 
@@ -1147,17 +1713,13 @@ impl FiniteDecisionRuntime {
                 grade: Outcome::Derived,
             };
 
-            FiniteDecisionRun {
-                program: self.program,
-                context: self.context,
-                inputs: self.bound_inputs.clone(),
-                facts,
+            Ok(DeliberationOutcome {
                 decision: Some(decision.clone()),
                 dispositions,
-                journal,
                 final_world: winning_cand.dst,
                 stop: FiniteDecisionStop::Selected(decision),
-            }
+                step: Some(step),
+            })
         }
     }
 
@@ -1167,14 +1729,28 @@ impl FiniteDecisionRuntime {
         target_name: &str,
     ) -> Result<WhyExplanation, FiniteDecisionUnknownReason> {
         let run = self.run();
-        if let FiniteDecisionStop::Unknown(reason) = run.stop {
+        let pool = self.plan.commit_of_candidate(target_name);
+        // Fail-closed if the relevant pool's deliberation faulted (ADR-0039:
+        // scoped to `target_name`'s own pool; for a target that names no
+        // candidate in any pool, this falls back to the first pool's stop,
+        // exactly matching pre-ADR-0039 behavior on a single-commit plan).
+        let stop_to_check = match pool {
+            Some(p) => run.commit_run(&p.name).map(|r| r.stop.clone()),
+            None => Some(run.stop.clone()),
+        };
+        if let Some(FiniteDecisionStop::Unknown(reason)) = stop_to_check {
             return Err(reason);
         }
+        let Some(pool) = pool else {
+            return Ok(WhyExplanation::CandidateNotFound);
+        };
+        let pool_run = run.commit_run(&pool.name);
 
         let regime_id = RegimeId::named(FINITE_FRONTIER_REGIME_NAME);
         let named_candidates: Vec<NamedCandidate> = self
             .entries
             .iter()
+            .filter(|e| pool.candidates.iter().any(|c| c == &e.name))
             .map(|e| {
                 NamedCandidate::with_handles(
                     e.name.clone(),
@@ -1193,8 +1769,9 @@ impl FiniteDecisionRuntime {
             return Ok(WhyExplanation::CandidateNotFound);
         };
 
-        let admitted_names: BTreeSet<String> = run
-            .dispositions
+        let admitted_names: BTreeSet<String> = pool_run
+            .map(|r| r.dispositions.as_slice())
+            .unwrap_or(&[])
             .iter()
             .filter(|d| d.status != CandidateStatus::RejectedGuardFalse)
             .map(|d| d.name.clone())
@@ -1206,12 +1783,13 @@ impl FiniteDecisionRuntime {
                 soc_regimes::finite_frontier::AdmissionDecision::rejected_guard_false()
             }
         });
+        let interner = self.interner.borrow();
         let explanation = explain_why(
             &named_candidates,
             &policy,
             &self.initial_exec(),
             target,
-            &self.interner,
+            &interner,
         );
         if let WhyExplanation::EvaluationFaulted { fault, .. } = &explanation {
             return Err(FiniteDecisionUnknownReason::from(fault.clone()));
@@ -1225,14 +1803,24 @@ impl FiniteDecisionRuntime {
         target_name: &str,
     ) -> Result<WhyNotExplanation, FiniteDecisionUnknownReason> {
         let run = self.run();
-        if let FiniteDecisionStop::Unknown(reason) = run.stop {
+        let pool = self.plan.commit_of_candidate(target_name);
+        let stop_to_check = match pool {
+            Some(p) => run.commit_run(&p.name).map(|r| r.stop.clone()),
+            None => Some(run.stop.clone()),
+        };
+        if let Some(FiniteDecisionStop::Unknown(reason)) = stop_to_check {
             return Err(reason);
         }
+        let Some(pool) = pool else {
+            return Ok(WhyNotExplanation::CandidateNotFound);
+        };
+        let pool_run = run.commit_run(&pool.name);
 
         let regime_id = RegimeId::named(FINITE_FRONTIER_REGIME_NAME);
         let named_candidates: Vec<NamedCandidate> = self
             .entries
             .iter()
+            .filter(|e| pool.candidates.iter().any(|c| c == &e.name))
             .map(|e| {
                 NamedCandidate::with_handles(
                     e.name.clone(),
@@ -1251,8 +1839,9 @@ impl FiniteDecisionRuntime {
             return Ok(WhyNotExplanation::CandidateNotFound);
         };
 
-        let admitted_names: BTreeSet<String> = run
-            .dispositions
+        let admitted_names: BTreeSet<String> = pool_run
+            .map(|r| r.dispositions.as_slice())
+            .unwrap_or(&[])
             .iter()
             .filter(|d| d.status != CandidateStatus::RejectedGuardFalse)
             .map(|d| d.name.clone())
@@ -1264,22 +1853,110 @@ impl FiniteDecisionRuntime {
                 soc_regimes::finite_frontier::AdmissionDecision::rejected_guard_false()
             }
         });
+        let interner = self.interner.borrow();
         let explanation = explain_why_not(
             &named_candidates,
             &policy,
             &self.initial_exec(),
             target,
-            &self.interner,
+            &interner,
         );
         if let WhyNotExplanation::EvaluationFaulted { fault, .. } = &explanation {
             return Err(FiniteDecisionUnknownReason::from(fault.clone()));
         }
         Ok(explanation)
     }
+
+    /// Build a structured, bounded derivation explanation for `target_name`:
+    /// the admission guard's evaluation trace, every rule/`let`/input it
+    /// transitively reads, the proposal's value trace, and — for an admitted
+    /// candidate — the calendar comparison against the actual winner.
+    ///
+    /// Purely informational (ADR-0030): this reuses [`Self::explain_why`]'s
+    /// own `Key` comparison rather than restating the calendar's ordering,
+    /// and every value in the trace comes from re-evaluating the exact
+    /// subexpression with [`crate::l3_v2::eval`] over the same environment
+    /// `run()` folded inputs, lets, and facts into — so it cannot disagree
+    /// with `run()`'s own result, and never changes it, the run's
+    /// program/context/snapshot identity, or any grade.
+    pub fn explain_candidate(
+        &self,
+        target_name: &str,
+    ) -> Result<crate::finite_decision::explain::ExplainOutcome, FiniteDecisionUnknownReason> {
+        use crate::finite_decision::explain;
+
+        let run = self.run();
+        if let FiniteDecisionStop::Unknown(reason) = &run.stop {
+            return Err(reason.clone());
+        }
+
+        let why = self.explain_why(target_name)?;
+        if matches!(why, WhyExplanation::CandidateNotFound) {
+            return Ok(explain::ExplainOutcome::CandidateNotFound);
+        }
+        let selection = explain::selection_from_why(&why);
+
+        // One work counter for the whole pass: every let, rule, guard,
+        // value, and decide instance evaluated from this environment draws
+        // on it (`l3_v2::MAX_RUN_STEPS`).
+        let mut env = EvalEnv::new()
+            .with_functions(self.functions.clone())
+            .with_schemas(Arc::new(self.plan.schemas.clone()))
+            .with_run_work(Arc::default());
+        for input in &self.bound_inputs {
+            env = env.with_input(input.name.clone(), input.value.clone());
+        }
+        for (name, expr) in &self.plan.lets {
+            match eval(expr, &env) {
+                Ok(v) => env = env.with_let(name.clone(), v),
+                Err(fault) => {
+                    // `run` already succeeded above, so every `let` already
+                    // evaluated cleanly over this same construction; this is
+                    // unreachable on a consistent plan, and failing closed
+                    // here is strictly safer than assuming it never happens.
+                    return Err(FiniteDecisionUnknownReason::ExpressionEvaluationFault {
+                        context: format!("let {name}"),
+                        fault,
+                    });
+                }
+            }
+        }
+        for fact in &run.facts {
+            env = env.with_fact(fact.rule.clone(), fact.value.clone());
+        }
+
+        Ok(explain::explain_candidate(
+            &self.plan,
+            &run,
+            &env,
+            target_name,
+            selection,
+        ))
+    }
+
     /// Re-evaluate all declared show expressions against the runtime's bound inputs, lets, and derived facts.
     pub fn evaluate_shows(
         &self,
         run: &FiniteDecisionRun,
+    ) -> Result<Vec<L3ValueV2>, FiniteDecisionUnknownReason> {
+        self.evaluate_shows_exprs(run, &self.plan.shows)
+    }
+
+    /// Re-evaluate an explicit list of lowered show expressions against this
+    /// runtime's bound inputs, lets, and derived facts.
+    ///
+    /// This runtime's own `plan` is used only for its lets/facts/functions —
+    /// `shows` need not be `self.plan.shows` (see [`Self::evaluate_shows`]).
+    /// This is how `brix run` prints `show` results without `show` items
+    /// feeding the canonical program identity: the plan a runtime is *built*
+    /// from is lowered from a `show`-free module (so `self.program` never
+    /// depends on whether the source declares any `show`), while the show
+    /// expressions actually printed are lowered separately, from the full
+    /// module, and passed here.
+    pub fn evaluate_shows_exprs(
+        &self,
+        run: &FiniteDecisionRun,
+        shows: &[L3ExprV2],
     ) -> Result<Vec<L3ValueV2>, FiniteDecisionUnknownReason> {
         if run.program != self.program {
             return Err(FiniteDecisionUnknownReason::InvariantViolation {
@@ -1317,9 +1994,13 @@ impl FiniteDecisionRuntime {
             });
         }
 
+        // One work counter for the whole pass: every let, rule, guard,
+        // value, and decide instance evaluated from this environment draws
+        // on it (`l3_v2::MAX_RUN_STEPS`).
         let mut env = EvalEnv::new()
             .with_functions(self.functions.clone())
-            .with_schemas(Arc::new(self.plan.schemas.clone()));
+            .with_schemas(Arc::new(self.plan.schemas.clone()))
+            .with_run_work(Arc::default());
         for input in &self.bound_inputs {
             env = env.with_input(input.name.clone(), input.value.clone());
         }
@@ -1337,8 +2018,28 @@ impl FiniteDecisionRuntime {
         for fact in &fresh_run.facts {
             env = env.with_fact(fact.rule.clone(), fact.value.clone());
         }
-        let mut results = Vec::with_capacity(self.plan.shows.len());
-        for (idx, show_expr) in self.plan.shows.iter().enumerate() {
+        // Each commit pool's own name is a "committed fact" too
+        // (ast::Item::Show's doc comment: "surfaces a committed fact") —
+        // bound only when that pool actually selected a candidate, so
+        // `show <commit name>` for a quiescent (or unevaluated) pool is
+        // unbound (a fault, not a fabricated value). ADR-0039: every pool
+        // binds its own name independently.
+        for commit_run in &fresh_run.commits {
+            if let Some(decision) = &commit_run.decision {
+                env = env.with_fact(commit_run.commit.clone(), decision.value.clone());
+            }
+        }
+        // A settled `decide` block's own name binds to the list of decided
+        // values, in element order (ADR-0043); an Unknown block (any
+        // instance faulted, or the block never settled) leaves its name
+        // unbound, exactly like a quiescent commit pool.
+        for decide_run in &fresh_run.decides {
+            if let Some(values) = decide_run.decided_values() {
+                env = env.with_fact(decide_run.decide.clone(), L3ValueV2::List(values.into()));
+            }
+        }
+        let mut results = Vec::with_capacity(shows.len());
+        for (idx, show_expr) in shows.iter().enumerate() {
             match eval(show_expr, &env) {
                 Ok(v) => results.push(v),
                 Err(fault) => {
@@ -1381,31 +2082,18 @@ pub fn finite_decision_audit_environment_from_plan(
     finite_decision_audit_environment_from_plan_with_inputs(plan, &InputSnapshot::empty())
 }
 
-/// Derive the run context, generator registry, and generator semantics for a finite-decision plan with an input snapshot.
+/// Derive the run context, generator registry, and generator semantics for a
+/// finite-decision plan with an input snapshot.
+///
+/// Delegates to [`FiniteDecisionRuntime::audit_environment`] (building a
+/// runtime internally) rather than re-deriving the registry from the plan's
+/// static `commit` candidates alone: since ADR-0043, a `decide` block's own
+/// candidates are only known once its list is evaluated against `snapshot`,
+/// so a plan-only derivation can no longer see them.
 pub fn finite_decision_audit_environment_from_plan_with_inputs(
     plan: &FiniteDecisionPlan,
     snapshot: &InputSnapshot,
 ) -> Result<(ContextId, GeneratorRegistry, GeneratorSemanticsV1), FiniteDecisionBuildError> {
-    snapshot.validate_completeness(plan)?;
-
-    let program = finite_decision_program_id(plan);
-    let initial_world = destination_world(program, None);
-    let policy = policy_id(program);
-    let context = context_id(program, initial_world, policy, Some(snapshot));
-
-    let mut registry = GeneratorRegistry::new();
-    let mut semantics = GeneratorSemanticsV1::new();
-    for cand_name in &plan.commit.candidates {
-        let _proposal = plan.find_proposal(cand_name).ok_or_else(|| {
-            FiniteDecisionBuildError::MissingProposal {
-                candidate: cand_name.clone(),
-            }
-        })?;
-        let prop_digest = proposal_digest(program, cand_name);
-        let dst = destination_world(program, Some(prop_digest));
-        let generator = generator_id(program, cand_name, initial_world, dst);
-        registry.insert(generator);
-        semantics.declare_rows(generator, [(initial_world, dst)]);
-    }
-    Ok((context, registry, semantics))
+    let runtime = FiniteDecisionRuntime::build_with_inputs(plan, snapshot)?;
+    Ok(runtime.audit_environment())
 }

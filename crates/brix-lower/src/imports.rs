@@ -12,6 +12,7 @@
 //! about the importer.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use brix_syntax::ast::{self, Item};
 
@@ -38,6 +39,43 @@ pub enum ImportError {
         second: String,
     },
 }
+
+impl fmt::Display for ImportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound(package) => {
+                write!(
+                    f,
+                    "package '{package}' was not found by the configured package loader \
+                     (check --package-path, or that the package name matches its on-disk layout)"
+                )
+            }
+            Self::Parse { package, error } => {
+                write!(f, "package '{package}' failed to parse: {error}")
+            }
+            Self::Cycle(chain) => {
+                write!(
+                    f,
+                    "import cycle detected: {} (each package imports the next, back to the first)",
+                    chain.join(" -> ")
+                )
+            }
+            Self::Conflict {
+                name,
+                first,
+                second,
+            } => {
+                write!(
+                    f,
+                    "declaration '{name}' is defined both by '{first}' and by '{second}'; \
+                     imports bring in declarations only, and a name must be unambiguous"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ImportError {}
 
 /// Resolve every `use` in `module`, returning a module whose imported
 /// declarations are in scope.
@@ -165,6 +203,7 @@ fn declared_name(item: &Item) -> Option<String> {
         Item::Propose(p) => Some(p.name.clone()),
         Item::Commit(c) => Some(c.name.clone()),
         Item::Input(i) => Some(i.name.clone()),
+        Item::Decide(d) => Some(d.name.clone()),
         Item::Show(_) | Item::Use(_) => None,
     }
 }

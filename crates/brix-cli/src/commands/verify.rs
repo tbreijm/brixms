@@ -47,7 +47,7 @@ pub fn execute_verify(
                     "usage-error",
                     vec![msg],
                 );
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                crate::json::emit_result_json(&res);
             } else {
                 eprintln!("brix verify: usage error: {msg}");
             }
@@ -70,7 +70,7 @@ pub fn execute_verify(
                     "io-error",
                     vec![msg],
                 );
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                crate::json::emit_result_json(&res);
             } else {
                 eprintln!("brix verify: IO error: {msg}");
             }
@@ -94,7 +94,7 @@ pub fn execute_verify(
                 "io-error",
                 vec![msg],
             );
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            crate::json::emit_result_json(&res);
         } else {
             eprintln!("brix verify: IO error: {msg}");
         }
@@ -114,7 +114,7 @@ pub fn execute_verify(
                     "io-error",
                     vec![msg],
                 );
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                crate::json::emit_result_json(&res);
             } else {
                 eprintln!("brix verify: IO error: {msg}");
             }
@@ -138,7 +138,7 @@ pub fn execute_verify(
                 "io-error",
                 vec![msg],
             );
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            crate::json::emit_result_json(&res);
         } else {
             eprintln!("brix verify: IO error: {msg}");
         }
@@ -161,7 +161,7 @@ pub fn execute_verify(
                 "io-error",
                 vec![msg],
             );
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            crate::json::emit_result_json(&res);
         } else {
             eprintln!("brix verify: IO error: {msg}");
         }
@@ -182,7 +182,7 @@ pub fn execute_verify(
                     "unknown",
                     vec![format!("bundle-decode-error: {err:?}")],
                 );
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                crate::json::emit_result_json(&res);
             } else {
                 eprintln!("brix verify: unknown ({msg})");
             }
@@ -203,7 +203,7 @@ pub fn execute_verify(
                     "io-error",
                     vec![err],
                 );
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                crate::json::emit_result_json(&res);
             } else {
                 eprintln!("brix verify: {err}");
             }
@@ -225,7 +225,7 @@ pub fn execute_verify(
                     "unknown",
                     vec![format!("source-parse-error: {err}")],
                 );
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                crate::json::emit_result_json(&res);
             } else {
                 eprintln!("brix verify: unknown ({msg})");
             }
@@ -237,7 +237,7 @@ pub fn execute_verify(
     let resolved_module = match brix_lower::imports::resolve_imports(&module, &loader) {
         Ok(m) => m,
         Err(err) => {
-            let msg = format!("source import error: {err:?}");
+            let msg = format!("source import error: {err}");
             if json {
                 let res = CliResultJson::failure(
                     "verify",
@@ -245,9 +245,9 @@ pub fn execute_verify(
                     Some(expect_program_hex.to_string()),
                     None,
                     "unknown",
-                    vec![format!("source-import-error: {err:?}")],
+                    vec![format!("source-import-error: {err}")],
                 );
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                crate::json::emit_result_json(&res);
             } else {
                 eprintln!("brix verify: unknown ({msg})");
             }
@@ -266,7 +266,7 @@ pub fn execute_verify(
                 "usage-error",
                 vec![msg],
             );
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            crate::json::emit_result_json(&res);
         } else {
             eprintln!("brix verify: usage error: {msg}");
         }
@@ -298,7 +298,7 @@ pub fn execute_verify(
                             err.status(),
                             vec![err.diagnostic()],
                         );
-                        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                        crate::json::emit_result_json(&res);
                     } else {
                         eprintln!("{}", err.render_human("verify"));
                     }
@@ -361,7 +361,7 @@ pub fn execute_verify(
                             vec![diag.clone()],
                         )
                         .with_inputs(input_snapshot_hex, None);
-                        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                        crate::json::emit_result_json(&res);
                     } else {
                         match &err {
                             brix_lower::audit_bundle::SourceBundleError::InputValidation(iv) => {
@@ -419,7 +419,7 @@ pub fn execute_verify(
                             "unknown",
                             vec![format!("verification-error: {err}")],
                         );
-                        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                        crate::json::emit_result_json(&res);
                     } else {
                         eprintln!("brix verify: unknown ({msg})");
                     }
@@ -454,8 +454,14 @@ pub fn execute_verify(
             decision: None,
             artifacts: vec![artifact],
             diagnostics: Vec::new(),
+            bindings: None,
+            explanation: None,
+            locations: None,
+            shows: None,
+            commits: None,
+            entity_decisions: None,
         };
-        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+        crate::json::emit_result_json(&res);
     } else {
         for line in receipt_lines {
             println!("{line}");

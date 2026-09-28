@@ -45,6 +45,9 @@ pub enum Command {
     Why {
         file: PathBuf,
         candidate: String,
+        /// `--entity INDEX` (ADR-0043): required when `candidate` is a
+        /// `decide`-block candidate, ignored otherwise.
+        entity: Option<usize>,
         input_paths: Vec<PathBuf>,
         json: bool,
         package_paths: Vec<PathBuf>,
@@ -52,12 +55,78 @@ pub enum Command {
     WhyNot {
         file: PathBuf,
         candidate: String,
+        /// `--entity INDEX` (ADR-0043): required when `candidate` is a
+        /// `decide`-block candidate, ignored otherwise.
+        entity: Option<usize>,
         input_paths: Vec<PathBuf>,
         json: bool,
         package_paths: Vec<PathBuf>,
     },
+    Test {
+        files: Vec<PathBuf>,
+        json: bool,
+    },
+    /// `brix kb <op> ...` — the persistent, revisable knowledge base (ADR-0041).
+    Kb {
+        op: KbOp,
+        json: bool,
+    },
+    /// `brix serve --stdio` — the embeddable JSON-lines protocol (ADR-0044).
+    Serve,
     Help,
     Version,
+}
+
+/// A `brix kb` sub-operation and its arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KbOp {
+    Init {
+        dir: PathBuf,
+        program: PathBuf,
+        input_paths: Vec<PathBuf>,
+        package_paths: Vec<PathBuf>,
+    },
+    Assert {
+        dir: PathBuf,
+        input_paths: Vec<PathBuf>,
+        package_paths: Vec<PathBuf>,
+    },
+    Retract {
+        dir: PathBuf,
+        names: Vec<String>,
+        package_paths: Vec<PathBuf>,
+    },
+    Program {
+        dir: PathBuf,
+        program: PathBuf,
+        package_paths: Vec<PathBuf>,
+    },
+    Log {
+        dir: PathBuf,
+        package_paths: Vec<PathBuf>,
+    },
+    Show {
+        dir: PathBuf,
+        rev: Option<u64>,
+        package_paths: Vec<PathBuf>,
+    },
+    Diff {
+        dir: PathBuf,
+        rev_a: u64,
+        rev_b: u64,
+        package_paths: Vec<PathBuf>,
+    },
+    Audit {
+        dir: PathBuf,
+        rev: u64,
+        bundle_out: PathBuf,
+        force: bool,
+        package_paths: Vec<PathBuf>,
+    },
+    Verify {
+        dir: PathBuf,
+        package_paths: Vec<PathBuf>,
+    },
 }
 
 /// Verification profile option for `brix verify`.
@@ -105,7 +174,7 @@ where
 
     if args.is_empty() {
         return Err(CliUsageError::usage(
-            "usage: brix <check|run|audit|verify|why|whynot> [options] [operands]\nRun 'brix --help' for usage details.",
+            "usage: brix <check|run|audit|verify|why|whynot|kb> [options] [operands]\nRun 'brix --help' for usage details.",
             json_requested,
             None,
         ));
@@ -160,6 +229,9 @@ where
         "verify" => parse_verify_args(subcmd_args, json_requested),
         "why" => parse_why_args(subcmd_args, json_requested, false),
         "whynot" => parse_why_args(subcmd_args, json_requested, true),
+        "test" => parse_test_args(subcmd_args, json_requested),
+        "kb" => parse_kb_args(subcmd_args, json_requested),
+        "serve" => parse_serve_args(subcmd_args),
         _ => Err(CliUsageError::usage(
             format!("unknown command: '{subcmd}'\nRun 'brix --help' for usage details."),
             json_requested,
@@ -563,12 +635,24 @@ fn parse_verify_args(args: &[String], json: bool) -> Result<Command, CliUsageErr
     })
 }
 
+/// Parse a `--entity` argument (ADR-0043): a nonnegative decimal index.
+fn parse_entity_index(raw: &str, json: bool, cmd_name: &str) -> Result<usize, CliUsageError> {
+    raw.parse::<usize>().map_err(|_| {
+        CliUsageError::usage(
+            format!("invalid '--entity' value '{raw}': expected a nonnegative integer index"),
+            json,
+            Some(cmd_name.to_string()),
+        )
+    })
+}
+
 fn parse_why_args(args: &[String], json: bool, is_whynot: bool) -> Result<Command, CliUsageError> {
     let cmd_name = if is_whynot { "whynot" } else { "why" };
     let mut positionals = Vec::new();
     let mut package_paths = Vec::new();
     let mut input_paths = Vec::new();
     let mut candidate: Option<String> = None;
+    let mut entity: Option<usize> = None;
     let mut i = 0;
 
     while i < args.len() {
@@ -587,6 +671,18 @@ fn parse_why_args(args: &[String], json: bool, is_whynot: bool) -> Result<Comman
             candidate = Some(args[i].clone());
         } else if let Some(stripped) = arg.strip_prefix("--candidate=") {
             candidate = Some(stripped.to_string());
+        } else if arg == "--entity" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing argument for '--entity'",
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            entity = Some(parse_entity_index(&args[i], json, cmd_name)?);
+        } else if let Some(stripped) = arg.strip_prefix("--entity=") {
+            entity = Some(parse_entity_index(stripped, json, cmd_name)?);
         } else if try_parse_input_flag(arg, args, &mut i, &mut input_paths, cmd_name, json)? {
             // Handled
         } else if arg == "--package-path" {
@@ -644,6 +740,7 @@ fn parse_why_args(args: &[String], json: bool, is_whynot: bool) -> Result<Comman
         Ok(Command::WhyNot {
             file,
             candidate,
+            entity,
             input_paths,
             json,
             package_paths,
@@ -652,11 +749,620 @@ fn parse_why_args(args: &[String], json: bool, is_whynot: bool) -> Result<Comman
         Ok(Command::Why {
             file,
             candidate,
+            entity,
             input_paths,
             json,
             package_paths,
         })
     }
+}
+
+/// Parse `brix test <file.test.json>... [--json]` arguments.
+///
+/// Unlike the other subcommands, `test` accepts one or more positional suite file operands
+/// (a suite carries its own `program` and `package_paths`, resolved relative to itself), and
+/// takes no `--input` or `--package-path` options of its own.
+fn parse_test_args(args: &[String], json: bool) -> Result<Command, CliUsageError> {
+    let mut files = Vec::new();
+    let mut i = 0;
+
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json" {
+            // Handled
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some("test".to_string()),
+            ));
+        } else {
+            files.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+
+    if files.is_empty() {
+        return Err(CliUsageError::usage(
+            "missing required file operand for 'brix test'",
+            json,
+            Some("test".to_string()),
+        ));
+    }
+
+    Ok(Command::Test { files, json })
+}
+
+/// Parse `brix serve --stdio` arguments. `--stdio` is required (the only
+/// transport ADR-0044 defines so far) and no other flags or operands are
+/// accepted; `--json` has no effect on `serve` (every response is already
+/// JSON), so it is deliberately not recognized here.
+fn parse_serve_args(args: &[String]) -> Result<Command, CliUsageError> {
+    if args == ["--stdio"] {
+        return Ok(Command::Serve);
+    }
+    if args.is_empty() {
+        return Err(CliUsageError::usage(
+            "usage: brix serve --stdio",
+            false,
+            Some("serve".to_string()),
+        ));
+    }
+    Err(CliUsageError::usage(
+        format!("unknown option(s) for 'brix serve': '{}'", args.join(" ")),
+        false,
+        Some("serve".to_string()),
+    ))
+}
+
+/// Parse `--package-path <dir>` / `--package-path=<dir>`, matching
+/// [`try_parse_input_flag`]'s conventions for a repeatable path option.
+fn try_parse_package_path_flag(
+    arg: &str,
+    args: &[String],
+    i: &mut usize,
+    package_paths: &mut Vec<PathBuf>,
+    cmd_name: &str,
+    json: bool,
+) -> Result<bool, CliUsageError> {
+    if arg == "--package-path" {
+        *i += 1;
+        if *i >= args.len() {
+            return Err(CliUsageError::usage(
+                "missing argument for '--package-path'",
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        }
+        package_paths.push(PathBuf::from(&args[*i]));
+        Ok(true)
+    } else if let Some(stripped) = arg.strip_prefix("--package-path=") {
+        package_paths.push(PathBuf::from(stripped));
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+fn parse_kb_args(args: &[String], json: bool) -> Result<Command, CliUsageError> {
+    if args.is_empty() {
+        return Err(CliUsageError::usage(
+            "usage: brix kb <init|assert|retract|program|log|show|diff|audit|verify> [options] [operands]",
+            json,
+            Some("kb".to_string()),
+        ));
+    }
+    let sub = args[0].as_str();
+    let rest = &args[1..];
+    let op = match sub {
+        "init" => parse_kb_init_args(rest, json)?,
+        "assert" => parse_kb_assert_args(rest, json)?,
+        "retract" => parse_kb_retract_args(rest, json)?,
+        "program" => parse_kb_program_args(rest, json)?,
+        "log" => parse_kb_log_args(rest, json)?,
+        "show" => parse_kb_show_args(rest, json)?,
+        "diff" => parse_kb_diff_args(rest, json)?,
+        "audit" => parse_kb_audit_args(rest, json)?,
+        "verify" => parse_kb_verify_args(rest, json)?,
+        other => {
+            return Err(CliUsageError::usage(
+                format!("unknown 'brix kb' sub-command: '{other}'"),
+                json,
+                Some("kb".to_string()),
+            ))
+        }
+    };
+    Ok(Command::Kb { op, json })
+}
+
+fn parse_kb_init_args(args: &[String], json: bool) -> Result<KbOp, CliUsageError> {
+    let cmd_name = "kb init";
+    let mut positionals = Vec::new();
+    let mut package_paths = Vec::new();
+    let mut input_paths = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json"
+            || try_parse_input_flag(arg, args, &mut i, &mut input_paths, cmd_name, json)?
+            || try_parse_package_path_flag(arg, args, &mut i, &mut package_paths, cmd_name, json)?
+        {
+            // Handled
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+    if positionals.len() < 2 {
+        return Err(CliUsageError::usage(
+            format!("missing required operands for '{cmd_name}': requires DIR and PROGRAM"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 2 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[2].display()),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    let program = positionals.pop().unwrap();
+    let dir = positionals.pop().unwrap();
+    Ok(KbOp::Init {
+        dir,
+        program,
+        input_paths,
+        package_paths,
+    })
+}
+
+fn parse_kb_assert_args(args: &[String], json: bool) -> Result<KbOp, CliUsageError> {
+    let cmd_name = "kb assert";
+    let mut positionals = Vec::new();
+    let mut package_paths = Vec::new();
+    let mut input_paths = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json"
+            || try_parse_input_flag(arg, args, &mut i, &mut input_paths, cmd_name, json)?
+            || try_parse_package_path_flag(arg, args, &mut i, &mut package_paths, cmd_name, json)?
+        {
+            // Handled
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+    if positionals.is_empty() {
+        return Err(CliUsageError::usage(
+            format!("missing required DIR operand for '{cmd_name}'"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 1 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[1].display()),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if input_paths.is_empty() {
+        return Err(CliUsageError::usage(
+            format!("'{cmd_name}' requires at least one '--input <path>'"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    Ok(KbOp::Assert {
+        dir: positionals.remove(0),
+        input_paths,
+        package_paths,
+    })
+}
+
+fn parse_kb_retract_args(args: &[String], json: bool) -> Result<KbOp, CliUsageError> {
+    let cmd_name = "kb retract";
+    let mut dir: Option<PathBuf> = None;
+    let mut names = Vec::new();
+    let mut package_paths = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json"
+            || try_parse_package_path_flag(arg, args, &mut i, &mut package_paths, cmd_name, json)?
+        {
+            // Handled
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else if dir.is_none() {
+            dir = Some(PathBuf::from(arg));
+        } else {
+            names.push(arg.clone());
+        }
+        i += 1;
+    }
+    let Some(dir) = dir else {
+        return Err(CliUsageError::usage(
+            format!("missing required DIR operand for '{cmd_name}'"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    };
+    if names.is_empty() {
+        return Err(CliUsageError::usage(
+            format!("'{cmd_name}' requires at least one INPUT-NAME operand"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    Ok(KbOp::Retract {
+        dir,
+        names,
+        package_paths,
+    })
+}
+
+fn parse_kb_program_args(args: &[String], json: bool) -> Result<KbOp, CliUsageError> {
+    let cmd_name = "kb program";
+    let mut positionals = Vec::new();
+    let mut package_paths = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json"
+            || try_parse_package_path_flag(arg, args, &mut i, &mut package_paths, cmd_name, json)?
+        {
+            // Handled
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+    if positionals.len() < 2 {
+        return Err(CliUsageError::usage(
+            format!("missing required operands for '{cmd_name}': requires DIR and PROGRAM"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 2 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[2].display()),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    let program = positionals.pop().unwrap();
+    let dir = positionals.pop().unwrap();
+    Ok(KbOp::Program {
+        dir,
+        program,
+        package_paths,
+    })
+}
+
+fn parse_kb_log_args(args: &[String], json: bool) -> Result<KbOp, CliUsageError> {
+    let cmd_name = "kb log";
+    let mut positionals = Vec::new();
+    let mut package_paths = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json"
+            || try_parse_package_path_flag(arg, args, &mut i, &mut package_paths, cmd_name, json)?
+        {
+            // Handled
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+    if positionals.is_empty() {
+        return Err(CliUsageError::usage(
+            format!("missing required DIR operand for '{cmd_name}'"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 1 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[1].display()),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    Ok(KbOp::Log {
+        dir: positionals.remove(0),
+        package_paths,
+    })
+}
+
+fn parse_kb_show_args(args: &[String], json: bool) -> Result<KbOp, CliUsageError> {
+    let cmd_name = "kb show";
+    let mut positionals = Vec::new();
+    let mut package_paths = Vec::new();
+    let mut rev: Option<u64> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json" {
+            // Handled
+        } else if arg == "--rev" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing argument for '--rev'",
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            rev = Some(parse_rev(&args[i], cmd_name, json)?);
+        } else if let Some(stripped) = arg.strip_prefix("--rev=") {
+            rev = Some(parse_rev(stripped, cmd_name, json)?);
+        } else if try_parse_package_path_flag(
+            arg,
+            args,
+            &mut i,
+            &mut package_paths,
+            cmd_name,
+            json,
+        )? {
+            // Handled
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+    if positionals.is_empty() {
+        return Err(CliUsageError::usage(
+            format!("missing required DIR operand for '{cmd_name}'"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 1 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[1].display()),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    Ok(KbOp::Show {
+        dir: positionals.remove(0),
+        rev,
+        package_paths,
+    })
+}
+
+fn parse_kb_diff_args(args: &[String], json: bool) -> Result<KbOp, CliUsageError> {
+    let cmd_name = "kb diff";
+    let mut positionals: Vec<String> = Vec::new();
+    let mut package_paths = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json"
+            || try_parse_package_path_flag(arg, args, &mut i, &mut package_paths, cmd_name, json)?
+        {
+            // Handled
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(arg.clone());
+        }
+        i += 1;
+    }
+    if positionals.len() < 3 {
+        return Err(CliUsageError::usage(
+            format!("missing required operands for '{cmd_name}': requires DIR, REV_A, and REV_B"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 3 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[3]),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    let rev_b = parse_rev(&positionals[2], cmd_name, json)?;
+    let rev_a = parse_rev(&positionals[1], cmd_name, json)?;
+    let dir = PathBuf::from(&positionals[0]);
+    Ok(KbOp::Diff {
+        dir,
+        rev_a,
+        rev_b,
+        package_paths,
+    })
+}
+
+fn parse_kb_audit_args(args: &[String], json: bool) -> Result<KbOp, CliUsageError> {
+    let cmd_name = "kb audit";
+    let mut positionals = Vec::new();
+    let mut package_paths = Vec::new();
+    let mut rev: Option<u64> = None;
+    let mut bundle_out: Option<PathBuf> = None;
+    let mut force = false;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json" {
+            // Handled
+        } else if arg == "--force" {
+            force = true;
+        } else if arg == "--rev" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing argument for '--rev'",
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            rev = Some(parse_rev(&args[i], cmd_name, json)?);
+        } else if let Some(stripped) = arg.strip_prefix("--rev=") {
+            rev = Some(parse_rev(stripped, cmd_name, json)?);
+        } else if arg == "--bundle" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing argument for '--bundle'",
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            bundle_out = Some(PathBuf::from(&args[i]));
+        } else if let Some(stripped) = arg.strip_prefix("--bundle=") {
+            bundle_out = Some(PathBuf::from(stripped));
+        } else if try_parse_package_path_flag(
+            arg,
+            args,
+            &mut i,
+            &mut package_paths,
+            cmd_name,
+            json,
+        )? {
+            // Handled
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+    if positionals.is_empty() {
+        return Err(CliUsageError::usage(
+            format!("missing required DIR operand for '{cmd_name}'"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 1 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[1].display()),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    let Some(rev) = rev else {
+        return Err(CliUsageError::usage(
+            format!("missing required '--rev <N>' option for '{cmd_name}'"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    };
+    let Some(bundle_out) = bundle_out else {
+        return Err(CliUsageError::usage(
+            format!("missing required '--bundle <out>' option for '{cmd_name}'"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    };
+    Ok(KbOp::Audit {
+        dir: positionals.remove(0),
+        rev,
+        bundle_out,
+        force,
+        package_paths,
+    })
+}
+
+fn parse_kb_verify_args(args: &[String], json: bool) -> Result<KbOp, CliUsageError> {
+    let cmd_name = "kb verify";
+    let mut positionals = Vec::new();
+    let mut package_paths = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json"
+            || try_parse_package_path_flag(arg, args, &mut i, &mut package_paths, cmd_name, json)?
+        {
+            // Handled
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+    if positionals.is_empty() {
+        return Err(CliUsageError::usage(
+            format!("missing required DIR operand for '{cmd_name}'"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 1 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[1].display()),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    Ok(KbOp::Verify {
+        dir: positionals.remove(0),
+        package_paths,
+    })
+}
+
+fn parse_rev(raw: &str, cmd_name: &str, json: bool) -> Result<u64, CliUsageError> {
+    raw.parse::<u64>().map_err(|_| {
+        CliUsageError::usage(
+            format!("invalid revision number: '{raw}' (expected a non-negative integer)"),
+            json,
+            Some(cmd_name.to_string()),
+        )
+    })
 }
 
 pub fn print_help() {
@@ -679,15 +1385,59 @@ Commands:
   verify --expect-program <hex> <file.brix> <bundle> [--profile <finite-decision|l3-v1>] [--input <path>...] [--json] [--package-path <dir>...]
       Verify an audit input bundle against source and external expected program pin.
 
-  why <file.brix> --candidate <name> [--input <path>...] [--json] [--package-path <dir>...]
-      Explain why a candidate was admitted or selected in deliberation.
+  why <file.brix> --candidate <name> [--entity <index>] [--input <path>...] [--json] [--package-path <dir>...]
+      Explain why a candidate was admitted or selected in deliberation. For a
+      candidate inside a per-entity 'decide' block, --entity names the list element.
 
-  whynot <file.brix> --candidate <name> [--input <path>...] [--json] [--package-path <dir>...]
+  whynot <file.brix> --candidate <name> [--entity <index>] [--input <path>...] [--json] [--package-path <dir>...]
       Explain why a candidate was not admitted or not selected in deliberation.
+
+  test <file.test.json>... [--json]
+      Run one or more regression test suites of the form \"these inputs -> this decision\".
+      Each suite is a strict 'brix.test@1' JSON file naming a program, optional package
+      paths, and cases with input files and expected status/decision/value/candidates/facts.
+      Paths inside a suite resolve relative to the suite file's own directory.
+
+  kb init <dir> <program.brix> [--input <path>...] [--package-path <dir>...] [--json]
+      Create a persistent knowledge base at <dir> and its first revision (ADR-0041).
+
+  kb assert <dir> --input <path>... [--package-path <dir>...] [--json]
+      Upsert named input values, creating a new revision. A new value for an
+      already-set name is a correction.
+
+  kb retract <dir> <input-name>... [--package-path <dir>...] [--json]
+      Remove named input values, creating a new revision.
+
+  kb program <dir> <new.brix> [--package-path <dir>...] [--json]
+      Change the knowledge base's program, creating a new revision. Existing
+      input values undeclared under the new program are dropped and reported.
+
+  kb log <dir> [--package-path <dir>...] [--json]
+      List every revision (oldest first), replayed fresh.
+
+  kb show <dir> [--rev <N>] [--package-path <dir>...] [--json]
+      Show one revision's full decision report (defaults to the current HEAD).
+
+  kb diff <dir> <revA> <revB> [--package-path <dir>...] [--json]
+      Show what changed between two revisions, and why.
+
+  kb audit <dir> --rev <N> --bundle <out> [--force] [--package-path <dir>...] [--json]
+      Emit a standard audit bundle for one revision (verifiable with 'brix verify').
+
+  kb verify <dir> [--package-path <dir>...] [--json]
+      Verify the whole knowledge base: every revision's digest, parent chain,
+      recomputed program/snapshot identities, and a fresh replay of its result.
+
+  serve --stdio
+      Run a long-running JSON-lines protocol (schema 'brix.serve@1') over
+      stdin/stdout: one request per line, one response per line, for
+      embedding the engine in another process instead of spawning a CLI
+      invocation per call. See spec/adr/ADR-0044_Serve_Protocol.md.
 
 Input Format:
   External inputs are supplied via repeatable '--input <path>' files conforming to
-  the strict 'brix.input@1' JSON schema.
+  the strict 'brix.input@N' JSON schemas (@1 scalars, @2 records and variants,
+  @3 bounded lists).
 
 Global Options:
   --help       Print help information
@@ -1006,6 +1756,7 @@ mod tests {
             Command::Why {
                 file: PathBuf::from("module.brix"),
                 candidate: "step_one".to_string(),
+                entity: None,
                 json: false,
                 package_paths: vec![],
                 input_paths: vec![],
@@ -1030,6 +1781,7 @@ mod tests {
             Command::Why {
                 file: PathBuf::from("module.brix"),
                 candidate: "step_one".to_string(),
+                entity: None,
                 json: true,
                 package_paths: vec![PathBuf::from("pkgs")],
                 input_paths: vec![PathBuf::from("snap.json")],
@@ -1052,11 +1804,54 @@ mod tests {
             Command::WhyNot {
                 file: PathBuf::from("module.brix"),
                 candidate: "step_two".to_string(),
+                entity: None,
                 json: false,
                 package_paths: vec![],
                 input_paths: vec![PathBuf::from("val.json")],
             }
         );
+    }
+
+    #[test]
+    fn test_test_command_shapes() {
+        // Single suite file
+        let cmd = parse_args(["test", "suite.test.json"]).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Test {
+                files: vec![PathBuf::from("suite.test.json")],
+                json: false,
+            }
+        );
+
+        // Multiple suite files, with --json interspersed
+        let cmd = parse_args(["test", "a.test.json", "--json", "b.test.json"]).unwrap();
+        assert_eq!(
+            cmd,
+            Command::Test {
+                files: vec![PathBuf::from("a.test.json"), PathBuf::from("b.test.json")],
+                json: true,
+            }
+        );
+
+        // Missing file operand
+        let err = parse_args(["test"]).unwrap_err();
+        assert!(err
+            .message
+            .contains("missing required file operand for 'brix test'"));
+
+        // Unknown option rejected
+        let err = parse_args(["test", "suite.test.json", "--bogus"]).unwrap_err();
+        assert!(err.message.contains("unknown option: '--bogus'"));
+
+        // Subcommand help/version rejected like other subcommands
+        assert!(parse_args(["test", "--help"]).is_err());
+        assert!(parse_args(["test", "-h"]).is_err());
+
+        // --json usage error is reported as JSON-capable
+        let err = parse_args(["test", "--json"]).unwrap_err();
+        assert!(err.is_json);
+        assert_eq!(err.command, Some("test".to_string()));
     }
 
     #[test]

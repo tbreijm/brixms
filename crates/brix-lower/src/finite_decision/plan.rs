@@ -7,8 +7,9 @@ use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_syntax::ast;
 
 use crate::l3_v2::{
-    check_exhaustive_expr, lower_expr_v2, DivModOpV2, L3ConfigBodyV2, L3ConfigDeclV2, L3ExprV2,
-    L3PatternV2, L3Schema, L3SchemaBody, L3SchemaType, L3V2LowerError, L3ValueType,
+    check_exhaustive_expr, is_reserved_list_operation_name, lower_expr_v2, DivModOpV2,
+    L3ConfigBodyV2, L3ConfigDeclV2, L3ExprV2, L3PatternV2, L3Schema, L3SchemaBody, L3SchemaType,
+    L3V2LowerError, L3ValueType,
 };
 
 pub const MAX_SCHEMA_COUNT: usize = 128;
@@ -21,6 +22,20 @@ pub const FINITE_DECISION_PROFILE: &str = "brix.l3.finite-decision@1";
 /// Maximum number of functions declared in a finite-decision module.
 pub const MAX_FUNCTION_COUNT: usize = 256;
 
+/// Maximum number of `commit` declarations in a finite-decision module (ADR-0039).
+pub const MAX_COMMIT_COUNT: usize = 64;
+
+/// Maximum number of `decide` declarations in a finite-decision module (ADR-0043).
+pub const MAX_DECIDE_COUNT: usize = 64;
+
+/// Maximum total number of per-entity instances across every `decide` block
+/// in a module, summed over every block's own list length (ADR-0043). Each
+/// block's own list is already bounded by an input's declared `max` (≤256)
+/// or the derived-list cap (`MAX_DERIVED_LIST_LEN` = 4,096); this is an
+/// additional, program-wide ceiling on how much per-entity deliberation work
+/// one run can ask for, independent of how many blocks it is spread across.
+pub const MAX_TOTAL_DECIDE_INSTANCES: usize = 4096;
+
 /// Maximum number of parameters declared by a single function.
 pub const MAX_FUNCTION_PARAMS: usize = 32;
 
@@ -30,12 +45,29 @@ pub const MAX_EXPR_DEPTH: usize = 128;
 /// Maximum number of AST expression nodes per expression.
 pub const MAX_EXPR_NODES: usize = 4096;
 
-/// A declared external input in a finite-decision plan (ADR-0031).
+/// A declared external input in a finite-decision plan (ADR-0031, ADR-0037).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FiniteDecisionInput {
     pub ordinal: u64,
     pub name: String,
     pub ty: L3ValueType,
+    /// Present exactly when `ty` is `L3ValueType::List`: the declared
+    /// element type and maximum length of `List<T> max N` (ADR-0037).
+    pub list: Option<FiniteDecisionListDecl>,
+}
+
+/// The declaration payload of a `List<T> max N` external input (ADR-0037).
+///
+/// `element` is a scalar or closed nominal schema type — never itself a list
+/// (nested lists are refused at lowering, per ADR-0037 §Scope) — expressed as
+/// [`L3SchemaType`] rather than [`L3ValueType`] because that is already the
+/// vocabulary the rest of the codebase uses for "a scalar or a named schema"
+/// (record fields, sum payloads, helper contracts), and reusing it here means
+/// element validation reuses [`crate::l3_v2::validate_l3_value`] unchanged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FiniteDecisionListDecl {
+    pub element: L3SchemaType,
+    pub max: u64,
 }
 
 /// A declared function parameter or return contract (ADR-0032).
@@ -90,6 +122,24 @@ pub struct FiniteDecisionCommit {
     pub candidates: Vec<String>,
 }
 
+/// A `decide NAME for BINDER in LIST_EXPR { propose ... }` block (ADR-0043):
+/// a commit pool instantiated once per element of `list`, in list order.
+/// Every proposal's `guard`/`value` may read `binder` (bound to the current
+/// element) in addition to everything an ordinary top-level `propose` can
+/// read; a proposal's *name* is still checked for uniqueness program-wide,
+/// exactly like a top-level `propose`, even though it is only ever a
+/// candidate within this block's own per-entity pools.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FiniteDecisionDecide {
+    pub name: String,
+    pub binder: String,
+    pub list: L3ExprV2,
+    /// The block's candidate proposals, in declaration order. Every element
+    /// of the instantiated list deliberates independently among exactly
+    /// these candidates.
+    pub proposals: Vec<FiniteDecisionProposal>,
+}
+
 /// A lowered finite-decision plan (ADR-0030, ADR-0031, ADR-0032).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FiniteDecisionPlan {
@@ -100,9 +150,28 @@ pub struct FiniteDecisionPlan {
     pub lets: Vec<(String, L3ExprV2)>,
     pub rules: Vec<FiniteDecisionRule>,
     pub proposals: Vec<FiniteDecisionProposal>,
-    pub commit: FiniteDecisionCommit,
+    /// The module's commit pools, in declaration order (ADR-0039). A
+    /// finite-decision module declares at least one; a proposal may be a
+    /// candidate in at most one of them ([`FiniteDecisionLowerError::ProposalInMultipleCommits`]).
+    pub commits: Vec<FiniteDecisionCommit>,
+    /// The module's per-entity `decide` blocks, in declaration order
+    /// (ADR-0043). Possibly empty — a module that declares none keeps a
+    /// byte-identical program id to before this feature existed.
+    pub decides: Vec<FiniteDecisionDecide>,
     pub shows: Vec<L3ExprV2>,
     pub schemas: BTreeMap<String, L3Schema>,
+    /// Declared type parameters of every `config` that has any (ADR-0042), in
+    /// declaration order: `(config name, parameter names)`. A parameterized
+    /// config's values are ordinary nominal constructors/records at runtime —
+    /// type parameters are erased for evaluation, exactly like the `let`
+    /// lane's `Stack<T>`/`Tree<T>` — so `configs` above (arity-only) is
+    /// unaffected. This is carried separately, and bound into program
+    /// identity only when nonempty (see
+    /// [`finite_decision_program_preimage`]), purely so two configs that
+    /// differ only in whether/how they are parameterized are not silently
+    /// identified — a config's own arity-based encoding already distinguishes
+    /// its variants and fields.
+    pub generic_configs: Vec<(String, Vec<String>)>,
 }
 
 impl FiniteDecisionPlan {
@@ -120,6 +189,44 @@ impl FiniteDecisionPlan {
     pub fn find_proposal(&self, name: &str) -> Option<&FiniteDecisionProposal> {
         self.proposals.iter().find(|p| p.name == name)
     }
+
+    /// Look up a commit pool by its declared name.
+    pub fn find_commit(&self, name: &str) -> Option<&FiniteDecisionCommit> {
+        self.commits.iter().find(|c| c.name == name)
+    }
+
+    /// The commit pool that lists `candidate` among its members, if any. A
+    /// candidate is a member of at most one pool ([`FiniteDecisionLowerError::ProposalInMultipleCommits`]
+    /// is rejected during lowering), so this is unambiguous.
+    pub fn commit_of_candidate(&self, candidate: &str) -> Option<&FiniteDecisionCommit> {
+        self.commits
+            .iter()
+            .find(|c| c.candidates.iter().any(|c| c == candidate))
+    }
+
+    /// Look up a `decide` block by its declared name (ADR-0043).
+    pub fn find_decide(&self, name: &str) -> Option<&FiniteDecisionDecide> {
+        self.decides.iter().find(|d| d.name == name)
+    }
+
+    /// The `decide` block that declares `candidate` as one of its own
+    /// proposals, if any (ADR-0043). Proposal names are unique
+    /// program-wide, so this is unambiguous.
+    pub fn decide_of_candidate(&self, candidate: &str) -> Option<&FiniteDecisionDecide> {
+        self.decides
+            .iter()
+            .find(|d| d.proposals.iter().any(|p| p.name == candidate))
+    }
+
+    /// Look up a proposal by candidate name, searching both top-level
+    /// `commit` pools and every `decide` block (ADR-0043).
+    pub fn find_any_proposal(&self, name: &str) -> Option<&FiniteDecisionProposal> {
+        self.find_proposal(name).or_else(|| {
+            self.decides
+                .iter()
+                .find_map(|d| d.proposals.iter().find(|p| p.name == name))
+        })
+    }
 }
 
 /// Errors occurring during finite-decision lowering.
@@ -129,6 +236,15 @@ pub enum FiniteDecisionLowerError {
         operator: &'static str,
         found: String,
     },
+    /// A `filter`/`where`/`count`/`all`/`any` condition or a `sum`/`min`/
+    /// `max` body has a statically known type other than the one it
+    /// requires (ADR-0040, following the precedent ADR-0034 set for `&&`/
+    /// `||`/`!` operands).
+    ListBodyType {
+        form: &'static str,
+        expected: &'static str,
+        found: String,
+    },
     BooleanTypeAnalysisLimit,
     ProfileMismatch {
         expected: String,
@@ -136,14 +252,58 @@ pub enum FiniteDecisionLowerError {
     },
     ItemNotAllowed(String),
     NoCommit,
-    MultipleCommits(usize),
+    /// More `commit` declarations than [`MAX_COMMIT_COUNT`] (ADR-0039). A
+    /// module may declare multiple independent commit pools; this bounds how
+    /// many, the way [`Self::TooManyFunctions`] bounds functions.
+    TooManyCommits {
+        limit: usize,
+        count: usize,
+    },
+    /// Two `commit` declarations shared the same name (ADR-0039). Commit
+    /// pool names must be unique within a module — they are readable facts
+    /// (`show <commit name>`) and CLI/`brix test` selectors.
+    DuplicateCommitName(String),
     EmptyCommit(String),
+    /// More `decide` declarations than [`MAX_DECIDE_COUNT`] (ADR-0043).
+    TooManyDecides {
+        limit: usize,
+        count: usize,
+    },
+    /// Two `decide` declarations shared the same name, or a `decide` shared a
+    /// name with a `commit` (ADR-0043) — both are readable only via `show`
+    /// and so occupy the same namespace.
+    DuplicateDecideName(String),
+    /// A `decide` block declared no `propose` members.
+    EmptyDecide(String),
+    /// A `commit` candidate list named a proposal declared inside a `decide`
+    /// block (ADR-0043): a `decide`-scoped proposal is implicitly owned by
+    /// its own block's per-entity pool and can never also be a `commit`
+    /// candidate.
+    CandidateOwnedByDecide {
+        commit: String,
+        candidate: String,
+        decide: String,
+    },
+    /// Two `otherwise` proposals landed in the same `decide` block
+    /// (ADR-0043, following ADR-0038's per-pool rule).
+    MultipleOtherwiseInDecide {
+        decide: String,
+    },
+    /// An `otherwise` proposal and an explicit `priority
+    /// 18446744073709551615` proposal landed in the same `decide` block
+    /// (ADR-0043, following ADR-0038's per-pool rule).
+    AmbiguousFallbackPriorityInDecide {
+        decide: String,
+        otherwise: String,
+        explicit: String,
+    },
     DuplicateProposalName(String),
     DuplicateInputName(String),
     DuplicateFunctionName(String),
     /// A declaration claimed a name reserved for a built-in operation
-    /// (ADR-0035). Refused where it is declared rather than silently losing
-    /// to the built-in at every call site.
+    /// (ADR-0035, ADR-0040) or the built-in `List` type (ADR-0037). Refused
+    /// where it is declared rather than silently losing to the built-in at
+    /// every use.
     ReservedOperationName {
         name: String,
         kind: &'static str,
@@ -161,10 +321,6 @@ pub enum FiniteDecisionLowerError {
         func: String,
         limit: usize,
         count: usize,
-    },
-    FunctionCycle {
-        func: String,
-        cycle: Vec<String>,
     },
     FunctionArityMismatch {
         func: String,
@@ -218,6 +374,23 @@ pub enum FiniteDecisionLowerError {
         name: String,
         ty: String,
     },
+    /// A `List<T> max N` input declared `N` outside `0..=256` (ADR-0037).
+    ListMaxOutOfRange {
+        name: String,
+        max: u64,
+        limit: u64,
+    },
+    /// A `List<T>` input whose element type `T` is itself `List<...>`
+    /// (ADR-0037 §Scope: nested lists are deferred).
+    NestedListNotAllowed {
+        name: String,
+    },
+    /// A `List<T>` input whose element type `T` is not an admitted scalar
+    /// (`Int`, `Bool`, `Str`) or a closed nominal schema (ADR-0037).
+    UnsupportedListElementType {
+        name: String,
+        ty: String,
+    },
     UnknownCandidateInCommit {
         commit: String,
         candidate: String,
@@ -238,6 +411,36 @@ pub enum FiniteDecisionLowerError {
         proposal: String,
         fact: String,
     },
+    /// An inferred rule body, proposal guard, or proposal value read a rule
+    /// declared at or after the reader itself (ADR-0038). Only reachable
+    /// when the dependency list was omitted — an explicit (even empty)
+    /// dependency list keeps today's `UndeclaredDependency`/
+    /// `ForwardOrSelfDependency`/`UndeclaredFactRead` behavior unchanged.
+    ForwardRuleRead {
+        reader_kind: &'static str,
+        reader: String,
+        dep: String,
+    },
+    /// Two `otherwise` proposals landed in the same commit pool (ADR-0038).
+    MultipleOtherwiseInCommit {
+        commit: String,
+    },
+    /// An `otherwise` proposal and an explicit `priority
+    /// 18446744073709551615` proposal landed in the same commit pool
+    /// (ADR-0038): both would be the pool's fallback, so which one applies
+    /// is ambiguous.
+    AmbiguousFallbackPriority {
+        commit: String,
+        otherwise: String,
+        explicit: String,
+    },
+    /// A candidate proposal appears in more than one `commit` pool
+    /// (ADR-0039): a proposal may be committed by at most one pool.
+    ProposalInMultipleCommits {
+        candidate: String,
+        first_commit: String,
+        second_commit: String,
+    },
     FunctionConstructorCollision {
         func: String,
         constructor: String,
@@ -257,6 +460,13 @@ impl fmt::Display for FiniteDecisionLowerError {
                     "logical {operator} requires Bool operands, found {found}"
                 )
             }
+            Self::ListBodyType {
+                form,
+                expected,
+                found,
+            } => {
+                write!(f, "'{form}' requires a {expected} body, found {found}")
+            }
             Self::BooleanTypeAnalysisLimit => {
                 write!(
                     f,
@@ -274,19 +484,52 @@ impl fmt::Display for FiniteDecisionLowerError {
                 f,
                 "finite-decision module must contain exactly one commit declaration, found none"
             ),
-            Self::MultipleCommits(count) => write!(
+            Self::TooManyCommits { limit, count } => write!(
                 f,
-                "finite-decision module must contain exactly one commit declaration, found {count}"
+                "finite-decision module declares {count} commit pools, exceeding the limit of {limit}"
             ),
+            Self::DuplicateCommitName(name) => {
+                write!(f, "duplicate commit declaration name: '{name}'")
+            }
             Self::EmptyCommit(name) => {
                 write!(f, "commit declaration '{name}' has no candidate members")
             }
+            Self::TooManyDecides { limit, count } => write!(
+                f,
+                "finite-decision module declares {count} decide blocks, exceeding the limit of {limit}"
+            ),
+            Self::DuplicateDecideName(name) => {
+                write!(f, "duplicate decide/commit declaration name: '{name}'")
+            }
+            Self::EmptyDecide(name) => {
+                write!(f, "decide block '{name}' has no propose members")
+            }
+            Self::CandidateOwnedByDecide {
+                commit,
+                candidate,
+                decide,
+            } => write!(
+                f,
+                "commit '{commit}' references '{candidate}', which is declared inside decide block '{decide}' and cannot also be a commit candidate"
+            ),
+            Self::MultipleOtherwiseInDecide { decide } => write!(
+                f,
+                "decide '{decide}' has more than one 'otherwise' proposal; at most one is allowed per decide block"
+            ),
+            Self::AmbiguousFallbackPriorityInDecide {
+                decide,
+                otherwise,
+                explicit,
+            } => write!(
+                f,
+                "decide '{decide}' has both an 'otherwise' proposal ('{otherwise}') and a proposal with explicit priority 18446744073709551615 ('{explicit}'); the fallback is ambiguous"
+            ),
             Self::DuplicateProposalName(name) => write!(f, "duplicate proposal name: '{name}'"),
             Self::DuplicateInputName(name) => write!(f, "duplicate input name: '{name}'"),
             Self::DuplicateFunctionName(name) => write!(f, "duplicate function name: '{name}'"),
             Self::ReservedOperationName { name, kind } => write!(
                 f,
-                "{kind} '{name}' uses a name reserved for a built-in integer operation"
+                "{kind} '{name}' uses a name reserved for a built-in; rename it"
             ),
             Self::DuplicateItemName(name) => write!(f, "duplicate top-level item name: '{name}'"),
             Self::DuplicateFunctionParameter { func, param } => {
@@ -299,13 +542,6 @@ impl fmt::Display for FiniteDecisionLowerError {
                 write!(
                     f,
                     "parameter count in function '{func}' exceeds limit ({count} > {limit})"
-                )
-            }
-            Self::FunctionCycle { func, cycle } => {
-                write!(
-                    f,
-                    "function cycle detected involving '{func}': {}",
-                    cycle.join(" -> ")
                 )
             }
             Self::FunctionArityMismatch {
@@ -364,6 +600,24 @@ impl fmt::Display for FiniteDecisionLowerError {
             Self::UnsupportedInputType { name, ty } => {
                 write!(f, "unsupported input type for '{name}': '{ty}' (only Int, Bool, Str are supported)")
             }
+            Self::ListMaxOutOfRange { name, max, limit } => {
+                write!(
+                    f,
+                    "input '{name}' declares 'max {max}', which exceeds the limit of {limit}"
+                )
+            }
+            Self::NestedListNotAllowed { name } => {
+                write!(
+                    f,
+                    "input '{name}' declares a nested list element type, which is not supported"
+                )
+            }
+            Self::UnsupportedListElementType { name, ty } => {
+                write!(
+                    f,
+                    "unsupported list element type for input '{name}': '{ty}' (only Int, Bool, Str, or a closed nominal schema are supported)"
+                )
+            }
             Self::UnknownCandidateInCommit { commit, candidate } => {
                 write!(
                     f,
@@ -388,6 +642,49 @@ impl fmt::Display for FiniteDecisionLowerError {
             Self::UndeclaredFactRead { proposal, fact } => {
                 write!(f, "proposal '{proposal}' reads fact '{fact}' without declaring it as a dependency")
             }
+            Self::ForwardRuleRead {
+                reader_kind,
+                reader,
+                dep,
+            } => {
+                if dep == reader {
+                    write!(
+                        f,
+                        "{reader_kind} '{reader}' reads itself; rules can only read rules declared above them"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "{reader_kind} '{reader}' reads rule '{dep}', which is declared below it; rules can only read rules declared above them"
+                    )
+                }
+            }
+            Self::MultipleOtherwiseInCommit { commit } => {
+                write!(
+                    f,
+                    "commit '{commit}' has more than one 'otherwise' proposal; at most one is allowed per commit"
+                )
+            }
+            Self::AmbiguousFallbackPriority {
+                commit,
+                otherwise,
+                explicit,
+            } => {
+                write!(
+                    f,
+                    "commit '{commit}' has both an 'otherwise' proposal ('{otherwise}') and a proposal with explicit priority 18446744073709551615 ('{explicit}'); the fallback is ambiguous"
+                )
+            }
+            Self::ProposalInMultipleCommits {
+                candidate,
+                first_commit,
+                second_commit,
+            } => {
+                write!(
+                    f,
+                    "proposal '{candidate}' is a candidate in more than one commit ('{first_commit}' and '{second_commit}'); a proposal may be committed by at most one commit pool"
+                )
+            }
             Self::FunctionConstructorCollision { func, constructor } => {
                 write!(
                     f,
@@ -409,6 +706,67 @@ impl fmt::Display for FiniteDecisionLowerError {
 }
 
 impl std::error::Error for FiniteDecisionLowerError {}
+
+impl FiniteDecisionLowerError {
+    /// What this error is about, as `(item name, specific identifier)` — a
+    /// subject a [`brix_syntax::SourceMap`] built alongside the AST can
+    /// resolve to a line/column without the AST itself carrying spans.
+    ///
+    /// The item name identifies which top-level declaration to look up; the
+    /// identifier, when present, narrows the location to a specific token
+    /// inside it (e.g. proposal `a`'s dependency `y`). `None` overall means
+    /// this error is not naturally about one declaration (a module-wide
+    /// admissibility or resource-limit failure).
+    pub fn location_subject(&self) -> Option<(&str, Option<&str>)> {
+        match self {
+            Self::EmptyCommit(name) => Some((name, None)),
+            Self::DuplicateProposalName(name) => Some((name, None)),
+            Self::DuplicateInputName(name) => Some((name, None)),
+            Self::DuplicateFunctionName(name) => Some((name, None)),
+            Self::DuplicateItemName(name) => Some((name, None)),
+            Self::UnknownCandidateInCommit { commit, candidate } => Some((commit, Some(candidate))),
+            Self::DuplicateCandidateInCommit { commit, candidate } => {
+                Some((commit, Some(candidate)))
+            }
+            Self::UndeclaredDependency { proposal, dep } => Some((proposal, Some(dep))),
+            Self::ForwardOrSelfDependency { proposal, dep } => Some((proposal, Some(dep))),
+            Self::UndeclaredFactRead { proposal, fact } => Some((proposal, Some(fact))),
+            Self::DuplicateFunctionParameter { func, param } => Some((func, Some(param))),
+            Self::TooManyFunctionParams { func, .. } => Some((func, None)),
+            Self::FunctionArityMismatch { func, .. } => Some((func, None)),
+            Self::RuleFactReadInFunction { func, fact } => Some((func, Some(fact))),
+            Self::InputReadInFunction { func, input } => Some((func, Some(input))),
+            Self::GlobalLetReadInFunction { func, binding } => Some((func, Some(binding))),
+            Self::UnknownContractType { name } => Some((name, None)),
+            Self::InvalidSchema { name, .. } => Some((name, None)),
+            Self::UnsupportedInputType { name, .. } => Some((name, None)),
+            Self::FunctionConstructorCollision { func, .. } => Some((func, None)),
+            Self::ReservedOperationName { name, .. } => Some((name, None)),
+            Self::DuplicateCommitName(name) => Some((name, None)),
+            Self::DuplicateDecideName(name) => Some((name, None)),
+            Self::EmptyDecide(name) => Some((name, None)),
+            Self::TooManyDecides { .. } => None,
+            Self::CandidateOwnedByDecide {
+                commit, candidate, ..
+            } => Some((commit, Some(candidate))),
+            Self::MultipleOtherwiseInDecide { decide } => Some((decide, None)),
+            Self::AmbiguousFallbackPriorityInDecide {
+                decide, explicit, ..
+            } => Some((decide, Some(explicit))),
+            Self::ForwardRuleRead { reader, dep, .. } => Some((reader, Some(dep))),
+            Self::MultipleOtherwiseInCommit { commit } => Some((commit, None)),
+            Self::AmbiguousFallbackPriority {
+                commit, explicit, ..
+            } => Some((commit, Some(explicit))),
+            Self::ProposalInMultipleCommits {
+                candidate,
+                second_commit,
+                ..
+            } => Some((second_commit, Some(candidate))),
+            _ => None,
+        }
+    }
+}
 
 /// Helper function checking that expression nesting depth and node limits are respected.
 fn check_expr_bounds(
@@ -459,6 +817,26 @@ fn check_expr_bounds(
             }
             Ok(())
         }
+        ast::Expr::Lambda { body, .. } => check_expr_bounds(body, depth + 1, node_count),
+        ast::Expr::ListLit(items) => {
+            for item in items {
+                check_expr_bounds(item, depth + 1, node_count)?;
+            }
+            Ok(())
+        }
+        ast::Expr::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => {
+            for (_, source) in generators {
+                check_expr_bounds(source, depth + 1, node_count)?;
+            }
+            if let Some(w) = where_clause {
+                check_expr_bounds(w, depth + 1, node_count)?;
+            }
+            check_expr_bounds(yield_expr, depth + 1, node_count)
+        }
     }
 }
 
@@ -466,6 +844,11 @@ fn schema_root_name(ty: &ast::Ty) -> Option<&str> {
     match ty {
         ast::Ty::Named(name) => (!matches!(name.as_str(), "Int" | "Bool" | "Str")).then_some(name),
         ast::Ty::Graded(inner, _) => schema_root_name(inner),
+        // `List<T>` (ADR-0037): the schema that must be reachable is `T`'s,
+        // not a (nonexistent) config named "List" — a list input's element
+        // schema still needs its record/sum shape collected for element
+        // validation, exactly as if `T` had been declared directly.
+        ast::Ty::App(name, args) if name == "List" => args.first().and_then(schema_root_name),
         ast::Ty::App(name, _) => Some(name),
         _ => None,
     }
@@ -539,7 +922,10 @@ fn collect_schema(
     if !config.params.is_empty() {
         return Err(FiniteDecisionLowerError::InvalidSchema {
             name: name.to_string(),
-            detail: "generic configs are unsupported".to_string(),
+            detail: "a generic config (ADR-0042) may be used as an internal value, but cannot \
+                     be validated as an input or helper-contract schema: type parameters are \
+                     erased at evaluation, so there is nothing left to check a payload against"
+                .to_string(),
         });
     }
     let body = match &config.body {
@@ -756,7 +1142,11 @@ fn parse_contract(
         ast::Ty::App(name, _) => {
             return Err(FiniteDecisionLowerError::UnsupportedContractType {
                 ty: format!("{name}<...>"),
-                detail: "generic/parameterized types are not supported in finite-decision"
+                detail: "a parameterized type cannot appear in a function contract or input \
+                         declaration (ADR-0042): type parameters are erased at evaluation, so \
+                         there is no payload shape left to check against — write the contract \
+                         without a return/parameter annotation instead, or use the type only \
+                         as an internal (uncontracted) value"
                     .to_string(),
             });
         }
@@ -775,6 +1165,13 @@ fn parse_contract(
         L3ValueType::Sum(name) | L3ValueType::Record(name) => {
             Some(L3SchemaType::Named(name.clone()))
         }
+        // `parse_contract` above never produces `List`: `ast::Ty::App` (which
+        // is how `List<T>` parses) is rejected a few lines up as an
+        // unsupported contract type, so a helper parameter or return
+        // contract never names a list (ADR-0037 §Scope, ADR-0040).
+        L3ValueType::List => {
+            unreachable!("parse_contract never returns a List value type")
+        }
     };
     Ok(FiniteDecisionContract {
         ty: value_type,
@@ -783,107 +1180,227 @@ fn parse_contract(
     })
 }
 
-/// Collect function calls from an L3 expression for cycle detection.
-fn collect_function_calls(e: &L3ExprV2, calls: &mut BTreeSet<String>) {
+/// Collect every `RuleFact` name read by a lowered rule body, proposal guard,
+/// or proposal value whose dependency list was inferred (ADR-0038).
+///
+/// Written as an exhaustive match with **no wildcard arm**: a new
+/// [`L3ExprV2`] variant must be handled here explicitly, so an expression
+/// form this walker does not yet know about is a compile error at merge
+/// rather than a silently-missed dependency.
+fn collect_rule_fact_reads(e: &L3ExprV2, out: &mut BTreeSet<String>) {
     match e {
-        L3ExprV2::Call { func, args } => {
-            calls.insert(func.clone());
-            for a in args {
-                collect_function_calls(a, calls);
-            }
+        L3ExprV2::Int(_)
+        | L3ExprV2::Str(_)
+        | L3ExprV2::Bool(_)
+        | L3ExprV2::LetRef(_)
+        | L3ExprV2::NullaryVariant { .. } => {}
+        L3ExprV2::RuleFact(rule) => {
+            out.insert(rule.clone());
         }
         L3ExprV2::Ctor { args, .. } => {
             for a in args {
-                collect_function_calls(a, calls);
+                collect_rule_fact_reads(a, out);
             }
         }
         L3ExprV2::Record { fields, .. } => {
             for (_, v) in fields {
-                collect_function_calls(v, calls);
+                collect_rule_fact_reads(v, out);
             }
         }
-        L3ExprV2::Field(base, _) => collect_function_calls(base, calls),
-        // `IntDivMod` is a reserved operation, not a helper call, so it
-        // contributes no name here — only its operands are walked.
+        L3ExprV2::Field(base, _) => collect_rule_fact_reads(base, out),
         L3ExprV2::Arith(_, a, b)
         | L3ExprV2::Cmp(_, a, b)
         | L3ExprV2::IntDivMod(_, a, b)
         | L3ExprV2::And(a, b)
         | L3ExprV2::Or(a, b) => {
-            collect_function_calls(a, calls);
-            collect_function_calls(b, calls);
+            collect_rule_fact_reads(a, out);
+            collect_rule_fact_reads(b, out);
         }
-        L3ExprV2::Not(a) => {
-            collect_function_calls(a, calls);
-        }
+        L3ExprV2::Not(a) => collect_rule_fact_reads(a, out),
         L3ExprV2::Match { scrutinee, arms } => {
-            collect_function_calls(scrutinee, calls);
+            collect_rule_fact_reads(scrutinee, out);
             for (_, body) in arms {
-                collect_function_calls(body, calls);
+                collect_rule_fact_reads(body, out);
             }
         }
-        L3ExprV2::Int(_)
-        | L3ExprV2::Str(_)
-        | L3ExprV2::Bool(_)
-        | L3ExprV2::LetRef(_)
-        | L3ExprV2::RuleFact(_)
-        | L3ExprV2::NullaryVariant { .. } => {}
+        L3ExprV2::Call { args, .. } | L3ExprV2::ListLit(args) => {
+            for a in args {
+                collect_rule_fact_reads(a, out);
+            }
+        }
+        // Binders lower to `LetRef`, so only the list and body expressions
+        // can read rule facts (ADR-0040).
+        L3ExprV2::Fold { list, body, .. }
+        | L3ExprV2::Filter {
+            list, cond: body, ..
+        }
+        | L3ExprV2::Map { list, body, .. } => {
+            collect_rule_fact_reads(list, out);
+            collect_rule_fact_reads(body, out);
+        }
+        L3ExprV2::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => {
+            for (_, source) in generators {
+                collect_rule_fact_reads(source, out);
+            }
+            if let Some(w) = where_clause {
+                collect_rule_fact_reads(w, out);
+            }
+            collect_rule_fact_reads(yield_expr, out);
+        }
+        L3ExprV2::In(a, b) => {
+            collect_rule_fact_reads(a, out);
+            collect_rule_fact_reads(b, out);
+        }
+        L3ExprV2::Len(a) | L3ExprV2::Distinct(a) => collect_rule_fact_reads(a, out),
     }
 }
 
-enum DfsMark {
-    Visiting,
-    Visited,
+/// Canonicalize an inferred dependency list (ADR-0038): the declared entries
+/// as written (already deduplicated by the caller), then every rule actually
+/// read but not already declared, in rule declaration order — `rules_in_order`
+/// is the plan's already-lowered rules, so this is simply a filter.
+fn canonical_dependency_list(
+    declared: &[String],
+    read: &BTreeSet<String>,
+    rules_in_order: &[FiniteDecisionRule],
+) -> Vec<String> {
+    let mut out = declared.to_vec();
+    let declared_set: BTreeSet<&String> = declared.iter().collect();
+    for rule in rules_in_order {
+        if read.contains(&rule.name) && !declared_set.contains(&rule.name) {
+            out.push(rule.name.clone());
+        }
+    }
+    out
 }
 
-/// Detect direct and mutual function recursion cycles across all declared functions.
-fn detect_cycles(
-    call_graph: &BTreeMap<String, BTreeSet<String>>,
+/// Validate the `otherwise` fallback discipline within one commit pool
+/// (ADR-0038): at most one `otherwise` proposal, and it cannot coexist with
+/// an explicit `priority 18446744073709551615` proposal in the same pool.
+///
+/// Candidates that do not name a declared proposal are skipped here — that
+/// is reported separately by [`FiniteDecisionLowerError::UnknownCandidateInCommit`].
+fn check_otherwise_pool(
+    commit_name: &str,
+    candidates: &[String],
+    module: &ast::Module,
 ) -> Result<(), FiniteDecisionLowerError> {
-    let mut marks: BTreeMap<&str, DfsMark> = BTreeMap::new();
-    let mut path: Vec<&str> = Vec::new();
+    let propose_decls: BTreeMap<&str, &ast::ProposeDecl> = module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ast::Item::Propose(p) => Some((p.name.as_str(), p)),
+            _ => None,
+        })
+        .collect();
 
-    for start in call_graph.keys() {
-        if !marks.contains_key(start.as_str()) {
-            dfs_cycle(start.as_str(), call_graph, &mut marks, &mut path)?;
+    let mut otherwise_in_pool: Option<&str> = None;
+    let mut explicit_max_in_pool: Option<&str> = None;
+    for cand in candidates {
+        let Some(decl) = propose_decls.get(cand.as_str()) else {
+            continue;
+        };
+        if decl.otherwise {
+            if otherwise_in_pool.is_some() {
+                return Err(FiniteDecisionLowerError::MultipleOtherwiseInCommit {
+                    commit: commit_name.to_string(),
+                });
+            }
+            otherwise_in_pool = Some(cand.as_str());
+        } else if decl.priority == u64::MAX && explicit_max_in_pool.is_none() {
+            explicit_max_in_pool = Some(cand.as_str());
         }
+    }
+    if let (Some(otherwise_name), Some(explicit_name)) = (otherwise_in_pool, explicit_max_in_pool) {
+        return Err(FiniteDecisionLowerError::AmbiguousFallbackPriority {
+            commit: commit_name.to_string(),
+            otherwise: otherwise_name.to_string(),
+            explicit: explicit_name.to_string(),
+        });
     }
     Ok(())
 }
 
-fn dfs_cycle<'a>(
-    node: &'a str,
-    call_graph: &'a BTreeMap<String, BTreeSet<String>>,
-    marks: &mut BTreeMap<&'a str, DfsMark>,
-    path: &mut Vec<&'a str>,
+/// Validate the `otherwise` fallback discipline within one `decide` block
+/// (ADR-0043, following ADR-0038's per-pool rule): at most one `otherwise`
+/// proposal, and it cannot coexist with an explicit `priority
+/// 18446744073709551615` proposal in the same block.
+///
+/// Unlike [`check_otherwise_pool`], this reads directly from the block's own
+/// `ast::ProposeDecl`s rather than re-resolving names through `module.items`
+/// — a `decide` block's proposals are never top-level `ast::Item::Propose`s.
+fn check_otherwise_decide(
+    decide_name: &str,
+    proposals: &[ast::ProposeDecl],
 ) -> Result<(), FiniteDecisionLowerError> {
-    marks.insert(node, DfsMark::Visiting);
-    path.push(node);
-
-    if let Some(neighbors) = call_graph.get(node) {
-        for next in neighbors {
-            match marks.get(next.as_str()) {
-                Some(DfsMark::Visiting) => {
-                    let cycle_start = path.iter().position(|&x| x == next.as_str()).unwrap_or(0);
-                    let mut cycle: Vec<String> =
-                        path[cycle_start..].iter().map(|s| s.to_string()).collect();
-                    cycle.push(next.clone());
-                    return Err(FiniteDecisionLowerError::FunctionCycle {
-                        func: node.to_string(),
-                        cycle,
-                    });
-                }
-                Some(DfsMark::Visited) => {}
-                None => {
-                    dfs_cycle(next.as_str(), call_graph, marks, path)?;
-                }
+    let mut otherwise_in: Option<&str> = None;
+    let mut explicit_max_in: Option<&str> = None;
+    for p in proposals {
+        if p.otherwise {
+            if otherwise_in.is_some() {
+                return Err(FiniteDecisionLowerError::MultipleOtherwiseInDecide {
+                    decide: decide_name.to_string(),
+                });
             }
+            otherwise_in = Some(p.name.as_str());
+        } else if p.priority == u64::MAX && explicit_max_in.is_none() {
+            explicit_max_in = Some(p.name.as_str());
         }
     }
-
-    path.pop();
-    marks.insert(node, DfsMark::Visited);
+    if let (Some(otherwise_name), Some(explicit_name)) = (otherwise_in, explicit_max_in) {
+        return Err(
+            FiniteDecisionLowerError::AmbiguousFallbackPriorityInDecide {
+                decide: decide_name.to_string(),
+                otherwise: otherwise_name.to_string(),
+                explicit: explicit_name.to_string(),
+            },
+        );
+    }
     Ok(())
+}
+
+/// Map an `L3V2LowerError` from lowering a `decide` block's proposal
+/// guard/value into the matching [`FiniteDecisionLowerError`], mirroring the
+/// closures `ast::Item::Propose` lowering uses inline (ADR-0038, ADR-0043).
+fn map_decide_propose_err(
+    e: L3V2LowerError,
+    proposal: &str,
+    rule_names: &BTreeSet<String>,
+    all_rule_names: &BTreeSet<String>,
+    deps_declared: bool,
+) -> FiniteDecisionLowerError {
+    match e {
+        L3V2LowerError::UnresolvedReference(n) if rule_names.contains(&n) => {
+            FiniteDecisionLowerError::UndeclaredFactRead {
+                proposal: proposal.to_string(),
+                fact: n,
+            }
+        }
+        L3V2LowerError::UnresolvedReference(n) if !deps_declared && all_rule_names.contains(&n) => {
+            FiniteDecisionLowerError::ForwardRuleRead {
+                reader_kind: "proposal",
+                reader: proposal.to_string(),
+                dep: n,
+            }
+        }
+        L3V2LowerError::FunctionArityMismatch {
+            func,
+            expected,
+            found,
+        } => FiniteDecisionLowerError::FunctionArityMismatch {
+            func,
+            expected,
+            found,
+        },
+        L3V2LowerError::DuplicateMatchBinder(binder) => {
+            FiniteDecisionLowerError::DuplicateMatchBinder(binder)
+        }
+        other => FiniteDecisionLowerError::ExprError(other),
+    }
 }
 
 /// Lower a parsed syntax module into a validated [`FiniteDecisionPlan`].
@@ -900,6 +1417,7 @@ pub fn lower_finite_decision_plan(
 
     // Pass 0: check item admissibility.
     let mut commit_items: Vec<&ast::CommitDecl> = Vec::new();
+    let mut decide_items: Vec<&ast::DecideDecl> = Vec::new();
     let mut fn_count = 0;
     for item in &module.items {
         match item {
@@ -914,6 +1432,9 @@ pub fn lower_finite_decision_plan(
             }
             ast::Item::Commit(c) => {
                 commit_items.push(c);
+            }
+            ast::Item::Decide(d) => {
+                decide_items.push(d);
             }
             ast::Item::Regime(r) => {
                 return Err(FiniteDecisionLowerError::ItemNotAllowed(format!(
@@ -941,28 +1462,78 @@ pub fn lower_finite_decision_plan(
         });
     }
 
-    // Exactly one nonempty commit.
-    if commit_items.is_empty() {
+    // At least one nonempty commit, OR at least one decide block (ADR-0030,
+    // ADR-0043); ADR-0039 lifts the earlier "exactly one" restriction on
+    // `commit` to "one or more, up to MAX_COMMIT_COUNT", each independently
+    // nonempty, uniquely named, and — across the whole module — claiming
+    // disjoint sets of candidates. A module made up entirely of `decide`
+    // blocks (no top-level `commit` at all) is valid: each block is already
+    // its own implicit per-entity commit pool.
+    if commit_items.is_empty() && decide_items.is_empty() {
         return Err(FiniteDecisionLowerError::NoCommit);
     }
-    if commit_items.len() > 1 {
-        return Err(FiniteDecisionLowerError::MultipleCommits(
-            commit_items.len(),
-        ));
+    if commit_items.len() > MAX_COMMIT_COUNT {
+        return Err(FiniteDecisionLowerError::TooManyCommits {
+            limit: MAX_COMMIT_COUNT,
+            count: commit_items.len(),
+        });
     }
-    let commit_decl = commit_items[0];
-    if commit_decl.candidates.is_empty() {
-        return Err(FiniteDecisionLowerError::EmptyCommit(
-            commit_decl.name.clone(),
-        ));
+    let mut commit_names_seen: BTreeSet<String> = BTreeSet::new();
+    // candidate name -> the (first, in declaration order) commit that claims it.
+    let mut candidate_owner: BTreeMap<String, String> = BTreeMap::new();
+    for commit_decl in &commit_items {
+        if !commit_names_seen.insert(commit_decl.name.clone()) {
+            return Err(FiniteDecisionLowerError::DuplicateCommitName(
+                commit_decl.name.clone(),
+            ));
+        }
+        if commit_decl.candidates.is_empty() {
+            return Err(FiniteDecisionLowerError::EmptyCommit(
+                commit_decl.name.clone(),
+            ));
+        }
+        let mut commit_candidates_seen = BTreeSet::new();
+        for cand in &commit_decl.candidates {
+            if !commit_candidates_seen.insert(cand.clone()) {
+                return Err(FiniteDecisionLowerError::DuplicateCandidateInCommit {
+                    commit: commit_decl.name.clone(),
+                    candidate: cand.clone(),
+                });
+            }
+            if let Some(first_commit) = candidate_owner.get(cand) {
+                return Err(FiniteDecisionLowerError::ProposalInMultipleCommits {
+                    candidate: cand.clone(),
+                    first_commit: first_commit.clone(),
+                    second_commit: commit_decl.name.clone(),
+                });
+            }
+            candidate_owner.insert(cand.clone(), commit_decl.name.clone());
+        }
     }
-    let mut commit_candidates_seen = BTreeSet::new();
-    for cand in &commit_decl.candidates {
-        if !commit_candidates_seen.insert(cand.clone()) {
-            return Err(FiniteDecisionLowerError::DuplicateCandidateInCommit {
-                commit: commit_decl.name.clone(),
-                candidate: cand.clone(),
-            });
+
+    // `decide` blocks (ADR-0043): zero or more, each an independent
+    // per-entity commit pool. A bound like `commit`'s, and unique names in
+    // the same namespace `commit` names occupy (both are readable only via
+    // `show`).
+    if decide_items.len() > MAX_DECIDE_COUNT {
+        return Err(FiniteDecisionLowerError::TooManyDecides {
+            limit: MAX_DECIDE_COUNT,
+            count: decide_items.len(),
+        });
+    }
+    let mut decide_names_seen: BTreeSet<String> = BTreeSet::new();
+    for decide_decl in &decide_items {
+        if commit_names_seen.contains(&decide_decl.name)
+            || !decide_names_seen.insert(decide_decl.name.clone())
+        {
+            return Err(FiniteDecisionLowerError::DuplicateDecideName(
+                decide_decl.name.clone(),
+            ));
+        }
+        if decide_decl.proposals.is_empty() {
+            return Err(FiniteDecisionLowerError::EmptyDecide(
+                decide_decl.name.clone(),
+            ));
         }
     }
 
@@ -989,12 +1560,23 @@ pub fn lower_finite_decision_plan(
             ast::Item::Let(l) => {
                 all_let_names.insert(l.name.clone());
             }
+            // `List<T> max N` is the built-in bounded list in a decision
+            // program (ADR-0037); a user `config List` would be shadowed at
+            // every use, so it is refused here instead.
+            ast::Item::Config(c) if c.name == "List" => {
+                return Err(FiniteDecisionLowerError::ReservedOperationName {
+                    name: c.name.clone(),
+                    kind: "config",
+                });
+            }
             ast::Item::Config(c) => match &c.body {
                 ast::ConfigBody::Sum(variants) => {
                     sum_configs.insert(c.name.clone());
                     let mut var_names = Vec::new();
                     for v in variants {
-                        if DivModOpV2::from_name(&v.name).is_some() {
+                        if DivModOpV2::from_name(&v.name).is_some()
+                            || is_reserved_list_operation_name(&v.name)
+                        {
                             return Err(FiniteDecisionLowerError::ReservedOperationName {
                                 name: v.name.clone(),
                                 kind: "constructor",
@@ -1035,7 +1617,8 @@ pub fn lower_finite_decision_plan(
 
     for item in &module.items {
         if let ast::Item::Fn(f) = item {
-            if DivModOpV2::from_name(&f.name).is_some() {
+            if DivModOpV2::from_name(&f.name).is_some() || is_reserved_list_operation_name(&f.name)
+            {
                 return Err(FiniteDecisionLowerError::ReservedOperationName {
                     name: f.name.clone(),
                     kind: "function",
@@ -1110,12 +1693,14 @@ pub fn lower_finite_decision_plan(
     let mut all_top_level_names: BTreeSet<String> = BTreeSet::new();
 
     let mut configs = Vec::new();
+    let mut generic_configs: Vec<(String, Vec<String>)> = Vec::new();
     let mut inputs = Vec::new();
     let mut functions = Vec::new();
     let mut lets = Vec::new();
     let mut rules = Vec::new();
     let mut proposals = Vec::new();
     let mut shows = Vec::new();
+    let mut decides: Vec<FiniteDecisionDecide> = Vec::new();
 
     let map_lower_err = |e: L3V2LowerError| match e {
         L3V2LowerError::FunctionArityMismatch {
@@ -1151,8 +1736,8 @@ pub fn lower_finite_decision_plan(
                         inp.name.clone(),
                     ));
                 }
-                let ty = match &inp.ty {
-                    ast::Ty::Named(n) => match n.as_str() {
+                let resolve_named = |name: &str| -> Result<L3ValueType, FiniteDecisionLowerError> {
+                    Ok(match name {
                         "Int" => L3ValueType::Int,
                         "Bool" => L3ValueType::Bool,
                         "Str" => L3ValueType::Str,
@@ -1174,7 +1759,60 @@ pub fn lower_finite_decision_plan(
                                 ty: other.to_string(),
                             });
                         }
-                    },
+                    })
+                };
+                let (ty, list) = match &inp.ty {
+                    // `List<T> max N` (ADR-0037).
+                    ast::Ty::App(app_name, args) if app_name == "List" => {
+                        if args.len() != 1 {
+                            return Err(FiniteDecisionLowerError::UnsupportedInputType {
+                                name: inp.name.clone(),
+                                ty: format!("List<{} args>", args.len()),
+                            });
+                        }
+                        let element = match &args[0] {
+                            ast::Ty::Named(n) => match resolve_named(n)? {
+                                L3ValueType::Int => L3SchemaType::Int,
+                                L3ValueType::Bool => L3SchemaType::Bool,
+                                L3ValueType::Str => L3SchemaType::Str,
+                                L3ValueType::Sum(name) | L3ValueType::Record(name) => {
+                                    L3SchemaType::Named(name)
+                                }
+                                L3ValueType::List => {
+                                    unreachable!("resolve_named never returns List")
+                                }
+                            },
+                            ast::Ty::App(inner, _) if inner == "List" => {
+                                return Err(FiniteDecisionLowerError::NestedListNotAllowed {
+                                    name: inp.name.clone(),
+                                });
+                            }
+                            other => {
+                                return Err(FiniteDecisionLowerError::UnsupportedListElementType {
+                                    name: inp.name.clone(),
+                                    ty: format!("{other:?}"),
+                                });
+                            }
+                        };
+                        // The parser requires `max` on every `List<T>` input
+                        // declaration (a missing bound is a parse error), so
+                        // `list_max` is always `Some` here.
+                        let max = inp
+                            .list_max
+                            .expect("parser requires 'max' on every List<T> input declaration");
+                        if max > crate::input::MAX_INPUT_LIST_MAX {
+                            return Err(FiniteDecisionLowerError::ListMaxOutOfRange {
+                                name: inp.name.clone(),
+                                max,
+                                limit: crate::input::MAX_INPUT_LIST_MAX,
+                            });
+                        }
+                        (
+                            L3ValueType::List,
+                            Some(FiniteDecisionListDecl { element, max }),
+                        )
+                    }
+                    ast::Ty::Named(n) => (resolve_named(n)?, None),
                     other => {
                         return Err(FiniteDecisionLowerError::UnsupportedInputType {
                             name: inp.name.clone(),
@@ -1186,11 +1824,20 @@ pub fn lower_finite_decision_plan(
                     ordinal: inputs.len() as u64,
                     name: inp.name.clone(),
                     ty,
+                    list,
                 });
             }
             ast::Item::Config(c) => {
                 if !all_top_level_names.insert(c.name.clone()) {
                     return Err(FiniteDecisionLowerError::DuplicateItemName(c.name.clone()));
+                }
+                // A parameterized config (ADR-0042): its values are ordinary
+                // nominal constructors/records at runtime, so nothing else in
+                // this loop treats `c.params` specially — the type
+                // parameters are erased for evaluation. Only recorded so
+                // identity distinguishes it (see `generic_configs` doc).
+                if !c.params.is_empty() {
+                    generic_configs.push((c.name.clone(), c.params.clone()));
                 }
                 if !has_functions {
                     if let ast::ConfigBody::Sum(variants) = &c.body {
@@ -1321,29 +1968,43 @@ pub fn lower_finite_decision_plan(
                     check_expr_bounds(&r.body, 0, &mut node_count)?;
                 }
 
-                let mut depends_on: Vec<String> = Vec::new();
-                for param in &r.params {
-                    if param.name == r.name {
-                        return Err(FiniteDecisionLowerError::RuleDependencyError(
-                            L3V2LowerError::ForwardOrSelfDependency {
-                                rule: r.name.clone(),
-                                depends_on: param.name.clone(),
-                            },
-                        ));
-                    }
-                    if !rule_names.contains(&param.name) {
-                        return Err(FiniteDecisionLowerError::RuleDependencyError(
-                            L3V2LowerError::UndeclaredDependency {
-                                rule: r.name.clone(),
-                                param: param.name.clone(),
-                            },
-                        ));
-                    }
-                    if !depends_on.contains(&param.name) {
-                        depends_on.push(param.name.clone());
+                // Explicit (even empty `()`) dependency list: keep today's
+                // meaning exactly — only the declared rules are readable, and
+                // every entry must already name an earlier rule. An omitted
+                // list instead infers from every rule the body actually
+                // reads (ADR-0038).
+                let mut declared_deps: Vec<String> = Vec::new();
+                if r.params_declared {
+                    for param in &r.params {
+                        if param.name == r.name {
+                            return Err(FiniteDecisionLowerError::RuleDependencyError(
+                                L3V2LowerError::ForwardOrSelfDependency {
+                                    rule: r.name.clone(),
+                                    depends_on: param.name.clone(),
+                                },
+                            ));
+                        }
+                        if !rule_names.contains(&param.name) {
+                            return Err(FiniteDecisionLowerError::RuleDependencyError(
+                                L3V2LowerError::UndeclaredDependency {
+                                    rule: r.name.clone(),
+                                    param: param.name.clone(),
+                                },
+                            ));
+                        }
+                        if !declared_deps.contains(&param.name) {
+                            declared_deps.push(param.name.clone());
+                        }
                     }
                 }
-                let readable: BTreeSet<String> = depends_on.iter().cloned().collect();
+                let readable: BTreeSet<String> = if r.params_declared {
+                    declared_deps.iter().cloned().collect()
+                } else {
+                    // Every rule declared above this one is readable; the
+                    // walk below over the lowered body recovers exactly
+                    // which ones were actually read.
+                    rule_names.clone()
+                };
                 let mut visible_bindings = let_names.clone();
                 visible_bindings.extend(input_names.iter().cloned());
                 let body = lower_expr_v2(
@@ -1366,6 +2027,15 @@ pub fn lower_finite_decision_plan(
                             },
                         )
                     }
+                    L3V2LowerError::UnresolvedReference(n)
+                        if !r.params_declared && all_rule_names.contains(&n) =>
+                    {
+                        FiniteDecisionLowerError::ForwardRuleRead {
+                            reader_kind: "rule",
+                            reader: r.name.clone(),
+                            dep: n,
+                        }
+                    }
                     L3V2LowerError::FunctionArityMismatch {
                         func,
                         expected,
@@ -1385,6 +2055,14 @@ pub fn lower_finite_decision_plan(
                     check_exhaustive_expr(&body, &sum_of_variant, &variants_of_sum)
                         .map_err(FiniteDecisionLowerError::ExprError)?;
                 }
+
+                let depends_on = if r.params_declared {
+                    declared_deps
+                } else {
+                    let mut read = BTreeSet::new();
+                    collect_rule_fact_reads(&body, &mut read);
+                    canonical_dependency_list(&[], &read, &rules)
+                };
 
                 rule_names.insert(r.name.clone());
                 rules.push(FiniteDecisionRule {
@@ -1410,25 +2088,32 @@ pub fn lower_finite_decision_plan(
                     check_expr_bounds(&p.value, 0, &mut node_count)?;
                 }
 
-                let mut deps: Vec<String> = Vec::new();
-                for dep in &p.deps {
-                    if dep == &p.name {
-                        return Err(FiniteDecisionLowerError::ForwardOrSelfDependency {
-                            proposal: p.name.clone(),
-                            dep: dep.clone(),
-                        });
-                    }
-                    if !rule_names.contains(dep) {
-                        return Err(FiniteDecisionLowerError::UndeclaredDependency {
-                            proposal: p.name.clone(),
-                            dep: dep.clone(),
-                        });
-                    }
-                    if !deps.contains(dep) {
-                        deps.push(dep.clone());
+                // Same explicit-vs-inferred split as `rule` (ADR-0038).
+                let mut declared_deps: Vec<String> = Vec::new();
+                if p.deps_declared {
+                    for dep in &p.deps {
+                        if dep == &p.name {
+                            return Err(FiniteDecisionLowerError::ForwardOrSelfDependency {
+                                proposal: p.name.clone(),
+                                dep: dep.clone(),
+                            });
+                        }
+                        if !rule_names.contains(dep) {
+                            return Err(FiniteDecisionLowerError::UndeclaredDependency {
+                                proposal: p.name.clone(),
+                                dep: dep.clone(),
+                            });
+                        }
+                        if !declared_deps.contains(dep) {
+                            declared_deps.push(dep.clone());
+                        }
                     }
                 }
-                let readable: BTreeSet<String> = deps.iter().cloned().collect();
+                let readable: BTreeSet<String> = if p.deps_declared {
+                    declared_deps.iter().cloned().collect()
+                } else {
+                    rule_names.clone()
+                };
                 let mut visible_bindings = let_names.clone();
                 visible_bindings.extend(input_names.iter().cloned());
                 let guard = lower_expr_v2(
@@ -1447,6 +2132,15 @@ pub fn lower_finite_decision_plan(
                         FiniteDecisionLowerError::UndeclaredFactRead {
                             proposal: p.name.clone(),
                             fact: n,
+                        }
+                    }
+                    L3V2LowerError::UnresolvedReference(n)
+                        if !p.deps_declared && all_rule_names.contains(&n) =>
+                    {
+                        FiniteDecisionLowerError::ForwardRuleRead {
+                            reader_kind: "proposal",
+                            reader: p.name.clone(),
+                            dep: n,
                         }
                     }
                     L3V2LowerError::FunctionArityMismatch {
@@ -1487,6 +2181,15 @@ pub fn lower_finite_decision_plan(
                             fact: n,
                         }
                     }
+                    L3V2LowerError::UnresolvedReference(n)
+                        if !p.deps_declared && all_rule_names.contains(&n) =>
+                    {
+                        FiniteDecisionLowerError::ForwardRuleRead {
+                            reader_kind: "proposal",
+                            reader: p.name.clone(),
+                            dep: n,
+                        }
+                    }
                     L3V2LowerError::FunctionArityMismatch {
                         func,
                         expected,
@@ -1507,6 +2210,15 @@ pub fn lower_finite_decision_plan(
                         .map_err(FiniteDecisionLowerError::ExprError)?;
                 }
 
+                let deps = if p.deps_declared {
+                    declared_deps
+                } else {
+                    let mut read = BTreeSet::new();
+                    collect_rule_fact_reads(&guard, &mut read);
+                    collect_rule_fact_reads(&value, &mut read);
+                    canonical_dependency_list(&[], &read, &rules)
+                };
+
                 proposals.push(FiniteDecisionProposal {
                     ordinal: proposals.len() as u64,
                     name: p.name.clone(),
@@ -1524,11 +2236,27 @@ pub fn lower_finite_decision_plan(
 
                 let mut visible_bindings = let_names.clone();
                 visible_bindings.extend(input_names.iter().cloned());
+                // A `show` runs conceptually *after* the full deliberation
+                // cycle (see `FiniteDecisionRuntime::evaluate_shows_exprs`),
+                // so it can additionally name the commit's own declaration —
+                // `show shipping` for `commit shipping from (...)` reads the
+                // decided candidate's value, exactly like an ordinary rule
+                // fact reference (`RuleFact`). It resolves once evaluation
+                // binds a fact under the commit's name; a quiescent run
+                // (no candidate selected) leaves that name unbound, which
+                // faults the show rather than the committed decision. A
+                // `decide` block's own name is readable the same way
+                // (ADR-0043): `show status` for `decide status for o in
+                // orders {...}` reads the list of decided values in element
+                // order, bound once every instance has settled.
+                let mut show_readable = rule_names.clone();
+                show_readable.extend(commit_items.iter().map(|c| c.name.clone()));
+                show_readable.extend(decide_items.iter().map(|d| d.name.clone()));
                 let show = lower_expr_v2(
                     expr,
                     &visible_bindings,
                     &BTreeSet::new(),
-                    &rule_names,
+                    &show_readable,
                     &nullary,
                     &variants_of,
                     &function_arities,
@@ -1547,18 +2275,177 @@ pub fn lower_finite_decision_plan(
             ast::Item::Commit(_) => {
                 // Handled via commit_decl.
             }
+            ast::Item::Decide(d) => {
+                // The block's own name lives in the same namespace as a
+                // commit pool's name (both are readable only via `show`);
+                // the pass-0 uniqueness check above already rejected a
+                // collision with another `decide` or `commit`, so this only
+                // guards against colliding with an ordinary top-level item.
+                if !all_top_level_names.insert(d.name.clone()) {
+                    return Err(FiniteDecisionLowerError::DuplicateItemName(d.name.clone()));
+                }
+                if bounded {
+                    let mut node_count = 0;
+                    check_expr_bounds(&d.list, 0, &mut node_count)?;
+                }
+
+                let mut visible_bindings = let_names.clone();
+                visible_bindings.extend(input_names.iter().cloned());
+                let list = lower_expr_v2(
+                    &d.list,
+                    &visible_bindings,
+                    &BTreeSet::new(),
+                    &rule_names,
+                    &nullary,
+                    &variants_of,
+                    &function_arities,
+                    true,
+                    has_functions,
+                )
+                .map_err(map_lower_err)?;
+
+                if bounded {
+                    check_exhaustive_expr(&list, &sum_of_variant, &variants_of_sum)
+                        .map_err(FiniteDecisionLowerError::ExprError)?;
+                }
+
+                check_otherwise_decide(&d.name, &d.proposals)?;
+
+                let mut binder_locals = BTreeSet::new();
+                binder_locals.insert(d.binder.clone());
+
+                let mut block_proposals = Vec::with_capacity(d.proposals.len());
+                for p in &d.proposals {
+                    if !proposal_names.insert(p.name.clone()) {
+                        return Err(FiniteDecisionLowerError::DuplicateProposalName(
+                            p.name.clone(),
+                        ));
+                    }
+                    if !all_top_level_names.insert(p.name.clone()) {
+                        return Err(FiniteDecisionLowerError::DuplicateItemName(p.name.clone()));
+                    }
+                    if bounded {
+                        let mut node_count = 0;
+                        check_expr_bounds(&p.guard, 0, &mut node_count)?;
+                        node_count = 0;
+                        check_expr_bounds(&p.value, 0, &mut node_count)?;
+                    }
+
+                    let mut declared_deps: Vec<String> = Vec::new();
+                    if p.deps_declared {
+                        for dep in &p.deps {
+                            if dep == &p.name {
+                                return Err(FiniteDecisionLowerError::ForwardOrSelfDependency {
+                                    proposal: p.name.clone(),
+                                    dep: dep.clone(),
+                                });
+                            }
+                            if !rule_names.contains(dep) {
+                                return Err(FiniteDecisionLowerError::UndeclaredDependency {
+                                    proposal: p.name.clone(),
+                                    dep: dep.clone(),
+                                });
+                            }
+                            if !declared_deps.contains(dep) {
+                                declared_deps.push(dep.clone());
+                            }
+                        }
+                    }
+                    let readable: BTreeSet<String> = if p.deps_declared {
+                        declared_deps.iter().cloned().collect()
+                    } else {
+                        rule_names.clone()
+                    };
+
+                    let guard = lower_expr_v2(
+                        &p.guard,
+                        &visible_bindings,
+                        &binder_locals,
+                        &readable,
+                        &nullary,
+                        &variants_of,
+                        &function_arities,
+                        true,
+                        has_functions,
+                    )
+                    .map_err(|e| {
+                        map_decide_propose_err(
+                            e,
+                            &p.name,
+                            &rule_names,
+                            &all_rule_names,
+                            p.deps_declared,
+                        )
+                    })?;
+
+                    if bounded {
+                        check_exhaustive_expr(&guard, &sum_of_variant, &variants_of_sum)
+                            .map_err(FiniteDecisionLowerError::ExprError)?;
+                    }
+
+                    let value = lower_expr_v2(
+                        &p.value,
+                        &visible_bindings,
+                        &binder_locals,
+                        &readable,
+                        &nullary,
+                        &variants_of,
+                        &function_arities,
+                        true,
+                        has_functions,
+                    )
+                    .map_err(|e| {
+                        map_decide_propose_err(
+                            e,
+                            &p.name,
+                            &rule_names,
+                            &all_rule_names,
+                            p.deps_declared,
+                        )
+                    })?;
+
+                    if bounded {
+                        check_exhaustive_expr(&value, &sum_of_variant, &variants_of_sum)
+                            .map_err(FiniteDecisionLowerError::ExprError)?;
+                    }
+
+                    let deps = if p.deps_declared {
+                        declared_deps
+                    } else {
+                        let mut read = BTreeSet::new();
+                        collect_rule_fact_reads(&guard, &mut read);
+                        collect_rule_fact_reads(&value, &mut read);
+                        canonical_dependency_list(&[], &read, &rules)
+                    };
+
+                    block_proposals.push(FiniteDecisionProposal {
+                        ordinal: block_proposals.len() as u64,
+                        name: p.name.clone(),
+                        deps,
+                        priority: p.priority,
+                        guard,
+                        value,
+                    });
+                }
+
+                decides.push(FiniteDecisionDecide {
+                    name: d.name.clone(),
+                    binder: d.binder.clone(),
+                    list,
+                    proposals: block_proposals,
+                });
+            }
             _ => unreachable!("pass 0 filtered unexpected items"),
         }
     }
 
-    // Cycle detection across all declared functions.
-    let mut call_graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for f in &functions {
-        let mut calls = BTreeSet::new();
-        collect_function_calls(&f.body, &mut calls);
-        call_graph.insert(f.name.clone(), calls);
-    }
-    detect_cycles(&call_graph)?;
+    // Direct and mutual recursion among functions is admitted (ADR-0042,
+    // superseding ADR-0032's refusal): a call graph cycle is no longer a
+    // lowering error. Termination is the evaluator's business — the shared
+    // call-depth and step budgets in `l3_v2::EvalBudget` fail a
+    // non-terminating (or merely too-deep) call chain closed to
+    // `Unknown(EvalFault::CallDepthExceeded | ResourceExhausted)` rather than
+    // refusing the program outright or overflowing the native stack.
 
     // Exhaustiveness check over all function bodies.
     for f in &functions {
@@ -1566,20 +2453,48 @@ pub fn lower_finite_decision_plan(
             .map_err(FiniteDecisionLowerError::ExprError)?;
     }
 
-    // Every candidate in commit must reference a declared proposal.
-    for cand in &commit_decl.candidates {
-        if !proposal_names.contains(cand) {
-            return Err(FiniteDecisionLowerError::UnknownCandidateInCommit {
-                commit: commit_decl.name.clone(),
-                candidate: cand.clone(),
-            });
+    // Every candidate in every commit must reference a declared proposal
+    // (ADR-0039: checked per pool, over all pools).
+    for commit_decl in &commit_items {
+        for cand in &commit_decl.candidates {
+            if !proposal_names.contains(cand) {
+                return Err(FiniteDecisionLowerError::UnknownCandidateInCommit {
+                    commit: commit_decl.name.clone(),
+                    candidate: cand.clone(),
+                });
+            }
+            // A `decide`-scoped proposal (ADR-0043) is implicitly owned by
+            // its own block's per-entity pools and can never also be a
+            // `commit` candidate, even though its name is already known to
+            // `proposal_names` above.
+            if let Some(owner) = decides
+                .iter()
+                .find(|d| d.proposals.iter().any(|p| p.name == *cand))
+            {
+                return Err(FiniteDecisionLowerError::CandidateOwnedByDecide {
+                    commit: commit_decl.name.clone(),
+                    candidate: cand.clone(),
+                    decide: owner.name.clone(),
+                });
+            }
         }
+
+        // `otherwise` fallback validation (ADR-0038): at most one `otherwise`
+        // proposal per commit pool, and it cannot coexist in the same pool
+        // with an explicit `priority 18446744073709551615` — both would be
+        // that pool's fallback of last resort, so which one applies is
+        // ambiguous. Independent per pool (ADR-0039): each commit pool may
+        // separately have its own `otherwise`.
+        check_otherwise_pool(&commit_decl.name, &commit_decl.candidates, module)?;
     }
 
-    let commit = FiniteDecisionCommit {
-        name: commit_decl.name.clone(),
-        candidates: commit_decl.candidates.clone(),
-    };
+    let commits: Vec<FiniteDecisionCommit> = commit_items
+        .iter()
+        .map(|commit_decl| FiniteDecisionCommit {
+            name: commit_decl.name.clone(),
+            candidates: commit_decl.candidates.clone(),
+        })
+        .collect();
 
     let plan = FiniteDecisionPlan {
         profile: FINITE_DECISION_PROFILE.to_string(),
@@ -1589,9 +2504,11 @@ pub fn lower_finite_decision_plan(
         lets,
         rules,
         proposals,
-        commit,
+        commits,
+        decides,
         shows,
         schemas,
+        generic_configs,
     };
     super::boolean_types::check(&plan, module)?;
     Ok(plan)
@@ -1743,6 +2660,63 @@ fn encode_expr_v2(w: &mut CanonWriter, e: &L3ExprV2) {
             encode_expr_v2(w, a);
             encode_expr_v2(w, b);
         }),
+        // Ordinal 17 (ADR-0037): op (0=sum,1=count,2=all,3=any,4=min,5=max —
+        // 4/5 are ADR-0040's extension), then the list expression, binder
+        // identifier, and body expression.
+        L3ExprV2::Fold {
+            op,
+            list,
+            binder,
+            body,
+        } => w.write_enum(17, |w| {
+            w.write_uint(op.ordinal());
+            encode_expr_v2(w, list);
+            w.write_ident(binder);
+            encode_expr_v2(w, body);
+        }),
+        // Ordinals 18-24 (ADR-0040).
+        L3ExprV2::Filter { list, binder, cond } => w.write_enum(18, |w| {
+            encode_expr_v2(w, list);
+            w.write_ident(binder);
+            encode_expr_v2(w, cond);
+        }),
+        L3ExprV2::Map { list, binder, body } => w.write_enum(19, |w| {
+            encode_expr_v2(w, list);
+            w.write_ident(binder);
+            encode_expr_v2(w, body);
+        }),
+        L3ExprV2::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => w.write_enum(20, |w| {
+            w.write_uint(generators.len() as u64);
+            for (binder, source) in generators {
+                w.write_ident(binder);
+                encode_expr_v2(w, source);
+            }
+            match where_clause {
+                None => w.write_enum(0, |_| {}),
+                Some(wc) => w.write_enum(1, |w| encode_expr_v2(w, wc)),
+            }
+            encode_expr_v2(w, yield_expr);
+        }),
+        L3ExprV2::ListLit(items) => w.write_enum(21, |w| {
+            w.write_uint(items.len() as u64);
+            for item in items {
+                encode_expr_v2(w, item);
+            }
+        }),
+        L3ExprV2::In(a, b) => w.write_enum(22, |w| {
+            encode_expr_v2(w, a);
+            encode_expr_v2(w, b);
+        }),
+        L3ExprV2::Len(a) => w.write_enum(23, |w| {
+            encode_expr_v2(w, a);
+        }),
+        L3ExprV2::Distinct(a) => w.write_enum(24, |w| {
+            encode_expr_v2(w, a);
+        }),
     }
 }
 
@@ -1753,6 +2727,18 @@ fn encode_input_type(w: &mut CanonWriter, ty: &L3ValueType) {
         L3ValueType::Str => w.write_enum(2, |_| {}),
         L3ValueType::Sum(nominal) => w.write_enum(3, |w| w.write_ident(nominal)),
         L3ValueType::Record(nominal) => w.write_enum(4, |w| w.write_ident(nominal)),
+        // Ordinal 5 is encoded directly by the inputs loop in
+        // `finite_decision_program_preimage`, which has access to the
+        // input's `list` declaration (element type and `max`) that this flat
+        // marker does not carry — see `FiniteDecisionInput::list`. Every
+        // `FiniteDecisionInput` with `ty == List` is constructed with
+        // `list: Some(_)`, so that call site never reaches this function with
+        // a `List` value in the first place.
+        L3ValueType::List => {
+            unreachable!(
+                "List input types are encoded via FiniteDecisionInput::list, not encode_input_type"
+            )
+        }
     }
 }
 
@@ -1794,6 +2780,11 @@ fn encode_value_type(w: &mut CanonWriter, ty: &L3ValueType) {
         L3ValueType::Str => w.write_enum(2, |_| {}),
         L3ValueType::Sum(nominal) => w.write_enum(3, |w| w.write_ident(nominal)),
         L3ValueType::Record(nominal) => w.write_enum(4, |w| w.write_ident(nominal)),
+        // Only used for function parameter/return contracts, which never
+        // carry `List` — see `parse_contract`'s handling of `ast::Ty::App`.
+        L3ValueType::List => {
+            unreachable!("function contracts never carry a List value type")
+        }
     }
 }
 
@@ -1844,6 +2835,23 @@ pub fn finite_decision_program_preimage(plan: &FiniteDecisionPlan) -> Vec<u8> {
         }
     }
 
+    // Generic config declarations (ADR-0042):
+    // Bound into program identity only when at least one config declares
+    // type parameters. When none do, omitted to maintain byte-for-byte
+    // preimage and ProgramId compatibility with every earlier program — type
+    // parameters did not exist as a concept any earlier profile encoded.
+    if !plan.generic_configs.is_empty() {
+        w.write_tag("brix.l3.finite-decision.generic-configs@1");
+        w.write_uint(plan.generic_configs.len() as u64);
+        for (name, params) in &plan.generic_configs {
+            w.write_ident(name);
+            w.write_uint(params.len() as u64);
+            for param in params {
+                w.write_ident(param);
+            }
+        }
+    }
+
     // Inputs (ADR-0031):
     // Bound into program identity when present. When empty, omitted to maintain
     // byte-for-byte preimage and ProgramId compatibility with alpha.2 programs.
@@ -1853,7 +2861,15 @@ pub fn finite_decision_program_preimage(plan: &FiniteDecisionPlan) -> Vec<u8> {
         for inp in &plan.inputs {
             w.write_uint(inp.ordinal);
             w.write_ident(&inp.name);
-            encode_input_type(&mut w, &inp.ty);
+            match (&inp.ty, &inp.list) {
+                // Ordinal 5 (ADR-0037): the declared element type with the
+                // existing scalar/nominal schema layout, then the maximum.
+                (L3ValueType::List, Some(list_decl)) => w.write_enum(5, |w| {
+                    encode_schema_type(w, &list_decl.element);
+                    w.write_uint(list_decl.max);
+                }),
+                (ty, _) => encode_input_type(&mut w, ty),
+            }
         }
     }
 
@@ -1909,17 +2925,67 @@ pub fn finite_decision_program_preimage(plan: &FiniteDecisionPlan) -> Vec<u8> {
         encode_expr_v2(&mut w, &p.value);
     }
 
-    // Commit membership and order
-    w.write_ident(&plan.commit.name);
-    w.write_uint(plan.commit.candidates.len() as u64);
-    for cand in &plan.commit.candidates {
-        w.write_ident(cand);
+    // Commit membership and order. The first pool keeps ADR-0030's exact
+    // single-commit slot, so every single-commit program's preimage (and
+    // program id) is byte-identical to before ADR-0039. A module with no
+    // `commit` at all (ADR-0043: valid when it declares at least one
+    // `decide` block instead) omits this slot entirely — no program lowered
+    // before ADR-0043 could ever have zero commits (`NoCommit` was
+    // unconditional), so there is no prior byte layout to preserve here.
+    if let Some(first) = plan.commits.first() {
+        w.write_ident(&first.name);
+        w.write_uint(first.candidates.len() as u64);
+        for cand in &first.candidates {
+            w.write_ident(cand);
+        }
     }
 
     // Show directives
     w.write_uint(plan.shows.len() as u64);
     for s in &plan.shows {
         encode_expr_v2(&mut w, s);
+    }
+
+    // Additional commit pools (ADR-0039): appended in declaration order under
+    // their own tag, and only when a module declares more than one pool.
+    if plan.commits.len() > 1 {
+        w.write_tag("brix.l3.finite-decision.commits@2");
+        w.write_uint((plan.commits.len() - 1) as u64);
+        for c in &plan.commits[1..] {
+            w.write_ident(&c.name);
+            w.write_uint(c.candidates.len() as u64);
+            for cand in &c.candidates {
+                w.write_ident(cand);
+            }
+        }
+    }
+
+    // `decide` blocks (ADR-0043): appended in declaration order under their
+    // own tag, and only when the module declares at least one — a module
+    // that declares none keeps a byte-identical preimage (and program id) to
+    // one lowered before this feature existed, following exactly the
+    // append-only discipline `brix.l3.finite-decision.commits@2` established
+    // above.
+    if !plan.decides.is_empty() {
+        w.write_tag("brix.l3.finite-decision.decides@1");
+        w.write_uint(plan.decides.len() as u64);
+        for d in &plan.decides {
+            w.write_ident(&d.name);
+            w.write_ident(&d.binder);
+            encode_expr_v2(&mut w, &d.list);
+            w.write_uint(d.proposals.len() as u64);
+            for p in &d.proposals {
+                w.write_uint(p.ordinal);
+                w.write_ident(&p.name);
+                w.write_uint(p.deps.len() as u64);
+                for dep in &p.deps {
+                    w.write_ident(dep);
+                }
+                w.write_uint(p.priority);
+                encode_expr_v2(&mut w, &p.guard);
+                encode_expr_v2(&mut w, &p.value);
+            }
+        }
     }
 
     w.finish()
