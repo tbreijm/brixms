@@ -498,6 +498,14 @@ impl FiniteDecisionRuntime {
                                 L3ValueType::Sum(ref name) | L3ValueType::Record(ref name) => {
                                     L3SchemaType::Named(name.clone())
                                 }
+                                // Helper contracts never carry `List`
+                                // (ADR-0037 §Scope, ADR-0040): `parse_contract`
+                                // rejects `List<T>` as an unsupported contract
+                                // type before a `FiniteDecisionContract` is
+                                // ever built.
+                                L3ValueType::List => {
+                                    unreachable!("helper contracts never carry a List value type")
+                                }
                             })
                         }),
                     )
@@ -510,6 +518,9 @@ impl FiniteDecisionRuntime {
                     L3ValueType::Str => L3SchemaType::Str,
                     L3ValueType::Sum(ref name) | L3ValueType::Record(ref name) => {
                         L3SchemaType::Named(name.clone())
+                    }
+                    L3ValueType::List => {
+                        unreachable!("helper contracts never carry a List value type")
                     }
                 })
             });

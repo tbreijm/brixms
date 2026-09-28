@@ -862,6 +862,15 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
         ast::Expr::Bin { op, .. } if op.is_logical() => Err(LowerError::Unsupported(format!(
             "'{op:?}' not in L2-first fragment"
         ))),
+        // List membership (ADR-0040) has no meaning in the kernel-realization
+        // lane, which predates lists entirely; named explicitly rather than
+        // falling into the arithmetic arm's catch-all, where the diagnostic
+        // would blame the wrong thing.
+        ast::Expr::Bin {
+            op: ast::BinOp::In, ..
+        } => Err(LowerError::Unsupported(
+            "list membership 'in' not in L2-first fragment".to_string(),
+        )),
         ast::Expr::Bin { op, lhs, rhs } => {
             let arith_op = match op {
                 ast::BinOp::Add => ArithOp::Add,
@@ -917,6 +926,15 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
         )),
         ast::Expr::Audit(..) => Err(LowerError::Unsupported(
             "Audit not in L2-first fragment".to_string(),
+        )),
+        ast::Expr::Lambda { .. } => Err(LowerError::Unsupported(
+            "list fold/filter/map lambdas not in L2-first fragment".to_string(),
+        )),
+        ast::Expr::ListLit(_) => Err(LowerError::Unsupported(
+            "list literals not in L2-first fragment".to_string(),
+        )),
+        ast::Expr::Comprehension { .. } => Err(LowerError::Unsupported(
+            "comprehensions not in L2-first fragment".to_string(),
         )),
     }
 }
@@ -1312,6 +1330,31 @@ fn check_declared_field_types(
         | ast::Expr::Audit(inner)
         | ast::Expr::Not(inner) => check_declared_field_types(inner, ctx, ty_ctx),
         ast::Expr::Num(_) | ast::Expr::Str(_) | ast::Expr::Bool(_) | ast::Expr::Var(_) => Ok(()),
+        // List/relational forms (ADR-0037, ADR-0040) are not part of the
+        // L2-first tree-realization fragment this pass checks; `lower_expr`
+        // below refuses them outright, so there is nothing for this
+        // declared-field-type pass to descend into structurally beyond their
+        // own sub-expressions.
+        ast::Expr::Lambda { body, .. } => check_declared_field_types(body, ctx, ty_ctx),
+        ast::Expr::ListLit(items) => {
+            for item in items {
+                check_declared_field_types(item, ctx, ty_ctx)?;
+            }
+            Ok(())
+        }
+        ast::Expr::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => {
+            for (_, source) in generators {
+                check_declared_field_types(source, ctx, ty_ctx)?;
+            }
+            if let Some(w) = where_clause {
+                check_declared_field_types(w, ctx, ty_ctx)?;
+            }
+            check_declared_field_types(yield_expr, ctx, ty_ctx)
+        }
     }
 }
 

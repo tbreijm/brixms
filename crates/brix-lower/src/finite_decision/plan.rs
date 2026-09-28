@@ -7,8 +7,9 @@ use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_syntax::ast;
 
 use crate::l3_v2::{
-    check_exhaustive_expr, lower_expr_v2, DivModOpV2, L3ConfigBodyV2, L3ConfigDeclV2, L3ExprV2,
-    L3PatternV2, L3Schema, L3SchemaBody, L3SchemaType, L3V2LowerError, L3ValueType,
+    check_exhaustive_expr, is_reserved_list_operation_name, lower_expr_v2, DivModOpV2,
+    L3ConfigBodyV2, L3ConfigDeclV2, L3ExprV2, L3PatternV2, L3Schema, L3SchemaBody, L3SchemaType,
+    L3V2LowerError, L3ValueType,
 };
 
 pub const MAX_SCHEMA_COUNT: usize = 128;
@@ -30,12 +31,29 @@ pub const MAX_EXPR_DEPTH: usize = 128;
 /// Maximum number of AST expression nodes per expression.
 pub const MAX_EXPR_NODES: usize = 4096;
 
-/// A declared external input in a finite-decision plan (ADR-0031).
+/// A declared external input in a finite-decision plan (ADR-0031, ADR-0037).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FiniteDecisionInput {
     pub ordinal: u64,
     pub name: String,
     pub ty: L3ValueType,
+    /// Present exactly when `ty` is `L3ValueType::List`: the declared
+    /// element type and maximum length of `List<T> max N` (ADR-0037).
+    pub list: Option<FiniteDecisionListDecl>,
+}
+
+/// The declaration payload of a `List<T> max N` external input (ADR-0037).
+///
+/// `element` is a scalar or closed nominal schema type — never itself a list
+/// (nested lists are refused at lowering, per ADR-0037 §Scope) — expressed as
+/// [`L3SchemaType`] rather than [`L3ValueType`] because that is already the
+/// vocabulary the rest of the codebase uses for "a scalar or a named schema"
+/// (record fields, sum payloads, helper contracts), and reusing it here means
+/// element validation reuses [`crate::l3_v2::validate_l3_value`] unchanged.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FiniteDecisionListDecl {
+    pub element: L3SchemaType,
+    pub max: u64,
 }
 
 /// A declared function parameter or return contract (ADR-0032).
@@ -129,6 +147,15 @@ pub enum FiniteDecisionLowerError {
         operator: &'static str,
         found: String,
     },
+    /// A `filter`/`where`/`count`/`all`/`any` condition or a `sum`/`min`/
+    /// `max` body has a statically known type other than the one it
+    /// requires (ADR-0040, following the precedent ADR-0034 set for `&&`/
+    /// `||`/`!` operands).
+    ListBodyType {
+        form: &'static str,
+        expected: &'static str,
+        found: String,
+    },
     BooleanTypeAnalysisLimit,
     ProfileMismatch {
         expected: String,
@@ -218,6 +245,23 @@ pub enum FiniteDecisionLowerError {
         name: String,
         ty: String,
     },
+    /// A `List<T> max N` input declared `N` outside `0..=256` (ADR-0037).
+    ListMaxOutOfRange {
+        name: String,
+        max: u64,
+        limit: u64,
+    },
+    /// A `List<T>` input whose element type `T` is itself `List<...>`
+    /// (ADR-0037 §Scope: nested lists are deferred).
+    NestedListNotAllowed {
+        name: String,
+    },
+    /// A `List<T>` input whose element type `T` is not an admitted scalar
+    /// (`Int`, `Bool`, `Str`) or a closed nominal schema (ADR-0037).
+    UnsupportedListElementType {
+        name: String,
+        ty: String,
+    },
     UnknownCandidateInCommit {
         commit: String,
         candidate: String,
@@ -256,6 +300,13 @@ impl fmt::Display for FiniteDecisionLowerError {
                     f,
                     "logical {operator} requires Bool operands, found {found}"
                 )
+            }
+            Self::ListBodyType {
+                form,
+                expected,
+                found,
+            } => {
+                write!(f, "'{form}' requires a {expected} body, found {found}")
             }
             Self::BooleanTypeAnalysisLimit => {
                 write!(
@@ -364,6 +415,24 @@ impl fmt::Display for FiniteDecisionLowerError {
             Self::UnsupportedInputType { name, ty } => {
                 write!(f, "unsupported input type for '{name}': '{ty}' (only Int, Bool, Str are supported)")
             }
+            Self::ListMaxOutOfRange { name, max, limit } => {
+                write!(
+                    f,
+                    "input '{name}' declares 'max {max}', which exceeds the limit of {limit}"
+                )
+            }
+            Self::NestedListNotAllowed { name } => {
+                write!(
+                    f,
+                    "input '{name}' declares a nested list element type, which is not supported"
+                )
+            }
+            Self::UnsupportedListElementType { name, ty } => {
+                write!(
+                    f,
+                    "unsupported list element type for input '{name}': '{ty}' (only Int, Bool, Str, or a closed nominal schema are supported)"
+                )
+            }
             Self::UnknownCandidateInCommit { commit, candidate } => {
                 write!(
                     f,
@@ -459,6 +528,26 @@ fn check_expr_bounds(
             }
             Ok(())
         }
+        ast::Expr::Lambda { body, .. } => check_expr_bounds(body, depth + 1, node_count),
+        ast::Expr::ListLit(items) => {
+            for item in items {
+                check_expr_bounds(item, depth + 1, node_count)?;
+            }
+            Ok(())
+        }
+        ast::Expr::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => {
+            for (_, source) in generators {
+                check_expr_bounds(source, depth + 1, node_count)?;
+            }
+            if let Some(w) = where_clause {
+                check_expr_bounds(w, depth + 1, node_count)?;
+            }
+            check_expr_bounds(yield_expr, depth + 1, node_count)
+        }
     }
 }
 
@@ -466,6 +555,11 @@ fn schema_root_name(ty: &ast::Ty) -> Option<&str> {
     match ty {
         ast::Ty::Named(name) => (!matches!(name.as_str(), "Int" | "Bool" | "Str")).then_some(name),
         ast::Ty::Graded(inner, _) => schema_root_name(inner),
+        // `List<T>` (ADR-0037): the schema that must be reachable is `T`'s,
+        // not a (nonexistent) config named "List" — a list input's element
+        // schema still needs its record/sum shape collected for element
+        // validation, exactly as if `T` had been declared directly.
+        ast::Ty::App(name, args) if name == "List" => args.first().and_then(schema_root_name),
         ast::Ty::App(name, _) => Some(name),
         _ => None,
     }
@@ -775,6 +869,13 @@ fn parse_contract(
         L3ValueType::Sum(name) | L3ValueType::Record(name) => {
             Some(L3SchemaType::Named(name.clone()))
         }
+        // `parse_contract` above never produces `List`: `ast::Ty::App` (which
+        // is how `List<T>` parses) is rejected a few lines up as an
+        // unsupported contract type, so a helper parameter or return
+        // contract never names a list (ADR-0037 §Scope, ADR-0040).
+        L3ValueType::List => {
+            unreachable!("parse_contract never returns a List value type")
+        }
     };
     Ok(FiniteDecisionContract {
         ty: value_type,
@@ -821,6 +922,47 @@ fn collect_function_calls(e: &L3ExprV2, calls: &mut BTreeSet<String>) {
             for (_, body) in arms {
                 collect_function_calls(body, calls);
             }
+        }
+        // Fold/filter/map/comprehension are reserved list forms, not helper
+        // calls, so — like `IntDivMod` above — they contribute no name here;
+        // only their sub-expressions (including their bodies, which may
+        // themselves call a helper) are walked.
+        L3ExprV2::Fold { list, body, .. } => {
+            collect_function_calls(list, calls);
+            collect_function_calls(body, calls);
+        }
+        L3ExprV2::Filter { list, cond, .. } => {
+            collect_function_calls(list, calls);
+            collect_function_calls(cond, calls);
+        }
+        L3ExprV2::Map { list, body, .. } => {
+            collect_function_calls(list, calls);
+            collect_function_calls(body, calls);
+        }
+        L3ExprV2::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => {
+            for (_, source) in generators {
+                collect_function_calls(source, calls);
+            }
+            if let Some(w) = where_clause {
+                collect_function_calls(w, calls);
+            }
+            collect_function_calls(yield_expr, calls);
+        }
+        L3ExprV2::ListLit(items) => {
+            for item in items {
+                collect_function_calls(item, calls);
+            }
+        }
+        L3ExprV2::In(a, b) => {
+            collect_function_calls(a, calls);
+            collect_function_calls(b, calls);
+        }
+        L3ExprV2::Len(a) | L3ExprV2::Distinct(a) => {
+            collect_function_calls(a, calls);
         }
         L3ExprV2::Int(_)
         | L3ExprV2::Str(_)
@@ -994,7 +1136,9 @@ pub fn lower_finite_decision_plan(
                     sum_configs.insert(c.name.clone());
                     let mut var_names = Vec::new();
                     for v in variants {
-                        if DivModOpV2::from_name(&v.name).is_some() {
+                        if DivModOpV2::from_name(&v.name).is_some()
+                            || is_reserved_list_operation_name(&v.name)
+                        {
                             return Err(FiniteDecisionLowerError::ReservedOperationName {
                                 name: v.name.clone(),
                                 kind: "constructor",
@@ -1035,7 +1179,8 @@ pub fn lower_finite_decision_plan(
 
     for item in &module.items {
         if let ast::Item::Fn(f) = item {
-            if DivModOpV2::from_name(&f.name).is_some() {
+            if DivModOpV2::from_name(&f.name).is_some() || is_reserved_list_operation_name(&f.name)
+            {
                 return Err(FiniteDecisionLowerError::ReservedOperationName {
                     name: f.name.clone(),
                     kind: "function",
@@ -1151,8 +1296,8 @@ pub fn lower_finite_decision_plan(
                         inp.name.clone(),
                     ));
                 }
-                let ty = match &inp.ty {
-                    ast::Ty::Named(n) => match n.as_str() {
+                let resolve_named = |name: &str| -> Result<L3ValueType, FiniteDecisionLowerError> {
+                    Ok(match name {
                         "Int" => L3ValueType::Int,
                         "Bool" => L3ValueType::Bool,
                         "Str" => L3ValueType::Str,
@@ -1174,7 +1319,60 @@ pub fn lower_finite_decision_plan(
                                 ty: other.to_string(),
                             });
                         }
-                    },
+                    })
+                };
+                let (ty, list) = match &inp.ty {
+                    // `List<T> max N` (ADR-0037).
+                    ast::Ty::App(app_name, args) if app_name == "List" => {
+                        if args.len() != 1 {
+                            return Err(FiniteDecisionLowerError::UnsupportedInputType {
+                                name: inp.name.clone(),
+                                ty: format!("List<{} args>", args.len()),
+                            });
+                        }
+                        let element = match &args[0] {
+                            ast::Ty::Named(n) => match resolve_named(n)? {
+                                L3ValueType::Int => L3SchemaType::Int,
+                                L3ValueType::Bool => L3SchemaType::Bool,
+                                L3ValueType::Str => L3SchemaType::Str,
+                                L3ValueType::Sum(name) | L3ValueType::Record(name) => {
+                                    L3SchemaType::Named(name)
+                                }
+                                L3ValueType::List => {
+                                    unreachable!("resolve_named never returns List")
+                                }
+                            },
+                            ast::Ty::App(inner, _) if inner == "List" => {
+                                return Err(FiniteDecisionLowerError::NestedListNotAllowed {
+                                    name: inp.name.clone(),
+                                });
+                            }
+                            other => {
+                                return Err(FiniteDecisionLowerError::UnsupportedListElementType {
+                                    name: inp.name.clone(),
+                                    ty: format!("{other:?}"),
+                                });
+                            }
+                        };
+                        // The parser requires `max` on every `List<T>` input
+                        // declaration (a missing bound is a parse error), so
+                        // `list_max` is always `Some` here.
+                        let max = inp
+                            .list_max
+                            .expect("parser requires 'max' on every List<T> input declaration");
+                        if max > crate::input::MAX_INPUT_LIST_MAX {
+                            return Err(FiniteDecisionLowerError::ListMaxOutOfRange {
+                                name: inp.name.clone(),
+                                max,
+                                limit: crate::input::MAX_INPUT_LIST_MAX,
+                            });
+                        }
+                        (
+                            L3ValueType::List,
+                            Some(FiniteDecisionListDecl { element, max }),
+                        )
+                    }
+                    ast::Ty::Named(n) => (resolve_named(n)?, None),
                     other => {
                         return Err(FiniteDecisionLowerError::UnsupportedInputType {
                             name: inp.name.clone(),
@@ -1186,6 +1384,7 @@ pub fn lower_finite_decision_plan(
                     ordinal: inputs.len() as u64,
                     name: inp.name.clone(),
                     ty,
+                    list,
                 });
             }
             ast::Item::Config(c) => {
@@ -1743,6 +1942,63 @@ fn encode_expr_v2(w: &mut CanonWriter, e: &L3ExprV2) {
             encode_expr_v2(w, a);
             encode_expr_v2(w, b);
         }),
+        // Ordinal 17 (ADR-0037): op (0=sum,1=count,2=all,3=any,4=min,5=max —
+        // 4/5 are ADR-0040's extension), then the list expression, binder
+        // identifier, and body expression.
+        L3ExprV2::Fold {
+            op,
+            list,
+            binder,
+            body,
+        } => w.write_enum(17, |w| {
+            w.write_uint(op.ordinal());
+            encode_expr_v2(w, list);
+            w.write_ident(binder);
+            encode_expr_v2(w, body);
+        }),
+        // Ordinals 18-24 (ADR-0040).
+        L3ExprV2::Filter { list, binder, cond } => w.write_enum(18, |w| {
+            encode_expr_v2(w, list);
+            w.write_ident(binder);
+            encode_expr_v2(w, cond);
+        }),
+        L3ExprV2::Map { list, binder, body } => w.write_enum(19, |w| {
+            encode_expr_v2(w, list);
+            w.write_ident(binder);
+            encode_expr_v2(w, body);
+        }),
+        L3ExprV2::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => w.write_enum(20, |w| {
+            w.write_uint(generators.len() as u64);
+            for (binder, source) in generators {
+                w.write_ident(binder);
+                encode_expr_v2(w, source);
+            }
+            match where_clause {
+                None => w.write_enum(0, |_| {}),
+                Some(wc) => w.write_enum(1, |w| encode_expr_v2(w, wc)),
+            }
+            encode_expr_v2(w, yield_expr);
+        }),
+        L3ExprV2::ListLit(items) => w.write_enum(21, |w| {
+            w.write_uint(items.len() as u64);
+            for item in items {
+                encode_expr_v2(w, item);
+            }
+        }),
+        L3ExprV2::In(a, b) => w.write_enum(22, |w| {
+            encode_expr_v2(w, a);
+            encode_expr_v2(w, b);
+        }),
+        L3ExprV2::Len(a) => w.write_enum(23, |w| {
+            encode_expr_v2(w, a);
+        }),
+        L3ExprV2::Distinct(a) => w.write_enum(24, |w| {
+            encode_expr_v2(w, a);
+        }),
     }
 }
 
@@ -1753,6 +2009,18 @@ fn encode_input_type(w: &mut CanonWriter, ty: &L3ValueType) {
         L3ValueType::Str => w.write_enum(2, |_| {}),
         L3ValueType::Sum(nominal) => w.write_enum(3, |w| w.write_ident(nominal)),
         L3ValueType::Record(nominal) => w.write_enum(4, |w| w.write_ident(nominal)),
+        // Ordinal 5 is encoded directly by the inputs loop in
+        // `finite_decision_program_preimage`, which has access to the
+        // input's `list` declaration (element type and `max`) that this flat
+        // marker does not carry — see `FiniteDecisionInput::list`. Every
+        // `FiniteDecisionInput` with `ty == List` is constructed with
+        // `list: Some(_)`, so that call site never reaches this function with
+        // a `List` value in the first place.
+        L3ValueType::List => {
+            unreachable!(
+                "List input types are encoded via FiniteDecisionInput::list, not encode_input_type"
+            )
+        }
     }
 }
 
@@ -1794,6 +2062,11 @@ fn encode_value_type(w: &mut CanonWriter, ty: &L3ValueType) {
         L3ValueType::Str => w.write_enum(2, |_| {}),
         L3ValueType::Sum(nominal) => w.write_enum(3, |w| w.write_ident(nominal)),
         L3ValueType::Record(nominal) => w.write_enum(4, |w| w.write_ident(nominal)),
+        // Only used for function parameter/return contracts, which never
+        // carry `List` — see `parse_contract`'s handling of `ast::Ty::App`.
+        L3ValueType::List => {
+            unreachable!("function contracts never carry a List value type")
+        }
     }
 }
 
@@ -1853,7 +2126,15 @@ pub fn finite_decision_program_preimage(plan: &FiniteDecisionPlan) -> Vec<u8> {
         for inp in &plan.inputs {
             w.write_uint(inp.ordinal);
             w.write_ident(&inp.name);
-            encode_input_type(&mut w, &inp.ty);
+            match (&inp.ty, &inp.list) {
+                // Ordinal 5 (ADR-0037): the declared element type with the
+                // existing scalar/nominal schema layout, then the maximum.
+                (L3ValueType::List, Some(list_decl)) => w.write_enum(5, |w| {
+                    encode_schema_type(w, &list_decl.element);
+                    w.write_uint(list_decl.max);
+                }),
+                (ty, _) => encode_input_type(&mut w, ty),
+            }
         }
     }
 

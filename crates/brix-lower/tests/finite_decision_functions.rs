@@ -1531,7 +1531,7 @@ fn test_boolean_operands_are_checked_even_when_short_circuited() {
         "config Decision = Done\nfn choose(): Bool = match true {\ntrue => true\nfalse => false && 1\n}\nrule r() = choose()\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
         "config Decision = Done\ninput count: Int\nrule r() = false && count\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
         "config Decision = Done\nfn unused(count: Int): Bool = false && count\nrule r() = true\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
-        "config Decision = Done\nfn count(): Int = 1\nrule r() = false && count()\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
+        "config Decision = Done\nfn one(): Int = 1\nrule r() = false && one()\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
         "config User = { age: Int }\nconfig Decision = Done\ninput user: User\nrule r() = false && user.age\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
         "config Decision = Done\nfn identity(x) = x\nrule r() = false && identity(1)\npropose p(r) priority 1 when true = Done\ncommit c from (p)",
         "config Decision = Done\nfn negate(x) = !x\nrule r() = false && negate(1)\npropose p(r) priority 1 when true = Done\ncommit c from (p)",

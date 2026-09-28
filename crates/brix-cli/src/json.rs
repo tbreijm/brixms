@@ -285,6 +285,11 @@ pub enum TaggedValue {
         nominal: String,
         fields: Vec<RecordFieldJson>,
     },
+    /// A bounded list (ADR-0037), mirroring the `brix.input@3` wire shape
+    /// `{ "type": "list", "items": [...] }`.
+    List {
+        items: Vec<TaggedValue>,
+    },
 }
 
 impl TaggedValue {
@@ -329,6 +334,10 @@ impl TaggedValue {
                 .collect(),
         }
     }
+
+    pub fn list(items: Vec<TaggedValue>) -> Self {
+        Self::List { items }
+    }
 }
 
 /// A field in a record value.
@@ -369,6 +378,9 @@ pub fn to_tagged_value(v: &L3ValueV2) -> TaggedValue {
                     value: to_tagged_value(val),
                 })
                 .collect(),
+        },
+        L3ValueV2::List(items) => TaggedValue::List {
+            items: items.iter().map(to_tagged_value).collect(),
         },
     }
 }

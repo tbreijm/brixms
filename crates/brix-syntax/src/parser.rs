@@ -489,7 +489,51 @@ impl Parser {
         let name = self.expect_ident("input declaration name")?.0;
         self.consume(TokenKind::Colon, "input declaration ':'")?;
         let ty = self.parse_ty()?;
-        Ok(InputDecl { name, ty })
+        // `List<T> max N` (ADR-0037). `max` is a contextual identifier here,
+        // exactly as `proving`/`exhaustive` are contextual after a `match`:
+        // it is not reserved anywhere else in the grammar.
+        let list_max = if matches!(&ty, Ty::App(name, _) if name == "List") {
+            match self.peek().clone() {
+                TokenKind::Ident(id) if id == "max" => {
+                    self.advance();
+                    let tok = self.current().clone();
+                    match &tok.kind {
+                        TokenKind::Num(s) if !s.contains('.') => match s.parse::<u64>() {
+                            Ok(v) => {
+                                self.advance();
+                                Some(v)
+                            }
+                            Err(_) => {
+                                return Err(ParseError::at(
+                                    format!(
+                                        "expected nonnegative unsigned integer for 'max', found '{s}'"
+                                    ),
+                                    tok.line,
+                                    tok.col,
+                                ));
+                            }
+                        },
+                        other => {
+                            return Err(ParseError::at(
+                                format!(
+                                    "expected nonnegative unsigned integer after 'max', found {other:?}"
+                                ),
+                                tok.line,
+                                tok.col,
+                            ));
+                        }
+                    }
+                }
+                other => {
+                    return Err(self.error(format!(
+                        "expected 'max' bound after 'List<...>' input type, found {other:?}"
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+        Ok(InputDecl { name, ty, list_max })
     }
 
     fn parse_ty(&mut self) -> Result<Ty, ParseError> {
@@ -553,6 +597,28 @@ impl Parser {
         self.parse_expr_bp(0)
     }
 
+    /// One call argument: either an ordinary expression, or a hygienic
+    /// binder `ident => expr` (ADR-0037, ADR-0040). Lambdas are fold/filter/
+    /// map syntax only — recognized here structurally, independent of the
+    /// callee's name, and rejected at lowering wherever the callee is not one
+    /// of the recognized builtin forms.
+    fn parse_call_arg(&mut self) -> Result<Expr, ParseError> {
+        if let TokenKind::Ident(name) = self.peek().clone() {
+            if self.tokens.get(self.pos + 1).map(|t| &t.kind) == Some(&TokenKind::FatArrow) {
+                self.advance(); // binder identifier
+                self.advance(); // '=>'
+                self.enter()?;
+                let body = self.parse_expr_inner();
+                self.leave();
+                return Ok(Expr::Lambda {
+                    param: name,
+                    body: Box::new(body?),
+                });
+            }
+        }
+        self.parse_expr()
+    }
+
     /// Precedence climbing for binary operators.
     ///
     /// Precedence levels (lowest to highest):
@@ -584,6 +650,7 @@ impl Parser {
                 TokenKind::Ge => (7, 8, BinOp::Ge, true),
                 TokenKind::EqEq => (7, 8, BinOp::Eq, true),
                 TokenKind::Ne => (7, 8, BinOp::Ne, true),
+                TokenKind::In => (7, 8, BinOp::In, true),
                 TokenKind::Plus => (9, 10, BinOp::Add, false),
                 TokenKind::Minus => (9, 10, BinOp::Sub, false),
                 TokenKind::Star => (11, 12, BinOp::Mul, false),
@@ -622,6 +689,7 @@ impl Parser {
                 | TokenKind::Ge
                 | TokenKind::EqEq
                 | TokenKind::Ne
+                | TokenKind::In
         )
     }
 
@@ -759,6 +827,41 @@ impl Parser {
                 self.consume(TokenKind::CloseParen, "grouped expression ')'")?;
                 Ok(expr)
             }
+            TokenKind::OpenBracket => {
+                self.advance();
+                let elems =
+                    self.parse_comma_separated(TokenKind::CloseBracket, |p| p.parse_expr())?;
+                self.consume(TokenKind::CloseBracket, "list literal ']'")?;
+                Ok(Expr::ListLit(elems))
+            }
+            TokenKind::For => {
+                self.advance();
+                let mut generators = Vec::new();
+                loop {
+                    let binder = self.expect_ident("comprehension generator binder")?.0;
+                    self.consume(TokenKind::In, "comprehension generator 'in'")?;
+                    let source = self.parse_expr()?;
+                    generators.push((binder, source));
+                    if self.check(&TokenKind::Comma) {
+                        self.advance();
+                        continue;
+                    }
+                    break;
+                }
+                let where_clause = if self.check(&TokenKind::Where) {
+                    self.advance();
+                    Some(Box::new(self.parse_expr()?))
+                } else {
+                    None
+                };
+                self.consume(TokenKind::Yield, "comprehension 'yield'")?;
+                let yield_expr = Box::new(self.parse_expr()?);
+                Ok(Expr::Comprehension {
+                    generators,
+                    where_clause,
+                    yield_expr,
+                })
+            }
             TokenKind::Ident(id) => {
                 if self.is_record_literal_ahead() {
                     self.advance(); // consume config name
@@ -775,8 +878,8 @@ impl Parser {
                     self.advance();
                     if self.check(&TokenKind::OpenParen) {
                         self.advance();
-                        let args =
-                            self.parse_comma_separated(TokenKind::CloseParen, |p| p.parse_expr())?;
+                        let args = self
+                            .parse_comma_separated(TokenKind::CloseParen, |p| p.parse_call_arg())?;
                         self.consume(TokenKind::CloseParen, "function call ')'")?;
                         Ok(Expr::Call { func: id, args })
                     } else {

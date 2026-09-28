@@ -288,6 +288,15 @@ pub fn fmt_value_human(v: &L3ValueV2) -> String {
                 .join(", ");
             format!("{nominal_config} {{ {inner} }}")
         }
+        // `[a, b, c]` (ADR-0037, ADR-0040).
+        L3ValueV2::List(items) => {
+            let inner = items
+                .iter()
+                .map(fmt_value_human)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{inner}]")
+        }
     }
 }
 

@@ -56,11 +56,15 @@ pub enum Item {
     Input(InputDecl),
 }
 
-/// `input NAME: TYPE`.
+/// `input NAME: TYPE` or `input NAME: List<TYPE> max N` (ADR-0037).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputDecl {
     pub name: String,
     pub ty: Ty,
+    /// The declared bound for a `List<T> max N` input (ADR-0037). `None` for
+    /// every non-list input declaration; `Some(n)` only when `ty` is
+    /// `Ty::App("List", _)`, checked by the parser at the point `max` is read.
+    pub list_max: Option<u64>,
 }
 
 /// `config Name = <body>`.
@@ -234,6 +238,22 @@ pub enum Expr {
     Audit(Box<Expr>),
     /// `!e` — logical NOT.
     Not(Box<Expr>),
+    /// `ident => expr` — a hygienic binder introduced only as the trailing
+    /// argument of a list fold/filter/map call (ADR-0037, ADR-0040). Not a
+    /// first-class value: it cannot appear anywhere else, and lowering
+    /// rejects it outside a recognized builtin call.
+    Lambda { param: String, body: Box<Expr> },
+    /// `[e1, e2, ...]` — a list literal (ADR-0040).
+    ListLit(Vec<Expr>),
+    /// `for x in xs, y in ys where cond yield e` — a relational comprehension
+    /// (ADR-0040). Generators are evaluated left to right; a later generator
+    /// or the `where` clause may reference an earlier binder, which is how a
+    /// join is written.
+    Comprehension {
+        generators: Vec<(String, Expr)>,
+        where_clause: Option<Box<Expr>>,
+        yield_expr: Box<Expr>,
+    },
 }
 
 /// Binary operators. Arithmetic ops are ordinary; `Then`/`And` are the witness
@@ -265,6 +285,9 @@ pub enum BinOp {
     AndAnd,
     /// `||` — logical OR (short-circuiting).
     OrOr,
+    /// `e in xs` — list membership by structural equality (ADR-0040). Same
+    /// precedence and non-associativity as the comparison operators.
+    In,
 }
 
 impl BinOp {
