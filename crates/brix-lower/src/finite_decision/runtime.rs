@@ -369,6 +369,26 @@ fn proposal_digest(program: FiniteDecisionProgramId, name: &str) -> Digest {
     w.digest(Domain::Value)
 }
 
+/// The per-instance analogue of [`proposal_digest`] for a `decide` block's
+/// candidate (ADR-0043): namespaced by the block's own name and the
+/// element's index, so the same candidate name reused across two different
+/// entities — or across a `decide` block and an unrelated `commit` pool —
+/// never collides on the same destination world, generator id, or witness.
+fn entity_proposal_digest(
+    program: FiniteDecisionProgramId,
+    decide: &str,
+    index: usize,
+    name: &str,
+) -> Digest {
+    let mut w = CanonWriter::new();
+    w.write_tag("brix.l3.finite-decision.entity-proposal@1");
+    w.write_bytes(program.digest().as_bytes());
+    w.write_ident(decide);
+    w.write_uint(index as u64);
+    w.write_ident(name);
+    w.digest(Domain::Value)
+}
+
 fn policy_id(program: FiniteDecisionProgramId) -> ConfigId {
     let mut w = CanonWriter::new();
     w.write_bytes(POLICY_MARKER);
@@ -399,6 +419,39 @@ fn generator_id(
     w.write_bytes(src.digest().as_bytes());
     w.write_bytes(dst.digest().as_bytes());
     GeneratorId::from_canon(&w.finish())
+}
+
+/// The per-instance analogue of [`generator_id`] for a `decide` block's
+/// candidate (ADR-0043); see [`entity_proposal_digest`] for the namespacing
+/// rationale.
+fn entity_generator_id(
+    program: FiniteDecisionProgramId,
+    decide: &str,
+    index: usize,
+    name: &str,
+    src: ConfigId,
+    dst: ConfigId,
+) -> GeneratorId {
+    let mut w = CanonWriter::new();
+    w.write_tag("brix.l3.finite-decision.entity-generator@1");
+    w.write_bytes(program.digest().as_bytes());
+    w.write_ident(decide);
+    w.write_uint(index as u64);
+    w.write_ident(name);
+    w.write_bytes(src.digest().as_bytes());
+    w.write_bytes(dst.digest().as_bytes());
+    GeneratorId::from_canon(&w.finish())
+}
+
+/// The outcome of one [`FiniteDecisionRuntime::deliberate`] call — a single
+/// pool's or a single per-entity instance's own selection-or-quiescence
+/// settlement (ADR-0030, ADR-0039, ADR-0043).
+struct DeliberationOutcome {
+    decision: Option<SelectedDecision>,
+    dispositions: Vec<CandidateDisposition>,
+    final_world: ConfigId,
+    stop: FiniteDecisionStop,
+    step: Option<CommittedStep>,
 }
 
 #[derive(Clone, Debug)]
@@ -453,7 +506,12 @@ pub struct FiniteDecisionRuntime {
     pub context: ContextId,
     pub initial_world: ConfigId,
     pub policy: ConfigId,
-    interner: Interner,
+    /// Interior-mutable so that per-entity `decide` deliberation (ADR-0043)
+    /// can intern the witness/successor handles for candidates discovered
+    /// only at run time (one element's candidates per list element), which
+    /// a static `commit` pool's candidates never need since every one of
+    /// those handles is already interned once, here, at construction.
+    interner: std::cell::RefCell<Interner>,
     initial: Handle,
     policy_handle: Handle,
     entries: Vec<PresenterEntry>,
@@ -616,7 +674,7 @@ impl FiniteDecisionRuntime {
             context,
             initial_world,
             policy,
-            interner,
+            interner: std::cell::RefCell::new(interner),
             initial,
             policy_handle,
             entries,
@@ -895,15 +953,106 @@ impl FiniteDecisionRuntime {
             }
         }
 
-        // Step 5: Build NamedCandidates and evaluate the deliberation
-        // frontier restricted to this pool's own entries.
-        let regime_id = RegimeId::named(FINITE_FRONTIER_REGIME_NAME);
-        let pool_entries: Vec<&PresenterEntry> = self
+        // Steps 5-6: shared with per-entity deliberation (ADR-0043) — see
+        // `Self::deliberate`.
+        let pool_entries: Vec<PresenterEntry> = self
             .entries
             .iter()
             .filter(|e| pool.candidates.iter().any(|c| c == &e.name))
+            .cloned()
             .collect();
-        let named_candidates: Vec<NamedCandidate> = pool_entries
+        match self.deliberate(&pool.candidates, &pool_entries, &admitted_names, candidate_values, 0) {
+            Ok(out) => FiniteDecisionCommitRun {
+                commit: pool.name.clone(),
+                decision: out.decision,
+                dispositions: out.dispositions,
+                final_world: out.final_world,
+                stop: out.stop,
+                step: out.step,
+            },
+            Err((reason, dispositions)) => fault(reason, dispositions),
+        }
+    }
+
+    /// Build the [`PresenterEntry`] set for one per-entity `decide` instance
+    /// (ADR-0043): candidate `name`s are namespaced by `(decide name,
+    /// element index)` in every identity-bearing digest, so two different
+    /// instances — or an instance and a top-level `commit` pool — that
+    /// happen to declare a same-spelled candidate name never collide on the
+    /// same destination world, generator id, or witness.
+    fn entity_entries(
+        &self,
+        decide_name: &str,
+        index: usize,
+        proposals: &[crate::finite_decision::plan::FiniteDecisionProposal],
+    ) -> Vec<PresenterEntry> {
+        let regime_id = RegimeId::named(FINITE_FRONTIER_REGIME_NAME);
+        let mut interner = self.interner.borrow_mut();
+        let mut entries = Vec::with_capacity(proposals.len());
+        for proposal in proposals {
+            let prop_digest =
+                entity_proposal_digest(self.program, decide_name, index, &proposal.name);
+            let dst = destination_world(self.program, Some(prop_digest));
+            let generator = entity_generator_id(
+                self.program,
+                decide_name,
+                index,
+                &proposal.name,
+                self.initial_world,
+                dst,
+            );
+            let successor = interner.intern(dst.digest());
+            let witness = Witness::new(self.initial_world, dst, regime_id);
+            let witness_handle = interner.intern(witness.id().digest());
+            let named = NamedCandidate::with_handles(
+                proposal.name.clone(),
+                regime_id,
+                self.initial_world,
+                dst,
+                self.initial,
+                witness_handle,
+                successor,
+                proposal.priority,
+            );
+            let tiebreak = named.canonical_tiebreak(&interner);
+            entries.push(PresenterEntry {
+                name: proposal.name.clone(),
+                candidate: Candidate {
+                    witness: witness_handle,
+                    successor,
+                },
+                generator,
+                src: self.initial_world,
+                dst,
+                priority: proposal.priority,
+                tiebreak,
+            });
+        }
+        entries
+    }
+
+    /// The shared core of Steps 5-6 (ADR-0030 §Deliberation): build
+    /// [`NamedCandidate`]s from `entries`, evaluate the deliberation
+    /// frontier under `admitted_names`, and settle either a single
+    /// selection or certified quiescence — used identically by a top-level
+    /// `commit` pool ([`Self::run_pool`]) and by one per-entity `decide`
+    /// instance (ADR-0043). `phase` is threaded into every calendar [`Key`]
+    /// this deliberation computes, purely for cross-run traceability: two
+    /// deliberations never share a destination world (every entry's `dst`
+    /// already differs — see [`entity_proposal_digest`]), so it carries no
+    /// correctness weight, but every pool and every entity instance gets its
+    /// own value regardless.
+    fn deliberate(
+        &self,
+        candidate_names: &[String],
+        entries: &[PresenterEntry],
+        admitted_names: &BTreeSet<String>,
+        candidate_values: Vec<(String, L3ValueV2)>,
+        phase: u64,
+    ) -> Result<DeliberationOutcome, (FiniteDecisionUnknownReason, Vec<CandidateDisposition>)> {
+        let interner = self.interner.borrow();
+        let regime_id = RegimeId::named(FINITE_FRONTIER_REGIME_NAME);
+        let named_candidates: Vec<NamedCandidate> = entries
             .iter()
             .map(|e| {
                 NamedCandidate::with_handles(
@@ -932,35 +1081,32 @@ impl FiniteDecisionRuntime {
             named_candidates.iter().cloned(),
             &policy,
             &exec,
-            &self.interner,
+            &interner,
         );
 
         // Fail-closed on frontier deliberation fault under B^uk discipline.
         if let Some(frontier_fault) = evaluated.fault() {
-            return fault(
-                FiniteDecisionUnknownReason::from(frontier_fault),
-                Vec::new(),
-            );
+            return Err((FiniteDecisionUnknownReason::from(frontier_fault), Vec::new()));
         }
 
-        // Compute structured dispositions for all candidates in this pool.
+        // Compute structured dispositions for all candidates.
         let mut dispositions = Vec::new();
-        for cand_name in &pool.candidates {
+        for cand_name in candidate_names {
             let Some(nc) = named_candidates.iter().find(|c| &c.name == cand_name) else {
-                return fault(
+                return Err((
                     FiniteDecisionUnknownReason::EvaluationError {
                         detail: format!("candidate '{cand_name}' missing from named candidates"),
                     },
                     Vec::new(),
-                );
+                ));
             };
             let Some(status) = evaluated.status_of(nc) else {
-                return fault(
+                return Err((
                     FiniteDecisionUnknownReason::EvaluationError {
                         detail: format!("candidate status missing for '{cand_name}'"),
                     },
                     Vec::new(),
-                );
+                ));
             };
             dispositions.push(CandidateDisposition {
                 name: cand_name.clone(),
@@ -969,29 +1115,26 @@ impl FiniteDecisionRuntime {
             });
         }
 
-        // Step 6: Selection or Certified Quiescence, scoped to this pool.
+        // Step 6: Selection or Certified Quiescence.
         if evaluated.is_quiescent() {
-            // All candidates in this pool rejected is successful certified
-            // quiescence for this pool, with decision None.
-            let pool_entries_owned: Vec<PresenterEntry> =
-                pool_entries.iter().map(|e| (*e).clone()).collect();
+            let entries_owned: Vec<PresenterEntry> = entries.iter().map(|e| (*e).clone()).collect();
             let all_presenter = CandidatePresenter {
                 initial: self.initial,
-                entries: pool_entries_owned.clone(),
+                entries: entries_owned.clone(),
             };
             let adm_adapter = PolicyToAdmAdapter::new(&policy, named_candidates.iter().cloned());
             let all_generators: BTreeSet<GeneratorId> =
-                pool_entries.iter().map(|e| e.generator).collect();
+                entries.iter().map(|e| e.generator).collect();
             let obs_profile = match GeneratorPartitionProfile::new(all_generators, BTreeSet::new())
             {
                 Ok(p) => p,
                 Err(err) => {
-                    return fault(
+                    return Err((
                         FiniteDecisionUnknownReason::QuiescenceVerificationFault {
                             detail: format!("invalid observation profile: {err:?}"),
                         },
                         dispositions,
-                    );
+                    ));
                 }
             };
             let pres = PresentationV1 {
@@ -1001,12 +1144,12 @@ impl FiniteDecisionRuntime {
                 adm: &adm_adapter,
                 adm_id: Digest::of(Domain::Value, b"brix.l3.finite-decision.adm@1"),
                 profile: &obs_profile,
-                interner: &self.interner,
+                interner: &interner,
                 context: self.context,
                 assumptions: DeclaredAssumptions::all(),
             };
             let mut k = |c: &Candidate, phase: u64| {
-                if let Some(entry) = pool_entries_owned.iter().find(|e| e.candidate == *c) {
+                if let Some(entry) = entries_owned.iter().find(|e| e.candidate == *c) {
                     Key::new(phase, entry.priority, entry.tiebreak)
                 } else {
                     Key::new(
@@ -1016,54 +1159,52 @@ impl FiniteDecisionRuntime {
                     )
                 }
             };
-            let (step, _, _) = sat_step(&pres, &exec, 0, &mut k, SaturationBudget::uniform(32));
+            let (step, _, _) = sat_step(&pres, &exec, phase, &mut k, SaturationBudget::uniform(32));
             let certificate = match step {
                 SaturatedStep::Quiescent(cert) => {
                     let cert_id = quiescence_certificate_id(&cert);
                     let check = check_quiescence_certificate(&cert, &pres, &exec, &[]);
                     if !matches!(check, CertificateCheck::Verified { .. }) {
-                        return fault(
+                        return Err((
                             FiniteDecisionUnknownReason::QuiescenceVerificationFault {
                                 detail: format!(
                                     "quiescence certificate verification failed: {check:?}"
                                 ),
                             },
                             dispositions,
-                        );
+                        ));
                     }
                     cert_id
                 }
                 other => {
-                    return fault(
+                    return Err((
                         FiniteDecisionUnknownReason::QuiescenceVerificationFault {
                             detail: format!(
                                 "saturation did not return quiescence certificate: {other:?}"
                             ),
                         },
                         dispositions,
-                    );
+                    ));
                 }
             };
 
-            FiniteDecisionCommitRun {
-                commit: pool.name.clone(),
+            Ok(DeliberationOutcome {
                 decision: None,
                 dispositions,
                 final_world: self.initial_world,
                 stop: FiniteDecisionStop::Quiescent { certificate },
                 step: None,
-            }
+            })
         } else {
-            // Exactly one candidate in this pool was selected.
             let Some((_, winning_cand)) = evaluated.selected.as_ref() else {
-                return fault(
+                return Err((
                     FiniteDecisionUnknownReason::EvaluationError {
                         detail: "expected selected candidate in evaluated frontier".to_string(),
                     },
                     dispositions,
-                );
+                ));
             };
-            let admitted_entries: Vec<PresenterEntry> = pool_entries
+            let admitted_entries: Vec<PresenterEntry> = entries
                 .iter()
                 .filter(|e| admitted_names.contains(&e.name))
                 .map(|e| (*e).clone())
@@ -1086,37 +1227,37 @@ impl FiniteDecisionRuntime {
             let tick_res = try_commit_tick(
                 &[&admitted_presenter],
                 &AdmAll,
-                &self.interner,
-                &self.initial_exec(),
+                &interner,
+                &exec,
                 self.context,
-                0,
+                phase,
                 &mut keyer,
             );
 
             let (committed, step, _) = match tick_res {
                 Ok(triple) => triple,
                 Err(err) => {
-                    return fault(
+                    return Err((
                         FiniteDecisionUnknownReason::CommitTickError {
                             detail: format!("{err:?}"),
                         },
                         dispositions,
-                    );
+                    ));
                 }
             };
 
             let Committed::Step { observation, .. } = committed else {
-                return fault(
+                return Err((
                     FiniteDecisionUnknownReason::CommitTickError {
                         detail: "expected committed step".to_string(),
                     },
                     dispositions,
-                );
+                ));
             };
 
             // Contract: Results are Derived, never Proven or Refuted.
             if observation.outcome_class != Outcome::Derived {
-                return fault(
+                return Err((
                     FiniteDecisionUnknownReason::CommitTickError {
                         detail: format!(
                             "committed observation grade {:?} is not Derived",
@@ -1124,16 +1265,16 @@ impl FiniteDecisionRuntime {
                         ),
                     },
                     dispositions,
-                );
+                ));
             }
 
             let Some(step) = step else {
-                return fault(
+                return Err((
                     FiniteDecisionUnknownReason::CommitTickError {
                         detail: "Committed::Step missing journal record".to_string(),
                     },
                     dispositions,
-                );
+                ));
             };
 
             let winning_val = match candidate_values
@@ -1142,7 +1283,7 @@ impl FiniteDecisionRuntime {
             {
                 Some((_, val)) => val,
                 None => {
-                    return fault(
+                    return Err((
                         FiniteDecisionUnknownReason::EvaluationError {
                             detail: format!(
                                 "winning candidate '{}' value missing from evaluated candidate values",
@@ -1150,7 +1291,7 @@ impl FiniteDecisionRuntime {
                             ),
                         },
                         dispositions,
-                    );
+                    ));
                 }
             };
 
@@ -1161,14 +1302,13 @@ impl FiniteDecisionRuntime {
                 grade: Outcome::Derived,
             };
 
-            FiniteDecisionCommitRun {
-                commit: pool.name.clone(),
+            Ok(DeliberationOutcome {
                 decision: Some(decision.clone()),
                 dispositions,
                 final_world: winning_cand.dst,
                 stop: FiniteDecisionStop::Selected(decision),
                 step: Some(step),
-            }
+            })
         }
     }
 
@@ -1232,12 +1372,13 @@ impl FiniteDecisionRuntime {
                 soc_regimes::finite_frontier::AdmissionDecision::rejected_guard_false()
             }
         });
+        let interner = self.interner.borrow();
         let explanation = explain_why(
             &named_candidates,
             &policy,
             &self.initial_exec(),
             target,
-            &self.interner,
+            &interner,
         );
         if let WhyExplanation::EvaluationFaulted { fault, .. } = &explanation {
             return Err(FiniteDecisionUnknownReason::from(fault.clone()));
@@ -1301,12 +1442,13 @@ impl FiniteDecisionRuntime {
                 soc_regimes::finite_frontier::AdmissionDecision::rejected_guard_false()
             }
         });
+        let interner = self.interner.borrow();
         let explanation = explain_why_not(
             &named_candidates,
             &policy,
             &self.initial_exec(),
             target,
-            &self.interner,
+            &interner,
         );
         if let WhyNotExplanation::EvaluationFaulted { fault, .. } = &explanation {
             return Err(FiniteDecisionUnknownReason::from(fault.clone()));
