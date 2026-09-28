@@ -31,6 +31,13 @@ pub struct CliResultJson {
     pub decision: Option<DecisionJson>,
     pub artifacts: Vec<ArtifactJson>,
     pub diagnostics: Vec<String>,
+    /// `let`-lane `brix check` output only (ADR-0042): one entry per checked
+    /// `let`/`witness` binding, additive and omitted everywhere else
+    /// (finite-decision `check`/`run`/`audit`/`verify`/`why`/`whynot`, and a
+    /// failed `let`-lane check keep the exact field set they had before this
+    /// existed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bindings: Option<Vec<BindingJson>>,
 }
 
 impl CliResultJson {

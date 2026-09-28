@@ -103,6 +103,18 @@ pub struct FiniteDecisionPlan {
     pub commit: FiniteDecisionCommit,
     pub shows: Vec<L3ExprV2>,
     pub schemas: BTreeMap<String, L3Schema>,
+    /// Declared type parameters of every `config` that has any (ADR-0042), in
+    /// declaration order: `(config name, parameter names)`. A parameterized
+    /// config's values are ordinary nominal constructors/records at runtime —
+    /// type parameters are erased for evaluation, exactly like the `let`
+    /// lane's `Stack<T>`/`Tree<T>` — so `configs` above (arity-only) is
+    /// unaffected. This is carried separately, and bound into program
+    /// identity only when nonempty (see
+    /// [`finite_decision_program_preimage`]), purely so two configs that
+    /// differ only in whether/how they are parameterized are not silently
+    /// identified — a config's own arity-based encoding already distinguishes
+    /// its variants and fields.
+    pub generic_configs: Vec<(String, Vec<String>)>,
 }
 
 impl FiniteDecisionPlan {
@@ -161,10 +173,6 @@ pub enum FiniteDecisionLowerError {
         func: String,
         limit: usize,
         count: usize,
-    },
-    FunctionCycle {
-        func: String,
-        cycle: Vec<String>,
     },
     FunctionArityMismatch {
         func: String,
@@ -299,13 +307,6 @@ impl fmt::Display for FiniteDecisionLowerError {
                 write!(
                     f,
                     "parameter count in function '{func}' exceeds limit ({count} > {limit})"
-                )
-            }
-            Self::FunctionCycle { func, cycle } => {
-                write!(
-                    f,
-                    "function cycle detected involving '{func}': {}",
-                    cycle.join(" -> ")
                 )
             }
             Self::FunctionArityMismatch {
@@ -539,7 +540,10 @@ fn collect_schema(
     if !config.params.is_empty() {
         return Err(FiniteDecisionLowerError::InvalidSchema {
             name: name.to_string(),
-            detail: "generic configs are unsupported".to_string(),
+            detail: "a generic config (ADR-0042) may be used as an internal value, but cannot \
+                     be validated as an input or helper-contract schema: type parameters are \
+                     erased at evaluation, so there is nothing left to check a payload against"
+                .to_string(),
         });
     }
     let body = match &config.body {
@@ -756,7 +760,11 @@ fn parse_contract(
         ast::Ty::App(name, _) => {
             return Err(FiniteDecisionLowerError::UnsupportedContractType {
                 ty: format!("{name}<...>"),
-                detail: "generic/parameterized types are not supported in finite-decision"
+                detail: "a parameterized type cannot appear in a function contract or input \
+                         declaration (ADR-0042): type parameters are erased at evaluation, so \
+                         there is no payload shape left to check against — write the contract \
+                         without a return/parameter annotation instead, or use the type only \
+                         as an internal (uncontracted) value"
                     .to_string(),
             });
         }
@@ -781,109 +789,6 @@ fn parse_contract(
         grade,
         schema_ty,
     })
-}
-
-/// Collect function calls from an L3 expression for cycle detection.
-fn collect_function_calls(e: &L3ExprV2, calls: &mut BTreeSet<String>) {
-    match e {
-        L3ExprV2::Call { func, args } => {
-            calls.insert(func.clone());
-            for a in args {
-                collect_function_calls(a, calls);
-            }
-        }
-        L3ExprV2::Ctor { args, .. } => {
-            for a in args {
-                collect_function_calls(a, calls);
-            }
-        }
-        L3ExprV2::Record { fields, .. } => {
-            for (_, v) in fields {
-                collect_function_calls(v, calls);
-            }
-        }
-        L3ExprV2::Field(base, _) => collect_function_calls(base, calls),
-        // `IntDivMod` is a reserved operation, not a helper call, so it
-        // contributes no name here — only its operands are walked.
-        L3ExprV2::Arith(_, a, b)
-        | L3ExprV2::Cmp(_, a, b)
-        | L3ExprV2::IntDivMod(_, a, b)
-        | L3ExprV2::And(a, b)
-        | L3ExprV2::Or(a, b) => {
-            collect_function_calls(a, calls);
-            collect_function_calls(b, calls);
-        }
-        L3ExprV2::Not(a) => {
-            collect_function_calls(a, calls);
-        }
-        L3ExprV2::Match { scrutinee, arms } => {
-            collect_function_calls(scrutinee, calls);
-            for (_, body) in arms {
-                collect_function_calls(body, calls);
-            }
-        }
-        L3ExprV2::Int(_)
-        | L3ExprV2::Str(_)
-        | L3ExprV2::Bool(_)
-        | L3ExprV2::LetRef(_)
-        | L3ExprV2::RuleFact(_)
-        | L3ExprV2::NullaryVariant { .. } => {}
-    }
-}
-
-enum DfsMark {
-    Visiting,
-    Visited,
-}
-
-/// Detect direct and mutual function recursion cycles across all declared functions.
-fn detect_cycles(
-    call_graph: &BTreeMap<String, BTreeSet<String>>,
-) -> Result<(), FiniteDecisionLowerError> {
-    let mut marks: BTreeMap<&str, DfsMark> = BTreeMap::new();
-    let mut path: Vec<&str> = Vec::new();
-
-    for start in call_graph.keys() {
-        if !marks.contains_key(start.as_str()) {
-            dfs_cycle(start.as_str(), call_graph, &mut marks, &mut path)?;
-        }
-    }
-    Ok(())
-}
-
-fn dfs_cycle<'a>(
-    node: &'a str,
-    call_graph: &'a BTreeMap<String, BTreeSet<String>>,
-    marks: &mut BTreeMap<&'a str, DfsMark>,
-    path: &mut Vec<&'a str>,
-) -> Result<(), FiniteDecisionLowerError> {
-    marks.insert(node, DfsMark::Visiting);
-    path.push(node);
-
-    if let Some(neighbors) = call_graph.get(node) {
-        for next in neighbors {
-            match marks.get(next.as_str()) {
-                Some(DfsMark::Visiting) => {
-                    let cycle_start = path.iter().position(|&x| x == next.as_str()).unwrap_or(0);
-                    let mut cycle: Vec<String> =
-                        path[cycle_start..].iter().map(|s| s.to_string()).collect();
-                    cycle.push(next.clone());
-                    return Err(FiniteDecisionLowerError::FunctionCycle {
-                        func: node.to_string(),
-                        cycle,
-                    });
-                }
-                Some(DfsMark::Visited) => {}
-                None => {
-                    dfs_cycle(next.as_str(), call_graph, marks, path)?;
-                }
-            }
-        }
-    }
-
-    path.pop();
-    marks.insert(node, DfsMark::Visited);
-    Ok(())
 }
 
 /// Lower a parsed syntax module into a validated [`FiniteDecisionPlan`].
@@ -1110,6 +1015,7 @@ pub fn lower_finite_decision_plan(
     let mut all_top_level_names: BTreeSet<String> = BTreeSet::new();
 
     let mut configs = Vec::new();
+    let mut generic_configs: Vec<(String, Vec<String>)> = Vec::new();
     let mut inputs = Vec::new();
     let mut functions = Vec::new();
     let mut lets = Vec::new();
@@ -1191,6 +1097,14 @@ pub fn lower_finite_decision_plan(
             ast::Item::Config(c) => {
                 if !all_top_level_names.insert(c.name.clone()) {
                     return Err(FiniteDecisionLowerError::DuplicateItemName(c.name.clone()));
+                }
+                // A parameterized config (ADR-0042): its values are ordinary
+                // nominal constructors/records at runtime, so nothing else in
+                // this loop treats `c.params` specially — the type
+                // parameters are erased for evaluation. Only recorded so
+                // identity distinguishes it (see `generic_configs` doc).
+                if !c.params.is_empty() {
+                    generic_configs.push((c.name.clone(), c.params.clone()));
                 }
                 if !has_functions {
                     if let ast::ConfigBody::Sum(variants) = &c.body {
@@ -1551,14 +1465,13 @@ pub fn lower_finite_decision_plan(
         }
     }
 
-    // Cycle detection across all declared functions.
-    let mut call_graph: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for f in &functions {
-        let mut calls = BTreeSet::new();
-        collect_function_calls(&f.body, &mut calls);
-        call_graph.insert(f.name.clone(), calls);
-    }
-    detect_cycles(&call_graph)?;
+    // Direct and mutual recursion among functions is admitted (ADR-0042,
+    // superseding ADR-0032's refusal): a call graph cycle is no longer a
+    // lowering error. Termination is the evaluator's business — the shared
+    // call-depth and step budgets in `l3_v2::EvalBudget` fail a
+    // non-terminating (or merely too-deep) call chain closed to
+    // `Unknown(EvalFault::CallDepthExceeded | ResourceExhausted)` rather than
+    // refusing the program outright or overflowing the native stack.
 
     // Exhaustiveness check over all function bodies.
     for f in &functions {
@@ -1592,6 +1505,7 @@ pub fn lower_finite_decision_plan(
         commit,
         shows,
         schemas,
+        generic_configs,
     };
     super::boolean_types::check(&plan, module)?;
     Ok(plan)
@@ -1841,6 +1755,23 @@ pub fn finite_decision_program_preimage(plan: &FiniteDecisionPlan) -> Vec<u8> {
         for (name, schema) in &plan.schemas {
             w.write_ident(name);
             encode_schema_body(&mut w, &schema.body);
+        }
+    }
+
+    // Generic config declarations (ADR-0042):
+    // Bound into program identity only when at least one config declares
+    // type parameters. When none do, omitted to maintain byte-for-byte
+    // preimage and ProgramId compatibility with every earlier program — type
+    // parameters did not exist as a concept any earlier profile encoded.
+    if !plan.generic_configs.is_empty() {
+        w.write_tag("brix.l3.finite-decision.generic-configs@1");
+        w.write_uint(plan.generic_configs.len() as u64);
+        for (name, params) in &plan.generic_configs {
+            w.write_ident(name);
+            w.write_uint(params.len() as u64);
+            for param in params {
+                w.write_ident(param);
+            }
         }
     }
 

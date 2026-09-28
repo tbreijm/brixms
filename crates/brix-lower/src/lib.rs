@@ -30,6 +30,7 @@ pub mod l3_canon;
 pub mod l3_regime;
 pub mod l3_run;
 pub mod l3_v2;
+pub mod let_eval;
 pub use audit_bundle::{
     check_finite_decision_audit_input_bundle_from_module_v1,
     check_finite_decision_audit_input_bundle_from_module_with_inputs_v1,
@@ -87,6 +88,7 @@ pub use l3_regime::{
     build_l3_observation_profile, build_l3_transition_table, l3_adm, l3_policy, L3Regime,
     L3TransitionTable,
 };
+pub use let_eval::{evaluate_let_module, LetEvalOutcome};
 pub use l3_run::{
     commit_error_reason, frontier_conflict_reason, run_l3_plan, run_l3_plan_with_interner,
     settlement_run_id, AdapterFailureDetail, L3AdmChoice, L3RunReport, L3UnknownReasonV1,
@@ -1126,7 +1128,12 @@ fn types_agree(declared: &TrTy, inferred: &TrTy) -> bool {
 
 /// Render a type for a diagnostic. `Debug` leaks the internal representation
 /// into user-facing output, so the surface spelling is reconstructed here.
-fn render_ty(t: &TrTy) -> String {
+///
+/// Exposed (not crate-private) so `brix check` can print the inferred type of
+/// a `let` binding instead of the placeholder `—` it printed before this
+/// existed — the type was always computed and carried on [`CheckResult::ty`],
+/// just never rendered.
+pub fn render_ty(t: &TrTy) -> String {
     render_ty_at(t, true)
 }
 
