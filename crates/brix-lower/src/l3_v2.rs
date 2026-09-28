@@ -924,6 +924,9 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
             ast::Item::Input(i) => {
                 return Err(L3V2LowerError::ItemNotAllowed(format!("input {}", i.name)))
             }
+            ast::Item::Decide(d) => {
+                return Err(L3V2LowerError::ItemNotAllowed(format!("decide {}", d.name)))
+            }
         }
     }
 

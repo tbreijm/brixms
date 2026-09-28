@@ -366,11 +366,44 @@ fn compare_case(expect: &ExpectSpec, run: &FiniteDecisionRun) -> Vec<Mismatch> {
                     mismatches.push(Mismatch::new(field, expected_status.clone(), cj.status));
                 }
             }
-            None => mismatches.push(Mismatch::new(
-                field,
-                expected_status.clone(),
-                "(no such candidate)",
-            )),
+            None => {
+                // Not a commit-pool candidate: search every decide block's
+                // every instance (ADR-0043) — a name declared inside a
+                // decide block may be admitted/selected/rejected in more
+                // than one instance, so this matches the first instance
+                // (in block, then element, order) that names it, which is
+                // enough to assert a candidate exists and its disposition
+                // in at least one instance without requiring `--entity`.
+                let found = run.decides.iter().find_map(|d| {
+                    d.instances
+                        .iter()
+                        .find_map(|inst| inst.dispositions.iter().find(|disp| &disp.name == name))
+                });
+                match found {
+                    Some(disp) => {
+                        let winning_name = run
+                            .decides
+                            .iter()
+                            .flat_map(|d| d.instances.iter())
+                            .find(|inst| inst.dispositions.iter().any(|dd| &dd.name == name))
+                            .and_then(|inst| inst.decision.as_ref())
+                            .map(|dec| dec.candidate.as_str());
+                        let cj = candidate_disposition_to_json(disp, winning_name);
+                        if &cj.status != expected_status {
+                            mismatches.push(Mismatch::new(
+                                field,
+                                expected_status.clone(),
+                                cj.status,
+                            ));
+                        }
+                    }
+                    None => mismatches.push(Mismatch::new(
+                        field,
+                        expected_status.clone(),
+                        "(no such candidate)",
+                    )),
+                }
+            }
         }
     }
 
@@ -391,6 +424,53 @@ fn compare_case(expect: &ExpectSpec, run: &FiniteDecisionRun) -> Vec<Mismatch> {
                 field,
                 expected_candidate.clone(),
                 "(no such commit)",
+            )),
+        }
+    }
+
+    for (decide_name, expected_candidates) in &expect.entities {
+        let field_base = format!("entities.{decide_name}");
+        match run.decide_run(decide_name) {
+            Some(decide_run) if decide_run.is_unknown() => {
+                mismatches.push(Mismatch::new(
+                    field_base,
+                    format!("{} instances", expected_candidates.len()),
+                    "(unknown)",
+                ));
+            }
+            Some(decide_run) => {
+                if decide_run.instances.len() != expected_candidates.len() {
+                    mismatches.push(Mismatch::new(
+                        format!("{field_base}.len"),
+                        expected_candidates.len().to_string(),
+                        decide_run.instances.len().to_string(),
+                    ));
+                }
+                for (idx, expected) in expected_candidates.iter().enumerate() {
+                    let field = format!("{field_base}[{idx}]");
+                    match decide_run.instances.get(idx) {
+                        Some(inst) => {
+                            let actual = inst
+                                .decision
+                                .as_ref()
+                                .map(|d| d.candidate.clone())
+                                .unwrap_or_else(|| "(none)".to_string());
+                            if &actual != expected {
+                                mismatches.push(Mismatch::new(field, expected.clone(), actual));
+                            }
+                        }
+                        None => mismatches.push(Mismatch::new(
+                            field,
+                            expected.clone(),
+                            "(no such instance)",
+                        )),
+                    }
+                }
+            }
+            None => mismatches.push(Mismatch::new(
+                field_base,
+                format!("{} instances", expected_candidates.len()),
+                "(no such decide block)",
             )),
         }
     }
@@ -608,6 +688,11 @@ struct ExpectSpec {
     /// matching `decision`'s own `"(none)"` convention. Checked in addition
     /// to `status`/`decision` (which only speak of the first commit pool).
     decisions: Vec<(String, String)>,
+    /// Per `decide` block (ADR-0043): block name -> expected decided
+    /// candidates, in element order, one entry per element, `"(none)"` for
+    /// a quiescent element. A block whose actual instance count differs
+    /// from the expected list's length is itself a mismatch.
+    entities: Vec<(String, Vec<String>)>,
 }
 
 /// A parse/validation failure for a `.test.json` suite file. Always fatal (exit 2): see
@@ -736,6 +821,7 @@ fn parse_expect(v: &JsonVal) -> Result<ExpectSpec, TestFileError> {
     let mut candidates: Vec<(String, String)> = Vec::new();
     let mut facts: Vec<(String, String)> = Vec::new();
     let mut decisions: Vec<(String, String)> = Vec::new();
+    let mut entities: Vec<(String, Vec<String>)> = Vec::new();
 
     for (key, val) in entries {
         match key.as_str() {
@@ -779,6 +865,17 @@ fn parse_expect(v: &JsonVal) -> Result<ExpectSpec, TestFileError> {
                     ));
                 }
             }
+            "entities" => {
+                let obj = as_object(val, "'expect.entities'")?;
+                for (name, list_val) in obj {
+                    let items = as_array(list_val, "'expect.entities[]'")?;
+                    let mut expected = Vec::with_capacity(items.len());
+                    for item in items {
+                        expected.push(as_string(item, "'expect.entities[][]'")?);
+                    }
+                    entities.push((name.clone(), expected));
+                }
+            }
             other => {
                 return Err(TestFileError::new(format!(
                     "unknown field '{other}' in 'expect'"
@@ -798,6 +895,7 @@ fn parse_expect(v: &JsonVal) -> Result<ExpectSpec, TestFileError> {
         candidates,
         facts,
         decisions,
+        entities,
     })
 }
 

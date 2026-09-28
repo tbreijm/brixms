@@ -121,6 +121,7 @@ Every one of these result schemas already existed before this ADR (they are exac
   "inputs": [ { "path": "in.json" }, { "source": "<brix.input@N text>" } ],  // optional
   "package_paths": ["pkgs/"],                          // optional
   "candidate": "ship",                                 // why / whynot only, required
+  "entity": 1,                                         // why / whynot only, optional: a decide-block element index (ADR-0043)
   "bundle_out": "out.bundle",                           // audit only, required
   "force": false,                                       // audit only, optional
   "bundle": "in.bundle",                                // verify only, required

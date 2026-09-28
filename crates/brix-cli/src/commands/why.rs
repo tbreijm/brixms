@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use brix_lower::finite_decision::FINITE_DECISION_PROFILE;
 use soc_regimes::finite_frontier::{WhyExplanation, WhyNotExplanation};
 
-use crate::cli::{EXIT_REJECTED_OR_UNKNOWN, EXIT_SUCCESS};
+use crate::cli::{EXIT_REJECTED_OR_UNKNOWN, EXIT_SUCCESS, EXIT_USAGE_OR_IO};
 use crate::commands::{
     candidate_disposition_to_json, decision_to_json, fact_to_json, format_finite_decision_human,
     unknown_reason_to_code_and_detail,
@@ -14,9 +14,11 @@ use crate::json::{CliResultJson, BRIX_CLI_SCHEMA};
 use crate::pipeline;
 
 /// Execute `brix why` or `brix whynot`.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_why_or_whynot(
     file: &Path,
     candidate: &str,
+    entity: Option<usize>,
     json: bool,
     package_paths: &[PathBuf],
     input_paths: &[PathBuf],
@@ -95,6 +97,46 @@ pub fn execute_why_or_whynot(
     } else {
         (None, None)
     };
+
+    // A `decide`-scoped candidate (ADR-0043) needs one more coordinate — an
+    // element index — since its name was declared once but instantiated
+    // once per element; `--entity INDEX` supplies it. Handled entirely
+    // separately from the commit-pool path below: `--entity` is required
+    // for a decide-owned candidate and refused for anything else.
+    if let Some(decide) = plan.decide_of_candidate(candidate) {
+        return explain_entity(
+            cmd_name,
+            decide,
+            candidate,
+            entity,
+            &run,
+            &context_hex,
+            input_snapshot,
+            inputs_json,
+            json,
+            is_whynot,
+        );
+    }
+    if entity.is_some() {
+        let msg = format!(
+            "'--entity' is only meaningful for a candidate declared inside a 'decide' block; '{candidate}' is not one"
+        );
+        if json {
+            let res = CliResultJson::failure(
+                cmd_name,
+                Some(FINITE_DECISION_PROFILE.to_string()),
+                Some(run.program.0.to_hex()),
+                Some(context_hex.clone()),
+                "usage-error",
+                vec![msg],
+            )
+            .with_inputs(input_snapshot, inputs_json);
+            crate::json::emit_result_json(&res);
+        } else {
+            eprintln!("brix {cmd_name}: {msg}");
+        }
+        return EXIT_USAGE_OR_IO;
+    }
 
     // Fail-closed pre-flight, scoped to `candidate`'s own commit pool
     // (ADR-0039) — a fault in a different pool must not block explaining a
@@ -336,6 +378,7 @@ pub fn execute_why_or_whynot(
             locations: None,
             shows: None,
             commits: None,
+            entity_decisions: None,
         };
         crate::json::emit_result_json(&res);
     } else {
@@ -349,6 +392,174 @@ pub fn execute_why_or_whynot(
                 crate::commands::explain_render::render_explanation_human(expl)
             );
         }
+    }
+
+    EXIT_SUCCESS
+}
+
+/// Explain a `decide`-scoped candidate (ADR-0043): resolves `--entity` to
+/// one settled instance of `decide`'s own block, then reports that
+/// instance's own admission/selection against its own admitted set and
+/// winner — never a sibling instance's. Uses the dispositions `run` already
+/// computed (the same fresh-from-inputs deliberation the commit-pool path
+/// re-derives via `explain_why`/`explain_why_not`, just read directly
+/// rather than re-run a second time), so it cannot disagree with `brix
+/// run`'s own output for the same inputs.
+///
+/// This is deliberately a simpler report than the commit-pool path's: it
+/// does not build the structured, bounded derivation trace
+/// (`FiniteDecisionRuntime::explain_candidate`) that path additionally
+/// offers, which is scoped to top-level candidates today.
+#[allow(clippy::too_many_arguments)]
+fn explain_entity(
+    cmd_name: &str,
+    decide: &brix_lower::finite_decision::FiniteDecisionDecide,
+    candidate: &str,
+    entity: Option<usize>,
+    run: &brix_lower::finite_decision::FiniteDecisionRun,
+    context_hex: &str,
+    input_snapshot: Option<String>,
+    inputs_json: Option<Vec<crate::json::InputJson>>,
+    json: bool,
+    is_whynot: bool,
+) -> u8 {
+    let fail = |status: &str, msg: String| -> u8 {
+        if json {
+            let res = CliResultJson::failure(
+                cmd_name,
+                Some(FINITE_DECISION_PROFILE.to_string()),
+                Some(run.program.0.to_hex()),
+                Some(context_hex.to_string()),
+                status,
+                vec![msg],
+            )
+            .with_inputs(input_snapshot.clone(), inputs_json.clone());
+            crate::json::emit_result_json(&res);
+        } else {
+            eprintln!("brix {cmd_name}: {msg}");
+        }
+        if status == "usage-error" {
+            EXIT_USAGE_OR_IO
+        } else {
+            EXIT_REJECTED_OR_UNKNOWN
+        }
+    };
+
+    let Some(index) = entity else {
+        return fail(
+            "usage-error",
+            format!(
+                "'{candidate}' is declared inside decide block '{}'; pass '--entity INDEX' to select which instance to explain",
+                decide.name
+            ),
+        );
+    };
+
+    let Some(decide_run) = run.decide_run(&decide.name) else {
+        return fail(
+            "unknown",
+            format!("decide block '{}' has no run to explain", decide.name),
+        );
+    };
+    if let brix_lower::finite_decision::FiniteDecisionDecideStop::Unknown(reason) = &decide_run.stop
+    {
+        let (code, detail) = unknown_reason_to_code_and_detail(reason);
+        return fail("unknown", format!("{code}: {detail}"));
+    }
+    let Some(inst) = decide_run.instances.get(index) else {
+        return fail(
+            "usage-error",
+            format!(
+                "decide block '{}' has {} instance(s); index {index} is out of range",
+                decide.name,
+                decide_run.instances.len()
+            ),
+        );
+    };
+    let Some(disposition) = inst.dispositions.iter().find(|d| d.name == candidate) else {
+        return fail(
+            "candidate-not-found",
+            format!(
+                "candidate '{candidate}' not found in decide block '{}' instance {index}",
+                decide.name
+            ),
+        );
+    };
+
+    let winning_name = inst.decision.as_ref().map(|d| d.candidate.as_str());
+    let cj = candidate_disposition_to_json(disposition, winning_name);
+    let explanation_text = if !is_whynot {
+        match &disposition.status {
+            soc_regimes::finite_frontier::CandidateStatus::Selected => format!(
+                "{candidate} [entity {index}]: selected — admitted with minimal calendar key"
+            ),
+            soc_regimes::finite_frontier::CandidateStatus::AdmittedNotSelected => format!(
+                "{candidate} [entity {index}]: admitted-not-selected — overshadowed by selected candidate '{}'",
+                winning_name.unwrap_or("(none)")
+            ),
+            soc_regimes::finite_frontier::CandidateStatus::RejectedGuardFalse => format!(
+                "{candidate} [entity {index}]: not-admitted — rejected (guard evaluated to false)"
+            ),
+            soc_regimes::finite_frontier::CandidateStatus::Rejected(r) => {
+                format!("{candidate} [entity {index}]: not-admitted — rejected ({r})")
+            }
+        }
+    } else {
+        match &disposition.status {
+            soc_regimes::finite_frontier::CandidateStatus::Selected => format!(
+                "{candidate} [entity {index}]: actually-selected — candidate was admitted and selected"
+            ),
+            soc_regimes::finite_frontier::CandidateStatus::AdmittedNotSelected => format!(
+                "{candidate} [entity {index}]: overshadowed — admitted but lost selection to higher-priority candidate '{}'",
+                winning_name.unwrap_or("(none)")
+            ),
+            soc_regimes::finite_frontier::CandidateStatus::RejectedGuardFalse => format!(
+                "{candidate} [entity {index}]: rejected — guard evaluated to false"
+            ),
+            soc_regimes::finite_frontier::CandidateStatus::Rejected(r) => {
+                format!("{candidate} [entity {index}]: rejected — {r}")
+            }
+        }
+    };
+
+    if json {
+        let res = CliResultJson {
+            schema: BRIX_CLI_SCHEMA.to_string(),
+            command: cmd_name.to_string(),
+            ok: true,
+            profile: Some(FINITE_DECISION_PROFILE.to_string()),
+            program: Some(run.program.0.to_hex()),
+            context: Some(context_hex.to_string()),
+            input_snapshot,
+            status: "explained".to_string(),
+            inputs: inputs_json,
+            facts: run.facts.iter().map(fact_to_json).collect(),
+            candidates: vec![cj],
+            decision: inst.decision.as_ref().map(decision_to_json),
+            artifacts: Vec::new(),
+            diagnostics: vec![explanation_text],
+            explanation: None,
+            locations: None,
+            shows: None,
+            commits: None,
+            entity_decisions: Some(vec![crate::commands::decide_run_to_json(decide_run)]),
+            bindings: None,
+        };
+        crate::json::emit_result_json(&res);
+    } else {
+        println!("{explanation_text}");
+        println!("binder: {}", crate::commands::fmt_value_human(&inst.binder));
+        if let Some(sel) = &inst.decision {
+            println!(
+                "decision: {} = {} @Derived",
+                sel.candidate,
+                crate::commands::fmt_value_human(&sel.value)
+            );
+        } else {
+            println!("decision: none (quiescent)");
+        }
+        println!("program: {}", run.program.0.to_hex());
+        println!("context: {context_hex}");
     }
 
     EXIT_SUCCESS

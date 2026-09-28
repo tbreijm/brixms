@@ -207,6 +207,38 @@ fn test_why_and_whynot() {
     assert_eq!(s.finish(), 0);
 }
 
+#[test]
+fn test_why_for_one_decide_instance() {
+    // ADR-0043: `entity` selects one element of a per-entity `decide` block.
+    let mut s = ServeSession::spawn();
+    let resp = s.call(
+        "why",
+        json!(41),
+        json!({
+            "program": { "path": "examples/order-book.brix" },
+            "inputs": [{ "path": "examples/order-book.json" }],
+            "candidate": "backorder",
+            "entity": 1
+        }),
+    );
+    assert_eq!(resp["ok"], true, "{resp}");
+    assert_eq!(resp["result"]["command"], "why");
+    assert_eq!(resp["result"]["ok"], true);
+    assert!(resp["result"]["entity_decisions"].is_array());
+
+    let bad = s.call(
+        "why",
+        json!(42),
+        json!({
+            "program": { "path": "examples/order-book.brix" },
+            "candidate": "ship",
+            "entity": -1
+        }),
+    );
+    assert_eq!(bad["ok"], false);
+    assert_eq!(s.finish(), 0);
+}
+
 // ---------------------------------------------------------------------------
 // a failing program: Unknown
 // ---------------------------------------------------------------------------

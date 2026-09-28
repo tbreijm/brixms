@@ -459,6 +459,7 @@ pub fn execute_verify(
             locations: None,
             shows: None,
             commits: None,
+            entity_decisions: None,
         };
         crate::json::emit_result_json(&res);
     } else {

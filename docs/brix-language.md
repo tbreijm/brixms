@@ -574,7 +574,71 @@ semantics, canonical encoding, and acceptance checklist.
 
 ---
 
-## 5. Epistemic grades and honest status
+## 5. Per-entity decisions (ADR-0043)
+
+Every `commit` pool declared so far makes one decision from the program's
+facts. A `decide` block makes **one decision per element of a list** —
+independently, using the same deliberation machinery every `commit` pool
+already uses.
+
+<!-- brix-snippet: fragment -->
+```brix
+config Order = { id: Int, units: Int }
+config Decision = Ship | Hold
+
+input orders: List<Order> max 32
+
+decide status for o in orders {
+  propose ship priority 10 when o.units <= 10 = Ship
+  propose hold otherwise = Hold
+}
+```
+
+- **`decide NAME for BINDER in LIST_EXPR { propose ... }`** instantiates one
+  commit pool per element of `LIST_EXPR`, in list order. `LIST_EXPR` is
+  evaluated once, from the shared inputs/`let`s/rule facts; each instance
+  then deliberates independently, with `BINDER` bound to its own element in
+  addition to everything an ordinary top-level `propose` can already read
+  (inputs, `let`s, any rule declared above the block). No explicit `commit …
+  from (…)` is written — the block's own `propose` items are its pool,
+  implicitly, for every instantiated element.
+- Every `propose` inside a `decide` block is spelled exactly like a
+  top-level one, including `otherwise` (ADR-0038) and inferred dependencies;
+  its name is checked for uniqueness **program-wide**, the same namespace a
+  top-level `propose` occupies, even though it is only ever a candidate
+  within its own block's per-instance pools.
+- **All-or-nothing per block.** A fault evaluating the list, or any one
+  instance's guard/value/deliberation faulting, makes the **whole block**
+  Unknown with no partial per-instance results — one logical decision, not a
+  pile of independent maybes. A fault in one `decide` block never affects a
+  sibling block or any `commit` pool, and vice versa (mirroring ADR-0039's
+  independence between commit pools, one level down).
+- A **program-wide** cap (`MAX_TOTAL_DECIDE_INSTANCES` = 4,096) bounds the
+  sum of every `decide` block's own list length together; exceeding it is a
+  typed Unknown for every block.
+- **`show status`** evaluates to the list of decided values, in element
+  order — the plural analogue of `show <commit name>` reading a pool's own
+  decided value.
+- `brix run` prints a `decide <name>:` section (one line per settled
+  instance) and, in `--json`, an additive `entity_decisions` array. `brix
+  why NAME --entity INDEX` / `brix whynot NAME --entity INDEX` explain one
+  specific instance. `brix test` gains an additive `expect.entities`
+  assertion: `"entities": {"status": ["ship", "hold"]}` checks the decided
+  candidates in element order.
+
+[`examples/order-book.brix`](../examples/order-book.brix) is a complete,
+verified program built from this: it joins each order against a shared
+stock list inside the `decide` block and independently ships, backorders,
+or holds every order, with
+[`examples/order-book.test.json`](../examples/order-book.test.json) covering
+all three outcomes across one list.
+
+See [ADR-0043](../spec/adr/ADR-0043_Per_Entity_Decisions.md) for the full
+semantics, canonical encoding, and acceptance checklist.
+
+---
+
+## 6. Epistemic grades and honest status
 
 Brix does not collapse every outcome into `true`/`false`:
 
@@ -600,7 +664,7 @@ kernel rules are not yet available or fully discharged.
 
 ---
 
-## 6. Type normalization and coercion lattices
+## 7. Type normalization and coercion lattices
 
 Type normalization runs on one declared, witnessed-coercion mechanism,
 `CoercionLattice`, with two live instances:

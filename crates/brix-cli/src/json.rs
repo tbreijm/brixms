@@ -121,6 +121,12 @@ pub struct CliResultJson {
     /// a single-commit module's JSON is byte-identical to before ADR-0039.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commits: Option<Vec<CommitPoolJson>>,
+    /// Every `decide` block's own per-entity outcome (ADR-0043), additive
+    /// under schema `brix.cli.result@1`. Populated only when the module
+    /// declares at least one `decide` block — a module that declares none
+    /// has byte-identical JSON to before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_decisions: Option<Vec<EntityDecisionsJson>>,
 }
 
 impl CliResultJson {
@@ -158,6 +164,7 @@ impl CliResultJson {
             locations: None,
             shows: None,
             commits: None,
+            entity_decisions: None,
         }
     }
 
@@ -190,6 +197,7 @@ impl CliResultJson {
             locations: None,
             shows: None,
             commits: None,
+            entity_decisions: None,
         }
     }
 
@@ -480,6 +488,29 @@ impl CommitPoolJson {
             decision,
         }
     }
+}
+
+/// One `decide` block's own per-entity outcome (ADR-0043), listed under
+/// `CliResultJson::entity_decisions`. `status` is `"settled"` or
+/// `"unknown"`; `instances` is empty and `reason` carries the block's own
+/// fault detail when `status` is `"unknown"` (all-or-nothing per block).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct EntityDecisionsJson {
+    pub name: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub instances: Vec<EntityInstanceJson>,
+}
+
+/// One element's own settled outcome within a `decide` block (ADR-0043).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct EntityInstanceJson {
+    pub index: u64,
+    pub binder: TaggedValue,
+    pub status: String,
+    pub candidates: Vec<CandidateJson>,
+    pub decision: Option<DecisionJson>,
 }
 
 /// Tagged object representing an evaluated Brix value.

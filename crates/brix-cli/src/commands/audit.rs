@@ -397,6 +397,7 @@ pub fn execute_audit(
             locations: None,
             shows: None,
             commits: None,
+            entity_decisions: None,
         };
         crate::json::emit_result_json(&res);
     } else {

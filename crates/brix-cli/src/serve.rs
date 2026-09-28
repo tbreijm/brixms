@@ -474,6 +474,22 @@ fn required_u64_field(params: &Value, field: &str) -> Result<u64, DispatchError>
     ))
 }
 
+/// `entity` (ADR-0043): absent or null means a commit-pool candidate;
+/// otherwise a non-negative integer element index into a `decide` block.
+fn optional_entity_field(params: &Value) -> Result<Option<usize>, DispatchError> {
+    match params.get("entity") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .map(Some)
+            .ok_or((
+                "invalid-params",
+                "field 'entity' must be a non-negative integer".to_string(),
+            )),
+    }
+}
+
 fn optional_u64_field(params: &Value, field: &str) -> Option<u64> {
     params.get(field).and_then(Value::as_u64)
 }
@@ -500,10 +516,12 @@ fn dispatch_program_method(method: &str, params: &Value) -> Result<(u8, Value), 
         "why" | "whynot" => {
             let candidate = required_str_field(params, "candidate")?.to_string();
             let is_whynot = method == "whynot";
+            let entity = optional_entity_field(params)?;
             with_captured_result(|| {
                 crate::commands::why::execute_why_or_whynot(
                     &file,
                     &candidate,
+                    entity,
                     true,
                     &package_paths,
                     &input_paths,

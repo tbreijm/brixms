@@ -104,5 +104,6 @@ pub(crate) fn item_kind_name(item: &Item) -> (&'static str, Option<String>) {
         Item::Propose(p) => ("propose", Some(p.name.clone())),
         Item::Commit(c) => ("commit", Some(c.name.clone())),
         Item::Input(i) => ("input", Some(i.name.clone())),
+        Item::Decide(d) => ("decide", Some(d.name.clone())),
     }
 }

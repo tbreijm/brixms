@@ -62,16 +62,76 @@ const FIXTURES: &[(&str, &str, Option<&str>)] = &[
         include_str!("../../../examples/fulfillment.brix"),
         Some(include_str!("../../../examples/fulfillment.json")),
     ),
+    (
+        "order-book.brix",
+        include_str!("../../../examples/order-book.brix"),
+        Some(include_str!("../../../examples/order-book.json")),
+    ),
 ];
 
 /// A small vocabulary of real Brix tokens, so a mutated program has some
 /// chance of still parsing (an insertion of pure noise almost never does).
 const TOKEN_VOCAB: &[&str] = &[
-    "config", "rule", "propose", "commit", "input", "fn", "when", "priority", "from", "let",
-    "show", "true", "false", "match", "{", "}", "(", ")", ":", "=", "|", ",", ".", "+", "-", "*",
-    "==", "!=", "<", "<=", ">", ">=", "&&", "||", "!", "0", "1", "42", "A", "B", "x", "[", "]",
-    "=>", "for", "in", "where", "yield", "filter", "map", "sum", "count", "len", "distinct", "min",
-    "max", "List", "max",
+    "config",
+    "rule",
+    "propose",
+    "commit",
+    "input",
+    "fn",
+    "when",
+    "priority",
+    "from",
+    "let",
+    "show",
+    "true",
+    "false",
+    "match",
+    "{",
+    "}",
+    "(",
+    ")",
+    ":",
+    "=",
+    "|",
+    ",",
+    ".",
+    "+",
+    "-",
+    "*",
+    "==",
+    "!=",
+    "<",
+    "<=",
+    ">",
+    ">=",
+    "&&",
+    "||",
+    "!",
+    "0",
+    "1",
+    "42",
+    "A",
+    "B",
+    "x",
+    "[",
+    "]",
+    "=>",
+    "for",
+    "in",
+    "where",
+    "yield",
+    "filter",
+    "map",
+    "sum",
+    "count",
+    "len",
+    "distinct",
+    "min",
+    "max",
+    "List",
+    "max",
+    "decide",
+    "otherwise",
 ];
 
 #[derive(Clone, Debug)]
@@ -605,5 +665,104 @@ proptest! {
             &run2.dispositions,
             "candidate dispositions must be deterministic"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (4) A fixed program with a per-entity `decide` block (ADR-0043) over a
+//     random `List<Int> max 8` snapshot: one instance per element, each
+//     independently classified `small`/`big`/`negative`. `run()` must never
+//     panic, the block must either fully settle (one instance per element,
+//     in order) or report a single typed Unknown, and repeated runs over
+//     the same snapshot must be exactly deterministic.
+// ---------------------------------------------------------------------------
+
+const DECIDE_PROGRAM: &str = r#"
+config Decision = Small | Big | Negative
+
+input xs: List<Int> max 8
+
+decide classification for x in xs {
+  propose negative priority 1 when x < 0 = Negative
+  propose small priority 2 when x >= 0 && x < 100 = Small
+  propose big otherwise = Big
+}
+"#;
+
+proptest! {
+    /// A `decide` block over a random-length, random-valued `List<Int> max
+    /// 8`: lowering and building are asserted to succeed (well-formed by
+    /// construction, and every proposal admits unconditionally on at least
+    /// one of the three disjoint ranges plus `otherwise`, so no instance can
+    /// ever fault or quiesce); `run()` must never panic, must produce
+    /// exactly one settled instance per input element, in order, with the
+    /// classification implied by its own value, and running the identical
+    /// plan+snapshot twice must be exactly deterministic — including the
+    /// per-instance decisions and the journal length.
+    #[test]
+    fn decide_program_lowers_and_runs_deterministically(
+        values in proptest::collection::vec(-1000i64..=1000, 0..=8),
+    ) {
+        let module = parse(DECIDE_PROGRAM)
+            .unwrap_or_else(|e| panic!("decide fixture program must parse: {e}"));
+        let plan = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE)
+            .unwrap_or_else(|e| panic!("decide fixture program must lower: {e}"));
+
+        let snapshot = list_snapshot(&values);
+        let runtime = FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot)
+            .unwrap_or_else(|e| panic!("decide fixture program must build with any valid List<Int> max 8 snapshot: {e}"));
+        let run = runtime.run(); // must not panic, even when xs is empty
+
+        prop_assert_eq!(run.decides.len(), 1, "exactly one decide block");
+        let decide_run = &run.decides[0];
+        prop_assert!(
+            !decide_run.is_unknown(),
+            "every instance admits unconditionally on one of its three disjoint ranges, so the block can never be Unknown for xs = {values:?}"
+        );
+        prop_assert_eq!(
+            decide_run.instances.len(),
+            values.len(),
+            "one settled instance per input element"
+        );
+        for (idx, (inst, &v)) in decide_run.instances.iter().zip(values.iter()).enumerate() {
+            prop_assert_eq!(inst.index, idx);
+            let expected = if v < 0 {
+                "negative"
+            } else if v < 100 {
+                "small"
+            } else {
+                "big"
+            };
+            let actual = inst
+                .decision
+                .as_ref()
+                .map(|d| d.candidate.as_str())
+                .unwrap_or("(none)");
+            prop_assert_eq!(
+                actual,
+                expected,
+                "instance {} (value {}) must classify as '{}'",
+                idx,
+                v,
+                expected
+            );
+        }
+
+        let runtime2 = FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot)
+            .expect("rebuilds identically");
+        let run2 = runtime2.run();
+        prop_assert_eq!(run.program, run2.program, "program id must be deterministic");
+        prop_assert_eq!(run.journal.len(), run2.journal.len(), "journal length must be deterministic");
+        let names1: Vec<_> = decide_run
+            .instances
+            .iter()
+            .map(|i| i.decision.as_ref().map(|d| d.candidate.clone()))
+            .collect();
+        let names2: Vec<_> = run2.decides[0]
+            .instances
+            .iter()
+            .map(|i| i.decision.as_ref().map(|d| d.candidate.clone()))
+            .collect();
+        prop_assert_eq!(names1, names2, "per-instance decisions must be deterministic");
     }
 }

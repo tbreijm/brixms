@@ -88,6 +88,7 @@ pub fn execute_check(
                     locations: None,
                     shows: None,
                     commits: None,
+                    entity_decisions: None,
                 };
                 crate::json::emit_result_json(&res);
             } else {
@@ -226,6 +227,7 @@ pub fn execute_check(
                 locations: None,
                 shows: None,
                 commits: commits_json,
+                entity_decisions: None,
             };
             crate::json::emit_result_json(&res);
         } else {
@@ -343,6 +345,7 @@ pub fn execute_check(
             locations: (!locations.is_empty()).then_some(locations),
             shows: None,
             commits: None,
+            entity_decisions: None,
         };
         crate::json::emit_result_json(&res);
     } else {

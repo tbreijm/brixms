@@ -53,6 +53,14 @@ def _normalize_inputs(
     return [_normalize_spec(i) for i in inputs]
 
 
+
+def _explain_params(candidate: str, entity: Optional[int]) -> Dict[str, Any]:
+    """`entity` selects one instance of a per-entity `decide` block (ADR-0043)."""
+    params: Dict[str, Any] = {"candidate": candidate}
+    if entity is not None:
+        params["entity"] = entity
+    return params
+
 class BrixError(Exception):
     """Base class for every error this client raises."""
 
@@ -343,10 +351,11 @@ class BrixClient:
         inputs: Optional[List[ProgramSpec]] = None,
         package_paths: Optional[List[str]] = None,
         timeout: Optional[float] = None,
+        entity: Optional[int] = None,
     ) -> Dict[str, Any]:
         """`brix why` — explain why `candidate` was admitted or selected."""
         return self._program_call(
-            "why", program, inputs, package_paths, extra={"candidate": candidate}, timeout=timeout
+            "why", program, inputs, package_paths, extra=_explain_params(candidate, entity), timeout=timeout
         )
 
     def whynot(
@@ -356,6 +365,7 @@ class BrixClient:
         inputs: Optional[List[ProgramSpec]] = None,
         package_paths: Optional[List[str]] = None,
         timeout: Optional[float] = None,
+        entity: Optional[int] = None,
     ) -> Dict[str, Any]:
         """`brix whynot` — explain why `candidate` was not admitted or not selected."""
         return self._program_call(
@@ -363,7 +373,7 @@ class BrixClient:
             program,
             inputs,
             package_paths,
-            extra={"candidate": candidate},
+            extra=_explain_params(candidate, entity),
             timeout=timeout,
         )
 
