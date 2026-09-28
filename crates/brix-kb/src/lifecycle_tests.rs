@@ -501,3 +501,113 @@ fn test_init_with_incomplete_inputs_is_honest_missing_inputs() {
         ReplayResult::Ran { .. } => panic!("expected missing inputs"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// stored snapshot size
+// ---------------------------------------------------------------------------
+
+/// Two inputs that are each within the CLI's single-file limit merge into a
+/// stored snapshot larger than that limit; later operations must still read
+/// it back.
+#[test]
+fn test_snapshot_merged_from_several_inputs_stays_readable() {
+    let tmp = TempDir::new("big_snapshot");
+    let kb_root = tmp.path.join("kb");
+    let program = tmp.path.join("big.brix");
+    std::fs::write(
+        &program,
+        "config D = Go\ninput a: List<Str> max 16\ninput b: List<Str> max 16\n\
+         propose go priority 1 when true = Go\ncommit d from (go)\n",
+    )
+    .unwrap();
+    let text = "x".repeat(60_000);
+    let shard = |name: &str| {
+        let items = vec![format!(r#"{{"type":"string","value":"{text}"}}"#); 12].join(",");
+        format!(
+            r#"{{"schema":"brix.input@3","values":{{"{name}":{{"type":"list","items":[{items}]}}}}}}"#
+        )
+    };
+    let a = write_input_shard(&tmp.path, "a.json", &shard("a"));
+    let b = write_input_shard(&tmp.path, "b.json", &shard("b"));
+
+    ops::init(&kb_root, &program, &[a, b], &[]).expect("init should succeed");
+    let snapshot_bytes: u64 = std::fs::read_dir(kb_root.join("snapshots"))
+        .unwrap()
+        .map(|e| e.unwrap().metadata().unwrap().len())
+        .sum();
+    assert!(
+        snapshot_bytes > brix_lower::input::MAX_INPUT_FILE_BYTES as u64,
+        "the stored snapshot must exceed one CLI input file for this test to mean anything"
+    );
+
+    let revisions = ops::log(&kb_root, &[]).expect("log must read the stored snapshot back");
+    assert_eq!(revisions.len(), 1);
+    ops::verify(&kb_root, &[]).expect("verify must replay the stored snapshot");
+}
+
+/// A new program that tightens a list bound drops the stored list instead of
+/// failing to replay it.
+#[test]
+fn test_program_change_drops_values_the_new_declarations_reject() {
+    let tmp = TempDir::new("program_tightens_list");
+    let kb_root = tmp.path.join("kb");
+    let source = |max: u32| {
+        format!(
+            "config D = Go | Wait\ninput xs: List<Int> max {max}\n\
+             propose go priority 1 when len(xs) > 0 = Go\npropose wait otherwise = Wait\n\
+             commit d from (go, wait)\n"
+        )
+    };
+    let wide = tmp.path.join("wide.brix");
+    let narrow = tmp.path.join("narrow.brix");
+    std::fs::write(&wide, source(8)).unwrap();
+    std::fs::write(&narrow, source(3)).unwrap();
+    let items = [r#"{"type":"int","value":"1"}"#; 5].join(",");
+    let input = write_input_shard(
+        &tmp.path,
+        "xs.json",
+        &format!(
+            r#"{{"schema":"brix.input@3","values":{{"xs":{{"type":"list","items":[{items}]}}}}}}"#
+        ),
+    );
+
+    ops::init(&kb_root, &wide, &[input], &[]).expect("init should succeed");
+    let outcome = ops::set_program(&kb_root, &narrow, &[])
+        .unwrap_or_else(|e| panic!("program change must not fail on a rejected value: {e}"));
+    match &outcome.record.change {
+        crate::revision::Change::Program { dropped_inputs, .. } => {
+            assert_eq!(dropped_inputs, &vec!["xs".to_string()]);
+        }
+        other => panic!("expected a program change, got {other:?}"),
+    }
+    assert_eq!(outcome.record.result.status, Status::MissingInputs);
+}
+
+/// A crash after writing a revision file but before updating HEAD leaves an
+/// uncommitted file past HEAD; the next write replaces it instead of failing.
+#[test]
+fn test_uncommitted_revision_past_head_does_not_wedge_writes() {
+    let tmp = TempDir::new("orphan_revision");
+    let kb_root = init_single_revision(&tmp);
+    std::fs::write(paths::revision_file(&kb_root, 2), b"{ partial").unwrap();
+
+    let input = example("shipping-input.json");
+    let outcome = ops::assert_inputs(&kb_root, &[input], &[])
+        .unwrap_or_else(|e| panic!("assert must replace the uncommitted revision: {e}"));
+    assert_eq!(outcome.record.seq, 2);
+    ops::verify(&kb_root, &[]).expect("the chain must verify after recovery");
+}
+
+/// `kb.json` is written last, so an `init` interrupted before it can be rerun.
+#[test]
+fn test_interrupted_init_can_be_rerun() {
+    let tmp = TempDir::new("interrupted_init");
+    let kb_root = init_single_revision(&tmp);
+    std::fs::remove_file(paths::kb_json(&kb_root)).unwrap();
+
+    let program = example("shipping-input.brix");
+    let input = example("shipping-input.json");
+    ops::init(&kb_root, &program, &[input], &[])
+        .unwrap_or_else(|e| panic!("init must succeed over an interrupted init: {e}"));
+    ops::verify(&kb_root, &[]).expect("the rerun init must verify");
+}

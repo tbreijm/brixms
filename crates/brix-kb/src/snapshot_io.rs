@@ -62,8 +62,10 @@ fn value_has_list(v: &InputValue) -> bool {
     }
 }
 
-/// Encode `snapshot` as a pretty-printed strict `brix.input@2` (or `@3`, the
-/// moment any value is a list — ADR-0037) JSON document.
+/// Encode `snapshot` as a compact strict `brix.input@2` (or `@3`, the moment
+/// any value is a list — ADR-0037) JSON document. Compact, because a stored
+/// snapshot must fit the knowledge base's byte limit and indentation would
+/// spend it on whitespace.
 pub fn encode_input_snapshot_v2(snapshot: &InputSnapshot) -> String {
     let mut values = Map::new();
     let mut needs_v3 = false;
@@ -80,7 +82,7 @@ pub fn encode_input_snapshot_v2(snapshot: &InputSnapshot) -> String {
         "schema": schema,
         "values": Json::Object(values),
     });
-    serde_json::to_string_pretty(&doc).expect("snapshot JSON encoding cannot fail")
+    serde_json::to_string(&doc).expect("snapshot JSON encoding cannot fail")
 }
 
 #[cfg(test)]

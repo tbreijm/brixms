@@ -1,7 +1,7 @@
 //! Immutable revision records, schema `brix.kb.revision@1` (ADR-0041).
 //!
-//! Each revision is a single append-only file (`revisions/<seq>.json`,
-//! write-once via `create_new`), chained to its parent by digest. The digest
+//! Each revision is a single file (`revisions/<seq>.json`), never rewritten
+//! once `HEAD` names it (ADR-0041 §2.6), chained to its parent by digest. The digest
 //! is computed over a canonical `brix_canon` preimage (never over the JSON
 //! bytes themselves — JSON has no canonical byte form in this codebase, see
 //! `spec/adr/ADR-0041_Persistent_Knowledge_Base.md` §"Why canon, not JSON,

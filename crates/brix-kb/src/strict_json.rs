@@ -394,20 +394,32 @@ impl<'a> Parser<'a> {
                         b'n' => s.push('\n'),
                         b't' => s.push('\t'),
                         b'r' => s.push('\r'),
+                        b'b' => s.push('\u{8}'),
+                        b'f' => s.push('\u{c}'),
                         b'u' => {
-                            if self.pos + 4 > self.bytes.len() {
-                                return Err(JsonError::UnexpectedEof);
-                            }
-                            let hex = &self.text[self.pos..self.pos + 4];
-                            let code =
-                                u32::from_str_radix(hex, 16).map_err(|_| JsonError::Syntax {
-                                    message: "invalid \\u escape".to_string(),
-                                    offset: self.pos,
-                                })?;
-                            self.pos += 4;
-                            // Only used for our own ASCII-safe metadata; BMP
-                            // scalars (no surrogate pairs) are all this schema
-                            // ever needs to round-trip.
+                            let unit = self.hex4()?;
+                            let code = if (0xD800..0xDC00).contains(&unit) {
+                                // A high surrogate must be followed by an
+                                // escaped low surrogate; together they encode
+                                // one scalar outside the BMP.
+                                if self.bytes.get(self.pos..self.pos + 2) != Some(&b"\\u"[..]) {
+                                    return Err(JsonError::Syntax {
+                                        message: "unpaired surrogate in \\u escape".to_string(),
+                                        offset: self.pos,
+                                    });
+                                }
+                                self.pos += 2;
+                                let low = self.hex4()?;
+                                if !(0xDC00..0xE000).contains(&low) {
+                                    return Err(JsonError::Syntax {
+                                        message: "unpaired surrogate in \\u escape".to_string(),
+                                        offset: self.pos,
+                                    });
+                                }
+                                0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00)
+                            } else {
+                                unit
+                            };
                             let ch = char::from_u32(code).ok_or(JsonError::Syntax {
                                 message: "invalid unicode scalar in \\u escape".to_string(),
                                 offset: self.pos,
@@ -435,6 +447,25 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    /// Read exactly four ASCII hex digits. Works on bytes, so a hostile
+    /// multi-byte character in their place is a syntax error, not a panic.
+    fn hex4(&mut self) -> Result<u32, JsonError> {
+        let digits = self
+            .bytes
+            .get(self.pos..self.pos + 4)
+            .ok_or(JsonError::UnexpectedEof)?;
+        let mut code = 0u32;
+        for &d in digits {
+            let v = (d as char).to_digit(16).ok_or(JsonError::Syntax {
+                message: "invalid \\u escape".to_string(),
+                offset: self.pos,
+            })?;
+            code = code * 16 + v;
+        }
+        self.pos += 4;
+        Ok(code)
     }
 
     fn enter(&mut self) -> Result<(), JsonError> {
@@ -592,5 +623,35 @@ mod tests {
         let v = parse_document(br#"{"outer": {"inner": 1}}"#).unwrap();
         let inner = v.field_obj("outer").unwrap();
         assert_eq!(inner.field_u64("inner").unwrap(), 1);
+    }
+
+    /// Everything `serde_json` writes, the strict reader reads back: the
+    /// short escapes (`\b`, `\f`), `\u00XX` control characters, and raw
+    /// non-BMP characters, plus surrogate pairs another writer may emit.
+    #[test]
+    fn reads_back_every_string_serde_json_writes() {
+        let original = "bs\u{8} ff\u{c} nul\u{0} esc\u{1b} tab\t nl\n q\" bsl\\ é 😀";
+        let encoded = serde_json::to_string(&serde_json::json!({ "s": original })).unwrap();
+        let v = parse_document(encoded.as_bytes()).unwrap();
+        assert_eq!(v.get("s").and_then(Value::as_str), Some(original));
+
+        let pair = parse_document(br#"{"s":"\ud83d\ude00"}"#).unwrap();
+        assert_eq!(pair.get("s").and_then(Value::as_str), Some("😀"));
+    }
+
+    /// Malformed `\u` escapes are errors, never panics, even when a
+    /// multi-byte character sits where the hex digits should be.
+    #[test]
+    fn malformed_unicode_escapes_are_errors_not_panics() {
+        for doc in [
+            "{\"s\":\"\\u00é\"}",
+            "{\"s\":\"\\u12\"}",
+            "{\"s\":\"\\ud83d\"}",
+            "{\"s\":\"\\ud83dx\"}",
+            "{\"s\":\"\\ud83d\\u0041\"}",
+            "{\"s\":\"\\ude00\"}",
+        ] {
+            assert!(parse_document(doc.as_bytes()).is_err(), "{doc}");
+        }
     }
 }

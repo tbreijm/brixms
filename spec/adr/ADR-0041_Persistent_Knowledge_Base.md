@@ -211,11 +211,16 @@ property end to end through the real binary's `diff` output.
 A single `.lock` file (`OpenOptions::create_new`) serializes writers; a concurrent `init`/
 `assert`/`retract`/`program` against a locked directory fails immediately with a clear message
 and exit 2, rather than blocking or corrupting state. Readers (`log`/`show`/`diff`/`verify`/
-`audit`) take no lock. `HEAD` is updated by write-temp-then-`rename`, so a crash between writing a
-revision file and updating `HEAD` leaves the previous, still-valid `HEAD` in place (the new
-revision file exists on disk but is simply not yet the head of anything).
+`audit`) take no lock.
 
-Every revision file is written with `create_new` and never opened for writing again.
+`HEAD` is the commit point. A revision file and `HEAD` are each written as a temporary sibling
+that is fsynced, renamed into place, and followed by an fsync of the directory, so a crash leaves
+either the old file or the complete new one. A crash between the two writes leaves the previous,
+still-valid `HEAD` and a revision file numbered past it; that file was never committed, no reader
+reaches it (readers go through `HEAD`), and the next writer, holding the lock, replaces it rather
+than refusing to continue. `init` writes `kb.json`, which marks the directory as a knowledge base,
+last, so an interrupted `init` can simply be rerun. Once `HEAD` names a revision, its file is never
+written again.
 `verify` walks the whole chain from revision 1: it strictly decodes each record (which alone
 catches a single hand-edited field, since the stored `digest` no longer matches — §2.3), checks
 `parent` against the previous revision's freshly recomputed digest, recomputes the program id from

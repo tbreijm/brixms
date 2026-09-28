@@ -160,31 +160,56 @@ fn store_if_absent(path: &Path, bytes: &[u8]) -> Result<(), KbError> {
     }
 }
 
-fn write_head_atomic(root: &Path, head: &Head) -> Result<(), KbError> {
-    let tmp = root.join(format!(".head.tmp.{}", std::process::id()));
-    std::fs::write(&tmp, head.to_json_string()).map_err(|e| {
-        KbError::io(
-            "kb-write-error",
-            format!("cannot write temporary HEAD: {e}"),
-        )
-    })?;
-    std::fs::rename(&tmp, paths::head(root)).map_err(|e| {
+/// Replace `path` with `bytes` so that a crash leaves either the old file or
+/// the complete new one: write a temporary sibling, fsync it, rename it over
+/// `path`, then fsync the directory so the rename itself is durable.
+fn write_file_durably(path: &Path, bytes: &[u8]) -> Result<(), KbError> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let tmp = dir.join(format!(".{name}.tmp.{}", std::process::id()));
+    let written = std::fs::File::create(&tmp)
+        .and_then(|mut f| f.write_all(bytes).and_then(|_| f.sync_all()))
+        .and_then(|_| std::fs::rename(&tmp, path));
+    if let Err(e) = written {
         let _ = std::fs::remove_file(&tmp);
-        KbError::io("kb-write-error", format!("cannot update HEAD: {e}"))
-    })
+        return Err(KbError::io(
+            "kb-write-error",
+            format!("cannot write '{}': {e}", path.display()),
+        ));
+    }
+    // Directory fsync is how POSIX makes a rename durable; other platforms
+    // cannot open a directory for this and rely on the rename alone.
+    #[cfg(unix)]
+    std::fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| {
+            KbError::io(
+                "kb-write-error",
+                format!("cannot sync '{}': {e}", dir.display()),
+            )
+        })?;
+    Ok(())
 }
 
+/// Commit `record` as the new HEAD revision.
+///
+/// HEAD is the commit point: a revision file numbered past HEAD is what a
+/// crash between the two writes below leaves behind, it was never committed,
+/// and the writer holding the lock replaces it rather than refusing to
+/// continue.
 fn write_revision_and_head(root: &Path, record: &RevisionRecord) -> Result<(), KbError> {
-    write_new(
+    write_file_durably(
         &paths::revision_file(root, record.seq),
         record.to_json_string().as_bytes(),
     )?;
-    write_head_atomic(
-        root,
-        &Head {
+    write_file_durably(
+        &paths::head(root),
+        Head {
             seq: record.seq,
             digest: record.digest(),
-        },
+        }
+        .to_json_string()
+        .as_bytes(),
     )
 }
 
@@ -233,12 +258,53 @@ fn read_stored_program(root: &Path, id: Digest) -> Result<String, KbError> {
     std::fs::read_to_string(&path).map_err(|e| io_err(&path, e))
 }
 
+/// Limits for reading a stored snapshot. One stored file holds what the CLI
+/// accepts as up to `max_files` separate shards, so its per-file bounds are
+/// the CLI's aggregate bounds; every other bound is unchanged.
+fn stored_snapshot_limits() -> InputLimits {
+    let cli = InputLimits::default();
+    InputLimits {
+        max_file_bytes: cli.max_aggregate_bytes,
+        max_files: 1,
+        max_value_nodes: cli.max_value_nodes.saturating_mul(cli.max_files),
+        ..cli
+    }
+}
+
 fn read_stored_snapshot(root: &Path, id: Digest) -> Result<InputSnapshot, KbError> {
     let path = paths::snapshot_file(root, id);
-    let limits = InputLimits::default();
+    let limits = stored_snapshot_limits();
     let shard = decode_input_shard_from_file(&path, &limits)
         .map_err(|e| KbError::from(brix_lower::input::InputError::from(e)))?;
     canonicalize_input_shards(vec![shard], &limits).map_err(KbError::from)
+}
+
+/// Encode and store `snapshot`, refusing one that could not be read back.
+/// Merging several input files, or several `kb assert`s, can produce a
+/// snapshot larger than any single `--input` accepted; storing it anyway
+/// would leave a revision no later operation can replay.
+fn store_snapshot(root: &Path, snapshot: &InputSnapshot) -> Result<(), KbError> {
+    let encoded = encode_input_snapshot_v2(snapshot);
+    let limits = stored_snapshot_limits();
+    let readable = encoded.len() <= limits.max_file_bytes
+        && brix_lower::input::decode_input_shard(encoded.as_bytes(), &limits).is_ok();
+    if !readable {
+        return Err(KbError::usage(
+            "kb-snapshot-too-large",
+            format!(
+                "the resulting input snapshot ({} bytes encoded) exceeds the knowledge base's \
+                 snapshot limits ({} bytes, {} value nodes); retract inputs or split the \
+                 knowledge base",
+                encoded.len(),
+                limits.max_file_bytes,
+                limits.max_value_nodes
+            ),
+        ));
+    }
+    store_if_absent(
+        &paths::snapshot_file(root, snapshot.id().digest()),
+        encoded.as_bytes(),
+    )
 }
 
 /// Read the stored program and snapshot for a revision record, load the plan,
@@ -348,10 +414,7 @@ pub fn init(
         source.as_bytes(),
     )?;
     let snapshot_id = snapshot.id();
-    store_if_absent(
-        &paths::snapshot_file(root, snapshot_id.digest()),
-        encode_input_snapshot_v2(&snapshot).as_bytes(),
-    )?;
+    store_snapshot(root, &snapshot)?;
 
     let replay = pipeline::replay(&plan, &snapshot)?;
     let result = compute_result(&replay)?;
@@ -367,6 +430,10 @@ pub fn init(
         result,
     };
 
+    // `kb.json` is written last: it is what marks the directory as a
+    // knowledge base, so a crash before it leaves a directory `init` can
+    // simply be rerun on.
+    write_revision_and_head(root, &record)?;
     write_new(
         &paths::kb_json(root),
         Manifest {
@@ -385,7 +452,6 @@ pub fn init(
             e
         }
     })?;
-    write_revision_and_head(root, &record)?;
 
     Ok(OpOutcome {
         record,
@@ -439,10 +505,7 @@ pub fn assert_inputs(
         .map_err(KbError::from)?;
 
     let snapshot_id = new_snapshot.id();
-    store_if_absent(
-        &paths::snapshot_file(root, snapshot_id.digest()),
-        encode_input_snapshot_v2(&new_snapshot).as_bytes(),
-    )?;
+    store_snapshot(root, &new_snapshot)?;
 
     let replay = pipeline::replay(&plan, &new_snapshot)?;
     let result = compute_result(&replay)?;
@@ -507,10 +570,7 @@ pub fn retract_inputs(
 
     let new_snapshot = InputSnapshot::from_values(values);
     let snapshot_id = new_snapshot.id();
-    store_if_absent(
-        &paths::snapshot_file(root, snapshot_id.digest()),
-        encode_input_snapshot_v2(&new_snapshot).as_bytes(),
-    )?;
+    store_snapshot(root, &new_snapshot)?;
 
     let replay = pipeline::replay(&plan, &new_snapshot)?;
     let result = compute_result(&replay)?;
@@ -553,14 +613,17 @@ pub fn set_program(
     let new_plan = pipeline::load_plan(&new_source, package_paths)?;
     let new_program_id = pipeline::program_id(&new_plan);
 
+    // Keep a value only if the new program's full declaration check accepts
+    // it: same type, and also the same list bound, element type, and
+    // record/sum shape. Anything else is dropped and reported.
     let mut kept = BTreeMap::new();
     let mut dropped = Vec::new();
     for (name, value) in base_snapshot.values() {
-        match new_plan.find_input(name) {
-            Some(decl) if decl.ty == value.value_type() => {
-                kept.insert(name.clone(), value.clone());
-            }
-            _ => dropped.push(name.clone()),
+        let alone = InputSnapshot::from_values(BTreeMap::from([(name.clone(), value.clone())]));
+        if alone.validate_against_declarations(&new_plan).is_ok() {
+            kept.insert(name.clone(), value.clone());
+        } else {
+            dropped.push(name.clone());
         }
     }
     let new_snapshot = InputSnapshot::from_values(kept);
@@ -570,10 +633,7 @@ pub fn set_program(
         &paths::program_file(root, new_program_id.digest()),
         new_source.as_bytes(),
     )?;
-    store_if_absent(
-        &paths::snapshot_file(root, snapshot_id.digest()),
-        encode_input_snapshot_v2(&new_snapshot).as_bytes(),
-    )?;
+    store_snapshot(root, &new_snapshot)?;
 
     let replay = pipeline::replay(&new_plan, &new_snapshot)?;
     let result = compute_result(&replay)?;
