@@ -15,7 +15,9 @@ pub mod ast;
 pub mod lexer;
 pub mod limits;
 pub mod parser;
+pub mod source_map;
 
 pub use ast::{CommitDecl, InputDecl, Module, ProposeDecl};
 pub use limits::{LimitExceeded, ParseLimits};
-pub use parser::{parse, parse_bounded, ParseError};
+pub use parser::{parse, parse_bounded, parse_bounded_with_source_map, ParseError};
+pub use source_map::{IdentOccurrence, ItemSourceInfo, SourceMap, SourceSpan};

@@ -4,6 +4,7 @@ digraph brixms_workspace {
   "brix-canon";
   "brix-cli";
   "brix-elaborate";
+  "brix-kb";
   "brix-kernel";
   "brix-lower";
   "brix-semantic";
@@ -12,6 +13,7 @@ digraph brixms_workspace {
   "soc-regimes";
   "brix-cli" -> "brix-canon";
   "brix-cli" -> "brix-elaborate";
+  "brix-cli" -> "brix-kb";
   "brix-cli" -> "brix-kernel";
   "brix-cli" -> "brix-lower";
   "brix-cli" -> "brix-semantic";
@@ -20,6 +22,10 @@ digraph brixms_workspace {
   "brix-cli" -> "soc-regimes";
   "brix-elaborate" -> "brix-kernel";
   "brix-elaborate" -> "brix-semantic";
+  "brix-kb" -> "brix-canon";
+  "brix-kb" -> "brix-lower";
+  "brix-kb" -> "brix-semantic";
+  "brix-kb" -> "brix-syntax";
   "brix-kernel" -> "brix-canon";
   "brix-kernel" -> "brix-semantic";
   "brix-lower" -> "brix-canon";

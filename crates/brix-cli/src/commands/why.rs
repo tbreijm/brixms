@@ -2,20 +2,16 @@
 
 use std::path::{Path, PathBuf};
 
-use brix_lower::finite_decision::{
-    finite_decision_program_id, lower_finite_decision_plan, FiniteDecisionRuntime,
-    FINITE_DECISION_PROFILE,
-};
-use brix_syntax::parse_bounded;
+use brix_lower::finite_decision::FINITE_DECISION_PROFILE;
 use soc_regimes::finite_frontier::{WhyExplanation, WhyNotExplanation};
 
-use crate::cli::{EXIT_REJECTED_OR_UNKNOWN, EXIT_SUCCESS, EXIT_USAGE_OR_IO};
+use crate::cli::{EXIT_REJECTED_OR_UNKNOWN, EXIT_SUCCESS};
 use crate::commands::{
     candidate_disposition_to_json, decision_to_json, fact_to_json, format_finite_decision_human,
     unknown_reason_to_code_and_detail,
 };
 use crate::json::{CliResultJson, BRIX_CLI_SCHEMA};
-use crate::packages::{make_package_loader, read_source_bounded};
+use crate::pipeline;
 
 /// Execute `brix why` or `brix whynot`.
 pub fn execute_why_or_whynot(
@@ -27,111 +23,61 @@ pub fn execute_why_or_whynot(
     is_whynot: bool,
 ) -> u8 {
     let cmd_name = if is_whynot { "whynot" } else { "why" };
+    let file_display = file.display().to_string();
 
-    let source = match read_source_bounded(file) {
+    let source = match pipeline::stage_read_source(cmd_name, file, json) {
         Ok(s) => s,
-        Err(err) => {
-            if json {
-                let res = CliResultJson::failure(cmd_name, None, None, None, "io-error", vec![err]);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("brix {cmd_name}: {err}");
-            }
-            return EXIT_USAGE_OR_IO;
-        }
+        Err(code) => return code,
     };
-
-    let module = match parse_bounded(&source, brix_syntax::ParseLimits::strict()) {
-        Ok(m) => m,
-        Err(err) => {
-            let msg = format!("parse error: {err}");
-            if json {
-                let res = CliResultJson::failure(cmd_name, None, None, None, "rejected", vec![msg]);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("brix {cmd_name}: rejected: {msg}");
-            }
-            return EXIT_REJECTED_OR_UNKNOWN;
-        }
+    let parsed = match pipeline::stage_parse(cmd_name, &file_display, &source, json) {
+        Ok(p) => p,
+        Err(code) => return code,
     };
-
-    let loader = make_package_loader(package_paths);
-    let resolved_module = match brix_lower::imports::resolve_imports(&module, &loader) {
-        Ok(m) => m,
-        Err(err) => {
-            let msg = format!("import error: {err:?}");
-            if json {
-                let res = CliResultJson::failure(cmd_name, None, None, None, "rejected", vec![msg]);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("brix {cmd_name}: rejected: {msg}");
-            }
-            return EXIT_REJECTED_OR_UNKNOWN;
-        }
-    };
+    let resolved_module =
+        match pipeline::stage_resolve_imports(cmd_name, &parsed.module, package_paths, json) {
+            Ok(m) => m,
+            Err(code) => return code,
+        };
 
     let mut resolved_module = resolved_module;
     crate::commands::prepare_finite_decision_module(&mut resolved_module);
 
-    let plan = match lower_finite_decision_plan(&resolved_module, FINITE_DECISION_PROFILE) {
+    let plan = match pipeline::stage_lower_plan(
+        cmd_name,
+        None,
+        &file_display,
+        &source,
+        &parsed.source_map,
+        &resolved_module,
+        json,
+    ) {
         Ok(p) => p,
-        Err(err) => {
-            let msg = format!("lowering error: {err}");
-            if json {
-                let res = CliResultJson::failure(cmd_name, None, None, None, "rejected", vec![msg]);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("brix {cmd_name}: rejected: {msg}");
-            }
-            return EXIT_REJECTED_OR_UNKNOWN;
-        }
+        Err(code) => return code,
     };
+    let program_hex = pipeline::program_id_hex(&plan);
+    let profile = Some(FINITE_DECISION_PROFILE.to_string());
 
-    let snapshot = match crate::commands::load_cli_input_snapshot(input_paths) {
+    let snapshot = match pipeline::stage_load_snapshot(
+        cmd_name,
+        profile.clone(),
+        Some(program_hex.clone()),
+        input_paths,
+        json,
+    ) {
         Ok(s) => s,
-        Err(err) => {
-            if json {
-                let res = CliResultJson::failure(
-                    cmd_name,
-                    Some(FINITE_DECISION_PROFILE.to_string()),
-                    Some(finite_decision_program_id(&plan).0.to_hex()),
-                    None,
-                    err.status(),
-                    vec![err.diagnostic()],
-                );
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("{}", err.render_human(cmd_name));
-            }
-            return err.exit_code();
-        }
+        Err(code) => return code,
     };
 
-    let runtime = match FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot) {
+    let runtime = match pipeline::stage_build_runtime(
+        cmd_name,
+        profile,
+        Some(program_hex),
+        &plan,
+        &snapshot,
+        json,
+    ) {
         Ok(r) => r,
-        Err(err) => {
-            let cli_err = crate::commands::CliInputError::from(err);
-            let snapshot_hex = if !snapshot.is_empty() {
-                Some(snapshot.id().0.to_hex())
-            } else {
-                None
-            };
-            if json {
-                let res = CliResultJson::failure(
-                    cmd_name,
-                    Some(FINITE_DECISION_PROFILE.to_string()),
-                    Some(finite_decision_program_id(&plan).0.to_hex()),
-                    None,
-                    cli_err.status(),
-                    vec![cli_err.diagnostic()],
-                )
-                .with_inputs(snapshot_hex, None);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("{}", cli_err.render_human(cmd_name));
-            }
-            return cli_err.exit_code();
-        }
+        Err(code) => return code,
     };
     let context_hex = runtime.context.digest().to_hex();
     let run = runtime.run();
@@ -339,6 +285,19 @@ pub fn execute_why_or_whynot(
         }
     };
 
+    // Structured derivation explanation (ADR-0030): purely additive, never
+    // changes the status line, exit code, or any field above. A fault or
+    // "not found" here is unreachable at this point (both already returned
+    // above via `explain_why`/`explain_why_not`), so a failure is swallowed
+    // rather than surfaced as a second, redundant error path.
+    let explanation = runtime
+        .explain_candidate(candidate)
+        .ok()
+        .and_then(|outcome| match outcome {
+            brix_lower::finite_decision::ExplainOutcome::Explained(expl) => Some(*expl),
+            brix_lower::finite_decision::ExplainOutcome::CandidateNotFound => None,
+        });
+
     if json {
         let winning_name = run.decision.as_ref().map(|d| d.candidate.as_str());
         let facts_json = run.facts.iter().map(fact_to_json).collect();
@@ -348,6 +307,9 @@ pub fn execute_why_or_whynot(
             .map(|d| candidate_disposition_to_json(d, winning_name))
             .collect();
         let decision_json = run.decision.as_ref().map(decision_to_json);
+        let explanation_json = explanation
+            .as_ref()
+            .map(crate::commands::explain_render::explanation_to_json);
 
         let res = CliResultJson {
             schema: BRIX_CLI_SCHEMA.to_string(),
@@ -364,6 +326,9 @@ pub fn execute_why_or_whynot(
             decision: decision_json,
             artifacts: Vec::new(),
             diagnostics: vec![explanation_text],
+            explanation: explanation_json,
+            locations: None,
+            shows: None,
         };
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {
@@ -371,6 +336,12 @@ pub fn execute_why_or_whynot(
         let human =
             format_finite_decision_human(&run, Some(&context_hex), input_snapshot.as_deref());
         print!("{human}");
+        if let Some(expl) = &explanation {
+            print!(
+                "{}",
+                crate::commands::explain_render::render_explanation_human(expl)
+            );
+        }
     }
 
     EXIT_SUCCESS

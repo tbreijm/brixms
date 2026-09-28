@@ -1381,6 +1381,44 @@ impl EvalEnv {
     pub fn satisfies(&self, deps: &[String]) -> bool {
         deps.iter().all(|d| self.facts.contains_key(d))
     }
+
+    /// Bind a name into the local scope (function parameters, `match`-arm
+    /// binders). Mirrors exactly what [`eval_internal_body`]'s `Call` and
+    /// `Match` cases already do to `locals` inline; exposed so an
+    /// explanation builder can reconstruct the identical scope a helper
+    /// body or taken arm actually ran under, without duplicating evaluation
+    /// logic. Never consulted by `eval` itself beyond the `locals` map it
+    /// already reads — purely a scope-construction helper.
+    pub(crate) fn with_local(mut self, name: impl Into<String>, v: L3ValueV2) -> Self {
+        self.locals.insert(name.into(), v);
+        self
+    }
+
+    /// Whether `name` resolves through the local scope (a function
+    /// parameter or `match`-arm binder) — never a top-level `let`, rule
+    /// fact, or external input.
+    ///
+    /// Provenance only, for an explanation to decide whether a reference is
+    /// "already shown" via its call/arm site or is a top-level fact worth
+    /// listing on its own. Never used to decide a *value*, so it cannot
+    /// change evaluation semantics.
+    pub(crate) fn is_local(&self, name: &str) -> bool {
+        self.locals.contains_key(name)
+    }
+
+    /// Whether `name` resolves to a top-level `let` binding (and is not
+    /// shadowed by a local). See [`Self::is_local`].
+    pub(crate) fn is_let_binding(&self, name: &str) -> bool {
+        !self.locals.contains_key(name) && self.lets.contains_key(name)
+    }
+
+    /// Whether `name` resolves to a bound external input (and is not
+    /// shadowed by a local). See [`Self::is_local`].
+    pub(crate) fn is_bound_input(&self, name: &str) -> bool {
+        !self.locals.contains_key(name)
+            && !self.lets.contains_key(name)
+            && self.inputs.contains_key(name)
+    }
 }
 
 /// Evaluate a v2 expression to a value.

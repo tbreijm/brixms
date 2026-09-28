@@ -1,61 +1,51 @@
-# Next Steps — SOC transition
+# Next Steps
 
-**The immediate 3–5 actions, in order.** Each has one acceptance criterion. Full
-plan: [Build_Plan_v3_SOC.md](./Build_Plan_v3_SOC.md). Constitution:
-[ADR-0002](./adr/ADR-0002_SOC_Constitution.md).
+The July 2026 list this file used to hold is done: `Audited` landed in the
+outcome lattice (`crates/brix-semantic/src/outcome.rs`), `soc-core` exists
+with the naive oracle and the incremental engine, and the O(Δ) gate
+(`crates/soc-core/tests/o_delta_gate.rs`) runs in CI. That work is history,
+not a plan — see `git log` and the ADRs it names for how it happened.
 
----
+**The forward-looking plan now lives in
+[`docs/planning/beta-roadmap.md`](../docs/planning/beta-roadmap.md)**,
+organized as milestones (one shared expression language across profiles;
+relations and per-entity decisions; a persistent, revisable knowledge base;
+tooling and integration) with open design questions and acceptance criteria
+for each. Read it for the full picture.
 
-### 1. Ratify ADR-0002, including ⟨D-AUD⟩ (S0) — ✅ RATIFIED 2026-07-25
+## The immediate actions
 
-Review and accept `spec/adr/ADR-0002_SOC_Constitution.md`. Confirm that the
-carried-forward ADR-0001 §§4–5–7 decisions (outcome ordinals, authority table,
-`ContextId` root-digest invariant) are unchanged, and ratify the one
-append-only lattice extension: **`Audited`** (ordinal 5, sole authority = the
-audit-factorization checker / reference replayer; the typed precondition for
-`elaboration-boundary` edges — ADR §4 ⟨D-AUD⟩). On ratification, `outcome.rs`
-gains the sixth member (append-only; existing golden vectors unchanged).
+In order, ahead of the milestones above:
 
-**Acceptance:** ADR-0002 status flips **Proposed → Accepted** ✅; ADR-0001 stays
-marked *Superseded-in-part*; `Audited` lands in `outcome.rs` with its authority
-row, an explicit lattice partial-order function (not derive order), and golden
-vectors for ordinal 5.
+1. **Ratify or fold in ADR-0032 through ADR-0036.** Each is marked "Proposed
+   implementation" even though its code is landed, tested, and part of the
+   0.1.0-alpha.3 source tree (pure finite-decision helper functions,
+   structured `brix.input@2` inputs, short-circuiting Boolean operators,
+   exact integer division, unary minus). Either ratify them as-is or fold
+   their content into a successor ADR; leaving landed behavior permanently
+   "Proposed" understates what a reader can already rely on.
+   **Acceptance:** each ADR's Status line reads "Accepted" (or is explicitly
+   superseded), matching its code's presence in `crates/brix-lower`.
 
-### 2. Resolve the behavior-signature decision ⟨D-FO⟩ (S0) — ✅ RATIFIED 2026-07-25
+2. **Decide ADR-0037 (bounded lists and folds).** It is "Proposed design"
+   only — no `List<T>` input, `sum`/`count`/`all`/`any` fold, or `max`-bound
+   syntax exists in the finite-decision lane yet. Review it against the
+   "Relations & per-entity decisions" milestone in the beta roadmap before
+   implementing, since a rule-schema design there may subsume it.
+   **Acceptance:** ADR-0037 is either accepted and implemented, or explicitly
+   superseded by whichever ADR the "finite relations" roadmap milestone
+   produces.
 
-Ratify `(O, F_O)`. **Ratified on the presented default:** `F_O = D_O = 1 + O×X` (partial
-deterministic committed behavior), `O = O_min` (settlement-event tags + committed
-`JudgementId` digest), deliberation in `B^uk_{K,O}`. See ADR §8.
-
-**Acceptance:** `(O, F_O)` chosen ✅ and version-tagged (like the canon vectors);
-recorded in ADR §8. **No `soc-core` encoder is frozen before this.**
-
-### 3. Extend `brix-semantic` with the SOC artifacts (S1)
-
-Add `Witness`, `RegimeId`, the generator registry `𝒢`, `Decomposition` evidence,
-and the `Realizes(w,x,y)` proposition kind — content-addressed, versioned
-encoders, `brix-canon`-only. (Issue-disposition new-issue #1/#3 track this.)
-
-**Acceptance:** golden vectors for every new artifact; malformed-artifact
-rejection; **the `ContextId` root-digest invariant golden vector is green**
-(`ScopeId::root()` parity preserved); retraction-closure fixtures still green.
-
-### 4. Stand up `soc-core` skeleton + the naive oracle (E1 → S2/E2)
-
-New crate: interner + persistent store + chained history digest (E1); then the
-realization interface, `Adm`, and `cand(e)`/`Succ(e)` as the single-threaded
-naive reference oracle (S2/E2). Correct, not fast.
-
-**Acceptance:** the **governance-conservation law** runs as an executable
-conformance property — tightening `Adm` shrinks `cand(e)` pointwise for every
-reachable state.
-
-### 5. Wire the O(Δ) gate harness early (E5, scaffold now)
-
-Stand the O(Δ) benchmark harness up against the naive oracle **before** building
-the fast incremental engine, so the invariant is measurable from the first
-delta-driven candidate. Instrument via ADR stage-4a cost records.
-
-**Acceptance:** a benchmark that **doubles inert configurations and asserts
-per-step cost is unchanged** exists and runs in CI (red on regression), even if
-the only engine behind it is still the oracle.
+3. **Reconcile the two-lane split documented in
+   [`docs/brix-language.md`](../docs/brix-language.md#the-two-lanes).**
+   `check_module` (the `let`-lane type checker) and
+   `lower_finite_decision_plan` (the finite-decision lane) currently accept
+   different expression subsets under the same grammar — `&&`/`||`/`!` and
+   the `div_*`/`mod_euclid` built-ins type-check in one lane and are
+   `Unresolved`/`Unsupported` in the other; `/` is Float division in one and
+   refused in the other. This is the concrete instance of the roadmap's "One
+   language" milestone.
+   **Acceptance:** a single written decision (an ADR, since it can move
+   program identity) on which lane's behavior is authoritative for each
+   discrepancy, landed as either a fix or a documented, intentional
+   difference — not silence.

@@ -1,0 +1,30 @@
+{
+  "schema": "brix.test@1",
+  "program": "shipping.brix",
+  "cases": [
+    {
+      "name": "ships when fixed stock covers the fixed threshold",
+      "inputs": [],
+      "expect": {
+        "status": "selected",
+        "decision": "ship",
+        "value": "Ship",
+        "candidates": {
+          "expedite": "rejected-guard-false",
+          "hold": "admitted-not-selected"
+        }
+      }
+    },
+    {
+      "name": "derives the expected stock and threshold facts",
+      "inputs": [],
+      "expect": {
+        "status": "selected",
+        "facts": {
+          "stock": "12",
+          "threshold": "10"
+        }
+      }
+    }
+  ]
+}

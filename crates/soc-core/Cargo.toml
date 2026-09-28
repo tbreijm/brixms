@@ -13,5 +13,13 @@ brix-semantic = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 
+[[bench]]
+name = "o_delta_wall_clock"
+harness = false
+
+[[bench]]
+name = "arc_map_insert"
+harness = false
+
 [lints]
 workspace = true

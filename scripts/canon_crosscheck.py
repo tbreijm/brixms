@@ -13,7 +13,10 @@ is visible rather than silent.
 
 Sources, in order of authority:
 
-1. `spec/BrixMS_v9_0.md` Appendix G — the normative sketch. It pins the *shape*
+1. `spec/archive/BrixMS_v9_0.md` Appendix G — the normative sketch (the file is
+   archived as a superseded pre-SOC language spec, but Appendix G's byte-level
+   encoding rules are still what this script and `brix-canon` implement). It
+   pins the *shape*
    of most encodings (length-prefixed bytes and strings, NFC for identifiers,
    sorted records/sets/maps, sequence-order lists, enum ordinal + payload,
    sorted bag pairs, currency + minor units, measure + value).

@@ -10,6 +10,7 @@
       "blake3",
       "brix-canon",
       "brix-elaborate",
+      "brix-kb",
       "brix-kernel",
       "brix-lower",
       "brix-semantic",
@@ -28,6 +29,21 @@
       "brix-kernel",
       "brix-semantic",
       "indexmap",
+      "unicode-normalization"
+    ],
+    "brix-kb": [
+      "blake3",
+      "brix-canon",
+      "brix-elaborate",
+      "brix-kernel",
+      "brix-lower",
+      "brix-semantic",
+      "brix-syntax",
+      "indexmap",
+      "libc",
+      "serde_json",
+      "soc-core",
+      "soc-regimes",
       "unicode-normalization"
     ],
     "brix-kernel": [
@@ -86,6 +102,10 @@
     },
     {
       "from": "brix-cli",
+      "to": "brix-kb"
+    },
+    {
+      "from": "brix-cli",
       "to": "brix-kernel"
     },
     {
@@ -115,6 +135,22 @@
     {
       "from": "brix-elaborate",
       "to": "brix-semantic"
+    },
+    {
+      "from": "brix-kb",
+      "to": "brix-canon"
+    },
+    {
+      "from": "brix-kb",
+      "to": "brix-lower"
+    },
+    {
+      "from": "brix-kb",
+      "to": "brix-semantic"
+    },
+    {
+      "from": "brix-kb",
+      "to": "brix-syntax"
     },
     {
       "from": "brix-kernel",
@@ -191,6 +227,7 @@
     "brix-canon",
     "brix-cli",
     "brix-elaborate",
+    "brix-kb",
     "brix-kernel",
     "brix-lower",
     "brix-semantic",

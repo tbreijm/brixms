@@ -2,6 +2,7 @@
 
 use crate::ast::*;
 use crate::lexer::{self, Token, TokenKind};
+use crate::source_map::{self, IdentOccurrence, ItemSourceInfo, SourceMap, SourceSpan};
 
 /// A parse error with a human-readable message and optional source location.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,9 +68,30 @@ pub fn parse(source: &str) -> Result<Module, ParseError> {
 /// each recursive descent. A refusal is a typed error and never a partial
 /// module; there is no permissive retry.
 pub fn parse_bounded(source: &str, limits: crate::ParseLimits) -> Result<Module, ParseError> {
+    let (module, _source_map) = parse_bounded_with_source_map(source, limits)?;
+    Ok(module)
+}
+
+/// Parse under explicit resource bounds (ADR-0022 D6), also returning a sidecar
+/// [`SourceMap`] recording where each top-level item — and each identifier
+/// token inside it — came from.
+///
+/// Runs the *exact same* parse as [`parse_bounded`] (which is defined in terms
+/// of this function and simply discards the map), so the two can never return
+/// different [`Module`]s for the same input.
+pub fn parse_bounded_with_source_map(
+    source: &str,
+    limits: crate::ParseLimits,
+) -> Result<(Module, SourceMap), ParseError> {
     let tokens = lexer::lex_bounded(source, limits)?;
     let mut parser = Parser::new(tokens, limits);
-    parser.parse_module()
+    let module = parser.parse_module()?;
+    Ok((
+        module,
+        SourceMap {
+            items: parser.item_source,
+        },
+    ))
 }
 
 struct Parser {
@@ -80,6 +102,10 @@ struct Parser {
     /// recursive expression rule and decremented on exit, so the bound tracks
     /// live stack rather than total rule applications.
     depth: usize,
+    /// Sidecar per-item source info, recorded as each top-level item is
+    /// parsed (see [`Self::parse_module`]). Never consulted by parsing itself
+    /// — purely an additional recording alongside it.
+    item_source: Vec<ItemSourceInfo>,
 }
 
 impl Parser {
@@ -89,6 +115,7 @@ impl Parser {
             pos: 0,
             limits,
             depth: 0,
+            item_source: Vec::new(),
         }
     }
 
@@ -212,9 +239,46 @@ impl Parser {
     fn parse_module(&mut self) -> Result<Module, ParseError> {
         let mut items = Vec::new();
         while !self.is_at_end() {
-            items.push(self.parse_item()?);
+            let start_pos = self.pos;
+            let item = self.parse_item()?;
+            self.record_item_source(&item, start_pos, self.pos);
+            items.push(item);
         }
         Ok(Module { items })
+    }
+
+    /// Record the span and identifier-token occurrences of the item that was
+    /// just parsed from token range `[start_pos, end_pos)`. Purely additive
+    /// bookkeeping for [`SourceMap`] — never observed by the parse itself.
+    fn record_item_source(&mut self, item: &Item, start_pos: usize, end_pos: usize) {
+        if start_pos >= end_pos || end_pos > self.tokens.len() {
+            return;
+        }
+        let start_tok = &self.tokens[start_pos];
+        let end_tok = &self.tokens[end_pos - 1];
+        let span = SourceSpan {
+            start_line: start_tok.line,
+            start_col: start_tok.col,
+            end_line: end_tok.line,
+            end_col: end_tok.col,
+        };
+        let mut idents = Vec::new();
+        for tok in &self.tokens[start_pos..end_pos] {
+            if let TokenKind::Ident(name) = &tok.kind {
+                idents.push(IdentOccurrence {
+                    name: name.clone(),
+                    line: tok.line,
+                    col: tok.col,
+                });
+            }
+        }
+        let (kind, name) = source_map::item_kind_name(item);
+        self.item_source.push(ItemSourceInfo {
+            kind,
+            name,
+            span,
+            idents,
+        });
     }
 
     fn parse_item(&mut self) -> Result<Item, ParseError> {

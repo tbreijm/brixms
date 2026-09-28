@@ -7,7 +7,7 @@
 //! different magnitudes (compare the 1-byte encoding of `2` against the 2-byte
 //! encoding of `256`: `0x02` sorts after `0x01,0x00` even though `2 < 256`).
 //! Appendix G's own numerics section requires `Ord` to equal canonical byte
-//! order (spec `BrixMS_v9_0.md` line ~4722), and Part V §8 leans on canonical
+//! order (spec `spec/archive/BrixMS_v9_0.md` line ~4722), and Part V §8 leans on canonical
 //! row order for aggregation — so the encoding must be order-preserving.
 //!
 //! This module implements the concrete ruling proposed in

@@ -48,15 +48,17 @@ pub use finite_decision::{
     finite_decision_audit_environment_from_plan,
     finite_decision_audit_environment_from_plan_with_inputs, finite_decision_program_id,
     finite_decision_program_preimage, lower_finite_decision_plan, run_finite_decision_plan,
-    run_finite_decision_plan_with_inputs, type_of_value, BoundInput, CandidateDisposition,
-    CandidateStatus, DerivedFact, FiniteDecisionBuildError, FiniteDecisionCommit,
+    run_finite_decision_plan_with_inputs, selection_from_why, type_of_value, BoundInput,
+    CandidateDisposition, CandidateExplanation, CandidateStatus, DerivedFact, ExplainOutcome,
+    FactExplain, FactOrigin, FiniteDecisionBuildError, FiniteDecisionCommit,
     FiniteDecisionContract, FiniteDecisionFnParam, FiniteDecisionFunction, FiniteDecisionInput,
     FiniteDecisionLowerError, FiniteDecisionPlan, FiniteDecisionProgramId, FiniteDecisionProposal,
     FiniteDecisionRule, FiniteDecisionRun, FiniteDecisionRuntime, FiniteDecisionStop,
-    FiniteDecisionUnknownReason, L3Schema, L3SchemaBody, L3SchemaType, L3ValueType,
-    QuiescenceCertificateId, SelectedDecision, WhyExplanation, WhyNotExplanation,
-    FINITE_DECISION_PROFILE, MAX_EXPR_DEPTH, MAX_EXPR_NODES, MAX_FUNCTION_COUNT,
-    MAX_FUNCTION_PARAMS, MAX_SCHEMA_COUNT, MAX_SCHEMA_DEPTH, MAX_SCHEMA_EDGES,
+    FiniteDecisionUnknownReason, L3Schema, L3SchemaBody, L3SchemaType, L3ValueType, NodeRef,
+    QuiescenceCertificateId, SelectedDecision, SelectionComparison, TraceNode, TraceOutcome,
+    WhyExplanation, WhyNotExplanation, FINITE_DECISION_PROFILE, MAX_EXPLAIN_NODES, MAX_EXPR_DEPTH,
+    MAX_EXPR_NODES, MAX_FUNCTION_COUNT, MAX_FUNCTION_PARAMS, MAX_SCHEMA_COUNT, MAX_SCHEMA_DEPTH,
+    MAX_SCHEMA_EDGES,
 };
 pub use input::{
     canonicalize_input_shards, decode_input_shard, decode_input_shard_from_file, input_context_id,
@@ -260,6 +262,36 @@ pub enum LowerError {
 impl From<TypeError> for LowerError {
     fn from(err: TypeError) -> Self {
         LowerError::TypeError(err)
+    }
+}
+
+impl LowerError {
+    /// What this error is about, as `(item name, specific identifier)` — see
+    /// [`crate::finite_decision::FiniteDecisionLowerError::location_subject`]
+    /// for the shared design. Several `LowerError` variants (e.g.
+    /// `TypeAnnotationMismatch`) name only the types in conflict, not the
+    /// binding — [`check_module`]'s caller already has that name paired
+    /// alongside the error, so it is not duplicated here.
+    pub fn location_subject(&self) -> Option<(&str, Option<&str>)> {
+        match self {
+            Self::Unresolved(name) => Some((name, None)),
+            Self::MissingField { config, field } => Some((config, Some(field))),
+            Self::UnknownField { config, field } => Some((config, Some(field))),
+            Self::UnknownVariantType {
+                config, variant, ..
+            } => Some((config, Some(variant))),
+            Self::UnknownDeclaredType(name) => Some((name, None)),
+            Self::RecordFieldTypeMismatch { config, field, .. } => Some((config, Some(field))),
+            Self::ParamTypeMismatch {
+                function, param, ..
+            } => Some((function, Some(param))),
+            Self::ReturnTypeMismatch { function, .. } => Some((function, None)),
+            Self::ConfigArityMismatch { config, .. } => Some((config, None)),
+            Self::RecursiveFunctionNeedsAnnotation { function, .. } => Some((function, None)),
+            Self::RecursiveFunction { function, .. } => Some((function, None)),
+            Self::MutuallyRecursiveConfig { config, .. } => Some((config, None)),
+            _ => None,
+        }
     }
 }
 
