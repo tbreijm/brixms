@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::plan::{FiniteDecisionLowerError as Error, FiniteDecisionPlan, MAX_EXPR_DEPTH};
-use crate::l3_v2::{L3ExprV2 as Expr, L3PatternV2, L3ValueType};
+use crate::l3_v2::{FoldOpV2, L3ExprV2 as Expr, L3PatternV2, L3ValueType};
 use brix_syntax::ast;
 
 const MAX_ANALYSIS_WORK: usize = 100_000;
@@ -30,6 +30,14 @@ enum Type {
         args: Vec<Shape>,
     },
     Either(Vec<Shape>),
+    /// A list's element shape (ADR-0037, ADR-0040). Kept distinct from
+    /// `Known(L3ValueType::List)` — which carries no element shape at all —
+    /// so a fold/filter/map/comprehension binder is checked against the
+    /// shape its own source expression actually produced wherever that is
+    /// known, and only falls back to `Unknown` when it is not (for example,
+    /// a bare reference to a declared `List<T>` input, whose runtime type
+    /// category is the same flat marker regardless of `T`).
+    List(Shape),
 }
 
 impl Type {
@@ -37,6 +45,7 @@ impl Type {
         match self {
             Self::Record(fields) => out.extend(std::mem::take(fields).into_values()),
             Self::Sum { args, .. } | Self::Either(args) => out.append(args),
+            Self::List(elem) => out.push(std::mem::replace(elem, unknown())),
             Self::Unknown | Self::Known(_) => {}
         }
     }
@@ -140,8 +149,62 @@ impl Checker<'_> {
             Type::Known(ty) => ty.to_string(),
             Type::Record(_) => "record".to_string(),
             Type::Sum { .. } => "sum".to_string(),
+            Type::List(_) => "list".to_string(),
         };
         Err(Error::BooleanOperandType { operator, found })
+    }
+
+    /// The list-form counterpart of [`Self::require_bool`] (ADR-0040,
+    /// following the precedent ADR-0034 set for `&&`/`||`/`!`): a `filter`/
+    /// `where`/`count`/`all`/`any` condition must be `Bool`, and a `sum`/
+    /// `min`/`max` body must be `Int`. Distinct from `require_bool` so the
+    /// diagnostic names the list form rather than a logical operator.
+    fn require_list_body(
+        &mut self,
+        shape: &Shape,
+        form: &'static str,
+        expected: L3ValueType,
+        depth: usize,
+    ) -> Result<(), Error> {
+        self.charge(depth)?;
+        let found = match shape.as_ref() {
+            Type::Unknown => return Ok(()),
+            Type::Known(ty) if *ty == expected => return Ok(()),
+            Type::Either(options) => {
+                for option in options {
+                    self.require_list_body(option, form, expected.clone(), depth + 1)?;
+                }
+                return Ok(());
+            }
+            Type::Known(ty) => ty.to_string(),
+            Type::Record(_) => "record".to_string(),
+            Type::Sum { .. } => "sum".to_string(),
+            Type::List(_) => "list".to_string(),
+        };
+        Err(Error::ListBodyType {
+            form,
+            expected: match expected {
+                L3ValueType::Bool => "Bool",
+                L3ValueType::Int => "Int",
+                _ => "a scalar",
+            },
+            found,
+        })
+    }
+
+    /// The element shape of a list-typed shape, or [`Type::Unknown`] when
+    /// `shape` is not statically known to be a list (for example, a bare
+    /// reference to a declared `List<T>` input — the runtime type category
+    /// there is the flat `L3ValueType::List` marker, which carries no element
+    /// shape). Never an error: an unresolved element shape still lets every
+    /// downstream check pass permissively, exactly like [`unknown`] elsewhere
+    /// in this module, and the evaluator's own [`crate::l3_v2::EvalFault`]
+    /// checks remain the defensive boundary.
+    fn list_element(&self, shape: &Shape) -> Shape {
+        match shape.as_ref() {
+            Type::List(elem) => elem.clone(),
+            _ => unknown(),
+        }
     }
 
     fn field(&mut self, base: &Shape, field: &str, depth: usize) -> Result<Shape, Error> {
@@ -317,6 +380,112 @@ impl Checker<'_> {
                     .map(|c| known(c.ty.clone()))
                     .unwrap_or(body?)
             }
+            Expr::ListLit(_)
+            | Expr::Fold { .. }
+            | Expr::Filter { .. }
+            | Expr::Map { .. }
+            | Expr::Comprehension { .. }
+            | Expr::In(..)
+            | Expr::Len(_)
+            | Expr::Distinct(_) => self.list_expr(expr, env, next)?,
+        })
+    }
+
+    /// The list and relation forms (ADR-0037, ADR-0040), kept out of
+    /// [`Self::expr`] so their locals do not widen its frame: `expr` recurses
+    /// once per nesting level, and a wider frame lowers the depth a default
+    /// thread stack can reach before `MAX_EXPR_DEPTH` is enforced.
+    #[inline(never)]
+    fn list_expr(&mut self, expr: &Expr, env: &Env, next: usize) -> Result<Shape, Error> {
+        Ok(match expr {
+            Expr::ListLit(items) => {
+                let mut shapes = Vec::with_capacity(items.len());
+                for item in items {
+                    shapes.push(self.expr(item, env, next)?);
+                }
+                let elem = match shapes.len() {
+                    0 => unknown(),
+                    1 => shapes.into_iter().next().expect("checked len == 1"),
+                    _ => Arc::new(Type::Either(shapes)),
+                };
+                Arc::new(Type::List(elem))
+            }
+            Expr::Fold {
+                op,
+                list,
+                binder,
+                body,
+            } => {
+                let list_shape = self.expr(list, env, next)?;
+                let elem_shape = self.list_element(&list_shape);
+                let mut locals = env.clone();
+                locals.insert(binder.clone(), elem_shape);
+                let body_shape = self.expr(body, &locals, next)?;
+                match op {
+                    FoldOpV2::Sum | FoldOpV2::Min | FoldOpV2::Max => {
+                        self.require_list_body(&body_shape, op.name(), L3ValueType::Int, next)?;
+                        known(L3ValueType::Int)
+                    }
+                    FoldOpV2::Count => {
+                        self.require_list_body(&body_shape, op.name(), L3ValueType::Bool, next)?;
+                        known(L3ValueType::Int)
+                    }
+                    FoldOpV2::All | FoldOpV2::Any => {
+                        self.require_list_body(&body_shape, op.name(), L3ValueType::Bool, next)?;
+                        known(L3ValueType::Bool)
+                    }
+                }
+            }
+            Expr::Filter { list, binder, cond } => {
+                let list_shape = self.expr(list, env, next)?;
+                let elem_shape = self.list_element(&list_shape);
+                let mut locals = env.clone();
+                locals.insert(binder.clone(), elem_shape.clone());
+                let cond_shape = self.expr(cond, &locals, next)?;
+                self.require_list_body(&cond_shape, "filter", L3ValueType::Bool, next)?;
+                Arc::new(Type::List(elem_shape))
+            }
+            Expr::Map { list, binder, body } => {
+                let list_shape = self.expr(list, env, next)?;
+                let elem_shape = self.list_element(&list_shape);
+                let mut locals = env.clone();
+                locals.insert(binder.clone(), elem_shape);
+                let body_shape = self.expr(body, &locals, next)?;
+                Arc::new(Type::List(body_shape))
+            }
+            Expr::Comprehension {
+                generators,
+                where_clause,
+                yield_expr,
+            } => {
+                let mut locals = env.clone();
+                for (binder, source) in generators {
+                    let source_shape = self.expr(source, &locals, next)?;
+                    let elem_shape = self.list_element(&source_shape);
+                    locals.insert(binder.clone(), elem_shape);
+                }
+                if let Some(w) = where_clause {
+                    let where_shape = self.expr(w, &locals, next)?;
+                    self.require_list_body(&where_shape, "where", L3ValueType::Bool, next)?;
+                }
+                let yield_shape = self.expr(yield_expr, &locals, next)?;
+                Arc::new(Type::List(yield_shape))
+            }
+            Expr::In(needle, haystack) => {
+                self.expr(needle, env, next)?;
+                self.expr(haystack, env, next)?;
+                known(L3ValueType::Bool)
+            }
+            Expr::Len(list) => {
+                self.expr(list, env, next)?;
+                known(L3ValueType::Int)
+            }
+            Expr::Distinct(list) => {
+                let list_shape = self.expr(list, env, next)?;
+                let elem_shape = self.list_element(&list_shape);
+                Arc::new(Type::List(elem_shape))
+            }
+            _ => unreachable!("list_expr is only called for list and relation forms"),
         })
     }
 }
@@ -330,8 +499,9 @@ pub(super) fn check(plan: &FiniteDecisionPlan, module: &ast::Module) -> Result<(
         .chain(plan.rules.iter().map(|r| &r.body))
         .chain(plan.proposals.iter().flat_map(|p| [&p.guard, &p.value]))
         .chain(plan.shows.iter());
-    // Preserve the existing acceptance of programs without Boolean operators.
-    if !has_boolean(roots.collect()) {
+    // Preserve the existing acceptance of programs without Boolean operators
+    // or list/relational forms.
+    if !needs_shape_check(roots.collect()) {
         return Ok(());
     }
     let configs = module
@@ -387,10 +557,16 @@ pub(super) fn check(plan: &FiniteDecisionPlan, module: &ast::Module) -> Result<(
     Ok(())
 }
 
-fn has_boolean(mut pending: Vec<&Expr>) -> bool {
+/// Whether any reachable expression needs this module's shape analysis:
+/// a Boolean operator (ADR-0034) or a list/relational form whose body has a
+/// required type (ADR-0037, ADR-0040: `fold`/`filter`/`map`/comprehension —
+/// `distinct`/`len`/`in`/a list literal impose no requirement of their own,
+/// but are still walked so a form nested inside one is found).
+fn needs_shape_check(mut pending: Vec<&Expr>) -> bool {
     while let Some(expr) = pending.pop() {
         match expr {
             Expr::And(..) | Expr::Or(..) | Expr::Not(..) => return true,
+            Expr::Fold { .. } | Expr::Filter { .. } | Expr::Map { .. } => return true,
             Expr::Arith(_, a, b) | Expr::IntDivMod(_, a, b) | Expr::Cmp(_, a, b) => {
                 pending.extend([a.as_ref(), b.as_ref()]);
             }
@@ -401,6 +577,24 @@ fn has_boolean(mut pending: Vec<&Expr>) -> bool {
                 pending.push(scrutinee);
                 pending.extend(arms.iter().map(|(_, body)| body));
             }
+            Expr::Comprehension {
+                generators,
+                where_clause,
+                yield_expr,
+            } => {
+                // A comprehension's `where` needs the same Bool check a
+                // `filter` condition does; a comprehension with no `where`
+                // still needs walking for a form nested in a generator or the
+                // `yield` expression.
+                if where_clause.is_some() {
+                    return true;
+                }
+                pending.extend(generators.iter().map(|(_, source)| source));
+                pending.push(yield_expr);
+            }
+            Expr::ListLit(items) => pending.extend(items),
+            Expr::In(a, b) => pending.extend([a.as_ref(), b.as_ref()]),
+            Expr::Len(a) | Expr::Distinct(a) => pending.push(a),
             _ => {}
         }
     }

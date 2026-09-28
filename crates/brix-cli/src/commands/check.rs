@@ -2,21 +2,17 @@
 
 use std::path::{Path, PathBuf};
 
-use brix_lower::check_module;
-use brix_lower::finite_decision::{
-    finite_decision_program_id, lower_finite_decision_plan, FiniteDecisionRuntime,
-    FiniteDecisionStop, FINITE_DECISION_PROFILE,
-};
+use brix_lower::finite_decision::{FiniteDecisionStop, FINITE_DECISION_PROFILE};
+use brix_lower::{check_module, evaluate_let_module, render_ty, LetEvalOutcome};
 use brix_syntax::ast::Item;
-use brix_syntax::parse_bounded;
 
 use crate::cli::{EXIT_REJECTED_OR_UNKNOWN, EXIT_SUCCESS, EXIT_USAGE_OR_IO};
 use crate::commands::{
-    candidate_disposition_to_json, decision_to_json, fact_to_json, format_finite_decision_human,
-    unknown_reason_to_code_and_detail,
+    candidate_disposition_to_json, decision_to_json, fact_to_json, fmt_value_human,
+    format_finite_decision_human, render_location_snippet, unknown_reason_to_code_and_detail,
 };
-use crate::json::{CliResultJson, BRIX_CLI_SCHEMA};
-use crate::packages::{make_package_loader, read_source_bounded};
+use crate::json::{to_tagged_value, BindingJson, CliResultJson, LocationJson, BRIX_CLI_SCHEMA};
+use crate::pipeline;
 
 /// Execute `brix check <file.brix> [--input <path>...]`.
 pub fn execute_check(
@@ -25,47 +21,21 @@ pub fn execute_check(
     package_paths: &[PathBuf],
     input_paths: &[PathBuf],
 ) -> u8 {
-    let source = match read_source_bounded(file) {
+    let file_display = file.display().to_string();
+
+    let source = match pipeline::stage_read_source("check", file, json) {
         Ok(s) => s,
-        Err(err) => {
-            if json {
-                let res = CliResultJson::failure("check", None, None, None, "io-error", vec![err]);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("brix check: {err}");
-            }
-            return EXIT_USAGE_OR_IO;
-        }
+        Err(code) => return code,
     };
-
-    let module = match parse_bounded(&source, brix_syntax::ParseLimits::strict()) {
-        Ok(m) => m,
-        Err(err) => {
-            let msg = format!("parse error: {err}");
-            if json {
-                let res = CliResultJson::failure("check", None, None, None, "rejected", vec![msg]);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("brix check: rejected: {msg}");
-            }
-            return EXIT_REJECTED_OR_UNKNOWN;
-        }
+    let parsed = match pipeline::stage_parse("check", &file_display, &source, json) {
+        Ok(p) => p,
+        Err(code) => return code,
     };
-
-    let loader = make_package_loader(package_paths);
-    let resolved_module = match brix_lower::imports::resolve_imports(&module, &loader) {
-        Ok(m) => m,
-        Err(err) => {
-            let msg = format!("import error: {err:?}");
-            if json {
-                let res = CliResultJson::failure("check", None, None, None, "rejected", vec![msg]);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
-            } else {
-                eprintln!("brix check: rejected: {msg}");
-            }
-            return EXIT_REJECTED_OR_UNKNOWN;
-        }
-    };
+    let resolved_module =
+        match pipeline::stage_resolve_imports("check", &parsed.module, package_paths, json) {
+            Ok(m) => m,
+            Err(code) => return code,
+        };
 
     // Determine if the module is in the finite-decision profile fragment.
     let has_finite_decision_items = resolved_module
@@ -76,39 +46,34 @@ pub fn execute_check(
     if has_finite_decision_items {
         let mut resolved_module = resolved_module;
         crate::commands::prepare_finite_decision_module(&mut resolved_module);
-        // Lower as finite-decision
-        let plan = match lower_finite_decision_plan(&resolved_module, FINITE_DECISION_PROFILE) {
+        // Lower as finite-decision. `check` reports the profile it was
+        // attempting even on a lowering failure (unlike run/audit/why/whynot,
+        // which report `None` there) — a pre-existing difference this
+        // consolidation preserves rather than papers over.
+        let plan = match pipeline::stage_lower_plan(
+            "check",
+            Some(FINITE_DECISION_PROFILE.to_string()),
+            &file_display,
+            &source,
+            &parsed.source_map,
+            &resolved_module,
+            json,
+        ) {
             Ok(p) => p,
-            Err(err) => {
-                let msg = format!("lowering error: {err}");
-                if json {
-                    let res = CliResultJson::failure(
-                        "check",
-                        Some(FINITE_DECISION_PROFILE.to_string()),
-                        None,
-                        None,
-                        "rejected",
-                        vec![msg],
-                    );
-                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
-                } else {
-                    eprintln!("brix check: rejected: {msg}");
-                }
-                return EXIT_REJECTED_OR_UNKNOWN;
-            }
+            Err(code) => return code,
         };
+        let program_hex = pipeline::program_id_hex(&plan);
 
         // If source declares inputs and NO --input was supplied:
         // Validate syntax and lowering/declarations only, do NOT build runtime or run preflight.
         if !plan.inputs.is_empty() && input_paths.is_empty() {
-            let prog_id = finite_decision_program_id(&plan).0.to_hex();
             if json {
                 let res = CliResultJson {
                     schema: BRIX_CLI_SCHEMA.to_string(),
                     command: "check".to_string(),
                     ok: true,
                     profile: Some(FINITE_DECISION_PROFILE.to_string()),
-                    program: Some(prog_id),
+                    program: Some(program_hex.clone()),
                     context: None,
                     input_snapshot: None,
                     status: "checked-input-contract".to_string(),
@@ -118,62 +83,43 @@ pub fn execute_check(
                     decision: None,
                     artifacts: Vec::new(),
                     diagnostics: Vec::new(),
+                    bindings: None,
+                    explanation: None,
+                    locations: None,
+                    shows: None,
+                    commits: None,
                 };
                 println!("{}", serde_json::to_string_pretty(&res).unwrap());
             } else {
                 println!("status: checked-input-contract");
-                println!("program: {prog_id}");
+                println!("program: {program_hex}");
             }
             return EXIT_SUCCESS;
         }
 
-        // Load input snapshot from provided paths (or empty snapshot if none).
-        let snapshot = match crate::commands::load_cli_input_snapshot(input_paths) {
+        let profile = Some(FINITE_DECISION_PROFILE.to_string());
+        let snapshot = match pipeline::stage_load_snapshot(
+            "check",
+            profile.clone(),
+            Some(program_hex.clone()),
+            input_paths,
+            json,
+        ) {
             Ok(s) => s,
-            Err(err) => {
-                if json {
-                    let res = CliResultJson::failure(
-                        "check",
-                        Some(FINITE_DECISION_PROFILE.to_string()),
-                        Some(finite_decision_program_id(&plan).0.to_hex()),
-                        None,
-                        err.status(),
-                        vec![err.diagnostic()],
-                    );
-                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
-                } else {
-                    eprintln!("{}", err.render_human("check"));
-                }
-                return err.exit_code();
-            }
+            Err(code) => return code,
         };
 
         // Preflight: build runtime with inputs and run the plan so check cannot exit success when run would return Unknown.
-        let runtime = match FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot) {
+        let runtime = match pipeline::stage_build_runtime(
+            "check",
+            profile,
+            Some(program_hex),
+            &plan,
+            &snapshot,
+            json,
+        ) {
             Ok(r) => r,
-            Err(err) => {
-                let cli_err = crate::commands::CliInputError::from(err);
-                let snapshot_hex = if !snapshot.is_empty() {
-                    Some(snapshot.id().0.to_hex())
-                } else {
-                    None
-                };
-                if json {
-                    let res = CliResultJson::failure(
-                        "check",
-                        Some(FINITE_DECISION_PROFILE.to_string()),
-                        Some(finite_decision_program_id(&plan).0.to_hex()),
-                        None,
-                        cli_err.status(),
-                        vec![cli_err.diagnostic()],
-                    )
-                    .with_inputs(snapshot_hex, None);
-                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
-                } else {
-                    eprintln!("{}", cli_err.render_human("check"));
-                }
-                return cli_err.exit_code();
-            }
+            Err(code) => return code,
         };
         let context_hex = runtime.context.digest().to_hex();
         let run = runtime.run();
@@ -192,8 +138,12 @@ pub fn execute_check(
             (None, None)
         };
 
-        if run.is_unknown() {
-            let (code, detail) = match &run.stop {
+        // ADR-0039: preflight fails if *any* commit pool is Unknown, not
+        // just the first — every pool must clear preflight independently.
+        let first_unknown_pool = run.commits.iter().find(|c| c.is_unknown());
+        if run.is_unknown() || first_unknown_pool.is_some() {
+            let stop = first_unknown_pool.map_or(&run.stop, |c| &c.stop);
+            let (code, detail) = match stop {
                 FiniteDecisionStop::Unknown(reason) => unknown_reason_to_code_and_detail(reason),
                 _ => (
                     "unknown-stop",
@@ -229,6 +179,32 @@ pub fn execute_check(
                 .map(|d| candidate_disposition_to_json(d, winning_name))
                 .collect();
             let decision_json = run.decision.as_ref().map(decision_to_json);
+            let commits_json = if run.commits.len() > 1 {
+                Some(
+                    run.commits
+                        .iter()
+                        .map(|c| {
+                            let win = c.decision.as_ref().map(|d| d.candidate.as_str());
+                            let status = match &c.stop {
+                                FiniteDecisionStop::Selected(_) => "selected",
+                                FiniteDecisionStop::Quiescent { .. } => "quiescent",
+                                FiniteDecisionStop::Unknown(_) => "unknown",
+                            };
+                            crate::json::CommitPoolJson::new(
+                                c.commit.clone(),
+                                status,
+                                c.dispositions
+                                    .iter()
+                                    .map(|d| candidate_disposition_to_json(d, win))
+                                    .collect(),
+                                c.decision.as_ref().map(decision_to_json),
+                            )
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            };
 
             let res = CliResultJson {
                 schema: BRIX_CLI_SCHEMA.to_string(),
@@ -245,6 +221,11 @@ pub fn execute_check(
                 decision: decision_json,
                 artifacts: Vec::new(),
                 diagnostics: Vec::new(),
+                bindings: None,
+                explanation: None,
+                locations: None,
+                shows: None,
+                commits: commits_json,
             };
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
         } else {
@@ -267,25 +248,71 @@ pub fn execute_check(
         return EXIT_USAGE_OR_IO;
     }
 
-    // Classic L1/L2 module check path (check_module)
+    // Classic L1/L2 module check path (check_module). `evaluate_let_module`
+    // is a separate, additive pass over the same source (ADR-0042): it never
+    // changes `check_module`'s type-checking or grades, only adds (or
+    // explains the absence of) a value for each binding `check_module`
+    // already accepted. The two walk `resolved_module` the same way, so
+    // their result vectors line up 1:1 by position.
     let results = check_module(&resolved_module);
+    let evaluated = evaluate_let_module(&resolved_module);
     let mut had_error = false;
     let mut diagnostics = Vec::new();
+    let mut locations = Vec::new();
     let mut human_lines = Vec::new();
+    let mut bindings_json = Vec::new();
 
     if results.is_empty() {
         human_lines.push("(no `let` bindings to check)".to_string());
     } else {
-        for r in &results {
+        for (r, (_, eval_outcome)) in results.iter().zip(evaluated.iter()) {
             match r {
                 Ok(cr) => {
-                    human_lines.push(format!("  {} : — @{:?}", cr.name, cr.outcome));
+                    let ty = cr
+                        .ty
+                        .as_ref()
+                        .map(render_ty)
+                        .unwrap_or_else(|| "?".to_string());
+                    let grade = format!("{:?}", cr.outcome);
+                    match eval_outcome {
+                        LetEvalOutcome::Value(v) => {
+                            let tagged = to_tagged_value(v);
+                            human_lines.push(format!(
+                                "  {} : {ty} @{grade} = {}",
+                                cr.name,
+                                fmt_value_human(v)
+                            ));
+                            bindings_json
+                                .push(BindingJson::evaluated(&cr.name, &ty, &grade, tagged));
+                        }
+                        LetEvalOutcome::NotEvaluated(reason) => {
+                            human_lines.push(format!(
+                                "  {} : {ty} @{grade} (not evaluated: {reason})",
+                                cr.name
+                            ));
+                            bindings_json
+                                .push(BindingJson::not_evaluated(&cr.name, &ty, &grade, reason));
+                        }
+                    }
                 }
                 Err((name, err)) => {
                     had_error = true;
                     let msg = format!("{name}: not checked: {err:?}");
                     diagnostics.push(msg.clone());
-                    human_lines.push(format!("  {msg}"));
+                    let mut line = format!("  {msg}");
+                    let ident = err
+                        .location_subject()
+                        .and_then(|(subject, ident)| (subject == name).then_some(ident).flatten());
+                    if let Some((loc_line, loc_col)) = parsed.source_map.resolve(name, ident) {
+                        if let Some(snippet) =
+                            render_location_snippet(&file_display, &source, loc_line, loc_col)
+                        {
+                            line.push('\n');
+                            line.push_str(&snippet);
+                        }
+                        locations.push(LocationJson::new(&file_display, loc_line, loc_col));
+                    }
+                    human_lines.push(line);
                 }
             }
         }
@@ -311,6 +338,11 @@ pub fn execute_check(
             decision: None,
             artifacts: Vec::new(),
             diagnostics,
+            bindings: (!bindings_json.is_empty()).then_some(bindings_json),
+            explanation: None,
+            locations: (!locations.is_empty()).then_some(locations),
+            shows: None,
+            commits: None,
         };
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {

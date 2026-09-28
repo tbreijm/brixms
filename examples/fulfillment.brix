@@ -1,0 +1,39 @@
+// A fulfillment policy over bounded lists of orders and stock (ADR-0037,
+// ADR-0040): a join between two `List<T> max N` inputs, aggregates over each
+// list, and a decision built from the result.
+
+config Order = { id: Int, sku: Int, units: Int }
+config Stock = { sku: Int, on_hand: Int }
+config Decision = ShipAll | ShipPartial | Hold
+
+input orders: List<Order> max 32
+input stock: List<Stock> max 32
+
+// How many orders there are, and the total units they ask for.
+rule order_count() = len(orders)
+rule total_units() = sum(orders, o => o.units)
+
+// The join: every order id for which some stock row names the same SKU with
+// enough on hand to cover it. Later generators (and a `where` clause) may
+// reference an earlier generator's binder — that is what makes this a join
+// rather than two independent loops.
+rule coverable_ids() = for o in orders, s in stock where s.sku == o.sku && s.on_hand >= o.units yield o.id
+
+// The orders that are NOT coverable: relational membership (`in`) against
+// the join's result, filtered over the original list.
+rule short_orders(coverable_ids) = filter(orders, o => !(o.id in coverable_ids))
+rule short_count(short_orders) = len(short_orders)
+
+// The largest single order, or 0 when there are no orders — `min`/`max` of
+// an empty list is a typed fault (ADR-0040), never a default, so this must
+// be guarded explicitly.
+rule max_order_size(order_count) = match order_count > 0 {
+  true => max(orders, o => o.units)
+  false => 0
+}
+
+propose ship_all(order_count, short_count) priority 1 when order_count > 0 && short_count == 0 = ShipAll
+propose ship_partial(order_count, short_count) priority 2 when short_count > 0 && short_count < order_count = ShipPartial
+propose hold(order_count, short_count) priority 3 when order_count == 0 || short_count == order_count = Hold
+
+commit decision from (ship_all, ship_partial, hold)

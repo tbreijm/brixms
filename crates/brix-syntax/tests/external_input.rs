@@ -14,7 +14,7 @@ input label: Str
     assert_eq!(module.items.len(), 3);
 
     match &module.items[0] {
-        Item::Input(InputDecl { name, ty }) => {
+        Item::Input(InputDecl { name, ty, .. }) => {
             assert_eq!(name, "threshold");
             assert_eq!(*ty, Ty::Named("Int".into()));
         }
@@ -22,7 +22,7 @@ input label: Str
     }
 
     match &module.items[1] {
-        Item::Input(InputDecl { name, ty }) => {
+        Item::Input(InputDecl { name, ty, .. }) => {
             assert_eq!(name, "enabled");
             assert_eq!(*ty, Ty::Named("Bool".into()));
         }
@@ -30,7 +30,7 @@ input label: Str
     }
 
     match &module.items[2] {
-        Item::Input(InputDecl { name, ty }) => {
+        Item::Input(InputDecl { name, ty, .. }) => {
             assert_eq!(name, "label");
             assert_eq!(*ty, Ty::Named("Str".into()));
         }

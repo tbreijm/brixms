@@ -52,7 +52,11 @@ commit c from (p)
     let p = plan(source);
     let runtime = FiniteDecisionRuntime::build(&p).expect("runtime builds");
     let run = runtime.run();
-    assert!(run.is_selected(), "expected a selected decision, got {:?}", run.stop);
+    assert!(
+        run.is_selected(),
+        "expected a selected decision, got {:?}",
+        run.stop
+    );
     assert_eq!(run.facts[0].value, L3ValueV2::Int(55));
 }
 

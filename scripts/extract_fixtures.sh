@@ -6,7 +6,7 @@
 # to its Part. Re-run whenever spec/ changes; the output dir is regenerated.
 set -euo pipefail
 
-SPEC="${1:-spec/BrixMS_v9_0.md}"
+SPEC="${1:-spec/archive/BrixMS_v9_0.md}"
 OUT="${2:-crates/brix-ast/tests/fixtures/spec}"
 
 if [ ! -f "$SPEC" ]; then

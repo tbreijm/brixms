@@ -307,6 +307,11 @@ pub enum L3LowerError {
     /// — but reporting a `!` as a *comparison* misnames what the author wrote,
     /// and this error is the only thing they see.
     LogicalOperatorNotAllowed,
+    /// A list or relational form (`List<T>` folds, `filter`/`map`, a
+    /// comprehension, a list literal, or `in`) in a rule/let body. v1's
+    /// closed-static-value fragment predates ADR-0037/ADR-0040 and admits
+    /// none of these forms.
+    ListSyntaxNotAllowed(&'static str),
     /// A boolean literal in a rule/let body. v1's value grammar is
     /// `Int`/`Str`/nullary-constructor/record only (ADR-0012 §3.2).
     BooleanLiteralNotAllowed,
@@ -821,6 +826,7 @@ fn normalize_static_value(expr: &ast::Expr, env: &NormEnv) -> Result<L3ValueV1, 
             | ast::BinOp::Eq
             | ast::BinOp::Ne => Err(L3LowerError::ComparisonNotAllowed),
             ast::BinOp::AndAnd | ast::BinOp::OrOr => Err(L3LowerError::LogicalOperatorNotAllowed),
+            ast::BinOp::In => Err(L3LowerError::ListSyntaxNotAllowed("in")),
         },
         ast::Expr::Not(_) => Err(L3LowerError::LogicalOperatorNotAllowed),
         ast::Expr::Bool(_) => Err(L3LowerError::BooleanLiteralNotAllowed),
@@ -828,6 +834,9 @@ fn normalize_static_value(expr: &ast::Expr, env: &NormEnv) -> Result<L3ValueV1, 
         ast::Expr::Prove(_) => Err(L3LowerError::ProveNotAllowed),
         ast::Expr::Why(_) => Err(L3LowerError::WhyNotAllowed),
         ast::Expr::Audit(_) => Err(L3LowerError::AuditNotAllowed),
+        ast::Expr::Lambda { .. } => Err(L3LowerError::ListSyntaxNotAllowed("lambda")),
+        ast::Expr::ListLit(_) => Err(L3LowerError::ListSyntaxNotAllowed("list literal")),
+        ast::Expr::Comprehension { .. } => Err(L3LowerError::ListSyntaxNotAllowed("comprehension")),
     }
 }
 

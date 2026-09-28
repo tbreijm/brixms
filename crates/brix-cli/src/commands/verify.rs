@@ -237,7 +237,7 @@ pub fn execute_verify(
     let resolved_module = match brix_lower::imports::resolve_imports(&module, &loader) {
         Ok(m) => m,
         Err(err) => {
-            let msg = format!("source import error: {err:?}");
+            let msg = format!("source import error: {err}");
             if json {
                 let res = CliResultJson::failure(
                     "verify",
@@ -245,7 +245,7 @@ pub fn execute_verify(
                     Some(expect_program_hex.to_string()),
                     None,
                     "unknown",
-                    vec![format!("source-import-error: {err:?}")],
+                    vec![format!("source-import-error: {err}")],
                 );
                 println!("{}", serde_json::to_string_pretty(&res).unwrap());
             } else {
@@ -454,6 +454,11 @@ pub fn execute_verify(
             decision: None,
             artifacts: vec![artifact],
             diagnostics: Vec::new(),
+            bindings: None,
+            explanation: None,
+            locations: None,
+            shows: None,
+            commits: None,
         };
         println!("{}", serde_json::to_string_pretty(&res).unwrap());
     } else {

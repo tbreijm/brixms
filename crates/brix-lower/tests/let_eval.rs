@@ -214,7 +214,10 @@ let v = match d {
 }
 "#;
     let reason = not_evaluated_reason(source, "v");
-    assert!(reason.contains("wildcard") || reason.contains("catch-all"), "reason: {reason}");
+    assert!(
+        reason.contains("wildcard") || reason.contains("catch-all"),
+        "reason: {reason}"
+    );
 }
 
 #[test]

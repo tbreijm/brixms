@@ -49,15 +49,17 @@ pub use finite_decision::{
     finite_decision_audit_environment_from_plan,
     finite_decision_audit_environment_from_plan_with_inputs, finite_decision_program_id,
     finite_decision_program_preimage, lower_finite_decision_plan, run_finite_decision_plan,
-    run_finite_decision_plan_with_inputs, type_of_value, BoundInput, CandidateDisposition,
-    CandidateStatus, DerivedFact, FiniteDecisionBuildError, FiniteDecisionCommit,
+    run_finite_decision_plan_with_inputs, selection_from_why, type_of_value, BoundInput,
+    CandidateDisposition, CandidateExplanation, CandidateStatus, DerivedFact, ExplainOutcome,
+    FactExplain, FactOrigin, FiniteDecisionBuildError, FiniteDecisionCommit,
     FiniteDecisionContract, FiniteDecisionFnParam, FiniteDecisionFunction, FiniteDecisionInput,
     FiniteDecisionLowerError, FiniteDecisionPlan, FiniteDecisionProgramId, FiniteDecisionProposal,
     FiniteDecisionRule, FiniteDecisionRun, FiniteDecisionRuntime, FiniteDecisionStop,
-    FiniteDecisionUnknownReason, L3Schema, L3SchemaBody, L3SchemaType, L3ValueType,
-    QuiescenceCertificateId, SelectedDecision, WhyExplanation, WhyNotExplanation,
-    FINITE_DECISION_PROFILE, MAX_EXPR_DEPTH, MAX_EXPR_NODES, MAX_FUNCTION_COUNT,
-    MAX_FUNCTION_PARAMS, MAX_SCHEMA_COUNT, MAX_SCHEMA_DEPTH, MAX_SCHEMA_EDGES,
+    FiniteDecisionUnknownReason, L3Schema, L3SchemaBody, L3SchemaType, L3ValueType, NodeRef,
+    QuiescenceCertificateId, SelectedDecision, SelectionComparison, TraceNode, TraceOutcome,
+    WhyExplanation, WhyNotExplanation, FINITE_DECISION_PROFILE, MAX_EXPLAIN_NODES, MAX_EXPR_DEPTH,
+    MAX_EXPR_NODES, MAX_FUNCTION_COUNT, MAX_FUNCTION_PARAMS, MAX_SCHEMA_COUNT, MAX_SCHEMA_DEPTH,
+    MAX_SCHEMA_EDGES,
 };
 pub use input::{
     canonicalize_input_shards, decode_input_shard, decode_input_shard_from_file, input_context_id,
@@ -88,12 +90,12 @@ pub use l3_regime::{
     build_l3_observation_profile, build_l3_transition_table, l3_adm, l3_policy, L3Regime,
     L3TransitionTable,
 };
-pub use let_eval::{evaluate_let_module, LetEvalOutcome};
 pub use l3_run::{
     commit_error_reason, frontier_conflict_reason, run_l3_plan, run_l3_plan_with_interner,
     settlement_run_id, AdapterFailureDetail, L3AdmChoice, L3RunReport, L3UnknownReasonV1,
     SettlementRunId, SettlementRunV1, SettlementStopV1,
 };
+pub use let_eval::{evaluate_let_module, LetEvalOutcome};
 pub use soc_core::{
     decode_audit_input_bundle_v1, encode_audit_input_bundle_v1, AuditDecodeLimits,
     BundleCheckError, BundleDecodeError, BundleProducerError, SettlementAuditInputBundleIdV1,
@@ -262,6 +264,36 @@ pub enum LowerError {
 impl From<TypeError> for LowerError {
     fn from(err: TypeError) -> Self {
         LowerError::TypeError(err)
+    }
+}
+
+impl LowerError {
+    /// What this error is about, as `(item name, specific identifier)` — see
+    /// [`crate::finite_decision::FiniteDecisionLowerError::location_subject`]
+    /// for the shared design. Several `LowerError` variants (e.g.
+    /// `TypeAnnotationMismatch`) name only the types in conflict, not the
+    /// binding — [`check_module`]'s caller already has that name paired
+    /// alongside the error, so it is not duplicated here.
+    pub fn location_subject(&self) -> Option<(&str, Option<&str>)> {
+        match self {
+            Self::Unresolved(name) => Some((name, None)),
+            Self::MissingField { config, field } => Some((config, Some(field))),
+            Self::UnknownField { config, field } => Some((config, Some(field))),
+            Self::UnknownVariantType {
+                config, variant, ..
+            } => Some((config, Some(variant))),
+            Self::UnknownDeclaredType(name) => Some((name, None)),
+            Self::RecordFieldTypeMismatch { config, field, .. } => Some((config, Some(field))),
+            Self::ParamTypeMismatch {
+                function, param, ..
+            } => Some((function, Some(param))),
+            Self::ReturnTypeMismatch { function, .. } => Some((function, None)),
+            Self::ConfigArityMismatch { config, .. } => Some((config, None)),
+            Self::RecursiveFunctionNeedsAnnotation { function, .. } => Some((function, None)),
+            Self::RecursiveFunction { function, .. } => Some((function, None)),
+            Self::MutuallyRecursiveConfig { config, .. } => Some((config, None)),
+            _ => None,
+        }
     }
 }
 
@@ -864,6 +896,15 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
         ast::Expr::Bin { op, .. } if op.is_logical() => Err(LowerError::Unsupported(format!(
             "'{op:?}' not in L2-first fragment"
         ))),
+        // List membership (ADR-0040) has no meaning in the kernel-realization
+        // lane, which predates lists entirely; named explicitly rather than
+        // falling into the arithmetic arm's catch-all, where the diagnostic
+        // would blame the wrong thing.
+        ast::Expr::Bin {
+            op: ast::BinOp::In, ..
+        } => Err(LowerError::Unsupported(
+            "list membership 'in' not in L2-first fragment".to_string(),
+        )),
         ast::Expr::Bin { op, lhs, rhs } => {
             let arith_op = match op {
                 ast::BinOp::Add => ArithOp::Add,
@@ -919,6 +960,15 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
         )),
         ast::Expr::Audit(..) => Err(LowerError::Unsupported(
             "Audit not in L2-first fragment".to_string(),
+        )),
+        ast::Expr::Lambda { .. } => Err(LowerError::Unsupported(
+            "list fold/filter/map lambdas not in L2-first fragment".to_string(),
+        )),
+        ast::Expr::ListLit(_) => Err(LowerError::Unsupported(
+            "list literals not in L2-first fragment".to_string(),
+        )),
+        ast::Expr::Comprehension { .. } => Err(LowerError::Unsupported(
+            "comprehensions not in L2-first fragment".to_string(),
         )),
     }
 }
@@ -1319,6 +1369,31 @@ fn check_declared_field_types(
         | ast::Expr::Audit(inner)
         | ast::Expr::Not(inner) => check_declared_field_types(inner, ctx, ty_ctx),
         ast::Expr::Num(_) | ast::Expr::Str(_) | ast::Expr::Bool(_) | ast::Expr::Var(_) => Ok(()),
+        // List/relational forms (ADR-0037, ADR-0040) are not part of the
+        // L2-first tree-realization fragment this pass checks; `lower_expr`
+        // below refuses them outright, so there is nothing for this
+        // declared-field-type pass to descend into structurally beyond their
+        // own sub-expressions.
+        ast::Expr::Lambda { body, .. } => check_declared_field_types(body, ctx, ty_ctx),
+        ast::Expr::ListLit(items) => {
+            for item in items {
+                check_declared_field_types(item, ctx, ty_ctx)?;
+            }
+            Ok(())
+        }
+        ast::Expr::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => {
+            for (_, source) in generators {
+                check_declared_field_types(source, ctx, ty_ctx)?;
+            }
+            if let Some(w) = where_clause {
+                check_declared_field_types(w, ctx, ty_ctx)?;
+            }
+            check_declared_field_types(yield_expr, ctx, ty_ctx)
+        }
     }
 }
 

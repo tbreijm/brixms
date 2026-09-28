@@ -38,6 +38,29 @@ pub struct CliResultJson {
     /// existed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bindings: Option<Vec<BindingJson>>,
+    /// Structured `why`/`whynot` derivation explanation (additive; ADR-0030).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<ExplanationJson>,
+    /// Source locations for entries in `diagnostics`, additive under schema
+    /// `brix.cli.result@1` (parallel to `input_snapshot`/`inputs`). Not
+    /// necessarily one-to-one with `diagnostics`: only diagnostics a
+    /// [`brix_syntax::SourceMap`] or a parse error could resolve to a
+    /// position contribute an entry here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locations: Option<Vec<LocationJson>>,
+    /// Evaluated `show` results for `brix run`, additive under schema
+    /// `brix.cli.result@1`. `None` when the program declares no `show`
+    /// expressions (or for commands other than `run`); an empty vec is never
+    /// produced instead of `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shows: Option<Vec<TaggedValue>>,
+    /// Every commit pool's own outcome (ADR-0039), additive under schema
+    /// `brix.cli.result@1`. `top-level `status`/`candidates`/`decision`
+    /// already mirror the first pool (declaration order), so this is
+    /// populated only when the module declares more than one commit pool —
+    /// a single-commit module's JSON is byte-identical to before ADR-0039.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commits: Option<Vec<CommitPoolJson>>,
 }
 
 impl CliResultJson {
@@ -70,6 +93,11 @@ impl CliResultJson {
             decision,
             artifacts,
             diagnostics,
+            bindings: None,
+            explanation: None,
+            locations: None,
+            shows: None,
+            commits: None,
         }
     }
 
@@ -97,6 +125,11 @@ impl CliResultJson {
             decision: None,
             artifacts: Vec::new(),
             diagnostics,
+            bindings: None,
+            explanation: None,
+            locations: None,
+            shows: None,
+            commits: None,
         }
     }
 
@@ -108,6 +141,36 @@ impl CliResultJson {
     ) -> Self {
         self.input_snapshot = input_snapshot;
         self.inputs = inputs;
+        self
+    }
+
+    /// Attach `let`-lane per-binding check results (ADR-0042).
+    pub fn with_bindings(mut self, bindings: Option<Vec<BindingJson>>) -> Self {
+        self.bindings = bindings;
+        self
+    }
+
+    /// Explicitly attach a structured `why`/`whynot` explanation.
+    pub fn with_explanation(mut self, explanation: Option<ExplanationJson>) -> Self {
+        self.explanation = explanation;
+        self
+    }
+
+    /// Explicitly attach source locations for `diagnostics` entries.
+    pub fn with_locations(mut self, locations: Option<Vec<LocationJson>>) -> Self {
+        self.locations = locations;
+        self
+    }
+
+    /// Explicitly attach evaluated `show` results.
+    pub fn with_shows(mut self, shows: Option<Vec<TaggedValue>>) -> Self {
+        self.shows = shows;
+        self
+    }
+
+    /// Explicitly attach every commit pool's own outcome (ADR-0039).
+    pub fn with_commits(mut self, commits: Option<Vec<CommitPoolJson>>) -> Self {
+        self.commits = commits;
         self
     }
 
@@ -139,6 +202,74 @@ impl InputJson {
             value,
             ordinal: ordinal.to_string(),
             grade: grade.into(),
+        }
+    }
+}
+
+/// One checked `let`/`witness` binding in the `let`-lane `brix check` output
+/// (ADR-0042): its inferred type and earned grade always come from type
+/// realization; `value` is present only when the binding's expression (and
+/// every helper it calls) lies in the exact executable fragment the shared
+/// evaluator covers, and `not_evaluated` names the reason otherwise. Exactly
+/// one of `value`/`not_evaluated` is present — evaluation never guesses.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct BindingJson {
+    pub name: String,
+    pub ty: String,
+    pub grade: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<TaggedValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_evaluated: Option<String>,
+}
+
+impl BindingJson {
+    pub fn evaluated(
+        name: impl Into<String>,
+        ty: impl Into<String>,
+        grade: impl Into<String>,
+        value: TaggedValue,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            ty: ty.into(),
+            grade: grade.into(),
+            value: Some(value),
+            not_evaluated: None,
+        }
+    }
+
+    pub fn not_evaluated(
+        name: impl Into<String>,
+        ty: impl Into<String>,
+        grade: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            ty: ty.into(),
+            grade: grade.into(),
+            value: None,
+            not_evaluated: Some(reason.into()),
+        }
+    }
+}
+
+/// A source location (1-based line/column) for a diagnostic, additive under
+/// schema `brix.cli.result@1`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LocationJson {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl LocationJson {
+    pub fn new(file: impl Into<String>, line: usize, column: usize) -> Self {
+        Self {
+            file: file.into(),
+            line,
+            column,
         }
     }
 }
@@ -266,6 +397,31 @@ impl DecisionJson {
     }
 }
 
+/// One commit pool's own outcome (ADR-0039), listed under `CliResultJson::commits`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct CommitPoolJson {
+    pub name: String,
+    pub status: String,
+    pub candidates: Vec<CandidateJson>,
+    pub decision: Option<DecisionJson>,
+}
+
+impl CommitPoolJson {
+    pub fn new(
+        name: impl Into<String>,
+        status: impl Into<String>,
+        candidates: Vec<CandidateJson>,
+        decision: Option<DecisionJson>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            status: status.into(),
+            candidates,
+            decision,
+        }
+    }
+}
+
 /// Tagged object representing an evaluated Brix value.
 ///
 /// Single discriminator named `type`.
@@ -291,6 +447,11 @@ pub enum TaggedValue {
     Record {
         nominal: String,
         fields: Vec<RecordFieldJson>,
+    },
+    /// A bounded list (ADR-0037), mirroring the `brix.input@3` wire shape
+    /// `{ "type": "list", "items": [...] }`.
+    List {
+        items: Vec<TaggedValue>,
     },
 }
 
@@ -336,6 +497,10 @@ impl TaggedValue {
                 .collect(),
         }
     }
+
+    pub fn list(items: Vec<TaggedValue>) -> Self {
+        Self::List { items }
+    }
 }
 
 /// A field in a record value.
@@ -377,7 +542,91 @@ pub fn to_tagged_value(v: &L3ValueV2) -> TaggedValue {
                 })
                 .collect(),
         },
+        L3ValueV2::List(items) => TaggedValue::List {
+            items: items.iter().map(to_tagged_value).collect(),
+        },
     }
+}
+
+/// A structured `why`/`whynot` derivation explanation for one candidate
+/// (ADR-0030). Conversion from the library's `brix_lower::finite_decision`
+/// explanation types lives in `crate::commands::explain_render`; this module
+/// only defines the wire shape.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ExplanationJson {
+    pub candidate: String,
+    pub guard: TraceNodeJson,
+    pub value: TraceNodeJson,
+    pub facts: Vec<FactExplainJson>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<SelectionJson>,
+    pub truncated: bool,
+}
+
+/// One node of a bounded evaluation trace, mirroring
+/// `brix_lower::finite_decision::TraceNode`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TraceNodeJson {
+    pub source: String,
+    pub outcome: TraceOutcomeJson,
+    pub children: Vec<TraceNodeJson>,
+}
+
+/// The outcome recorded at one [`TraceNodeJson`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TraceOutcomeJson {
+    Value {
+        value: TaggedValue,
+    },
+    NotEvaluated,
+    Fault {
+        detail: String,
+    },
+    Truncated,
+    /// A bounded-summary list form (ADR-0040): the real evaluator ran every
+    /// one of `total` elements, but only `shown` were expanded into their own
+    /// child trace node.
+    Summarized {
+        shown: usize,
+        total: usize,
+    },
+}
+
+/// Where a fact transitively read by a guard or value expression comes from.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FactOriginJson {
+    Rule { deps: Vec<String> },
+    Let,
+    Input,
+}
+
+/// One rule, `let`, or input transitively read while evaluating a guard or
+/// value expression.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FactExplainJson {
+    pub name: String,
+    pub origin: FactOriginJson,
+    pub value: TaggedValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grade: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<TraceNodeJson>,
+}
+
+/// The calendar comparison between a candidate and the deliberation's actual
+/// winner (reusing the runtime's own `Key` ordering — never restated).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SelectionJson {
+    pub candidate: String,
+    pub priority: String,
+    pub is_winner: bool,
+    pub winner: String,
+    pub winner_priority: String,
+    pub decided_by_tiebreak: bool,
+    pub candidate_tiebreak: String,
+    pub winner_tiebreak: String,
 }
 
 #[cfg(test)]

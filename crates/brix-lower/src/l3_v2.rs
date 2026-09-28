@@ -136,7 +136,119 @@ pub enum L3ExprV2 {
     /// the operation is pinned structurally in the canonical encoding and
     /// cannot be reached, shadowed, or renamed through the helper table.
     IntDivMod(DivModOpV2, Box<L3ExprV2>, Box<L3ExprV2>),
+    /// A deterministic fold over a bounded list (ADR-0037, ADR-0040):
+    /// `sum`/`count`/`all`/`any`/`min`/`max`. `binder` is a hygienic lexical
+    /// variable scoped to `body`; references to it lower to the ordinary
+    /// [`Self::LetRef`] encoding.
+    Fold {
+        op: FoldOpV2,
+        list: Box<L3ExprV2>,
+        binder: String,
+        body: Box<L3ExprV2>,
+    },
+    /// `filter(xs, x => cond)` (ADR-0040): keep elements in sequence order
+    /// for which `cond` evaluates to `true`.
+    Filter {
+        list: Box<L3ExprV2>,
+        binder: String,
+        cond: Box<L3ExprV2>,
+    },
+    /// `map(xs, x => e)` (ADR-0040): the list of `e` evaluated for each
+    /// element, in sequence order.
+    Map {
+        list: Box<L3ExprV2>,
+        binder: String,
+        body: Box<L3ExprV2>,
+    },
+    /// `for x in xs, y in ys where cond yield e` (ADR-0040): nested generator
+    /// loops evaluated left to right, in generator order. A later generator
+    /// and the `where` clause may reference an earlier binder.
+    Comprehension {
+        generators: Vec<(String, L3ExprV2)>,
+        where_clause: Option<Box<L3ExprV2>>,
+        yield_expr: Box<L3ExprV2>,
+    },
+    /// `[e1, e2, ...]` — a list literal (ADR-0040).
+    ListLit(Vec<L3ExprV2>),
+    /// `e in xs` — list membership by structural equality (ADR-0040).
+    In(Box<L3ExprV2>, Box<L3ExprV2>),
+    /// `len(xs)` (ADR-0040).
+    Len(Box<L3ExprV2>),
+    /// `distinct(xs)` (ADR-0040): first occurrence kept, order otherwise
+    /// preserved.
+    Distinct(Box<L3ExprV2>),
 }
+
+/// Deterministic fold operations over a bounded list. `Sum`/`Count`/`All`/
+/// `Any` are ADR-0037's first slice; `Min`/`Max` are ADR-0040's extension.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum FoldOpV2 {
+    Sum,
+    Count,
+    All,
+    Any,
+    Min,
+    Max,
+}
+
+impl FoldOpV2 {
+    /// Every operation, in canonical-ordinal order.
+    pub const ALL: [FoldOpV2; 6] = [
+        FoldOpV2::Sum,
+        FoldOpV2::Count,
+        FoldOpV2::All,
+        FoldOpV2::Any,
+        FoldOpV2::Min,
+        FoldOpV2::Max,
+    ];
+
+    /// The source name that calls this fold. These names are reserved: a
+    /// module may not declare a helper or constructor that shadows one.
+    pub const fn name(self) -> &'static str {
+        match self {
+            FoldOpV2::Sum => "sum",
+            FoldOpV2::Count => "count",
+            FoldOpV2::All => "all",
+            FoldOpV2::Any => "any",
+            FoldOpV2::Min => "min",
+            FoldOpV2::Max => "max",
+        }
+    }
+
+    /// Resolve a source name to its fold operation, if it is one of the
+    /// reserved names.
+    pub fn from_name(name: &str) -> Option<FoldOpV2> {
+        FoldOpV2::ALL.into_iter().find(|op| op.name() == name)
+    }
+
+    /// Canonical ordinal, appended and never renumbered: `sum`=0, `count`=1,
+    /// `all`=2, `any`=3 (ADR-0037), `min`=4, `max`=5 (ADR-0040).
+    pub(crate) const fn ordinal(self) -> u64 {
+        match self {
+            FoldOpV2::Sum => 0,
+            FoldOpV2::Count => 1,
+            FoldOpV2::All => 2,
+            FoldOpV2::Any => 3,
+            FoldOpV2::Min => 4,
+            FoldOpV2::Max => 5,
+        }
+    }
+}
+
+/// Every reserved list/relational operation name (ADR-0037, ADR-0040): a
+/// module may not declare a helper or constructor that shadows one, exactly
+/// as ADR-0035 reserves `div_floor`/`div_ceil`/`div_half_even`/`mod_euclid`.
+pub fn is_reserved_list_operation_name(name: &str) -> bool {
+    FoldOpV2::from_name(name).is_some() || matches!(name, "filter" | "map" | "len" | "distinct")
+}
+
+/// Maximum length of a list produced by `filter`, `map`, a comprehension, a
+/// list literal, or `distinct` (ADR-0040). A declared input's own `max` bound
+/// (ADR-0037) is checked separately and may not exceed 256; this bound guards
+/// every *derived* list a running program can build, including the result of
+/// a large cartesian product, so evaluation fails closed with a typed fault
+/// rather than growing memory without bound.
+pub const MAX_DERIVED_LIST_LEN: usize = 4096;
 
 /// Exact signed integer division and modulo operations (ADR-0035).
 ///
@@ -285,6 +397,16 @@ pub enum L3ValueType {
     Bool,
     Sum(String),
     Record(String),
+    /// A bounded list (ADR-0037, ADR-0040). Deliberately flat: unlike `Sum`/
+    /// `Record`, this category carries no element type. Two lists are always
+    /// "the same type" for the shallow contract checks that use this type
+    /// (proposal value uniformity, declared input types); the element type
+    /// and length are enforced separately, by the declared input's element
+    /// schema and `max` (ADR-0037) and by each operation's own runtime
+    /// [`EvalFault::OperandShape`] check. This sidesteps a genuine ambiguity
+    /// a payload-carrying variant would have to resolve for its own sake: an
+    /// empty runtime list has no element it could infer a type from.
+    List,
 }
 
 /// A recursively checked schema type used by structured inputs and helper
@@ -425,6 +547,14 @@ pub fn validate_l3_value(
             "{path}: expected {}, found '{nominal_sum}'",
             expected.display_name()
         )),
+        // Lists are never nested inside a record/sum schema or a helper
+        // contract (ADR-0037 §Scope defers nested lists); reaching here means
+        // a list value was passed where a scalar or nominal schema type was
+        // expected.
+        (L3ValueV2::List(_), expected) => Err(format!(
+            "{path}: expected {}, found list",
+            expected.display_name()
+        )),
     }
 }
 
@@ -436,6 +566,7 @@ impl fmt::Display for L3ValueType {
             Self::Bool => write!(f, "Bool"),
             Self::Sum(s) => write!(f, "Sum({s})"),
             Self::Record(r) => write!(f, "Record({r})"),
+            Self::List => write!(f, "List"),
         }
     }
 }
@@ -448,6 +579,7 @@ pub fn type_of_value(v: &L3ValueV2) -> L3ValueType {
         L3ValueV2::Bool(_) => L3ValueType::Bool,
         L3ValueV2::Ctor { nominal_sum, .. } => L3ValueType::Sum(nominal_sum.clone()),
         L3ValueV2::Record { nominal_config, .. } => L3ValueType::Record(nominal_config.clone()),
+        L3ValueV2::List(_) => L3ValueType::List,
     }
 }
 
@@ -672,6 +804,18 @@ pub enum L3V2LowerError {
     },
     /// A pattern contains duplicate match variable binders.
     DuplicateMatchBinder(String),
+    /// A `sum`/`count`/`all`/`any`/`min`/`max`/`filter`/`map` call site did
+    /// not have the required shape `form(list, x => expr)` (ADR-0037,
+    /// ADR-0040): wrong arity is reported as [`Self::FunctionArityMismatch`]
+    /// instead, so this is specifically a missing or malformed binder.
+    ListFormShape {
+        form: &'static str,
+        detail: &'static str,
+    },
+    /// A lambda (`x => expr`) reached lowering outside the one position that
+    /// admits it: the second argument of a recognized fold/filter/map call
+    /// (ADR-0037, ADR-0040). Lambdas are not first-class values.
+    LambdaNotAllowed,
 }
 
 impl fmt::Display for L3V2LowerError {
@@ -719,6 +863,16 @@ impl fmt::Display for L3V2LowerError {
             Self::DuplicateMatchBinder(name) => {
                 write!(f, "duplicate match pattern binder: '{name}'")
             }
+            Self::ListFormShape { form, detail } => {
+                write!(
+                    f,
+                    "'{form}' requires the form '{form}(list, x => expr)': {detail}"
+                )
+            }
+            Self::LambdaNotAllowed => write!(
+                f,
+                "a lambda 'x => expr' is fold/filter/map syntax only and cannot appear here"
+            ),
         }
     }
 }
@@ -910,6 +1064,31 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
     })
 }
 
+/// Validate and destructure a `form(list_expr, binder => body_expr)` call
+/// site shared by `sum`/`count`/`all`/`any`/`min`/`max`/`filter`/`map`
+/// (ADR-0037, ADR-0040). `form` is the reserved name that matched, supplied
+/// by the caller so the diagnostic names it even though the callee is a
+/// runtime `&String`.
+fn expect_list_form<'a>(
+    form: &'static str,
+    args: &'a [ast::Expr],
+) -> Result<(&'a ast::Expr, &'a str, &'a ast::Expr), L3V2LowerError> {
+    if args.len() != 2 {
+        return Err(L3V2LowerError::FunctionArityMismatch {
+            func: form.to_string(),
+            expected: 2,
+            found: args.len(),
+        });
+    }
+    match &args[1] {
+        ast::Expr::Lambda { param, body } => Ok((&args[0], param.as_str(), body.as_ref())),
+        _ => Err(L3V2LowerError::ListFormShape {
+            form,
+            detail: "expected a binder of the form `x => expr` as the second argument",
+        }),
+    }
+}
+
 /// Lower one surface expression into the v2 IR.
 ///
 /// `in_rule` distinguishes a rule body — which may read earlier rules' facts —
@@ -1022,6 +1201,145 @@ pub(crate) fn lower_expr_v2(
             // shadow them: a helper or constructor claiming one of these names
             // is refused where it is declared, so this branch is never a
             // silent override of something the author wrote.
+            if let Some(op) = FoldOpV2::from_name(func) {
+                let (list_expr, binder, body_expr) = expect_list_form(op.name(), args)?;
+                let list = Box::new(lower_expr_v2(
+                    list_expr,
+                    lets,
+                    locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?);
+                let mut body_locals = locals.clone();
+                body_locals.insert(binder.to_string());
+                let body = Box::new(lower_expr_v2(
+                    body_expr,
+                    lets,
+                    &body_locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?);
+                return Ok(L3ExprV2::Fold {
+                    op,
+                    list,
+                    binder: binder.to_string(),
+                    body,
+                });
+            }
+            if func == "filter" {
+                let (list_expr, binder, cond_expr) = expect_list_form("filter", args)?;
+                let list = Box::new(lower_expr_v2(
+                    list_expr,
+                    lets,
+                    locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?);
+                let mut body_locals = locals.clone();
+                body_locals.insert(binder.to_string());
+                let cond = Box::new(lower_expr_v2(
+                    cond_expr,
+                    lets,
+                    &body_locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?);
+                return Ok(L3ExprV2::Filter {
+                    list,
+                    binder: binder.to_string(),
+                    cond,
+                });
+            }
+            if func == "map" {
+                let (list_expr, binder, body_expr) = expect_list_form("map", args)?;
+                let list = Box::new(lower_expr_v2(
+                    list_expr,
+                    lets,
+                    locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?);
+                let mut body_locals = locals.clone();
+                body_locals.insert(binder.to_string());
+                let body = Box::new(lower_expr_v2(
+                    body_expr,
+                    lets,
+                    &body_locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?);
+                return Ok(L3ExprV2::Map {
+                    list,
+                    binder: binder.to_string(),
+                    body,
+                });
+            }
+            if func == "len" {
+                if args.len() != 1 {
+                    return Err(L3V2LowerError::FunctionArityMismatch {
+                        func: func.clone(),
+                        expected: 1,
+                        found: args.len(),
+                    });
+                }
+                let inner = lower_expr_v2(
+                    &args[0],
+                    lets,
+                    locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?;
+                return Ok(L3ExprV2::Len(Box::new(inner)));
+            }
+            if func == "distinct" {
+                if args.len() != 1 {
+                    return Err(L3V2LowerError::FunctionArityMismatch {
+                        func: func.clone(),
+                        expected: 1,
+                        found: args.len(),
+                    });
+                }
+                let inner = lower_expr_v2(
+                    &args[0],
+                    lets,
+                    locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?;
+                return Ok(L3ExprV2::Distinct(Box::new(inner)));
+            }
             if let Some(op) = DivModOpV2::from_name(func) {
                 if args.len() != 2 {
                     return Err(L3V2LowerError::FunctionArityMismatch {
@@ -1135,6 +1453,7 @@ pub(crate) fn lower_expr_v2(
                 ast::BinOp::Ne => Ok(L3ExprV2::Cmp(CmpOpV2::Ne, l, r)),
                 ast::BinOp::AndAnd => Ok(L3ExprV2::And(l, r)),
                 ast::BinOp::OrOr => Ok(L3ExprV2::Or(l, r)),
+                ast::BinOp::In => Ok(L3ExprV2::In(l, r)),
                 ast::BinOp::Then | ast::BinOp::And => Err(L3V2LowerError::Unsupported(
                     "witness composition has no executable meaning in v2".to_string(),
                 )),
@@ -1232,6 +1551,86 @@ pub(crate) fn lower_expr_v2(
         ast::Expr::Prove(_) => Err(L3V2LowerError::Unsupported("prove".to_string())),
         ast::Expr::Why(_) => Err(L3V2LowerError::Unsupported("why".to_string())),
         ast::Expr::Audit(_) => Err(L3V2LowerError::Unsupported("audit".to_string())),
+        // A lambda reaches lowering directly only when it appears somewhere
+        // other than the recognized second argument of a fold/filter/map
+        // call — every valid occurrence is consumed structurally above,
+        // before recursing. Lambdas are fold syntax only (ADR-0037): they
+        // cannot escape, be stored, or be passed as ordinary function values.
+        ast::Expr::Lambda { .. } => Err(L3V2LowerError::LambdaNotAllowed),
+        ast::Expr::ListLit(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(lower_expr_v2(
+                    item,
+                    lets,
+                    locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?);
+            }
+            Ok(L3ExprV2::ListLit(out))
+        }
+        ast::Expr::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => {
+            let mut gen_locals = locals.clone();
+            let mut out_generators = Vec::with_capacity(generators.len());
+            for (binder, source) in generators {
+                let source_lowered = lower_expr_v2(
+                    source,
+                    lets,
+                    &gen_locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?;
+                out_generators.push((binder.clone(), source_lowered));
+                // A later generator or the `where` clause may reference an
+                // earlier binder — the join case ADR-0040 names — so each
+                // binder joins scope before the next generator's source is
+                // lowered.
+                gen_locals.insert(binder.clone());
+            }
+            let where_lowered = match where_clause {
+                Some(w) => Some(Box::new(lower_expr_v2(
+                    w,
+                    lets,
+                    &gen_locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                )?)),
+                None => None,
+            };
+            let yield_lowered = Box::new(lower_expr_v2(
+                yield_expr,
+                lets,
+                &gen_locals,
+                rules,
+                nullary,
+                variants_of,
+                functions,
+                in_rule,
+                helper_enabled,
+            )?);
+            Ok(L3ExprV2::Comprehension {
+                generators: out_generators,
+                where_clause: where_lowered,
+                yield_expr: yield_lowered,
+            })
+        }
     }
 }
 
@@ -1259,6 +1658,10 @@ pub enum L3ValueV2 {
         nominal_config: String,
         fields: Vec<(String, L3ValueV2)>,
     },
+    /// A bounded list value (ADR-0037, ADR-0040). Elements carry their own
+    /// nominal identity as usual; the list itself has none — it is a
+    /// structural sequence, in evaluation order.
+    List(Vec<L3ValueV2>),
 }
 
 /// Why an evaluation could not produce a value.
@@ -1314,6 +1717,10 @@ pub enum EvalFault {
         found: Box<str>,
         path: Option<Box<str>>,
     },
+    /// `min`/`max` of an empty list (ADR-0040). Never a default value: an
+    /// empty aggregate has no minimum or maximum to report, so this is a
+    /// typed evaluation fault rather than `0` or any other placeholder.
+    EmptyAggregate(FoldOpV2),
 }
 
 impl fmt::Display for EvalFault {
@@ -1358,6 +1765,9 @@ impl fmt::Display for EvalFault {
                         "return contract violation in function '{func}'{location}: expected {expected}, found {found}"
                     )
                 }
+            }
+            Self::EmptyAggregate(op) => {
+                write!(f, "{}() of an empty list has no value", op.name())
             }
         }
     }
@@ -1436,6 +1846,44 @@ impl EvalEnv {
     /// condition ⟨D-DERIVE⟩ states.
     pub fn satisfies(&self, deps: &[String]) -> bool {
         deps.iter().all(|d| self.facts.contains_key(d))
+    }
+
+    /// Bind a name into the local scope (function parameters, `match`-arm
+    /// binders). Mirrors exactly what [`eval_internal_body`]'s `Call` and
+    /// `Match` cases already do to `locals` inline; exposed so an
+    /// explanation builder can reconstruct the identical scope a helper
+    /// body or taken arm actually ran under, without duplicating evaluation
+    /// logic. Never consulted by `eval` itself beyond the `locals` map it
+    /// already reads — purely a scope-construction helper.
+    pub(crate) fn with_local(mut self, name: impl Into<String>, v: L3ValueV2) -> Self {
+        self.locals.insert(name.into(), v);
+        self
+    }
+
+    /// Whether `name` resolves through the local scope (a function
+    /// parameter or `match`-arm binder) — never a top-level `let`, rule
+    /// fact, or external input.
+    ///
+    /// Provenance only, for an explanation to decide whether a reference is
+    /// "already shown" via its call/arm site or is a top-level fact worth
+    /// listing on its own. Never used to decide a *value*, so it cannot
+    /// change evaluation semantics.
+    pub(crate) fn is_local(&self, name: &str) -> bool {
+        self.locals.contains_key(name)
+    }
+
+    /// Whether `name` resolves to a top-level `let` binding (and is not
+    /// shadowed by a local). See [`Self::is_local`].
+    pub(crate) fn is_let_binding(&self, name: &str) -> bool {
+        !self.locals.contains_key(name) && self.lets.contains_key(name)
+    }
+
+    /// Whether `name` resolves to a bound external input (and is not
+    /// shadowed by a local). See [`Self::is_local`].
+    pub(crate) fn is_bound_input(&self, name: &str) -> bool {
+        !self.locals.contains_key(name)
+            && !self.lets.contains_key(name)
+            && self.inputs.contains_key(name)
     }
 }
 
@@ -1567,6 +2015,12 @@ impl EvalBudget {
                         stack.push((v, depth + 1));
                     }
                 }
+                L3ValueV2::List(items) => {
+                    bytes += 16;
+                    for item in items {
+                        stack.push((item, depth + 1));
+                    }
+                }
             }
 
             if self.allocated_bytes + bytes > self.max_bytes {
@@ -1610,10 +2064,11 @@ impl EvalBudget {
 /// Operands evaluate **left to right**, which is ABI: it fixes which fault a
 /// program with two faulty operands reports.
 pub fn eval(e: &L3ExprV2, env: &EvalEnv) -> Result<L3ValueV2, EvalFault> {
-    if env.functions.is_empty() && env.schemas.is_empty() {
-        // No helpers in scope: no `Call` exists to recurse through (helpers
-        // are the only source of dynamic call nesting), so the fast,
-        // unbudgeted path this profile has always used is unchanged.
+    if env.functions.is_empty() && env.schemas.is_empty() && !expr_has_list_form(e) {
+        // No helpers in scope and no list/relational form anywhere in `e`:
+        // nothing here can recurse through a `Call`, and there is no
+        // cartesian-product-shaped multiplier either, so the fast, unbudgeted
+        // path this profile has always used is unchanged.
         let mut budget = None;
         return eval_internal(e, env, &mut budget, None);
     }
@@ -1652,6 +2107,50 @@ pub fn eval(e: &L3ExprV2, env: &EvalEnv) -> Result<L3ValueV2, EvalFault> {
             })
         })
     })
+}
+
+/// Whether `e` reaches a list/relational form anywhere in its tree
+/// (ADR-0037, ADR-0040).
+///
+/// A finite-decision program without functions or nominal schemas otherwise
+/// runs with no evaluator work budget at all, exactly reproducing its
+/// pre-ADR-0032 behavior. List iteration can multiply the work a *bounded*
+/// expression performs well past its own static node count — a large
+/// cartesian product is the sharpest case — so any expression that reaches
+/// one of these forms must have the shared budget active regardless of
+/// whether it also uses functions or schemas. Programs that use none of these
+/// forms are unaffected: this returns `false` for exactly the expressions
+/// [`eval`] treated as unbounded before this change.
+fn expr_has_list_form(e: &L3ExprV2) -> bool {
+    match e {
+        L3ExprV2::Fold { .. }
+        | L3ExprV2::Filter { .. }
+        | L3ExprV2::Map { .. }
+        | L3ExprV2::Comprehension { .. }
+        | L3ExprV2::ListLit(_)
+        | L3ExprV2::In(..)
+        | L3ExprV2::Len(_)
+        | L3ExprV2::Distinct(_) => true,
+        L3ExprV2::Int(_)
+        | L3ExprV2::Str(_)
+        | L3ExprV2::Bool(_)
+        | L3ExprV2::LetRef(_)
+        | L3ExprV2::RuleFact(_)
+        | L3ExprV2::NullaryVariant { .. } => false,
+        L3ExprV2::Ctor { args, .. } | L3ExprV2::Call { args, .. } => {
+            args.iter().any(expr_has_list_form)
+        }
+        L3ExprV2::Record { fields, .. } => fields.iter().any(|(_, v)| expr_has_list_form(v)),
+        L3ExprV2::Field(base, _) | L3ExprV2::Not(base) => expr_has_list_form(base),
+        L3ExprV2::Arith(_, a, b)
+        | L3ExprV2::Cmp(_, a, b)
+        | L3ExprV2::IntDivMod(_, a, b)
+        | L3ExprV2::And(a, b)
+        | L3ExprV2::Or(a, b) => expr_has_list_form(a) || expr_has_list_form(b),
+        L3ExprV2::Match { scrutinee, arms } => {
+            expr_has_list_form(scrutinee) || arms.iter().any(|(_, body)| expr_has_list_form(body))
+        }
+    }
 }
 
 fn eval_internal(
@@ -2060,7 +2559,421 @@ fn eval_internal_body(
 
             Ok(ret_val)
         }
+        L3ExprV2::Fold {
+            op,
+            list,
+            binder,
+            body,
+        } => eval_fold(*op, list, binder, body, env, budget, current_func),
+        L3ExprV2::Filter { list, binder, cond } => {
+            eval_filter(list, binder, cond, env, budget, current_func)
+        }
+        L3ExprV2::Map { list, binder, body } => {
+            eval_map(list, binder, body, env, budget, current_func)
+        }
+        L3ExprV2::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => eval_comprehension(
+            generators,
+            where_clause,
+            yield_expr,
+            env,
+            budget,
+            current_func,
+        ),
+        L3ExprV2::ListLit(items) => eval_list_lit(items, env, budget, current_func),
+        L3ExprV2::In(needle, haystack) => eval_in(needle, haystack, env, budget, current_func),
+        L3ExprV2::Len(list) => eval_len(list, env, budget, current_func),
+        L3ExprV2::Distinct(list) => eval_distinct(list, env, budget, current_func),
     }
+}
+
+// The list/relational evaluators below are pulled out of `eval_internal_body`
+// (rather than inlined as match arms, as every other form in this evaluator
+// is) so that function's own per-call stack frame — which every recursive
+// evaluation depth is charged against, including deep non-list recursion
+// such as chained helper calls — stays close to its pre-ADR-0037 size. A
+// debug build does not reuse one match arm's stack slots for another, so a
+// large arm here would otherwise widen every recursive call in this
+// evaluator, including ones that never touch a list, and a bound like
+// `MAX_EVAL_RECURSION_DEPTH` is only as tight as the frame size it was
+// chosen against.
+#[inline(never)]
+fn eval_fold(
+    op: FoldOpV2,
+    list: &L3ExprV2,
+    binder: &str,
+    body: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    let list_val = eval_internal(list, env, budget, current_func)?;
+    let L3ValueV2::List(items) = list_val else {
+        return Err(EvalFault::OperandShape("fold requires a List operand"));
+    };
+    match op {
+        FoldOpV2::Sum => {
+            let mut acc: i64 = 0;
+            for item in items {
+                if let Some(b) = budget.as_mut() {
+                    b.charge_clone(&item)?;
+                }
+                let mut item_env = env.clone();
+                item_env.locals.insert(binder.to_string(), item);
+                let v = eval_internal(body, &item_env, budget, current_func)?;
+                let L3ValueV2::Int(n) = v else {
+                    return Err(EvalFault::OperandShape("sum body must evaluate to Int"));
+                };
+                acc = acc
+                    .checked_add(n)
+                    .ok_or(EvalFault::Overflow(ArithOpV2::Add))?;
+            }
+            Ok(L3ValueV2::Int(acc))
+        }
+        FoldOpV2::Count => {
+            let mut acc: i64 = 0;
+            for item in items {
+                if let Some(b) = budget.as_mut() {
+                    b.charge_clone(&item)?;
+                }
+                let mut item_env = env.clone();
+                item_env.locals.insert(binder.to_string(), item);
+                let v = eval_internal(body, &item_env, budget, current_func)?;
+                let L3ValueV2::Bool(keep) = v else {
+                    return Err(EvalFault::OperandShape("count body must evaluate to Bool"));
+                };
+                if keep {
+                    acc = acc
+                        .checked_add(1)
+                        .ok_or(EvalFault::Overflow(ArithOpV2::Add))?;
+                }
+            }
+            Ok(L3ValueV2::Int(acc))
+        }
+        FoldOpV2::All => {
+            for item in items {
+                if let Some(b) = budget.as_mut() {
+                    b.charge_clone(&item)?;
+                }
+                let mut item_env = env.clone();
+                item_env.locals.insert(binder.to_string(), item);
+                let v = eval_internal(body, &item_env, budget, current_func)?;
+                let L3ValueV2::Bool(keep) = v else {
+                    return Err(EvalFault::OperandShape("all body must evaluate to Bool"));
+                };
+                if !keep {
+                    return Ok(L3ValueV2::Bool(false));
+                }
+            }
+            Ok(L3ValueV2::Bool(true))
+        }
+        FoldOpV2::Any => {
+            for item in items {
+                if let Some(b) = budget.as_mut() {
+                    b.charge_clone(&item)?;
+                }
+                let mut item_env = env.clone();
+                item_env.locals.insert(binder.to_string(), item);
+                let v = eval_internal(body, &item_env, budget, current_func)?;
+                let L3ValueV2::Bool(keep) = v else {
+                    return Err(EvalFault::OperandShape("any body must evaluate to Bool"));
+                };
+                if keep {
+                    return Ok(L3ValueV2::Bool(true));
+                }
+            }
+            Ok(L3ValueV2::Bool(false))
+        }
+        FoldOpV2::Min | FoldOpV2::Max => {
+            if items.is_empty() {
+                return Err(EvalFault::EmptyAggregate(op));
+            }
+            let mut acc: Option<i64> = None;
+            for item in items {
+                if let Some(b) = budget.as_mut() {
+                    b.charge_clone(&item)?;
+                }
+                let mut item_env = env.clone();
+                item_env.locals.insert(binder.to_string(), item);
+                let v = eval_internal(body, &item_env, budget, current_func)?;
+                let L3ValueV2::Int(n) = v else {
+                    return Err(EvalFault::OperandShape("min/max body must evaluate to Int"));
+                };
+                acc = Some(match acc {
+                    None => n,
+                    Some(cur) if op == FoldOpV2::Min => cur.min(n),
+                    Some(cur) => cur.max(n),
+                });
+            }
+            Ok(L3ValueV2::Int(acc.expect("non-empty checked above")))
+        }
+    }
+}
+
+#[inline(never)]
+fn eval_filter(
+    list: &L3ExprV2,
+    binder: &str,
+    cond: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    let list_val = eval_internal(list, env, budget, current_func)?;
+    let L3ValueV2::List(items) = list_val else {
+        return Err(EvalFault::OperandShape("filter requires a List operand"));
+    };
+    let mut out = Vec::new();
+    for item in items {
+        if let Some(b) = budget.as_mut() {
+            b.charge_clone(&item)?;
+        }
+        let mut item_env = env.clone();
+        item_env.locals.insert(binder.to_string(), item.clone());
+        let v = eval_internal(cond, &item_env, budget, current_func)?;
+        let L3ValueV2::Bool(keep) = v else {
+            return Err(EvalFault::OperandShape(
+                "filter condition must evaluate to Bool",
+            ));
+        };
+        if keep {
+            if out.len() >= MAX_DERIVED_LIST_LEN {
+                return Err(EvalFault::ResourceExhausted {
+                    limit: MAX_DERIVED_LIST_LEN,
+                    detail: "derived list length limit exceeded".to_string(),
+                });
+            }
+            out.push(item);
+        }
+    }
+    Ok(L3ValueV2::List(out))
+}
+
+#[inline(never)]
+fn eval_map(
+    list: &L3ExprV2,
+    binder: &str,
+    body: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    let list_val = eval_internal(list, env, budget, current_func)?;
+    let L3ValueV2::List(items) = list_val else {
+        return Err(EvalFault::OperandShape("map requires a List operand"));
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        if let Some(b) = budget.as_mut() {
+            b.charge_clone(&item)?;
+        }
+        let mut item_env = env.clone();
+        item_env.locals.insert(binder.to_string(), item);
+        let v = eval_internal(body, &item_env, budget, current_func)?;
+        if out.len() >= MAX_DERIVED_LIST_LEN {
+            return Err(EvalFault::ResourceExhausted {
+                limit: MAX_DERIVED_LIST_LEN,
+                detail: "derived list length limit exceeded".to_string(),
+            });
+        }
+        out.push(v);
+    }
+    Ok(L3ValueV2::List(out))
+}
+
+/// Nested generator loops, left to right, evaluated recursively so a later
+/// generator's environment already carries every earlier binder — the join
+/// case ADR-0040 names. Its own function (not nested inside
+/// [`eval_comprehension`]) for the same stack-frame-size reason the sibling
+/// `eval_*` functions here are pulled out of `eval_internal_body`.
+#[inline(never)]
+fn eval_comprehension_generators(
+    gens: &[(String, L3ExprV2)],
+    where_clause: &Option<Box<L3ExprV2>>,
+    yield_expr: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+    out: &mut Vec<L3ValueV2>,
+) -> Result<(), EvalFault> {
+    match gens.split_first() {
+        None => {
+            let keep = match where_clause {
+                None => true,
+                Some(w) => {
+                    let v = eval_internal(w, env, budget, current_func)?;
+                    let L3ValueV2::Bool(b) = v else {
+                        return Err(EvalFault::OperandShape(
+                            "comprehension 'where' must evaluate to Bool",
+                        ));
+                    };
+                    b
+                }
+            };
+            if keep {
+                let v = eval_internal(yield_expr, env, budget, current_func)?;
+                if out.len() >= MAX_DERIVED_LIST_LEN {
+                    return Err(EvalFault::ResourceExhausted {
+                        limit: MAX_DERIVED_LIST_LEN,
+                        detail: "derived list length limit exceeded".to_string(),
+                    });
+                }
+                out.push(v);
+            }
+            Ok(())
+        }
+        Some(((binder, source), rest)) => {
+            let list_val = eval_internal(source, env, budget, current_func)?;
+            let L3ValueV2::List(items) = list_val else {
+                return Err(EvalFault::OperandShape(
+                    "comprehension generator requires a List operand",
+                ));
+            };
+            for item in items {
+                if let Some(b) = budget.as_mut() {
+                    b.charge_clone(&item)?;
+                }
+                let mut next_env = env.clone();
+                next_env.locals.insert(binder.clone(), item);
+                eval_comprehension_generators(
+                    rest,
+                    where_clause,
+                    yield_expr,
+                    &next_env,
+                    budget,
+                    current_func,
+                    out,
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+
+#[inline(never)]
+fn eval_comprehension(
+    generators: &[(String, L3ExprV2)],
+    where_clause: &Option<Box<L3ExprV2>>,
+    yield_expr: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    let mut out = Vec::new();
+    eval_comprehension_generators(
+        generators,
+        where_clause,
+        yield_expr,
+        env,
+        budget,
+        current_func,
+        &mut out,
+    )?;
+    Ok(L3ValueV2::List(out))
+}
+
+#[inline(never)]
+fn eval_list_lit(
+    items: &[L3ExprV2],
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    if items.len() > MAX_DERIVED_LIST_LEN {
+        return Err(EvalFault::ResourceExhausted {
+            limit: MAX_DERIVED_LIST_LEN,
+            detail: "derived list length limit exceeded".to_string(),
+        });
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let v = eval_internal(item, env, budget, current_func)?;
+        if let Some(b) = budget.as_mut() {
+            b.charge_value(&v, 2)?;
+        }
+        out.push(v);
+    }
+    Ok(L3ValueV2::List(out))
+}
+
+#[inline(never)]
+fn eval_in(
+    needle: &L3ExprV2,
+    haystack: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    let needle_val = eval_internal(needle, env, budget, current_func)?;
+    let haystack_val = eval_internal(haystack, env, budget, current_func)?;
+    let L3ValueV2::List(items) = haystack_val else {
+        return Err(EvalFault::OperandShape(
+            "'in' requires a List right operand",
+        ));
+    };
+    let mut found = false;
+    for item in &items {
+        if let Some(b) = budget.as_mut() {
+            b.tick_step()?;
+        }
+        if *item == needle_val {
+            found = true;
+            break;
+        }
+    }
+    Ok(L3ValueV2::Bool(found))
+}
+
+#[inline(never)]
+fn eval_len(
+    list: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    let list_val = eval_internal(list, env, budget, current_func)?;
+    let L3ValueV2::List(items) = list_val else {
+        return Err(EvalFault::OperandShape("len requires a List operand"));
+    };
+    Ok(L3ValueV2::Int(items.len() as i64))
+}
+
+#[inline(never)]
+fn eval_distinct(
+    list: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    let list_val = eval_internal(list, env, budget, current_func)?;
+    let L3ValueV2::List(items) = list_val else {
+        return Err(EvalFault::OperandShape("distinct requires a List operand"));
+    };
+    // First occurrence kept, order otherwise preserved (ADR-0040). A
+    // `BTreeSet` gives an O(log n) membership check without a hash map
+    // (`disallowed_types`); the insertion-ordered `out` is the value this
+    // expression actually produces.
+    let mut seen: BTreeSet<L3ValueV2> = BTreeSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        if let Some(b) = budget.as_mut() {
+            b.tick_step()?;
+            b.charge_clone(&item)?;
+        }
+        if seen.insert(item.clone()) {
+            if out.len() >= MAX_DERIVED_LIST_LEN {
+                return Err(EvalFault::ResourceExhausted {
+                    limit: MAX_DERIVED_LIST_LEN,
+                    detail: "derived list length limit exceeded".to_string(),
+                });
+            }
+            out.push(item);
+        }
+    }
+    Ok(L3ValueV2::List(out))
 }
 
 /// Check that every `match` in `plan` is exhaustive over its scrutinee's sum.
@@ -2172,6 +3085,44 @@ pub(crate) fn check_exhaustive_expr(
             check_exhaustive_expr(b, sum_of_variant, variants_of_sum)
         }
         L3ExprV2::Not(a) => check_exhaustive_expr(a, sum_of_variant, variants_of_sum),
+        L3ExprV2::In(a, b) => {
+            check_exhaustive_expr(a, sum_of_variant, variants_of_sum)?;
+            check_exhaustive_expr(b, sum_of_variant, variants_of_sum)
+        }
+        L3ExprV2::Len(a) | L3ExprV2::Distinct(a) => {
+            check_exhaustive_expr(a, sum_of_variant, variants_of_sum)
+        }
+        L3ExprV2::ListLit(items) => {
+            for item in items {
+                check_exhaustive_expr(item, sum_of_variant, variants_of_sum)?;
+            }
+            Ok(())
+        }
+        L3ExprV2::Fold { list, body, .. } => {
+            check_exhaustive_expr(list, sum_of_variant, variants_of_sum)?;
+            check_exhaustive_expr(body, sum_of_variant, variants_of_sum)
+        }
+        L3ExprV2::Filter { list, cond, .. } => {
+            check_exhaustive_expr(list, sum_of_variant, variants_of_sum)?;
+            check_exhaustive_expr(cond, sum_of_variant, variants_of_sum)
+        }
+        L3ExprV2::Map { list, body, .. } => {
+            check_exhaustive_expr(list, sum_of_variant, variants_of_sum)?;
+            check_exhaustive_expr(body, sum_of_variant, variants_of_sum)
+        }
+        L3ExprV2::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => {
+            for (_, source) in generators {
+                check_exhaustive_expr(source, sum_of_variant, variants_of_sum)?;
+            }
+            if let Some(w) = where_clause {
+                check_exhaustive_expr(w, sum_of_variant, variants_of_sum)?;
+            }
+            check_exhaustive_expr(yield_expr, sum_of_variant, variants_of_sum)
+        }
         L3ExprV2::Int(_)
         | L3ExprV2::Str(_)
         | L3ExprV2::Bool(_)

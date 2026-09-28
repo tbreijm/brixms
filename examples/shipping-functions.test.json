@@ -1,0 +1,42 @@
+{
+  "schema": "brix.test@1",
+  "program": "shipping-functions.brix",
+  "cases": [
+    {
+      "name": "ships within EU-NORTH with sufficient stock",
+      "inputs": ["shipping-functions.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "ship",
+        "value": "Ship",
+        "facts": {
+          "threshold": "15"
+        }
+      }
+    },
+    {
+      "name": "expedites when requested and region valid, even with low stock",
+      "inputs": ["tests/shipping-functions-expedite.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "expedite",
+        "value": "Expedite",
+        "candidates": {
+          "ship": "rejected-guard-false"
+        }
+      }
+    },
+    {
+      "name": "holds for an invalid region regardless of stock",
+      "inputs": ["tests/shipping-functions-hold.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "hold",
+        "value": "Hold",
+        "facts": {
+          "valid_dest": "false"
+        }
+      }
+    }
+  ]
+}

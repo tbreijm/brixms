@@ -1,0 +1,20 @@
+[package]
+name = "brix-kb"
+description = "Persistent, revisable knowledge base for Brix finite-decision programs (ADR-0041): facts are asserted, corrected and retracted as immutable on-disk revisions, every revision is re-decided, and callers can ask what changed between revisions and why (SOC-LAW-09, correction and retraction non-erasure)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+brix-syntax = { path = "../brix-syntax" }
+brix-lower = { path = "../brix-lower" }
+brix-canon = { workspace = true }
+brix-semantic = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+brix-canon = { workspace = true }
+
+[lints]
+workspace = true

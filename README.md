@@ -300,71 +300,13 @@ become guessed results.
 
 ## Try it
 
-Prebuilt release archives are published for **`aarch64-apple-darwin`** (macOS Apple Silicon) and **`x86_64-unknown-linux-gnu`** (Linux x86_64) on GitHub Releases.
+The workspace version in [`Cargo.toml`](./Cargo.toml) is `0.1.0-alpha.3`, but
+no `v0.1.0-alpha.3` tag has ever been pushed, so no prebuilt archive for it
+exists. **Building from source is therefore the primary way to try the
+current language and CLI**; every feature marked **"(source build)"** later
+in this README exists only in the source tree, in neither published archive.
 
-### Prebuilt archive installation
-
-#### macOS (Apple Silicon: `aarch64-apple-darwin`)
-
-1. Download the release archive and SHA256 checksum file:
-   ```bash
-   curl -LO https://github.com/tbreijm/brixms/releases/download/v0.1.0-alpha.3/brix-v0.1.0-alpha.3-aarch64-apple-darwin.tar.gz
-   curl -LO https://github.com/tbreijm/brixms/releases/download/v0.1.0-alpha.3/brix-v0.1.0-alpha.3-aarch64-apple-darwin.tar.gz.sha256
-   ```
-2. Verify the checksum:
-   ```bash
-   shasum -a 256 -c brix-v0.1.0-alpha.3-aarch64-apple-darwin.tar.gz.sha256
-   ```
-3. Extract the archive (extracting the predictable top-level directory `brix-v0.1.0-alpha.3-aarch64-apple-darwin`):
-   ```bash
-   tar -xzf brix-v0.1.0-alpha.3-aarch64-apple-darwin.tar.gz
-   ```
-4. Enter the extracted top-level directory and verify the executable:
-   ```bash
-   cd brix-v0.1.0-alpha.3-aarch64-apple-darwin
-   ./brix --version
-   ```
-   Outputs:
-   ```text
-   brix 0.1.0-alpha.3
-   ```
-5. Run preflight check and deliberation on the bundled external-input example:
-   ```bash
-   ./brix check examples/shipping-input.brix --input examples/shipping-input.json
-   ./brix run examples/shipping-input.brix --input examples/shipping-input.json
-   ```
-
-#### Linux (`x86_64-unknown-linux-gnu`)
-
-1. Download the release archive and SHA256 checksum file:
-   ```bash
-   curl -LO https://github.com/tbreijm/brixms/releases/download/v0.1.0-alpha.3/brix-v0.1.0-alpha.3-x86_64-unknown-linux-gnu.tar.gz
-   curl -LO https://github.com/tbreijm/brixms/releases/download/v0.1.0-alpha.3/brix-v0.1.0-alpha.3-x86_64-unknown-linux-gnu.tar.gz.sha256
-   ```
-2. Verify the checksum:
-   ```bash
-   sha256sum -c brix-v0.1.0-alpha.3-x86_64-unknown-linux-gnu.tar.gz.sha256
-   ```
-3. Extract the archive (extracting the predictable top-level directory `brix-v0.1.0-alpha.3-x86_64-unknown-linux-gnu`):
-   ```bash
-   tar -xzf brix-v0.1.0-alpha.3-x86_64-unknown-linux-gnu.tar.gz
-   ```
-4. Enter the extracted top-level directory and verify the executable:
-   ```bash
-   cd brix-v0.1.0-alpha.3-x86_64-unknown-linux-gnu
-   ./brix --version
-   ```
-   Outputs:
-   ```text
-   brix 0.1.0-alpha.3
-   ```
-5. Run preflight check and deliberation on the bundled external-input example:
-   ```bash
-   ./brix check examples/shipping-input.brix --input examples/shipping-input.json
-   ./brix run examples/shipping-input.brix --input examples/shipping-input.json
-   ```
-
-### Building from source (alternative)
+### Building from source (primary path)
 
 Install Rust through [rustup](https://rustup.rs/). The repository pins Rust
 **1.96.1** in [`rust-toolchain.toml`](./rust-toolchain.toml), so the matching
@@ -382,8 +324,45 @@ cargo run -p brix-cli -- check crates/brix-lower/tests/fixtures/id.brix
 The final command prints:
 
 ```text
-r : Int @Proven
+r : — @Proven
 ```
+
+(`brix check` reports each `let` binding's name and the evidence grade it
+earned; it does not print the inferred type on this line today — see
+[`docs/brix-language.md`](./docs/brix-language.md).)
+
+### Prebuilt archive installation (published releases lag behind source)
+
+Prebuilt archives are published on the [GitHub Releases
+page](https://github.com/tbreijm/brixms/releases) for
+**`aarch64-apple-darwin`** (macOS Apple Silicon) and
+**`x86_64-unknown-linux-gnu`** (Linux x86_64). As of this writing the newest
+published tag is **`v0.1.0-alpha.2`** — check the Releases page for the
+current newest tag and set `VERSION` below to match it exactly; do not assume
+`v0.1.0-alpha.3` is (yet) one of them.
+
+```bash
+VERSION=v0.1.0-alpha.2               # exact tag from the Releases page above
+TARGET=x86_64-unknown-linux-gnu      # or aarch64-apple-darwin
+
+curl -LO "https://github.com/tbreijm/brixms/releases/download/${VERSION}/brix-${VERSION}-${TARGET}.tar.gz"
+curl -LO "https://github.com/tbreijm/brixms/releases/download/${VERSION}/brix-${VERSION}-${TARGET}.tar.gz.sha256"
+
+# Verify the checksum (Linux: sha256sum; macOS: shasum -a 256):
+sha256sum -c "brix-${VERSION}-${TARGET}.tar.gz.sha256"
+
+# Extract the predictable top-level directory and enter it:
+tar -xzf "brix-${VERSION}-${TARGET}.tar.gz"
+cd "brix-${VERSION}-${TARGET}"
+
+./brix --version
+```
+
+`./brix --version` prints the matching version string, e.g. `brix
+0.1.0-alpha.2`. From there, run `./brix --help` and check the archive's own
+bundled `examples/` directory and `README.md` for what that specific release
+ships — an older release archive can lag behind the quickstarts below, which
+are written against a source checkout.
 
 ### A small Brix program
 
@@ -590,8 +569,9 @@ invoke `./brix` directly from the extracted directory.
 ### Reusable functions in decision programs (source build)
 
 The working source adds pure, nonrecursive helpers to finite-decision programs
-([ADR-0032](./spec/adr/ADR-0032_Finite_Decision_Functions.md)). This extension is
-not included in the previously published alpha.3 archives.
+([ADR-0032](./spec/adr/ADR-0032_Finite_Decision_Functions.md)). This extension
+is not included in either published release archive (`v0.1.0-alpha.1`,
+`v0.1.0-alpha.2`).
 
 ```brix
 fn enough(available: Int, needed: Int): Bool = available >= needed
@@ -715,6 +695,7 @@ division ([ADR-0035](./spec/adr/ADR-0035_Integer_Division.md)), so a decision
 that needs a ratio, a per-unit allocation, or a remainder can compute it in the
 audited expression instead of taking an already-divided value as input.
 
+<!-- brix-snippet: fragment -->
 ```brix
 let per_car_cents = div_floor(price_cents, car_count)
 let leftover_cents = mod_euclid(price_cents, car_count)
@@ -766,7 +747,10 @@ them.
 ## What is coming
 
 The next work is about completing the trust story and widening the useful
-language surface, not replacing the architecture above.
+language surface, not replacing the architecture above. For the fuller
+picture — what a beta needs beyond this alpha, organized as milestones with
+open design questions — see
+[`docs/planning/beta-roadmap.md`](./docs/planning/beta-roadmap.md).
 
 ### Near-term engineering
 

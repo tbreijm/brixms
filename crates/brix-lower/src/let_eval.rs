@@ -194,7 +194,9 @@ pub fn evaluate_let_module(m: &ast::Module) -> Vec<(String, LetEvalOutcome)> {
 fn describe_lower_error(e: &L3V2LowerError) -> String {
     match e {
         L3V2LowerError::FloatLiteralNotAllowed(_) => {
-            "Float arithmetic is outside the exact executable fragment".to_string()
+            "a Float value is outside the exact executable fragment (Float is admitted only by \
+             the type-realization checker, never by the shared evaluator)"
+                .to_string()
         }
         L3V2LowerError::DivisionNotAllowed => division_not_admitted_reason().to_string(),
         L3V2LowerError::Unsupported(detail) if detail.contains("composition") => {
@@ -214,7 +216,9 @@ fn describe_lower_error(e: &L3V2LowerError) -> String {
             "a nested constructor pattern is outside the exact executable fragment".to_string()
         }
         L3V2LowerError::DuplicateMatchBinder(name) => {
-            format!("match pattern rebinds '{name}', which is outside the exact executable fragment")
+            format!(
+                "match pattern rebinds '{name}', which is outside the exact executable fragment"
+            )
         }
         L3V2LowerError::IntegerOverflow(lit) => {
             format!("integer literal '{lit}' does not fit in the executable fragment's Int")
@@ -242,9 +246,7 @@ fn describe_eval_fault(f: &EvalFault) -> String {
         EvalFault::CallDepthExceeded { .. } => {
             "exceeded the evaluator's recursion depth bound".to_string()
         }
-        EvalFault::ResourceExhausted { .. } => {
-            "exceeded the evaluator's work budget".to_string()
-        }
+        EvalFault::ResourceExhausted { .. } => "exceeded the evaluator's work budget".to_string(),
         other => format!("evaluation fault ({other})"),
     }
 }

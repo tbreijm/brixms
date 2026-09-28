@@ -32,6 +32,11 @@ pub enum TokenKind {
     Commit,
     From,
     Input,
+    For,
+    In,
+    Where,
+    Yield,
+    Otherwise,
 
     // Identifiers & Literals
     Ident(String),
@@ -39,31 +44,33 @@ pub enum TokenKind {
     Str(String),
 
     // Symbols & Operators
-    OpenBrace,  // {
-    CloseBrace, // }
-    OpenParen,  // (
-    CloseParen, // )
-    Colon,      // :
-    Equals,     // =
-    Pipe,       // |
-    Comma,      // ,
-    Dot,        // .
-    At,         // @
-    FatArrow,   // =>
-    Plus,       // +
-    Minus,      // -
-    Star,       // *
-    Slash,      // /
-    Lt,         // <
-    Le,         // <=
-    Gt,         // >
-    Ge,         // >=
-    EqEq,       // ==
-    Ne,         // !=
-    AmpAmp,     // &&
-    PipePipe,   // ||
-    Bang,       // !
-    Underscore, // _
+    OpenBrace,    // {
+    CloseBrace,   // }
+    OpenParen,    // (
+    CloseParen,   // )
+    OpenBracket,  // [
+    CloseBracket, // ]
+    Colon,        // :
+    Equals,       // =
+    Pipe,         // |
+    Comma,        // ,
+    Dot,          // .
+    At,           // @
+    FatArrow,     // =>
+    Plus,         // +
+    Minus,        // -
+    Star,         // *
+    Slash,        // /
+    Lt,           // <
+    Le,           // <=
+    Gt,           // >
+    Ge,           // >=
+    EqEq,         // ==
+    Ne,           // !=
+    AmpAmp,       // &&
+    PipePipe,     // ||
+    Bang,         // !
+    Underscore,   // _
 
     Eof,
 }
@@ -259,6 +266,11 @@ pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token
                     "commit" => TokenKind::Commit,
                     "from" => TokenKind::From,
                     "input" => TokenKind::Input,
+                    "for" => TokenKind::For,
+                    "in" => TokenKind::In,
+                    "where" => TokenKind::Where,
+                    "yield" => TokenKind::Yield,
+                    "otherwise" => TokenKind::Otherwise,
                     // `Derived`/`Audited`/`Proven` are deliberately NOT
                     // keywords. They are grade names only in grade position
                     // (after `@`), which the parser recognizes; everywhere
@@ -303,6 +315,16 @@ pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token
                 i += 1;
                 col += 1;
                 TokenKind::CloseParen
+            }
+            '[' => {
+                i += 1;
+                col += 1;
+                TokenKind::OpenBracket
+            }
+            ']' => {
+                i += 1;
+                col += 1;
+                TokenKind::CloseBracket
             }
             ':' => {
                 i += 1;

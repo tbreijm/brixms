@@ -30,6 +30,9 @@ use crate::l3_v2::{validate_l3_value, L3SchemaType, L3ValueV2};
 /// The canonical schema identifier for external input artifacts (ADR-0031 ⟨D-SCHEMA⟩).
 pub const INPUT_SCHEMA_V1: &str = "brix.input@1";
 pub const INPUT_SCHEMA_V2: &str = "brix.input@2";
+/// `brix.input@3` (ADR-0037): the scalar/record/sum forms of `@1`/`@2`, plus
+/// the bounded-list form `{ "type": "list", "items": [...] }`.
+pub const INPUT_SCHEMA_V3: &str = "brix.input@3";
 
 /// The canonical domain tag for input snapshot identity (ADR-0031 ⟨D-IDENTITY⟩).
 pub const INPUT_SNAPSHOT_TAG: &str = "brix.input.snapshot@1";
@@ -51,6 +54,11 @@ pub const MAX_INPUT_COUNT: usize = 256;
 
 /// Maximum allowed byte length for an input identifier name (64 B).
 pub const MAX_INPUT_NAME_BYTES: usize = 64;
+
+/// Maximum allowed declared `max` bound for a `List<T> max N` input
+/// declaration (ADR-0037). `max` is otherwise unconstrained (any value in
+/// `0..=256` is admitted, including zero).
+pub const MAX_INPUT_LIST_MAX: u64 = 256;
 
 /// Maximum allowed byte length for an input string value (64 KiB).
 pub const MAX_STRING_VALUE_BYTES: usize = 65536;
@@ -111,6 +119,11 @@ pub enum InputValue {
         nominal: String,
         fields: BTreeMap<String, InputValue>,
     },
+    /// A bounded list (ADR-0037), admitted only in `brix.input@3` and later.
+    /// Element type and maximum length come from the source input
+    /// declaration, never from the shard itself; only the sequence of
+    /// element values is carried here.
+    List(Vec<InputValue>),
 }
 
 /// Backward-compatible name for the scalar transport value type. `brix.input@1`
@@ -127,6 +140,7 @@ impl InputScalarValue {
             Self::Str(_) => L3ValueType::Str,
             Self::Sum { nominal, .. } => L3ValueType::Sum(nominal.clone()),
             Self::Record { nominal, .. } => L3ValueType::Record(nominal.clone()),
+            Self::List(_) => L3ValueType::List,
         }
     }
 
@@ -152,6 +166,7 @@ impl InputScalarValue {
                     .map(|(name, value)| (name.clone(), value.to_l3_value()))
                     .collect(),
             },
+            Self::List(items) => L3ValueV2::List(items.iter().map(Self::to_l3_value).collect()),
         }
     }
 
@@ -183,6 +198,12 @@ impl InputScalarValue {
                     .map(|(name, value)| Some((name.clone(), Self::from_l3_value(value)?)))
                     .collect::<Option<BTreeMap<_, _>>>()?,
             }),
+            L3ValueV2::List(items) => Some(Self::List(
+                items
+                    .iter()
+                    .map(Self::from_l3_value)
+                    .collect::<Option<Vec<_>>>()?,
+            )),
         }
     }
 }
@@ -211,6 +232,16 @@ impl Canonical for InputValue {
                 for (name, value) in fields {
                     w.write_ident(name);
                     value.canon_write(w);
+                }
+            }),
+            // Ordinal 5 (ADR-0037): the element count, then each element's
+            // canonical tagged value in sequence order. The element type
+            // itself is not repeated here — the program's declaration binds
+            // it, and context binds program and snapshot together.
+            Self::List(items) => w.write_enum(5, |w| {
+                w.write_uint(items.len() as u64);
+                for item in items {
+                    item.canon_write(w);
                 }
             }),
         }
@@ -289,6 +320,25 @@ impl InputSnapshot {
         }
     }
 
+    /// Construct a snapshot directly from an already-validated set of values,
+    /// bypassing shard decoding.
+    ///
+    /// For a caller (such as `brix-kb`, ADR-0041) that maintains its own
+    /// on-disk snapshot as canonical values rather than re-decoding a shard
+    /// file for every edit — e.g. building a corrected snapshot by upserting
+    /// or removing named values from one already loaded. `total_bytes` and
+    /// `shard_count` become `0`: they describe the *decoded artifact* a
+    /// snapshot came from (diagnostics only), never its canonical identity —
+    /// [`input_snapshot_preimage`] reads only `values` — so a programmatically
+    /// constructed snapshot has no artifact history to report.
+    pub fn from_values(values: BTreeMap<String, InputValue>) -> Self {
+        Self {
+            values,
+            total_bytes: 0,
+            shard_count: 0,
+        }
+    }
+
     /// The sorted values map.
     pub fn values(&self) -> &BTreeMap<String, InputValue> {
         &self.values
@@ -356,6 +406,45 @@ impl InputSnapshot {
                         name: name.clone(),
                         detail,
                     });
+                }
+            }
+            if decl.ty == L3ValueType::List {
+                let InputValue::List(items) = val else {
+                    return Err(InputValidationError::InvalidValue {
+                        name: name.clone(),
+                        detail: "declared List input did not decode to a list value".to_string(),
+                    });
+                };
+                let list_decl =
+                    decl.list
+                        .as_ref()
+                        .ok_or_else(|| InputValidationError::InvalidValue {
+                            name: name.clone(),
+                            detail: "declared List input has no element/max declaration"
+                                .to_string(),
+                        })?;
+                if items.len() as u64 > list_decl.max {
+                    return Err(InputValidationError::InvalidValue {
+                        name: name.clone(),
+                        detail: format!(
+                            "list has {} element(s), exceeding the declared maximum of {}",
+                            items.len(),
+                            list_decl.max
+                        ),
+                    });
+                }
+                for (index, item) in items.iter().enumerate() {
+                    if let Err(detail) = validate_l3_value(
+                        &item.to_l3_value(),
+                        &list_decl.element,
+                        &plan.schemas,
+                        &format!("{name}[{index}]"),
+                    ) {
+                        return Err(InputValidationError::InvalidValue {
+                            name: name.clone(),
+                            detail,
+                        });
+                    }
                 }
             }
         }
@@ -672,9 +761,46 @@ impl fmt::Display for InputValidationError {
 
 impl std::error::Error for InputValidationError {}
 
+impl InputValidationError {
+    /// The declared `input` item this error is about, as an item-name subject
+    /// (see [`crate::finite_decision::FiniteDecisionLowerError::location_subject`]
+    /// for the shared design) — every variant here names exactly the input
+    /// declaration, never a more specific token inside it.
+    pub fn location_subject(&self) -> Option<(&str, Option<&str>)> {
+        match self {
+            Self::UndeclaredInput { name }
+            | Self::MissingInput { name, .. }
+            | Self::TypeMismatch { name, .. }
+            | Self::InvalidValue { name, .. } => Some((name, None)),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Decoder and Shard Helpers
 // ---------------------------------------------------------------------------
+
+/// Whether `value`, or anything nested within it, is a list (ADR-0037).
+fn value_has_list(value: &InputValue) -> bool {
+    match value {
+        InputValue::List(_) => true,
+        InputValue::Sum { args, .. } => args.iter().any(value_has_list),
+        InputValue::Record { fields, .. } => fields.values().any(value_has_list),
+        InputValue::Int(_) | InputValue::Bool(_) | InputValue::Str(_) => false,
+    }
+}
+
+/// Whether a list appears anywhere *other than* at `value`'s own top level:
+/// inside a sum's `args`, a record's `fields`, or a list's own elements
+/// (ADR-0037 §Scope defers nested lists, including a list of lists).
+fn value_has_nested_list(value: &InputValue) -> bool {
+    match value {
+        InputValue::List(items) => items.iter().any(value_has_list),
+        InputValue::Sum { args, .. } => args.iter().any(value_has_list),
+        InputValue::Record { fields, .. } => fields.values().any(value_has_list),
+        InputValue::Int(_) | InputValue::Bool(_) | InputValue::Str(_) => false,
+    }
+}
 
 /// Decode a single input artifact shard from pre-bounded in-memory bytes (ADR-0031 ⟨D-SCHEMA⟩, ⟨D-BOUNDS⟩).
 pub fn decode_input_shard(
@@ -1247,7 +1373,10 @@ impl<'a> StrictJsonParser<'a> {
             match key.as_str() {
                 "schema" => {
                     let schema_val = self.parse_string(64)?;
-                    if schema_val != INPUT_SCHEMA_V1 && schema_val != INPUT_SCHEMA_V2 {
+                    if schema_val != INPUT_SCHEMA_V1
+                        && schema_val != INPUT_SCHEMA_V2
+                        && schema_val != INPUT_SCHEMA_V3
+                    {
                         return Err(InputDecodeError::InvalidSchema {
                             expected: INPUT_SCHEMA_V1,
                             found: schema_val,
@@ -1303,6 +1432,25 @@ impl<'a> StrictJsonParser<'a> {
             return Err(InputDecodeError::InvalidType {
                 expected: "scalar tagged value for brix.input@1",
                 found: "composite value".to_string(),
+                offset: 0,
+            });
+        }
+        if (schema == INPUT_SCHEMA_V1 || schema == INPUT_SCHEMA_V2)
+            && values.values().any(value_has_list)
+        {
+            return Err(InputDecodeError::InvalidType {
+                expected: "non-list tagged value for brix.input@1/@2",
+                found: "list value".to_string(),
+                offset: 0,
+            });
+        }
+        // Lists are admitted only as a top-level `@3` value (ADR-0037
+        // §Scope): a list nested inside a sum's `args` or a record's
+        // `fields` is refused even under `@3`.
+        if schema == INPUT_SCHEMA_V3 && values.values().any(value_has_nested_list) {
+            return Err(InputDecodeError::InvalidType {
+                expected: "list only at the top level of a brix.input@3 value",
+                found: "nested list value".to_string(),
                 offset: 0,
             });
         }
@@ -1403,6 +1551,7 @@ impl<'a> StrictJsonParser<'a> {
         let mut variant: Option<String> = None;
         let mut args: Option<Vec<InputValue>> = None;
         let mut fields: Option<BTreeMap<String, InputValue>> = None;
+        let mut items: Option<Vec<InputValue>> = None;
 
         self.skip_whitespace();
         if self.peek() == Some(b'}') {
@@ -1433,6 +1582,11 @@ impl<'a> StrictJsonParser<'a> {
                 "variant" => variant = Some(self.parse_input_name()?),
                 "args" => args = Some(self.parse_value_array()?),
                 "fields" => fields = Some(self.parse_record_fields()?),
+                // The `items` array reuses the same bounded tagged-value
+                // array parser as `args` — the wire shape ADR-0037 specifies
+                // (`{ "type": "list", "items": [<tagged value>, ...] }`) is
+                // structurally identical to a sum's `args`.
+                "items" => items = Some(self.parse_value_array()?),
                 _ => {
                     return Err(InputDecodeError::UnknownField {
                         field,
@@ -1467,7 +1621,10 @@ impl<'a> StrictJsonParser<'a> {
             "int" | "bool" | "string" => &["type", "value"],
             "sum" => &["type", "nominal", "variant", "args"],
             "record" => &["type", "nominal", "fields"],
-            _ => &["type", "value", "nominal", "variant", "args", "fields"],
+            "list" => &["type", "items"],
+            _ => &[
+                "type", "value", "nominal", "variant", "args", "fields", "items",
+            ],
         };
         if let Some(field) = seen_fields
             .iter()
@@ -1518,8 +1675,11 @@ impl<'a> StrictJsonParser<'a> {
                 nominal: nominal.ok_or(InputDecodeError::MissingField("nominal"))?,
                 fields: fields.ok_or(InputDecodeError::MissingField("fields"))?,
             }),
+            "list" => Ok(InputValue::List(
+                items.ok_or(InputDecodeError::MissingField("items"))?,
+            )),
             other => Err(InputDecodeError::InvalidType {
-                expected: "one of ['int', 'bool', 'string', 'sum', 'record']",
+                expected: "one of ['int', 'bool', 'string', 'sum', 'record', 'list']",
                 found: other.to_string(),
                 offset: type_offset,
             }),

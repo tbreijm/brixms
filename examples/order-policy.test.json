@@ -1,0 +1,27 @@
+{
+  "schema": "brix.test@1",
+  "program": "order-policy.brix",
+  "cases": [
+    {
+      "name": "accepts an export order meeting the unit threshold",
+      "inputs": ["order-policy.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "accept",
+        "value": "Ship"
+      }
+    },
+    {
+      "name": "holds a domestic order below the unit threshold",
+      "inputs": ["tests/order-policy-hold.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "hold",
+        "value": "Hold",
+        "candidates": {
+          "accept": "rejected-guard-false"
+        }
+      }
+    }
+  ]
+}
