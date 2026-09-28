@@ -1,0 +1,51 @@
+{
+  "schema": "brix.test@1",
+  "program": "allocation.brix",
+  "cases": [
+    {
+      "name": "splits evenly across five cars with a healthy share",
+      "inputs": ["allocation.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "balanced",
+        "value": "Balanced",
+        "facts": {
+          "share": "2400",
+          "leftover": "0"
+        }
+      }
+    },
+    {
+      "name": "flags an insufficient per-car share when it divides evenly but is too small",
+      "inputs": ["tests/allocation-insufficient.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "insufficient",
+        "value": "Insufficient",
+        "candidates": {
+          "balanced": "rejected-guard-false"
+        }
+      }
+    },
+    {
+      "name": "flags an uneven split when the remainder is nonzero",
+      "inputs": ["tests/allocation-uneven.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "uneven",
+        "value": "Uneven",
+        "facts": {
+          "leftover": "2"
+        }
+      }
+    },
+    {
+      "name": "division by zero car count yields unknown",
+      "inputs": ["tests/allocation-div-zero.json"],
+      "expect": {
+        "status": "unknown",
+        "unknown_code": "expression-evaluation-fault"
+      }
+    }
+  ]
+}

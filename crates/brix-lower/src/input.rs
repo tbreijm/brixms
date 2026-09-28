@@ -320,6 +320,25 @@ impl InputSnapshot {
         }
     }
 
+    /// Construct a snapshot directly from an already-validated set of values,
+    /// bypassing shard decoding.
+    ///
+    /// For a caller (such as `brix-kb`, ADR-0041) that maintains its own
+    /// on-disk snapshot as canonical values rather than re-decoding a shard
+    /// file for every edit — e.g. building a corrected snapshot by upserting
+    /// or removing named values from one already loaded. `total_bytes` and
+    /// `shard_count` become `0`: they describe the *decoded artifact* a
+    /// snapshot came from (diagnostics only), never its canonical identity —
+    /// [`input_snapshot_preimage`] reads only `values` — so a programmatically
+    /// constructed snapshot has no artifact history to report.
+    pub fn from_values(values: BTreeMap<String, InputValue>) -> Self {
+        Self {
+            values,
+            total_bytes: 0,
+            shard_count: 0,
+        }
+    }
+
     /// The sorted values map.
     pub fn values(&self) -> &BTreeMap<String, InputValue> {
         &self.values
@@ -741,6 +760,21 @@ impl fmt::Display for InputValidationError {
 }
 
 impl std::error::Error for InputValidationError {}
+
+impl InputValidationError {
+    /// The declared `input` item this error is about, as an item-name subject
+    /// (see [`crate::finite_decision::FiniteDecisionLowerError::location_subject`]
+    /// for the shared design) — every variant here names exactly the input
+    /// declaration, never a more specific token inside it.
+    pub fn location_subject(&self) -> Option<(&str, Option<&str>)> {
+        match self {
+            Self::UndeclaredInput { name }
+            | Self::MissingInput { name, .. }
+            | Self::TypeMismatch { name, .. }
+            | Self::InvalidValue { name, .. } => Some((name, None)),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Decoder and Shard Helpers

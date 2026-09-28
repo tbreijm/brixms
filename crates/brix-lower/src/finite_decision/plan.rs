@@ -479,6 +479,47 @@ impl fmt::Display for FiniteDecisionLowerError {
 
 impl std::error::Error for FiniteDecisionLowerError {}
 
+impl FiniteDecisionLowerError {
+    /// What this error is about, as `(item name, specific identifier)` — a
+    /// subject a [`brix_syntax::SourceMap`] built alongside the AST can
+    /// resolve to a line/column without the AST itself carrying spans.
+    ///
+    /// The item name identifies which top-level declaration to look up; the
+    /// identifier, when present, narrows the location to a specific token
+    /// inside it (e.g. proposal `a`'s dependency `y`). `None` overall means
+    /// this error is not naturally about one declaration (a module-wide
+    /// admissibility or resource-limit failure).
+    pub fn location_subject(&self) -> Option<(&str, Option<&str>)> {
+        match self {
+            Self::EmptyCommit(name) => Some((name, None)),
+            Self::DuplicateProposalName(name) => Some((name, None)),
+            Self::DuplicateInputName(name) => Some((name, None)),
+            Self::DuplicateFunctionName(name) => Some((name, None)),
+            Self::DuplicateItemName(name) => Some((name, None)),
+            Self::UnknownCandidateInCommit { commit, candidate } => Some((commit, Some(candidate))),
+            Self::DuplicateCandidateInCommit { commit, candidate } => {
+                Some((commit, Some(candidate)))
+            }
+            Self::UndeclaredDependency { proposal, dep } => Some((proposal, Some(dep))),
+            Self::ForwardOrSelfDependency { proposal, dep } => Some((proposal, Some(dep))),
+            Self::UndeclaredFactRead { proposal, fact } => Some((proposal, Some(fact))),
+            Self::DuplicateFunctionParameter { func, param } => Some((func, Some(param))),
+            Self::TooManyFunctionParams { func, .. } => Some((func, None)),
+            Self::FunctionCycle { func, .. } => Some((func, None)),
+            Self::FunctionArityMismatch { func, .. } => Some((func, None)),
+            Self::RuleFactReadInFunction { func, fact } => Some((func, Some(fact))),
+            Self::InputReadInFunction { func, input } => Some((func, Some(input))),
+            Self::GlobalLetReadInFunction { func, binding } => Some((func, Some(binding))),
+            Self::UnknownContractType { name } => Some((name, None)),
+            Self::InvalidSchema { name, .. } => Some((name, None)),
+            Self::UnsupportedInputType { name, .. } => Some((name, None)),
+            Self::FunctionConstructorCollision { func, .. } => Some((func, None)),
+            Self::ReservedOperationName { name, .. } => Some((name, None)),
+            _ => None,
+        }
+    }
+}
+
 /// Helper function checking that expression nesting depth and node limits are respected.
 fn check_expr_bounds(
     e: &ast::Expr,
@@ -1723,11 +1764,22 @@ pub fn lower_finite_decision_plan(
 
                 let mut visible_bindings = let_names.clone();
                 visible_bindings.extend(input_names.iter().cloned());
+                // A `show` runs conceptually *after* the full deliberation
+                // cycle (see `FiniteDecisionRuntime::evaluate_shows_exprs`),
+                // so it can additionally name the commit's own declaration —
+                // `show shipping` for `commit shipping from (...)` reads the
+                // decided candidate's value, exactly like an ordinary rule
+                // fact reference (`RuleFact`). It resolves once evaluation
+                // binds a fact under the commit's name; a quiescent run
+                // (no candidate selected) leaves that name unbound, which
+                // faults the show rather than the committed decision.
+                let mut show_readable = rule_names.clone();
+                show_readable.insert(commit_decl.name.clone());
                 let show = lower_expr_v2(
                     expr,
                     &visible_bindings,
                     &BTreeSet::new(),
-                    &rule_names,
+                    &show_readable,
                     &nullary,
                     &variants_of,
                     &function_arities,

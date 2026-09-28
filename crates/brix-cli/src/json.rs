@@ -31,6 +31,22 @@ pub struct CliResultJson {
     pub decision: Option<DecisionJson>,
     pub artifacts: Vec<ArtifactJson>,
     pub diagnostics: Vec<String>,
+    /// Structured `why`/`whynot` derivation explanation (additive; ADR-0030).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<ExplanationJson>,
+    /// Source locations for entries in `diagnostics`, additive under schema
+    /// `brix.cli.result@1` (parallel to `input_snapshot`/`inputs`). Not
+    /// necessarily one-to-one with `diagnostics`: only diagnostics a
+    /// [`brix_syntax::SourceMap`] or a parse error could resolve to a
+    /// position contribute an entry here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locations: Option<Vec<LocationJson>>,
+    /// Evaluated `show` results for `brix run`, additive under schema
+    /// `brix.cli.result@1`. `None` when the program declares no `show`
+    /// expressions (or for commands other than `run`); an empty vec is never
+    /// produced instead of `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shows: Option<Vec<TaggedValue>>,
 }
 
 impl CliResultJson {
@@ -63,6 +79,9 @@ impl CliResultJson {
             decision,
             artifacts,
             diagnostics,
+            explanation: None,
+            locations: None,
+            shows: None,
         }
     }
 
@@ -90,6 +109,9 @@ impl CliResultJson {
             decision: None,
             artifacts: Vec::new(),
             diagnostics,
+            explanation: None,
+            locations: None,
+            shows: None,
         }
     }
 
@@ -101,6 +123,24 @@ impl CliResultJson {
     ) -> Self {
         self.input_snapshot = input_snapshot;
         self.inputs = inputs;
+        self
+    }
+
+    /// Explicitly attach a structured `why`/`whynot` explanation.
+    pub fn with_explanation(mut self, explanation: Option<ExplanationJson>) -> Self {
+        self.explanation = explanation;
+        self
+    }
+
+    /// Explicitly attach source locations for `diagnostics` entries.
+    pub fn with_locations(mut self, locations: Option<Vec<LocationJson>>) -> Self {
+        self.locations = locations;
+        self
+    }
+
+    /// Explicitly attach evaluated `show` results.
+    pub fn with_shows(mut self, shows: Option<Vec<TaggedValue>>) -> Self {
+        self.shows = shows;
         self
     }
 
@@ -132,6 +172,25 @@ impl InputJson {
             value,
             ordinal: ordinal.to_string(),
             grade: grade.into(),
+        }
+    }
+}
+
+/// A source location (1-based line/column) for a diagnostic, additive under
+/// schema `brix.cli.result@1`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LocationJson {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl LocationJson {
+    pub fn new(file: impl Into<String>, line: usize, column: usize) -> Self {
+        Self {
+            file: file.into(),
+            line,
+            column,
         }
     }
 }
@@ -383,6 +442,76 @@ pub fn to_tagged_value(v: &L3ValueV2) -> TaggedValue {
             items: items.iter().map(to_tagged_value).collect(),
         },
     }
+}
+
+/// A structured `why`/`whynot` derivation explanation for one candidate
+/// (ADR-0030). Conversion from the library's `brix_lower::finite_decision`
+/// explanation types lives in `crate::commands::explain_render`; this module
+/// only defines the wire shape.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ExplanationJson {
+    pub candidate: String,
+    pub guard: TraceNodeJson,
+    pub value: TraceNodeJson,
+    pub facts: Vec<FactExplainJson>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<SelectionJson>,
+    pub truncated: bool,
+}
+
+/// One node of a bounded evaluation trace, mirroring
+/// `brix_lower::finite_decision::TraceNode`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TraceNodeJson {
+    pub source: String,
+    pub outcome: TraceOutcomeJson,
+    pub children: Vec<TraceNodeJson>,
+}
+
+/// The outcome recorded at one [`TraceNodeJson`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TraceOutcomeJson {
+    Value { value: TaggedValue },
+    NotEvaluated,
+    Fault { detail: String },
+    Truncated,
+}
+
+/// Where a fact transitively read by a guard or value expression comes from.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FactOriginJson {
+    Rule { deps: Vec<String> },
+    Let,
+    Input,
+}
+
+/// One rule, `let`, or input transitively read while evaluating a guard or
+/// value expression.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FactExplainJson {
+    pub name: String,
+    pub origin: FactOriginJson,
+    pub value: TaggedValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grade: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<TraceNodeJson>,
+}
+
+/// The calendar comparison between a candidate and the deliberation's actual
+/// winner (reusing the runtime's own `Key` ordering — never restated).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SelectionJson {
+    pub candidate: String,
+    pub priority: String,
+    pub is_winner: bool,
+    pub winner: String,
+    pub winner_priority: String,
+    pub decided_by_tiebreak: bool,
+    pub candidate_tiebreak: String,
+    pub winner_tiebreak: String,
 }
 
 #[cfg(test)]

@@ -1,6 +1,9 @@
 pub mod audit;
 pub mod check;
+pub mod explain_render;
+pub mod kb;
 pub mod run;
+pub mod test;
 pub mod verify;
 pub mod why;
 
@@ -231,6 +234,89 @@ pub fn escape_diagnostic_human(s: &str) -> String {
         }
     }
     out
+}
+
+/// Render a rustc-style single-line source snippet with a caret under
+/// `(line, column)` (both 1-based), meant to be appended — with a leading
+/// newline — after a diagnostic's existing first line:
+///
+/// ```text
+///   --> examples/bad.brix:3:11
+///    |
+///  3 | propose a(y) priority 1 when x > 0 = A
+///    |           ^
+/// ```
+///
+/// The source line is untrusted: every character is escaped through
+/// [`escape_diagnostic_human`] before display, and the caret offset is
+/// recomputed against the *escaped* text so it still lands under the
+/// intended character even when escaping changes the visible width (e.g. a
+/// tab becomes the two characters `\t`). A very long line is windowed around
+/// the target column — with an ellipsis marking a cut side — so one
+/// pathological line cannot dominate terminal output. `column` is a
+/// character index (not a byte or terminal-cell index), matching how the
+/// lexer counts columns; a wide character still occupies one column here.
+///
+/// Returns `None` when `line` is out of range for `source` (defensive: a
+/// location should always resolve to a real line, but rendering never panics
+/// on a mismatch instead).
+pub fn render_location_snippet(
+    file_display: &str,
+    source: &str,
+    line: usize,
+    column: usize,
+) -> Option<String> {
+    const MAX_WINDOW_CHARS: usize = 200;
+    const CONTEXT_BEFORE: usize = 40;
+
+    if line == 0 {
+        return None;
+    }
+    let raw_line: Vec<char> = source.lines().nth(line - 1)?.chars().collect();
+    let col_idx = column.saturating_sub(1).min(raw_line.len());
+
+    let (win_start, win_col_idx, trunc_left) = if raw_line.len() > MAX_WINDOW_CHARS {
+        let start = col_idx.saturating_sub(CONTEXT_BEFORE);
+        (start, col_idx - start, start > 0)
+    } else {
+        (0, col_idx, false)
+    };
+    let win_end = raw_line.len().min(win_start + MAX_WINDOW_CHARS);
+    let trunc_right = win_end < raw_line.len();
+
+    let mut text = String::new();
+    let mut caret_offset = 0usize;
+    for (i, c) in raw_line[win_start..win_end].iter().enumerate() {
+        let piece = escape_diagnostic_human(&c.to_string());
+        if i < win_col_idx {
+            caret_offset += piece.chars().count();
+        }
+        text.push_str(&piece);
+    }
+    let left_mark = if trunc_left { "\u{2026} " } else { "" };
+    let right_mark = if trunc_right { " \u{2026}" } else { "" };
+    caret_offset += left_mark.chars().count();
+
+    let num_str = line.to_string();
+    let blank = " ".repeat(num_str.chars().count());
+    let caret_spaces = " ".repeat(1 + caret_offset);
+
+    let mut out = String::new();
+    out.push(' ');
+    out.push_str(&blank);
+    out.push_str(&format!("--> {file_display}:{line}:{column}\n"));
+    out.push(' ');
+    out.push_str(&blank);
+    out.push_str(" |\n");
+    out.push(' ');
+    out.push_str(&num_str);
+    out.push_str(&format!(" | {left_mark}{text}{right_mark}\n"));
+    out.push(' ');
+    out.push_str(&blank);
+    out.push_str(" |");
+    out.push_str(&caret_spaces);
+    out.push('^');
+    Some(out)
 }
 
 /// Escape a string scalar safely for human rendering.

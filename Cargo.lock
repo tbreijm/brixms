@@ -65,6 +65,7 @@ version = "0.1.0-alpha.3"
 dependencies = [
  "brix-canon",
  "brix-elaborate",
+ "brix-kb",
  "brix-kernel",
  "brix-lower",
  "brix-semantic",
@@ -86,6 +87,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "brix-kb"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "brix-canon",
+ "brix-lower",
+ "brix-semantic",
+ "brix-syntax",
+ "serde_json",
+]
+
+[[package]]
 name = "brix-kernel"
 version = "0.1.0-alpha.3"
 dependencies = [
@@ -103,6 +115,7 @@ dependencies = [
  "brix-semantic",
  "brix-syntax",
  "libc",
+ "proptest",
  "soc-core",
  "soc-regimes",
 ]
@@ -118,6 +131,9 @@ dependencies = [
 [[package]]
 name = "brix-syntax"
 version = "0.1.0-alpha.3"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "cc"

@@ -8,7 +8,7 @@ rather than a recovered rev. 2.
 
 **Primary sources.** `docs/SOC_core_foundations_revised.tex` (the formal skeleton);
 `spec/adr/ADR-0002_SOC_Constitution.md` and the ADR series through ADR-0019 (the ratified
-design); `spec/BrixMS_v9_0.md` (Part II design contract); the v1 EPA thesis
+design); `spec/archive/BrixMS_v9_0.md` (Part II design contract, archived, pre-SOC); the v1 EPA thesis
 (`BrixMS_EPA_Thesis_Reijm.pdf`, TU Delft 2019 — Brix formalism §5.3, Cartesian
 coarse-phase detection §6.3, admitted intractability §8.3, which is the paper's own P3
 evidence); the v2 TypeScript hypergraph implementation.

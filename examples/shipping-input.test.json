@@ -1,0 +1,51 @@
+{
+  "schema": "brix.test@1",
+  "program": "shipping-input.brix",
+  "cases": [
+    {
+      "name": "ships when stock covers the threshold",
+      "inputs": ["shipping-input.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "ship",
+        "value": "Ship",
+        "candidates": {
+          "expedite": "rejected-guard-false",
+          "hold": "admitted-not-selected"
+        },
+        "facts": {
+          "threshold": "10"
+        }
+      }
+    },
+    {
+      "name": "holds when stock is below the threshold",
+      "inputs": ["tests/shipping-input-hold.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "hold",
+        "value": "Hold",
+        "candidates": {
+          "expedite": "rejected-guard-false",
+          "ship": "rejected-guard-false"
+        },
+        "facts": {
+          "can_ship": "false"
+        }
+      }
+    },
+    {
+      "name": "expedites when stock is very high",
+      "inputs": ["tests/shipping-input-expedite.json"],
+      "expect": {
+        "status": "selected",
+        "decision": "expedite",
+        "value": "Expedite",
+        "candidates": {
+          "ship": "admitted-not-selected",
+          "hold": "admitted-not-selected"
+        }
+      }
+    }
+  ]
+}
