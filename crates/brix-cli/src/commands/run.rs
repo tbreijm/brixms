@@ -274,7 +274,7 @@ pub fn execute_run(
             shows: shows_json,
             commits: commits_json,
         };
-        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+        crate::json::emit_result_json(&res);
     } else {
         print!("{human}");
     }

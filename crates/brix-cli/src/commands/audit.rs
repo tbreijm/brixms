@@ -33,7 +33,7 @@ pub fn execute_audit(
         );
         if json {
             let res = CliResultJson::failure("audit", None, None, None, "io-error", vec![msg]);
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            crate::json::emit_result_json(&res);
         } else {
             eprintln!("brix audit: refused: {msg}");
         }
@@ -131,7 +131,7 @@ pub fn execute_audit(
                 vec![format!("{code}: {detail}")],
             )
             .with_inputs(input_snapshot, inputs_json);
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            crate::json::emit_result_json(&res);
         } else {
             let human =
                 format_finite_decision_human(&run, Some(&context_hex), input_snapshot.as_deref());
@@ -171,7 +171,7 @@ pub fn execute_audit(
                 audit_lines,
             )
             .with_inputs(input_snapshot, inputs_json);
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            crate::json::emit_result_json(&res);
         } else {
             let mut human =
                 format_finite_decision_human(&run, Some(&context_hex), input_snapshot.as_deref());
@@ -199,7 +199,7 @@ pub fn execute_audit(
                     vec![msg],
                 )
                 .with_inputs(input_snapshot, inputs_json);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                crate::json::emit_result_json(&res);
             } else {
                 eprintln!("brix audit: {msg}");
             }
@@ -221,7 +221,7 @@ pub fn execute_audit(
                     vec![msg],
                 )
                 .with_inputs(input_snapshot, inputs_json);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                crate::json::emit_result_json(&res);
             } else {
                 eprintln!("brix audit: {msg}");
             }
@@ -235,7 +235,7 @@ pub fn execute_audit(
         let msg = format!("parent directory '{}' does not exist", parent.display());
         if json {
             let res = CliResultJson::failure("audit", None, None, None, "io-error", vec![msg]);
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            crate::json::emit_result_json(&res);
         } else {
             eprintln!("brix audit: IO error: {msg}");
         }
@@ -282,7 +282,7 @@ pub fn execute_audit(
                 if json {
                     let res =
                         CliResultJson::failure("audit", None, None, None, "io-error", vec![msg]);
-                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                    crate::json::emit_result_json(&res);
                 } else {
                     eprintln!("brix audit: IO error: {msg}");
                 }
@@ -297,7 +297,7 @@ pub fn execute_audit(
             let msg = "failed to create unique temporary file after 1000 attempts".to_string();
             if json {
                 let res = CliResultJson::failure("audit", None, None, None, "io-error", vec![msg]);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                crate::json::emit_result_json(&res);
             } else {
                 eprintln!("brix audit: IO error: {msg}");
             }
@@ -338,7 +338,7 @@ pub fn execute_audit(
         );
         if json {
             let res = CliResultJson::failure("audit", None, None, None, "io-error", vec![msg]);
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            crate::json::emit_result_json(&res);
         } else {
             eprintln!("brix audit: IO error: {msg}");
         }
@@ -397,7 +397,7 @@ pub fn execute_audit(
             shows: None,
             commits: None,
         };
-        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+        crate::json::emit_result_json(&res);
     } else {
         let mut human =
             format_finite_decision_human(&run, Some(&context_hex), input_snapshot.as_deref());

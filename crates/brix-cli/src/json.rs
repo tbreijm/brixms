@@ -1,10 +1,70 @@
 //! Canonical JSON output format for the Brix Alpha CLI (`brix.cli.result@1`).
 
+use std::cell::RefCell;
+
 use brix_lower::l3_v2::L3ValueV2;
 use serde::{Deserialize, Serialize};
 
 /// The canonical top-level CLI JSON result schema.
 pub const BRIX_CLI_SCHEMA: &str = "brix.cli.result@1";
+
+thread_local! {
+    /// When `Some`, [`emit_result_json`] stores its payload here (as a
+    /// [`serde_json::Value`]) instead of printing it to stdout. Used by
+    /// `brix serve --stdio` (`crate::serve`) to obtain a command's exact
+    /// JSON result object without any change to the commands themselves:
+    /// every `--json`-enabled code path already calls `emit_result_json`
+    /// exactly once, on every branch, with the value it would otherwise
+    /// print, so activating capture around a normal (`json: true`) command
+    /// invocation recovers that value as data instead of stdout text. Not
+    /// every command's result shares `CliResultJson`'s `brix.cli.result@1`
+    /// shape (`brix test` uses `brix.test.result@1`, `brix kb` uses
+    /// `brix.cli.kb-result@1`), so the captured form is the untyped `Value`
+    /// every one of them serializes to, not `CliResultJson` itself.
+    ///
+    /// Processing in `brix serve --stdio` is strictly sequential (one
+    /// request at a time on a single thread), so a thread-local is
+    /// sufficient here and requires no synchronization or `unsafe` code.
+    static CAPTURE: RefCell<Option<Option<serde_json::Value>>> = const { RefCell::new(None) };
+}
+
+/// Print `payload` as pretty JSON on stdout — the single call every
+/// `--json`-enabled command path uses to emit its final JSON result object.
+/// When a capture is active (see [`with_captured_result`]), the payload is
+/// stored instead of printed, so nothing but protocol responses reaches
+/// stdout under `brix serve --stdio`.
+pub fn emit_result_json<T: Serialize>(payload: &T) {
+    let captured = CAPTURE.with(|c| {
+        let mut slot = c.borrow_mut();
+        if let Some(target) = slot.as_mut() {
+            *target = Some(serde_json::to_value(payload).unwrap());
+            true
+        } else {
+            false
+        }
+    });
+    if !captured {
+        println!("{}", serde_json::to_string_pretty(payload).unwrap());
+    }
+}
+
+/// Run `f` (a full command invocation made with `json: true`) with stdout
+/// JSON capture active, and return the exact JSON value it would otherwise
+/// have printed, along with `f`'s own return value (the exit code).
+///
+/// Panics if `f` completes without ever calling [`emit_result_json`] — every
+/// `json: true` command path is required to call it exactly once on every
+/// branch, so this would indicate a real bug in the command rather than a
+/// condition callers should recover from.
+pub fn with_captured_result<T>(f: impl FnOnce() -> T) -> (serde_json::Value, T) {
+    CAPTURE.with(|c| *c.borrow_mut() = Some(None));
+    let ret = f();
+    let captured = CAPTURE.with(|c| c.borrow_mut().take());
+    match captured {
+        Some(Some(payload)) => (payload, ret),
+        _ => panic!("brix serve: command invocation did not produce a JSON result"),
+    }
+}
 
 /// Top-level result object for all JSON-enabled CLI invocations.
 ///

@@ -88,7 +88,7 @@ pub fn execute_check(
                     shows: None,
                     commits: None,
                 };
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                crate::json::emit_result_json(&res);
             } else {
                 println!("status: checked-input-contract");
                 println!("program: {program_hex}");
@@ -161,7 +161,7 @@ pub fn execute_check(
                     vec![diag],
                 )
                 .with_inputs(input_snapshot, inputs_json);
-                println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                crate::json::emit_result_json(&res);
             } else {
                 eprintln!("brix check: preflight returned Unknown: {diag}");
             }
@@ -225,7 +225,7 @@ pub fn execute_check(
                 shows: None,
                 commits: commits_json,
             };
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            crate::json::emit_result_json(&res);
         } else {
             let human =
                 format_finite_decision_human(&run, Some(&context_hex), input_snapshot.as_deref());
@@ -239,7 +239,7 @@ pub fn execute_check(
         let msg = "--input is only supported for finite-decision modules".to_string();
         if json {
             let res = CliResultJson::failure("check", None, None, None, "usage-error", vec![msg]);
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            crate::json::emit_result_json(&res);
         } else {
             eprintln!("brix check: {msg}");
         }
@@ -309,7 +309,7 @@ pub fn execute_check(
             shows: None,
             commits: None,
         };
-        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+        crate::json::emit_result_json(&res);
     } else {
         for line in human_lines {
             println!("{line}");

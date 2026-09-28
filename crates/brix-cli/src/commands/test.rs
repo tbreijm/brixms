@@ -70,7 +70,7 @@ pub fn execute_test(files: &[PathBuf], json: bool) -> u8 {
                         file: path.display().to_string(),
                         error: msg,
                     };
-                    println!("{}", serde_json::to_string_pretty(&err_obj).unwrap());
+                    crate::json::emit_result_json(&err_obj);
                 } else {
                     eprintln!("brix test: {}", escape_diagnostic_human(&full));
                 }
@@ -537,7 +537,7 @@ fn print_json_results(
         failed: total_failed,
         files,
     };
-    println!("{}", serde_json::to_string_pretty(&res).unwrap());
+    crate::json::emit_result_json(&res);
 }
 
 fn case_outcome_to_json(outcome: &CaseOutcome) -> TestCaseResultJson {

@@ -103,7 +103,7 @@ fn print_error(cmd: &str, err: &KbError, json_out: bool) -> u8 {
             "status": err.status,
             "diagnostics": [err.diagnostic()],
         });
-        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+        crate::json::emit_result_json(&res);
     } else {
         eprintln!("brix {cmd}: {}: {}", err.status, err.message);
     }
@@ -261,7 +261,7 @@ fn run_write_op(
             "revision": record_json(&outcome.record),
             "result": report.json,
         });
-        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+        crate::json::emit_result_json(&res);
     } else {
         println!(
             "knowledge base: {}\nrevision: {}\nparent: {}\nchange: {}\nprogram: {}\nsnapshot: {}",
@@ -310,7 +310,7 @@ fn execute_log(dir: &std::path::Path, package_paths: &[PathBuf], json_out: bool)
             "dir": dir.display().to_string(),
             "revisions": rows,
         });
-        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+        crate::json::emit_result_json(&res);
     } else {
         for o in &entries {
             let report = decision_report(&o.record, &o.replay);
@@ -349,7 +349,7 @@ fn execute_show(
             "revision": record_json(&outcome.record),
             "result": report.json,
         });
-        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+        crate::json::emit_result_json(&res);
     } else {
         println!(
             "revision: {}\nparent: {}\nchange: {}\nprogram: {}\nsnapshot: {}",
@@ -444,7 +444,7 @@ fn execute_diff(
             "decision_a": report.decision_a.as_ref().map(|(c, v)| json!({"candidate": c, "value": crate::commands::fmt_value_human(v)})),
             "decision_b": report.decision_b.as_ref().map(|(c, v)| json!({"candidate": c, "value": crate::commands::fmt_value_human(v)})),
         });
-        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+        crate::json::emit_result_json(&res);
     } else {
         println!(
             "diff: revision {} -> revision {}",
@@ -560,7 +560,7 @@ fn execute_audit(
                 "count": outcome.receipts_count.to_string(),
             }],
         });
-        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+        crate::json::emit_result_json(&res);
     } else {
         println!(
             "revision: {}\nstatus: audited\nbundle: {}\nbundle_id: {}\nfinal_chain: {}\nreceipts: {}",
@@ -588,7 +588,7 @@ fn execute_verify(dir: &std::path::Path, package_paths: &[PathBuf], json_out: bo
             "status": "verified",
             "revisions_checked": report.revisions_checked,
         });
-        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+        crate::json::emit_result_json(&res);
     } else {
         println!(
             "status: verified\nrevisions_checked: {}",

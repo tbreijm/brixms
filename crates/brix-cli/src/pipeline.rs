@@ -43,7 +43,7 @@ use crate::packages::{make_package_loader, read_source_bounded};
 /// every pipeline-stage failure (and nothing else) is rendered.
 pub fn emit_failure(json: bool, payload: CliResultJson, human_line: &str) {
     if json {
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        crate::json::emit_result_json(&payload);
     } else {
         eprintln!("{human_line}");
     }

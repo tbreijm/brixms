@@ -123,7 +123,7 @@ pub fn execute_why_or_whynot(
                 vec![diag],
             )
             .with_inputs(input_snapshot, inputs_json);
-            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            crate::json::emit_result_json(&res);
         } else {
             eprintln!("brix {cmd_name}: deliberation resulted in Unknown: {diag}");
         }
@@ -163,7 +163,7 @@ pub fn execute_why_or_whynot(
                         vec![msg],
                     )
                     .with_inputs(input_snapshot, inputs_json);
-                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                    crate::json::emit_result_json(&res);
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
                 }
@@ -181,7 +181,7 @@ pub fn execute_why_or_whynot(
                         vec![msg],
                     )
                     .with_inputs(input_snapshot, inputs_json);
-                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                    crate::json::emit_result_json(&res);
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
                 }
@@ -202,7 +202,7 @@ pub fn execute_why_or_whynot(
                         vec![msg],
                     )
                     .with_inputs(input_snapshot, inputs_json);
-                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                    crate::json::emit_result_json(&res);
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
                 }
@@ -242,7 +242,7 @@ pub fn execute_why_or_whynot(
                         vec![msg],
                     )
                     .with_inputs(input_snapshot, inputs_json);
-                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                    crate::json::emit_result_json(&res);
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
                 }
@@ -260,7 +260,7 @@ pub fn execute_why_or_whynot(
                         vec![msg],
                     )
                     .with_inputs(input_snapshot, inputs_json);
-                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                    crate::json::emit_result_json(&res);
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
                 }
@@ -281,7 +281,7 @@ pub fn execute_why_or_whynot(
                         vec![msg],
                     )
                     .with_inputs(input_snapshot, inputs_json);
-                    println!("{}", serde_json::to_string_pretty(&res).unwrap());
+                    crate::json::emit_result_json(&res);
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
                 }
@@ -336,7 +336,7 @@ pub fn execute_why_or_whynot(
             shows: None,
             commits: None,
         };
-        println!("{}", serde_json::to_string_pretty(&res).unwrap());
+        crate::json::emit_result_json(&res);
     } else {
         println!("{explanation_text}");
         let human =
