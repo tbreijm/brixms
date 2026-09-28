@@ -37,6 +37,8 @@ pub enum TokenKind {
     Where,
     Yield,
     Otherwise,
+    /// `decide NAME for BINDER in LIST_EXPR { propose ... }` (ADR-0043).
+    Decide,
 
     // Identifiers & Literals
     Ident(String),
@@ -271,6 +273,7 @@ pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token
                     "where" => TokenKind::Where,
                     "yield" => TokenKind::Yield,
                     "otherwise" => TokenKind::Otherwise,
+                    "decide" => TokenKind::Decide,
                     // `Derived`/`Audited`/`Proven` are deliberately NOT
                     // keywords. They are grade names only in grade position
                     // (after `@`), which the parser recognizes; everywhere

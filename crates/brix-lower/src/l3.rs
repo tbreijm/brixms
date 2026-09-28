@@ -214,6 +214,8 @@ pub enum L3LowerError {
     CommitItemNotAllowed(String),
     /// A top-level `input` declaration is present (ADR-0031).
     InputItemNotAllowed(String),
+    /// A top-level `decide` declaration is present (ADR-0043).
+    DecideItemNotAllowed(String),
     /// A `rule` was declared with one or more parameters (ADR-0012 §1: "every
     /// selected rule has zero parameters").
     ParameterizedRule(String),
@@ -417,6 +419,7 @@ pub fn lower_l3_plan(
             }
             ast::Item::Commit(c) => return Err(L3LowerError::CommitItemNotAllowed(c.name.clone())),
             ast::Item::Input(i) => return Err(L3LowerError::InputItemNotAllowed(i.name.clone())),
+            ast::Item::Decide(d) => return Err(L3LowerError::DecideItemNotAllowed(d.name.clone())),
             ast::Item::Config(_) | ast::Item::Let(_) | ast::Item::Rule(_) => {}
         }
     }

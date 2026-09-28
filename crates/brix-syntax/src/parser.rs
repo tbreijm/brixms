@@ -330,6 +330,10 @@ impl Parser {
                 self.advance();
                 self.parse_input_decl().map(Item::Input)
             }
+            TokenKind::Decide => {
+                self.advance();
+                self.parse_decide_decl().map(Item::Decide)
+            }
             other => Err(self.error(format!("Unexpected token {:?} at top-level item", other))),
         }
     }
@@ -606,6 +610,28 @@ impl Parser {
             ));
         }
         Ok(CommitDecl { name, candidates })
+    }
+
+    /// `decide NAME for BINDER in LIST_EXPR { propose ... }` (ADR-0043).
+    fn parse_decide_decl(&mut self) -> Result<DecideDecl, ParseError> {
+        let name = self.expect_ident("decide declaration name")?.0;
+        self.consume(TokenKind::For, "decide declaration 'for'")?;
+        let binder = self.expect_ident("decide declaration binder")?.0;
+        self.consume(TokenKind::In, "decide declaration 'in'")?;
+        let list = self.parse_expr()?;
+        self.consume(TokenKind::OpenBrace, "decide block '{'")?;
+        let mut proposals = Vec::new();
+        while !self.check(&TokenKind::CloseBrace) && !self.is_at_end() {
+            self.consume(TokenKind::Propose, "decide block 'propose'")?;
+            proposals.push(self.parse_propose_decl()?);
+        }
+        self.consume(TokenKind::CloseBrace, "decide block '}'")?;
+        Ok(DecideDecl {
+            name,
+            binder,
+            list,
+            proposals,
+        })
     }
 
     fn parse_input_decl(&mut self) -> Result<InputDecl, ParseError> {

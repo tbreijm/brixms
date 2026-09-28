@@ -54,6 +54,23 @@ pub enum Item {
     Commit(CommitDecl),
     /// `input NAME: TYPE` — external input declaration (ADR-0031).
     Input(InputDecl),
+    /// `decide NAME for BINDER in LIST_EXPR { propose ... }` — a per-entity
+    /// commit pool, instantiated once per element of `LIST_EXPR` (ADR-0043).
+    Decide(DecideDecl),
+}
+
+/// `decide NAME for BINDER in LIST_EXPR { propose ... }` (ADR-0043): declares
+/// a commit pool that is instantiated once per element of the list named by
+/// `list`, in list order. Every nested `propose` is scoped to this block —
+/// its guard/value may additionally read `binder`, bound to the current
+/// element — but its *name* is checked for uniqueness program-wide, exactly
+/// like a top-level `propose`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecideDecl {
+    pub name: String,
+    pub binder: String,
+    pub list: Expr,
+    pub proposals: Vec<ProposeDecl>,
 }
 
 /// `input NAME: TYPE` or `input NAME: List<TYPE> max N` (ADR-0037).

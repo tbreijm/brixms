@@ -25,6 +25,17 @@ pub const MAX_FUNCTION_COUNT: usize = 256;
 /// Maximum number of `commit` declarations in a finite-decision module (ADR-0039).
 pub const MAX_COMMIT_COUNT: usize = 64;
 
+/// Maximum number of `decide` declarations in a finite-decision module (ADR-0043).
+pub const MAX_DECIDE_COUNT: usize = 64;
+
+/// Maximum total number of per-entity instances across every `decide` block
+/// in a module, summed over every block's own list length (ADR-0043). Each
+/// block's own list is already bounded by an input's declared `max` (≤256)
+/// or the derived-list cap (`MAX_DERIVED_LIST_LEN` = 4,096); this is an
+/// additional, program-wide ceiling on how much per-entity deliberation work
+/// one run can ask for, independent of how many blocks it is spread across.
+pub const MAX_TOTAL_DECIDE_INSTANCES: usize = 4096;
+
 /// Maximum number of parameters declared by a single function.
 pub const MAX_FUNCTION_PARAMS: usize = 32;
 
@@ -1345,6 +1356,7 @@ pub fn lower_finite_decision_plan(
 
     // Pass 0: check item admissibility.
     let mut commit_items: Vec<&ast::CommitDecl> = Vec::new();
+    let mut decide_items: Vec<&ast::DecideDecl> = Vec::new();
     let mut fn_count = 0;
     for item in &module.items {
         match item {
@@ -1359,6 +1371,9 @@ pub fn lower_finite_decision_plan(
             }
             ast::Item::Commit(c) => {
                 commit_items.push(c);
+            }
+            ast::Item::Decide(d) => {
+                decide_items.push(d);
             }
             ast::Item::Regime(r) => {
                 return Err(FiniteDecisionLowerError::ItemNotAllowed(format!(
