@@ -139,10 +139,10 @@ for what a caller does with a decision that is only half-published.
   arbitrary subset succeeding depending on declaration order.
 - Each instance's own guard/value evaluation is charged to the *existing*
   ADR-0032 evaluator work budget exactly like a top-level proposal's guard/
-  value already is — one fresh `MAX_CALL_STEPS` (10,000) budget per
-  `eval()` call, i.e. per instance per proposal, not a new shared counter.
-  A large instance count is bounded by `MAX_TOTAL_DECIDE_INSTANCES` above,
-  not by trying to fit all of it in one evaluator budget.
+  value already is: one `MAX_CALL_STEPS` budget per `eval()` call, i.e.
+  per instance per proposal. All instances also share the run-wide
+  `MAX_RUN_STEPS` counter (ADR-0042 §Evaluation budgets), so the instance
+  count cannot multiply the per-evaluation bound without limit.
 
 ## Identity
 

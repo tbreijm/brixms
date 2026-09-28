@@ -496,37 +496,38 @@ pub fn produce_finite_decision_audit_input_bundle_with_limits_v1(
     }
 
     if !run.journal.is_empty() {
-        // Every step — from any commit pool (ADR-0039) or any `decide`
-        // block instance (ADR-0043) — originates at the same shared
-        // initial world, so every step's own `src` is checked, not only
-        // the journal's first. `dst` is checked against the set of every
-        // final world this run actually reports owning a step (one per
-        // pool/instance that selected), rather than only the single
-        // top-level-mirrored `run.final_world`: with more than one pool or
-        // instance, the journal's last step need not be the *first* pool's
-        // own final world, which is all `run.final_world` ever promises.
-        let known_final_worlds: std::collections::BTreeSet<_> = run
+        // The journal must be exactly the steps the run reports, in journal
+        // order: each commit pool that selected (ADR-0039, declaration
+        // order), then each `decide` instance that selected (ADR-0043,
+        // block order, then element order). A missing, duplicated, extra,
+        // or reordered step is a mismatch, and every step starts from the
+        // shared initial world.
+        let expected: Vec<_> = run
             .commits
             .iter()
-            .filter_map(|c| c.step.as_ref().map(|_| c.final_world))
+            .filter_map(|c| c.step.as_ref())
             .chain(
                 run.decides
                     .iter()
                     .flat_map(|d| d.instances.iter())
-                    .filter_map(|inst| inst.step.as_ref().map(|_| inst.final_world)),
+                    .filter_map(|inst| inst.step.as_ref()),
             )
             .collect();
-        for step in run.journal.steps() {
-            if step.src != runtime.initial_world {
-                return Err(SourceBundleProducerError::RunMismatch(
-                    "initial world mismatch between runtime and journal".to_string(),
-                ));
-            }
-            if !known_final_worlds.contains(&step.dst) {
-                return Err(SourceBundleProducerError::RunMismatch(
-                    "final world mismatch between journal and run".to_string(),
-                ));
-            }
+        let journal = run.journal.steps();
+        if journal.len() != expected.len()
+            || journal
+                .iter()
+                .zip(&expected)
+                .any(|(step, want)| step != *want)
+        {
+            return Err(SourceBundleProducerError::RunMismatch(
+                "journal steps do not match the run's committed steps".to_string(),
+            ));
+        }
+        if journal.iter().any(|step| step.src != runtime.initial_world) {
+            return Err(SourceBundleProducerError::RunMismatch(
+                "initial world mismatch between runtime and journal".to_string(),
+            ));
         }
     } else if run.final_world != runtime.initial_world {
         return Err(SourceBundleProducerError::RunMismatch(

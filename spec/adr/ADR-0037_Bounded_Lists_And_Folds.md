@@ -40,7 +40,7 @@ design text and are recorded here rather than silently decided in code:
   fully validated, and thus a declared bound is fully enforced, before a plan
   ever runs — the fail-closed property the design text asks for.
 - Fold iteration is charged to the *existing* ADR-0032 evaluator work budget
-  (`MAX_CALL_STEPS` = 10,000) with no new counter: each element's body
+  (`MAX_CALL_STEPS`; current figures in ADR-0042 §Evaluation budgets) with no new counter: each element's body
   evaluation is one more call to the same big-step evaluator, which already
   charges one step per node visited. The one change needed was widening when
   that budget is *active* at all: previously a plan with no `fn` declarations

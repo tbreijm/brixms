@@ -800,3 +800,46 @@ fn verify_finite_decision_with_inputs_fails_on_missing_or_tampered_snapshot() {
         "expected InputValidation(UndeclaredInput), got: {err_extra:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Journal must be exactly the run's committed steps (ADR-0039, ADR-0043)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_bundle_refuses_journal_with_missing_duplicate_or_reordered_steps() {
+    let source = r#"
+config D = A | B
+config E = X | Y
+propose a priority 1 when true = A
+propose x priority 1 when true = X
+commit d from (a)
+commit e from (x)
+"#;
+    let p = fd_plan(source);
+    let runtime = FiniteDecisionRuntime::build(&p).expect("runtime builds");
+    let run = runtime.run();
+    assert_eq!(run.journal.len(), 2, "both commit pools select");
+    produce_finite_decision_audit_input_bundle_v1(&runtime, &run)
+        .expect("the honest run must produce a bundle");
+
+    let steps = run.journal.steps().to_vec();
+    let tampered_journals = [
+        vec![steps[0].clone()],
+        vec![steps[0].clone(), steps[0].clone()],
+        vec![steps[1].clone(), steps[0].clone()],
+        vec![steps[0].clone(), steps[1].clone(), steps[1].clone()],
+    ];
+    for journal_steps in tampered_journals {
+        let mut tampered = run.clone();
+        tampered.journal = soc_core::journal::Journal::new();
+        for step in journal_steps {
+            tampered.journal.append(step);
+        }
+        match produce_finite_decision_audit_input_bundle_v1(&runtime, &tampered) {
+            Err(SourceBundleProducerError::RunMismatch(msg)) => {
+                assert!(msg.contains("journal steps"), "{msg}");
+            }
+            other => panic!("expected RunMismatch, got {:?}", other.map(|_| ())),
+        }
+    }
+}

@@ -617,17 +617,21 @@ pub fn format_finite_decision_human(
     // pool (ADR-0039). A single-commit module (still the overwhelming
     // common case) prints exactly the pre-ADR-0039 text: no pool header,
     // just its one pool's own section below.
-    if run.commits.len() <= 1 {
-        push_commit_pool_human(&mut out, &run.commits.first(), &run.dispositions, &run.stop);
-    } else {
-        for pool_run in &run.commits {
-            out.push_str(&format!("commit {}:\n", pool_run.commit));
-            push_commit_pool_human(
-                &mut out,
-                &Some(pool_run),
-                &pool_run.dispositions,
-                &pool_run.stop,
-            );
+    // A module made only of `decide` blocks (ADR-0043) has no commit pool,
+    // so it prints no top-level decision; its blocks report below.
+    match run.commits.len() {
+        0 => {}
+        1 => push_commit_pool_human(&mut out, &run.commits.first(), &run.dispositions, &run.stop),
+        _ => {
+            for pool_run in &run.commits {
+                out.push_str(&format!("commit {}:\n", pool_run.commit));
+                push_commit_pool_human(
+                    &mut out,
+                    &Some(pool_run),
+                    &pool_run.dispositions,
+                    &pool_run.stop,
+                );
+            }
         }
     }
 

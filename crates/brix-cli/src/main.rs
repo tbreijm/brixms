@@ -30,7 +30,14 @@ pub mod serve;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let exit_val = run_with_args(args);
+    // Run the whole command on one evaluation thread, so every evaluation it
+    // performs (including a whole `serve` session) runs inline instead of
+    // spawning a bounded-stack thread per expression
+    // (`brix_lower::l3_v2::with_eval_stack`).
+    let exit_val = brix_lower::l3_v2::with_eval_stack(move || run_with_args(args))
+        // The thread panicked (the panic message is already printed) or
+        // could not be created; 101 is the exit code Rust uses for a panic.
+        .unwrap_or(101);
     ExitCode::from(exit_val)
 }
 

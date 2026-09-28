@@ -877,9 +877,13 @@ impl FiniteDecisionRuntime {
     /// Execute the complete finite-decision deliberation cycle.
     pub fn run(&self) -> FiniteDecisionRun {
         // Step 0: Inject functions and bound inputs into evaluation environment before lets/rules/proposals.
+        // One work counter for the whole pass: every let, rule, guard,
+        // value, and decide instance evaluated from this environment draws
+        // on it (`l3_v2::MAX_RUN_STEPS`).
         let mut env = EvalEnv::new()
             .with_functions(self.functions.clone())
-            .with_schemas(Arc::new(self.plan.schemas.clone()));
+            .with_schemas(Arc::new(self.plan.schemas.clone()))
+            .with_run_work(Arc::default());
         for input in &self.bound_inputs {
             env = env.with_input(input.name.clone(), input.value.clone());
         }
@@ -1061,7 +1065,7 @@ impl FiniteDecisionRuntime {
         // Evaluate every block's list once, up front, so the program-wide
         // instance cap can be checked over every block's length together
         // before any block's per-entity deliberation runs.
-        let mut lists: Vec<Result<Vec<L3ValueV2>, FiniteDecisionUnknownReason>> =
+        let mut lists: Vec<Result<Arc<[L3ValueV2]>, FiniteDecisionUnknownReason>> =
             Vec::with_capacity(self.plan.decides.len());
         let mut total: usize = 0;
         for decide in &self.plan.decides {
@@ -1892,9 +1896,13 @@ impl FiniteDecisionRuntime {
         }
         let selection = explain::selection_from_why(&why);
 
+        // One work counter for the whole pass: every let, rule, guard,
+        // value, and decide instance evaluated from this environment draws
+        // on it (`l3_v2::MAX_RUN_STEPS`).
         let mut env = EvalEnv::new()
             .with_functions(self.functions.clone())
-            .with_schemas(Arc::new(self.plan.schemas.clone()));
+            .with_schemas(Arc::new(self.plan.schemas.clone()))
+            .with_run_work(Arc::default());
         for input in &self.bound_inputs {
             env = env.with_input(input.name.clone(), input.value.clone());
         }
@@ -1986,9 +1994,13 @@ impl FiniteDecisionRuntime {
             });
         }
 
+        // One work counter for the whole pass: every let, rule, guard,
+        // value, and decide instance evaluated from this environment draws
+        // on it (`l3_v2::MAX_RUN_STEPS`).
         let mut env = EvalEnv::new()
             .with_functions(self.functions.clone())
-            .with_schemas(Arc::new(self.plan.schemas.clone()));
+            .with_schemas(Arc::new(self.plan.schemas.clone()))
+            .with_run_work(Arc::default());
         for input in &self.bound_inputs {
             env = env.with_input(input.name.clone(), input.value.clone());
         }
@@ -2023,7 +2035,7 @@ impl FiniteDecisionRuntime {
         // unbound, exactly like a quiescent commit pool.
         for decide_run in &fresh_run.decides {
             if let Some(values) = decide_run.decided_values() {
-                env = env.with_fact(decide_run.decide.clone(), L3ValueV2::List(values));
+                env = env.with_fact(decide_run.decide.clone(), L3ValueV2::List(values.into()));
             }
         }
         let mut results = Vec::with_capacity(shows.len());

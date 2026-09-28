@@ -168,22 +168,55 @@ A bound only protects the process if the native stack it is meant to stand
 in for cannot be exhausted first — and running `eval_internal`'s recursive
 descent on whatever thread happened to call in (the CLI's unmodified process
 main thread; a test harness thread; a future embedder) makes "never a stack
-overflow" depend on a stack size nothing here controls. `l3_v2::eval` now
-runs a bounded evaluation (any evaluation with a nonempty helper table, or
-that reaches a list/relational form, ADR-0037/ADR-0040) on a freshly spawned
-thread with a fixed, generous stack (`EVAL_THREAD_STACK_BYTES`, 256 MiB —
-sized empirically against a debug build's larger stack frames, not just an
-optimized one, since the merge bar's own `cargo test` runs debug). A thread
-that cannot be spawned, or that panics — `eval_internal` is total, so a
-panic there is a defect, never an expected outcome — reports a resource
-fault rather than propagating to the caller. The budget, not the caller's
-thread, is what decides whether a program is admitted, and a failure is
-always `Unknown(EvalFault::CallDepthExceeded | ResourceExhausted)`, never a
-crash. `crates/brix-lower/tests/finite_decision_recursion.rs` exercises a
+overflow" depend on a stack size nothing here controls. Only a helper call
+can recurse, so an evaluation with a nonempty helper table runs on an
+evaluation thread with a fixed, generous stack (`EVAL_THREAD_STACK_BYTES`,
+256 MiB, reserved rather than committed, and sized against a debug build's
+larger frames since the merge bar's `cargo test` runs debug). Without
+helpers, native depth is bounded by expression nesting and the evaluation
+runs on the caller's thread. A caller that evaluates many expressions enters
+the evaluation thread once through `l3_v2::with_eval_stack`, and every
+evaluation inside it runs inline; the CLI runs each command, including a
+whole `brix serve` session, that way. A thread that cannot be created, or
+that panics — `eval_internal` is total, so a panic there is a defect, never
+an expected outcome — reports a resource fault rather than propagating to
+the caller. The budget, not the caller's thread, decides whether a program is
+admitted, and a failure is always
+`Unknown(EvalFault::CallDepthExceeded | ResourceExhausted)`, never a crash.
+`crates/brix-lower/tests/finite_decision_recursion.rs` exercises a
 terminating direct- and mutual-recursion happy path, recursion just under
 and comfortably past `MAX_CALL_DEPTH`, budget exhaustion from a
 recursively-growing value (independent of the call-depth bound), run
 determinism, and audit-bundle replay of a recursive helper.
+
+### Evaluation budgets
+
+This section supersedes the budget figures quoted in ADR-0037, ADR-0040, and
+ADR-0043.
+
+- **Work.** Every evaluation step, including reading a value or binding a
+  list element, costs one step. One evaluation may take `MAX_CALL_STEPS`
+  (2,000,000) steps, enough for a full join of two maximum-size list inputs
+  (256 × 256 pairs) but not a three-way one. Every evaluation in one
+  deliberation run (lets, rules, guards, values, and every `decide`
+  instance) also draws on a shared counter bounded by `MAX_RUN_STEPS`
+  (50,000,000), so a `decide` block cannot multiply the per-evaluation bound
+  by its instance count. The worst case is about two seconds in a release
+  build.
+- **Memory.** `MAX_EVAL_VALUE_NODES` and `MAX_EVAL_VALUE_BYTES` bound values
+  an evaluation *builds*: constructors, records, list literals, and the
+  results of `map`, `filter`, and comprehensions. Reading a value the
+  evaluation already holds is not an allocation: list values are shared
+  (`L3ValueV2::List` holds an `Arc<[L3ValueV2]>`), and the evaluation
+  environment shares inputs, lets, and facts, so a per-element environment
+  copies only its local bindings. Charging reads as allocation made any
+  input over about 1 MB unusable in an expression, and refused a join of two
+  lists on memory it never kept.
+
+Exceeding any bound is `Unknown` with `ResourceExhausted`, as before.
+`crates/brix-lower/tests/eval_shared_values.rs` covers repeated reads of a
+large input, a full two-list join, a refused three-way join, and the
+run-wide bound across `decide` instances.
 
 Two match arms in the recursive evaluation core — `eval_internal_body`'s
 `Call`/`Match` dispatch and `boolean_types::Checker::expr`'s equivalent — sit

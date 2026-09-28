@@ -138,8 +138,10 @@ elements are produced rather than after the fact. Every element a
 comprehension or fold visits — including every element of every nested
 generator's list, so a two-generator comprehension over two lists of size
 `m` and `n` visits on the order of `m * n` elements — is charged to the
-*existing* ADR-0032 evaluator work budget (`MAX_CALL_STEPS` = 10,000; see
-ADR-0037's note on when that budget is active at all). A large cartesian
+*existing* ADR-0032 evaluator work budget (`MAX_CALL_STEPS`; see
+ADR-0037's note on when that budget is active at all, and ADR-0042
+§Evaluation budgets for the current figures, which admit a full join of two
+maximum-size lists). A large cartesian
 product therefore fails closed with a typed fault well before it could
 exhaust memory, at the cost of a genuinely tight ceiling on how large a join
 this first slice can usefully evaluate — a known tightness this ADR accepts

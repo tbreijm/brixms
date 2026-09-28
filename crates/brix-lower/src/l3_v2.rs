@@ -600,11 +600,21 @@ pub const MAX_CALL_DEPTH: usize = 1_000;
 /// native-stack use from *any* expression shape, not the bound a program is
 /// expected to reach through calls alone.
 pub const MAX_EVAL_RECURSION_DEPTH: usize = 20_000;
-/// Total evaluation steps (ADR-0032's `tick_step`), raised so a helper
-/// recursing near `MAX_CALL_DEPTH` — each level several steps — can still
-/// complete rather than exhausting the step budget before the call-depth
-/// bound is even reached.
-pub const MAX_CALL_STEPS: usize = 200_000;
+/// Total evaluation steps per evaluation (ADR-0032's `tick_step`): the bound
+/// on work. Sized so a helper recursing near `MAX_CALL_DEPTH` can complete,
+/// and so a full join of two maximum-size list inputs (256 x 256 pairs, a
+/// few steps each) fits, while a three-way join of them does not.
+pub const MAX_CALL_STEPS: usize = 2_000_000;
+
+/// Total evaluation steps across one deliberation run, shared by every
+/// evaluation in it (see [`EvalEnv::with_run_work`]). A per-evaluation bound
+/// alone would let a `decide` block multiply it by its instance count; this
+/// keeps the work a whole run may do bounded no matter how it is split.
+pub const MAX_RUN_STEPS: usize = 50_000_000;
+
+/// Steps an evaluation accumulates locally before adding them to the shared
+/// run counter, so the shared atomic is touched rarely.
+const RUN_WORK_FLUSH_STEPS: usize = 4096;
 pub const MAX_VALUE_DEPTH: usize = 128;
 pub const MAX_EVAL_VALUE_NODES: usize = 10_000;
 pub const MAX_EVAL_VALUE_BYTES: usize = 1_000_000;
@@ -626,7 +636,42 @@ pub const MAX_EVAL_VALUE_BYTES: usize = 1_000_000;
 /// program — a bounded evaluation always runs on a freshly spawned thread with
 /// this fixed, generous stack. The budget above, not the caller's thread, is
 /// then what decides whether a program is admitted.
+///
+/// The stack is reserved, not committed: only the pages a deep recursion
+/// actually touches are backed by memory. To avoid paying a thread spawn per
+/// expression, a caller that evaluates many expressions (a whole
+/// deliberation run) enters the evaluation thread once through
+/// [`with_eval_stack`]; `eval` calls inside it run inline.
 const EVAL_THREAD_STACK_BYTES: usize = 256 * 1024 * 1024;
+
+thread_local! {
+    /// Whether this thread is an evaluation thread with the
+    /// [`EVAL_THREAD_STACK_BYTES`] stack.
+    static ON_EVAL_STACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` on an evaluation thread with the [`EVAL_THREAD_STACK_BYTES`]
+/// stack, so every [`eval`] inside it runs inline rather than spawning its
+/// own thread. Runs `f` directly when already on one.
+///
+/// Returns `None` if the operating system refuses to create the thread, or
+/// `f` panics; callers report either as a resource fault.
+pub fn with_eval_stack<R: Send>(f: impl FnOnce() -> R + Send) -> Option<R> {
+    if ON_EVAL_STACK.with(|on| on.get()) {
+        return Some(f());
+    }
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(EVAL_THREAD_STACK_BYTES)
+            .spawn_scoped(scope, move || {
+                ON_EVAL_STACK.with(|on| on.set(true));
+                f()
+            })
+            .ok()?
+            .join()
+            .ok()
+    })
+}
 
 /// Normalized pure function definition in L3.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1664,7 +1709,12 @@ pub enum L3ValueV2 {
     /// A bounded list value (ADR-0037, ADR-0040). Elements carry their own
     /// nominal identity as usual; the list itself has none — it is a
     /// structural sequence, in evaluation order.
-    List(Vec<L3ValueV2>),
+    ///
+    /// Shared, not owned: reading a list input or fact, or binding it in a
+    /// fold, costs a reference-count increment rather than a deep copy.
+    /// Equality, ordering, and every canonical encoding depend only on the
+    /// elements.
+    List(Arc<[L3ValueV2]>),
 }
 
 /// Why an evaluation could not produce a value.
@@ -1786,10 +1836,16 @@ impl std::error::Error for EvalFault {}
 /// reading one is precisely what ⟨D-DERIVE⟩ admits.
 #[derive(Clone, Debug, Default)]
 pub struct EvalEnv {
-    inputs: BTreeMap<String, L3ValueV2>,
-    lets: BTreeMap<String, L3ValueV2>,
-    facts: BTreeMap<String, L3ValueV2>,
+    // Inputs, lets, and facts are fixed for a whole evaluation and shared
+    // behind `Arc`, so the per-element environment a fold, filter, map, or
+    // match arm builds copies only `locals`, not every value in scope.
+    inputs: Arc<BTreeMap<String, L3ValueV2>>,
+    lets: Arc<BTreeMap<String, L3ValueV2>>,
+    facts: Arc<BTreeMap<String, L3ValueV2>>,
     locals: BTreeMap<String, L3ValueV2>,
+    /// Steps spent so far by every evaluation in the enclosing run, if the
+    /// caller bounds a whole run (see [`MAX_RUN_STEPS`]).
+    run_work: Option<Arc<std::sync::atomic::AtomicUsize>>,
     functions: Arc<BTreeMap<String, L3FunctionDef>>,
     schemas: Arc<BTreeMap<String, L3Schema>>,
 }
@@ -1800,17 +1856,17 @@ impl EvalEnv {
     }
 
     pub fn with_input(mut self, name: impl Into<String>, v: L3ValueV2) -> Self {
-        self.inputs.insert(name.into(), v);
+        Arc::make_mut(&mut self.inputs).insert(name.into(), v);
         self
     }
 
     pub fn with_let(mut self, name: impl Into<String>, v: L3ValueV2) -> Self {
-        self.lets.insert(name.into(), v);
+        Arc::make_mut(&mut self.lets).insert(name.into(), v);
         self
     }
 
     pub fn with_fact(mut self, rule: impl Into<String>, v: L3ValueV2) -> Self {
-        self.facts.insert(rule.into(), v);
+        Arc::make_mut(&mut self.facts).insert(rule.into(), v);
         self
     }
 
@@ -1818,6 +1874,14 @@ impl EvalEnv {
         let mut map = (*self.functions).clone();
         map.insert(name.into(), def);
         self.functions = Arc::new(map);
+        self
+    }
+
+    /// Share one work counter across every evaluation that uses this
+    /// environment (or a clone of it), bounding their total steps by
+    /// [`MAX_RUN_STEPS`].
+    pub fn with_run_work(mut self, counter: Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        self.run_work = Some(counter);
         self
     }
 
@@ -1915,6 +1979,8 @@ struct EvalBudget {
     pub allocated_bytes: usize,
     pub max_bytes: usize,
     pub max_value_depth: usize,
+    run_work: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    unflushed_steps: usize,
 }
 
 impl Default for EvalBudget {
@@ -1931,15 +1997,21 @@ impl Default for EvalBudget {
             allocated_bytes: 0,
             max_bytes: MAX_EVAL_VALUE_BYTES,
             max_value_depth: MAX_VALUE_DEPTH,
+            run_work: None,
+            unflushed_steps: 0,
         }
     }
 }
 
 impl EvalBudget {
-    /// Iteratively inspect a value before cloning to check and charge its node count, byte size,
-    /// and tree depth against the pre-allocation limits without risking stack overflow.
-    fn charge_clone(&mut self, val: &L3ValueV2) -> Result<(), EvalFault> {
-        self.charge_value(val, 1)
+    /// Charge reading or binding a value the evaluation already holds: one
+    /// step of work, and nothing against the allocation budgets. Lists are
+    /// shared ([`L3ValueV2::List`]) and any other copy is transient, so
+    /// counting reads as allocation would refuse a join of two list inputs
+    /// on memory it never keeps. Newly built values are charged in full by
+    /// [`Self::charge_value`].
+    fn charge_clone(&mut self, _val: &L3ValueV2) -> Result<(), EvalFault> {
+        self.tick_step()
     }
 
     fn charge_allocation(&mut self, nodes: usize, bytes: usize) -> Result<(), EvalFault> {
@@ -1960,6 +2032,8 @@ impl EvalBudget {
         Ok(())
     }
 
+    /// Charge a newly built value in full: its node count, byte size, and
+    /// depth, walked iteratively so a deep value cannot overflow the stack.
     fn charge_value(&mut self, val: &L3ValueV2, depth: usize) -> Result<(), EvalFault> {
         let mut stack: Vec<(&L3ValueV2, usize)> = vec![(val, depth)];
         let mut count = 0usize;
@@ -2020,7 +2094,7 @@ impl EvalBudget {
                 }
                 L3ValueV2::List(items) => {
                     bytes += 16;
-                    for item in items {
+                    for item in items.iter() {
                         stack.push((item, depth + 1));
                     }
                 }
@@ -2051,6 +2125,29 @@ impl EvalBudget {
                 detail: "evaluation step limit exceeded".to_string(),
             });
         }
+        self.unflushed_steps += 1;
+        if self.unflushed_steps >= RUN_WORK_FLUSH_STEPS {
+            self.flush_run_work()?;
+        }
+        Ok(())
+    }
+
+    /// Add this evaluation's unreported steps to the shared run counter and
+    /// fail once the run as a whole passes [`MAX_RUN_STEPS`].
+    fn flush_run_work(&mut self) -> Result<(), EvalFault> {
+        let pending = std::mem::take(&mut self.unflushed_steps);
+        let Some(counter) = &self.run_work else {
+            return Ok(());
+        };
+        let total = counter
+            .fetch_add(pending, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(pending);
+        if total > MAX_RUN_STEPS {
+            return Err(EvalFault::ResourceExhausted {
+                limit: MAX_RUN_STEPS,
+                detail: "run step limit exceeded".to_string(),
+            });
+        }
         Ok(())
     }
 }
@@ -2075,39 +2172,31 @@ pub fn eval(e: &L3ExprV2, env: &EvalEnv) -> Result<L3ValueV2, EvalFault> {
         let mut budget = None;
         return eval_internal(e, env, &mut budget, None);
     }
-    // See `EVAL_THREAD_STACK_BYTES`: a helper may recurse (ADR-0042), so
-    // evaluation runs on a dedicated, generously sized stack rather than
-    // trusting the caller's thread — the budget decides admission, not the
-    // native stack.
-    std::thread::scope(|scope| {
-        let spawned = std::thread::Builder::new()
-            .stack_size(EVAL_THREAD_STACK_BYTES)
-            .spawn_scoped(scope, move || {
-                let mut budget = Some(EvalBudget::default());
-                eval_internal(e, env, &mut budget, None)
-            });
-        let handle = match spawned {
-            Ok(h) => h,
-            // Spawning a thread can fail under real resource exhaustion (the
-            // OS refused). That is itself a resource limit, so it is reported
-            // the same way any other evaluation resource fault is — never a
-            // panic.
-            Err(_) => {
-                return Err(EvalFault::ResourceExhausted {
-                    limit: EVAL_THREAD_STACK_BYTES,
-                    detail: "could not spawn the bounded evaluation thread".to_string(),
-                })
-            }
-        };
-        // `join` catches a panic in the spawned thread rather than
-        // propagating it; `eval_internal` is total (every path returns a
-        // `Result`) so a panic here would itself be a defect, not an expected
-        // outcome — reported as a fault rather than re-panicking the caller.
-        handle.join().unwrap_or_else(|_| {
-            Err(EvalFault::ResourceExhausted {
-                limit: MAX_EVAL_RECURSION_DEPTH,
-                detail: "the bounded evaluation thread panicked".to_string(),
-            })
+    let budgeted = move || {
+        let mut budget = Some(EvalBudget {
+            run_work: env.run_work.clone(),
+            ..EvalBudget::default()
+        });
+        let value = eval_internal(e, env, &mut budget, None)?;
+        budget.as_mut().map_or(Ok(()), EvalBudget::flush_run_work)?;
+        Ok(value)
+    };
+    // Only a helper call can recurse (ADR-0042); without helpers, native
+    // stack depth is bounded by expression nesting, so the budgeted
+    // evaluation runs on the caller's thread.
+    if env.functions.is_empty() {
+        return budgeted();
+    }
+    // See `EVAL_THREAD_STACK_BYTES`: with helpers in scope, evaluation runs
+    // on a dedicated, generously sized stack rather than trusting the
+    // caller's thread — the budget decides admission, not the native stack.
+    // `eval_internal` is total, so a failure here means the OS refused the
+    // thread or a defect panicked; both are reported as a resource fault,
+    // never propagated as a panic.
+    with_eval_stack(budgeted).unwrap_or_else(|| {
+        Err(EvalFault::ResourceExhausted {
+            limit: EVAL_THREAD_STACK_BYTES,
+            detail: "the bounded evaluation thread could not run".to_string(),
         })
     })
 }
@@ -2414,14 +2503,10 @@ fn eval_internal_body(
                 if binders.len() != args.len() {
                     return Err(EvalFault::OperandShape("constructor arity mismatch"));
                 }
+                // Cloning the environment copies only `locals`; inputs, lets,
+                // and facts are shared (see `EvalEnv`).
                 if let Some(b) = budget.as_mut() {
-                    for (name, value) in env
-                        .locals
-                        .iter()
-                        .chain(env.lets.iter())
-                        .chain(env.inputs.iter())
-                        .chain(env.facts.iter())
-                    {
+                    for (name, value) in env.locals.iter() {
                         b.charge_allocation(0, name.len())?;
                         b.charge_clone(value)?;
                     }
@@ -2521,10 +2606,11 @@ fn eval_internal_body(
                 fn_locals.insert(param_name.clone(), val);
             }
             let fn_env = EvalEnv {
-                inputs: BTreeMap::new(),
-                lets: BTreeMap::new(),
-                facts: BTreeMap::new(),
+                inputs: Arc::default(),
+                lets: Arc::default(),
+                facts: Arc::default(),
                 locals: fn_locals,
+                run_work: env.run_work.clone(),
                 functions: env.functions.clone(),
                 schemas: def.schemas.clone(),
             };
@@ -2620,7 +2706,7 @@ fn eval_fold(
     match op {
         FoldOpV2::Sum => {
             let mut acc: i64 = 0;
-            for item in items {
+            for item in items.iter().cloned() {
                 if let Some(b) = budget.as_mut() {
                     b.charge_clone(&item)?;
                 }
@@ -2638,7 +2724,7 @@ fn eval_fold(
         }
         FoldOpV2::Count => {
             let mut acc: i64 = 0;
-            for item in items {
+            for item in items.iter().cloned() {
                 if let Some(b) = budget.as_mut() {
                     b.charge_clone(&item)?;
                 }
@@ -2657,7 +2743,7 @@ fn eval_fold(
             Ok(L3ValueV2::Int(acc))
         }
         FoldOpV2::All => {
-            for item in items {
+            for item in items.iter().cloned() {
                 if let Some(b) = budget.as_mut() {
                     b.charge_clone(&item)?;
                 }
@@ -2674,7 +2760,7 @@ fn eval_fold(
             Ok(L3ValueV2::Bool(true))
         }
         FoldOpV2::Any => {
-            for item in items {
+            for item in items.iter().cloned() {
                 if let Some(b) = budget.as_mut() {
                     b.charge_clone(&item)?;
                 }
@@ -2695,7 +2781,7 @@ fn eval_fold(
                 return Err(EvalFault::EmptyAggregate(op));
             }
             let mut acc: Option<i64> = None;
-            for item in items {
+            for item in items.iter().cloned() {
                 if let Some(b) = budget.as_mut() {
                     b.charge_clone(&item)?;
                 }
@@ -2730,7 +2816,7 @@ fn eval_filter(
         return Err(EvalFault::OperandShape("filter requires a List operand"));
     };
     let mut out = Vec::new();
-    for item in items {
+    for item in items.iter().cloned() {
         if let Some(b) = budget.as_mut() {
             b.charge_clone(&item)?;
         }
@@ -2752,7 +2838,7 @@ fn eval_filter(
             out.push(item);
         }
     }
-    Ok(L3ValueV2::List(out))
+    Ok(L3ValueV2::List(out.into()))
 }
 
 #[inline(never)]
@@ -2769,7 +2855,7 @@ fn eval_map(
         return Err(EvalFault::OperandShape("map requires a List operand"));
     };
     let mut out = Vec::with_capacity(items.len());
-    for item in items {
+    for item in items.iter().cloned() {
         if let Some(b) = budget.as_mut() {
             b.charge_clone(&item)?;
         }
@@ -2784,7 +2870,7 @@ fn eval_map(
         }
         out.push(v);
     }
-    Ok(L3ValueV2::List(out))
+    Ok(L3ValueV2::List(out.into()))
 }
 
 /// Nested generator loops, left to right, evaluated recursively so a later
@@ -2835,7 +2921,7 @@ fn eval_comprehension_generators(
                     "comprehension generator requires a List operand",
                 ));
             };
-            for item in items {
+            for item in items.iter().cloned() {
                 if let Some(b) = budget.as_mut() {
                     b.charge_clone(&item)?;
                 }
@@ -2875,7 +2961,7 @@ fn eval_comprehension(
         current_func,
         &mut out,
     )?;
-    Ok(L3ValueV2::List(out))
+    Ok(L3ValueV2::List(out.into()))
 }
 
 #[inline(never)]
@@ -2899,7 +2985,7 @@ fn eval_list_lit(
         }
         out.push(v);
     }
-    Ok(L3ValueV2::List(out))
+    Ok(L3ValueV2::List(out.into()))
 }
 
 #[inline(never)]
@@ -2918,7 +3004,7 @@ fn eval_in(
         ));
     };
     let mut found = false;
-    for item in &items {
+    for item in items.iter() {
         if let Some(b) = budget.as_mut() {
             b.tick_step()?;
         }
@@ -2961,7 +3047,7 @@ fn eval_distinct(
     // expression actually produces.
     let mut seen: BTreeSet<L3ValueV2> = BTreeSet::new();
     let mut out = Vec::new();
-    for item in items {
+    for item in items.iter().cloned() {
         if let Some(b) = budget.as_mut() {
             b.tick_step()?;
             b.charge_clone(&item)?;
@@ -2976,7 +3062,7 @@ fn eval_distinct(
             out.push(item);
         }
     }
-    Ok(L3ValueV2::List(out))
+    Ok(L3ValueV2::List(out.into()))
 }
 
 /// Check that every `match` in `plan` is exhaustive over its scrutinee's sum.
