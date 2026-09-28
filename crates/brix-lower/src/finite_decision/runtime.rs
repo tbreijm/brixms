@@ -1424,7 +1424,10 @@ impl FiniteDecisionRuntime {
 
         // Fail-closed on frontier deliberation fault under B^uk discipline.
         if let Some(frontier_fault) = evaluated.fault() {
-            return Err((FiniteDecisionUnknownReason::from(frontier_fault), Vec::new()));
+            return Err((
+                FiniteDecisionUnknownReason::from(frontier_fault),
+                Vec::new(),
+            ));
         }
 
         // Compute structured dispositions for all candidates.

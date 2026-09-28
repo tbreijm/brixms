@@ -1433,11 +1433,13 @@ fn check_otherwise_decide(
         }
     }
     if let (Some(otherwise_name), Some(explicit_name)) = (otherwise_in, explicit_max_in) {
-        return Err(FiniteDecisionLowerError::AmbiguousFallbackPriorityInDecide {
-            decide: decide_name.to_string(),
-            otherwise: otherwise_name.to_string(),
-            explicit: explicit_name.to_string(),
-        });
+        return Err(
+            FiniteDecisionLowerError::AmbiguousFallbackPriorityInDecide {
+                decide: decide_name.to_string(),
+                otherwise: otherwise_name.to_string(),
+                explicit: explicit_name.to_string(),
+            },
+        );
     }
     Ok(())
 }
