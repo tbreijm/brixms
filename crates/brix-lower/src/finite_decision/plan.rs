@@ -2295,23 +2295,34 @@ pub fn finite_decision_program_preimage(plan: &FiniteDecisionPlan) -> Vec<u8> {
         encode_expr_v2(&mut w, &p.value);
     }
 
-    // Commit pools, in declaration order (ADR-0039 lifts ADR-0030's single
-    // commit to a self-delimited list of one or more independent pools —
-    // program identity now depends on how many there are and each one's own
-    // membership, exactly like the Rules/Proposals sections above it).
-    w.write_uint(plan.commits.len() as u64);
-    for c in &plan.commits {
-        w.write_ident(&c.name);
-        w.write_uint(c.candidates.len() as u64);
-        for cand in &c.candidates {
-            w.write_ident(cand);
-        }
+    // Commit membership and order. The first pool keeps ADR-0030's exact
+    // single-commit slot, so every single-commit program's preimage (and
+    // program id) is byte-identical to before ADR-0039.
+    let first = &plan.commits[0];
+    w.write_ident(&first.name);
+    w.write_uint(first.candidates.len() as u64);
+    for cand in &first.candidates {
+        w.write_ident(cand);
     }
 
     // Show directives
     w.write_uint(plan.shows.len() as u64);
     for s in &plan.shows {
         encode_expr_v2(&mut w, s);
+    }
+
+    // Additional commit pools (ADR-0039): appended in declaration order under
+    // their own tag, and only when a module declares more than one pool.
+    if plan.commits.len() > 1 {
+        w.write_tag("brix.l3.finite-decision.commits@2");
+        w.write_uint((plan.commits.len() - 1) as u64);
+        for c in &plan.commits[1..] {
+            w.write_ident(&c.name);
+            w.write_uint(c.candidates.len() as u64);
+            for cand in &c.candidates {
+                w.write_ident(cand);
+            }
+        }
     }
 
     w.finish()

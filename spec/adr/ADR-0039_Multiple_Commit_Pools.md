@@ -89,17 +89,16 @@ selecting sibling's name resolves normally.
 
 ## Program identity
 
-The canonical preimage's commit section changes from "one name, then its
-candidate list" (implicitly exactly one pool) to a self-delimited list: a
-pool count, then each pool's name and candidate list, in declaration order —
-exactly the convention the Rules and Proposals sections above it already
-use. This is the one deliberate, one-time break in this ADR: **every**
-finite-decision program's id changes, including every module that still
-declares exactly one `commit` block, because the preimage now says "1 pool"
-where it previously said nothing at all. `crates/brix-lower/tests/finite_decision_functions.rs`'s
-two frozen-identity regression vectors are pinned to their post-ADR-0039
-values with a comment explaining why, the same way ADR-0036 (unary minus)
-documented its own frozen vector.
+Single-commit programs keep byte-identical preimages and program ids. The
+first pool is written exactly where ADR-0030 wrote the single commit (its
+name, then its candidate list). When a module declares more than one pool,
+the remaining pools are appended at the very end of the preimage, after the
+show directives, under the tag `brix.l3.finite-decision.commits@2`: the count
+of additional pools, then each one's name and candidate list, in declaration
+order. A module with one pool never writes that tag, so no existing program id,
+frozen vector, or audit bundle changes. Adding, removing, renaming, or
+reordering any pool, or changing any pool's membership or order, changes the
+program id.
 
 No other identity-bearing behavior changes: a single-commit module's
 rules/proposals/functions/schemas encode exactly as before, and its
