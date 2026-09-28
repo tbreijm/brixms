@@ -298,6 +298,7 @@ pub struct FiniteDecisionEntityRun {
     pub binder: L3ValueV2,
     pub decision: Option<SelectedDecision>,
     pub dispositions: Vec<CandidateDisposition>,
+    pub final_world: ConfigId,
     /// Always [`FiniteDecisionStop::Selected`] or
     /// [`FiniteDecisionStop::Quiescent`] — never `Unknown`: a fault in any
     /// one instance fails the whole block closed
@@ -809,12 +810,36 @@ impl FiniteDecisionRuntime {
     }
 
     /// Derive the generator registry and semantics for this runtime.
+    ///
+    /// Includes every top-level `commit` pool's static candidates (known
+    /// without running anything) and, since ADR-0043, every `decide`
+    /// block's every actually-instantiated element's own candidates —
+    /// discovered by running the deliberation once, since an instance count
+    /// depends on runtime input values and cannot be known from the plan
+    /// alone. This is why `audit`/`verify` for a `decide`-using program
+    /// must run before they can audit: the generator universe itself is
+    /// input-dependent.
     pub fn audit_environment(&self) -> (ContextId, GeneratorRegistry, GeneratorSemanticsV1) {
         let mut registry = GeneratorRegistry::new();
         let mut semantics = GeneratorSemanticsV1::new();
         for entry in &self.entries {
             registry.insert(entry.generator);
             semantics.declare_rows(entry.generator, [(entry.src, entry.dst)]);
+        }
+        if !self.plan.decides.is_empty() {
+            let run = self.run();
+            for decide_run in &run.decides {
+                let Some(decide) = self.plan.find_decide(&decide_run.decide) else {
+                    continue;
+                };
+                for inst in &decide_run.instances {
+                    let entries = self.entity_entries(&decide.name, inst.index, &decide.proposals);
+                    for entry in &entries {
+                        registry.insert(entry.generator);
+                        semantics.declare_rows(entry.generator, [(entry.src, entry.dst)]);
+                    }
+                }
+            }
         }
         (self.context, registry, semantics)
     }
@@ -1184,6 +1209,7 @@ impl FiniteDecisionRuntime {
                     binder: item.clone(),
                     decision: out.decision,
                     dispositions: out.dispositions,
+                    final_world: out.final_world,
                     stop: out.stop,
                     step: out.step,
                 }),
@@ -2020,31 +2046,18 @@ pub fn finite_decision_audit_environment_from_plan(
     finite_decision_audit_environment_from_plan_with_inputs(plan, &InputSnapshot::empty())
 }
 
-/// Derive the run context, generator registry, and generator semantics for a finite-decision plan with an input snapshot.
+/// Derive the run context, generator registry, and generator semantics for a
+/// finite-decision plan with an input snapshot.
+///
+/// Delegates to [`FiniteDecisionRuntime::audit_environment`] (building a
+/// runtime internally) rather than re-deriving the registry from the plan's
+/// static `commit` candidates alone: since ADR-0043, a `decide` block's own
+/// candidates are only known once its list is evaluated against `snapshot`,
+/// so a plan-only derivation can no longer see them.
 pub fn finite_decision_audit_environment_from_plan_with_inputs(
     plan: &FiniteDecisionPlan,
     snapshot: &InputSnapshot,
 ) -> Result<(ContextId, GeneratorRegistry, GeneratorSemanticsV1), FiniteDecisionBuildError> {
-    snapshot.validate_completeness(plan)?;
-
-    let program = finite_decision_program_id(plan);
-    let initial_world = destination_world(program, None);
-    let policy = policy_id(program);
-    let context = context_id(program, initial_world, policy, Some(snapshot));
-
-    let mut registry = GeneratorRegistry::new();
-    let mut semantics = GeneratorSemanticsV1::new();
-    for cand_name in plan.commits.iter().flat_map(|c| c.candidates.iter()) {
-        let _proposal = plan.find_proposal(cand_name).ok_or_else(|| {
-            FiniteDecisionBuildError::MissingProposal {
-                candidate: cand_name.clone(),
-            }
-        })?;
-        let prop_digest = proposal_digest(program, cand_name);
-        let dst = destination_world(program, Some(prop_digest));
-        let generator = generator_id(program, cand_name, initial_world, dst);
-        registry.insert(generator);
-        semantics.declare_rows(generator, [(initial_world, dst)]);
-    }
-    Ok((context, registry, semantics))
+    let runtime = FiniteDecisionRuntime::build_with_inputs(plan, snapshot)?;
+    Ok(runtime.audit_environment())
 }
