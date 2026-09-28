@@ -86,11 +86,47 @@ fn collect_refs(
                 collect_refs(a, let_refs, rule_refs);
             }
         }
-        L3ExprV2::And(a, b) | L3ExprV2::Or(a, b) => {
+        L3ExprV2::And(a, b) | L3ExprV2::Or(a, b) | L3ExprV2::In(a, b) => {
             collect_refs(a, let_refs, rule_refs);
             collect_refs(b, let_refs, rule_refs);
         }
-        L3ExprV2::Not(a) => collect_refs(a, let_refs, rule_refs),
+        L3ExprV2::Not(a) | L3ExprV2::Len(a) | L3ExprV2::Distinct(a) => {
+            collect_refs(a, let_refs, rule_refs)
+        }
+        // A fold/filter/map binder is a hygienic local, not a `let`/rule
+        // reference (ADR-0037, ADR-0040) — exactly like a function parameter
+        // or match binder above, its own body is walked for *other* names it
+        // reads, and the binder itself never becomes a graph node.
+        L3ExprV2::Fold { list, body, .. } => {
+            collect_refs(list, let_refs, rule_refs);
+            collect_refs(body, let_refs, rule_refs);
+        }
+        L3ExprV2::Filter { list, cond, .. } => {
+            collect_refs(list, let_refs, rule_refs);
+            collect_refs(cond, let_refs, rule_refs);
+        }
+        L3ExprV2::Map { list, body, .. } => {
+            collect_refs(list, let_refs, rule_refs);
+            collect_refs(body, let_refs, rule_refs);
+        }
+        L3ExprV2::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => {
+            for (_, source) in generators {
+                collect_refs(source, let_refs, rule_refs);
+            }
+            if let Some(w) = where_clause {
+                collect_refs(w, let_refs, rule_refs);
+            }
+            collect_refs(yield_expr, let_refs, rule_refs);
+        }
+        L3ExprV2::ListLit(items) => {
+            for item in items {
+                collect_refs(item, let_refs, rule_refs);
+            }
+        }
     }
 }
 

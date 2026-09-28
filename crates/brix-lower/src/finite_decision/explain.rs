@@ -36,6 +36,16 @@ use crate::l3_v2::{
     eval, ArithOpV2, CmpOpV2, EvalEnv, EvalFault, L3ExprV2, L3PatternV2, L3ValueV2,
 };
 
+/// How many elements of a list form's source (or result, for a
+/// comprehension) get expanded into their own child trace (ADR-0040). A
+/// fold/filter/map/comprehension shows a *bounded summary* rather than one
+/// child per element — a `sum` over a `max 4096` derived list would otherwise
+/// make its own explanation as large as the list itself, defeating the whole
+/// point of a node budget. Every element is still visited by the real
+/// evaluator exactly as [`crate::l3_v2::eval`] runs it; this cap only bounds
+/// how many of those visits get their own [`TraceNode`] here.
+const MAX_LIST_TRACE_ELEMENTS: usize = 5;
+
 /// Maximum number of [`TraceNode`]s materialized in one explanation
 /// (guard trace, value trace, and every transitively-read fact's trace,
 /// combined). Chosen to comfortably cover any single guard or value
@@ -76,6 +86,12 @@ pub enum TraceOutcome {
     Fault(EvalFault),
     /// The node budget was exhausted before this subtree could be built.
     Truncated,
+    /// The real evaluator ran every one of `total` elements here (a fold's or
+    /// comprehension generator's source list, or a comprehension's result),
+    /// but only the first `shown` were expanded into their own child trace
+    /// (ADR-0040, [`MAX_LIST_TRACE_ELEMENTS`]) — a deliberate, bounded
+    /// summary, not a truncation the node budget forced.
+    Summarized { shown: usize, total: usize },
 }
 
 /// One node of a bounded evaluation trace: a source-like rendering of a
@@ -295,6 +311,50 @@ fn render(e: &L3ExprV2) -> String {
             "{func}({})",
             args.iter().map(render).collect::<Vec<_>>().join(", ")
         ),
+        L3ExprV2::Fold {
+            op,
+            list,
+            binder,
+            body,
+        } => format!(
+            "{}({}, {binder} => {})",
+            op.name(),
+            render(list),
+            render(body)
+        ),
+        L3ExprV2::Filter { list, binder, cond } => {
+            format!("filter({}, {binder} => {})", render(list), render(cond))
+        }
+        L3ExprV2::Map { list, binder, body } => {
+            format!("map({}, {binder} => {})", render(list), render(body))
+        }
+        L3ExprV2::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => {
+            let gens = generators
+                .iter()
+                .map(|(binder, source)| format!("{binder} in {}", render(source)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let where_src = where_clause
+                .as_ref()
+                .map(|w| format!(" where {}", render(w)))
+                .unwrap_or_default();
+            format!("for {gens}{where_src} yield {}", render(yield_expr))
+        }
+        L3ExprV2::ListLit(items) => {
+            format!(
+                "[{}]",
+                items.iter().map(render).collect::<Vec<_>>().join(", ")
+            )
+        }
+        L3ExprV2::In(needle, haystack) => {
+            format!("{} in {}", render_operand(needle), render_operand(haystack))
+        }
+        L3ExprV2::Len(list) => format!("len({})", render(list)),
+        L3ExprV2::Distinct(list) => format!("distinct({})", render(list)),
     }
 }
 
@@ -315,7 +375,51 @@ fn needs_parens(e: &L3ExprV2) -> bool {
             | L3ExprV2::Cmp(..)
             | L3ExprV2::Arith(..)
             | L3ExprV2::Match { .. }
+            | L3ExprV2::In(..)
     )
+}
+
+/// A source-like rendering of a runtime value (ADR-0037, ADR-0040), used only
+/// for a bounded-summary element's own trace source (`"o = Order { ... }"`).
+/// Deliberately not shared with `crates/brix-cli`'s `fmt_value_human`:
+/// `brix-lower` cannot depend on `brix-cli`, and this rendering serves a
+/// different purpose (a `TraceNode` source string, never terminal output), so
+/// duplicating the small match is simpler than inverting that dependency.
+fn render_value(v: &L3ValueV2) -> String {
+    match v {
+        L3ValueV2::Int(n) => n.to_string(),
+        L3ValueV2::Bool(b) => b.to_string(),
+        L3ValueV2::Str(s) => render_str_literal(s),
+        L3ValueV2::Ctor { variant, args, .. } => {
+            if args.is_empty() {
+                variant.clone()
+            } else {
+                format!(
+                    "{variant}({})",
+                    args.iter().map(render_value).collect::<Vec<_>>().join(", ")
+                )
+            }
+        }
+        L3ValueV2::Record {
+            nominal_config,
+            fields,
+        } => {
+            let inner = fields
+                .iter()
+                .map(|(k, v)| format!("{k}: {}", render_value(v)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{nominal_config} {{ {inner} }}")
+        }
+        L3ValueV2::List(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(render_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 fn render_pattern(p: &L3PatternV2) -> String {
@@ -574,6 +678,187 @@ impl TraceBuilder {
                 self.build_match(e, scrutinee, arms, env, helper_depth)
             }
             L3ExprV2::Call { func, args } => self.build_call(e, func, args, env, helper_depth),
+            L3ExprV2::Fold {
+                list, binder, body, ..
+            } => self.build_fold(e, list, binder, body, env, helper_depth),
+            L3ExprV2::Filter { list, binder, cond } => {
+                self.build_sampled_list_form(e, list, binder, cond, env, helper_depth)
+            }
+            L3ExprV2::Map { list, binder, body } => {
+                self.build_sampled_list_form(e, list, binder, body, env, helper_depth)
+            }
+            L3ExprV2::Comprehension {
+                generators,
+                where_clause,
+                yield_expr,
+            } => {
+                self.build_comprehension(e, generators, where_clause, yield_expr, env, helper_depth)
+            }
+            L3ExprV2::ListLit(items) => {
+                let children: Vec<TraceNode> = items
+                    .iter()
+                    .map(|item| self.build(item, env, helper_depth))
+                    .collect();
+                TraceNode {
+                    source: render(e),
+                    outcome: self.eval_top(e, env),
+                    children,
+                    node_ref: None,
+                }
+            }
+            L3ExprV2::In(needle, haystack) => {
+                let cn = self.build(needle, env, helper_depth);
+                let ch = self.build(haystack, env, helper_depth);
+                TraceNode {
+                    source: render(e),
+                    outcome: self.eval_top(e, env),
+                    children: vec![cn, ch],
+                    node_ref: None,
+                }
+            }
+            L3ExprV2::Len(list) | L3ExprV2::Distinct(list) => {
+                let child = self.build(list, env, helper_depth);
+                TraceNode {
+                    source: render(e),
+                    outcome: self.eval_top(e, env),
+                    children: vec![child],
+                    node_ref: None,
+                }
+            }
+        }
+    }
+
+    /// Up to [`MAX_LIST_TRACE_ELEMENTS`] per-element child traces, in source
+    /// order, plus a trailing [`TraceOutcome::Summarized`] marker when
+    /// `items` holds more than that. Shared by `sum`/`count`/`all`/`any`/
+    /// `min`/`max` (ADR-0037, ADR-0040) and `filter`/`map` (ADR-0040): each
+    /// binds `binder` to one element and traces `body` under it, exactly the
+    /// environment `eval_internal_body`'s own fold/filter/map evaluation
+    /// binds.
+    fn expand_bounded_elements(
+        &mut self,
+        items: &[L3ValueV2],
+        binder: &str,
+        body: &L3ExprV2,
+        env: &EvalEnv,
+        helper_depth: usize,
+    ) -> Vec<TraceNode> {
+        let shown = items.len().min(MAX_LIST_TRACE_ELEMENTS);
+        let mut children = Vec::with_capacity(shown + 1);
+        for item in items.iter().take(shown) {
+            let elem_env = env.clone().with_local(binder.to_string(), item.clone());
+            let body_trace = self.build(body, &elem_env, helper_depth);
+            let outcome = body_trace.outcome.clone();
+            children.push(TraceNode {
+                source: format!("{binder} = {}", render_value(item)),
+                outcome,
+                children: vec![body_trace],
+                node_ref: None,
+            });
+        }
+        if items.len() > shown {
+            children.push(TraceNode {
+                source: format!("... ({} more element(s))", items.len() - shown),
+                outcome: TraceOutcome::Summarized {
+                    shown,
+                    total: items.len(),
+                },
+                children: Vec::new(),
+                node_ref: None,
+            });
+        }
+        children
+    }
+
+    fn build_fold(
+        &mut self,
+        e: &L3ExprV2,
+        list: &L3ExprV2,
+        binder: &str,
+        body: &L3ExprV2,
+        env: &EvalEnv,
+        helper_depth: usize,
+    ) -> TraceNode {
+        let list_child = self.build(list, env, helper_depth);
+        let items = match list_child.value() {
+            Some(L3ValueV2::List(items)) => Some(items.clone()),
+            _ => None,
+        };
+        let mut children = vec![list_child];
+        if let Some(items) = items {
+            children.extend(self.expand_bounded_elements(&items, binder, body, env, helper_depth));
+        }
+        TraceNode {
+            source: render(e),
+            outcome: self.eval_top(e, env),
+            children,
+            node_ref: None,
+        }
+    }
+
+    /// `filter`/`map` (ADR-0040): same bounded-element shape as
+    /// [`Self::build_fold`], over the form's *source* list — for `filter`
+    /// this is every element considered, not only the ones kept, so a reader
+    /// can see why an early element was dropped as well as why one was kept.
+    fn build_sampled_list_form(
+        &mut self,
+        e: &L3ExprV2,
+        list: &L3ExprV2,
+        binder: &str,
+        body: &L3ExprV2,
+        env: &EvalEnv,
+        helper_depth: usize,
+    ) -> TraceNode {
+        self.build_fold(e, list, binder, body, env, helper_depth)
+    }
+
+    fn build_comprehension(
+        &mut self,
+        e: &L3ExprV2,
+        generators: &[(String, L3ExprV2)],
+        where_clause: &Option<Box<L3ExprV2>>,
+        yield_expr: &L3ExprV2,
+        env: &EvalEnv,
+        helper_depth: usize,
+    ) -> TraceNode {
+        let _ = where_clause; // named in `render(e)` already.
+        let _ = yield_expr;
+        let mut children: Vec<TraceNode> = generators
+            .iter()
+            .map(|(_, source)| self.build(source, env, helper_depth))
+            .collect();
+        let outcome = self.eval_top(e, env);
+        let result_items = match &outcome {
+            TraceOutcome::Value(L3ValueV2::List(items)) => Some(items.clone()),
+            _ => None,
+        };
+        if let Some(items) = result_items {
+            let shown = items.len().min(MAX_LIST_TRACE_ELEMENTS);
+            for (index, item) in items.iter().take(shown).enumerate() {
+                children.push(TraceNode {
+                    source: format!("[{index}] = {}", render_value(item)),
+                    outcome: TraceOutcome::Value(item.clone()),
+                    children: Vec::new(),
+                    node_ref: None,
+                });
+            }
+            if items.len() > shown {
+                children.push(TraceNode {
+                    source: format!("... ({} more element(s))", items.len() - shown),
+                    outcome: TraceOutcome::Summarized {
+                        shown,
+                        total: items.len(),
+                    },
+                    children: Vec::new(),
+                    node_ref: None,
+                });
+            }
+        }
+        TraceNode {
+            source: render(e),
+            outcome,
+            children,
+            node_ref: None,
         }
     }
 

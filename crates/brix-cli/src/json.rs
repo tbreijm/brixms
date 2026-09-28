@@ -472,10 +472,21 @@ pub struct TraceNodeJson {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TraceOutcomeJson {
-    Value { value: TaggedValue },
+    Value {
+        value: TaggedValue,
+    },
     NotEvaluated,
-    Fault { detail: String },
+    Fault {
+        detail: String,
+    },
     Truncated,
+    /// A bounded-summary list form (ADR-0040): the real evaluator ran every
+    /// one of `total` elements, but only `shown` were expanded into their own
+    /// child trace node.
+    Summarized {
+        shown: usize,
+        total: usize,
+    },
 }
 
 /// Where a fact transitively read by a guard or value expression comes from.

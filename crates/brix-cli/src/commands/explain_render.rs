@@ -55,6 +55,10 @@ fn trace_outcome_to_json(outcome: &TraceOutcome) -> TraceOutcomeJson {
             detail: f.to_string(),
         },
         TraceOutcome::Truncated => TraceOutcomeJson::Truncated,
+        TraceOutcome::Summarized { shown, total } => TraceOutcomeJson::Summarized {
+            shown: *shown,
+            total: *total,
+        },
     }
 }
 
@@ -145,6 +149,9 @@ fn node_head(node: &TraceNode) -> String {
             )
         }
         TraceOutcome::Truncated => format!("{src}: truncated"),
+        TraceOutcome::Summarized { shown, total } => {
+            format!("{src} (showing {shown} of {total} elements)")
+        }
     }
 }
 
