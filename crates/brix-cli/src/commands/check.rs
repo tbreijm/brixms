@@ -2,16 +2,16 @@
 
 use std::path::{Path, PathBuf};
 
-use brix_lower::check_module;
 use brix_lower::finite_decision::{FiniteDecisionStop, FINITE_DECISION_PROFILE};
+use brix_lower::{check_module, evaluate_let_module, render_ty, LetEvalOutcome};
 use brix_syntax::ast::Item;
 
 use crate::cli::{EXIT_REJECTED_OR_UNKNOWN, EXIT_SUCCESS, EXIT_USAGE_OR_IO};
 use crate::commands::{
-    candidate_disposition_to_json, decision_to_json, fact_to_json, format_finite_decision_human,
-    render_location_snippet, unknown_reason_to_code_and_detail,
+    candidate_disposition_to_json, decision_to_json, fact_to_json, fmt_value_human,
+    format_finite_decision_human, render_location_snippet, unknown_reason_to_code_and_detail,
 };
-use crate::json::{CliResultJson, LocationJson, BRIX_CLI_SCHEMA};
+use crate::json::{to_tagged_value, BindingJson, CliResultJson, LocationJson, BRIX_CLI_SCHEMA};
 use crate::pipeline;
 
 /// Execute `brix check <file.brix> [--input <path>...]`.
@@ -83,6 +83,7 @@ pub fn execute_check(
                     decision: None,
                     artifacts: Vec::new(),
                     diagnostics: Vec::new(),
+                    bindings: None,
                     explanation: None,
                     locations: None,
                     shows: None,
@@ -220,6 +221,7 @@ pub fn execute_check(
                 decision: decision_json,
                 artifacts: Vec::new(),
                 diagnostics: Vec::new(),
+                bindings: None,
                 explanation: None,
                 locations: None,
                 shows: None,
@@ -246,20 +248,52 @@ pub fn execute_check(
         return EXIT_USAGE_OR_IO;
     }
 
-    // Classic L1/L2 module check path (check_module)
+    // Classic L1/L2 module check path (check_module). `evaluate_let_module`
+    // is a separate, additive pass over the same source (ADR-0042): it never
+    // changes `check_module`'s type-checking or grades, only adds (or
+    // explains the absence of) a value for each binding `check_module`
+    // already accepted. The two walk `resolved_module` the same way, so
+    // their result vectors line up 1:1 by position.
     let results = check_module(&resolved_module);
+    let evaluated = evaluate_let_module(&resolved_module);
     let mut had_error = false;
     let mut diagnostics = Vec::new();
     let mut locations = Vec::new();
     let mut human_lines = Vec::new();
+    let mut bindings_json = Vec::new();
 
     if results.is_empty() {
         human_lines.push("(no `let` bindings to check)".to_string());
     } else {
-        for r in &results {
+        for (r, (_, eval_outcome)) in results.iter().zip(evaluated.iter()) {
             match r {
                 Ok(cr) => {
-                    human_lines.push(format!("  {} : — @{:?}", cr.name, cr.outcome));
+                    let ty = cr
+                        .ty
+                        .as_ref()
+                        .map(render_ty)
+                        .unwrap_or_else(|| "?".to_string());
+                    let grade = format!("{:?}", cr.outcome);
+                    match eval_outcome {
+                        LetEvalOutcome::Value(v) => {
+                            let tagged = to_tagged_value(v);
+                            human_lines.push(format!(
+                                "  {} : {ty} @{grade} = {}",
+                                cr.name,
+                                fmt_value_human(v)
+                            ));
+                            bindings_json
+                                .push(BindingJson::evaluated(&cr.name, &ty, &grade, tagged));
+                        }
+                        LetEvalOutcome::NotEvaluated(reason) => {
+                            human_lines.push(format!(
+                                "  {} : {ty} @{grade} (not evaluated: {reason})",
+                                cr.name
+                            ));
+                            bindings_json
+                                .push(BindingJson::not_evaluated(&cr.name, &ty, &grade, reason));
+                        }
+                    }
                 }
                 Err((name, err)) => {
                     had_error = true;
@@ -304,6 +338,7 @@ pub fn execute_check(
             decision: None,
             artifacts: Vec::new(),
             diagnostics,
+            bindings: (!bindings_json.is_empty()).then_some(bindings_json),
             explanation: None,
             locations: (!locations.is_empty()).then_some(locations),
             shows: None,

@@ -304,6 +304,25 @@ impl DivModOpV2 {
     }
 }
 
+/// Why `/` is refused in a finite-decision program, and by [`crate::let_eval`]
+/// as the reason a `let`-lane binding that uses `/` is not evaluated
+/// (ADR-0042 — the two lanes share one meaning for every operator, so the
+/// executable fragment's exclusion of `/` is explained the same way in both
+/// places rather than by two diagnostics that could drift apart).
+///
+/// `/` is not meaningless: it means exact-to-Float division (`Int / Int →
+/// Float`) in the type-realization (`let`) lane. It is refused here because
+/// `Float` values are not admitted in a finite-decision program at all — not
+/// because the rounding is ambiguous. A program that wants an exact integer
+/// result names the rounding it wants: [`DivModOpV2::name`] lists
+/// `div_floor`, `div_ceil`, `div_half_even`, and `mod_euclid` (ADR-0035).
+pub(crate) fn division_not_admitted_reason() -> &'static str {
+    "'/' means exact-to-Float division (Int / Int -> Float) in the `let` lane; \
+     Float values are not admitted in a finite-decision program, so '/' is not \
+     admitted here either — use div_floor, div_ceil, div_half_even, or \
+     mod_euclid for an exact integer result (ADR-0035, ADR-0042)"
+}
+
 /// Apply an exact integer division or modulo.
 ///
 /// Computed in `i128` throughout, so no intermediate can overflow before the
@@ -564,13 +583,50 @@ pub fn type_of_value(v: &L3ValueV2) -> L3ValueType {
     }
 }
 
-/// Evaluation bounds (ADR-0032).
-pub const MAX_CALL_DEPTH: usize = 64;
-pub const MAX_EVAL_RECURSION_DEPTH: usize = 64;
-pub const MAX_CALL_STEPS: usize = 10_000;
+/// Evaluation bounds (ADR-0032, raised and joined by an evaluation-thread
+/// stack guarantee under ADR-0042 to admit direct and mutual helper
+/// recursion).
+///
+/// `MAX_CALL_DEPTH` is the number of simultaneously outstanding (uncompleted)
+/// [`L3ExprV2::Call`] invocations — the bound a recursive helper actually
+/// hits, e.g. `length` over a list of more than this many elements. It is
+/// the primary, user-meaningful recursion bound.
+pub const MAX_CALL_DEPTH: usize = 1_000;
+/// The bound on total `eval_internal` nesting, counting every expression
+/// form (`match`, arithmetic, field projection, …), not only calls. Each
+/// logical call level costs several of these (evaluating the scrutinee, the
+/// chosen arm, the call's own arguments, then the callee's body), so this is
+/// set well above `MAX_CALL_DEPTH` — it is a backstop against unbounded
+/// native-stack use from *any* expression shape, not the bound a program is
+/// expected to reach through calls alone.
+pub const MAX_EVAL_RECURSION_DEPTH: usize = 20_000;
+/// Total evaluation steps (ADR-0032's `tick_step`), raised so a helper
+/// recursing near `MAX_CALL_DEPTH` — each level several steps — can still
+/// complete rather than exhausting the step budget before the call-depth
+/// bound is even reached.
+pub const MAX_CALL_STEPS: usize = 200_000;
 pub const MAX_VALUE_DEPTH: usize = 128;
 pub const MAX_EVAL_VALUE_NODES: usize = 10_000;
 pub const MAX_EVAL_VALUE_BYTES: usize = 1_000_000;
+
+/// The stack size a bounded evaluation runs on (ADR-0042), independent of the
+/// calling thread's own stack.
+///
+/// **Why a dedicated thread at all.** `MAX_CALL_DEPTH`/`MAX_EVAL_RECURSION_DEPTH`
+/// above bound the *logical* nesting `eval_internal` is willing to reach, but
+/// each logical level costs several *native* stack frames. "Never a stack
+/// overflow" (ADR-0042 — a resource fault must fail closed to `Unknown`, never
+/// crash the process) cannot depend on how much stack the caller's thread
+/// happens to have: the CLI runs on the process main thread (no custom stack
+/// size), a test harness thread's default varies by platform, and an embedder
+/// is free to call in from anywhere. Rather than tune the depth bounds down to
+/// whatever the smallest thread anyone might call from could survive — which
+/// would make ordinary, obviously-terminating recursion (e.g. `length` over a
+/// few hundred elements) fail for a reason with nothing to do with the
+/// program — a bounded evaluation always runs on a freshly spawned thread with
+/// this fixed, generous stack. The budget above, not the caller's thread, is
+/// then what decides whether a program is admitted.
+const EVAL_THREAD_STACK_BYTES: usize = 256 * 1024 * 1024;
 
 /// Normalized pure function definition in L3.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -728,7 +784,10 @@ pub enum L3V2LowerError {
     DefaultArmNotAllowed,
     /// A nested constructor pattern. Not in Stage A.
     NestedPatternNotAllowed,
-    /// Division, deferred until its fault semantics are pinned.
+    /// `/` (ADR-0042): the operator has an exact meaning — `Int / Int → Float`
+    /// in the type-realization (`let`) lane — but `Float` values are not
+    /// admitted in a finite-decision program, so the operator is refused here
+    /// by name rather than silently rounded or coerced.
     DivisionNotAllowed,
     /// A float literal. v2 inherits v1's exclusion.
     FloatLiteralNotAllowed(String),
@@ -787,10 +846,7 @@ impl fmt::Display for L3V2LowerError {
             }
             Self::DefaultArmNotAllowed => write!(f, "default arm not allowed in match"),
             Self::NestedPatternNotAllowed => write!(f, "nested pattern not allowed in match"),
-            Self::DivisionNotAllowed => write!(
-                f,
-                "the '/' operator has no meaning here because it does not say                  which rounding it performs; use div_floor, div_ceil,                  div_half_even, or mod_euclid (ADR-0035)"
-            ),
+            Self::DivisionNotAllowed => write!(f, "{}", division_not_admitted_reason()),
             Self::FloatLiteralNotAllowed(lit) => write!(f, "float literal not allowed: {lit}"),
             Self::IntegerOverflow(lit) => write!(f, "integer literal overflow: {lit}"),
             Self::Unsupported(feature) => write!(f, "unsupported feature: {feature}"),
@@ -808,7 +864,10 @@ impl fmt::Display for L3V2LowerError {
                 write!(f, "duplicate match pattern binder: '{name}'")
             }
             Self::ListFormShape { form, detail } => {
-                write!(f, "'{form}' requires the form '{form}(list, x => expr)': {detail}")
+                write!(
+                    f,
+                    "'{form}' requires the form '{form}(list, x => expr)': {detail}"
+                )
             }
             Self::LambdaNotAllowed => write!(
                 f,
@@ -2005,13 +2064,49 @@ impl EvalBudget {
 /// Operands evaluate **left to right**, which is ABI: it fixes which fault a
 /// program with two faulty operands reports.
 pub fn eval(e: &L3ExprV2, env: &EvalEnv) -> Result<L3ValueV2, EvalFault> {
-    let mut budget = if env.functions.is_empty() && env.schemas.is_empty() && !expr_has_list_form(e)
-    {
-        None
-    } else {
-        Some(EvalBudget::default())
-    };
-    eval_internal(e, env, &mut budget, None)
+    if env.functions.is_empty() && env.schemas.is_empty() && !expr_has_list_form(e) {
+        // No helpers in scope and no list/relational form anywhere in `e`:
+        // nothing here can recurse through a `Call`, and there is no
+        // cartesian-product-shaped multiplier either, so the fast, unbudgeted
+        // path this profile has always used is unchanged.
+        let mut budget = None;
+        return eval_internal(e, env, &mut budget, None);
+    }
+    // See `EVAL_THREAD_STACK_BYTES`: a helper may recurse (ADR-0042), so
+    // evaluation runs on a dedicated, generously sized stack rather than
+    // trusting the caller's thread — the budget decides admission, not the
+    // native stack.
+    std::thread::scope(|scope| {
+        let spawned = std::thread::Builder::new()
+            .stack_size(EVAL_THREAD_STACK_BYTES)
+            .spawn_scoped(scope, move || {
+                let mut budget = Some(EvalBudget::default());
+                eval_internal(e, env, &mut budget, None)
+            });
+        let handle = match spawned {
+            Ok(h) => h,
+            // Spawning a thread can fail under real resource exhaustion (the
+            // OS refused). That is itself a resource limit, so it is reported
+            // the same way any other evaluation resource fault is — never a
+            // panic.
+            Err(_) => {
+                return Err(EvalFault::ResourceExhausted {
+                    limit: EVAL_THREAD_STACK_BYTES,
+                    detail: "could not spawn the bounded evaluation thread".to_string(),
+                })
+            }
+        };
+        // `join` catches a panic in the spawned thread rather than
+        // propagating it; `eval_internal` is total (every path returns a
+        // `Result`) so a panic here would itself be a defect, not an expected
+        // outcome — reported as a fault rather than re-panicking the caller.
+        handle.join().unwrap_or_else(|_| {
+            Err(EvalFault::ResourceExhausted {
+                limit: MAX_EVAL_RECURSION_DEPTH,
+                detail: "the bounded evaluation thread panicked".to_string(),
+            })
+        })
+    })
 }
 
 /// Whether `e` reaches a list/relational form anywhere in its tree

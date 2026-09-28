@@ -331,6 +331,7 @@ pub fn execute_why_or_whynot(
             decision: decision_json,
             artifacts: Vec::new(),
             diagnostics: vec![explanation_text],
+            bindings: None,
             explanation: explanation_json,
             locations: None,
             shows: None,

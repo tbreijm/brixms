@@ -12,6 +12,15 @@ supersedes this slice's refusal of nominal record and sum annotations with
 full schema validation. The original scalar contract below records the
 boundary of the function-only milestone.
 
+[ADR-0042](ADR-0042_One_Evaluator.md) supersedes this slice's refusal of
+direct and mutual recursion (the "Direct and mutual recursion are rejected"
+sentence below): a helper may now call itself or call through a cycle of
+other helpers, with termination made the shared evaluator's call-depth and
+work-budget bounds' responsibility rather than a lowering-time refusal. The
+call-and-scope contract below is otherwise unchanged — recursion did not
+relax anything else this slice established (closures, global-state access,
+argument evaluation order, or the type/evidence contract).
+
 ## Motivation
 
 The frontend already parses pure `fn` helpers, but finite-decision lowering

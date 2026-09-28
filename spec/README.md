@@ -5,7 +5,7 @@ the **normative contracts** (`SOC_Semantic_Laws.md`,
 `Type_Realization_Contract.md`), and the **archive** of superseded plans and
 specifications. There is no single current language-specification document —
 the language surface is defined by the accepted ADRs (see "Reading order"
-below and ADR-0030 through ADR-0041).
+below and ADR-0030 through ADR-0042).
 
 ## Reading order (start here)
 
@@ -80,12 +80,14 @@ spec/
   adr/
     ADR-0001_Proof_Substrate.md ← superseded-in-part (frozen §§4–5–7 survive)
     ADR-0002_SOC_Constitution.md← CURRENT constitution
-    ADR-0030 .. ADR-0041        ← the current language-surface ADRs (finite-
+    ADR-0030 .. ADR-0042        ← the current language-surface ADRs (finite-
                                    decision alpha, external inputs, functions,
                                    structured inputs, Boolean ops, integer
                                    division, unary minus, bounded lists,
-                                   finite relations, persistent knowledge base —
-                                   check each one's own Status line)
+                                   finite relations, inferred dependencies,
+                                   multiple commit pools, persistent knowledge
+                                   base, one evaluator — check each one's own
+                                   Status line)
   Build_Plan_v3_SOC.md          ← CURRENT master plan
   Next_Steps.md                 ← immediate actions
   Issue_Disposition_2026-07.md  ← issue re-classification + new issues

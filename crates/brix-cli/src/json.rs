@@ -91,6 +91,13 @@ pub struct CliResultJson {
     pub decision: Option<DecisionJson>,
     pub artifacts: Vec<ArtifactJson>,
     pub diagnostics: Vec<String>,
+    /// `let`-lane `brix check` output only (ADR-0042): one entry per checked
+    /// `let`/`witness` binding, additive and omitted everywhere else
+    /// (finite-decision `check`/`run`/`audit`/`verify`/`why`/`whynot`, and a
+    /// failed `let`-lane check keep the exact field set they had before this
+    /// existed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bindings: Option<Vec<BindingJson>>,
     /// Structured `why`/`whynot` derivation explanation (additive; ADR-0030).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explanation: Option<ExplanationJson>,
@@ -146,6 +153,7 @@ impl CliResultJson {
             decision,
             artifacts,
             diagnostics,
+            bindings: None,
             explanation: None,
             locations: None,
             shows: None,
@@ -177,6 +185,7 @@ impl CliResultJson {
             decision: None,
             artifacts: Vec::new(),
             diagnostics,
+            bindings: None,
             explanation: None,
             locations: None,
             shows: None,
@@ -192,6 +201,12 @@ impl CliResultJson {
     ) -> Self {
         self.input_snapshot = input_snapshot;
         self.inputs = inputs;
+        self
+    }
+
+    /// Attach `let`-lane per-binding check results (ADR-0042).
+    pub fn with_bindings(mut self, bindings: Option<Vec<BindingJson>>) -> Self {
+        self.bindings = bindings;
         self
     }
 
@@ -247,6 +262,55 @@ impl InputJson {
             value,
             ordinal: ordinal.to_string(),
             grade: grade.into(),
+        }
+    }
+}
+
+/// One checked `let`/`witness` binding in the `let`-lane `brix check` output
+/// (ADR-0042): its inferred type and earned grade always come from type
+/// realization; `value` is present only when the binding's expression (and
+/// every helper it calls) lies in the exact executable fragment the shared
+/// evaluator covers, and `not_evaluated` names the reason otherwise. Exactly
+/// one of `value`/`not_evaluated` is present — evaluation never guesses.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct BindingJson {
+    pub name: String,
+    pub ty: String,
+    pub grade: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<TaggedValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_evaluated: Option<String>,
+}
+
+impl BindingJson {
+    pub fn evaluated(
+        name: impl Into<String>,
+        ty: impl Into<String>,
+        grade: impl Into<String>,
+        value: TaggedValue,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            ty: ty.into(),
+            grade: grade.into(),
+            value: Some(value),
+            not_evaluated: None,
+        }
+    }
+
+    pub fn not_evaluated(
+        name: impl Into<String>,
+        ty: impl Into<String>,
+        grade: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            ty: ty.into(),
+            grade: grade.into(),
+            value: None,
+            not_evaluated: Some(reason.into()),
         }
     }
 }

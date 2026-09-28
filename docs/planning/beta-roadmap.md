@@ -64,59 +64,62 @@ or tell you what changed when a fact does. That is the beta gap.
 
 ---
 
-## Milestone: One language
+## Milestone: One language — largely landed (ADR-0042)
 
-**Problem.** The `let` lane (`check_module`) and the finite-decision lane
-(`lower_finite_decision_plan`) currently accept different fragments of what
-looks like the same expression grammar, for reasons that are historical
-(each fragment grew to serve its own profile) rather than semantic. Three
-concrete splits, all verified in [`docs/brix-language.md`](../brix-language.md#known-inconsistencies-between-the-lanes):
+**Resolution.** [ADR-0042](../../spec/adr/ADR-0042_One_Evaluator.md) gave the
+`let` lane and the finite-decision lane one shared evaluator
+(`brix_lower::l3_v2::eval`) for the fragment both admit, and answered the
+open design questions below: **yes**, the `let` lane now runs
+(`brix_lower::evaluate_let_module` computes a value for every binding in the
+exact executable fragment, printed by `brix check` as `name : Type @Grade =
+value`, or `(not evaluated: …)` with the specific reason otherwise — never a
+guess); recursion and generic configs are admitted and evaluated identically
+in both lanes (a config's type parameters are erased for evaluation, exactly
+like the values they never constrained in the first place); and the
+profile-specific restrictions that remain (`Float`, witness composition, and
+a generic type in a finite-decision schema/contract) are named, documented
+profile choices — see
+[`docs/brix-language.md`](../brix-language.md#what-still-differs-between-the-lanes)
+— not silent disagreements between two otherwise-identical-looking
+expression languages. Canonical identity for every program that did not use
+the newly-admitted forms is unchanged (verified against `examples/*.brix`
+program/context ids and the frozen program-id regression tests in
+`crates/brix-lower/tests/finite_decision_functions.rs`); a generic config
+declaration is now additionally bound into a finite-decision program's
+identity (a new, additive preimage section, empty and therefore
+byte-identical for every program that declares none).
 
-- `/` is `Int / Int → Float` field-of-fractions division in the `let` lane,
-  and refused outright in the finite-decision lane (which instead offers
-  `div_floor`/`div_ceil`/`div_half_even`/`mod_euclid`, refused in turn in the
-  `let` lane).
-- Recursive `fn` and generic/recursive configs (`List<T>`) type-check in the
-  `let` lane and are refused in the finite-decision lane
-  (`FunctionCycle`, `"generic configs are unsupported"`).
-- `&&`/`\|\|`/`!` work only in the finite-decision lane; `then`/`and`
-  (witness composition) work only in the `let` lane (`brix-lower/src/l3.rs`
-  still carries `WitnessCompositionNotAllowed` for the L3 path, per
-  `docs/planning/language-usability-issue-drafts.md` item 3).
+What the original three splits below became:
 
-**Direction.** One shared checker and evaluator for one expression language,
-used by every profile. A profile restricts what is *allowed* — bounds,
-termination, which items may appear — never what things *mean*. The `/`
-split, "recursion and generics only outside the executing lane," and "the
-`let` lane never produces a runtime value" should each become an explicit,
-documented profile restriction on one language, not a second language that
-happens to share syntax.
+- `/` still means one thing everywhere (`Int / Int → Float`), and is still
+  refused in the finite-decision lane — because `Float` itself is not
+  admitted there, not because `/`'s meaning is unclear. Both diagnostics
+  (the finite-decision refusal, and the `let` lane's "not evaluated" reason)
+  now say so in the same words and name the same replacements
+  (`div_floor`/`div_ceil`/`div_half_even`/`mod_euclid`).
+- Recursive `fn` and generic configs are admitted and evaluate identically
+  in both lanes now (ADR-0042 supersedes ADR-0032's `FunctionCycle`
+  refusal and the finite-decision lane's blanket "generic configs are
+  unsupported"); a generic config is still refused specifically in an
+  `input`/helper-contract schema, with a diagnostic naming why (type
+  parameters are erased, so there is no payload shape left to validate).
+- `&&`/`\|\|`/`!` still work only in the finite-decision lane (the `let`
+  lane's own type-realization grammar has no Boolean-operator rule yet —
+  unlike the other two splits, this one was never about the shared
+  evaluator); `then`/`and` (witness composition) still work only in the
+  `let` lane, and the shared evaluator still has no value for a composed
+  witness, so a `let`-lane `then`/`and` binding type-checks but is not
+  evaluated.
 
-**Open design questions.**
-
-- Does unifying the grammar change canonical program identity for existing
-  finite-decision programs? (Likely yes for some cases — e.g. if `/`
-  becomes meaningful there — so this is ADR territory, not a patch.)
-- Where do the profile-specific restrictions live: as a single grammar with
-  a profile-parameterized checker, or as a shared core IR that each profile's
-  checker restricts before evaluating?
-- Does the `let` lane gain the ability to *run* (produce a value), or does
-  "checks a type and grade, never a value" become its permanent, documented
-  restriction — with values only ever produced by an executing profile?
-
-**Acceptance criteria.**
-
-- A single written decision (ADR) on which lane's behavior is authoritative
-  for each of the three splits above, or an explicit statement that both
-  behaviors are intentional and permanent, with the profile boundary that
-  makes them so named in the grammar/checker, not left implicit in two
-  separate code paths that happen to diverge.
-- `crates/brix-lower/tests/doc_snippets.rs` (or its successor) still passes
-  with fewer "known inconsistency" fragments than it has today — the
-  fragments existing because the lanes really disagree, not because the
-  documentation is being generous.
-- No silent change to any existing program's canonical identity; a
-  deliberate change to identity is versioned and stated as such.
+**Still open** (deliberately out of this milestone's scope): giving the
+`let` lane's own type-realization grammar `&&`/`\|\|`/`!` (a checker-side
+gap, not an evaluator one); admitting `Float` or witness composition into
+the finite-decision lane's expression grammar at all (a profile-scope
+decision, not a mechanical follow-on); and reconciling the relations
+milestone's built-in `List<T>` name with a user's ability to declare a
+same-named config (currently: the built-in wins in every type position,
+which is confusing rather than unsound — see
+`docs/brix-language.md`'s note on `Stack<T>`/`Tree<T>`).
 
 ---
 

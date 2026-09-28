@@ -269,6 +269,7 @@ pub fn execute_run(
             decision: decision_json,
             artifacts: Vec::new(),
             diagnostics,
+            bindings: None,
             explanation: None,
             locations: None,
             shows: shows_json,

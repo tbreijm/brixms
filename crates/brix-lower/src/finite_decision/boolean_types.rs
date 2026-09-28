@@ -6,7 +6,7 @@
 //! records when a helper duplicates an argument. Work and recursion are bounded
 //! separately from the evaluator, including visits through shared shapes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::plan::{FiniteDecisionLowerError as Error, FiniteDecisionPlan, MAX_EXPR_DEPTH};
@@ -78,6 +78,17 @@ struct Checker<'a> {
     plan: &'a FiniteDecisionPlan,
     configs: BTreeMap<&'a str, &'a ast::ConfigBody>,
     remaining: usize,
+    /// Helper names whose body is currently being expanded on this path
+    /// (ADR-0042). A helper may now recurse, directly or mutually, so
+    /// expanding `Expr::Call` by re-walking the callee's body — as this
+    /// static pass does — would otherwise unfold a genuinely recursive
+    /// helper forever (bounded only by the depth/work charge, and only after
+    /// wastefully re-deriving the same shape at every level). A call back
+    /// into a helper already on this stack is resolved from its declared
+    /// return contract (or `Unknown`) instead of re-entered: this pass is a
+    /// static shape approximation, not the evaluator, and termination of the
+    /// *program* is the evaluator's call-depth/work budget, not this one.
+    active: BTreeSet<String>,
 }
 
 impl Checker<'_> {
@@ -334,7 +345,9 @@ impl Checker<'_> {
                 Arc::new(Type::Either(result))
             }
             Expr::Call { func, args } => {
-                // Lowering has already checked arity, resolution and cycles.
+                // Lowering has already checked arity and resolution; a cycle
+                // in the call graph is admitted (ADR-0042) rather than
+                // rejected here.
                 let function = self.plan.find_function(func).expect("resolved helper");
                 let mut locals = Env::new();
                 for (param, arg) in function.params.iter().zip(args) {
@@ -348,12 +361,24 @@ impl Checker<'_> {
                             .unwrap_or(shape),
                     );
                 }
-                let body = self.expr(&function.body, &locals, next)?;
+                // A call back into a helper already being expanded on this
+                // path: recursion terminates at runtime (or fails closed to
+                // `Unknown` at the evaluator's depth/work bound), not in this
+                // static approximation, so it is not re-entered here.
+                if !self.active.insert(func.clone()) {
+                    return Ok(function
+                        .ret_contract
+                        .as_ref()
+                        .map(|c| known(c.ty.clone()))
+                        .unwrap_or_else(unknown));
+                }
+                let body = self.expr(&function.body, &locals, next);
+                self.active.remove(func);
                 function
                     .ret_contract
                     .as_ref()
                     .map(|c| known(c.ty.clone()))
-                    .unwrap_or(body)
+                    .unwrap_or(body?)
             }
             Expr::ListLit(_)
             | Expr::Fold { .. }
@@ -491,6 +516,7 @@ pub(super) fn check(plan: &FiniteDecisionPlan, module: &ast::Module) -> Result<(
         plan,
         configs,
         remaining: MAX_ANALYSIS_WORK,
+        active: BTreeSet::new(),
     };
     for function in &plan.functions {
         let locals = function

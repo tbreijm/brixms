@@ -392,6 +392,7 @@ pub fn execute_audit(
             decision: decision_json,
             artifacts: vec![artifact],
             diagnostics: Vec::new(),
+            bindings: None,
             explanation: None,
             locations: None,
             shows: None,

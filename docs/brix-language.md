@@ -25,16 +25,16 @@ binding is type-checked on its own.
 | | The `let` lane | The finite-decision lane |
 |---|---|---|
 | Triggered by | no `propose`/`commit`/`input` items | any `propose`, `commit`, or `input` item |
-| Implementation | `brix_lower::check_module` | `brix_lower::finite_decision::lower_finite_decision_plan`, then the finite-decision runtime for `run`/`audit`/`verify`/`why`/`whynot` |
-| Produces | a name + evidence-grade judgement per `let` binding, no value | a settled `@Derived` decision, with facts and candidate dispositions |
-| `brix run` | not applicable — the lane only checks, it never executes | executes the plan to completion |
-| Recursive `fn` | allowed, with mandatory type annotations, capped at `@Audited` | refused (`FunctionCycle`) |
-| Generic/recursive configs (e.g. `List<T>`) | allowed | refused (`invalid schema '…': generic configs are unsupported`) |
-| `&&`, `\|\|`, `!` | refused (`Unsupported("… not in L2-first fragment")`) | supported (ADR-0034) |
-| `div_floor`/`div_ceil`/`div_half_even`/`mod_euclid` | refused (`Unresolved(…)`) | supported (ADR-0035) |
-| `/` | `Int / Int → Float` (field-of-fractions division) | refused (`DivisionNotAllowed`; use the four named operations above) |
+| Implementation | `brix_lower::check_module` for typing, `brix_lower::evaluate_let_module` for values — both lower onto the same `L3ExprV2`/`eval` the finite-decision lane uses (ADR-0042) | `brix_lower::finite_decision::lower_finite_decision_plan`, then the finite-decision runtime for `run`/`audit`/`verify`/`why`/`whynot` |
+| Produces | a name, an evidence-grade judgement, **and** — when the binding's expression is in the exact executable fragment — its value, per `let` binding | a settled `@Derived` decision, with facts and candidate dispositions |
+| `brix run` | not applicable — the lane only checks, it never executes a *program*; `brix check` itself now evaluates each binding | executes the plan to completion |
+| Recursive `fn` | type-checks (capped at `@Audited`) *and* evaluates, bounded by the same call-depth/work budget as the finite-decision lane (ADR-0042, superseding ADR-0032's refusal) | admitted and evaluated the same way; a non-terminating call chain faults closed to `Unknown`, never a lowering error and never a stack overflow |
+| Generic configs (e.g. `Stack<T>`) | type-checks *and* evaluates — type parameters are erased for evaluation, a value is just a nominal constructor/record | evaluates as an internal value the same way; still refused in an `input` declaration or a helper's parameter/return contract (type parameters leave nothing to validate a payload against) |
+| `&&`, `\|\|`, `!` | refused (`Unsupported("… not in L2-first fragment")`) — not yet in the type-realization checker's own grammar | supported (ADR-0034) |
+| `div_floor`/`div_ceil`/`div_half_even`/`mod_euclid` | refused (`Unresolved(…)`) — same reason | supported (ADR-0035) |
+| `/` | one meaning everywhere: `Int / Int → Float` (field-of-fractions division). The `let` lane type-checks it (capped at `@Audited`) but does not evaluate it — `Float` is outside the shared evaluator's exact executable fragment, so `brix check` reports the type/grade with a reason instead of a value | refused outright (`DivisionNotAllowed`), with a diagnostic naming why (`Float` is not admitted in a finite-decision program) and the four named replacements above |
 | unary `-` | supported | supported (ADR-0036) |
-| `then`/`and` (witness composition) | supported | not part of the finite-decision expression grammar |
+| `then`/`and` (witness composition) | type-checks; not evaluated (outside the shared evaluator's fragment — it is witness composition, not a value operation) | not part of the finite-decision expression grammar |
 | external `input` declarations | not supported | the whole point (ADR-0031, ADR-0033) |
 
 The finite-decision lane is not a superset or subset of the `let` lane — it
@@ -42,10 +42,17 @@ is a separate, deliberately bounded execution profile
 (`brix.l3.finite-decision@1`,
 [ADR-0030](../spec/adr/ADR-0030_Finite_Decision_Alpha.md)) built for a
 different job: settling one bounded decision instead of type-checking
-arbitrary bindings. But the two lanes do currently disagree on what looks
-like the same expression grammar, and that is real, current behavior worth
-stating plainly rather than discovering by trial and error — see "Known
-inconsistencies between the lanes" near the end of this document.
+arbitrary bindings, and it keeps its own restrictions (no `Float`, no
+witness composition, generic types refused in schemas/contracts). What
+changed under [ADR-0042](../spec/adr/ADR-0042_One_Evaluator.md) is that
+those restrictions are now *profile* choices about which programs a lane
+admits, not two different meanings for the same expression: one evaluator
+(`brix_lower::l3_v2::eval`) computes every value either lane produces, so
+`+`, `match`, a constructor, a recursive call, or a generic config's
+erasure means exactly the same thing wherever it is admitted. What still
+genuinely differs between the lanes — `Float`, witness composition,
+generic types in a contract, and where the *grade* comes from — is listed
+in "What still differs between the lanes" near the end of this document.
 
 ---
 
@@ -56,21 +63,26 @@ brix check <file.brix>
 ```
 
 For a module with no `propose`/`commit`/`input` item, `brix check` parses the
-source, lowers it onto native type-realization expressions, and type-checks
-each top-level `let` binding. For each one it prints:
+source, lowers it onto native type-realization expressions, type-checks each
+top-level `let` binding, and — separately, through the same evaluator the
+finite-decision lane uses (ADR-0042) — evaluates it. For each binding it
+prints:
 
 ```text
-  name : — @Grade
+  name : Type @Grade = value
 ```
 
-The `—` is not a placeholder that happens to be empty in these examples: the
-CLI does not print the inferred type on this line today (the type is
-computed — `brix_lower::CheckResult::ty` carries it — but `brix check`'s
-human-readable output never renders it; see
-`crates/brix-cli/src/commands/check.rs`). The type is checked, just not
-echoed.
+The type comes from type realization and is always printed now
+(`brix_lower::CheckResult::ty`, rendered by `brix_lower::render_ty`); earlier
+CLI builds computed the type but never rendered it on this line, printing a
+bare `—` instead — that was the placeholder, not a documented feature. The
+value comes from a *second*, additive pass (`brix_lower::evaluate_let_module`)
+that changes nothing about the type or the grade: when a binding's expression
+lies outside the exact executable fragment the shared evaluator covers (or
+depends on one that does), `brix check` prints the reason instead of a value
+— `name : Type @Grade (not evaluated: …)` — rather than ever guessing one.
 
-### Literals earn `@Proven`
+### Literals earn `@Proven` and evaluate
 
 ```brix
 let x = 42
@@ -81,10 +93,15 @@ let f = 3.14
 Output of `brix check`:
 
 ```text
-  x : — @Proven
-  s : — @Proven
-  f : — @Proven
+  x : Int @Proven = 42
+  s : Str @Proven = "hi"
+  f : Float @Proven (not evaluated: a Float value is outside the exact executable fragment (Float is admitted only by the type-realization checker, never by the shared evaluator))
 ```
+
+`f` type-checks and earns `@Proven` exactly as `x` and `s` do — evaluability
+never affects the grade. It has no value line because `Float` is outside the
+fragment the shared evaluator (`brix_lower::l3_v2::eval`) covers in *either*
+lane (see the two-lanes table above).
 
 ### Composite expressions earn their weakest leaf grade
 
@@ -101,15 +118,16 @@ let r = double(2)
 Output of `brix check`:
 
 ```text
-  c : — @Audited
-  p : — @Proven
-  v : — @Proven
-  r : — @Audited
+  c : Int @Audited = 3
+  p : {a: Int, b: Int} @Proven = Item { a: 1, b: 2 }
+  v : Int @Proven = 1
+  r : Int @Audited = 4
 ```
 
 `c` and `r` are capped at `@Audited` because arithmetic's primitive typing
 generator is not yet kernel-discharged (see "Epistemic grades and honest
-status" below) — not because anything about the expression is in doubt.
+status" below) — not because anything about the expression is in doubt, and
+not because it failed to evaluate: it evaluated to `4`, at `@Audited`.
 
 A record literal's fields are checked against a declared `config Name = {
 … }` of the same name **if one exists**; `p` above has no declared `config
@@ -157,24 +175,32 @@ The current `let`-lane fragment supports:
   through the grade lattice; strengthening beyond the earned grade is
   rejected as epistemic erasure.
 
-Parallel composition, always `@Proven` for two already-proven operands:
+Parallel composition, always `@Proven` for two already-proven operands, but
+not evaluated — witness composition is not a value operation the shared
+evaluator has any meaning for:
 
 ```brix
 let pair = 1 and "x"
 ```
 
 ```text
-  pair : — @Proven
+  pair : (Int and Str) @Proven (not evaluated: witness composition ('then'/'and') is outside the exact executable fragment)
 ```
 
 ### Recursive functions
 
-Commit `a9eb98f` added real recursion to the `let` lane: a definition's own
-declared type is bound (`Expr::Fix`) while checking its body, so a recursive
-call is a hypothesis lookup rather than an attempt to inline a copy of the
-body forever. Both direct and mutual recursion work, and both parameter and
-return types must be **declared** — they cannot be inferred from a body that
-mentions the name(s) being defined.
+Commit `a9eb98f` added real recursion to the `let` lane's *type checker*: a
+definition's own declared type is bound (`Expr::Fix`) while checking its
+body, so a recursive call is a hypothesis lookup rather than an attempt to
+inline a copy of the body forever. Both direct and mutual recursion
+type-check, and both parameter and return types must be **declared** — they
+cannot be inferred from a body that mentions the name(s) being defined.
+[ADR-0042](../spec/adr/ADR-0042_One_Evaluator.md) gave recursion a second,
+independent path through the *evaluator*: `evaluate_let_module` lowers `fn`
+declarations onto genuine (non-inlined) calls through `l3_v2::eval`, the same
+mechanism the finite-decision lane now uses for its own recursive helpers, so
+a terminating recursive `let`-lane function evaluates to a real value instead
+of stopping at a type:
 
 ```brix
 config Nat = Z | S(Nat)
@@ -195,15 +221,21 @@ let r = is_even(four)
 ```
 
 ```text
-  four : — @Proven
-  r : — @Audited
+  four : Nat[S(Nat)] @Proven = S(S(S(S(Z))))
+  r : Parity @Audited = IsEven
 ```
 
 `r` is capped at `@Audited`, and that cap is structural, not a bug to fix:
 the recursive-typing rule (`g_fix`) *assumes* the very obligation it is
 checking, which is the standard sound rule for a **typing** judgement but not
-one the kernel can independently discharge. A typing judgement never claims
-the function terminates, either — so this type-checks, correctly:
+one the kernel can independently discharge — and evaluating `r` to `IsEven`
+does not change that; evaluation never moves a grade. A typing judgement
+never claims the function terminates, either, so a non-terminating recursive
+function still type-checks — but now it evaluates honestly to "not
+evaluated" instead of silently having no value line at all: the shared
+evaluator's call-depth bound (ADR-0042, the same one the finite-decision lane
+runs under) catches it and reports why, rather than hanging or overflowing
+the stack:
 
 ```brix
 fn loop(x: Int): Int = loop(x)
@@ -212,7 +244,7 @@ let r = loop(1)
 ```
 
 ```text
-  r : — @Audited
+  r : Int @Audited (not evaluated: exceeded the evaluator's recursion depth bound)
 ```
 
 Leaving out an annotation on a recursive definition is refused by name
@@ -352,7 +384,7 @@ Three source extensions widen what a finite-decision program's rule bodies,
 proposal guards, and proposal values can express, without turning any of
 them into settlement rules, witness generators, or a new evidence authority.
 
-### Pure, nonrecursive helpers (ADR-0032)
+### Pure helpers, including recursive ones (ADR-0032, ADR-0042)
 
 ```brix
 fn enough(available: Int, needed: Int): Bool = available >= needed
@@ -367,8 +399,40 @@ commit shipping from (ship)
 
 Helpers take their data explicitly as arguments — inputs, global `let`s, and
 rule facts are **not** captured from the surrounding module — and evaluate
-arguments once, left to right, including unused ones. Recursive calls are
-rejected here (`FunctionCycle`), unlike in the `let` lane.
+arguments once, left to right, including unused ones.
+
+A helper may call itself, or call through a cycle of other helpers
+([ADR-0042](../spec/adr/ADR-0042_One_Evaluator.md), superseding ADR-0032's
+outright refusal of a call-graph cycle):
+
+```brix
+config Decision = Done
+
+fn countdown(x: Int): Int = match x == 0 {
+  true => 0
+  false => countdown(x - 1)
+}
+
+rule r() = countdown(5)
+propose p(r) priority 10 when r == 0 = Done
+commit c from (p)
+```
+
+```text
+facts:
+  r: 0 @Derived
+candidates:
+  p: selected (priority 10) — selected: minimal calendar key
+decision: p = Done @Derived
+status: selected
+```
+
+(`program`/`context` hex ids omitted, as elsewhere in this document.)
+Termination is not assumed: a call chain that does not terminate faults
+closed to `Unknown` at the same call-depth/work-budget bound described in
+"Recursive functions" above, rather than hanging the CLI or overflowing the
+native stack — see `crates/brix-lower/tests/finite_decision_recursion.rs` for
+the budget-exhaustion and past-the-bound cases.
 
 ### Short-circuiting `&&`, `||`, `!` (ADR-0034)
 
@@ -559,23 +623,34 @@ let mixed = 1 + 2.5
 ```
 
 ```text
-  ratio : — @Audited
-  mixed : — @Audited
+  ratio : Float @Audited (not evaluated: '/' means exact-to-Float division (Int / Int -> Float) in the `let` lane; Float values are not admitted in a finite-decision program, so '/' is not admitted here either — use div_floor, div_ceil, div_half_even, or mod_euclid for an exact integer result (ADR-0035, ADR-0042))
+  mixed : Float @Audited (not evaluated: a Float value is outside the exact executable fragment (Float is admitted only by the type-realization checker, never by the shared evaluator))
 ```
 
+Both type-check — `/` genuinely means `Int / Int → Float` here, and mixed
+arithmetic genuinely coerces — but neither evaluates, because `Float` is
+outside the shared evaluator's exact executable fragment in either lane.
 Remember that this `/` is the `let`-lane one: the finite-decision lane
-refuses `/` outright (see §3 above).
+refuses the *operator* outright (see §3 above), with a diagnostic that names
+the same reason `ratio`'s "not evaluated" note does.
 
 ---
 
-## Known inconsistencies between the lanes
+## What still differs between the lanes
 
-These are current, real behaviors — not typos in this document — surfaced by
-running the CLI, kept here so nobody has to rediscover them by trial and
-error. `spec/Next_Steps.md` tracks reconciling them.
+[ADR-0042](../spec/adr/ADR-0042_One_Evaluator.md) moved the lanes onto one
+evaluator (`brix_lower::l3_v2::eval`) for the fragment both admit: arithmetic,
+comparison, records, sums, `match`, and — new under that ADR — recursive
+calls and generic configs (their type parameters erased at evaluation, since
+a value is a nominal constructor/record either way). What remains different
+is real, current behavior surfaced by running the CLI, kept here so nobody
+has to rediscover it by trial and error, and it comes down to what each
+*profile* admits at all, not what an admitted expression means.
 
 - **`&&`, `||`, `!` and the four division built-ins only work in the
-  finite-decision lane.** The same syntax is refused in the `let` lane:
+  finite-decision lane.** The type-realization checker's own grammar does not
+  parse them into an operator the `let` lane's `lower_expr` handles yet — this
+  is a gap in that checker, not the shared evaluator refusing them:
 
   <!-- brix-snippet: fragment -->
   ```brix
@@ -589,22 +664,28 @@ error. `spec/Next_Steps.md` tracks reconciling them.
     c: not checked: Unresolved("div_floor")
   ```
 
-- **`/` means different things in the two lanes**: `Int / Int → Float`
-  division in the `let` lane, `DivisionNotAllowed` in the finite-decision
-  lane (which names `div_floor`/`div_ceil`/`div_half_even`/`mod_euclid` as
-  the replacement in its own diagnostic).
+- **`Float` and witness composition (`then`/`and`) exist only in the `let`
+  lane, by profile design, not by omission.** The finite-decision lane
+  refuses them outright (`DivisionNotAllowed` for `/`, which is exact-to-Float
+  division and therefore inadmissible where `Float` itself is inadmissible;
+  witness composition is not part of the finite-decision expression grammar
+  at all). The `let` lane admits both for *type-checking* — `/` earns
+  `@Audited`, `then`/`and` earn a grade from their operands — but the shared
+  evaluator still cannot compute a `Float` or a composed-witness value in
+  *either* lane, so `brix check` reports `(not evaluated: …)` for them there
+  too (§1 above has worked examples of both).
 
-- **Recursion and generic configs work in the `let` lane and are refused in
-  the finite-decision lane.** A generic config used anywhere in a
-  finite-decision module's schemas — even just as a helper's parameter
-  type — is refused outright:
+- **A generic config is still refused in a finite-decision `input` or helper
+  contract**, even though it evaluates fine as a plain value in both lanes
+  now — a declared type parameter leaves nothing for a schema to validate a
+  payload against:
 
   <!-- brix-snippet: fragment -->
   ```brix
-  config List<T> = Nil | Cons(T, List<T>)
+  config Stack<T> = Nil | Cons(T, Stack<T>)
   config Decision = Yes | No
 
-  fn head_or(xs: List<Int>, fallback: Int): Int = match xs {
+  fn head_or(xs: Stack<Int>, fallback: Int): Int = match xs {
     Nil => fallback
     Cons(h, _) => h
   }
@@ -617,20 +698,35 @@ error. `spec/Next_Steps.md` tracks reconciling them.
   ```
 
   ```text
-  brix check: rejected: lowering error: invalid schema 'List': generic configs are unsupported
+  brix check: rejected: lowering error: invalid schema 'Stack': a generic config (ADR-0042) may be used as an internal value, but cannot be validated as an input or helper-contract schema: type parameters are erased at evaluation, so there is nothing left to check a payload against
   ```
 
-  A directly self-recursive helper is refused the same way, by a dedicated
-  error naming the cycle:
+  Drop the `: Stack<Int>` contract (or use the config only as an internal,
+  unannotated value, as the runnable example in §1's "Recursive functions"
+  does with `Nat`/`Parity`) and the same program runs to a decision in either
+  lane. Note also that `List<T>` itself is no longer a name available for a
+  user-declared generic config in the finite-decision lane: `List<T> max N`
+  is now a reserved, built-in bounded-list input type there (§4) — a
+  user config named `List` is a distinct declaration from that built-in,
+  and a type-position `List<...>` always resolves to the built-in, so
+  declaring one is confusing at best. `Stack<T>`/`Tree<T>` (used throughout
+  this document and in `crates/brix-lower/tests/finite_decision_generic_configs.rs`
+  and `crates/brix-lower/tests/let_eval.rs`) avoid the clash; the `let` lane
+  has no such reserved name.
 
-  ```text
-  brix check: rejected: lowering error: function cycle detected involving 'loop': loop -> loop
-  ```
-
-- **`brix check`'s human output never prints the inferred type**, in either
-  lane's binding-level report — only the name and the grade (`name : —
-  @Grade`). The type is computed and available on `CheckResult::ty`; it is
-  simply not rendered today.
+- **Recursion still fails differently on genuine non-termination.** Both
+  lanes now admit a recursive call and run it under the same call-depth and
+  work-budget bounds (`crates/brix-lower/src/l3_v2.rs`), so a call chain that
+  does not terminate faults closed rather than hanging or overflowing the
+  stack — but the *shape* of that failure differs because the two lanes
+  report different things in the first place: the finite-decision lane
+  reports `Unknown` for the whole run (`brix check`/`run` exit non-zero, no
+  decision), while the `let` lane still type-checks the binding (a typing
+  judgement never claims termination) and reports only the evaluated value as
+  absent, `(not evaluated: exceeded the evaluator's recursion depth bound)` —
+  see the `loop` example in §1's "Recursive functions" and
+  `crates/brix-lower/tests/finite_decision_recursion.rs` for the
+  finite-decision-lane equivalent.
 
 ---
 
@@ -647,8 +743,9 @@ error. `spec/Next_Steps.md` tracks reconciling them.
   deterministic context identity.
 - **Reusable functions** (landed and tested; ADR status "Proposed
   implementation",
-  [ADR-0032](../spec/adr/ADR-0032_Finite_Decision_Functions.md)): pure,
-  nonrecursive helper `fn`s in finite-decision programs.
+  [ADR-0032](../spec/adr/ADR-0032_Finite_Decision_Functions.md)): pure
+  helper `fn`s in finite-decision programs — originally nonrecursive; its
+  refusal of direct and mutual recursion is superseded by ADR-0042 below.
 - **Structured inputs** (landed and tested; ADR status "Proposed
   implementation",
   [ADR-0033](../spec/adr/ADR-0033_Structured_Input_Contracts.md)):
@@ -682,6 +779,26 @@ error. `spec/Next_Steps.md` tracks reconciling them.
   Stages A–C landed in `brix-lower`, defining the derivation evaluator and
   eligibility rules on committed dependencies — a separate executable
   profile from finite-decision, not exposed by `brix run`.
+- **Inferred dependencies and `otherwise`** (landed and tested; ADR status
+  "Proposed implementation",
+  [ADR-0038](../spec/adr/ADR-0038_Inferred_Dependencies_And_Otherwise.md)): a
+  rule/proposal's declared-dependency list may be inferred from the facts its
+  body actually reads, and a `propose … otherwise = value` proposal supplies
+  a maximal-priority fallback.
+- **Multiple commit pools** (landed and tested; ADR status "Proposed
+  implementation",
+  [ADR-0039](../spec/adr/ADR-0039_Multiple_Commit_Pools.md)): a module may
+  declare more than one `commit`, each its own independent deliberation over
+  its own candidates — see §2 above.
+- **One evaluator** (landed and tested; ADR status "Proposed implementation",
+  [ADR-0042](../spec/adr/ADR-0042_One_Evaluator.md)): the `let` lane computes
+  a value for every binding in the exact executable fragment, through the
+  same evaluator (`l3_v2::eval`) the finite-decision lane runs — recursive
+  helpers and generic configs are admitted and evaluated identically in both
+  lanes now; each lane's remaining restrictions (`Float`, witness
+  composition, generic types in a finite-decision schema/contract) are
+  profile choices, not different meanings for the same expression. See "What
+  still differs between the lanes" above.
 
 For the fuller picture of what a beta needs beyond this — one shared
 expression language across lanes, relations and per-entity decisions, a

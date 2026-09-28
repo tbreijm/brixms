@@ -454,6 +454,7 @@ pub fn execute_verify(
             decision: None,
             artifacts: vec![artifact],
             diagnostics: Vec::new(),
+            bindings: None,
             explanation: None,
             locations: None,
             shows: None,
