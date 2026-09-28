@@ -141,16 +141,9 @@ pub fn execute_check(
 
         // ADR-0039: preflight fails if *any* commit pool is Unknown, not
         // just the first — every pool must clear preflight independently.
-        let first_unknown_pool = run.commits.iter().find(|c| c.is_unknown());
-        if run.is_unknown() || first_unknown_pool.is_some() {
-            let stop = first_unknown_pool.map_or(&run.stop, |c| &c.stop);
-            let (code, detail) = match stop {
-                FiniteDecisionStop::Unknown(reason) => unknown_reason_to_code_and_detail(reason),
-                _ => (
-                    "unknown-stop",
-                    "unexpected deliberation stop condition in failure path".to_string(),
-                ),
-            };
+        // ADR-0043: and every `decide` block.
+        if let Some(reason) = run.first_fault() {
+            let (code, detail) = unknown_reason_to_code_and_detail(reason);
             let status_str = "unknown";
             let diag = format!("{code}: {detail}");
             if json {

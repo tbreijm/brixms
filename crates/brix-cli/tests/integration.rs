@@ -3105,3 +3105,65 @@ fn test_34_show_fault_reports_diagnostic_and_exits_1_without_altering_decision()
     // No fabricated show value on fault.
     assert!(val.as_object().unwrap().get("shows").is_none());
 }
+
+// ---------------------------------------------------------------------------
+// A run fails closed when any decision faults, not only the first
+// ---------------------------------------------------------------------------
+
+/// A fault in a second commit pool (ADR-0039) or in a decide block
+/// (ADR-0043) makes `run`, `check`, and `audit` fail with status `unknown`,
+/// even when the first commit pool selected.
+#[test]
+fn test_fault_in_any_decision_fails_the_run() {
+    let tmp = TempDirGuard::new("any_fault");
+    let second_pool = tmp.path().join("second_pool.brix");
+    fs::write(
+        &second_pool,
+        "config D = A | B\nconfig E = X | Y\nrule zero() = 0\n\
+         propose a priority 1 when true = A\n\
+         propose x priority 1 when div_floor(1, zero) > 0 = X\npropose y otherwise = Y\n\
+         commit d from (a)\ncommit e from (x, y)\n",
+    )
+    .unwrap();
+    let decide_block = tmp.path().join("decide_block.brix");
+    fs::write(
+        &decide_block,
+        "config D = A | B\nrule zero() = 0\npropose a priority 1 when true = A\n\
+         commit d from (a)\ndecide per for v in [1, 2] {\n  \
+         propose ok priority 1 when div_floor(v, zero) > 0 = A\n  propose no otherwise = B\n}\n",
+    )
+    .unwrap();
+
+    for program in [&second_pool, &decide_block] {
+        let mut cmd = brix();
+        cmd.arg("run").arg(program).arg("--json");
+        let (code, stdout, stderr) = run_cmd(cmd);
+        assert_eq!(
+            code,
+            1,
+            "run must fail for {}: {stdout}{stderr}",
+            program.display()
+        );
+        let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["status"], "unknown");
+
+        let mut cmd = brix();
+        cmd.arg("check").arg(program);
+        assert_eq!(
+            run_cmd(cmd).0,
+            1,
+            "check must fail for {}",
+            program.display()
+        );
+
+        let mut cmd = brix();
+        cmd.arg("audit")
+            .arg(program)
+            .arg("--bundle")
+            .arg(tmp.path().join("bundle.json"));
+        let (code, _, _) = run_cmd(cmd);
+        assert_ne!(code, 0, "audit must refuse {}", program.display());
+        assert!(!tmp.path().join("bundle.json").exists());
+    }
+}

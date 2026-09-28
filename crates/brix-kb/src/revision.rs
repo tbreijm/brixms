@@ -19,7 +19,8 @@
 
 use brix_canon::{CanonWriter, Digest, Domain};
 use brix_lower::finite_decision::{
-    CandidateDisposition, CandidateStatus, DerivedFact, FiniteDecisionProgramId,
+    CandidateDisposition, CandidateStatus, DerivedFact, FiniteDecisionDecideStop,
+    FiniteDecisionProgramId, FiniteDecisionRun, FiniteDecisionStop,
 };
 use brix_lower::input::{InputScalarValue, InputSnapshotId};
 use brix_lower::l3_v2::L3ValueV2;
@@ -33,7 +34,7 @@ pub const REVISION_SCHEMA: &str = "brix.kb.revision@1";
 const REVISION_TAG: &str = "brix.kb.revision@1";
 const VALUE_TAG: &str = "brix.kb.decision-value@1";
 const FACTS_TAG: &str = "brix.kb.facts@1";
-const DISPOSITIONS_TAG: &str = "brix.kb.dispositions@1";
+const OUTCOMES_TAG: &str = "brix.kb.outcomes@1";
 
 /// The change that produced a revision.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -198,7 +199,7 @@ pub struct RevisionResult {
     /// never constructed).
     pub context_id: Option<ContextId>,
     pub facts_digest: Option<Digest>,
-    pub dispositions_digest: Option<Digest>,
+    pub outcomes_digest: Option<Digest>,
     pub diagnostics: Vec<String>,
 }
 
@@ -221,7 +222,7 @@ impl RevisionResult {
             None => w.write_enum(0, |_| {}),
             Some(d) => w.write_enum(1, |w| w.write_bytes(d.as_bytes())),
         }
-        match &self.dispositions_digest {
+        match &self.outcomes_digest {
             None => w.write_enum(0, |_| {}),
             Some(d) => w.write_enum(1, |w| w.write_bytes(d.as_bytes())),
         }
@@ -235,7 +236,7 @@ impl RevisionResult {
             "decision_digest": self.decision_digest.map(|d| d.to_hex()),
             "context_id": self.context_id.map(|c| c.digest().to_hex()),
             "facts_digest": self.facts_digest.map(|d| d.to_hex()),
-            "dispositions_digest": self.dispositions_digest.map(|d| d.to_hex()),
+            "outcomes_digest": self.outcomes_digest.map(|d| d.to_hex()),
             "diagnostics": self.diagnostics,
         })
     }
@@ -247,7 +248,7 @@ impl RevisionResult {
             "decision_digest",
             "context_id",
             "facts_digest",
-            "dispositions_digest",
+            "outcomes_digest",
             "diagnostics",
         ])
         .map_err(|e| json_err("result", e))?;
@@ -275,10 +276,10 @@ impl RevisionResult {
             .map_err(|e| json_err("result.facts_digest", e))?
             .map(|h| hex_to_digest(h, "result.facts_digest"))
             .transpose()?;
-        let dispositions_digest = v
-            .field_opt_str("dispositions_digest")
-            .map_err(|e| json_err("result.dispositions_digest", e))?
-            .map(|h| hex_to_digest(h, "result.dispositions_digest"))
+        let outcomes_digest = v
+            .field_opt_str("outcomes_digest")
+            .map_err(|e| json_err("result.outcomes_digest", e))?
+            .map(|h| hex_to_digest(h, "result.outcomes_digest"))
             .transpose()?;
         let diagnostics = v
             .field_str_array("diagnostics")
@@ -289,7 +290,7 @@ impl RevisionResult {
             decision_digest,
             context_id,
             facts_digest,
-            dispositions_digest,
+            outcomes_digest,
             diagnostics,
         })
     }
@@ -507,22 +508,72 @@ pub fn digest_facts(facts: &[DerivedFact]) -> Result<Digest, KbError> {
     Ok(w.digest(Domain::Value))
 }
 
-/// A single combined digest over every candidate disposition, in the run's
-/// own order. `CandidateStatus`'s `Display` is used as the encoding of the
-/// status/reason, which is fine for this internal drift check (it is a
-/// hand-written, deterministic rendering — see
-/// `soc_regimes::finite_frontier::CandidateStatus`) even though `Display` is
-/// not in general suitable for a canonical semantic identity.
-pub fn digest_dispositions(dispositions: &[CandidateDisposition]) -> Digest {
+/// A single combined digest over every decision the run declares: each
+/// commit pool (ADR-0039) and each `decide` block instance (ADR-0043), with
+/// its stop, its selected candidate and value, and every candidate's
+/// disposition, in journal order. `kb verify` compares this against a fresh
+/// replay, so a change in any decision, not only the first commit pool's, is
+/// detected.
+///
+/// `CandidateStatus`'s and the Unknown reason's `Display` renderings are used
+/// as encodings here, which is fine for this internal drift check (both are
+/// hand-written and deterministic) even though `Display` is not in general
+/// suitable for a canonical semantic identity.
+pub fn digest_outcomes(run: &FiniteDecisionRun) -> Result<Digest, KbError> {
     let mut w = CanonWriter::new();
-    w.write_tag(DISPOSITIONS_TAG);
+    w.write_tag(OUTCOMES_TAG);
+    w.write_uint(run.commits.len() as u64);
+    for pool in &run.commits {
+        w.write_ident(&pool.commit);
+        write_stop(&mut w, &pool.stop)?;
+        write_dispositions(&mut w, &pool.dispositions);
+    }
+    w.write_uint(run.decides.len() as u64);
+    for block in &run.decides {
+        w.write_ident(&block.decide);
+        match &block.stop {
+            FiniteDecisionDecideStop::Settled => w.write_enum(0, |_| {}),
+            FiniteDecisionDecideStop::Unknown(reason) => {
+                let reason = reason.to_string();
+                w.write_enum(1, |w| w.write_str(&reason))
+            }
+        }
+        w.write_uint(block.instances.len() as u64);
+        for inst in &block.instances {
+            w.write_uint(inst.index as u64);
+            w.write_bytes(digest_decision_value(&inst.binder)?.as_bytes());
+            write_stop(&mut w, &inst.stop)?;
+            write_dispositions(&mut w, &inst.dispositions);
+        }
+    }
+    Ok(w.digest(Domain::Value))
+}
+
+fn write_stop(w: &mut CanonWriter, stop: &FiniteDecisionStop) -> Result<(), KbError> {
+    match stop {
+        FiniteDecisionStop::Selected(sel) => {
+            let value = digest_decision_value(&sel.value)?;
+            w.write_enum(0, |w| {
+                w.write_ident(&sel.candidate);
+                w.write_bytes(value.as_bytes());
+            });
+        }
+        FiniteDecisionStop::Quiescent { .. } => w.write_enum(1, |_| {}),
+        FiniteDecisionStop::Unknown(reason) => {
+            let reason = reason.to_string();
+            w.write_enum(2, |w| w.write_str(&reason));
+        }
+    }
+    Ok(())
+}
+
+fn write_dispositions(w: &mut CanonWriter, dispositions: &[CandidateDisposition]) {
     w.write_uint(dispositions.len() as u64);
     for d in dispositions {
         w.write_ident(&d.name);
         w.write_uint(d.priority);
         w.write_str(&status_display(&d.status));
     }
-    w.digest(Domain::Value)
 }
 
 fn status_display(status: &CandidateStatus) -> String {
@@ -548,7 +599,7 @@ mod tests {
                 decision_digest: Some(Digest::of(Domain::Value, b"decision")),
                 context_id: Some(ContextId(Digest::of(Domain::Value, b"context"))),
                 facts_digest: Some(Digest::of(Domain::Value, b"facts")),
-                dispositions_digest: Some(Digest::of(Domain::Value, b"dispositions")),
+                outcomes_digest: Some(Digest::of(Domain::Value, b"dispositions")),
                 diagnostics: vec![],
             },
         }

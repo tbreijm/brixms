@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use brix_lower::finite_decision::{
-    lower_finite_decision_plan, FiniteDecisionRuntime, FiniteDecisionStop, FINITE_DECISION_PROFILE,
+    lower_finite_decision_plan, FiniteDecisionRuntime, FINITE_DECISION_PROFILE,
 };
 use brix_syntax::ast::{Expr, Item};
 
@@ -166,13 +166,9 @@ pub fn execute_run(
     let run = runtime.run();
 
     let is_ok = !run.is_unknown();
-    let (status_str, mut diagnostics) = match &run.stop {
-        FiniteDecisionStop::Selected(_) => ("selected".to_string(), Vec::new()),
-        FiniteDecisionStop::Quiescent { .. } => ("quiescent".to_string(), Vec::new()),
-        FiniteDecisionStop::Unknown(reason) => {
-            let (code, detail) = unknown_reason_to_code_and_detail(reason);
-            ("unknown".to_string(), vec![format!("{code}: {detail}")])
-        }
+    let (status_str, mut diagnostics) = match crate::commands::run_status(&run) {
+        (status, None) => (status.to_string(), Vec::new()),
+        (status, Some((code, detail))) => (status.to_string(), vec![format!("{code}: {detail}")]),
     };
 
     let (input_snapshot, inputs_json) = if !snapshot.is_empty() {
@@ -227,45 +223,8 @@ pub fn execute_run(
         // ADR-0039: every commit pool's own outcome, additive — populated
         // only when the module declares more than one pool, so a
         // single-commit module's JSON is unchanged (see the field's doc).
-        let commits_json = if run.commits.len() > 1 {
-            Some(
-                run.commits
-                    .iter()
-                    .map(|c| {
-                        let win = c.decision.as_ref().map(|d| d.candidate.as_str());
-                        let status = match &c.stop {
-                            FiniteDecisionStop::Selected(_) => "selected",
-                            FiniteDecisionStop::Quiescent { .. } => "quiescent",
-                            FiniteDecisionStop::Unknown(_) => "unknown",
-                        };
-                        crate::json::CommitPoolJson::new(
-                            c.commit.clone(),
-                            status,
-                            c.dispositions
-                                .iter()
-                                .map(|d| candidate_disposition_to_json(d, win))
-                                .collect(),
-                            c.decision.as_ref().map(decision_to_json),
-                        )
-                    })
-                    .collect(),
-            )
-        } else {
-            None
-        };
-
-        // ADR-0043: every `decide` block's own per-entity outcome, additive
-        // — populated only when the module declares at least one block.
-        let entity_decisions = if run.decides.is_empty() {
-            None
-        } else {
-            Some(
-                run.decides
-                    .iter()
-                    .map(crate::commands::decide_run_to_json)
-                    .collect(),
-            )
-        };
+        let commits_json = crate::commands::commits_to_json(&run);
+        let entity_decisions = crate::commands::entity_decisions_to_json(&run);
 
         let res = CliResultJson {
             schema: BRIX_CLI_SCHEMA.to_string(),

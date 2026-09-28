@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use brix_lower::audit_bundle::produce_finite_decision_audit_input_bundle_v1;
-use brix_lower::finite_decision::{FiniteDecisionStop, FINITE_DECISION_PROFILE};
+use brix_lower::finite_decision::FINITE_DECISION_PROFILE;
 use soc_core::audit::AuditResult;
 use soc_core::audit_bundle::AuditDecodeLimits;
 
@@ -113,14 +113,8 @@ pub fn execute_audit(
     };
 
     // The run itself must not be Unknown.
-    if run.is_unknown() {
-        let (code, detail) = match &run.stop {
-            FiniteDecisionStop::Unknown(reason) => unknown_reason_to_code_and_detail(reason),
-            _ => (
-                "unknown-stop",
-                "unexpected deliberation stop condition in failure path".to_string(),
-            ),
-        };
+    if let Some(reason) = run.first_fault() {
+        let (code, detail) = unknown_reason_to_code_and_detail(reason);
         if json {
             let res = CliResultJson::failure(
                 "audit",

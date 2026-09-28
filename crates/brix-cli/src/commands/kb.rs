@@ -19,7 +19,7 @@ use crate::cli::KbOp;
 use crate::cli::{EXIT_REJECTED_OR_UNKNOWN, EXIT_SUCCESS};
 use crate::commands::{
     bound_input_to_json, candidate_disposition_to_json, decision_to_json, fact_to_json,
-    format_finite_decision_human, unknown_reason_to_code_and_detail,
+    format_finite_decision_human,
 };
 
 /// The local JSON schema tag for `brix kb` output. Deliberately not
@@ -200,22 +200,48 @@ fn decision_report(record: &RevisionRecord, replay: &ReplayResult) -> DecisionRe
                 .collect();
             let decision = run.decision.as_ref().map(decision_to_json);
             let inputs: Vec<_> = run.inputs.iter().map(bound_input_to_json).collect();
-            let (status, diagnostics) = match &run.stop {
-                FiniteDecisionStop::Selected(_) => ("selected", Vec::new()),
-                FiniteDecisionStop::Quiescent { .. } => ("quiescent", Vec::new()),
-                FiniteDecisionStop::Unknown(reason) => {
-                    let (code, detail) = unknown_reason_to_code_and_detail(reason);
-                    ("unknown", vec![format!("{code}: {detail}")])
-                }
+            let (status, diagnostics) = match crate::commands::run_status(run) {
+                (status, None) => (status, Vec::new()),
+                (status, Some((code, detail))) => (status, vec![format!("{code}: {detail}")]),
             };
-            let decision_summary = match &run.stop {
-                FiniteDecisionStop::Selected(sel) => Some(format!(
-                    "{}={}",
-                    sel.candidate,
-                    crate::commands::fmt_value_human(&sel.value)
-                )),
-                FiniteDecisionStop::Quiescent { .. } => Some("quiescent".to_string()),
-                FiniteDecisionStop::Unknown(_) => None,
+            // One-line summary for `kb log`: the first commit pool's decision,
+            // then each further pool and each decide block's decided values.
+            let decision_summary = if status == "unknown" {
+                None
+            } else {
+                let mut parts: Vec<String> = Vec::new();
+                for (i, pool) in run.commits.iter().enumerate() {
+                    let outcome = match &pool.stop {
+                        FiniteDecisionStop::Selected(sel) => format!(
+                            "{}={}",
+                            sel.candidate,
+                            crate::commands::fmt_value_human(&sel.value)
+                        ),
+                        _ => "quiescent".to_string(),
+                    };
+                    parts.push(if i == 0 {
+                        outcome
+                    } else {
+                        format!("{}: {outcome}", pool.commit)
+                    });
+                }
+                for block in &run.decides {
+                    let values = block
+                        .decided_values()
+                        .map(|vs| {
+                            vs.iter()
+                                .map(crate::commands::fmt_value_human)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_else(|| "quiescent".to_string());
+                    parts.push(format!("{}: [{values}]", block.decide));
+                }
+                Some(if parts.is_empty() {
+                    "quiescent".to_string()
+                } else {
+                    parts.join("; ")
+                })
             };
             DecisionReport {
                 status,
@@ -227,6 +253,8 @@ fn decision_report(record: &RevisionRecord, replay: &ReplayResult) -> DecisionRe
                     "facts": facts,
                     "candidates": candidates,
                     "decision": decision,
+                    "commits": crate::commands::commits_to_json(run),
+                    "entity_decisions": crate::commands::entity_decisions_to_json(run),
                     "diagnostics": diagnostics,
                 }),
                 decision_summary,
@@ -441,6 +469,12 @@ fn execute_diff(
             "facts_added": report.facts_added,
             "facts_removed": report.facts_removed,
             "candidates_changed": candidates_json,
+            "entities_changed": report.entities_changed.iter().map(|e| json!({
+                "decide": e.decide,
+                "index": e.index,
+                "old": e.old,
+                "new": e.new,
+            })).collect::<Vec<_>>(),
             "decision_a": report.decision_a.as_ref().map(|(c, v)| json!({"candidate": c, "value": crate::commands::fmt_value_human(v)})),
             "decision_b": report.decision_b.as_ref().map(|(c, v)| json!({"candidate": c, "value": crate::commands::fmt_value_human(v)})),
         });
@@ -512,6 +546,18 @@ fn execute_diff(
             println!("candidates:");
             for c in &report.candidates_changed {
                 println!("  ~ {}: {} -> {}", c.name, c.old_status, c.new_status);
+            }
+        }
+        if !report.entities_changed.is_empty() {
+            println!("entities:");
+            for e in &report.entities_changed {
+                println!(
+                    "  ~ {} [{}]: {} -> {}",
+                    e.decide,
+                    e.index,
+                    e.old.as_deref().unwrap_or("none"),
+                    e.new.as_deref().unwrap_or("none"),
+                );
             }
         }
         let render_decision = |d: &Option<(String, brix_lower::l3_v2::L3ValueV2)>,

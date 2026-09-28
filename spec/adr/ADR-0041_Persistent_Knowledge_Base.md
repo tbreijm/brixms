@@ -116,7 +116,7 @@ Schema `brix.kb.revision@1`:
     "decision_digest": "<64-hex, or null>",
     "context_id": "<64-hex, or null only for missing-inputs>",
     "facts_digest": "<64-hex, or null>",
-    "dispositions_digest": "<64-hex, or null>",
+    "outcomes_digest": "<64-hex, or null>",
     "diagnostics": []
   },
   "digest": "<64-hex — this record's own identity>"
@@ -157,11 +157,17 @@ hand-edit immediately, before it even walks the parent chain (§2.6).
 
 Two digests in the record are deliberately **not** built from a portable canonical encoding:
 `facts_digest` folds in `CandidateStatus`'s `Display` rendering (a hand-written, deterministic
-string, not `Debug`), and it, plus `dispositions_digest`, exist purely as this crate's own
+string, not `Debug`), and it, plus `outcomes_digest`, exist purely as this crate's own
 tamper/drift check — never compared against another implementation's bytes the way `SOC-LAW-01`
 governs a semantic identity. `decision_digest`, by contrast, reuses `InputScalarValue`'s real
 `Canonical` encoding (the same bytes that value would carry if it were later re-supplied as an
 input), because a decision's value is exactly the kind of thing that identity governs.
+
+`outcomes_digest` covers every decision the program declares, not only the first commit pool:
+each commit pool (ADR-0039) and each instance of each `decide` block (ADR-0043), with its stop,
+selected candidate and value, and candidate dispositions. `status` is `unknown` when any of them
+failed closed, the same rule `brix run` uses for its status and exit code. `candidate` and
+`decision_digest` describe the first commit pool, as `brix run`'s top-level decision does.
 
 ### 2.4 Strict, duplicate-key-rejecting decoding
 

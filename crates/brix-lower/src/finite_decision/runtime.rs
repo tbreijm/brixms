@@ -414,9 +414,33 @@ impl FiniteDecisionRun {
         matches!(self.stop, FiniteDecisionStop::Quiescent { .. })
     }
 
-    /// Whether deliberation halted with an Unknown fault (first commit pool).
+    /// Whether the run as a whole failed closed: any commit pool or `decide`
+    /// block ended Unknown (ADR-0039, ADR-0043). A run is only a success when
+    /// every decision it declares settled; see [`Self::first_fault`].
     pub fn is_unknown(&self) -> bool {
-        matches!(self.stop, FiniteDecisionStop::Unknown(_))
+        self.first_fault().is_some()
+    }
+
+    /// The first fault in the run, in journal order: commit pools in
+    /// declaration order, then `decide` blocks in declaration order. `None`
+    /// when every declared decision settled (selected or quiescent).
+    ///
+    /// Callers that report a run's status or exit code must use this (or
+    /// [`Self::is_unknown`]) rather than [`Self::stop`], which describes only
+    /// the first commit pool.
+    pub fn first_fault(&self) -> Option<&FiniteDecisionUnknownReason> {
+        if let FiniteDecisionStop::Unknown(reason) = &self.stop {
+            return Some(reason);
+        }
+        let pools = self.commits.iter().filter_map(|c| match &c.stop {
+            FiniteDecisionStop::Unknown(reason) => Some(reason),
+            _ => None,
+        });
+        let decides = self.decides.iter().filter_map(|d| match &d.stop {
+            FiniteDecisionDecideStop::Unknown(reason) => Some(reason),
+            FiniteDecisionDecideStop::Settled => None,
+        });
+        pools.chain(decides).next()
     }
 
     /// Retrieve the structured status disposition of candidate `name`,

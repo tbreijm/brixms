@@ -20,8 +20,8 @@ use crate::manifest::{Head, Manifest};
 use crate::paths;
 use crate::pipeline::{self, ReplayResult};
 use crate::revision::{
-    digest_decision_value, digest_dispositions, digest_facts, Change, RevisionRecord,
-    RevisionResult, Status,
+    digest_decision_value, digest_facts, digest_outcomes, Change, RevisionRecord, RevisionResult,
+    Status,
 };
 use crate::snapshot_io::encode_input_snapshot_v2;
 
@@ -329,7 +329,7 @@ fn compute_result(replay: &ReplayResult) -> Result<RevisionResult, KbError> {
             decision_digest: None,
             context_id: None,
             facts_digest: None,
-            dispositions_digest: None,
+            outcomes_digest: None,
             diagnostics: missing
                 .iter()
                 .map(|n| format!("missing required input '{n}'"))
@@ -337,18 +337,27 @@ fn compute_result(replay: &ReplayResult) -> Result<RevisionResult, KbError> {
         }),
         ReplayResult::Ran { run, .. } => {
             let facts_digest = Some(digest_facts(&run.facts)?);
-            let dispositions_digest = Some(digest_dispositions(&run.dispositions));
-            let (status, candidate, decision_digest, diagnostics) = match &run.stop {
-                FiniteDecisionStop::Selected(sel) => (
-                    Status::Selected,
-                    Some(sel.candidate.clone()),
-                    Some(digest_decision_value(&sel.value)?),
-                    Vec::new(),
-                ),
-                FiniteDecisionStop::Quiescent { .. } => (Status::Quiescent, None, None, Vec::new()),
-                FiniteDecisionStop::Unknown(reason) => {
-                    (Status::Unknown, None, None, vec![reason.to_string()])
-                }
+            let outcomes_digest = Some(digest_outcomes(run)?);
+            // Status covers every commit pool and decide block: any fault
+            // makes the revision Unknown (ADR-0039, ADR-0043). `candidate`
+            // and `decision_digest` describe the first commit pool, as
+            // `brix run`'s top-level decision does.
+            let (status, candidate, decision_digest, diagnostics) = match run.first_fault() {
+                Some(reason) => (Status::Unknown, None, None, vec![reason.to_string()]),
+                None => match &run.stop {
+                    FiniteDecisionStop::Selected(sel) => (
+                        Status::Selected,
+                        Some(sel.candidate.clone()),
+                        Some(digest_decision_value(&sel.value)?),
+                        Vec::new(),
+                    ),
+                    FiniteDecisionStop::Quiescent { .. } => {
+                        (Status::Quiescent, None, None, Vec::new())
+                    }
+                    FiniteDecisionStop::Unknown(reason) => {
+                        (Status::Unknown, None, None, vec![reason.to_string()])
+                    }
+                },
             };
             Ok(RevisionResult {
                 status,
@@ -356,7 +365,7 @@ fn compute_result(replay: &ReplayResult) -> Result<RevisionResult, KbError> {
                 decision_digest,
                 context_id: Some(run.context),
                 facts_digest,
-                dispositions_digest,
+                outcomes_digest,
                 diagnostics,
             })
         }

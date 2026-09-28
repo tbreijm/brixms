@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use brix_lower::finite_decision::{
     CandidateStatus, FiniteDecisionCommit, FiniteDecisionContract, FiniteDecisionFnParam,
     FiniteDecisionFunction, FiniteDecisionInput, FiniteDecisionPlan, FiniteDecisionProposal,
-    FiniteDecisionRule,
+    FiniteDecisionRule, FiniteDecisionRun,
 };
 use brix_lower::input::InputValue;
 use brix_lower::l3_v2::L3ValueV2;
@@ -63,6 +63,16 @@ pub struct DeclChange {
 }
 
 /// A fully computed diff between two revisions of the same knowledge base.
+/// One `decide` block instance whose selected candidate differs between two
+/// revisions (`None` means quiescent, or absent from that revision).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntityChange {
+    pub decide: String,
+    pub index: usize,
+    pub old: Option<String>,
+    pub new: Option<String>,
+}
+
 pub struct DiffReport {
     pub rev_a: u64,
     pub rev_b: u64,
@@ -78,6 +88,8 @@ pub struct DiffReport {
     pub facts_added: Vec<String>,
     pub facts_removed: Vec<String>,
     pub candidates_changed: Vec<CandidateChange>,
+    /// Per-entity decisions (ADR-0043) whose selected candidate differs.
+    pub entities_changed: Vec<EntityChange>,
     pub decision_a: Option<(String, L3ValueV2)>,
     pub decision_b: Option<(String, L3ValueV2)>,
 }
@@ -140,124 +152,123 @@ pub fn diff(
 
     let graph_b = build_dep_graph(&plan_b);
 
+    // Each side is compared on its own terms: a revision whose input
+    // contract is incomplete ran nothing, so it contributes no facts,
+    // candidates, or decisions, and everything the other side has shows as
+    // added or removed rather than being dropped.
+    let (run_a, run_b) = (ran(&replay_a), ran(&replay_b));
+
+    let facts_of = |run: Option<&FiniteDecisionRun>| -> BTreeMap<String, L3ValueV2> {
+        run.iter()
+            .flat_map(|r| r.facts.iter())
+            .map(|f| (f.rule.clone(), f.value.clone()))
+            .collect()
+    };
+    let (facts_a, facts_b) = (facts_of(run_a), facts_of(run_b));
     let mut facts_changed_raw: Vec<(String, L3ValueV2, L3ValueV2)> = Vec::new();
     let mut facts_unchanged_count = 0usize;
     let mut facts_added = Vec::new();
     let mut facts_removed = Vec::new();
-    let mut candidates_changed = Vec::new();
-
-    if let (ReplayResult::Ran { run: run_a, .. }, ReplayResult::Ran { run: run_b, .. }) =
-        (&replay_a, &replay_b)
-    {
-        let facts_a: BTreeMap<&str, &L3ValueV2> = run_a
-            .facts
-            .iter()
-            .map(|f| (f.rule.as_str(), &f.value))
-            .collect();
-        let facts_b: BTreeMap<&str, &L3ValueV2> = run_b
-            .facts
-            .iter()
-            .map(|f| (f.rule.as_str(), &f.value))
-            .collect();
-        let mut all_names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-        all_names.extend(facts_a.keys().copied());
-        all_names.extend(facts_b.keys().copied());
-        for name in all_names {
-            match (facts_a.get(name), facts_b.get(name)) {
-                (Some(a), Some(b)) => {
-                    if a == b {
-                        facts_unchanged_count += 1;
-                    } else {
-                        facts_changed_raw.push((name.to_string(), (*a).clone(), (*b).clone()));
-                    }
-                }
-                (Some(_), None) => facts_removed.push(name.to_string()),
-                (None, Some(_)) => facts_added.push(name.to_string()),
-                (None, None) => {}
-            }
+    let all_fact_names: std::collections::BTreeSet<&String> =
+        facts_a.keys().chain(facts_b.keys()).collect();
+    for name in all_fact_names {
+        match (facts_a.get(name), facts_b.get(name)) {
+            (Some(a), Some(b)) if a == b => facts_unchanged_count += 1,
+            (Some(a), Some(b)) => facts_changed_raw.push((name.clone(), a.clone(), b.clone())),
+            (Some(_), None) => facts_removed.push(name.clone()),
+            (None, Some(_)) => facts_added.push(name.clone()),
+            (None, None) => {}
         }
-
-        let changed_fact_names: std::collections::BTreeSet<String> = facts_changed_raw
-            .iter()
-            .map(|(n, _, _)| n.clone())
-            .collect();
-
-        let disp_a: BTreeMap<&str, &CandidateStatus> = run_a
-            .dispositions
-            .iter()
-            .map(|d| (d.name.as_str(), &d.status))
-            .collect();
-        let disp_b: BTreeMap<&str, &CandidateStatus> = run_b
-            .dispositions
-            .iter()
-            .map(|d| (d.name.as_str(), &d.status))
-            .collect();
-        for (name, sb) in &disp_b {
-            if let Some(sa) = disp_a.get(name) {
-                if sa != sb {
-                    candidates_changed.push(CandidateChange {
-                        name: name.to_string(),
-                        old_status: (*sa).clone(),
-                        new_status: (*sb).clone(),
-                    });
-                }
-            }
-        }
-
-        let facts_changed = facts_changed_raw
-            .into_iter()
-            .map(|(name, old, new)| {
-                let reach = graph_b.rules.get(&name).cloned().unwrap_or_default();
-                let why_inputs: Vec<String> = reach
-                    .inputs
-                    .iter()
-                    .filter(|n| changed_input_names.contains(n.as_str()))
-                    .cloned()
-                    .collect();
-                let why_rules: Vec<String> = reach
-                    .rules
-                    .iter()
-                    .filter(|r| changed_fact_names.contains(r.as_str()))
-                    .cloned()
-                    .collect();
-                FactChange {
-                    name,
-                    old,
-                    new,
-                    why_inputs,
-                    why_rules,
-                }
-            })
-            .collect();
-
-        let decision_a = run_a
-            .decision
-            .as_ref()
-            .map(|d| (d.candidate.clone(), d.value.clone()));
-        let decision_b = run_b
-            .decision
-            .as_ref()
-            .map(|d| (d.candidate.clone(), d.value.clone()));
-
-        return Ok(DiffReport {
-            rev_a,
-            rev_b,
-            status_a: record_a.result.status,
-            status_b: record_b.result.status,
-            program_changed,
-            decl_changes,
-            inputs_added,
-            inputs_removed,
-            inputs_changed,
-            facts_changed,
-            facts_unchanged_count,
-            facts_added,
-            facts_removed,
-            candidates_changed,
-            decision_a,
-            decision_b,
-        });
     }
+    let changed_fact_names: std::collections::BTreeSet<String> = facts_changed_raw
+        .iter()
+        .map(|(n, _, _)| n.clone())
+        .collect();
+
+    // Candidates of every commit pool (ADR-0039); a candidate belongs to
+    // exactly one pool, so names are unique across them.
+    let dispositions_of = |run: Option<&FiniteDecisionRun>| -> BTreeMap<String, CandidateStatus> {
+        run.iter()
+            .flat_map(|r| r.commits.iter())
+            .flat_map(|c| c.dispositions.iter())
+            .map(|d| (d.name.clone(), d.status.clone()))
+            .collect()
+    };
+    let (disp_a, disp_b) = (dispositions_of(run_a), dispositions_of(run_b));
+    let mut candidates_changed = Vec::new();
+    for (name, sb) in &disp_b {
+        if let Some(sa) = disp_a.get(name) {
+            if sa != sb {
+                candidates_changed.push(CandidateChange {
+                    name: name.clone(),
+                    old_status: sa.clone(),
+                    new_status: sb.clone(),
+                });
+            }
+        }
+    }
+
+    // Per-entity decisions (ADR-0043), compared by block and element index.
+    let entities_of =
+        |run: Option<&FiniteDecisionRun>| -> BTreeMap<(String, usize), Option<String>> {
+            run.iter()
+                .flat_map(|r| r.decides.iter())
+                .flat_map(|d| {
+                    d.instances.iter().map(move |i| {
+                        (
+                            (d.decide.clone(), i.index),
+                            i.decision.as_ref().map(|s| s.candidate.clone()),
+                        )
+                    })
+                })
+                .collect()
+        };
+    let (ent_a, ent_b) = (entities_of(run_a), entities_of(run_b));
+    let mut entities_changed = Vec::new();
+    let all_entities: std::collections::BTreeSet<&(String, usize)> =
+        ent_a.keys().chain(ent_b.keys()).collect();
+    for key in all_entities {
+        let (old, new) = (ent_a.get(key).cloned(), ent_b.get(key).cloned());
+        if old != new {
+            entities_changed.push(EntityChange {
+                decide: key.0.clone(),
+                index: key.1,
+                old: old.flatten(),
+                new: new.flatten(),
+            });
+        }
+    }
+
+    let facts_changed = facts_changed_raw
+        .into_iter()
+        .map(|(name, old, new)| {
+            let reach = graph_b.rules.get(&name).cloned().unwrap_or_default();
+            let why_inputs: Vec<String> = reach
+                .inputs
+                .iter()
+                .filter(|n| changed_input_names.contains(n.as_str()))
+                .cloned()
+                .collect();
+            let why_rules: Vec<String> = reach
+                .rules
+                .iter()
+                .filter(|r| changed_fact_names.contains(r.as_str()))
+                .cloned()
+                .collect();
+            FactChange {
+                name,
+                old,
+                new,
+                why_inputs,
+                why_rules,
+            }
+        })
+        .collect();
+
+    let decision_of = |run: Option<&FiniteDecisionRun>| {
+        run.and_then(|r| r.decision.as_ref())
+            .map(|d| (d.candidate.clone(), d.value.clone()))
+    };
 
     Ok(DiffReport {
         rev_a,
@@ -269,14 +280,24 @@ pub fn diff(
         inputs_added,
         inputs_removed,
         inputs_changed,
-        facts_changed: Vec::new(),
+        facts_changed,
         facts_unchanged_count,
         facts_added,
         facts_removed,
         candidates_changed,
-        decision_a: None,
-        decision_b: None,
+        entities_changed,
+        decision_a: decision_of(run_a),
+        decision_b: decision_of(run_b),
     })
+}
+
+/// The run a replay produced, or `None` when its input contract was
+/// incomplete and nothing ran.
+fn ran(replay: &ReplayResult) -> Option<&FiniteDecisionRun> {
+    match replay {
+        ReplayResult::Ran { run, .. } => Some(run),
+        ReplayResult::MissingInputs { .. } => None,
+    }
 }
 
 fn diff_by_name<T>(

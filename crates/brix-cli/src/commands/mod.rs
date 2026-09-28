@@ -407,6 +407,51 @@ pub fn decision_to_json(d: &SelectedDecision) -> DecisionJson {
     }
 }
 
+/// Every commit pool's own outcome (ADR-0039), populated only when the
+/// module declares more than one pool, so a single-commit module's JSON is
+/// unchanged.
+pub fn commits_to_json(
+    run: &brix_lower::finite_decision::FiniteDecisionRun,
+) -> Option<Vec<crate::json::CommitPoolJson>> {
+    if run.commits.len() <= 1 {
+        return None;
+    }
+    Some(
+        run.commits
+            .iter()
+            .map(|c| {
+                let win = c.decision.as_ref().map(|d| d.candidate.as_str());
+                let status = match &c.stop {
+                    FiniteDecisionStop::Selected(_) => "selected",
+                    FiniteDecisionStop::Quiescent { .. } => "quiescent",
+                    FiniteDecisionStop::Unknown(_) => "unknown",
+                };
+                crate::json::CommitPoolJson::new(
+                    c.commit.clone(),
+                    status,
+                    c.dispositions
+                        .iter()
+                        .map(|d| candidate_disposition_to_json(d, win))
+                        .collect(),
+                    c.decision.as_ref().map(decision_to_json),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// Every `decide` block's per-entity outcome (ADR-0043), populated only when
+/// the module declares at least one block.
+pub fn entity_decisions_to_json(
+    run: &brix_lower::finite_decision::FiniteDecisionRun,
+) -> Option<Vec<EntityDecisionsJson>> {
+    if run.decides.is_empty() {
+        None
+    } else {
+        Some(run.decides.iter().map(decide_run_to_json).collect())
+    }
+}
+
 /// Convert one `decide` block's own run into its JSON representation
 /// (ADR-0043).
 pub fn decide_run_to_json(
@@ -452,6 +497,24 @@ pub fn decide_run_to_json(
 }
 
 use brix_lower::finite_decision::FiniteDecisionUnknownReason;
+
+/// A run's overall status for reporting and exit codes: `"unknown"` with the
+/// first fault if any commit pool or `decide` block failed closed, otherwise
+/// the first commit pool's own status (ADR-0039, ADR-0043).
+pub fn run_status(
+    run: &brix_lower::finite_decision::FiniteDecisionRun,
+) -> (&'static str, Option<(&'static str, String)>) {
+    if let Some(reason) = run.first_fault() {
+        return ("unknown", Some(unknown_reason_to_code_and_detail(reason)));
+    }
+    match &run.stop {
+        FiniteDecisionStop::Selected(_) => ("selected", None),
+        FiniteDecisionStop::Quiescent { .. } => ("quiescent", None),
+        FiniteDecisionStop::Unknown(reason) => {
+            ("unknown", Some(unknown_reason_to_code_and_detail(reason)))
+        }
+    }
+}
 
 /// Map a deliberation unknown reason to a stable reason code and human detail string.
 pub fn unknown_reason_to_code_and_detail(

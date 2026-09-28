@@ -611,3 +611,101 @@ fn test_interrupted_init_can_be_rerun() {
         .unwrap_or_else(|e| panic!("init must succeed over an interrupted init: {e}"));
     ops::verify(&kb_root, &[]).expect("the rerun init must verify");
 }
+
+// ---------------------------------------------------------------------------
+// every decision, not only the first commit pool
+// ---------------------------------------------------------------------------
+
+/// A decide-only program's per-entity outcomes are part of the revision
+/// record, and `kb diff` reports which entities changed.
+#[test]
+fn test_per_entity_outcomes_are_recorded_and_diffed() {
+    let tmp = TempDir::new("per_entity");
+    let kb_root = tmp.path.join("kb");
+    let first = ops::init(
+        &kb_root,
+        &example("order-book.brix"),
+        &[example("order-book.json")],
+        &[],
+    )
+    .expect("init should succeed");
+
+    let stock = write_input_shard(
+        &tmp.path,
+        "stock.json",
+        r#"{"schema":"brix.input@3","values":{"stock":{"type":"list","items":[
+            {"type":"record","nominal":"Stock","fields":[
+                {"name":"sku","value":{"type":"int","value":"100"}},
+                {"name":"on_hand","value":{"type":"int","value":"50"}}]},
+            {"type":"record","nominal":"Stock","fields":[
+                {"name":"sku","value":{"type":"int","value":"300"}},
+                {"name":"on_hand","value":{"type":"int","value":"50"}}]}]}}}"#,
+    );
+    let second = ops::assert_inputs(&kb_root, &[stock], &[]).expect("assert should succeed");
+    assert_ne!(
+        first.record.result.outcomes_digest, second.record.result.outcomes_digest,
+        "a change in per-entity decisions must change the recorded outcomes"
+    );
+
+    let report = crate::diff::diff(&kb_root, 1, 2, &[]).expect("diff should succeed");
+    let changed: Vec<(usize, Option<&str>, Option<&str>)> = report
+        .entities_changed
+        .iter()
+        .map(|e| (e.index, e.old.as_deref(), e.new.as_deref()))
+        .collect();
+    assert_eq!(
+        changed,
+        vec![
+            (1, Some("backorder"), Some("ship")),
+            (3, Some("backorder"), Some("ship"))
+        ]
+    );
+    ops::verify(&kb_root, &[]).expect("chain must verify");
+}
+
+/// A fault in a decide block makes the whole revision Unknown, as it makes
+/// `brix run` fail.
+#[test]
+fn test_fault_in_decide_block_makes_revision_unknown() {
+    let tmp = TempDir::new("decide_fault");
+    let kb_root = tmp.path.join("kb");
+    let program = tmp.path.join("p.brix");
+    std::fs::write(
+        &program,
+        "config D = A | B\ninput xs: List<Int> max 4\n\
+         propose a priority 1 when true = A\ncommit d from (a)\n\
+         decide per for v in xs {\n  propose ok priority 1 when div_floor(10, v) > 0 = A\n  \
+         propose no otherwise = B\n}\n",
+    )
+    .unwrap();
+    let xs = write_input_shard(
+        &tmp.path,
+        "xs.json",
+        r#"{"schema":"brix.input@3","values":{"xs":{"type":"list","items":[{"type":"int","value":"2"},{"type":"int","value":"0"}]}}}"#,
+    );
+    let outcome = ops::init(&kb_root, &program, &[xs], &[]).expect("init should succeed");
+    assert_eq!(outcome.record.result.status, Status::Unknown);
+}
+
+/// Diffing against a revision whose inputs were incomplete still reports the
+/// other revision's decision and facts.
+#[test]
+fn test_diff_against_missing_inputs_keeps_the_other_side() {
+    let tmp = TempDir::new("diff_missing");
+    let kb_root = tmp.path.join("kb");
+    ops::init(&kb_root, &example("shipping-input.brix"), &[], &[]).expect("init should succeed");
+    ops::assert_inputs(&kb_root, &[example("shipping-input.json")], &[])
+        .expect("assert should succeed");
+
+    let report = crate::diff::diff(&kb_root, 1, 2, &[]).expect("diff should succeed");
+    assert_eq!(report.status_a, Status::MissingInputs);
+    assert!(report.decision_a.is_none());
+    assert_eq!(
+        report.decision_b.as_ref().map(|(c, _)| c.as_str()),
+        Some("ship")
+    );
+    assert!(
+        !report.facts_added.is_empty(),
+        "the new side's facts must show as added"
+    );
+}

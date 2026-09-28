@@ -15,9 +15,7 @@ use soc_core::audit_receipt::SettlementAuditReceiptIdV1;
 use crate::finite_decision::plan::{
     finite_decision_program_id, FiniteDecisionProgramId, FINITE_DECISION_PROFILE,
 };
-use crate::finite_decision::runtime::{
-    FiniteDecisionRun, FiniteDecisionRuntime, FiniteDecisionStop,
-};
+use crate::finite_decision::runtime::{FiniteDecisionRun, FiniteDecisionRuntime};
 use crate::l3::{lower_l3_plan, L3PlanV1, PlanLimitsV1, L3_PROFILE_MARKER_V1};
 use crate::l3_audit::{l3_generator_registry, l3_generator_semantics};
 use crate::l3_canon::{context_id, policy_id, program_id, ProgramIdV1, RunContextV1};
@@ -473,12 +471,10 @@ pub fn produce_finite_decision_audit_input_bundle_with_limits_v1(
     run: &FiniteDecisionRun,
     limits: &AuditDecodeLimits,
 ) -> Result<SettlementAuditInputBundleV1, SourceBundleProducerError> {
+    // Every commit pool and `decide` block must have settled (ADR-0039,
+    // ADR-0043): a bundle attests to the whole run.
     if run.is_unknown() {
         return Err(SourceBundleProducerError::UnknownRun);
-    }
-    match &run.stop {
-        FiniteDecisionStop::Unknown(_) => return Err(SourceBundleProducerError::UnknownRun),
-        FiniteDecisionStop::Selected(_) | FiniteDecisionStop::Quiescent { .. } => {}
     }
 
     if run.program != runtime.program {

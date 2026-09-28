@@ -27,15 +27,14 @@ use serde::Serialize;
 
 use brix_lower::finite_decision::{
     finite_decision_program_id, lower_finite_decision_plan, FiniteDecisionPlan, FiniteDecisionRun,
-    FiniteDecisionRuntime, FiniteDecisionStop, FINITE_DECISION_PROFILE,
+    FiniteDecisionRuntime, FINITE_DECISION_PROFILE,
 };
 use brix_syntax::parse_bounded;
 
 use crate::cli::{EXIT_REJECTED_OR_UNKNOWN, EXIT_SUCCESS, EXIT_USAGE_OR_IO};
 use crate::commands::{
     candidate_disposition_to_json, escape_diagnostic_human, fmt_value_human,
-    load_cli_input_snapshot, prepare_finite_decision_module, unknown_reason_to_code_and_detail,
-    CliInputError,
+    load_cli_input_snapshot, prepare_finite_decision_module, CliInputError,
 };
 use crate::packages::{make_package_loader, read_source_bounded};
 
@@ -293,11 +292,7 @@ fn run_case(prepared: &PreparedFile, case: &TestCaseSpec) -> CaseOutcome {
 fn compare_case(expect: &ExpectSpec, run: &FiniteDecisionRun) -> Vec<Mismatch> {
     let mut mismatches = Vec::new();
 
-    let actual_status = match &run.stop {
-        FiniteDecisionStop::Selected(_) => "selected",
-        FiniteDecisionStop::Quiescent { .. } => "quiescent",
-        FiniteDecisionStop::Unknown(_) => "unknown",
-    };
+    let (actual_status, fault) = crate::commands::run_status(run);
     if actual_status != expect.status.as_str() {
         mismatches.push(Mismatch::new(
             "status",
@@ -333,12 +328,10 @@ fn compare_case(expect: &ExpectSpec, run: &FiniteDecisionRun) -> Vec<Mismatch> {
     }
 
     if let Some(expected_code) = &expect.unknown_code {
-        let actual_code = match &run.stop {
-            FiniteDecisionStop::Unknown(reason) => {
-                unknown_reason_to_code_and_detail(reason).0.to_string()
-            }
-            _ => "(not unknown)".to_string(),
-        };
+        let actual_code = fault
+            .as_ref()
+            .map(|(code, _)| code.to_string())
+            .unwrap_or_else(|| "(not unknown)".to_string());
         if &actual_code != expected_code {
             mismatches.push(Mismatch::new(
                 "unknown_code",
