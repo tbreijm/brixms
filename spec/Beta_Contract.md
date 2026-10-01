@@ -55,14 +55,15 @@ otherwise decide`
 
 These names are reserved for built-ins in a decision program: the integer
 operations `div_floor div_ceil div_half_even mod_euclid`, the list
-operations `sum count all any min max filter map len distinct`, and the type
-name `List`. A declaration that uses one is refused with an error, never
+operations `sum count all any min max filter map len distinct`, the numeric
+operations `f64 decimal f64_from_int decimal_from_int decimal_div f64_neg
+decimal_neg`, and the type names `List F64 Decimal`. A declaration that uses one is refused with an error, never
 silently shadowed.
 
 ### Input files
 
-`brix.input@1` (scalars), `@2` (records and variants), and `@3` (bounded
-lists) are accepted by every beta release, with the same strict decoding:
+`brix.input@1` (scalars), `@2` (records and variants), `@3` (bounded
+lists), and `@4` (explicit F64/Decimal values, ADR-0045) are accepted by every beta release, with the same strict decoding:
 duplicate keys, unknown fields, and out-of-bound values are rejected, never
 repaired. A new capability gets a new schema version; existing versions do
 not change.
@@ -105,6 +106,7 @@ lowered. Exceeding one is a clear rejection (for inputs and programs) or
 
 | Limit | Value |
 | --- | --- |
+| Decimal normalized scale / coefficient | 0..=18 / signed i128 |
 | Input file size / files per run / total input bytes | 1 MiB / 16 / 4 MiB |
 | Declared inputs | 256 |
 | Elements in a list input (`max N`) | 256 |

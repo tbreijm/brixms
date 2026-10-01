@@ -184,7 +184,7 @@ pub fn read_decimal(r: &mut crate::CanonReader<'_>) -> Result<Decimal, CanonErro
                 ibuf.push(xf(r.read_u8()?));
             }
             let (exp_i128, _) = crate::int_codec::decode_int(&ibuf)?;
-            let exponent = exp_i128 as i64;
+            let exponent = i64::try_from(exp_i128).map_err(|_| CanonError::BadLength)?;
 
             let mut digits = Vec::new();
             loop {
@@ -201,18 +201,26 @@ pub fn read_decimal(r: &mut crate::CanonReader<'_>) -> Result<Decimal, CanonErro
                 return Err(CanonError::BadLength);
             }
             let ndigits = digits.len() as i64;
-            let scale = ndigits - 1 - exponent;
-            if scale < 0 {
-                return Err(CanonError::BadLength);
-            }
+            let scale = (ndigits - 1)
+                .checked_sub(exponent)
+                .and_then(|scale| u8::try_from(scale).ok())
+                .ok_or(CanonError::BadLength)?;
             let mut unscaled: i128 = 0;
             for d in &digits {
-                unscaled = unscaled * 10 + *d as i128;
+                // Accumulate negative coefficients directly so i128::MIN
+                // does not require an unrepresentable positive intermediate.
+                unscaled = unscaled
+                    .checked_mul(10)
+                    .and_then(|value| {
+                        if negate {
+                            value.checked_sub(*d as i128)
+                        } else {
+                            value.checked_add(*d as i128)
+                        }
+                    })
+                    .ok_or(CanonError::BadLength)?;
             }
-            if negate {
-                unscaled = -unscaled;
-            }
-            Ok(Decimal::new(unscaled, scale as u8))
+            Ok(Decimal::new(unscaled, scale))
         }
         _ => Err(CanonError::BadLength),
     }
@@ -258,6 +266,9 @@ mod tests {
             (-153, 1),
             (-2, 0),
             (999999999999i128, 3),
+            (i128::MIN, 0),
+            (i128::MIN, 18),
+            (i128::MAX, 0),
         ] {
             let d = Decimal::new(u, s);
             let bytes = d.canon_bytes();
@@ -266,6 +277,23 @@ mod tests {
             assert_eq!(d, back, "roundtrip failed for ({u}, {s})");
             assert!(r.is_empty());
         }
+    }
+
+    #[test]
+    fn decoder_rejects_coefficient_and_scale_overflow() {
+        // Positive i128::MIN magnitude is one beyond i128::MAX.
+        let mut bytes = Decimal::new(i128::MIN, 0).canon_bytes();
+        bytes[0] = SIGN_POS;
+        for byte in &mut bytes[1..] {
+            *byte = !*byte;
+        }
+        assert!(read_decimal(&mut crate::CanonReader::new(&bytes)).is_err());
+
+        let mut writer = CanonWriter::new();
+        writer.write_raw(&[SIGN_POS]);
+        writer.write_int128(-256);
+        writer.write_raw(&[2, 0]);
+        assert!(read_decimal(&mut crate::CanonReader::new(writer.bytes())).is_err());
     }
 
     fn ref_cmp(a: &Decimal, b: &Decimal) -> Ordering {

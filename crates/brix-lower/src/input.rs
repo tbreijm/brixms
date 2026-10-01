@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::Path;
 
-use brix_canon::{CanonWriter, Canonical, Digest, Domain};
+use brix_canon::{decimal_parse, CanonWriter, Canonical, Decimal, Digest, Domain, FiniteF64};
 use brix_semantic::{ConfigId, ContextId};
 
 use crate::finite_decision::plan::{FiniteDecisionPlan, FiniteDecisionProgramId};
@@ -33,6 +33,8 @@ pub const INPUT_SCHEMA_V2: &str = "brix.input@2";
 /// `brix.input@3` (ADR-0037): the scalar/record/sum forms of `@1`/`@2`, plus
 /// the bounded-list form `{ "type": "list", "items": [...] }`.
 pub const INPUT_SCHEMA_V3: &str = "brix.input@3";
+/// Adds finite binary64 and exact decimal values with string payloads.
+pub const INPUT_SCHEMA_V4: &str = "brix.input@4";
 
 /// The canonical domain tag for input snapshot identity (ADR-0031 ⟨D-IDENTITY⟩).
 pub const INPUT_SNAPSHOT_TAG: &str = "brix.input.snapshot@1";
@@ -124,6 +126,8 @@ pub enum InputValue {
     /// declaration, never from the shard itself; only the sequence of
     /// element values is carried here.
     List(Vec<InputValue>),
+    F64(FiniteF64),
+    Decimal(Decimal),
 }
 
 /// Backward-compatible name for the scalar transport value type. `brix.input@1`
@@ -135,6 +139,8 @@ impl InputScalarValue {
     /// Return the corresponding [`L3ValueType`].
     pub fn value_type(&self) -> L3ValueType {
         match self {
+            Self::F64(_) => L3ValueType::F64,
+            Self::Decimal(_) => L3ValueType::Decimal,
             Self::Int(_) => L3ValueType::Int,
             Self::Bool(_) => L3ValueType::Bool,
             Self::Str(_) => L3ValueType::Str,
@@ -147,6 +153,8 @@ impl InputScalarValue {
     /// Convert into a runtime [`L3ValueV2`].
     pub fn to_l3_value(&self) -> L3ValueV2 {
         match self {
+            Self::F64(n) => L3ValueV2::F64(*n),
+            Self::Decimal(n) => L3ValueV2::Decimal(*n),
             Self::Int(n) => L3ValueV2::Int(*n),
             Self::Bool(b) => L3ValueV2::Bool(*b),
             Self::Str(s) => L3ValueV2::Str(s.clone()),
@@ -173,6 +181,8 @@ impl InputScalarValue {
     /// Convert a runtime value into the transport representation.
     pub fn from_l3_value(val: &L3ValueV2) -> Option<Self> {
         match val {
+            L3ValueV2::F64(n) => Some(Self::F64(*n)),
+            L3ValueV2::Decimal(n) => Some(Self::Decimal(*n)),
             L3ValueV2::Int(n) => Some(Self::Int(*n)),
             L3ValueV2::Bool(b) => Some(Self::Bool(*b)),
             L3ValueV2::Str(s) => Some(Self::Str(s.clone())),
@@ -211,6 +221,8 @@ impl InputScalarValue {
 impl Canonical for InputValue {
     fn canon_write(&self, w: &mut CanonWriter) {
         match self {
+            Self::F64(n) => w.write_enum(6, |w| n.canon_write(w)),
+            Self::Decimal(n) => w.write_enum(7, |w| n.canon_write(w)),
             Self::Int(n) => w.write_enum(0, |w| w.write_int(*n)),
             Self::Bool(b) => w.write_enum(1, |w| w.write_bool(*b)),
             Self::Str(s) => w.write_enum(2, |w| w.write_str(s)),
@@ -780,13 +792,27 @@ impl InputValidationError {
 // Decoder and Shard Helpers
 // ---------------------------------------------------------------------------
 
+/// Whether `value`, or anything nested within it, requires the numeric transport.
+fn value_has_numeric(value: &InputValue) -> bool {
+    match value {
+        InputValue::F64(_) | InputValue::Decimal(_) => true,
+        InputValue::Sum { args, .. } | InputValue::List(args) => args.iter().any(value_has_numeric),
+        InputValue::Record { fields, .. } => fields.values().any(value_has_numeric),
+        InputValue::Int(_) | InputValue::Bool(_) | InputValue::Str(_) => false,
+    }
+}
+
 /// Whether `value`, or anything nested within it, is a list (ADR-0037).
 fn value_has_list(value: &InputValue) -> bool {
     match value {
         InputValue::List(_) => true,
         InputValue::Sum { args, .. } => args.iter().any(value_has_list),
         InputValue::Record { fields, .. } => fields.values().any(value_has_list),
-        InputValue::Int(_) | InputValue::Bool(_) | InputValue::Str(_) => false,
+        InputValue::Int(_)
+        | InputValue::Bool(_)
+        | InputValue::Str(_)
+        | InputValue::F64(_)
+        | InputValue::Decimal(_) => false,
     }
 }
 
@@ -798,7 +824,11 @@ fn value_has_nested_list(value: &InputValue) -> bool {
         InputValue::List(items) => items.iter().any(value_has_list),
         InputValue::Sum { args, .. } => args.iter().any(value_has_list),
         InputValue::Record { fields, .. } => fields.values().any(value_has_list),
-        InputValue::Int(_) | InputValue::Bool(_) | InputValue::Str(_) => false,
+        InputValue::Int(_)
+        | InputValue::Bool(_)
+        | InputValue::Str(_)
+        | InputValue::F64(_)
+        | InputValue::Decimal(_) => false,
     }
 }
 
@@ -1376,6 +1406,7 @@ impl<'a> StrictJsonParser<'a> {
                     if schema_val != INPUT_SCHEMA_V1
                         && schema_val != INPUT_SCHEMA_V2
                         && schema_val != INPUT_SCHEMA_V3
+                        && schema_val != INPUT_SCHEMA_V4
                     {
                         return Err(InputDecodeError::InvalidSchema {
                             expected: INPUT_SCHEMA_V1,
@@ -1424,6 +1455,13 @@ impl<'a> StrictJsonParser<'a> {
         let schema = schema.ok_or(InputDecodeError::MissingField("schema"))?;
         let values = values.ok_or(InputDecodeError::MissingField("values"))?;
 
+        if schema != INPUT_SCHEMA_V4 && values.values().any(value_has_numeric) {
+            return Err(InputDecodeError::InvalidType {
+                expected: "f64 and decimal values require brix.input@4",
+                found: "numeric value in an older schema".to_string(),
+                offset: 0,
+            });
+        }
         if schema == INPUT_SCHEMA_V1
             && values
                 .values()
@@ -1447,9 +1485,11 @@ impl<'a> StrictJsonParser<'a> {
         // Lists are admitted only as a top-level `@3` value (ADR-0037
         // §Scope): a list nested inside a sum's `args` or a record's
         // `fields` is refused even under `@3`.
-        if schema == INPUT_SCHEMA_V3 && values.values().any(value_has_nested_list) {
+        if (schema == INPUT_SCHEMA_V3 || schema == INPUT_SCHEMA_V4)
+            && values.values().any(value_has_nested_list)
+        {
             return Err(InputDecodeError::InvalidType {
-                expected: "list only at the top level of a brix.input@3 value",
+                expected: "list only at the top level of a brix.input@3/@4 value",
                 found: "nested list value".to_string(),
                 offset: 0,
             });
@@ -1618,7 +1658,7 @@ impl<'a> StrictJsonParser<'a> {
         self.leave_depth();
         let (type_name, type_offset) = raw_type.ok_or(InputDecodeError::MissingField("type"))?;
         let allowed: &[&str] = match type_name.as_str() {
-            "int" | "bool" | "string" => &["type", "value"],
+            "int" | "bool" | "string" | "f64" | "decimal" => &["type", "value"],
             "sum" => &["type", "nominal", "variant", "args"],
             "record" => &["type", "nominal", "fields"],
             "list" => &["type", "items"],
@@ -1636,6 +1676,28 @@ impl<'a> StrictJsonParser<'a> {
             });
         }
         match type_name.as_str() {
+            "f64" | "decimal" => match raw_value.ok_or(InputDecodeError::MissingField("value"))? {
+                RawValue::String(s) => {
+                    let value = if type_name == "f64" {
+                        s.parse::<FiniteF64>()
+                            .map(InputValue::F64)
+                            .map_err(|e| e.to_string())
+                    } else {
+                        decimal_parse(&s)
+                            .map(InputValue::Decimal)
+                            .map_err(|e| e.to_string())
+                    };
+                    value.map_err(|message| InputDecodeError::SyntaxError {
+                        message: format!("invalid {type_name} value: {message}"),
+                        offset: type_offset,
+                    })
+                }
+                value => Err(InputDecodeError::InvalidType {
+                    expected: "string payload for f64 or decimal value",
+                    found: value.type_name().to_string(),
+                    offset: type_offset,
+                }),
+            },
             "int" => match raw_value.ok_or(InputDecodeError::MissingField("value"))? {
                 RawValue::String(s) => {
                     validate_decimal_int(&s)?;
@@ -1679,7 +1741,8 @@ impl<'a> StrictJsonParser<'a> {
                 items.ok_or(InputDecodeError::MissingField("items"))?,
             )),
             other => Err(InputDecodeError::InvalidType {
-                expected: "one of ['int', 'bool', 'string', 'sum', 'record', 'list']",
+                expected:
+                    "one of ['int', 'bool', 'string', 'sum', 'record', 'list', 'f64', 'decimal']",
                 found: other.to_string(),
                 offset: type_offset,
             }),

@@ -7,11 +7,16 @@ use brix_syntax::parse;
 
 #[test]
 fn boolean_analysis_bounds_helper_expansion() {
-    let mut source = "fn f0() = true\n".to_string();
+    // Avoid the reserved f64 constructor in generated helper names.
+    let mut source = "fn helper0() = true\n".to_string();
     for i in 1..25 {
-        source.push_str(&format!("fn f{i}() = f{}() && f{}()\n", i - 1, i - 1));
+        source.push_str(&format!(
+            "fn helper{i}() = helper{}() && helper{}()\n",
+            i - 1,
+            i - 1
+        ));
     }
-    source.push_str("propose p() priority 1 when false && f24() = true\ncommit c from (p)");
+    source.push_str("propose p() priority 1 when false && helper24() = true\ncommit c from (p)");
     let module = parse(&source).unwrap();
     assert_eq!(
         lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE),
@@ -21,11 +26,12 @@ fn boolean_analysis_bounds_helper_expansion() {
 
 #[test]
 fn boolean_analysis_bounds_helper_depth() {
-    let mut source = "fn f0() = true\n".to_string();
+    // Avoid the reserved f64 constructor in generated helper names.
+    let mut source = "fn helper0() = true\n".to_string();
     for i in 1..150 {
-        source.push_str(&format!("fn f{i}() = f{}()\n", i - 1));
+        source.push_str(&format!("fn helper{i}() = helper{}()\n", i - 1));
     }
-    source.push_str("propose p() priority 1 when false && f149() = true\ncommit c from (p)");
+    source.push_str("propose p() priority 1 when false && helper149() = true\ncommit c from (p)");
     let module = parse(&source).unwrap();
     assert_eq!(
         lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE),

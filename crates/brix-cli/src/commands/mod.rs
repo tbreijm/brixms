@@ -349,6 +349,8 @@ pub fn escape_str_human(s: &str) -> String {
 /// Format an [`L3ValueV2`] for human-readable display.
 pub fn fmt_value_human(v: &L3ValueV2) -> String {
     match v {
+        L3ValueV2::F64(n) => n.to_string(),
+        L3ValueV2::Decimal(n) => brix_canon::decimal_format(*n),
         L3ValueV2::Int(n) => n.to_string(),
         L3ValueV2::Bool(b) => b.to_string(),
         L3ValueV2::Str(s) => escape_str_human(s),

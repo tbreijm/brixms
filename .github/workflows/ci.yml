@@ -18,6 +18,24 @@ env:
   BRIX_TEST_SHARED_TARGET_DIR: ${{ github.workspace }}/target/nested
 
 jobs:
+  numeric-conformance:
+    name: numeric-conformance (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Toolchain (pinned via rust-toolchain.toml)
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Numeric bit vectors and exact decimal arithmetic
+        run: cargo test -p brix-canon
+      - name: Numeric execution, transport, and audit replay
+        run: |
+          cargo test -p brix-lower --test numeric_arithmetic --test numeric_input --test numeric_plan
+          cargo test -p brix-cli --test numeric_integration
+
   lint:
     name: lint
     runs-on: ubuntu-latest

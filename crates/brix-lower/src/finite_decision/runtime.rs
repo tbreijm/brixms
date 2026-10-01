@@ -747,6 +747,8 @@ impl FiniteDecisionRuntime {
                                 L3ValueType::Int => L3SchemaType::Int,
                                 L3ValueType::Bool => L3SchemaType::Bool,
                                 L3ValueType::Str => L3SchemaType::Str,
+                                L3ValueType::F64 => L3SchemaType::F64,
+                                L3ValueType::Decimal => L3SchemaType::Decimal,
                                 L3ValueType::Sum(ref name) | L3ValueType::Record(ref name) => {
                                     L3SchemaType::Named(name.clone())
                                 }
@@ -768,6 +770,8 @@ impl FiniteDecisionRuntime {
                     L3ValueType::Int => L3SchemaType::Int,
                     L3ValueType::Bool => L3SchemaType::Bool,
                     L3ValueType::Str => L3SchemaType::Str,
+                    L3ValueType::F64 => L3SchemaType::F64,
+                    L3ValueType::Decimal => L3SchemaType::Decimal,
                     L3ValueType::Sum(ref name) | L3ValueType::Record(ref name) => {
                         L3SchemaType::Named(name.clone())
                     }

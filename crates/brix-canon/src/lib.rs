@@ -49,13 +49,20 @@
 //! Normative reference: `spec/archive/BrixMS_v9_0.md` Appendix G (canonical encoding).
 
 mod decimal;
+mod decimal_math;
 mod float;
 mod int_codec;
 mod quantity;
+mod strict_ieee;
 
 pub use decimal::{read_decimal, Decimal};
+pub use decimal_math::{
+    decimal_add, decimal_div_exact, decimal_div_round, decimal_format, decimal_from_i64,
+    decimal_mul, decimal_neg, decimal_parse, decimal_sub, NumericError, MAX_DECIMAL_SCALE,
+};
 pub use float::{total_order_key_f32, total_order_key_f64};
 pub use quantity::{Money, Quantity};
+pub use strict_ieee::FiniteF64;
 
 /// Canon version tag, embedded in every digest domain. A change to any encoding
 /// rule requires bumping this AND minting a fresh `vectors/` set — the old
@@ -392,10 +399,12 @@ fn nfc_cow(s: &str) -> std::borrow::Cow<'_, str> {
 /// Types with a canonical byte encoding. Implementing this is the *only* way a
 /// type participates in identity, hashing, logging, or aggregation order.
 ///
-/// Note: floating-point types deliberately do **not** implement `Canonical`,
-/// because App. G excludes floats from key positions. Use
-/// [`total_order_key_f64`] to obtain a totalOrder tiebreak key for aggregation
-/// ordering only.
+/// Raw floating-point types deliberately do **not** implement `Canonical`:
+/// App. G excludes floats from key positions. ADR-0045's [`FiniteF64`] wrapper
+/// has a separate, finite-only value encoding for decision input digests;
+/// that encoding does not admit the value as an entity key. Use
+/// [`total_order_key_f64`] for numeric aggregation ordering, not the raw bits
+/// of that value encoding.
 pub trait Canonical {
     /// Append this value's canonical bytes to `w`.
     fn canon_write(&self, w: &mut CanonWriter);

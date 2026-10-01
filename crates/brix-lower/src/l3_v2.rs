@@ -106,9 +106,8 @@ pub enum L3ExprV2 {
     },
     /// Field projection on a record.
     Field(Box<L3ExprV2>, String),
-    /// Checked integer arithmetic. Division is deliberately absent — ADR-0027
-    /// §5 defers it until quotient type, rounding, division-by-zero and
-    /// `MIN / -1` are separately pinned.
+    /// Checked same-domain numeric arithmetic. Infix division accepts F64
+    /// and Decimal; integer division requires an explicit rounding builtin.
     Arith(ArithOpV2, Box<L3ExprV2>, Box<L3ExprV2>),
     /// Comparison, yielding a boolean.
     Cmp(CmpOpV2, Box<L3ExprV2>, Box<L3ExprV2>),
@@ -177,6 +176,64 @@ pub enum L3ExprV2 {
     /// `distinct(xs)` (ADR-0040): first occurrence kept, order otherwise
     /// preserved.
     Distinct(Box<L3ExprV2>),
+    /// Explicit numeric construction, conversion, rounding, or negation.
+    NumericBuiltin(NumericBuiltinV2, Vec<L3ExprV2>),
+}
+
+/// Numeric operations pinned independently of user-defined helper names.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum NumericBuiltinV2 {
+    F64,
+    Decimal,
+    F64FromInt,
+    DecimalFromInt,
+    DecimalDiv,
+    F64Neg,
+    DecimalNeg,
+}
+
+impl NumericBuiltinV2 {
+    pub const ALL: [Self; 7] = [
+        Self::F64,
+        Self::Decimal,
+        Self::F64FromInt,
+        Self::DecimalFromInt,
+        Self::DecimalDiv,
+        Self::F64Neg,
+        Self::DecimalNeg,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::F64 => "f64",
+            Self::Decimal => "decimal",
+            Self::F64FromInt => "f64_from_int",
+            Self::DecimalFromInt => "decimal_from_int",
+            Self::DecimalDiv => "decimal_div",
+            Self::F64Neg => "f64_neg",
+            Self::DecimalNeg => "decimal_neg",
+        }
+    }
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|op| op.name() == name)
+    }
+    pub const fn arity(self) -> usize {
+        match self {
+            Self::DecimalDiv => 4,
+            _ => 1,
+        }
+    }
+    pub const fn ordinal(self) -> u64 {
+        match self {
+            Self::F64 => 0,
+            Self::Decimal => 1,
+            Self::F64FromInt => 2,
+            Self::DecimalFromInt => 3,
+            Self::DecimalDiv => 4,
+            Self::F64Neg => 5,
+            Self::DecimalNeg => 6,
+        }
+    }
 }
 
 /// Deterministic fold operations over a bounded list. `Sum`/`Count`/`All`/
@@ -304,23 +361,14 @@ impl DivModOpV2 {
     }
 }
 
-/// Why `/` is refused in a finite-decision program, and by [`crate::let_eval`]
-/// as the reason a `let`-lane binding that uses `/` is not evaluated
-/// (ADR-0042 — the two lanes share one meaning for every operator, so the
-/// executable fragment's exclusion of `/` is explained the same way in both
-/// places rather than by two diagnostics that could drift apart).
-///
-/// `/` is not meaningless: it means exact-to-Float division (`Int / Int →
-/// Float`) in the type-realization (`let`) lane. It is refused here because
-/// `Float` values are not admitted in a finite-decision program at all — not
-/// because the rounding is ambiguous. A program that wants an exact integer
-/// result names the rounding it wants: [`DivModOpV2::name`] lists
-/// `div_floor`, `div_ceil`, `div_half_even`, and `mod_euclid` (ADR-0035).
+/// Why integer `/` is not executable (ADR-0035, ADR-0042, ADR-0045).
+/// The research lane may still type Int/Int as historical Float; the
+/// executable profile requires explicit integer rounding or F64/Decimal values.
 pub(crate) fn division_not_admitted_reason() -> &'static str {
-    "'/' means exact-to-Float division (Int / Int -> Float) in the `let` lane; \
-     Float values are not admitted in a finite-decision program, so '/' is not \
-     admitted here either — use div_floor, div_ceil, div_half_even, or \
-     mod_euclid for an exact integer result (ADR-0035, ADR-0042)"
+    "integer '/' is not executable: use div_floor, div_ceil, div_half_even, or \
+     mod_euclid for an exact integer result. The let lane retains Int / Int -> Float \
+     typing without executable Float values; decision '/' requires F64 or Decimal \
+     operands (ADR-0035, ADR-0042, ADR-0045)"
 }
 
 /// Apply an exact integer division or modulo.
@@ -407,6 +455,8 @@ pub enum L3ValueType {
     /// a payload-carrying variant would have to resolve for its own sake: an
     /// empty runtime list has no element it could infer a type from.
     List,
+    F64,
+    Decimal,
 }
 
 /// A recursively checked schema type used by structured inputs and helper
@@ -418,6 +468,8 @@ pub enum L3SchemaType {
     Bool,
     Str,
     Named(String),
+    F64,
+    Decimal,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -439,6 +491,8 @@ impl L3SchemaType {
             Self::Bool => "Bool".to_string(),
             Self::Str => "Str".to_string(),
             Self::Named(name) => name.clone(),
+            Self::F64 => "F64".to_string(),
+            Self::Decimal => "Decimal".to_string(),
         }
     }
 }
@@ -454,8 +508,14 @@ pub fn validate_l3_value(
     match (value, expected) {
         (L3ValueV2::Int(_), L3SchemaType::Int)
         | (L3ValueV2::Bool(_), L3SchemaType::Bool)
-        | (L3ValueV2::Str(_), L3SchemaType::Str) => Ok(()),
-        (L3ValueV2::Int(_), _) | (L3ValueV2::Bool(_), _) | (L3ValueV2::Str(_), _) => Err(format!(
+        | (L3ValueV2::Str(_), L3SchemaType::Str)
+        | (L3ValueV2::F64(_), L3SchemaType::F64)
+        | (L3ValueV2::Decimal(_), L3SchemaType::Decimal) => Ok(()),
+        (L3ValueV2::Int(_), _)
+        | (L3ValueV2::Bool(_), _)
+        | (L3ValueV2::Str(_), _)
+        | (L3ValueV2::F64(_), _)
+        | (L3ValueV2::Decimal(_), _) => Err(format!(
             "{path}: expected {}, found primitive",
             expected.display_name()
         )),
@@ -567,6 +627,8 @@ impl fmt::Display for L3ValueType {
             Self::Sum(s) => write!(f, "Sum({s})"),
             Self::Record(r) => write!(f, "Record({r})"),
             Self::List => write!(f, "List"),
+            Self::F64 => write!(f, "F64"),
+            Self::Decimal => write!(f, "Decimal"),
         }
     }
 }
@@ -580,6 +642,8 @@ pub fn type_of_value(v: &L3ValueV2) -> L3ValueType {
         L3ValueV2::Ctor { nominal_sum, .. } => L3ValueType::Sum(nominal_sum.clone()),
         L3ValueV2::Record { nominal_config, .. } => L3ValueType::Record(nominal_config.clone()),
         L3ValueV2::List(_) => L3ValueType::List,
+        L3ValueV2::F64(_) => L3ValueType::F64,
+        L3ValueV2::Decimal(_) => L3ValueType::Decimal,
     }
 }
 
@@ -689,6 +753,7 @@ pub enum ArithOpV2 {
     Add,
     Sub,
     Mul,
+    Div,
 }
 
 impl ArithOpV2 {
@@ -698,6 +763,7 @@ impl ArithOpV2 {
             ArithOpV2::Add => 0,
             ArithOpV2::Sub => 1,
             ArithOpV2::Mul => 2,
+            ArithOpV2::Div => 3,
         }
     }
 }
@@ -991,6 +1057,12 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
             ast::Item::Config(c) => {
                 if let ast::ConfigBody::Sum(variants) = &c.body {
                     for v in variants {
+                        if NumericBuiltinV2::from_name(&v.name).is_some() {
+                            return Err(L3V2LowerError::Unsupported(format!(
+                                "constructor '{}' shadows a reserved numeric builtin",
+                                v.name
+                            )));
+                        }
                         variants_of.insert(v.name.clone(), c.name.clone());
                         if v.params.is_empty() {
                             nullary.insert(v.name.clone(), c.name.clone());
@@ -1245,6 +1317,33 @@ pub(crate) fn lower_expr_v2(
             })
         }
         ast::Expr::Call { func, args } => {
+            if let Some(op) = NumericBuiltinV2::from_name(func) {
+                if args.len() != op.arity() {
+                    return Err(L3V2LowerError::FunctionArityMismatch {
+                        func: func.clone(),
+                        expected: op.arity(),
+                        found: args.len(),
+                    });
+                }
+                let args = args
+                    .iter()
+                    .map(|a| {
+                        lower_expr_v2(
+                            a,
+                            lets,
+                            locals,
+                            rules,
+                            nullary,
+                            variants_of,
+                            functions,
+                            in_rule,
+                            helper_enabled,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok(L3ExprV2::NumericBuiltin(op, args));
+            }
+
             // Reserved names resolve first and unconditionally. Nothing can
             // shadow them: a helper or constructor claiming one of these names
             // is refused where it is declared, so this branch is never a
@@ -1492,7 +1591,13 @@ pub(crate) fn lower_expr_v2(
                 ast::BinOp::Add => Ok(L3ExprV2::Arith(ArithOpV2::Add, l, r)),
                 ast::BinOp::Sub => Ok(L3ExprV2::Arith(ArithOpV2::Sub, l, r)),
                 ast::BinOp::Mul => Ok(L3ExprV2::Arith(ArithOpV2::Mul, l, r)),
-                ast::BinOp::Div => Err(L3V2LowerError::DivisionNotAllowed),
+                ast::BinOp::Div => {
+                    if matches!((&*l, &*r), (L3ExprV2::Int(_), L3ExprV2::Int(_))) {
+                        Err(L3V2LowerError::DivisionNotAllowed)
+                    } else {
+                        Ok(L3ExprV2::Arith(ArithOpV2::Div, l, r))
+                    }
+                }
                 ast::BinOp::Lt => Ok(L3ExprV2::Cmp(CmpOpV2::Lt, l, r)),
                 ast::BinOp::Le => Ok(L3ExprV2::Cmp(CmpOpV2::Le, l, r)),
                 ast::BinOp::Gt => Ok(L3ExprV2::Cmp(CmpOpV2::Gt, l, r)),
@@ -1715,6 +1820,8 @@ pub enum L3ValueV2 {
     /// Equality, ordering, and every canonical encoding depend only on the
     /// elements.
     List(Arc<[L3ValueV2]>),
+    F64(brix_canon::FiniteF64),
+    Decimal(brix_canon::Decimal),
 }
 
 /// Why an evaluation could not produce a value.
@@ -1774,12 +1881,15 @@ pub enum EvalFault {
     /// empty aggregate has no minimum or maximum to report, so this is a
     /// typed evaluation fault rather than `0` or any other placeholder.
     EmptyAggregate(FoldOpV2),
+    /// An invalid numeric value, overflow, zero divisor, or inexact decimal result.
+    Numeric(String),
 }
 
 impl fmt::Display for EvalFault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Overflow(op) => write!(f, "arithmetic overflow ({op:?})"),
+            Self::Numeric(detail) => write!(f, "numeric fault: {detail}"),
             Self::Unbound(name) => write!(f, "unbound identifier: {name}"),
             Self::NoSuchField(field) => write!(f, "no such field: {field}"),
             Self::NoMatchingArm => write!(f, "no matching arm in match expression"),
@@ -2066,7 +2176,10 @@ impl EvalBudget {
             }
 
             match node {
-                L3ValueV2::Int(_) | L3ValueV2::Bool(_) => {
+                L3ValueV2::Int(_)
+                | L3ValueV2::Bool(_)
+                | L3ValueV2::F64(_)
+                | L3ValueV2::Decimal(_) => {
                     bytes += 8;
                 }
                 L3ValueV2::Str(s) => {
@@ -2229,9 +2342,9 @@ fn expr_has_list_form(e: &L3ExprV2) -> bool {
         | L3ExprV2::LetRef(_)
         | L3ExprV2::RuleFact(_)
         | L3ExprV2::NullaryVariant { .. } => false,
-        L3ExprV2::Ctor { args, .. } | L3ExprV2::Call { args, .. } => {
-            args.iter().any(expr_has_list_form)
-        }
+        L3ExprV2::Ctor { args, .. }
+        | L3ExprV2::Call { args, .. }
+        | L3ExprV2::NumericBuiltin(_, args) => args.iter().any(expr_has_list_form),
         L3ExprV2::Record { fields, .. } => fields.iter().any(|(_, v)| expr_has_list_form(v)),
         L3ExprV2::Field(base, _) | L3ExprV2::Not(base) => expr_has_list_form(base),
         L3ExprV2::Arith(_, a, b)
@@ -2242,6 +2355,110 @@ fn expr_has_list_form(e: &L3ExprV2) -> bool {
         L3ExprV2::Match { scrutinee, arms } => {
             expr_has_list_form(scrutinee) || arms.iter().any(|(_, body)| expr_has_list_form(body))
         }
+    }
+}
+
+fn numeric_fault(error: brix_canon::NumericError) -> EvalFault {
+    EvalFault::Numeric(error.to_string())
+}
+
+/// Arithmetic never coerces values between numeric domains.
+pub(crate) fn eval_numeric_arith(
+    op: ArithOpV2,
+    x: L3ValueV2,
+    y: L3ValueV2,
+) -> Result<L3ValueV2, EvalFault> {
+    use brix_canon::{decimal_add, decimal_div_exact, decimal_mul, decimal_sub};
+    match (x, y) {
+        (L3ValueV2::Int(x), L3ValueV2::Int(y)) => {
+            let result = match op {
+                ArithOpV2::Add => x.checked_add(y),
+                ArithOpV2::Sub => x.checked_sub(y),
+                ArithOpV2::Mul => x.checked_mul(y),
+                ArithOpV2::Div => {
+                    return Err(EvalFault::OperandShape(
+                        "Int division requires div_floor, div_ceil, or div_half_even",
+                    ))
+                }
+            };
+            result.map(L3ValueV2::Int).ok_or(EvalFault::Overflow(op))
+        }
+        (L3ValueV2::F64(x), L3ValueV2::F64(y)) => {
+            let result = match op {
+                ArithOpV2::Add => x.checked_add(y),
+                ArithOpV2::Sub => x.checked_sub(y),
+                ArithOpV2::Mul => x.checked_mul(y),
+                ArithOpV2::Div => x.checked_div(y),
+            };
+            result.map(L3ValueV2::F64).map_err(numeric_fault)
+        }
+        (L3ValueV2::Decimal(x), L3ValueV2::Decimal(y)) => {
+            let result = match op {
+                ArithOpV2::Add => decimal_add(x, y),
+                ArithOpV2::Sub => decimal_sub(x, y),
+                ArithOpV2::Mul => decimal_mul(x, y),
+                ArithOpV2::Div => decimal_div_exact(x, y),
+            };
+            result.map(L3ValueV2::Decimal).map_err(numeric_fault)
+        }
+        _ => Err(EvalFault::OperandShape(
+            "arithmetic requires operands of the same numeric type",
+        )),
+    }
+}
+
+fn numeric_order(x: &L3ValueV2, y: &L3ValueV2) -> Result<std::cmp::Ordering, EvalFault> {
+    match (x, y) {
+        (L3ValueV2::Int(x), L3ValueV2::Int(y)) => Ok(x.cmp(y)),
+        (L3ValueV2::F64(x), L3ValueV2::F64(y)) => Ok(x.cmp(y)),
+        (L3ValueV2::Decimal(x), L3ValueV2::Decimal(y)) => Ok(x.cmp(y)),
+        _ => Err(EvalFault::OperandShape(
+            "ordering requires operands of the same numeric type",
+        )),
+    }
+}
+
+pub(crate) fn eval_numeric_builtin(
+    op: NumericBuiltinV2,
+    args: &[L3ValueV2],
+) -> Result<L3ValueV2, EvalFault> {
+    use brix_canon::{decimal_div_round, decimal_from_i64, decimal_neg, decimal_parse, FiniteF64};
+    match (op, args) {
+        (NumericBuiltinV2::F64, [L3ValueV2::Str(text)]) => text
+            .parse::<FiniteF64>()
+            .map(L3ValueV2::F64)
+            .map_err(numeric_fault),
+        (NumericBuiltinV2::Decimal, [L3ValueV2::Str(text)]) => decimal_parse(text)
+            .map(L3ValueV2::Decimal)
+            .map_err(numeric_fault),
+        (NumericBuiltinV2::F64FromInt, [L3ValueV2::Int(value)]) => {
+            Ok(L3ValueV2::F64(FiniteF64::from_i64(*value)))
+        }
+        (NumericBuiltinV2::DecimalFromInt, [L3ValueV2::Int(value)]) => {
+            Ok(L3ValueV2::Decimal(decimal_from_i64(*value)))
+        }
+        (
+            NumericBuiltinV2::DecimalDiv,
+            [L3ValueV2::Decimal(a), L3ValueV2::Decimal(b), L3ValueV2::Int(scale), L3ValueV2::Str(mode)],
+        ) => {
+            let scale = u8::try_from(*scale)
+                .ok()
+                .filter(|scale| *scale <= 18)
+                .ok_or_else(|| EvalFault::Numeric("decimal scale must be in 0..=18".into()))?;
+            decimal_div_round(*a, *b, scale, mode)
+                .map(L3ValueV2::Decimal)
+                .map_err(numeric_fault)
+        }
+        (NumericBuiltinV2::F64Neg, [L3ValueV2::F64(value)]) => value
+            .checked_neg()
+            .map(L3ValueV2::F64)
+            .map_err(numeric_fault),
+        (NumericBuiltinV2::DecimalNeg, [L3ValueV2::Decimal(value)]) => decimal_neg(*value)
+            .map(L3ValueV2::Decimal)
+            .map_err(numeric_fault),
+        _ => Err(EvalFault::OperandShape(
+            "invalid numeric builtin argument types or arity",
+        )),
     }
 }
 
@@ -2393,39 +2610,33 @@ fn eval_internal_body(
                 eval_internal(a, env, budget, current_func)?,
                 eval_internal(b, env, budget, current_func)?,
             );
-            let (L3ValueV2::Int(x), L3ValueV2::Int(y)) = (x, y) else {
-                return Err(EvalFault::OperandShape("arithmetic requires Int operands"));
-            };
-            // Checked, never wrapping. An overflowed fact would claim a value
-            // the arithmetic did not produce.
-            let r = match op {
-                ArithOpV2::Add => x.checked_add(y),
-                ArithOpV2::Sub => x.checked_sub(y),
-                ArithOpV2::Mul => x.checked_mul(y),
-            };
-            r.map(L3ValueV2::Int).ok_or(EvalFault::Overflow(*op))
+            eval_numeric_arith(*op, x, y)
         }
         L3ExprV2::Cmp(op, a, b) => {
             let (x, y) = (
                 eval_internal(a, env, budget, current_func)?,
                 eval_internal(b, env, budget, current_func)?,
             );
-            // Ordering comparisons are numeric; equality is structural, so it
-            // works for any two values of the same shape.
+            // Numeric domains never coerce, including equality. Existing
+            // nonnumeric structural equality retains its historical behavior.
+            if (matches!(x, L3ValueV2::F64(_) | L3ValueV2::Decimal(_))
+                || matches!(y, L3ValueV2::F64(_) | L3ValueV2::Decimal(_)))
+                && type_of_value(&x) != type_of_value(&y)
+            {
+                return Err(EvalFault::OperandShape(
+                    "comparison requires operands of the same numeric type",
+                ));
+            }
             let out = match op {
                 CmpOpV2::Eq => x == y,
                 CmpOpV2::Ne => x != y,
                 _ => {
-                    let (L3ValueV2::Int(x), L3ValueV2::Int(y)) = (x, y) else {
-                        return Err(EvalFault::OperandShape(
-                            "ordering comparison requires Int operands",
-                        ));
-                    };
+                    let ordering = numeric_order(&x, &y)?;
                     match op {
-                        CmpOpV2::Lt => x < y,
-                        CmpOpV2::Le => x <= y,
-                        CmpOpV2::Gt => x > y,
-                        CmpOpV2::Ge => x >= y,
+                        CmpOpV2::Lt => ordering.is_lt(),
+                        CmpOpV2::Le => ordering.is_le(),
+                        CmpOpV2::Gt => ordering.is_gt(),
+                        CmpOpV2::Ge => ordering.is_ge(),
                         CmpOpV2::Eq | CmpOpV2::Ne => unreachable!("handled above"),
                     }
                 }
@@ -2463,6 +2674,16 @@ fn eval_internal_body(
                 return Err(EvalFault::OperandShape("logical OR requires Bool operands"));
             };
             Ok(L3ValueV2::Bool(bool_b))
+        }
+        L3ExprV2::NumericBuiltin(op, args) => {
+            if args.len() != op.arity() {
+                return Err(EvalFault::OperandShape("numeric builtin arity mismatch"));
+            }
+            let args = args
+                .iter()
+                .map(|a| eval_internal(a, env, budget, current_func))
+                .collect::<Result<Vec<_>, _>>()?;
+            eval_numeric_builtin(*op, &args)
         }
         L3ExprV2::IntDivMod(op, a, b) => {
             let (x, y) = (
@@ -3152,7 +3373,9 @@ pub(crate) fn check_exhaustive_expr(
                 })
             }
         }
-        L3ExprV2::Ctor { args, .. } | L3ExprV2::Call { args, .. } => {
+        L3ExprV2::Ctor { args, .. }
+        | L3ExprV2::Call { args, .. }
+        | L3ExprV2::NumericBuiltin(_, args) => {
             for a in args {
                 check_exhaustive_expr(a, sum_of_variant, variants_of_sum)?;
             }

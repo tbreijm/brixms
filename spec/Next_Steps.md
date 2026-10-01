@@ -46,8 +46,9 @@ In order, ahead of the milestones above:
    `lower_finite_decision_plan` (the finite-decision lane) currently accept
    different expression subsets under the same grammar — `&&`/`||`/`!` and
    the `div_*`/`mod_euclid` built-ins type-check in one lane and are
-   `Unresolved`/`Unsupported` in the other; `/` is Float division in one and
-   refused in the other. This is the concrete instance of the roadmap's "One
+   `Unresolved`/`Unsupported` in the other; integer `/` is Float division in
+   the `let` type checker and refused in decisions. ADR-0045 separately adds
+   executable `F64`/`Decimal` division to decision programs. This is the concrete instance of the roadmap's "One
    language" milestone.
    **Acceptance:** a single written decision (an ADR, since it can move
    program identity) on which lane's behavior is authoritative for each
