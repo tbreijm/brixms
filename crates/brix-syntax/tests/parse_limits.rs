@@ -86,3 +86,47 @@ fn prefix_nesting_just_under_the_bound_is_accepted() {
     let src = format!("let x = {}true", "!".repeat(limit - 1));
     parse_bounded(&src, ParseLimits::strict()).expect("depth below the bound must parse");
 }
+
+fn nested_match(depth: usize) -> String {
+    format!("{}1{}", "match x { A => ".repeat(depth), " }".repeat(depth))
+}
+
+#[test]
+fn match_nesting_respects_default_and_custom_boundaries() {
+    for limit in [8, ParseLimits::strict().max_nesting_depth] {
+        let limits = ParseLimits {
+            max_nesting_depth: limit,
+            ..ParseLimits::strict()
+        };
+        // The outer expression uses one level; each match scrutinee and arm
+        // body uses another. Splitting parser frames must not change this.
+        let accepted = format!("show {}", nested_match(limit - 1));
+        parse_bounded(&accepted, limits).expect("match nesting below the bound must parse");
+        let refused = format!("show {}", nested_match(limit));
+        let error = parse_bounded(&refused, limits).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(&LimitExceeded::NestingDepth { limit }.to_string()));
+    }
+}
+
+#[test]
+fn depth_is_released_between_sibling_matches() {
+    let expression = nested_match(4);
+    let source = (0..500)
+        .map(|i| format!("let x{i} = {expression}\n"))
+        .collect::<String>();
+    parse_bounded(&source, ParseLimits::strict()).expect("shallow sibling matches must parse");
+}
+
+#[test]
+fn nested_matches_with_binary_operands_are_refused_before_stack_overflow() {
+    // Precedence climbing retains additional frames when each match occurs
+    // on a right-hand side. The same default stack must still reach the guard.
+    let source = format!(
+        "show {}1{}",
+        "true || true && 1 < 2 + 3 * match x { A => ".repeat(200),
+        " }".repeat(200)
+    );
+    assert_refused_for_depth(&source, "match in binary operands");
+}
