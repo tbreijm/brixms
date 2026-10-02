@@ -876,10 +876,10 @@ commit c from (p)
 fn test_too_many_functions_limit() {
     let mut source = String::from("config Decision = Done\n");
     for i in 0..=MAX_FUNCTION_COUNT {
-        source.push_str(&format!("fn f{i}(): Int = {i}\n"));
+        source.push_str(&format!("fn helper{i}(): Int = {i}\n"));
     }
     source.push_str(
-        "rule r() = f0()\npropose p(r) priority 10 when true = Done\ncommit c from (p)\n",
+        "rule r() = helper0()\npropose p(r) priority 10 when true = Done\ncommit c from (p)\n",
     );
     let module = parse(&source).expect("parses");
     let err = lower_finite_decision_plan(&module, FINITE_DECISION_PROFILE).unwrap_err();

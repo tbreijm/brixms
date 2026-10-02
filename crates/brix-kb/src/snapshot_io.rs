@@ -1,4 +1,4 @@
-//! Encoding an [`InputSnapshot`] back to a strict `brix.input@2`/`@3` JSON file.
+//! Encoding an [`InputSnapshot`] back to a strict `brix.input@2`/`@3`/`@4` JSON file.
 //!
 //! `brix-lower::input` only ever *decodes* `brix.input@1`/`@2`/`@3` artifacts
 //! (they arrive from outside the toolchain, via `--input`); nothing before
@@ -15,13 +15,19 @@
 //! `brix.input@3` (ADR-0037) the moment any value — including one nested
 //! inside a `sum`'s `args` or a `record`'s `fields`, which `@3` still refuses
 //! at any depth other than the top level — is a list, since `@1`/`@2` refuse
-//! list values outright.
+//! list values outright. Numeric values anywhere in a snapshot require `@4`.
 
-use brix_lower::input::{InputSnapshot, InputValue, INPUT_SCHEMA_V2, INPUT_SCHEMA_V3};
+use brix_lower::input::{
+    InputSnapshot, InputValue, INPUT_SCHEMA_V2, INPUT_SCHEMA_V3, INPUT_SCHEMA_V4,
+};
 use serde_json::{json, Map, Value as Json};
 
 fn encode_value(v: &InputValue) -> Json {
     match v {
+        InputValue::F64(n) => json!({"type": "f64", "value": n.to_string()}),
+        InputValue::Decimal(n) => {
+            json!({"type": "decimal", "value": brix_canon::decimal_format(*n)})
+        }
         InputValue::Int(n) => json!({"type": "int", "value": n.to_string()}),
         InputValue::Bool(b) => json!({"type": "bool", "value": b}),
         InputValue::Str(s) => json!({"type": "string", "value": s}),
@@ -58,6 +64,19 @@ fn value_has_list(v: &InputValue) -> bool {
         InputValue::List(_) => true,
         InputValue::Sum { args, .. } => args.iter().any(value_has_list),
         InputValue::Record { fields, .. } => fields.values().any(value_has_list),
+        InputValue::Int(_)
+        | InputValue::Bool(_)
+        | InputValue::Str(_)
+        | InputValue::F64(_)
+        | InputValue::Decimal(_) => false,
+    }
+}
+
+fn value_has_numeric(v: &InputValue) -> bool {
+    match v {
+        InputValue::F64(_) | InputValue::Decimal(_) => true,
+        InputValue::Sum { args, .. } | InputValue::List(args) => args.iter().any(value_has_numeric),
+        InputValue::Record { fields, .. } => fields.values().any(value_has_numeric),
         InputValue::Int(_) | InputValue::Bool(_) | InputValue::Str(_) => false,
     }
 }
@@ -69,11 +88,15 @@ fn value_has_list(v: &InputValue) -> bool {
 pub fn encode_input_snapshot_v2(snapshot: &InputSnapshot) -> String {
     let mut values = Map::new();
     let mut needs_v3 = false;
+    let mut needs_v4 = false;
     for (name, value) in snapshot.values() {
         needs_v3 |= value_has_list(value);
+        needs_v4 |= value_has_numeric(value);
         values.insert(name.clone(), encode_value(value));
     }
-    let schema = if needs_v3 {
+    let schema = if needs_v4 {
+        INPUT_SCHEMA_V4
+    } else if needs_v3 {
         INPUT_SCHEMA_V3
     } else {
         INPUT_SCHEMA_V2
@@ -97,6 +120,26 @@ mod tests {
         let decoded = canonicalize_input_shards(vec![shard], &limits).expect("canonicalize");
         assert_eq!(decoded.id(), snapshot.id(), "snapshot id must round-trip");
         assert_eq!(decoded.values(), snapshot.values());
+    }
+
+    #[test]
+    fn numeric_snapshots_write_v4_and_preserve_canonical_identity() {
+        let limits = InputLimits::default();
+        for value in [
+            json!({"type":"f64", "value":"-0.0"}),
+            json!({"type":"decimal", "value":"9007199254740993.123456789012345678"}),
+            json!({"type":"list", "items":[{"type":"decimal", "value":"0.10"}]}),
+            json!({"type":"record", "nominal":"Price", "fields":[{"name":"amount", "value":{"type":"decimal", "value":"12.50"}}]}),
+            json!({"type":"sum", "nominal":"Measure", "variant":"Reading", "args":[{"type":"f64", "value":"1.5"}]}),
+        ] {
+            let bytes = serde_json::to_vec(&json!({"schema":"brix.input@4", "values":{"x":value}}))
+                .unwrap();
+            let shard = decode_input_shard(&bytes, &limits).unwrap();
+            let snapshot = canonicalize_input_shards(vec![shard], &limits).unwrap();
+            let encoded = encode_input_snapshot_v2(&snapshot);
+            assert!(encoded.contains("brix.input@4"));
+            roundtrip(&snapshot);
+        }
     }
 
     #[test]

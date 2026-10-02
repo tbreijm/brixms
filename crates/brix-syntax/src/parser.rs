@@ -743,7 +743,7 @@ impl Parser {
     }
 
     fn parse_expr_inner(&mut self) -> Result<Expr, ParseError> {
-        self.parse_expr_bp(0)
+        self.parse_expr_bp()
     }
 
     /// One call argument: either an ordinary expression, or a hygienic
@@ -768,7 +768,7 @@ impl Parser {
         self.parse_expr()
     }
 
-    /// Precedence climbing for binary operators.
+    /// Precedence parsing for binary operators.
     ///
     /// Precedence levels (lowest to highest):
     /// 1. `then`, `and` (witness composition)
@@ -784,62 +784,70 @@ impl Parser {
     /// [`Self::parse_expr_postfix`] before that. So `-a * b` is `(-a) * b`
     /// (unary minus binds tighter than every binary operator here), and `-a.field`
     /// is `-(a.field)` (postfix binds tighter than prefix).
-    fn parse_expr_bp(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
-        let mut lhs = self.parse_expr_prefix()?;
+    fn parse_expr_bp(&mut self) -> Result<Expr, ParseError> {
+        // The recursive Pratt form retained one parser frame per active
+        // precedence level. A nested expression on the right of a match could
+        // therefore consume many frames per charged depth level. Keep the
+        // operator/value stacks explicit so stack use stays bounded by the
+        // normal call structure while preserving the same binding powers.
+        let mut values = vec![self.parse_expr_prefix()?];
+        let mut operators: Vec<(u8, BinOp, bool)> = Vec::new();
 
         loop {
-            let (left_bp, right_bp, op, is_cmp) = match self.peek() {
-                TokenKind::Then => (1, 2, BinOp::Then, false),
-                TokenKind::And => (1, 2, BinOp::And, false),
-                TokenKind::PipePipe => (3, 4, BinOp::OrOr, false),
-                TokenKind::AmpAmp => (5, 6, BinOp::AndAnd, false),
-                TokenKind::Lt => (7, 8, BinOp::Lt, true),
-                TokenKind::Le => (7, 8, BinOp::Le, true),
-                TokenKind::Gt => (7, 8, BinOp::Gt, true),
-                TokenKind::Ge => (7, 8, BinOp::Ge, true),
-                TokenKind::EqEq => (7, 8, BinOp::Eq, true),
-                TokenKind::Ne => (7, 8, BinOp::Ne, true),
-                TokenKind::In => (7, 8, BinOp::In, true),
-                TokenKind::Plus => (9, 10, BinOp::Add, false),
-                TokenKind::Minus => (9, 10, BinOp::Sub, false),
-                TokenKind::Star => (11, 12, BinOp::Mul, false),
-                TokenKind::Slash => (11, 12, BinOp::Div, false),
+            let (binding_power, op, is_comparison) = match self.peek() {
+                TokenKind::Then => (1, BinOp::Then, false),
+                TokenKind::And => (1, BinOp::And, false),
+                TokenKind::PipePipe => (3, BinOp::OrOr, false),
+                TokenKind::AmpAmp => (5, BinOp::AndAnd, false),
+                TokenKind::Lt => (7, BinOp::Lt, true),
+                TokenKind::Le => (7, BinOp::Le, true),
+                TokenKind::Gt => (7, BinOp::Gt, true),
+                TokenKind::Ge => (7, BinOp::Ge, true),
+                TokenKind::EqEq => (7, BinOp::Eq, true),
+                TokenKind::Ne => (7, BinOp::Ne, true),
+                TokenKind::In => (7, BinOp::In, true),
+                TokenKind::Plus => (9, BinOp::Add, false),
+                TokenKind::Minus => (9, BinOp::Sub, false),
+                TokenKind::Star => (11, BinOp::Mul, false),
+                TokenKind::Slash => (11, BinOp::Div, false),
                 _ => break,
             };
 
-            if left_bp < min_bp {
-                break;
-            }
-
-            self.advance();
-
-            let rhs = self.parse_expr_bp(right_bp)?;
-
-            if is_cmp && self.peek_cmp() {
+            if is_comparison
+                && operators
+                    .iter()
+                    .any(|(bp, _, was_comparison)| *bp == binding_power && *was_comparison)
+            {
                 return Err(self.error("comparison operators do not chain; parenthesise instead"));
             }
 
-            lhs = Expr::Bin {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
+            while operators
+                .last()
+                .is_some_and(|(bp, _, _)| *bp >= binding_power)
+            {
+                Self::reduce_binary(&mut values, &mut operators);
+            }
+
+            self.advance();
+            operators.push((binding_power, op, is_comparison));
+            values.push(self.parse_expr_prefix()?);
         }
 
-        Ok(lhs)
+        while !operators.is_empty() {
+            Self::reduce_binary(&mut values, &mut operators);
+        }
+        Ok(values.pop().expect("an expression starts with one operand"))
     }
 
-    fn peek_cmp(&self) -> bool {
-        matches!(
-            self.peek(),
-            TokenKind::Lt
-                | TokenKind::Le
-                | TokenKind::Gt
-                | TokenKind::Ge
-                | TokenKind::EqEq
-                | TokenKind::Ne
-                | TokenKind::In
-        )
+    fn reduce_binary(values: &mut Vec<Expr>, operators: &mut Vec<(u8, BinOp, bool)>) {
+        let (_, op, _) = operators.pop().expect("an operator is pending");
+        let rhs = values.pop().expect("an operator has a right operand");
+        let lhs = values.pop().expect("an operator has a left operand");
+        values.push(Expr::Bin {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        });
     }
 
     /// Operand of a self-recursive prefix operator (`!`, unary `-`, `prove`,
@@ -954,89 +962,107 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Bool(false))
             }
-            TokenKind::Match => {
-                self.advance();
-                let scrutinee = Box::new(self.parse_expr()?);
-                self.consume(TokenKind::OpenBrace, "match body '{'")?;
-                let mut arms = Vec::new();
-                while !self.check(&TokenKind::CloseBrace) && !self.is_at_end() {
-                    arms.push(self.parse_match_arm()?);
-                }
-                self.consume(TokenKind::CloseBrace, "match body '}'")?;
-                let proving_exhaustive = self.parse_optional_proving_exhaustive()?;
-                Ok(Expr::Match {
-                    scrutinee,
-                    arms,
-                    proving_exhaustive,
-                })
-            }
-            TokenKind::OpenParen => {
-                self.advance();
-                let expr = self.parse_expr()?;
-                self.consume(TokenKind::CloseParen, "grouped expression ')'")?;
-                Ok(expr)
-            }
-            TokenKind::OpenBracket => {
-                self.advance();
-                let elems =
-                    self.parse_comma_separated(TokenKind::CloseBracket, |p| p.parse_expr())?;
-                self.consume(TokenKind::CloseBracket, "list literal ']'")?;
-                Ok(Expr::ListLit(elems))
-            }
-            TokenKind::For => {
-                self.advance();
-                let mut generators = Vec::new();
-                loop {
-                    let binder = self.expect_ident("comprehension generator binder")?.0;
-                    self.consume(TokenKind::In, "comprehension generator 'in'")?;
-                    let source = self.parse_expr()?;
-                    generators.push((binder, source));
-                    if self.check(&TokenKind::Comma) {
-                        self.advance();
-                        continue;
-                    }
-                    break;
-                }
-                let where_clause = if self.check(&TokenKind::Where) {
-                    self.advance();
-                    Some(Box::new(self.parse_expr()?))
-                } else {
-                    None
-                };
-                self.consume(TokenKind::Yield, "comprehension 'yield'")?;
-                let yield_expr = Box::new(self.parse_expr()?);
-                Ok(Expr::Comprehension {
-                    generators,
-                    where_clause,
-                    yield_expr,
-                })
-            }
-            TokenKind::Ident(id) => {
-                if self.is_record_literal_ahead() {
-                    self.advance(); // consume config name
-                    self.advance(); // consume '{'
-                    let fields = self.parse_comma_separated(TokenKind::CloseBrace, |p| {
-                        let fname = p.expect_ident("record field name")?.0;
-                        p.consume(TokenKind::Colon, "':' in record literal")?;
-                        let fexpr = p.parse_expr()?;
-                        Ok((fname, fexpr))
-                    })?;
-                    self.consume(TokenKind::CloseBrace, "record literal '}'")?;
-                    Ok(Expr::Record { config: id, fields })
-                } else {
-                    self.advance();
-                    if self.check(&TokenKind::OpenParen) {
-                        self.advance();
-                        let args = self
-                            .parse_comma_separated(TokenKind::CloseParen, |p| p.parse_call_arg())?;
-                        self.consume(TokenKind::CloseParen, "function call ')'")?;
-                        Ok(Expr::Call { func: id, args })
-                    } else {
-                        Ok(Expr::Var(id))
-                    }
-                }
-            }
+            TokenKind::Match => self.parse_match_expr(),
+            TokenKind::OpenParen => self.parse_grouped_expr(),
+            TokenKind::OpenBracket => self.parse_list_expr(),
+            TokenKind::For => self.parse_comprehension_expr(),
+            TokenKind::Ident(id) => self.parse_ident_expr(id),
             other => Err(self.error(format!("Unexpected token {:?} in expression", other))),
+        }
+    }
+
+    // Recursive primary-expression alternatives have separate frames so the
+    // dispatch frame does not retain storage for every branch (notably the
+    // vectors and nested Expr results built by match, list, comprehension,
+    // record, and call expressions).
+    #[inline(never)]
+    fn parse_match_expr(&mut self) -> Result<Expr, ParseError> {
+        self.advance();
+        let scrutinee = Box::new(self.parse_expr()?);
+        self.consume(TokenKind::OpenBrace, "match body '{'")?;
+        let mut arms = Vec::new();
+        while !self.check(&TokenKind::CloseBrace) && !self.is_at_end() {
+            arms.push(self.parse_match_arm()?);
+        }
+        self.consume(TokenKind::CloseBrace, "match body '}'")?;
+        let proving_exhaustive = self.parse_optional_proving_exhaustive()?;
+        Ok(Expr::Match {
+            scrutinee,
+            arms,
+            proving_exhaustive,
+        })
+    }
+
+    #[inline(never)]
+    fn parse_grouped_expr(&mut self) -> Result<Expr, ParseError> {
+        self.advance();
+        let expr = self.parse_expr()?;
+        self.consume(TokenKind::CloseParen, "grouped expression ')'")?;
+        Ok(expr)
+    }
+
+    #[inline(never)]
+    fn parse_list_expr(&mut self) -> Result<Expr, ParseError> {
+        self.advance();
+        let elems = self.parse_comma_separated(TokenKind::CloseBracket, |p| p.parse_expr())?;
+        self.consume(TokenKind::CloseBracket, "list literal ']'")?;
+        Ok(Expr::ListLit(elems))
+    }
+
+    #[inline(never)]
+    fn parse_comprehension_expr(&mut self) -> Result<Expr, ParseError> {
+        self.advance();
+        let mut generators = Vec::new();
+        loop {
+            let binder = self.expect_ident("comprehension generator binder")?.0;
+            self.consume(TokenKind::In, "comprehension generator 'in'")?;
+            let source = self.parse_expr()?;
+            generators.push((binder, source));
+            if self.check(&TokenKind::Comma) {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+        let where_clause = if self.check(&TokenKind::Where) {
+            self.advance();
+            Some(Box::new(self.parse_expr()?))
+        } else {
+            None
+        };
+        self.consume(TokenKind::Yield, "comprehension 'yield'")?;
+        let yield_expr = Box::new(self.parse_expr()?);
+        Ok(Expr::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        })
+    }
+
+    #[inline(never)]
+    fn parse_ident_expr(&mut self, id: String) -> Result<Expr, ParseError> {
+        if self.is_record_literal_ahead() {
+            self.advance(); // consume config name
+            self.advance(); // consume '{'
+            let fields = self.parse_comma_separated(TokenKind::CloseBrace, |p| {
+                let fname = p.expect_ident("record field name")?.0;
+                p.consume(TokenKind::Colon, "':' in record literal")?;
+                let fexpr = p.parse_expr()?;
+                Ok((fname, fexpr))
+            })?;
+            self.consume(TokenKind::CloseBrace, "record literal '}'")?;
+            Ok(Expr::Record { config: id, fields })
+        } else {
+            self.advance();
+            if self.check(&TokenKind::OpenParen) {
+                self.advance();
+                let args =
+                    self.parse_comma_separated(TokenKind::CloseParen, |p| p.parse_call_arg())?;
+                self.consume(TokenKind::CloseParen, "function call ')'")?;
+                Ok(Expr::Call { func: id, args })
+            } else {
+                Ok(Expr::Var(id))
+            }
         }
     }
 

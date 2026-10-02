@@ -307,6 +307,11 @@ fn render(e: &L3ExprV2) -> String {
                 .join(", ");
             format!("match {} {{ {} }}", render_operand(scrutinee), arms_src)
         }
+        L3ExprV2::NumericBuiltin(op, args) => format!(
+            "{}({})",
+            op.name(),
+            args.iter().map(render).collect::<Vec<_>>().join(", ")
+        ),
         L3ExprV2::Call { func, args } => format!(
             "{func}({})",
             args.iter().map(render).collect::<Vec<_>>().join(", ")
@@ -388,6 +393,8 @@ fn needs_parens(e: &L3ExprV2) -> bool {
 fn render_value(v: &L3ValueV2) -> String {
     match v {
         L3ValueV2::Int(n) => n.to_string(),
+        L3ValueV2::F64(n) => format!("f64(\"{n}\")"),
+        L3ValueV2::Decimal(n) => format!("decimal(\"{}\")", brix_canon::decimal_format(*n)),
         L3ValueV2::Bool(b) => b.to_string(),
         L3ValueV2::Str(s) => render_str_literal(s),
         L3ValueV2::Ctor { variant, args, .. } => {
@@ -455,6 +462,7 @@ fn arith_symbol(op: ArithOpV2) -> &'static str {
         ArithOpV2::Add => "+",
         ArithOpV2::Sub => "-",
         ArithOpV2::Mul => "*",
+        ArithOpV2::Div => "/",
     }
 }
 
@@ -593,7 +601,7 @@ impl TraceBuilder {
                 };
                 self.leaf(e, env, node_ref)
             }
-            L3ExprV2::Ctor { args, .. } => {
+            L3ExprV2::Ctor { args, .. } | L3ExprV2::NumericBuiltin(_, args) => {
                 let children: Vec<TraceNode> = args
                     .iter()
                     .map(|a| self.build(a, env, helper_depth))

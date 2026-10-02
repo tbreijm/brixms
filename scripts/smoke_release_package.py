@@ -24,6 +24,7 @@ REQUIRED_SHIPPED_FILES = [
     Path(p) for p in (
         "brix", "README.md", "LICENSE",
         "examples/shipping.brix", "examples/shipping-input.brix", "examples/shipping-input.json",
+        "examples/numeric-policy.brix", "examples/numeric-policy.json",
     )
 ]
 
@@ -159,11 +160,12 @@ def smoke_check(package_dir: Path, expected_version: str) -> None:
         bin_path = verify_shipped_files(package_dir)
         ex = package_dir / "examples"
         ship_brix, ship_in_brix, ship_in_json = ex / "shipping.brix", ex / "shipping-input.brix", ex / "shipping-input.json"
-        print("[1/9] Validating required shipped files and binary permissions... OK")
+        numeric_brix, numeric_json = ex / "numeric-policy.brix", ex / "numeric-policy.json"
+        print("[1/10] Validating required shipped files and binary permissions... OK")
 
         # Step 2: Packaged binary version
         verify_binary_version(bin_path, norm_version, cwd=scratch_dir)
-        print(f"[2/9] Validating packaged binary version (brix {norm_version})... OK")
+        print(f"[2/10] Validating packaged binary version (brix {norm_version})... OK")
 
         def run(subcmd: str, rest: list[str | Path], exp_status: str, exp_code: int = 0, exp_ok: bool = True) -> dict:
             return run_brix_json(
@@ -177,26 +179,26 @@ def smoke_check(package_dir: Path, expected_version: str) -> None:
         if json_decl.get("context") is not None or json_decl.get("input_snapshot") is not None:
             raise SmokeCheckError(f"Expected null context and snapshot in declaration check: {json_decl}")
         decl_program = assert_64_hex(json_decl.get("program"), "declaration program")
-        print(f"[3/9] Exercising declaration-only check... OK (program pin: {decl_program})")
+        print(f"[3/10] Exercising declaration-only check... OK (program pin: {decl_program})")
 
         # Step 4: Preflight check with inputs
         json_pref = run("check", [ship_in_brix, "--input", ship_in_json], "accepted")
         preflight_context = assert_64_hex(json_pref.get("context"), "preflight context")
         preflight_snapshot = assert_64_hex(json_pref.get("input_snapshot"), "preflight input_snapshot")
         assert_shipping_execution(json_pref, decl_program, preflight_context, preflight_snapshot)
-        print("[4/9] Exercising preflight check with external inputs... OK (status: accepted, ship @ Derived)")
+        print("[4/10] Exercising preflight check with external inputs... OK (status: accepted, ship @ Derived)")
 
         # Step 5: Legacy zero-input shipping execution
         json_leg = run("run", [ship_brix], "selected")
         if json_leg.get("input_snapshot") is not None:
             raise SmokeCheckError(f"Expected null input_snapshot for zero-input program: {json_leg}")
         assert_ship_derived(json_leg)
-        print("[5/9] Exercising legacy zero-input shipping... OK (status: selected, ship @ Derived)")
+        print("[5/10] Exercising legacy zero-input shipping... OK (status: selected, ship @ Derived)")
 
         # Step 6: Input-aware deliberation run
         json_run = run("run", [ship_in_brix, "--input", ship_in_json], "selected")
         assert_shipping_execution(json_run, decl_program, preflight_context, preflight_snapshot)
-        print("[6/9] Exercising input-aware run... OK (status: selected, ship @ Derived)")
+        print("[6/10] Exercising input-aware run... OK (status: selected, ship @ Derived)")
 
         # Step 7: Deliberation explanation re-derivation (why ship and whynot expedite)
         for cmd, cand, exp_st, exp_code, exp_diag in (
@@ -209,7 +211,7 @@ def smoke_check(package_dir: Path, expected_version: str) -> None:
             diags = " ".join(res.get("diagnostics") or [])
             if exp_diag not in diags:
                 raise SmokeCheckError(f"'{cmd} {cand}' diagnostics missing '{exp_diag}': {diags}")
-        print("[7/9] Exercising deliberation explanation (why ship & whynot expedite)... OK")
+        print("[7/10] Exercising deliberation explanation (why ship & whynot expedite)... OK")
 
         # Step 8: Audit deliberation to a temporary bundle
         bundle_file = scratch_dir / "shipping_input.brixaudit"
@@ -218,7 +220,7 @@ def smoke_check(package_dir: Path, expected_version: str) -> None:
         if not bundle_file.is_file() or bundle_file.stat().st_size == 0:
             raise SmokeCheckError(f"Audit bundle was not created or is empty: {bundle_file}")
         audit_art = extract_bundle_artifact(json_audit)
-        print(f"[8/9] Producing audit input bundle... OK (bundle_id: {audit_art['bundle_id']})")
+        print(f"[8/10] Producing audit input bundle... OK (bundle_id: {audit_art['bundle_id']})")
 
         # Step 9: Independent verify with declaration pin + negative cases
         # 9a: Positive verification
@@ -257,9 +259,38 @@ def smoke_check(package_dir: Path, expected_version: str) -> None:
         if not any(isinstance(d, str) and "context identity mismatch" in d and alt_context in d and preflight_context in d for d in alt_diags):
             raise SmokeCheckError(f"Expected context mismatch diagnostic containing {alt_context} and {preflight_context}, got: {alt_diags}")
 
-        print("[9/9] Verifying audit bundle with declaration program pin and testing negative input cases... OK")
+        print("[9/10] Verifying audit bundle with declaration program pin and testing negative input cases... OK")
 
-    print(f"\nSmoke check PASSED: all 9 validation stages succeeded for release package.")
+        # Step 10: Packaged explicit numeric policy run and audit replay.
+        numeric_run = run("run", [numeric_brix, "--input", numeric_json], "selected")
+        numeric_program = assert_64_hex(numeric_run.get("program"), "numeric program")
+        numeric_context = assert_64_hex(numeric_run.get("context"), "numeric context")
+        numeric_snapshot = assert_64_hex(numeric_run.get("input_snapshot"), "numeric input_snapshot")
+        expected_facts = {
+            "measured_speed": {"type": "f64", "value": "25.1"},
+            "tax": {"type": "decimal", "value": "4.1895"},
+            "installment": {"type": "decimal", "value": "6.65"},
+        }
+        actual_facts = {
+            fact.get("name"): fact.get("value")
+            for fact in numeric_run.get("facts", []) if isinstance(fact, dict)
+        }
+        if any(actual_facts.get(name) != value for name, value in expected_facts.items()):
+            raise SmokeCheckError(f"Numeric result facts mismatch: expected {expected_facts}, got {actual_facts}")
+
+        numeric_bundle = scratch_dir / "numeric_policy.brixaudit"
+        numeric_audit = run("audit", [numeric_brix, "--input", numeric_json, "--bundle", numeric_bundle], "audited")
+        assert_identities(numeric_audit, numeric_program, numeric_context, numeric_snapshot)
+        numeric_audit_art = extract_bundle_artifact(numeric_audit)
+        numeric_verify = run("verify", ["--expect-program", numeric_program, numeric_brix, numeric_bundle, "--input", numeric_json], "audit-bundle-verified")
+        assert_identities(numeric_verify, numeric_program, numeric_context, numeric_snapshot)
+        numeric_verify_art = extract_bundle_artifact(numeric_verify)
+        for field in ("bundle_id", "final_chain_digest", "receipt_ids", "count"):
+            if numeric_verify_art.get(field) != numeric_audit_art.get(field):
+                raise SmokeCheckError(f"Numeric artifact field '{field}' mismatch between audit and verify")
+        print("[10/10] Running numeric policy and verifying its audit bundle... OK (speed 25.1, tax 4.1895, installment 6.65)")
+
+    print(f"\nSmoke check PASSED: all 10 validation stages succeeded for release package.")
 
 
 def main() -> int:

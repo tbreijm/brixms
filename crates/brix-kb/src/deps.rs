@@ -81,7 +81,7 @@ fn collect_refs(
                 collect_refs(body, let_refs, rule_refs);
             }
         }
-        L3ExprV2::Call { args, .. } => {
+        L3ExprV2::Call { args, .. } | L3ExprV2::NumericBuiltin(_, args) => {
             for a in args {
                 collect_refs(a, let_refs, rule_refs);
             }

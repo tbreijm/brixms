@@ -9,7 +9,7 @@ use brix_syntax::ast;
 use crate::l3_v2::{
     check_exhaustive_expr, is_reserved_list_operation_name, lower_expr_v2, DivModOpV2,
     L3ConfigBodyV2, L3ConfigDeclV2, L3ExprV2, L3PatternV2, L3Schema, L3SchemaBody, L3SchemaType,
-    L3V2LowerError, L3ValueType,
+    L3V2LowerError, L3ValueType, NumericBuiltinV2,
 };
 
 pub const MAX_SCHEMA_COUNT: usize = 128;
@@ -308,6 +308,11 @@ pub enum FiniteDecisionLowerError {
         name: String,
         kind: &'static str,
     },
+    NumericOperandType {
+        operation: &'static str,
+        expected: String,
+        found: String,
+    },
     DuplicateItemName(String),
     DuplicateFunctionParameter {
         func: String,
@@ -386,7 +391,7 @@ pub enum FiniteDecisionLowerError {
         name: String,
     },
     /// A `List<T>` input whose element type `T` is not an admitted scalar
-    /// (`Int`, `Bool`, `Str`) or a closed nominal schema (ADR-0037).
+    /// (`Int`, `Bool`, `Str`, `F64`, `Decimal`) or a closed nominal schema.
     UnsupportedListElementType {
         name: String,
         ty: String,
@@ -531,6 +536,8 @@ impl fmt::Display for FiniteDecisionLowerError {
                 f,
                 "{kind} '{name}' uses a name reserved for a built-in; rename it"
             ),
+            Self::NumericOperandType { operation, expected, found } => write!(f,
+                "{operation} requires {expected}; found {found}"),
             Self::DuplicateItemName(name) => write!(f, "duplicate top-level item name: '{name}'"),
             Self::DuplicateFunctionParameter { func, param } => {
                 write!(f, "duplicate parameter '{param}' in function '{func}'")
@@ -598,7 +605,7 @@ impl fmt::Display for FiniteDecisionLowerError {
                 write!(f, "input name exceeds length limit ({limit} bytes)")
             }
             Self::UnsupportedInputType { name, ty } => {
-                write!(f, "unsupported input type for '{name}': '{ty}' (only Int, Bool, Str are supported)")
+                write!(f, "unsupported input type for '{name}': '{ty}' (expected Int, Bool, Str, F64, Decimal, a closed nominal schema, or a bounded List)")
             }
             Self::ListMaxOutOfRange { name, max, limit } => {
                 write!(
@@ -615,7 +622,7 @@ impl fmt::Display for FiniteDecisionLowerError {
             Self::UnsupportedListElementType { name, ty } => {
                 write!(
                     f,
-                    "unsupported list element type for input '{name}': '{ty}' (only Int, Bool, Str, or a closed nominal schema are supported)"
+                    "unsupported list element type for input '{name}': '{ty}' (only Int, Bool, Str, F64, Decimal, or a closed nominal schema are supported)"
                 )
             }
             Self::UnknownCandidateInCommit { commit, candidate } => {
@@ -842,7 +849,9 @@ fn check_expr_bounds(
 
 fn schema_root_name(ty: &ast::Ty) -> Option<&str> {
     match ty {
-        ast::Ty::Named(name) => (!matches!(name.as_str(), "Int" | "Bool" | "Str")).then_some(name),
+        ast::Ty::Named(name) => {
+            (!matches!(name.as_str(), "Int" | "Bool" | "Str" | "F64" | "Decimal")).then_some(name)
+        }
         ast::Ty::Graded(inner, _) => schema_root_name(inner),
         // `List<T>` (ADR-0037): the schema that must be reachable is `T`'s,
         // not a (nonexistent) config named "List" — a list input's element
@@ -864,6 +873,8 @@ fn schema_type_from_ast(
             "Int" => Ok(L3SchemaType::Int),
             "Bool" => Ok(L3SchemaType::Bool),
             "Str" => Ok(L3SchemaType::Str),
+            "F64" => Ok(L3SchemaType::F64),
+            "Decimal" => Ok(L3SchemaType::Decimal),
             other if configs.contains_key(other) => Ok(L3SchemaType::Named(other.to_string())),
             other => Err(FiniteDecisionLowerError::InvalidSchema {
                 name: owner.to_string(),
@@ -1108,6 +1119,8 @@ fn parse_contract(
             "Int" => L3ValueType::Int,
             "Bool" => L3ValueType::Bool,
             "Str" => L3ValueType::Str,
+            "F64" => L3ValueType::F64,
+            "Decimal" => L3ValueType::Decimal,
             "Float" => {
                 return Err(FiniteDecisionLowerError::UnsupportedContractType {
                     ty: "Float".to_string(),
@@ -1162,6 +1175,7 @@ fn parse_contract(
         L3ValueType::Int => None,
         L3ValueType::Bool => None,
         L3ValueType::Str => None,
+        L3ValueType::F64 | L3ValueType::Decimal => None,
         L3ValueType::Sum(name) | L3ValueType::Record(name) => {
             Some(L3SchemaType::Named(name.clone()))
         }
@@ -1223,7 +1237,9 @@ fn collect_rule_fact_reads(e: &L3ExprV2, out: &mut BTreeSet<String>) {
                 collect_rule_fact_reads(body, out);
             }
         }
-        L3ExprV2::Call { args, .. } | L3ExprV2::ListLit(args) => {
+        L3ExprV2::Call { args, .. }
+        | L3ExprV2::ListLit(args)
+        | L3ExprV2::NumericBuiltin(_, args) => {
             for a in args {
                 collect_rule_fact_reads(a, out);
             }
@@ -1563,7 +1579,7 @@ pub fn lower_finite_decision_plan(
             // `List<T> max N` is the built-in bounded list in a decision
             // program (ADR-0037); a user `config List` would be shadowed at
             // every use, so it is refused here instead.
-            ast::Item::Config(c) if c.name == "List" => {
+            ast::Item::Config(c) if matches!(c.name.as_str(), "List" | "F64" | "Decimal") => {
                 return Err(FiniteDecisionLowerError::ReservedOperationName {
                     name: c.name.clone(),
                     kind: "config",
@@ -1576,6 +1592,7 @@ pub fn lower_finite_decision_plan(
                     for v in variants {
                         if DivModOpV2::from_name(&v.name).is_some()
                             || is_reserved_list_operation_name(&v.name)
+                            || NumericBuiltinV2::from_name(&v.name).is_some()
                         {
                             return Err(FiniteDecisionLowerError::ReservedOperationName {
                                 name: v.name.clone(),
@@ -1617,7 +1634,9 @@ pub fn lower_finite_decision_plan(
 
     for item in &module.items {
         if let ast::Item::Fn(f) = item {
-            if DivModOpV2::from_name(&f.name).is_some() || is_reserved_list_operation_name(&f.name)
+            if DivModOpV2::from_name(&f.name).is_some()
+                || is_reserved_list_operation_name(&f.name)
+                || NumericBuiltinV2::from_name(&f.name).is_some()
             {
                 return Err(FiniteDecisionLowerError::ReservedOperationName {
                     name: f.name.clone(),
@@ -1741,6 +1760,8 @@ pub fn lower_finite_decision_plan(
                         "Int" => L3ValueType::Int,
                         "Bool" => L3ValueType::Bool,
                         "Str" => L3ValueType::Str,
+                        "F64" => L3ValueType::F64,
+                        "Decimal" => L3ValueType::Decimal,
                         name if schemas
                             .get(name)
                             .is_some_and(|schema| matches!(&schema.body, L3SchemaBody::Sum(_))) =>
@@ -1775,6 +1796,8 @@ pub fn lower_finite_decision_plan(
                                 L3ValueType::Int => L3SchemaType::Int,
                                 L3ValueType::Bool => L3SchemaType::Bool,
                                 L3ValueType::Str => L3SchemaType::Str,
+                                L3ValueType::F64 => L3SchemaType::F64,
+                                L3ValueType::Decimal => L3SchemaType::Decimal,
                                 L3ValueType::Sum(name) | L3ValueType::Record(name) => {
                                     L3SchemaType::Named(name)
                                 }
@@ -2717,6 +2740,13 @@ fn encode_expr_v2(w: &mut CanonWriter, e: &L3ExprV2) {
         L3ExprV2::Distinct(a) => w.write_enum(24, |w| {
             encode_expr_v2(w, a);
         }),
+        L3ExprV2::NumericBuiltin(op, args) => w.write_enum(25, |w| {
+            w.write_enum(op.ordinal(), |_| {});
+            w.write_uint(args.len() as u64);
+            for arg in args {
+                encode_expr_v2(w, arg);
+            }
+        }),
     }
 }
 
@@ -2725,6 +2755,8 @@ fn encode_input_type(w: &mut CanonWriter, ty: &L3ValueType) {
         L3ValueType::Int => w.write_enum(0, |_| {}),
         L3ValueType::Bool => w.write_enum(1, |_| {}),
         L3ValueType::Str => w.write_enum(2, |_| {}),
+        L3ValueType::F64 => w.write_enum(6, |_| {}),
+        L3ValueType::Decimal => w.write_enum(7, |_| {}),
         L3ValueType::Sum(nominal) => w.write_enum(3, |w| w.write_ident(nominal)),
         L3ValueType::Record(nominal) => w.write_enum(4, |w| w.write_ident(nominal)),
         // Ordinal 5 is encoded directly by the inputs loop in
@@ -2748,6 +2780,8 @@ fn encode_schema_type(w: &mut CanonWriter, ty: &L3SchemaType) {
         L3SchemaType::Bool => w.write_enum(1, |_| {}),
         L3SchemaType::Str => w.write_enum(2, |_| {}),
         L3SchemaType::Named(name) => w.write_enum(3, |w| w.write_ident(name)),
+        L3SchemaType::F64 => w.write_enum(4, |_| {}),
+        L3SchemaType::Decimal => w.write_enum(5, |_| {}),
     }
 }
 
@@ -2778,6 +2812,8 @@ fn encode_value_type(w: &mut CanonWriter, ty: &L3ValueType) {
         L3ValueType::Int => w.write_enum(0, |_| {}),
         L3ValueType::Bool => w.write_enum(1, |_| {}),
         L3ValueType::Str => w.write_enum(2, |_| {}),
+        L3ValueType::F64 => w.write_enum(6, |_| {}),
+        L3ValueType::Decimal => w.write_enum(7, |_| {}),
         L3ValueType::Sum(nominal) => w.write_enum(3, |w| w.write_ident(nominal)),
         L3ValueType::Record(nominal) => w.write_enum(4, |w| w.write_ident(nominal)),
         // Only used for function parameter/return contracts, which never

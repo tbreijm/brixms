@@ -32,7 +32,7 @@ binding is type-checked on its own.
 | Generic configs (e.g. `Stack<T>`) | type-checks *and* evaluates — type parameters are erased for evaluation, a value is just a nominal constructor/record | evaluates as an internal value the same way; still refused in an `input` declaration or a helper's parameter/return contract (type parameters leave nothing to validate a payload against) |
 | `&&`, `\|\|`, `!` | refused (`Unsupported("… not in L2-first fragment")`) — not yet in the type-realization checker's own grammar | supported (ADR-0034) |
 | `div_floor`/`div_ceil`/`div_half_even`/`mod_euclid` | refused (`Unresolved(…)`) — same reason | supported (ADR-0035) |
-| `/` | one meaning everywhere: `Int / Int → Float` (field-of-fractions division). The `let` lane type-checks it (capped at `@Audited`) but does not evaluate it — `Float` is outside the shared evaluator's exact executable fragment, so `brix check` reports the type/grade with a reason instead of a value | refused outright (`DivisionNotAllowed`), with a diagnostic naming why (`Float` is not admitted in a finite-decision program) and the four named replacements above |
+| `/` | `Int / Int → Float` (field-of-fractions division). The `let` lane type-checks it (capped at `@Audited`) but does not evaluate it — `Float` is outside the shared evaluator's exact executable fragment, so `brix check` reports the type/grade with a reason instead of a value | supported for same-domain `F64` and `Decimal`; integer `/` is refused in favor of the named rounding operations (ADR-0045) |
 | unary `-` | supported | supported (ADR-0036) |
 | `then`/`and` (witness composition) | type-checks; not evaluated (outside the shared evaluator's fragment — it is witness composition, not a value operation) | not part of the finite-decision expression grammar |
 | external `input` declarations | not supported | the whole point (ADR-0031, ADR-0033) |
@@ -42,7 +42,8 @@ is a separate, deliberately bounded execution profile
 (`brix.l3.finite-decision@1`,
 [ADR-0030](../spec/adr/ADR-0030_Finite_Decision_Alpha.md)) built for a
 different job: settling one bounded decision instead of type-checking
-arbitrary bindings, and it keeps its own restrictions (no `Float`, no
+arbitrary bindings, and it keeps its own restrictions (no historical `Float`
+literals, explicit `F64`/`Decimal` values instead, no
 witness composition, generic types refused in schemas/contracts). What
 changed under [ADR-0042](../spec/adr/ADR-0042_One_Evaluator.md) is that
 those restrictions are now *profile* choices about which programs a lane
@@ -290,10 +291,11 @@ input urgent: Bool
 - **Syntax:** `input <name>: <type>` at top level.
 - **Scope:** an input is bound into scope for rule bodies, proposal guards
   (`when`), proposal values, and `show` expressions.
-- **Types accepted directly:** `Int` (`i64`), `Bool`, and `Str`. `Float` and
-  bare records/sums are rejected fail-closed with no lossy coercion — *except*
-  through the `brix.input@2` structured-input extension below, which accepts
-  whole records and sums.
+- **Types accepted directly:** `Int` (`i64`), `Bool`, `Str`, and the explicit
+  `F64` and `Decimal` domains (numeric transport requires `brix.input@4`).
+  Named records and sums use the structured-input extension below. The old
+  `Float` type is still confined to the type-realization lane; no implicit
+  numeric conversions are performed.
 - Input names participate in top-level collision checks against every other
   declared name.
 
@@ -461,7 +463,7 @@ coercion, and this is caught statically even on a skipped branch (`false &&
 
 ### Exact integer division (ADR-0035) and unary minus (ADR-0036)
 
-`/` stays refused in this lane (`DivisionNotAllowed`) because integer
+`/` stays refused for integer operands because integer
 division has no single correct rounding — `-7 / 2` is `-3` in Rust and `-4`
 in Python, both defensible. Four named operations replace it:
 
@@ -499,6 +501,54 @@ alongside ADR-0035 so a negative dividend could be written at all.
 
 ---
 
+### Explicit floating-point and decimal arithmetic (ADR-0045)
+
+Decision programs can use `F64` for approximate measurements and `Decimal`
+for exact base-10 calculations. Construct them explicitly:
+
+```brix
+let measured = f64("0.1") + f64("0.2")
+let exact = decimal("0.1") + decimal("0.2")
+let installment = decimal_div(decimal("10"), decimal("3"), 2, "half_even")
+propose quote priority 1 when measured > f64("0") = installment
+commit result from (quote)
+```
+
+These expressions belong in a decision program (with `input`, `propose`, or
+`commit`); the separate type-realization lane does not gain these built-ins.
+`measured` is binary64 `0.30000000000000004`; `exact` is Decimal `0.3`;
+`installment` is Decimal `3.33`.
+
+Both domains support same-type `+`, `-`, `*`, `/` and comparisons. `F64`
+rejects NaN, infinity, nonfinite results, and zero divisors; it normalizes
+negative zero. `Decimal` uses a checked `i128` coefficient and normalized
+scale up to 18. Its `/` is exact and faults on repeating or out-of-range
+quotients. `decimal_div(a, b, scale, mode)` explicitly rounds with `floor`,
+`ceil`, `trunc`, or `half_even`; scale must be 0 through 18. Results normalize
+trailing zeros and do not preserve monetary display padding.
+
+`f64_from_int` and `decimal_from_int` explicitly convert integers; only the
+former can lose precision. `f64_neg` and `decimal_neg` negate these domains;
+prefix minus keeps its existing integer desugaring. Cross-domain arithmetic
+is refused. Numeric folds and conversions between F64 and Decimal are not
+part of this first slice.
+
+Use `brix.input@4` with string payloads, for example
+`{"type":"f64","value":"1.25"}` or
+`{"type":"decimal","value":"19.95"}`. Numeric values also work in
+structured inputs and top-level bounded lists. Schemas `@1`–`@3` keep their
+existing meanings and reject these new tags.
+
+Run the complete example:
+
+```bash
+cargo run -p brix-cli -- run examples/numeric-policy.brix --input examples/numeric-policy.json
+```
+
+The same source and inputs support `check`, `why`, `audit`, and `verify`.
+See [ADR-0045](../spec/adr/ADR-0045_Explicit_Numeric_Arithmetic.md) for the
+precise rounding, resource, identity, and evidence contracts.
+
 ## 4. Bounded lists and finite relations (ADR-0037, ADR-0040)
 
 A finite-decision program can declare a bounded, homogeneous list as a
@@ -532,7 +582,8 @@ covering all three outcomes plus the empty-list case.
   admits a `{"type": "list", "items": [...]}` value at the top level only — a
   list nested inside a record field or a sum's argument is still refused,
   fail-closed, on every schema version. `@1`/`@2` continue to refuse a list
-  value outright, so an existing input artifact is unaffected.
+  value outright, so an existing input artifact is unaffected. Lists containing
+  `F64` or `Decimal` values require `brix.input@4`.
 - **Folds** — `sum`, `count`, `all`, `any`, `min`, `max` — reduce a list to a
   scalar: `sum(xs, x => e)`, `count(xs, x => cond)`, and so on. `min`/`max` of
   an empty list is a typed fault (`EmptyAggregate`), never a default value —
@@ -687,7 +738,7 @@ let mixed = 1 + 2.5
 ```
 
 ```text
-  ratio : Float @Audited (not evaluated: '/' means exact-to-Float division (Int / Int -> Float) in the `let` lane; Float values are not admitted in a finite-decision program, so '/' is not admitted here either — use div_floor, div_ceil, div_half_even, or mod_euclid for an exact integer result (ADR-0035, ADR-0042))
+  ratio : Float @Audited (not evaluated: integer '/' is not executable: use div_floor, div_ceil, div_half_even, or mod_euclid for an exact integer result. The let lane retains Int / Int -> Float typing without executable Float values; decision '/' requires F64 or Decimal operands (ADR-0035, ADR-0042, ADR-0045))
   mixed : Float @Audited (not evaluated: a Float value is outside the exact executable fragment (Float is admitted only by the type-realization checker, never by the shared evaluator))
 ```
 

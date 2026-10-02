@@ -10,7 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::plan::{FiniteDecisionLowerError as Error, FiniteDecisionPlan, MAX_EXPR_DEPTH};
-use crate::l3_v2::{FoldOpV2, L3ExprV2 as Expr, L3PatternV2, L3ValueType};
+use crate::l3_v2::{
+    ArithOpV2, FoldOpV2, L3ExprV2 as Expr, L3PatternV2, L3ValueType, NumericBuiltinV2,
+};
 use brix_syntax::ast;
 
 const MAX_ANALYSIS_WORK: usize = 100_000;
@@ -108,6 +110,8 @@ impl Checker<'_> {
             "Int" => known(L3ValueType::Int),
             "Bool" => known(L3ValueType::Bool),
             "Str" => known(L3ValueType::Str),
+            "F64" => known(L3ValueType::F64),
+            "Decimal" => known(L3ValueType::Decimal),
             _ => match self.configs.get(name.as_str()) {
                 Some(ast::ConfigBody::Record(_)) => known(L3ValueType::Record(name.clone())),
                 Some(ast::ConfigBody::Sum(_)) => known(L3ValueType::Sum(name.clone())),
@@ -152,6 +156,35 @@ impl Checker<'_> {
             Type::List(_) => "list".to_string(),
         };
         Err(Error::BooleanOperandType { operator, found })
+    }
+
+    fn require_scalar(
+        &mut self,
+        shape: &Shape,
+        operation: &'static str,
+        expected: &L3ValueType,
+        depth: usize,
+    ) -> Result<(), Error> {
+        self.charge(depth)?;
+        let found = match shape.as_ref() {
+            Type::Unknown => return Ok(()),
+            Type::Known(ty) if ty == expected => return Ok(()),
+            Type::Either(options) => {
+                for option in options {
+                    self.require_scalar(option, operation, expected, depth + 1)?;
+                }
+                return Ok(());
+            }
+            Type::Known(ty) => ty.to_string(),
+            Type::Record(_) => "record".into(),
+            Type::Sum { .. } => "sum".into(),
+            Type::List(_) => "list".into(),
+        };
+        Err(Error::NumericOperandType {
+            operation,
+            expected: expected.to_string(),
+            found,
+        })
     }
 
     /// The list-form counterpart of [`Self::require_bool`] (ADR-0040,
@@ -300,13 +333,70 @@ impl Checker<'_> {
                 let base = self.expr(base, env, next)?;
                 self.field(&base, field, next)?
             }
-            Expr::Arith(_, a, b) | Expr::IntDivMod(_, a, b) | Expr::Cmp(_, a, b) => {
+            Expr::Arith(op, a, b) => {
+                let lhs = self.expr(a, env, next)?;
+                let rhs = self.expr(b, env, next)?;
+                if *op == ArithOpV2::Div
+                    && matches!(lhs.as_ref(), Type::Known(L3ValueType::Int))
+                    && matches!(rhs.as_ref(), Type::Known(L3ValueType::Int))
+                {
+                    return Err(Error::ExprError(
+                        crate::l3_v2::L3V2LowerError::DivisionNotAllowed,
+                    ));
+                }
+                // New numeric domains never mix, including skipped operands.
+                for (one, other) in [(&lhs, &rhs), (&rhs, &lhs)] {
+                    if let Type::Known(ty @ (L3ValueType::F64 | L3ValueType::Decimal)) =
+                        one.as_ref()
+                    {
+                        self.require_scalar(other, "numeric arithmetic", ty, next)?;
+                    }
+                }
+                // Arithmetic preserves its numeric domain. Unknown arguments
+                // remain unknown; the evaluator enforces same-domain operands.
+                match lhs.as_ref() {
+                    Type::Known(
+                        ty @ (L3ValueType::Int | L3ValueType::F64 | L3ValueType::Decimal),
+                    ) => known(ty.clone()),
+                    _ => unknown(),
+                }
+            }
+            Expr::IntDivMod(_, a, b) | Expr::Cmp(_, a, b) => {
                 self.expr(a, env, next)?;
                 self.expr(b, env, next)?;
                 known(if matches!(expr, Expr::Cmp(..)) {
                     L3ValueType::Bool
                 } else {
                     L3ValueType::Int
+                })
+            }
+            Expr::NumericBuiltin(op, args) => {
+                let expected: &[L3ValueType] = match op {
+                    NumericBuiltinV2::F64 | NumericBuiltinV2::Decimal => &[L3ValueType::Str],
+                    NumericBuiltinV2::F64FromInt | NumericBuiltinV2::DecimalFromInt => {
+                        &[L3ValueType::Int]
+                    }
+                    NumericBuiltinV2::F64Neg => &[L3ValueType::F64],
+                    NumericBuiltinV2::DecimalNeg => &[L3ValueType::Decimal],
+                    NumericBuiltinV2::DecimalDiv => &[
+                        L3ValueType::Decimal,
+                        L3ValueType::Decimal,
+                        L3ValueType::Int,
+                        L3ValueType::Str,
+                    ],
+                };
+                for (arg, ty) in args.iter().zip(expected) {
+                    let shape = self.expr(arg, env, next)?;
+                    self.require_scalar(&shape, op.name(), ty, next)?;
+                }
+                known(match op {
+                    NumericBuiltinV2::F64
+                    | NumericBuiltinV2::F64FromInt
+                    | NumericBuiltinV2::F64Neg => L3ValueType::F64,
+                    NumericBuiltinV2::Decimal
+                    | NumericBuiltinV2::DecimalFromInt
+                    | NumericBuiltinV2::DecimalDiv
+                    | NumericBuiltinV2::DecimalNeg => L3ValueType::Decimal,
                 })
             }
             Expr::And(a, b) | Expr::Or(a, b) => {
@@ -498,7 +588,10 @@ pub(super) fn check(plan: &FiniteDecisionPlan, module: &ast::Module) -> Result<(
         .chain(plan.lets.iter().map(|(_, e)| e))
         .chain(plan.rules.iter().map(|r| &r.body))
         .chain(plan.proposals.iter().flat_map(|p| [&p.guard, &p.value]))
-        .chain(plan.shows.iter());
+        .chain(plan.shows.iter())
+        .chain(plan.decides.iter().flat_map(|d| {
+            std::iter::once(&d.list).chain(d.proposals.iter().flat_map(|p| [&p.guard, &p.value]))
+        }));
     // Preserve the existing acceptance of programs without Boolean operators
     // or list/relational forms.
     if !needs_shape_check(roots.collect()) {
@@ -537,7 +630,16 @@ pub(super) fn check(plan: &FiniteDecisionPlan, module: &ast::Module) -> Result<(
     let mut env: Env = plan
         .inputs
         .iter()
-        .map(|i| (i.name.clone(), known(i.ty.clone())))
+        .map(|i| {
+            let shape = if let Some(list) = &i.list {
+                Arc::new(Type::List(
+                    checker.declared_shape(&ast::Ty::Named(list.element.display_name())),
+                ))
+            } else {
+                known(i.ty.clone())
+            };
+            (i.name.clone(), shape)
+        })
         .collect();
     for (name, expr) in &plan.lets {
         let shape = checker.expr(expr, &env, 0)?;
@@ -550,6 +652,15 @@ pub(super) fn check(plan: &FiniteDecisionPlan, module: &ast::Module) -> Result<(
     for proposal in &plan.proposals {
         checker.expr(&proposal.guard, &env, 0)?;
         checker.expr(&proposal.value, &env, 0)?;
+    }
+    for decide in &plan.decides {
+        let list_shape = checker.expr(&decide.list, &env, 0)?;
+        let mut locals = env.clone();
+        locals.insert(decide.binder.clone(), checker.list_element(&list_shape));
+        for proposal in &decide.proposals {
+            checker.expr(&proposal.guard, &locals, 0)?;
+            checker.expr(&proposal.value, &locals, 0)?;
+        }
     }
     for expr in &plan.shows {
         checker.expr(expr, &env, 0)?;
@@ -565,7 +676,11 @@ pub(super) fn check(plan: &FiniteDecisionPlan, module: &ast::Module) -> Result<(
 fn needs_shape_check(mut pending: Vec<&Expr>) -> bool {
     while let Some(expr) = pending.pop() {
         match expr {
-            Expr::And(..) | Expr::Or(..) | Expr::Not(..) => return true,
+            Expr::And(..)
+            | Expr::Or(..)
+            | Expr::Not(..)
+            | Expr::NumericBuiltin(..)
+            | Expr::Arith(ArithOpV2::Div, ..) => return true,
             Expr::Fold { .. } | Expr::Filter { .. } | Expr::Map { .. } => return true,
             Expr::Arith(_, a, b) | Expr::IntDivMod(_, a, b) | Expr::Cmp(_, a, b) => {
                 pending.extend([a.as_ref(), b.as_ref()]);

@@ -521,6 +521,12 @@ pub struct EntityInstanceJson {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TaggedValue {
+    F64 {
+        value: String,
+    },
+    Decimal {
+        value: String,
+    },
     Int {
         value: String,
     },
@@ -606,6 +612,12 @@ pub struct RecordFieldJson {
 /// Integers are formatted as decimal strings.
 pub fn to_tagged_value(v: &L3ValueV2) -> TaggedValue {
     match v {
+        L3ValueV2::F64(n) => TaggedValue::F64 {
+            value: n.to_string(),
+        },
+        L3ValueV2::Decimal(n) => TaggedValue::Decimal {
+            value: brix_canon::decimal_format(*n),
+        },
         L3ValueV2::Int(n) => TaggedValue::Int {
             value: n.to_string(),
         },

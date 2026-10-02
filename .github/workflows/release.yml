@@ -74,6 +74,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      - name: Numeric conformance tests
+        run: |
+          cargo test -p brix-canon
+          cargo test -p brix-lower --test numeric_arithmetic --test numeric_input --test numeric_plan
       - name: Build brix-cli binary
         run: cargo build --release -p brix-cli --target ${{ matrix.target }}
       - name: Package tar.gz asset and SHA256 file
@@ -91,6 +95,8 @@ jobs:
           cp "examples/shipping.brix" "${STAGE_DIR}/examples/shipping.brix"
           cp "examples/shipping-input.brix" "${STAGE_DIR}/examples/shipping-input.brix"
           cp "examples/shipping-input.json" "${STAGE_DIR}/examples/shipping-input.json"
+          cp "examples/numeric-policy.brix" "${STAGE_DIR}/examples/numeric-policy.brix"
+          cp "examples/numeric-policy.json" "${STAGE_DIR}/examples/numeric-policy.json"
           tar -czf "${ARCHIVE}" -C "${PKG_DIR}" "brix-${TAG}-${{ matrix.target }}"
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"

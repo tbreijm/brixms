@@ -88,12 +88,11 @@ byte-identical for every program that declares none).
 
 What the original three splits below became:
 
-- `/` still means one thing everywhere (`Int / Int → Float`), and is still
-  refused in the finite-decision lane — because `Float` itself is not
-  admitted there, not because `/`'s meaning is unclear. Both diagnostics
-  (the finite-decision refusal, and the `let` lane's "not evaluated" reason)
-  now say so in the same words and name the same replacements
-  (`div_floor`/`div_ceil`/`div_half_even`/`mod_euclid`).
+- ADR-0045 adds same-domain `F64` and `Decimal` division to decision
+  programs. Integer `/` remains refused there in favor of the named rounding
+  operations. The `let` type-realization lane retains historical
+  `Int / Int → Float` typing without executable Float values; explicit
+  `F64`/`Decimal` decision built-ins do not change that research surface.
 - Recursive `fn` and generic configs are admitted and evaluate identically
   in both lanes now (ADR-0042 supersedes ADR-0032's `FunctionCycle`
   refusal and the finite-decision lane's blanket "generic configs are

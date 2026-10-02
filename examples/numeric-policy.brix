@@ -1,0 +1,18 @@
+// Approximate measurements and exact financial arithmetic in one decision.
+input distance: F64
+input duration: F64
+input price: Decimal
+
+config Quote = { speed: F64, tax: Decimal, installment: Decimal }
+
+fn speed(d: F64, t: F64): F64 = d / t
+rule measured_speed() = speed(distance, duration)
+rule tax() = price * decimal("0.21")
+rule installment() = decimal_div(price, decimal("3"), 2, "half_even")
+
+propose quote(measured_speed, tax, installment) priority 1 when measured_speed < f64("30") = Quote {
+    speed: measured_speed,
+    tax: tax,
+    installment: installment
+}
+commit decision from (quote)

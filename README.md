@@ -4,395 +4,65 @@
 [![Release](https://img.shields.io/github/v/release/tbreijm/brixms?include_prereleases&sort=semver&label=release)](https://github.com/tbreijm/brixms/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
-**Software is good at producing an answer. It is much worse at preserving why
-that answer was allowed to become the answer. BrixMS is a language and runtime
-for that second problem.**
-
-## The problem
-
-Imagine a system deciding whether an order may ship. It combines a stock
-measurement, an estimated delivery time, a pricing rule, a compliance rule, and
-the policy in force today. Several outcomes may be possible. Some inputs were
-measured, some derived, and some formally proved. Tomorrow one of them may be
-corrected.
-
-A conventional program can certainly calculate `ship = true`. But after it
-stores that boolean, the important distinctions are easy to lose:
-
-- What other outcomes were possible?
-- Which policy selected this one?
-- Which facts were measured, inferred, replay-checked, or proved?
-- Can another process reproduce the decision from the same inputs?
-- If one input changes, what must be reconsidered—and what can safely remain?
-
-Logs help, but they usually record what code ran, not why the resulting claim
-deserved a particular level of trust. A database can retain history, but history
-alone does not say which authority was entitled to publish a conclusion. A rule
-engine can derive many facts, but deriving possibilities and committing one
-operational reality are different acts.
-
-Systems faced with incomplete, contested, or revisable information therefore
-tend toward one of two failures: they pretend there is a single truth and
-silently overwrite what came before, or they retain every possibility without a
-disciplined way to commit and act. Neither result is easy to audit later.
-
-## Why the existing pieces are not enough by themselves
-
-BrixMS builds on established tools and theories; it does not claim they are
-defective. They solve different parts of the problem:
-
-| Existing approach | What it is good at | What remains separate |
-| --- | --- | --- |
-| Databases and rule engines | Storing facts and deriving consequences | The evidence grade and authority behind a committed result |
-| Workflow and event systems | Choosing and recording actions | Replayable semantic justification rather than an after-the-fact log |
-| Proof assistants | Checking a theorem in an explicit context | Running a changing world under policy and bounded resources |
-| Incremental dataflow | Updating results from small changes efficiently | Choosing among admissible alternatives and grading the result |
-
-One application can combine all four, but their boundaries then live in glue
-code: a convention says which log counts as an audit, which boolean came from a
-proof, which cache is valid under a new revision, and which component may claim
-success. Those conventions are exactly where evidence can be dropped or
-silently upgraded.
-
-## Why a whole language?
-
-The first versions of Brix were libraries and runtimes. That proved the
-execution idea, but it also exposed the limit of treating the important rules
-as API discipline. If evidence, policy, identity, and provenance are ordinary
-optional values, ordinary code can forget them.
-
-Brix makes them part of the program instead:
-
-- `config` and `witness` are the primitive semantic objects; `rule`, source
-  `regime` syntax, and runtime providers construct or present witness
-  relations without becoming additional semantic entities;
-- evidence grades such as `@Derived`, `@Audited`, and `@Proven` are checked, not
-  comments;
-- composition preserves the witness explaining a result;
-- context, policy, and history are bound into canonical identities;
-- illegal evidence upgrades are rejected at publication boundaries.
-
-The point of a new language is not novel punctuation. It is to make the
-accountability rules structural from source text through execution, audit, and
-proof—so that bypassing them is not the easiest programming path.
-
-**Brix** is that language. **SOC (Settlement-Oriented Computing)** is the
-paradigm underneath it: settlement is the organizing idea in the same way that
-objects organize object-oriented systems.
-
-> BrixMS is experimental and pre-release. The core runtime, proof kernel,
-> incremental engine, and first end-to-end language workflows exist today. The
-> language, verification transport, and broader execution profiles are still
-> being completed.
-
-## What is BrixMS for?
-
-BrixMS is aimed at programs that must act while information is still partial,
-disputed, or subject to revision—and must later explain the context, policy,
-history, and evidence behind the action.
-
-That makes the architecture relevant to rule engines, simulations, planning
-systems, policy-driven automation, and other stateful systems where:
-
-- several next actions may be valid, but commitment must be deterministic;
-- results must be replayable or independently checked;
-- “not established” must remain different from “false”;
-- changing a small part of a large world should trigger local work, not a full
-  recomputation;
-- users need to inspect not only a result, but its derivation and proof status.
-
-It is not presented as a production-ready solution for those domains yet. They
-describe the class of problems the design is being built to handle.
-
-## Where it came from
-
-BrixMS is a continuation of public work, not a new name placed on a blank
-history.
-
-### 2019: the Brix formalism
-
-The documented line begins with Tony Reijm's 2019 TU Delft EPA thesis. It
-described models assembled from context-independent “brix” and a coarse
-detect–execute cycle: find combinations that satisfy an interaction, turn them
-into events, execute them, and repeat. The current
-[`article outline`](./docs/BrixMS_Scientific_Article_Outline.md) records the
-source sections and, importantly, the thesis's own admission that the Cartesian
-detection phase becomes intractable. That limitation is the historical reason
-the current project treats cost proportional to the whole world as a semantic
-failure, not a performance task to postpone.
-
-### The first open-source implementation
-
-The original browser implementation remains public at
-[`tbreijm/tbreijm.github.io`](https://github.com/tbreijm/tbreijm.github.io). Its
-model was already recognizable: structures supplied properties; roles selected
-context-specific views and access; behaviours plus constraints formed
-interactions; collision detection dynamically bound structures to roles and
-generated events until the event set was exhausted. The repository includes the
-JavaScript implementation and a
-[runnable browser demo](https://tbreijm.github.io/) under the MIT license.
-
-That is the project’s detect–execute lineage. It established the useful idea:
-do not hard-wire every object-to-object call; detect which pieces fit the roles
-of an interaction, then execute the resulting event.
-
-### From collisions to indexed relations
-
-A later TypeScript/hypergraph iteration made those relationships explicit and
-moved detection toward incidence indices. The archived
-[`Ring 0 build plan`](./spec/archive/Ring0_Build_Plan.md) records the connection
-directly: the global incidence index was the production form of the original
-collision-loop primitive. It also records the reference-oracle discipline that
-survives today—keep a deliberately simple implementation and differentially
-test the optimized engine against it.
-
-### From detect–execute to settlement
-
-The current Rust implementation is a ground-up SOC-native rebuild. It preserves
-the original concern—discover applicable interactions without scanning an
-inert world—but broadens the question from *what can fire?* to *what may this
-system commit, under this policy, with what evidence?*
-
-The evolution is visible in the architecture:
-
-```text
-original Brix       detect matching structures -> generate and execute events
-hypergraph engine   index incidence -> update affected relations
-current BrixMS      propose candidates -> settle one -> audit or prove it
-```
-
-This is conceptual and experimental continuity, not source compatibility. The
-legacy engine was retained as a differential oracle during the SOC transition
-and then deleted after the native implementation reached parity.
-
-### Prior art, stated openly
-
-The broader design also stands on known work: Datalog and Datomic for facts and
-rules, dependent type systems and Lean for proofs as values, incremental and
-differential dataflow for O(Δ) maintenance, provenance research for derivation
-tracking, and category/coalgebra work for relational composition and
-saturation. [`ADR-0010`](./spec/adr/ADR-0010_SOC_Language_Design.md) summarizes
-that lineage; the article outline records the later prior-art review that
-explicitly rejects claiming the categorical machinery as novel.
-
-The intended contribution is the synthesis and its enforced accountability
-discipline: a committed step factors through declared logged generators;
-replay, settlement, and proof have separate authorities; and evidence cannot be
-upgraded merely because one component says so.
-
-## How BrixMS answers the problem
-
-Four ideas carry the distinction between possibility, commitment, and evidence
-all the way through the system.
-
-### 1. Configurations and witnesses
-
-A configuration is a state, value, model, program fragment, or world fragment.
-A witness records a meaningful relationship or transition between two
-configurations. Its `RegimeId` is provenance for the interpretation under
-which that witness is meaningful; it is not a discovery-provider identity.
-
-Mathematically, configurations are the objects of one category and witnesses
-are its arrows. In everyday use, that means every important transition has a
-nameable, content-addressed explanation.
-
-### 2. Deliberation is plural; commitment is singular
-
-More than one non-ontological witness provider may present the same or distinct
-candidate witnesses. Candidates are deduplicated by witness and successor; an
-admissibility policy filters them, and a keyed calendar selects exactly one in
-a stable order. The committed journal therefore does not depend on thread
-timing, map iteration, or provider identity.
-
-```text
-world + policy + history
-          |
-          v
- witness providers present possibilities
-          |
-          v
-   admissibility filter
-          |
-          v
- deterministic calendar -----> committed step (@Derived)
-                                      |
-                                      +---- replay audit (@Audited)
-                                      |
-                                      +---- proof kernel (@Proven)
-```
-
-### 3. Evidence has grades
-
-BrixMS does not collapse every outcome into `true` or `false`:
-
-```text
-       Proven       Refuted      kernel-certified, incomparable poles
-           \         /
-             Audited             replay verified
-                |
-             Derived             committed within a revision
-                |
-             Measured            certified external result
-                |
-             Unknown             no truth commitment
-```
-
-Each grade has one authority. The settlement kernel may publish `Derived`; the
-audit checker may publish `Audited`; only a proof kernel may publish `Proven` or
-`Refuted`. Resource exhaustion, unsupported input, incomplete search, and
-failed replay remain `Unknown`.
-
-Strengthening a result creates a new judgement linked to the earlier evidence.
-It never edits the old claim or silently rounds it upward.
-
-### 4. Cost follows change
-
-The central performance rule is O(Δ): work per committed step must scale with
-the changed configurations and their index fanout, not with all inert state in
-the world.
-
-```text
-cost(step) ∝ |Δ| × fanout
-doubling inert |world| ⇒ no per-step cost increase
-```
-
-The repository keeps both implementations needed to enforce this honestly: a
-simple recompute-the-world oracle and the real incremental engine. The active
-[`o_delta_gate`](./crates/soc-core/tests/o_delta_gate.rs) proves that the naïve
-path grows with world size while the incremental path stays flat.
-
-## What works now
-
-The project has moved beyond a paper design. These paths are implemented and
-covered by executable gates:
-
-| Layer | Current implementation |
-| --- | --- |
-| Brix language | Hand-written lexer/parser; functions and bindings; records and algebraic sums; directly recursive and parameterized configurations; matching; arithmetic and comparison; grade annotations |
-| Type realization | Tree-shaped derivations, conflict reporting, declared function contracts, certified match coverage, and honest per-result grade caps |
-| Command line | `check`, `run`, `audit`, `verify`, `why`, `whynot`, `test`, `kb`, and `serve --stdio` (JSON-lines protocol, with a Python client) |
-| Settlement runtime | Admission policies, deterministic keyed selection, transactional candidate deltas, persistent state, append-only journals, and deterministic replay |
-| Incremental engine | Materialized candidate views, footprint indexing, differential agreement with the naïve oracle, and the green O(Δ) gate |
-| Audit | Replay-verified decompositions, authority-checked `Audited` publication, oracle-bound receipts, and source-re-derived L3 manifests |
-| Saturation | Administrative versus realizing steps, certified quiescence, bounded divergence evidence, weak bisimulation/refinement, and closure checking |
-| Proof | A small dependent kernel with explicit proof terms, composition and tensor rules, primitive relations, canonical certificate envelopes, and adversarial vectors |
-| Reproducibility | Pinned Rust toolchain, canonical encodings, frozen vectors, independent cross-checks, deterministic-order lints, and artifact-drift CI |
-
-Execution profiles currently in the workspace:
-
-- `brix check` exercises native type-realization over top-level bindings (`soc-regimes`)
-  or runs preflight verification on finite-decision modules;
-- `brix.l3.finite-decision@1` ([ADR-0030](./spec/adr/ADR-0030_Finite_Decision_Alpha.md),
-  [ADR-0031](./spec/adr/ADR-0031_External_Input_Alpha.md))
-  implements the finite-decision alpha deliberation profile across `crates/soc-regimes` and `crates/brix-lower`,
-  evaluating complete candidate frontiers, structured rejection reasons,
-  external operational inputs with strict schema validation and bounded disjoint shards (alpha.3), and
-  deterministic calendar selection at phase zero. Deliberated outcomes are committed as `@Derived`
-  at runtime; the runtime decision remains `@Derived`, while successful independent replay issues and
-  verifies separate `@Audited` audit receipts via audit bundle verification;
-- `brix run`, `audit`, `verify`, `why`, and `whynot` drive the finite-decision alpha workflow (with repeatable `--input` support);
-- decision programs can also use recursive pure helpers, bounded lists and
-  finite relations over them, inferred rule dependencies with an `otherwise`
-  fallback, several independent `commit` decisions, and per-entity `decide`
-  blocks (see [Beyond the alpha](#beyond-the-alpha-source-build) below);
-- `brix test` runs "these inputs → this decision" regression suites, `brix kb`
-  keeps a persistent, revisable knowledge base with replay-verified history,
-  and `brix serve --stdio` embeds the engine in another process;
-- `crates/brix-lower` additionally contains Stages A–C of L3 v2 derivation
-  ([ADR-0027](./spec/adr/ADR-0027_L3_V2_Derivation.md)).
-
-The parser recognizes some designed syntax that downstream execution profiles do not
-yet implement. Those constructs are refused before execution; they do not
-become guessed results.
-
-## Try it
-
-The workspace version in [`Cargo.toml`](./Cargo.toml) is `0.1.0-alpha.3`, but
-no `v0.1.0-alpha.3` tag has ever been pushed, so no prebuilt archive for it
-exists. **Building from source is therefore the primary way to try the
-current language and CLI**; every feature marked **"(source build)"** later
-in this README exists only in the source tree, in neither published archive.
-
-### Building from source (primary path)
-
-Install Rust through [rustup](https://rustup.rs/). The repository pins Rust
-**1.96.1** in [`rust-toolchain.toml`](./rust-toolchain.toml), so the matching
-toolchain is selected automatically.
-
-```bash
-git clone https://github.com/tbreijm/brixms.git
-cd brixms
-cargo test --workspace
-
-# Type-check the checked-in identity example.
-cargo run -p brix-cli -- check crates/brix-lower/tests/fixtures/id.brix
-```
-
-The final command prints:
-
-```text
-r : Int @Proven = 42
-```
-
-(`brix check` reports each `let` binding's name, its inferred type, the
-evidence grade it earned, and, when the expression lies in the fragment the
-shared evaluator runs, its value; see
-[`docs/brix-language.md`](./docs/brix-language.md).)
-
-### Prebuilt archive installation (published releases lag behind source)
-
-Prebuilt archives are published on the [GitHub Releases
-page](https://github.com/tbreijm/brixms/releases) for
-**`aarch64-apple-darwin`** (macOS Apple Silicon) and
-**`x86_64-unknown-linux-gnu`** (Linux x86_64). As of this writing the newest
-published tag is **`v0.1.0-alpha.2`** — check the Releases page for the
-current newest tag and set `VERSION` below to match it exactly; do not assume
-`v0.1.0-alpha.3` is (yet) one of them.
-
-```bash
-VERSION=v0.1.0-alpha.2               # exact tag from the Releases page above
-TARGET=x86_64-unknown-linux-gnu      # or aarch64-apple-darwin
-
-curl -LO "https://github.com/tbreijm/brixms/releases/download/${VERSION}/brix-${VERSION}-${TARGET}.tar.gz"
-curl -LO "https://github.com/tbreijm/brixms/releases/download/${VERSION}/brix-${VERSION}-${TARGET}.tar.gz.sha256"
-
-# Verify the checksum (Linux: sha256sum; macOS: shasum -a 256):
-sha256sum -c "brix-${VERSION}-${TARGET}.tar.gz.sha256"
-
-# Extract the predictable top-level directory and enter it:
-tar -xzf "brix-${VERSION}-${TARGET}.tar.gz"
-cd "brix-${VERSION}-${TARGET}"
-
-./brix --version
-```
-
-`./brix --version` prints the matching version string, e.g. `brix
-0.1.0-alpha.2`. From there, run `./brix --help` and check the archive's own
-bundled `examples/` directory and `README.md` for what that specific release
-ships — an older release archive can lag behind the quickstarts below, which
-are written against a source checkout.
-
-### A small Brix program
-
-```brix
-config List<T> = Nil | Cons(T, List<T>)
-
-fn head_or(xs: List<Int>, fallback: Int): Int = match xs {
-  Nil => fallback
-  Cons(head, _) => head
-}
-
-let answer: Int @Proven = head_or(Cons(42, Nil), 0)
-```
-
-`brix check` prints `answer : Int @Proven = 42`.
-
-The annotation is a contract, not documentation: the checker must establish
-both the declared type and the requested evidence grade.
-
-### Quickstart: End-to-end decision workflow (`examples/shipping.brix`)
-
-The repository includes a complete finite-decision workflow in [`examples/shipping.brix`](./examples/shipping.brix):
+BrixMS is an experimental language and runtime for making decisions from
+incomplete or changing information while preserving what was considered, what
+was chosen, and what evidence supports the result. It is in beta development;
+the current executable language surface is useful for bounded policy and
+settlement workflows, while broader proof and production guarantees remain
+in progress.
+
+## Why BrixMS
+
+Most programs return an answer. BrixMS also represents the candidates behind
+that answer, the rules and inputs that shaped it, and the boundary between a
+runtime decision and later independent verification. This helps when a result
+may need to be explained, replayed, or revised as facts change.
+
+The runtime deliberates over admissible candidates and commits deterministically.
+A decision made during execution is `@Derived`; successful independent replay
+can produce a separate `@Audited` receipt. Unsupported work, incomplete search,
+resource exhaustion, and failed replay remain `Unknown`. Evidence is never
+silently promoted.
+
+BrixMS continues Tony Reijm's 2019 Brix formalism and its earlier open-source
+implementations, while this repository is a ground-up Rust rebuild around
+Settlement-Oriented Computing (SOC). The
+[scientific article outline](./docs/BrixMS_Scientific_Article_Outline.md)
+documents the lineage and prior art; this implementation does not claim source
+compatibility with the legacy engines.
+
+## Current capabilities
+
+The source checkout currently supports:
+
+- finite decision programs with typed rules, proposals, explicit commit pools,
+  multiple independent decisions, and per-entity `decide` blocks;
+- bounded list inputs and finite relations, including joins, comprehensions,
+  filtering, mapping, membership, and bounded folds;
+- explicit `F64` arithmetic for finite approximate measurements and `Decimal`
+  arithmetic for exact base-10 values, including explicit rounded decimal
+  division;
+- strict, tagged JSON inputs, including structured values and bounded lists;
+- `check`, `run`, `audit`, `verify`, `why`, `whynot`, and regression `test`
+  commands;
+- a persistent, revisable knowledge base (`brix kb`) with replay-checked
+  history;
+- a JSON-lines server (`brix serve --stdio`) and a small standard-library
+  Python client;
+- a Rust runtime with deterministic settlement, an incremental engine, a
+  recomputation oracle, and a small proof kernel.
+
+The parser recognizes some syntax whose downstream execution profile is not
+implemented. Such programs are rejected before execution. Arithmetic and
+comparison are not all kernel-proven, certified refutation is not available,
+and the system does not claim general termination or production readiness.
+See the [beta contract](./spec/Beta_Contract.md) and
+[semantic status ledger](./spec/SOC_Semantic_Laws.md) for precise evidence and
+scope.
+
+## Try it from source
+
+This is the complete [`shipping.brix`](./examples/shipping.brix) program:
 
 ```brix
 config Decision = Expedite | Ship | Hold
@@ -408,575 +78,161 @@ commit shipping from (expedite, ship, hold)
 show shipping
 ```
 
-Run the pipeline from preflight check through execution, audit bundle creation, offline verification, and explanation:
+With stock at 12, `expedite` is ineligible and `ship` wins over `hold` because
+it has the lower priority number. The result retains the candidate dispositions
+so you can ask why a choice won or lost.
+
+Install Rust using [rustup](https://rustup.rs/). The repository pins its Rust
+toolchain in [`rust-toolchain.toml`](./rust-toolchain.toml).
 
 ```bash
-# 1. Preflight check: parses, resolves imports, and validates the plan
+git clone https://github.com/tbreijm/brixms.git
+cd brixms
+cargo build -p brix-cli
 cargo run -p brix-cli -- check examples/shipping.brix
-
-# 2. Run deliberation to completion (committed at @Derived)
 cargo run -p brix-cli -- run examples/shipping.brix
+```
 
-# 3. Deliberate, commit, and emit an ADR-0026 audit input bundle
-cargo run -p brix-cli -- audit examples/shipping.brix --bundle /tmp/shipping.brixaudit --force
+`check` validates the program and its plan. `run` deliberates and prints the
+facts, candidate dispositions, and committed decision. Both commands work with
+the finite-decision profile demonstrated in
+[`examples/shipping.brix`](./examples/shipping.brix).
 
-# 4. Verify the bundle independently against source (replaying and verifying separate @Audited receipts)
+For independent replay, create and verify an audit bundle:
+
+```bash
+cargo run -p brix-cli -- audit examples/shipping.brix \
+  --bundle /tmp/shipping.brixaudit --force
 cargo run -p brix-cli -- verify \
   --expect-program 3a815590c807a8af7e7756d8f0edef99a4938e15830de282b24949fe88ba0d5e \
   examples/shipping.brix /tmp/shipping.brixaudit
-
-# 5. Inspect why the winning candidate was selected
-cargo run -p brix-cli -- why examples/shipping.brix --candidate ship
-
-# 6. Inspect why another candidate was rejected
-cargo run -p brix-cli -- whynot examples/shipping.brix --candidate expedite
 ```
 
-In finite-decision deliberation, candidate selection commits at evidence grade **`@Derived`** during runtime execution, and the runtime decision remains **`@Derived`**. Successful independent replay issues and verifies separate **`@Audited`** audit receipts via `brix verify`.
+The runtime decision remains `@Derived`; `verify` independently replays the
+bundle and checks the separate audit evidence. Use `cargo run -p brix-cli -- --help`
+for the complete command syntax.
 
-### Quickstart: External-input decision workflow (`examples/shipping-input.brix`)
+### External inputs
 
-In `0.1.0-alpha.3`, BrixMS supports external operational inputs under the finite-decision profile ([ADR-0031](./spec/adr/ADR-0031_External_Input_Alpha.md)). In [`examples/shipping-input.brix`](./examples/shipping-input.brix), parameters previously hard-coded are declared as external inputs:
-
-```brix
-config Decision = Expedite | Ship | Hold
-
-input stock: Int
-input eligible: Bool
-input region: Str
-
-rule threshold() = 10
-rule destination() = region
-rule valid_destination(destination) = destination == "EU-NORTH"
-
-rule can_ship(threshold, valid_destination) = match eligible {
-  true => match valid_destination {
-    true => stock >= threshold
-    false => false
-  }
-  false => false
-}
-
-propose expedite() priority 5 when stock >= 50 = Expedite
-propose ship(can_ship) priority 10 when can_ship == true = Ship
-propose hold() priority 100 when true = Hold
-
-commit shipping from (expedite, ship, hold)
-show shipping
-```
-
-External values are supplied via strict JSON files conforming to schema `brix.input@1`, using unambiguous tagged scalar representations ([`examples/shipping-input.json`](./examples/shipping-input.json)):
-
-```json
-{
-  "schema": "brix.input@1",
-  "values": {
-    "stock": {
-      "type": "int",
-      "value": "12"
-    },
-    "eligible": {
-      "type": "bool",
-      "value": true
-    },
-    "region": {
-      "type": "string",
-      "value": "EU-NORTH"
-    }
-  }
-}
-```
-
-Key external input properties:
-- **Strict Tagged JSON Scalars:** Schema `brix.input@1` requires explicit tagged scalar objects (`int` with decimal strings, `bool` with booleans, `string` with strings). Floats and lossy coercions are rejected. Any duplicate JSON key in the envelope, values, or objects is strictly rejected fail-closed.
-- **Repeatable Disjoint Shards:** Multiple `--input` flags (e.g. `--input base.json --input overrides.json`) compose disjoint shards. Keys across shards must be mutually exclusive; overlapping keys fail closed with duplicate shard errors. Shard ordering does not affect canonical snapshot identity.
-- **Snapshot & Context Identity:** Static program identity (`FiniteDecisionProgramId`) binds input declarations (name, type, ordinal), never input values. Supplied values are canonicalized into an `InputSnapshotId` (`Domain::Snapshot`). Deliberation `ContextId` binds both program identity and the active snapshot identity under `"brix.l3.finite-decision.context.input@1"`.
-- **Derived Evidence:** External inputs enter execution strictly at epistemic grade **`@Derived`** (unverified external claims cannot ambiently upgrade to `@Audited` or `@Proven`). Candidate deliberation commits at **`@Derived`**, and the runtime decision remains **`@Derived`**.
-
-Execute the full external-input lifecycle:
-
-- **Prebuilt archive:** run `./brix <subcommand> ...` from the extracted directory.
-- **Source workspace:** run `cargo run -p brix-cli -- <subcommand> ...` from the repository root.
-
-The sequence below is shown with `./brix` (substitute `cargo run -p brix-cli --` if running from a source workspace):
+Declare values in Brix and provide them in a strict tagged JSON file. For
+example, [`examples/shipping-input.brix`](./examples/shipping-input.brix)
+accepts the values in [`examples/shipping-input.json`](./examples/shipping-input.json):
 
 ```bash
-# 1. Declaration-only check: validates syntax, imports, and plan contract without inputs
-./brix check examples/shipping-input.brix
-# (or from source workspace: cargo run -p brix-cli -- check examples/shipping-input.brix)
-# Outputs: status: checked-input-contract, program: 44a5c10083cf9ebd7e948f2e4934087f39b4959bc2b32f085e98d20085ec7943
-
-# 2. Preflight check with input: validates type matching, completeness, and dry-run deliberation
-./brix check examples/shipping-input.brix --input examples/shipping-input.json
-
-# 3. Deliberate to completion with input (@Derived)
-./brix run examples/shipping-input.brix --input examples/shipping-input.json
-
-# 4. Deliberate, commit, and emit an audit input bundle with bound input records
-./brix audit examples/shipping-input.brix \
-  --input examples/shipping-input.json \
-  --bundle /tmp/shipping-input.brixaudit --force
-
-# 5. Verify the bundle independently against source and caller-supplied inputs
-# Offline replay re-derives the input snapshot and context, issuing and verifying separate @Audited receipts
-./brix verify \
-  --expect-program 44a5c10083cf9ebd7e948f2e4934087f39b4959bc2b32f085e98d20085ec7943 \
-  examples/shipping-input.brix /tmp/shipping-input.brixaudit \
+cargo run -p brix-cli -- check examples/shipping-input.brix \
   --input examples/shipping-input.json
-
-# 6. Inspect why the winning candidate was selected with external inputs
-./brix why examples/shipping-input.brix \
-  --input examples/shipping-input.json --candidate ship
-
-# 7. Inspect why another candidate was rejected with external inputs
-./brix whynot examples/shipping-input.brix \
-  --input examples/shipping-input.json --candidate expedite
+cargo run -p brix-cli -- run examples/shipping-input.brix \
+  --input examples/shipping-input.json
 ```
 
-Multiple disjoint shards can be passed repeatably by specifying `--input` multiple times with non-overlapping keys (schematic example using non-repository placeholder paths):
+Input shards can be supplied with repeated `--input` flags when their keys are
+disjoint. The schema version is explicit: `brix.input@1` covers scalar values,
+`@2` structured records and variants, `@3` bounded top-level lists, and `@4`
+adds `F64` and `Decimal`. Numeric payloads are strings so JSON transport does
+not round them. Inputs enter as `@Derived`; they do not establish audited or
+proven facts by themselves.
+
+### Numeric policies
+
+Use `F64` for approximate measurements and `Decimal` for exact base-10
+arithmetic. The domains do not mix implicitly. `F64` rejects non-finite values
+and results; `Decimal` uses checked arithmetic and explicit rounding when a
+quotient is not exact. Decimal values normalize trailing zeros, so display
+padding is not preserved.
+
+The complete example calculates speed, tax, and an installment:
 
 ```bash
-# Schematic placeholder paths (disjoint shards composing the full input contract):
-./brix run examples/shipping-input.brix \
-  --input /path/to/shard-stock.json \
-  --input /path/to/shard-region.json
+cargo run -p brix-cli -- run examples/numeric-policy.brix \
+  --input examples/numeric-policy.json
 ```
 
-### CLI guide
+See [explicit numeric arithmetic in the language guide](./docs/brix-language.md#explicit-floating-point-and-decimal-arithmetic-adr-0045)
+and [ADR-0045](./spec/adr/ADR-0045_Explicit_Numeric_Arithmetic.md) for the
+supported operations, rounding modes, and limits.
 
-The `brix` CLI driver provides these subcommands:
+### Lists, relations, and per-entity decisions
 
-```text
-brix check   <file.brix> [--input <path>...] [--json] [--package-path <dir>...]
-             check a module; runs declaration-only check or preflight with --input
+Inputs may contain bounded lists of scalars, records, or variants. Programs can
+join lists using finite comprehensions, derive bounded lists, and make one
+decision per item with `decide`. The examples
+[`fulfillment.brix`](./examples/fulfillment.brix) and
+[`order-book.brix`](./examples/order-book.brix) show these patterns with
+regression cases. Limits on input size, derived list size, and evaluator work
+are enforced; resource exhaustion fails closed.
 
-brix run     <file.brix> [--input <path>...] [--json] [--package-path <dir>...]
-             execute a finite-decision deliberation plan to completion (@Derived)
+## Knowledge base and Python embedding
 
-brix audit   <file.brix> --bundle <out> [--input <path>...] [--force] [--json] [--package-path <dir>...]
-             run and audit a finite-decision plan, emitting an audit input bundle on success
+`brix kb` stores a revisable sequence of assertions and program versions. Its
+`log`, `show`, and `diff` operations inspect revisions; `audit` and `verify`
+support replay-checked history. Run `brix --help` for the operation forms.
 
-brix verify  --expect-program <hex> <file.brix> <bundle> [--profile <finite-decision|l3-v1>] [--input <path>...] [--json] [--package-path <dir>...]
-             verify an audit input bundle against source and expected program pin (@Audited)
-
-brix why     <file.brix> --candidate <name> [--entity <index>] [--input <path>...] [--json] [--package-path <dir>...]
-             explain why a candidate was admitted or selected in deliberation
-
-brix whynot  <file.brix> --candidate <name> [--entity <index>] [--input <path>...] [--json] [--package-path <dir>...]
-             explain why a candidate was not admitted or not selected in deliberation
-
-brix test    <file.test.json>... [--json]
-             run "these inputs -> this decision" regression suites (brix.test@1)
-
-brix kb      init|assert|retract|program|log|show|diff|audit|verify <dir> ...
-             keep a persistent, revisable knowledge base (ADR-0041); `brix --help` lists each form
-
-brix serve   --stdio
-             serve the same commands over a JSON-lines protocol (brix.serve@1, ADR-0044)
-```
-
-Global options: `--help` and `--version`.
-
-Input options:
-- `--input <path>` (or `--input=<path>`) can be repeated to supply disjoint input shards conforming to the strict `brix.input@N` JSON schemas: `@1` scalars, `@2` records and variants, `@3` bounded lists.
-- `brix verify --profile l3-v1` rejects `--input` (exiting with usage error code 2), as external input shards apply to the `finite-decision` profile.
-
-From a source workspace, prefix a command with `cargo run -p brix-cli --`, or build
-the executable once with `cargo build -p brix-cli`. When using a prebuilt archive,
-invoke `./brix` directly from the extracted directory.
-
-### Reusable functions in decision programs (source build)
-
-The working source adds pure, nonrecursive helpers to finite-decision programs
-([ADR-0032](./spec/adr/ADR-0032_Finite_Decision_Functions.md)). This extension
-is not included in either published release archive (`v0.1.0-alpha.1`,
-`v0.1.0-alpha.2`).
-
-```brix
-fn enough(available: Int, needed: Int): Bool = available >= needed
-
-input stock: Int
-rule threshold() = 15
-rule eligible(threshold) = enough(stock, threshold)
-
-propose ship(eligible) priority 10 when eligible = stock
-commit shipping from (ship)
-```
-
-Helpers can call other helpers and appear in lets, rules, and proposal guards
-or values. They take their data explicitly as arguments: inputs, global lets,
-and rule facts are not captured from the surrounding module. Arguments evaluate
-once, left to right, including unused arguments; an arithmetic fault still
-stops the decision.
-
-Optional parameter and return annotations support `Int`, `Bool`, `Str`, and
-closed, acyclic nominal records and sums, with optional `@Derived`. Contracts
-check the entire value at the call boundary, including nested fields and sum
-payloads. Recursive calls and unsupported contracts are rejected. Evaluation
-has nesting, work, and value-growth limits.
-
-Run the full shipping example from this checkout:
+To embed Brix in another process, start `brix serve --stdio`. The protocol
+exchanges one JSON request and response per line and exposes the CLI operations
+without human-output parsing. The
+[Python client](./bindings/python/README.md) requires Python 3.9 or newer and
+has no third-party runtime dependency:
 
 ```bash
-cargo run -p brix-cli -- run examples/shipping-functions.brix \
-  --input examples/shipping-functions.json
+python3 -m pip install -e ./bindings/python
 ```
 
-It selects `ship = Ship @Derived`. The same source and inputs work with
-`check`, `why`, `whynot`, `audit`, and `verify` using the command forms above.
-Helper bodies and contracts are included in the program pin; changing one
-invalidates verification against the old pin. Successful replay produces
-separate `Audited` receipts.
-
-The library can also evaluate helper calls in `show` expressions. The CLI
-currently removes `show` directives and prints its fixed decision report.
-
-### Structured inputs and typed policies (source build)
-
-The source extension in [ADR-0033](./spec/adr/ADR-0033_Structured_Input_Contracts.md)
-lets a program accept an entire domain value and pass it to a checked helper:
-
-```brix
-config Destination = Domestic | Export(Str)
-config Order = { units: Int, destination: Destination }
-
-input order: Order
-fn enough(o: Order): Bool = o.units >= 10
-
-propose accept() priority 10 when enough(order) = true
-propose hold() priority 100 when true = false
-commit decision from (accept, hold)
-```
-
-Use `brix.input@2` JSON artifacts for tagged record and sum values; the ADR
-includes the full input format. Existing `brix.input@1` scalar artifacts remain
-supported. The decoder rejects duplicate keys and fields, while schema checks
-reject missing or extra fields, wrong payload types, and unknown variants.
-Nested records and sums are supported; recursive and generic schemas are not
-part of this slice.
-
-```bash
-cargo run -p brix-cli -- run examples/order-policy.brix \
-  --input examples/order-policy.json
-```
-
-The same program and inputs work across the six commands above. A changed
-schema changes the program pin; a changed input value changes the snapshot
-and context. Old audit bundles must still verify against the exact source,
-program pin, and inputs that produced them.
-
-### Boolean operators in conditions (source build)
-
-The working source adds short-circuiting `&&`, `||`, and prefix `!`
-([ADR-0034](./spec/adr/ADR-0034_Boolean_Operators.md)), so a policy that is a
-conjunction of conditions can be written as one:
-
-```brix
-config Decision = Approved | Rejected
-
-fn eligible(score: Int, flagged: Bool): Bool = score >= 700 && !flagged
-
-rule credit_score() = 750
-rule fraud_flag() = false
-rule is_eligible(credit_score, fraud_flag) = eligible(credit_score, fraud_flag)
-
-propose approve(is_eligible) priority 1 when is_eligible = Approved
-propose reject() priority 10 when true = Rejected
-commit c from (approve, reject)
-```
-
-They work anywhere an expression does: lets, rule bodies, helper bodies, and
-proposal guards and values. `&&` binds tighter than `||`, both bind looser than
-comparison, and `!` binds tighter than every binary operator — so
-`a || b && !c` reads as `a || (b && (!c))`. Comparison remains
-non-associative: `a < b < c` is still refused by name rather than read as a
-conjunction.
-
-`&&` and `||` short-circuit, and that is part of the semantics rather than an
-optimization: `false && e` does not evaluate `e`, so an arithmetic fault in `e`
-does not stop the decision. Replay short-circuits identically, which is what
-makes the behavior reproducible under `audit` and `verify`.
-
-Operands must be `Bool`. There is no truthiness or coercion from `Int`.
-Static checks reject known non-Boolean operands even when skipped:
-`false && 1` and `true || 1` are errors at `check`. These checks follow helper
-arguments, bindings, fields, and match arms without evaluating their values;
-`false && (div_floor(1, 0) == 0)` still succeeds. Reached operands also retain
-runtime type checks. The `and` spelling remains witness tensor composition.
-
-Programs that do not use the new operators keep their existing program pins:
-the canonical expression encoding appends ordinals rather than renumbering.
-
-### Exact integer division and rounding (source build)
-
-The working source adds four reserved built-in operations for signed integer
-division ([ADR-0035](./spec/adr/ADR-0035_Integer_Division.md)), so a decision
-that needs a ratio, a per-unit allocation, or a remainder can compute it in the
-audited expression instead of taking an already-divided value as input.
-
-<!-- brix-snippet: fragment -->
-```brix
-let per_car_cents = div_floor(price_cents, car_count)
-let leftover_cents = mod_euclid(price_cents, car_count)
-```
-
-| Operation | Rounds toward |
-|---|---|
-| `div_floor(a, b)` | negative infinity |
-| `div_ceil(a, b)` | positive infinity |
-| `div_half_even(a, b)` | nearest, ties to even |
-| `mod_euclid(a, b)` | not a rounding; the remainder `r` with `0 <= r < \|b\|` |
-
-`/` stays refused, and its diagnostic now names these four as the
-replacement: integer division has no single correct rounding — `-7 / 2` is
-`-3` in Rust and `-4` in Python, both defensible — so the language does not
-pick one silently. Each of the four names the rounding it performs instead.
-A negative dividend is written `-7`
-([ADR-0036](./spec/adr/ADR-0036_Unary_Minus.md)).
-
-Both operands must be `Int`. `b == 0` raises `DivisionByZero` for all four
-operations; the one operand pair that is mathematically defined but does not
-fit in `Int` (`Int::MIN` divided by `-1`) raises `DivisionOverflow` for the
-three division operations — `mod_euclid` never overflows, since its result is
-always bounded by `|b|`. Every fault fails closed: no decision is committed,
-and it surfaces at `brix check` preflight rather than only at `run`.
-
-Run the full allocation example from this checkout:
-
-```bash
-cargo run -p brix-cli -- run examples/allocation.brix \
-  --input examples/allocation.json
-```
-
-It splits a price across a car count with `div_floor` and checks the
-remainder with `mod_euclid`, selecting `decision = balanced = Balanced
-@Derived`. The same source and inputs work with `check`, `why`, `whynot`,
-`audit`, and `verify` using the command forms above.
-
-Programs that do not use these operations keep their existing program pins:
-ordinals `0`-`15` of the canonical expression encoding keep their existing
-meanings and bytes, and the new operation is a distinct ordinal appended after
-them.
-
-### Beyond the alpha (source build)
-
-These extensions are implemented in the source tree and covered by the same
-gates. Each keeps the program ids of programs that do not use it; the
-examples below are pinned by frozen identity tests. The full reference, with
-checked snippets, is [`docs/brix-language.md`](./docs/brix-language.md).
-
-- **Recursion** ([ADR-0042](./spec/adr/ADR-0042_One_Evaluator.md)): helpers
-  may call themselves or each other. Evaluation is bounded by call depth and a
-  step budget; a program that runs out fails closed to `Unknown` instead of
-  being rejected up front. The `let` lane and the decision lane now share one
-  evaluator, so `brix check` prints values too.
-- **Bounded lists and relations**
-  ([ADR-0037](./spec/adr/ADR-0037_Bounded_Lists_And_Folds.md),
-  [ADR-0040](./spec/adr/ADR-0040_Finite_Relations.md)): `input orders:
-  List<Order> max 64`, list literals, `sum`/`count`/`all`/`any`/`min`/`max`,
-  `filter`, `map`, `distinct`, `len`, `in`, and joins written as
-  `for o in orders, s in stock where o.sku == s.sku yield …`. Inputs use
-  `brix.input@3`. See [`examples/fulfillment.brix`](./examples/fulfillment.brix).
-- **Less ceremony** ([ADR-0038](./spec/adr/ADR-0038_Inferred_Dependencies_And_Otherwise.md)):
-  dependency lists are inferred from what a rule or proposal reads, and
-  `propose hold otherwise = Hold` declares the fallback.
-- **Several decisions per program**
-  ([ADR-0039](./spec/adr/ADR-0039_Multiple_Commit_Pools.md)): each `commit`
-  block is an independent decision; see
-  [`examples/order-desk.brix`](./examples/order-desk.brix).
-- **Per-entity decisions**
-  ([ADR-0043](./spec/adr/ADR-0043_Per_Entity_Decisions.md)): one decision
-  for each element of a list.
-
-```brix
-decide status for o in orders {
-  propose ship priority 1 when any(stock, s => s.sku == o.sku && s.on_hand >= o.units) = Ship
-  propose backorder priority 2 when any(stock, s => s.sku == o.sku) = Backorder
-  propose hold otherwise = Hold
-}
-```
-
-```bash
-cargo run -p brix-cli -- run examples/order-book.brix --input examples/order-book.json
-```
-
-prints one line per order (`[0] Order { id: 1, sku: 100, units: 5 }: ship =
-Ship @Derived`, …), and `brix why examples/order-book.brix --candidate
-backorder --entity 1 --input examples/order-book.json` explains one of them.
-
-- **Regression suites**: `brix test examples/*.test.json` checks every example
-  against its expected decisions.
-- **Knowledge base** ([ADR-0041](./spec/adr/ADR-0041_Persistent_Knowledge_Base.md)):
-  `brix kb init`, then `assert`/`retract` facts or change the program; each
-  revision is replayed and verifiable, and `brix kb diff` explains what changed.
-- **Embedding** ([ADR-0044](./spec/adr/ADR-0044_Serve_Protocol.md)):
-  `brix serve --stdio` answers one JSON request per line with the same result
-  objects `--json` prints. A standard-library Python client lives in
-  [`bindings/python/`](./bindings/python/) (`pip install -e bindings/python`):
+Run from the source checkout after building the CLI:
 
 ```python
 from brix import BrixClient, path
 
-with BrixClient() as client:
+with BrixClient(brix_bin="./target/debug/brix") as client:
     result = client.run(program=path("examples/shipping.brix"))
     print(result["status"], result["decision"])
 ```
 
-**CLI target surface & status:**
-- `brix verify` implements offline verification of ADR-0026 audit input transport bundles.
-- `brix sim` and interactive REPLs are not implemented.
+The `brix` executable must be built or installed separately. See
+[ADR-0044](./spec/adr/ADR-0044_Serve_Protocol.md) for the protocol contract.
 
-## What is coming
+## Releases
 
-The next work is about completing the trust story and widening the useful
-language surface, not replacing the architecture above. For the fuller
-picture, see [`docs/planning/beta-plan.md`](./docs/planning/beta-plan.md)
-(the review and the ranked investment plan),
-[`spec/Beta_Contract.md`](./spec/Beta_Contract.md) (what a beta release
-promises), and [`docs/planning/beta-roadmap.md`](./docs/planning/beta-roadmap.md)
-(the open design questions for each milestone).
-
-### Near-term engineering
-
-- discharge the remaining primitive typing relations so arithmetic,
-  comparisons, and more matches can move from `Audited` to genuine `Proven`;
-- widen offline audit bundle verification and transport beyond single-module
-  finite-decision snapshots;
-- add dependency tracking and incremental invalidation for type-realization
-  results;
-- extend the executable L3 subset beyond the current static rule-agenda and
-  live finite-decision profiles;
-- finish versioned context transport and confinement checks.
-
-### Longer-term design and research
-
-- parallelize deliberation while preserving the exact serial commit sequence;
-- build broader native Brix packages and more realization regimes;
-- complete the universal-world/faithfulness obligations without overstating
-  the still-open mathematical claims;
-- grow the language toward self-hosting while keeping the Rust kernels small
-  and independently checkable.
-
-The precise status is intentionally explicit:
-
-- arithmetic and comparison currently top out at `Audited` where primitive
-  leaves remain undischarged;
-- catch-all matching is also deliberately capped;
-- recursion in either lane is bounded by call depth and a step budget and fails closed to `Unknown`; termination is never claimed;
-- certified refutation does not exist yet, so negative results are conflicts or
-  `Unknown`, never `Refuted`;
-- context confinement and several durable artifact obligations remain partial.
-
-The authoritative status ledger is
-[`SOC_Semantic_Laws.md`](./spec/SOC_Semantic_Laws.md). The exact distinction
-between implemented, test-pinned, and specified-only typing clauses lives in
-[`Type_Realization_Contract.md`](./spec/Type_Realization_Contract.md).
-
-## How the implementation is organized
-
-BrixMS is a Rust workspace with nine focused crates:
-
-```text
-                         brix-canon
-                             |
-                       brix-semantic
-                      /      |       \
-              soc-core   brix-kernel  soc-regimes
-                  |           ^           ^
-                  |      brix-elaborate    |
-                  |           ^           |
-.brix -> brix-syntax -> brix-lower --------+
-                           |
-                        brix-cli
-```
-
-| Crate | Role |
-| --- | --- |
-| [`brix-canon`](./crates/brix-canon) | Canonical bytes, ordering, and digest identity |
-| [`brix-semantic`](./crates/brix-semantic) | Shared artifacts, evidence grades, and legal publication routes |
-| [`soc-core`](./crates/soc-core) | Settlement, incremental execution, journals, audit, and saturation |
-| [`soc-regimes`](./crates/soc-regimes) | Literal and native Brix type-realization regimes |
-| [`brix-kernel`](./crates/brix-kernel) | Independent proof-term acceptance and certificates |
-| [`brix-elaborate`](./crates/brix-elaborate) | Checked bridge from audited evidence into the proof kernel |
-| [`brix-syntax`](./crates/brix-syntax) | Surface AST, lexer, parser, and hostile-input bounds |
-| [`brix-lower`](./crates/brix-lower) | Type-realization lowering and the executable L3 adapter |
-| [`brix-cli`](./crates/brix-cli) | User-facing commands |
-
-`brix-semantic` depends only on `brix-canon`, and `brix-kernel` depends only on
-those two crates. This keeps the trusted proof boundary independent of the
-parser, runtime, and regimes that construct proof candidates.
-
-The former `brix-ast`/`brix-ir`/`brixc`/`brix-rt` engine served as a
-differential oracle during the SOC transition and has been deleted. The current
-workspace is the SOC-native implementation, not two competing engines.
-
-## Repository guide
-
-```text
-crates/     the Rust implementation
-spec/       constitution, decisions, semantic laws, contracts, and plans
-docs/       the SOC foundation, language overview, and article material
-vectors/    frozen canonical and certificate artifacts
-packages/   experimental Brix package sources
-scripts/    independent canonical, dependency, and traceability checks
-```
-
-For a conceptual introduction, read
-[`docs/brix-language.md`](./docs/brix-language.md). For the governing design and
-the exact boundary between claims and conjectures, continue with:
-
-1. [`spec/README.md`](./spec/README.md) — document map and authority.
-2. [`ADR-0002`](./spec/adr/ADR-0002_SOC_Constitution.md) — the accepted SOC
-   constitution.
-3. [`SOC_Semantic_Laws.md`](./spec/SOC_Semantic_Laws.md) — laws, executable
-   anchors, and open obligations.
-4. [`Type_Realization_Contract.md`](./spec/Type_Realization_Contract.md) — the
-   native typing contract and its current limits.
-5. [`Build_Plan_v3_SOC.md`](./spec/Build_Plan_v3_SOC.md) — dependency-ordered
-   design plan; use the law registry and code for current landed status.
-
-The mathematical source is
-[`SOC_core_foundations_revised.tex`](./docs/SOC_core_foundations_revised.tex).
-It labels established results, conditional claims, targets, and open questions
-separately. The accepted engineering constitution governs where the documents
-differ.
-
-## Development and verification
-
-The local merge bar is:
+The current workspace version is `0.1.0-alpha.3`. Its prerelease archives
+target macOS Apple Silicon (`aarch64-apple-darwin`) and Linux x86_64
+(`x86_64-unknown-linux-gnu`); each has a SHA-256 sidecar. Download the exact
+tagged asset from the [GitHub Releases page](https://github.com/tbreijm/brixms/releases):
 
 ```bash
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-python3 scripts/canon_crosscheck.py
-python3 scripts/check_tcb_dependencies.py --check
-scripts/test_tcb_dependency_gate.sh
-python3 scripts/check_soc_law_map.py
-scripts/test_law_map_provisional_gate.sh
+VERSION=v0.1.0-alpha.3
+TARGET=x86_64-unknown-linux-gnu # or aarch64-apple-darwin
+curl -LO "https://github.com/tbreijm/brixms/releases/download/${VERSION}/brix-${VERSION}-${TARGET}.tar.gz"
+curl -LO "https://github.com/tbreijm/brixms/releases/download/${VERSION}/brix-${VERSION}-${TARGET}.tar.gz.sha256"
+sha256sum -c "brix-${VERSION}-${TARGET}.tar.gz.sha256" # macOS: shasum -a 256 -c "brix-${VERSION}-${TARGET}.tar.gz.sha256"
+tar -xzf "brix-${VERSION}-${TARGET}.tar.gz"
+cd "brix-${VERSION}-${TARGET}"
+./brix run examples/shipping.brix
+./brix run examples/numeric-policy.brix --input examples/numeric-policy.json
 ```
 
-An extracted release package directory can be smoke-validated end-to-end against an expected version:
+Release archives include the CLI, README, and the `shipping`,
+`shipping-input`, and `numeric-policy` examples. Other examples linked above
+are available in the source checkout. Always consult the README and examples
+bundled with a downloaded release when checking what that archive supports.
 
-```bash
-python3 scripts/smoke_release_package.py <extracted_package_dir> <expected_version>
-```
+## Documentation
 
-The required CI merge gates protecting `main` (defined in [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)) are:
+- [Language guide](./docs/brix-language.md) — syntax, executable profiles,
+  types, inputs, arithmetic, lists, and decisions.
+- [Beta contract](./spec/Beta_Contract.md) — what the beta claims and does not
+  claim.
+- [Semantic laws](./spec/SOC_Semantic_Laws.md) and
+  [type realization contract](./spec/Type_Realization_Contract.md) — evidence
+  status and conformance scope.
+- [Beta plan](./docs/planning/beta-plan.md) and
+  [roadmap](./docs/planning/beta-roadmap.md) — planned work and open questions.
+- [Contributing](./CONTRIBUTING.md) — development discipline and specification
+  workflow.
 
-1. **`lint`**: formatting (`cargo fmt`), TCB dependency policy (`check_tcb_dependencies.py`), law-map traceability (`check_soc_law_map.py`), canon vector cross-check (`canon_crosscheck.py`), and Clippy warnings-as-errors;
-2. **`build`**: workspace test archiving and doctests (`cargo test --doc --workspace`);
-3. **`test`**: execution of the workspace test suite via `cargo nextest`;
-4. **`determinism`**: repeated test execution asserting zero git status drift on frozen artifacts (proxy for G3 reproducibility);
-5. **`conformance`**: dedicated regime test gate covering `soc-regimes` native type-checker parity;
-6. **`acceptance`**: adversarial certificate vector verification in `brix-kernel`;
-7. **`reproducibility`**: reproducible emit, cache integrity, and deterministic size budgets in `soc-core`;
-8. **`cargo-deny`**: supply-chain security, license compatibility, crate bans, and advisory checks.
+## Development
 
-`unsafe` is denied workspace-wide, and unordered standard hash maps are denied in semantic paths.
-
-See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the determinism discipline,
-dependency policy, and specification-erratum workflow.
+Build or run the CLI with Cargo. The workspace's contribution gates are
+documented in [`CONTRIBUTING.md`](./CONTRIBUTING.md); the CI workflow runs
+formatting, lint, tests, determinism, conformance, and artifact checks.
 
 ## License
 

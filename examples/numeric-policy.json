@@ -1,0 +1,8 @@
+{
+  "schema": "brix.input@4",
+  "values": {
+    "distance": { "type": "f64", "value": "125.5" },
+    "duration": { "type": "f64", "value": "5" },
+    "price": { "type": "decimal", "value": "19.95" }
+  }
+}
