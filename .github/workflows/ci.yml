@@ -224,7 +224,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build brix-cli
         run: cargo build -p brix-cli
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Install pytest
