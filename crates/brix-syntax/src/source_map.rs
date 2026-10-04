@@ -105,5 +105,11 @@ pub(crate) fn item_kind_name(item: &Item) -> (&'static str, Option<String>) {
         Item::Commit(c) => ("commit", Some(c.name.clone())),
         Item::Input(i) => ("input", Some(i.name.clone())),
         Item::Decide(d) => ("decide", Some(d.name.clone())),
+        Item::Export(inner) => {
+            let (_, name) = item_kind_name(inner);
+            ("export", name)
+        }
+        Item::RelInput(r) => ("rel_input", Some(r.name.clone())),
+        Item::RelDerived(r) => ("rel_derived", Some(r.name.clone())),
     }
 }

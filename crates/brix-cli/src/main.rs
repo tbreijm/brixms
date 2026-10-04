@@ -134,6 +134,7 @@ where
         ),
         Ok(cli::Command::Test { files, json }) => commands::test::execute_test(&files, json),
         Ok(cli::Command::Kb { op, json }) => commands::kb::execute_kb(&op, json),
+        Ok(cli::Command::World { op, json }) => commands::world::execute_world(&op, json),
         Ok(cli::Command::Serve) => serve::run_stdio(),
         Err(err) => {
             if err.is_json {

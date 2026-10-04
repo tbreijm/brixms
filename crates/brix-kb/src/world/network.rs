@@ -1,0 +1,1885 @@
+//! Maintained operator network, truth maintenance, and candidate frontier deliberation (ADR-0046 P4).
+//!
+//! Provides [`WorldNetwork`], which compiles relational DAGs into an incrementally maintained
+//! operator network with:
+//! - Exact $O(\Delta)$ propagation across [`OperatorNode::Scan`], [`OperatorNode::Bind`],
+//!   [`OperatorNode::Filter`], [`OperatorNode::Project`], [`OperatorNode::EquiJoin`],
+//!   [`OperatorNode::Distinct`], and [`OperatorNode::GroupedCount`].
+//! - Symmetric indexed joins with derivation support tracking.
+//! - Set semantics with derivation support counters ($0 \to 1$ emits $+$, $1 \to 0$ emits $-$, $>1$ tracks multiple supports).
+//! - Monotonic group count tracking with $0 \to 1$, count update, and $1 \to 0$ transitions.
+//! - Candidate frontier maintenance per entity with multi-support survival.
+//! - Canonical settlement discipline selecting least `Key = (phase, priority, tiebreak)` from [`soc_core::calendar`].
+//! - Replay comparison ([`WorldNetwork::recompute_from_scratch`]); independent audit is a separate implementation.
+
+#![deny(unsafe_code)]
+
+use super::persistent::{PMap, PSet};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::sync::Arc;
+
+use brix_canon::{CanonWriter, Canonical, Digest, Domain};
+use brix_lower::module_graph::LinkedProgram;
+use brix_lower::relation_dag::{
+    lower_relations, FieldRef, GroupProjection, OperatorId, OperatorNode, RelationDag,
+};
+use brix_syntax::ast::{self, Expr};
+use soc_core::calendar::{Frontier, Key};
+use soc_core::store::TrieMap;
+
+use super::batch::{WorldBatch, WorldBatchOp};
+use super::codec::TupleRecord;
+use super::error::WorldError;
+use super::types::{WorldKey, WorldTuple};
+
+/// A scalar value admitted in relational operators and expressions.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Value {
+    /// Internal absence sentinel; never an admissible expression value.
+    Null,
+    Bool(bool),
+    Int(i64),
+    Str(String),
+    F64(brix_canon::FiniteF64),
+    Decimal(brix_canon::Decimal),
+}
+
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Null => {}
+            Self::Bool(v) => v.hash(state),
+            Self::Int(v) => v.hash(state),
+            Self::Str(v) => v.hash(state),
+            Self::F64(v) => v.to_string().hash(state),
+            Self::Decimal(v) => {
+                v.unscaled().hash(state);
+                v.scale().hash(state);
+            }
+        }
+    }
+}
+
+impl Value {
+    pub fn as_bool(&self) -> Result<bool, WorldError> {
+        match self {
+            Self::Bool(v) => Ok(*v),
+            _ => Err(WorldError::NetworkError(
+                "Unknown(EvaluationFault): guard must be Bool".into(),
+            )),
+        }
+    }
+    pub fn as_int(&self) -> Option<i64> {
+        if let Self::Int(v) = self {
+            Some(*v)
+        } else {
+            None
+        }
+    }
+    pub fn as_str(&self) -> Option<&str> {
+        if let Self::Str(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.to_string().into_bytes()
+    }
+    /// Untyped byte payloads remain strings; schemas alone select numeric decoding.
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self::Str(String::from_utf8_lossy(bytes).into_owned())
+    }
+    pub fn from_str_val(s: &str) -> Self {
+        Self::Str(s.to_owned())
+    }
+    pub fn from_typed_bytes(bytes: &[u8], ty: &ast::Ty) -> Result<Self, WorldError> {
+        let text = std::str::from_utf8(bytes)
+            .map_err(|e| WorldError::NetworkError(format!("invalid scalar UTF-8: {e}")))?;
+        let invalid = || WorldError::NetworkError(format!("invalid {ty:?} scalar {text:?}"));
+        match ty {
+            ast::Ty::Named(name) => match name.as_str() {
+                "Str" => Ok(Self::Str(text.to_owned())),
+                "Int" => text.parse().map(Self::Int).map_err(|_| invalid()),
+                "Bool" => match text {
+                    "true" => Ok(Self::Bool(true)),
+                    "false" => Ok(Self::Bool(false)),
+                    _ => Err(invalid()),
+                },
+                "F64" => text.parse().map(Self::F64).map_err(|_| invalid()),
+                "Decimal" => brix_canon::decimal_parse(text)
+                    .map(Self::Decimal)
+                    .map_err(|_| invalid()),
+                _ => Err(invalid()),
+            },
+            _ => Err(invalid()),
+        }
+    }
+    pub fn to_scalar(&self) -> Result<brix_lower::l3_v2::L3ValueV2, WorldError> {
+        use brix_lower::l3_v2::L3ValueV2 as V;
+        Ok(match self {
+            Self::Bool(v) => V::Bool(*v),
+            Self::Int(v) => V::Int(*v),
+            Self::Str(v) => V::Str(v.clone()),
+            Self::F64(v) => V::F64(*v),
+            Self::Decimal(v) => V::Decimal(*v),
+            Self::Null => {
+                return Err(WorldError::NetworkError(
+                    "Unknown(EvaluationFault): absent scalar value".into(),
+                ))
+            }
+        })
+    }
+    pub fn from_scalar(v: brix_lower::l3_v2::L3ValueV2) -> Result<Self, WorldError> {
+        use brix_lower::l3_v2::L3ValueV2 as V;
+        Ok(match v {
+            V::Bool(v) => Self::Bool(v),
+            V::Int(v) => Self::Int(v),
+            V::Str(v) => Self::Str(v),
+            V::F64(v) => Self::F64(v),
+            V::Decimal(v) => Self::Decimal(v),
+            _ => {
+                return Err(WorldError::NetworkError(
+                    "expression result is not a scalar".into(),
+                ))
+            }
+        })
+    }
+}
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Null => write!(f, "null"),
+            Self::Bool(v) => write!(f, "{v}"),
+            Self::Int(v) => write!(f, "{v}"),
+            Self::Str(v) => write!(f, "{v}"),
+            Self::F64(v) => write!(f, "{v}"),
+            Self::Decimal(v) => write!(f, "{}", brix_canon::decimal_format(*v)),
+        }
+    }
+}
+
+/// An intermediate tuple carrying evaluated fields in operator pipeline execution.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+pub struct IntermediateTuple {
+    pub fields: BTreeMap<String, Value>,
+}
+
+impl IntermediateTuple {
+    pub fn new() -> Self {
+        Self {
+            fields: BTreeMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, key: impl Into<String>, val: Value) {
+        self.fields.insert(key.into(), val);
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.fields.get(key)
+    }
+
+    pub fn get_qualified(&self, binding: &str, field: &str) -> Option<&Value> {
+        let qualified = format!("{binding}.{field}");
+        self.fields
+            .get(&qualified)
+            .or_else(|| self.fields.get(field))
+    }
+
+    pub fn from_tuple_record(rec: &TupleRecord) -> Self {
+        let mut fields = BTreeMap::new();
+        for (k, v) in &rec.fields {
+            fields.insert(k.clone(), Value::from_bytes(v));
+        }
+        Self { fields }
+    }
+
+    pub fn to_tuple_record(&self) -> TupleRecord {
+        let mut rec = TupleRecord::new();
+        for (k, v) in &self.fields {
+            rec.set(k.clone(), v.to_bytes());
+        }
+        rec
+    }
+
+    pub fn merge(&self, other: &IntermediateTuple) -> IntermediateTuple {
+        let mut merged = self.fields.clone();
+        for (k, v) in &other.fields {
+            merged.insert(k.clone(), v.clone());
+        }
+        IntermediateTuple { fields: merged }
+    }
+}
+
+/// A derivation identifier uniquely tracking justifications for TMS truth maintenance.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum DerivationId {
+    /// Base fact in a relation identified by primary key.
+    Base { relation: String, key: WorldKey },
+    /// Fact derived through a unary operator node.
+    Unary {
+        op: OperatorId,
+        parent: Box<DerivationId>,
+    },
+    /// Composite fact derived by joining left and right supports in an EquiJoin.
+    Join {
+        op: OperatorId,
+        left: Box<DerivationId>,
+        right: Box<DerivationId>,
+    },
+    /// Aggregation derivation for a group.
+    Group {
+        op: OperatorId,
+        group_key: Vec<Value>,
+    },
+    /// Canonical derivation for a distinct tuple produced by set semantics.
+    Distinct { op: OperatorId, tuple_key: Vec<u8> },
+}
+
+impl DerivationId {
+    pub fn canon_write(&self, w: &mut CanonWriter) {
+        match self {
+            Self::Base { relation, key } => {
+                w.write_uint(1);
+                w.write_str(relation);
+                key.canon_write(w);
+            }
+            Self::Unary { op, parent } => {
+                w.write_uint(2);
+                w.write_uint(op.0 as u64);
+                parent.canon_write(w);
+            }
+            Self::Join { op, left, right } => {
+                w.write_uint(3);
+                w.write_uint(op.0 as u64);
+                left.canon_write(w);
+                right.canon_write(w);
+            }
+            Self::Group { op, group_key } => {
+                w.write_uint(4);
+                w.write_uint(op.0 as u64);
+                w.write_uint(group_key.len() as u64);
+                for v in group_key {
+                    w.write_bytes(&v.to_bytes());
+                }
+            }
+            Self::Distinct { op, tuple_key } => {
+                w.write_uint(5);
+                w.write_uint(op.0 as u64);
+                w.write_bytes(tuple_key);
+            }
+        }
+    }
+
+    pub fn digest(&self) -> Digest {
+        let mut w = CanonWriter::new();
+        w.write_tag("brix.derivation@1");
+        self.canon_write(&mut w);
+        w.digest(Domain::Value)
+    }
+
+    /// Recursively collect all contributing base facts (relation, primary key).
+    pub fn collect_base_facts(&self, out: &mut BTreeSet<(String, WorldKey)>) {
+        match self {
+            Self::Base { relation, key } => {
+                out.insert((relation.clone(), key.clone()));
+            }
+            Self::Unary { parent, .. } => {
+                parent.collect_base_facts(out);
+            }
+            Self::Join { left, right, .. } => {
+                left.collect_base_facts(out);
+                right.collect_base_facts(out);
+            }
+            Self::Group { .. } | Self::Distinct { .. } => {}
+        }
+    }
+}
+
+/// Incremental delta emitted between operator nodes.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TupleDelta {
+    Insert {
+        tuple: IntermediateTuple,
+        derivation: DerivationId,
+    },
+    Retract {
+        tuple: IntermediateTuple,
+        derivation: DerivationId,
+    },
+}
+
+impl TupleDelta {
+    pub fn tuple(&self) -> &IntermediateTuple {
+        match self {
+            Self::Insert { tuple, .. } | Self::Retract { tuple, .. } => tuple,
+        }
+    }
+
+    pub fn derivation(&self) -> &DerivationId {
+        match self {
+            Self::Insert { derivation, .. } | Self::Retract { derivation, .. } => derivation,
+        }
+    }
+
+    pub fn is_insert(&self) -> bool {
+        matches!(self, Self::Insert { .. })
+    }
+}
+
+/// A proposed candidate entry within a per-entity decide block.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CandidateEntry {
+    pub candidate_name: String,
+    pub entity_id: String,
+    pub priority: u64,
+    pub phase: u64,
+    pub value: Value,
+    pub calendar_key: Key,
+    pub supports: PSet<DerivationId>,
+}
+
+/// A deterministic settled decision chosen by canonical settlement discipline.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SettledDecision {
+    pub entity_id: String,
+    pub candidate_name: String,
+    pub priority: u64,
+    pub phase: u64,
+    pub value: Value,
+    pub calendar_key: Key,
+}
+
+impl SettledDecision {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "entity_id": self.entity_id,
+            "candidate_name": self.candidate_name,
+            "priority": self.priority,
+            "phase": self.phase,
+            "value": self.value.to_string(),
+            "calendar_key": format!("phase={},priority={},tiebreak={}", self.calendar_key.phase, self.calendar_key.priority, self.calendar_key.tiebreak.to_hex()),
+        })
+    }
+}
+
+/// Explanation of an individual candidate in a decide deliberation.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CandidateExplanation {
+    pub name: String,
+    pub priority: u64,
+    pub phase: u64,
+    pub value: Value,
+    pub supports_count: usize,
+    pub winning: bool,
+}
+
+impl CandidateExplanation {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "priority": self.priority,
+            "phase": self.phase,
+            "value": self.value.to_string(),
+            "supports_count": self.supports_count,
+            "winning": self.winning,
+        })
+    }
+}
+
+/// Comprehensive explanation of the candidate deliberation and winning settlement for an entity.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DecisionExplanation {
+    pub entity_id: String,
+    pub decide_name: String,
+    pub winning_candidate: Option<String>,
+    pub value: Option<Value>,
+    pub priority: Option<u64>,
+    pub phase: Option<u64>,
+    pub calendar_key: Option<Key>,
+    pub candidates: Vec<CandidateExplanation>,
+    pub contributing_facts: Vec<(String, WorldKey)>,
+}
+
+impl DecisionExplanation {
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "entity_id": self.entity_id,
+            "decide_name": self.decide_name,
+            "winning_candidate": self.winning_candidate,
+            "value": self.value.as_ref().map(|v| v.to_string()),
+            "priority": self.priority,
+            "phase": self.phase,
+            "calendar_key": self.calendar_key.map(|k| format!("phase={},priority={},tiebreak={}", k.phase, k.priority, k.tiebreak.to_hex())),
+            "candidates": self.candidates.iter().map(|c| c.to_json()).collect::<Vec<_>>(),
+            "contributing_facts": self.contributing_facts.iter().map(|(rel, key)| {
+                let key_repr = std::str::from_utf8(key.as_bytes()).map(|s| s.to_string()).unwrap_or_else(|_| key.to_hex());
+                serde_json::json!({
+                    "relation": rel,
+                    "key": key_repr,
+                })
+            }).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// Compute a deterministic canonical Blake3 digest across all settled decisions.
+pub fn compute_decision_root(
+    settlements: &BTreeMap<String, BTreeMap<String, SettledDecision>>,
+) -> Digest {
+    let mut tree = TrieMap::new();
+    for (decide, entities) in settlements {
+        for (entity, decision) in entities {
+            tree = tree.insert(decision_key(decide, entity), decision_tuple(decision));
+        }
+    }
+    tree.root_digest()
+}
+
+fn decision_key(decide: &str, entity: &str) -> WorldKey {
+    let mut w = CanonWriter::new();
+    w.write_tag("brix.world.decision-key@1");
+    w.write_str(decide);
+    w.write_str(entity);
+    WorldKey::new(w.finish())
+}
+
+fn decision_tuple(decision: &SettledDecision) -> WorldTuple {
+    let mut w = CanonWriter::new();
+    w.write_tag("brix.world.decision@1");
+    w.write_ident(&decision.candidate_name);
+    w.write_uint(decision.priority);
+    w.write_uint(decision.phase);
+    canon_write_value(&decision.value, &mut w);
+    w.write_bytes(decision.calendar_key.tiebreak.as_bytes());
+    WorldTuple::new(w.finish())
+}
+
+/// A compiled decide block scoping candidates to individual entities.
+#[derive(Clone, Debug)]
+pub struct DecideBlock {
+    pub name: String,
+    pub binder: String,
+    pub source_relation: String,
+    pub proposals: Vec<ast::ProposeDecl>,
+}
+
+/// Compute a deterministic canonical Blake3 calendar key for a candidate.
+pub fn compute_candidate_calendar_key(
+    phase: u64,
+    priority: u64,
+    decide_name: &str,
+    entity_id: &str,
+    candidate_name: &str,
+    value: &Value,
+) -> Key {
+    let mut w = CanonWriter::new();
+    w.write_tag("brix.candidate.tiebreak@1");
+    w.write_str(decide_name);
+    w.write_str(entity_id);
+    w.write_str(candidate_name);
+    canon_write_value(value, &mut w);
+    let tiebreak = w.digest(Domain::Value);
+    Key::new(phase, priority, tiebreak)
+}
+
+/// The state maintained inside an operator node.
+fn canon_write_value(value: &Value, w: &mut CanonWriter) {
+    match value {
+        Value::Int(i) => {
+            w.write_uint(1);
+            w.write_int(*i);
+        }
+        Value::Str(s) => {
+            w.write_uint(2);
+            w.write_str(s);
+        }
+        Value::Bool(b) => {
+            w.write_uint(3);
+            w.write_uint(if *b { 1 } else { 0 });
+        }
+        Value::Null => {
+            w.write_uint(0);
+        }
+        Value::F64(v) => {
+            w.write_uint(4);
+            v.canon_write(w);
+        }
+        Value::Decimal(v) => {
+            w.write_uint(5);
+            v.canon_write(w);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum OperatorState {
+    Scan {
+        relation: String,
+        key_fields: Vec<String>,
+        schema: ast::Ty,
+        records: PMap<WorldKey, (WorldTuple, IntermediateTuple)>,
+    },
+    Bind {
+        input: OperatorId,
+        alias: String,
+    },
+    Filter {
+        input: OperatorId,
+        predicate: ast::Expr,
+    },
+    Project {
+        input: OperatorId,
+        projections: Vec<(String, ast::Expr)>,
+    },
+    EquiJoin {
+        left: OperatorId,
+        right: OperatorId,
+        left_keys: Vec<FieldRef>,
+        right_keys: Vec<FieldRef>,
+        left_index: PMap<Vec<Value>, PMap<DerivationId, IntermediateTuple>>,
+        right_index: PMap<Vec<Value>, PMap<DerivationId, IntermediateTuple>>,
+    },
+    Distinct {
+        input: OperatorId,
+        supports: PMap<IntermediateTuple, PSet<DerivationId>>,
+    },
+    GroupedCount {
+        input: OperatorId,
+        group_keys: Vec<ast::Expr>,
+        projections: Vec<(String, GroupProjection)>,
+        groups: PMap<Vec<Value>, PSet<DerivationId>>,
+    },
+}
+
+/// Fully observable snapshot of the network state for diffs and verification.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct WorldNetworkState {
+    pub base_relations: BTreeMap<String, BTreeMap<WorldKey, WorldTuple>>,
+    pub derived_relations: BTreeMap<String, BTreeSet<TupleRecord>>,
+    pub candidate_frontier: BTreeMap<String, BTreeMap<String, BTreeMap<String, CandidateEntry>>>,
+    pub settlements: BTreeMap<String, BTreeMap<String, SettledDecision>>,
+    pub distinct_supports: BTreeMap<OperatorId, BTreeMap<TupleRecord, BTreeSet<DerivationId>>>,
+}
+
+/// Outcome report summarizing changes after applying a batch through the network.
+#[derive(Clone, Debug, Default)]
+pub struct NetworkDeltaReport {
+    pub revision: u64,
+    pub ops_applied: usize,
+    pub intermediate_deltas_count: usize,
+    pub derived_tuples_inserted: usize,
+    pub derived_tuples_retracted: usize,
+    pub candidates_inserted: usize,
+    pub candidates_retracted: usize,
+    pub settlements: BTreeMap<String, BTreeMap<String, SettledDecision>>,
+}
+
+/// The maintained operator network running bounded incremental evaluations (ADR-0046 §3.5, §3.7).
+#[derive(Clone, Debug)]
+pub struct WorldNetwork {
+    pub dag: Arc<RelationDag>,
+    pub operator_states: PMap<usize, OperatorState>,
+    pub relation_subscribers: PMap<String, Vec<OperatorId>>,
+    pub downstream: PMap<OperatorId, Vec<OperatorId>>,
+    output_relations: PMap<OperatorId, Vec<String>>,
+    pub base_relations: PMap<String, PMap<WorldKey, WorldTuple>>,
+    pub derived_relations: PMap<String, PSet<TupleRecord>>,
+    pub decides: PMap<String, DecideBlock>,
+    decision_subscribers: PMap<String, Vec<String>>,
+    decision_tree: TrieMap<WorldKey, WorldTuple>,
+    pub candidate_frontier: PMap<String, PMap<String, PMap<String, CandidateEntry>>>,
+    pub functions: Arc<BTreeMap<String, ast::Callable>>,
+    pub current_revision: u64,
+}
+
+impl WorldNetwork {
+    /// Construct a new network from a lowered relational DAG.
+    pub fn new(dag: RelationDag) -> Self {
+        let mut operator_states = PMap::new();
+        let mut relation_subscribers: PMap<String, Vec<OperatorId>> = PMap::new();
+        let mut downstream: PMap<OperatorId, Vec<OperatorId>> = PMap::new();
+        let mut base_relations = PMap::new();
+
+        for (idx, node) in dag.nodes.iter().enumerate() {
+            let op_id = OperatorId(idx);
+            match node {
+                OperatorNode::Scan {
+                    relation,
+                    key_fields,
+                    schema,
+                } => {
+                    relation_subscribers
+                        .entry(relation.clone())
+                        .or_default()
+                        .push(op_id);
+                    base_relations.insert(relation.clone(), PMap::new());
+                    operator_states.insert(
+                        idx,
+                        OperatorState::Scan {
+                            relation: relation.clone(),
+                            key_fields: key_fields.clone(),
+                            schema: schema.clone(),
+                            records: PMap::new(),
+                        },
+                    );
+                }
+                OperatorNode::Bind { input, alias } => {
+                    downstream.entry(*input).or_default().push(op_id);
+                    operator_states.insert(
+                        idx,
+                        OperatorState::Bind {
+                            input: *input,
+                            alias: alias.clone(),
+                        },
+                    );
+                }
+                OperatorNode::Filter { input, predicate } => {
+                    downstream.entry(*input).or_default().push(op_id);
+                    operator_states.insert(
+                        idx,
+                        OperatorState::Filter {
+                            input: *input,
+                            predicate: predicate.clone(),
+                        },
+                    );
+                }
+                OperatorNode::Project { input, projections } => {
+                    downstream.entry(*input).or_default().push(op_id);
+                    operator_states.insert(
+                        idx,
+                        OperatorState::Project {
+                            input: *input,
+                            projections: projections.clone(),
+                        },
+                    );
+                }
+                OperatorNode::EquiJoin {
+                    left,
+                    right,
+                    left_keys,
+                    right_keys,
+                } => {
+                    downstream.entry(*left).or_default().push(op_id);
+                    downstream.entry(*right).or_default().push(op_id);
+                    operator_states.insert(
+                        idx,
+                        OperatorState::EquiJoin {
+                            left: *left,
+                            right: *right,
+                            left_keys: left_keys.clone(),
+                            right_keys: right_keys.clone(),
+                            left_index: PMap::new(),
+                            right_index: PMap::new(),
+                        },
+                    );
+                }
+                OperatorNode::Distinct { input } => {
+                    downstream.entry(*input).or_default().push(op_id);
+                    operator_states.insert(
+                        idx,
+                        OperatorState::Distinct {
+                            input: *input,
+                            supports: PMap::new(),
+                        },
+                    );
+                }
+                OperatorNode::GroupedCount {
+                    input,
+                    group_keys,
+                    projections,
+                } => {
+                    downstream.entry(*input).or_default().push(op_id);
+                    operator_states.insert(
+                        idx,
+                        OperatorState::GroupedCount {
+                            input: *input,
+                            group_keys: group_keys.clone(),
+                            projections: projections.clone(),
+                            groups: PMap::new(),
+                        },
+                    );
+                }
+            }
+        }
+
+        let mut derived_relations = PMap::new();
+        for (name, &op_id) in &dag.relation_outputs {
+            if !matches!(dag.nodes[op_id.0], OperatorNode::Scan { .. }) {
+                derived_relations.insert(name.clone(), PSet::new());
+            }
+        }
+
+        let mut output_relations: PMap<OperatorId, Vec<String>> = PMap::new();
+        for (name, op) in &dag.relation_outputs {
+            output_relations.entry(*op).or_default().push(name.clone());
+        }
+        Self {
+            dag: Arc::new(dag),
+            output_relations,
+            operator_states,
+            relation_subscribers,
+            downstream,
+            base_relations,
+            derived_relations,
+            decides: PMap::new(),
+            decision_subscribers: PMap::new(),
+            decision_tree: TrieMap::new(),
+            candidate_frontier: PMap::new(),
+            functions: Arc::new(BTreeMap::new()),
+            current_revision: 0,
+        }
+    }
+
+    /// Attach decide blocks to this network.
+    pub fn with_decides(mut self, decides: Vec<DecideBlock>) -> Self {
+        for d in decides {
+            self.decision_subscribers
+                .entry(d.source_relation.clone())
+                .or_default()
+                .push(d.name.clone());
+            self.decides.insert(d.name.clone(), d);
+        }
+        self
+    }
+
+    /// Attach helper functions to this network.
+    pub fn with_functions(mut self, functions: BTreeMap<String, ast::Callable>) -> Self {
+        self.functions = Arc::new(functions);
+        self
+    }
+
+    /// Construct a network directly from a linked program.
+    pub fn from_program(program: &LinkedProgram) -> Result<Self, WorldError> {
+        let mut dag = lower_relations(program)?;
+        for node in &mut dag.nodes {
+            if let OperatorNode::Scan {
+                relation, schema, ..
+            } = node
+            {
+                if let ast::Ty::Named(name) = schema {
+                    let owner = relation
+                        .rsplit_once("::")
+                        .map(|(m, _)| m)
+                        .unwrap_or(&program.root_module);
+                    let (module, local) = name.rsplit_once("::").unwrap_or((owner, name));
+                    let qname = brix_lower::module_graph::QualifiedName::new(module, local);
+                    let config = program.configs.get(&qname).ok_or_else(|| {
+                        WorldError::NetworkError(format!("unknown row schema {qname}"))
+                    })?;
+                    match &config.body {
+                        ast::ConfigBody::Record(fields) => {
+                            *schema = ast::Ty::Record(fields.clone())
+                        }
+                        _ => {
+                            return Err(WorldError::NetworkError(format!(
+                                "row schema {qname} must be a record"
+                            )))
+                        }
+                    }
+                }
+            }
+        }
+        let mut decides = Vec::new();
+
+        for (qname, decl) in &program.decides {
+            let mut source_relation = None;
+            if let Expr::Var(v) = &decl.list {
+                if dag.relation_outputs.contains_key(v) {
+                    source_relation = Some(v.clone());
+                } else {
+                    let qualified = format!("{}::{v}", program.root_module);
+                    if dag.relation_outputs.contains_key(&qualified) {
+                        source_relation = Some(qualified);
+                    } else if let Some(found) = dag
+                        .relation_outputs
+                        .keys()
+                        .find(|k| k.ends_with(&format!("::{v}")))
+                    {
+                        source_relation = Some(found.clone());
+                    }
+                }
+            }
+
+            if let Some(src) = source_relation {
+                decides.push(DecideBlock {
+                    name: qname.to_string(),
+                    binder: decl.binder.clone(),
+                    source_relation: src,
+                    proposals: decl.proposals.clone(),
+                });
+            }
+        }
+
+        let mut functions = BTreeMap::new();
+        for (qname, callable) in &program.functions {
+            functions.insert(qname.to_string(), callable.clone());
+            functions.insert(callable.name.clone(), callable.clone());
+        }
+
+        Ok(Self::new(dag)
+            .with_decides(decides)
+            .with_functions(functions))
+    }
+
+    /// Apply an atomic mutation batch envelope to the operator network.
+    pub fn apply_batch(&mut self, batch: &WorldBatch) -> Result<NetworkDeltaReport, WorldError> {
+        if batch.expected_base_revision != self.current_revision {
+            return Err(WorldError::StaleBaseRevision {
+                expected: batch.expected_base_revision,
+                current: self.current_revision,
+            });
+        }
+        let normalized = batch.validate_and_normalize()?;
+        self.apply_ops(&normalized)
+    }
+
+    /// Apply normalized batch operations to the operator network.
+    pub fn apply_ops(&mut self, ops: &[WorldBatchOp]) -> Result<NetworkDeltaReport, WorldError> {
+        let mut staged = self.clone();
+        let report = staged.apply_ops_staged(ops)?;
+        *self = staged;
+        Ok(report)
+    }
+
+    /// Apply to a private staging network; callers publish it only on success.
+    pub(crate) fn apply_ops_staged(
+        &mut self,
+        ops: &[WorldBatchOp],
+    ) -> Result<NetworkDeltaReport, WorldError> {
+        let mut report = NetworkDeltaReport {
+            revision: self.current_revision + 1,
+            ops_applied: ops.len(),
+            ..Default::default()
+        };
+
+        // Queue of deltas by operator id
+        let mut pending_deltas: BTreeMap<OperatorId, Vec<TupleDelta>> = BTreeMap::new();
+
+        // 1. Process base ops at Scan nodes
+        for op in ops {
+            let rel_name = op.relation();
+            let base_rel = self
+                .base_relations
+                .get_mut(rel_name)
+                .ok_or_else(|| WorldError::UnknownRelation(rel_name.to_string()))?;
+
+            let scan_ops = self
+                .relation_subscribers
+                .get(rel_name)
+                .cloned()
+                .unwrap_or_default();
+            for scan_op_id in scan_ops {
+                let scan_state = self
+                    .operator_states
+                    .get_mut(&scan_op_id.0)
+                    .expect("scan operator");
+                if let OperatorState::Scan {
+                    relation,
+                    schema,
+                    records,
+                    ..
+                } = scan_state
+                {
+                    match op {
+                        WorldBatchOp::Upsert { key, tuple, .. } => {
+                            base_rel.insert(key.clone(), tuple.clone());
+                            let derivation = DerivationId::Base {
+                                relation: relation.clone(),
+                                key: key.clone(),
+                            };
+
+                            let rec = TupleRecord::from_tuple(tuple)?;
+                            let ast::Ty::Record(fields) = schema else {
+                                return Err(WorldError::NetworkError(format!(
+                                    "unresolved row schema for {relation}"
+                                )));
+                            };
+                            if rec.fields.len() != fields.len() {
+                                return Err(WorldError::NetworkError(format!(
+                                    "row fields do not match schema for {relation}"
+                                )));
+                            }
+                            let mut intermediate = IntermediateTuple::new();
+                            for field in fields {
+                                let bytes = rec.get(&field.name).ok_or_else(|| {
+                                    WorldError::NetworkError(format!(
+                                        "missing field {relation}.{}",
+                                        field.name
+                                    ))
+                                })?;
+                                intermediate.insert(
+                                    field.name.clone(),
+                                    Value::from_typed_bytes(bytes, &field.ty)?,
+                                );
+                            }
+
+                            // If old record existed at key, retract it first
+                            if let Some((_, old_inter)) = records.get(key) {
+                                if old_inter == &intermediate {
+                                    // Idempotent value, no change
+                                    continue;
+                                }
+                                let ret_delta = TupleDelta::Retract {
+                                    tuple: old_inter.clone(),
+                                    derivation: derivation.clone(),
+                                };
+                                pending_deltas
+                                    .entry(scan_op_id)
+                                    .or_default()
+                                    .push(ret_delta);
+                            }
+
+                            let ins_delta = TupleDelta::Insert {
+                                tuple: intermediate.clone(),
+                                derivation,
+                            };
+                            records.insert(key.clone(), (tuple.clone(), intermediate));
+                            pending_deltas
+                                .entry(scan_op_id)
+                                .or_default()
+                                .push(ins_delta);
+                        }
+                        WorldBatchOp::Remove { key, .. } => {
+                            base_rel.remove(key);
+                            if let Some((_, old_inter)) = records.remove(key) {
+                                let derivation = DerivationId::Base {
+                                    relation: relation.clone(),
+                                    key: key.clone(),
+                                };
+                                let ret_delta = TupleDelta::Retract {
+                                    tuple: old_inter,
+                                    derivation,
+                                };
+                                pending_deltas
+                                    .entry(scan_op_id)
+                                    .or_default()
+                                    .push(ret_delta);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Acyclic topological propagation across all operators
+        let mut relation_deltas: BTreeMap<String, Vec<TupleDelta>> = BTreeMap::new();
+
+        while let Some((op_id, deltas)) = pending_deltas.pop_first() {
+            let op_idx = op_id.0;
+
+            report.intermediate_deltas_count += deltas.len();
+
+            let mut out_deltas = Vec::new();
+            match self
+                .operator_states
+                .get_mut(&op_idx)
+                .expect("queued operator")
+            {
+                OperatorState::Scan { .. } => {
+                    // Scan passes queued input deltas directly downstream
+                    out_deltas = deltas;
+                }
+                OperatorState::Bind { alias, .. } => {
+                    for delta in deltas {
+                        let is_ins = delta.is_insert();
+                        let (tuple, deriv) = match delta {
+                            TupleDelta::Insert { tuple, derivation }
+                            | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
+                        };
+
+                        let mut bound_tuple = IntermediateTuple::new();
+                        for (k, v) in &tuple.fields {
+                            bound_tuple.insert(format!("{alias}.{k}"), v.clone());
+                            bound_tuple.insert(k.clone(), v.clone());
+                        }
+
+                        let out_deriv = DerivationId::Unary {
+                            op: op_id,
+                            parent: Box::new(deriv),
+                        };
+
+                        if is_ins {
+                            out_deltas.push(TupleDelta::Insert {
+                                tuple: bound_tuple,
+                                derivation: out_deriv,
+                            });
+                        } else {
+                            out_deltas.push(TupleDelta::Retract {
+                                tuple: bound_tuple,
+                                derivation: out_deriv,
+                            });
+                        }
+                    }
+                }
+                OperatorState::Filter { predicate, .. } => {
+                    for delta in deltas {
+                        let is_ins = delta.is_insert();
+                        let (tuple, deriv) = match delta {
+                            TupleDelta::Insert { tuple, derivation }
+                            | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
+                        };
+
+                        let passed = eval_expr(predicate, &tuple, &self.functions)?.as_bool()?;
+                        if passed {
+                            let out_deriv = DerivationId::Unary {
+                                op: op_id,
+                                parent: Box::new(deriv),
+                            };
+                            if is_ins {
+                                out_deltas.push(TupleDelta::Insert {
+                                    tuple,
+                                    derivation: out_deriv,
+                                });
+                            } else {
+                                out_deltas.push(TupleDelta::Retract {
+                                    tuple,
+                                    derivation: out_deriv,
+                                });
+                            }
+                        }
+                    }
+                }
+                OperatorState::Project { projections, .. } => {
+                    for delta in deltas {
+                        let is_ins = delta.is_insert();
+                        let (tuple, deriv) = match delta {
+                            TupleDelta::Insert { tuple, derivation }
+                            | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
+                        };
+
+                        let mut projected = IntermediateTuple::new();
+                        for (name, expr) in projections.iter() {
+                            let val = eval_expr(expr, &tuple, &self.functions)?;
+                            projected.insert(name.clone(), val);
+                        }
+
+                        let out_deriv = DerivationId::Unary {
+                            op: op_id,
+                            parent: Box::new(deriv),
+                        };
+
+                        if is_ins {
+                            out_deltas.push(TupleDelta::Insert {
+                                tuple: projected,
+                                derivation: out_deriv,
+                            });
+                        } else {
+                            out_deltas.push(TupleDelta::Retract {
+                                tuple: projected,
+                                derivation: out_deriv,
+                            });
+                        }
+                    }
+                }
+                OperatorState::EquiJoin {
+                    left,
+                    right,
+                    left_keys,
+                    right_keys,
+                    left_index,
+                    right_index,
+                } => {
+                    let left_op = *left;
+                    let _right_op = *right;
+
+                    for delta in deltas {
+                        let is_ins = delta.is_insert();
+                        let (tuple, deriv) = match delta {
+                            TupleDelta::Insert { tuple, derivation }
+                            | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
+                        };
+
+                        // Determine whether delta came from left or right branch by matching parent op
+                        let is_left = match &deriv {
+                            DerivationId::Unary { op, .. }
+                            | DerivationId::Join { op, .. }
+                            | DerivationId::Group { op, .. }
+                            | DerivationId::Distinct { op, .. } => *op == left_op,
+                            DerivationId::Base { relation, .. } => {
+                                match &self.dag.nodes[left_op.0] {
+                                    OperatorNode::Scan { relation: r, .. } => r == relation,
+                                    _ => false,
+                                }
+                            }
+                        };
+
+                        if is_left {
+                            let join_key: Vec<Value> = left_keys
+                                .iter()
+                                .map(|k| {
+                                    tuple
+                                        .get_qualified(&k.binding, &k.field)
+                                        .cloned()
+                                        .ok_or_else(|| {
+                                            WorldError::NetworkError(format!(
+                                                "missing join field {}.{}",
+                                                k.binding, k.field
+                                            ))
+                                        })
+                                })
+                                .collect::<Result<_, _>>()?;
+
+                            if is_ins {
+                                if let Some(matching_rights) = right_index.get(&join_key) {
+                                    for (d_r, t_r) in matching_rights {
+                                        let composite = tuple.merge(t_r);
+                                        let comp_deriv = DerivationId::Join {
+                                            op: op_id,
+                                            left: Box::new(deriv.clone()),
+                                            right: Box::new(d_r.clone()),
+                                        };
+                                        out_deltas.push(TupleDelta::Insert {
+                                            tuple: composite,
+                                            derivation: comp_deriv,
+                                        });
+                                    }
+                                }
+                                left_index.entry(join_key).or_default().insert(deriv, tuple);
+                            } else {
+                                if let Some(matching_lefts) = left_index.get_mut(&join_key) {
+                                    matching_lefts.remove(&deriv);
+                                    if matching_lefts.is_empty() {
+                                        left_index.remove(&join_key);
+                                    }
+                                }
+                                if let Some(matching_rights) = right_index.get(&join_key) {
+                                    for (d_r, t_r) in matching_rights {
+                                        let composite = tuple.merge(t_r);
+                                        let comp_deriv = DerivationId::Join {
+                                            op: op_id,
+                                            left: Box::new(deriv.clone()),
+                                            right: Box::new(d_r.clone()),
+                                        };
+                                        out_deltas.push(TupleDelta::Retract {
+                                            tuple: composite,
+                                            derivation: comp_deriv,
+                                        });
+                                    }
+                                }
+                            }
+                        } else {
+                            let join_key: Vec<Value> = right_keys
+                                .iter()
+                                .map(|k| {
+                                    tuple
+                                        .get_qualified(&k.binding, &k.field)
+                                        .cloned()
+                                        .ok_or_else(|| {
+                                            WorldError::NetworkError(format!(
+                                                "missing join field {}.{}",
+                                                k.binding, k.field
+                                            ))
+                                        })
+                                })
+                                .collect::<Result<_, _>>()?;
+
+                            if is_ins {
+                                if let Some(matching_lefts) = left_index.get(&join_key) {
+                                    for (d_l, t_l) in matching_lefts {
+                                        let composite = t_l.merge(&tuple);
+                                        let comp_deriv = DerivationId::Join {
+                                            op: op_id,
+                                            left: Box::new(d_l.clone()),
+                                            right: Box::new(deriv.clone()),
+                                        };
+                                        out_deltas.push(TupleDelta::Insert {
+                                            tuple: composite,
+                                            derivation: comp_deriv,
+                                        });
+                                    }
+                                }
+                                right_index
+                                    .entry(join_key)
+                                    .or_default()
+                                    .insert(deriv, tuple);
+                            } else {
+                                if let Some(matching_rights) = right_index.get_mut(&join_key) {
+                                    matching_rights.remove(&deriv);
+                                    if matching_rights.is_empty() {
+                                        right_index.remove(&join_key);
+                                    }
+                                }
+                                if let Some(matching_lefts) = left_index.get(&join_key) {
+                                    for (d_l, t_l) in matching_lefts {
+                                        let composite = t_l.merge(&tuple);
+                                        let comp_deriv = DerivationId::Join {
+                                            op: op_id,
+                                            left: Box::new(d_l.clone()),
+                                            right: Box::new(deriv.clone()),
+                                        };
+                                        out_deltas.push(TupleDelta::Retract {
+                                            tuple: composite,
+                                            derivation: comp_deriv,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                OperatorState::Distinct { supports, .. } => {
+                    for delta in deltas {
+                        let is_ins = delta.is_insert();
+                        let (tuple, deriv) = match delta {
+                            TupleDelta::Insert { tuple, derivation }
+                            | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
+                        };
+
+                        let tuple_key = tuple.to_tuple_record().to_tuple().0;
+                        let out_deriv = DerivationId::Distinct {
+                            op: op_id,
+                            tuple_key,
+                        };
+
+                        if is_ins {
+                            let entry = supports.entry(tuple.clone()).or_default();
+                            let was_empty = entry.is_empty();
+                            entry.insert(deriv);
+                            if was_empty {
+                                // 0 -> 1 transition for this distinct tuple
+                                out_deltas.push(TupleDelta::Insert {
+                                    tuple,
+                                    derivation: out_deriv,
+                                });
+                            }
+                        } else if let Some(entry) = supports.get_mut(&tuple) {
+                            entry.remove(&deriv);
+                            if entry.is_empty() {
+                                supports.remove(&tuple);
+                                // 1 -> 0 transition: emit matching retraction!
+                                out_deltas.push(TupleDelta::Retract {
+                                    tuple,
+                                    derivation: out_deriv,
+                                });
+                            }
+                        }
+                    }
+                }
+                OperatorState::GroupedCount {
+                    group_keys,
+                    projections,
+                    groups,
+                    ..
+                } => {
+                    for delta in deltas {
+                        let is_ins = delta.is_insert();
+                        let (tuple, deriv) = match delta {
+                            TupleDelta::Insert { tuple, derivation }
+                            | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
+                        };
+
+                        let key_vals: Vec<Value> = group_keys
+                            .iter()
+                            .map(|expr| eval_expr(expr, &tuple, &self.functions))
+                            .collect::<Result<_, _>>()?;
+
+                        if is_ins {
+                            let set = groups.entry(key_vals.clone()).or_default();
+                            let old_count = set.len();
+                            set.insert(deriv);
+                            let new_count = set.len();
+
+                            if new_count != old_count {
+                                let out_deriv = DerivationId::Group {
+                                    op: op_id,
+                                    group_key: key_vals.clone(),
+                                };
+                                if old_count == 0 {
+                                    // 0 -> 1 transition
+                                    let out_tuple = build_grouped_tuple(projections, &key_vals, 1);
+                                    out_deltas.push(TupleDelta::Insert {
+                                        tuple: out_tuple,
+                                        derivation: out_deriv,
+                                    });
+                                } else {
+                                    // Count update
+                                    let old_tuple =
+                                        build_grouped_tuple(projections, &key_vals, old_count);
+                                    let new_tuple =
+                                        build_grouped_tuple(projections, &key_vals, new_count);
+                                    out_deltas.push(TupleDelta::Retract {
+                                        tuple: old_tuple,
+                                        derivation: out_deriv.clone(),
+                                    });
+                                    out_deltas.push(TupleDelta::Insert {
+                                        tuple: new_tuple,
+                                        derivation: out_deriv,
+                                    });
+                                }
+                            }
+                        } else if let Some(set) = groups.get_mut(&key_vals) {
+                            let old_count = set.len();
+                            set.remove(&deriv);
+                            let new_count = set.len();
+
+                            if new_count != old_count {
+                                let out_deriv = DerivationId::Group {
+                                    op: op_id,
+                                    group_key: key_vals.clone(),
+                                };
+                                if new_count == 0 {
+                                    // 1 -> 0 transition
+                                    let old_tuple = build_grouped_tuple(projections, &key_vals, 1);
+                                    groups.remove(&key_vals);
+                                    out_deltas.push(TupleDelta::Retract {
+                                        tuple: old_tuple,
+                                        derivation: out_deriv,
+                                    });
+                                } else {
+                                    // Count update
+                                    let old_tuple =
+                                        build_grouped_tuple(projections, &key_vals, old_count);
+                                    let new_tuple =
+                                        build_grouped_tuple(projections, &key_vals, new_count);
+                                    out_deltas.push(TupleDelta::Retract {
+                                        tuple: old_tuple,
+                                        derivation: out_deriv.clone(),
+                                    });
+                                    out_deltas.push(TupleDelta::Insert {
+                                        tuple: new_tuple,
+                                        derivation: out_deriv,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Check if this operator is a relation output
+            if let Some(outputs) = self.output_relations.get(&op_id) {
+                for rel_name in outputs {
+                    relation_deltas
+                        .entry(rel_name.clone())
+                        .or_default()
+                        .extend(out_deltas.clone());
+
+                    if !self.base_relations.contains_key(rel_name) {
+                        for od in &out_deltas {
+                            let rec = od.tuple().to_tuple_record();
+                            if od.is_insert() {
+                                if self
+                                    .derived_relations
+                                    .entry(rel_name.clone())
+                                    .or_default()
+                                    .insert(rec)
+                                {
+                                    report.derived_tuples_inserted += 1;
+                                }
+                            } else {
+                                if self
+                                    .derived_relations
+                                    .entry(rel_name.clone())
+                                    .or_default()
+                                    .remove(&rec)
+                                {
+                                    report.derived_tuples_retracted += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Route to downstream operators
+            if let Some(down) = self.downstream.get(&op_id) {
+                for consumer in down {
+                    pending_deltas
+                        .entry(*consumer)
+                        .or_default()
+                        .extend(out_deltas.clone());
+                }
+            }
+        }
+
+        // 3. Update candidate frontiers for decide blocks from relation deltas
+        let mut touched_entities = BTreeSet::new();
+        for (relation, rel_deltas) in &relation_deltas {
+            for decide_name in self
+                .decision_subscribers
+                .get(relation)
+                .into_iter()
+                .flatten()
+            {
+                let decide = &self.decides[decide_name];
+                for delta in rel_deltas {
+                    let is_ins = delta.is_insert();
+                    let (tuple, deriv) = match delta {
+                        TupleDelta::Insert { tuple, derivation }
+                        | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
+                    };
+
+                    let mut eval_tuple = tuple.clone();
+                    for (k, v) in &tuple.fields {
+                        eval_tuple.insert(format!("{}.{k}", decide.binder), v.clone());
+                    }
+
+                    for propose in &decide.proposals {
+                        let entity_id = extract_entity_id(&eval_tuple, &decide.binder, propose);
+                        touched_entities.insert((decide.name.clone(), entity_id.clone()));
+
+                        if is_ins {
+                            let guard_passed =
+                                eval_expr(&propose.guard, &eval_tuple, &self.functions)?
+                                    .as_bool()?;
+                            if guard_passed {
+                                let val = eval_expr(&propose.value, &eval_tuple, &self.functions)?;
+                                let cal_key = compute_candidate_calendar_key(
+                                    0,
+                                    propose.priority,
+                                    &decide.name,
+                                    &entity_id,
+                                    &propose.name,
+                                    &val,
+                                );
+
+                                let entity_map = self
+                                    .candidate_frontier
+                                    .entry(decide.name.clone())
+                                    .or_default()
+                                    .entry(entity_id.clone())
+                                    .or_default();
+
+                                let entry =
+                                    entity_map.entry(propose.name.clone()).or_insert_with(|| {
+                                        report.candidates_inserted += 1;
+                                        CandidateEntry {
+                                            candidate_name: propose.name.clone(),
+                                            entity_id: entity_id.clone(),
+                                            priority: propose.priority,
+                                            phase: 0,
+                                            value: val.clone(),
+                                            calendar_key: cal_key,
+                                            supports: PSet::new(),
+                                        }
+                                    });
+
+                                entry.supports.insert(deriv.clone());
+                            }
+                        } else if let Some(decide_map) =
+                            self.candidate_frontier.get_mut(&decide.name)
+                        {
+                            if let Some(entity_map) = decide_map.get_mut(&entity_id) {
+                                if let Some(entry) = entity_map.get_mut(&propose.name) {
+                                    entry.supports.remove(deriv);
+                                    if entry.supports.is_empty() {
+                                        entity_map.remove(&propose.name);
+                                        report.candidates_retracted += 1;
+                                    }
+                                }
+                                if entity_map.is_empty() {
+                                    decide_map.remove(&entity_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (decide, entity) in touched_entities {
+            if self
+                .candidate_frontier
+                .get(&decide)
+                .is_some_and(|entities| entities.is_empty())
+            {
+                self.candidate_frontier.remove(&decide);
+            }
+            let key = decision_key(&decide, &entity);
+            if let Some(decision) = self.get_settlement(&decide, &entity) {
+                self.decision_tree = self.decision_tree.insert(key, decision_tuple(&decision));
+                report
+                    .settlements
+                    .entry(decide)
+                    .or_default()
+                    .insert(entity, decision);
+            } else {
+                self.decision_tree = self.decision_tree.remove(&key);
+            }
+        }
+        self.current_revision += 1;
+        Ok(report)
+    }
+
+    /// Canonical decision root, maintained only for affected entities.
+    pub fn decision_root(&self) -> Digest {
+        self.decision_tree.root_digest()
+    }
+
+    /// Retrieve all derived tuples produced for a relation.
+    pub fn get_derived_tuples(&self, relation: &str) -> Option<Vec<TupleRecord>> {
+        self.derived_relations
+            .get(relation)
+            .map(|set| set.iter().cloned().collect())
+    }
+
+    /// Retrieve candidates for a specific decide block and entity.
+    pub fn get_candidates(
+        &self,
+        decide: &str,
+        entity_id: &str,
+    ) -> Option<&PMap<String, CandidateEntry>> {
+        self.candidate_frontier.get(decide)?.get(entity_id)
+    }
+
+    /// Deliberate and select the winning candidate for an entity using canonical settlement discipline.
+    pub fn get_settlement(&self, decide: &str, entity_id: &str) -> Option<SettledDecision> {
+        let decide_frontier = self.candidate_frontier.get(decide)?;
+        let entity_candidates = decide_frontier.get(entity_id)?;
+
+        let mut frontier: Frontier<&CandidateEntry> = Frontier::new();
+        for candidate in entity_candidates.values() {
+            if !candidate.supports.is_empty() {
+                let _ = frontier.insert(candidate.calendar_key, candidate);
+            }
+        }
+
+        let (key, candidate) = frontier.select_least()?;
+        Some(SettledDecision {
+            entity_id: candidate.entity_id.clone(),
+            candidate_name: candidate.candidate_name.clone(),
+            priority: candidate.priority,
+            phase: candidate.phase,
+            value: candidate.value.clone(),
+            calendar_key: key,
+        })
+    }
+
+    /// Settle decisions across all entities in all decide blocks.
+    pub fn all_settlements(&self) -> BTreeMap<String, BTreeMap<String, SettledDecision>> {
+        let mut out = BTreeMap::new();
+        for (decide_name, entity_map) in &self.candidate_frontier {
+            let mut entities = BTreeMap::new();
+            for entity_id in entity_map.keys() {
+                if let Some(decision) = self.get_settlement(decide_name, entity_id) {
+                    entities.insert(entity_id.clone(), decision);
+                }
+            }
+            if !entities.is_empty() {
+                out.insert(decide_name.clone(), entities);
+            }
+        }
+        out
+    }
+
+    /// Capture current observable network state.
+    pub fn current_state(&self) -> WorldNetworkState {
+        let mut distinct_supports = BTreeMap::new();
+        for (idx, state) in self.operator_states.iter() {
+            if let OperatorState::Distinct { supports, .. } = state {
+                let mut map = BTreeMap::new();
+                for (it, sups) in supports {
+                    map.insert(it.to_tuple_record(), sups.iter().cloned().collect());
+                }
+                distinct_supports.insert(OperatorId(*idx), map);
+            }
+        }
+
+        WorldNetworkState {
+            base_relations: self
+                .base_relations
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                    )
+                })
+                .collect(),
+            derived_relations: self
+                .derived_relations
+                .iter()
+                .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+                .collect(),
+            candidate_frontier: self
+                .candidate_frontier
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.iter()
+                            .map(|(k, v)| {
+                                (
+                                    k.clone(),
+                                    v.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                                )
+                            })
+                            .collect(),
+                    )
+                })
+                .collect(),
+            settlements: self.all_settlements(),
+            distinct_supports,
+        }
+    }
+
+    /// Rebuild from base facts using this engine. This checks update history, not independent semantics.
+    pub fn recompute_from_scratch(&self) -> Result<WorldNetworkState, WorldError> {
+        let mut fresh = WorldNetwork::new((*self.dag).clone())
+            .with_decides(self.decides.values().cloned().collect())
+            .with_functions(
+                self.functions
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            );
+
+        let mut ops = Vec::new();
+        for (rel, records) in &self.base_relations {
+            for (key, tuple) in records {
+                ops.push(WorldBatchOp::Upsert {
+                    relation: rel.clone(),
+                    key: key.clone(),
+                    tuple: tuple.clone(),
+                });
+            }
+        }
+
+        fresh.apply_ops(&ops)?;
+        Ok(fresh.current_state())
+    }
+
+    /// Verify differential correctness: compare incrementally maintained state with oracle full recompute.
+    pub fn verify_differential_correctness(&self) -> Result<(), WorldError> {
+        let scratch_state = self.recompute_from_scratch()?;
+        let incremental_state = self.current_state();
+
+        if incremental_state.derived_relations != scratch_state.derived_relations {
+            return Err(WorldError::NetworkError(format!(
+                "differential mismatch in derived relations: incremental={:?}, scratch={:?}",
+                incremental_state.derived_relations, scratch_state.derived_relations
+            )));
+        }
+
+        if incremental_state.settlements != scratch_state.settlements {
+            return Err(WorldError::NetworkError(format!(
+                "differential mismatch in settlements: incremental={:?}, scratch={:?}",
+                incremental_state.settlements, scratch_state.settlements
+            )));
+        }
+
+        if incremental_state.candidate_frontier != scratch_state.candidate_frontier {
+            return Err(WorldError::NetworkError(format!(
+                "differential mismatch in candidate frontier: incremental={:?}, scratch={:?}",
+                incremental_state.candidate_frontier, scratch_state.candidate_frontier
+            )));
+        }
+
+        if incremental_state.distinct_supports != scratch_state.distinct_supports {
+            return Err(WorldError::NetworkError(format!(
+                "differential mismatch in distinct supports: incremental={:?}, scratch={:?}",
+                incremental_state.distinct_supports, scratch_state.distinct_supports
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Recursively resolve contributing base facts for a derivation, expanding through Distinct operators.
+    pub fn collect_base_facts_for_derivation(
+        &self,
+        deriv: &DerivationId,
+        out: &mut BTreeSet<(String, WorldKey)>,
+    ) {
+        match deriv {
+            DerivationId::Base { relation, key } => {
+                out.insert((relation.clone(), key.clone()));
+            }
+            DerivationId::Unary { parent, .. } => {
+                self.collect_base_facts_for_derivation(parent, out);
+            }
+            DerivationId::Join { left, right, .. } => {
+                self.collect_base_facts_for_derivation(left, out);
+                self.collect_base_facts_for_derivation(right, out);
+            }
+            DerivationId::Distinct { op, tuple_key } => {
+                if let Some(OperatorState::Distinct { supports, .. }) =
+                    self.operator_states.get(&op.0)
+                {
+                    for (tuple, parent_derivs) in supports {
+                        if tuple.to_tuple_record().to_tuple().0 == *tuple_key {
+                            for p in parent_derivs {
+                                self.collect_base_facts_for_derivation(p, out);
+                            }
+                        }
+                    }
+                }
+            }
+            DerivationId::Group { .. } => {}
+        }
+    }
+
+    /// Deliberate and explain the decision for an entity key across any matching decide block.
+    pub fn explain_decision(&self, entity_id: &str) -> Option<DecisionExplanation> {
+        for decide_name in self.candidate_frontier.keys() {
+            if let Some(exp) = self.explain_decision_for(decide_name, entity_id) {
+                return Some(exp);
+            }
+        }
+        None
+    }
+
+    /// Deliberate and explain the decision for an entity key in a specific decide block.
+    pub fn explain_decision_for(
+        &self,
+        decide_name: &str,
+        entity_id: &str,
+    ) -> Option<DecisionExplanation> {
+        let decide_frontier = self.candidate_frontier.get(decide_name)?;
+        let entity_candidates = decide_frontier.get(entity_id)?;
+
+        let settlement = self.get_settlement(decide_name, entity_id);
+        let winning_name = settlement.as_ref().map(|s| &s.candidate_name);
+
+        let mut candidates = Vec::new();
+        let mut contributing_base = BTreeSet::new();
+
+        for (cand_name, entry) in entity_candidates {
+            let winning = winning_name == Some(cand_name);
+            for deriv in &entry.supports {
+                self.collect_base_facts_for_derivation(deriv, &mut contributing_base);
+            }
+            candidates.push(CandidateExplanation {
+                name: cand_name.clone(),
+                priority: entry.priority,
+                phase: entry.phase,
+                value: entry.value.clone(),
+                supports_count: entry.supports.len(),
+                winning,
+            });
+        }
+
+        Some(DecisionExplanation {
+            entity_id: entity_id.to_string(),
+            decide_name: decide_name.to_string(),
+            winning_candidate: settlement.as_ref().map(|s| s.candidate_name.clone()),
+            value: settlement.as_ref().map(|s| s.value.clone()),
+            priority: settlement.as_ref().map(|s| s.priority),
+            phase: settlement.as_ref().map(|s| s.phase),
+            calendar_key: settlement.as_ref().map(|s| s.calendar_key),
+            candidates,
+            contributing_facts: contributing_base.into_iter().collect(),
+        })
+    }
+}
+
+fn build_grouped_tuple(
+    projections: &[(String, GroupProjection)],
+    key_vals: &[Value],
+    count: usize,
+) -> IntermediateTuple {
+    let mut tuple = IntermediateTuple::new();
+    for (name, proj) in projections {
+        match proj {
+            GroupProjection::Key(idx) => {
+                let v = key_vals.get(*idx).cloned().unwrap_or(Value::Null);
+                tuple.insert(name, v);
+            }
+            GroupProjection::Count => {
+                tuple.insert(name, Value::Int(count as i64));
+            }
+        }
+    }
+    tuple
+}
+
+fn extract_entity_id(
+    tuple: &IntermediateTuple,
+    binder: &str,
+    propose: &ast::ProposeDecl,
+) -> String {
+    if !propose.deps.is_empty() {
+        let dep = &propose.deps[0];
+        if let Some(v) = tuple.get(dep).or_else(|| {
+            if let Some((_, f)) = dep.split_once('.') {
+                tuple.get(f)
+            } else {
+                None
+            }
+        }) {
+            return v.to_string();
+        }
+    }
+
+    let candidates = [
+        "entity_id",
+        &format!("{binder}.entity_id"),
+        "order_id",
+        &format!("{binder}.order_id"),
+        "id",
+        &format!("{binder}.id"),
+        "key",
+        &format!("{binder}.key"),
+    ];
+
+    for c in candidates {
+        if let Some(v) = tuple.get(c) {
+            return v.to_string();
+        }
+    }
+
+    if let Some((_, v)) = tuple
+        .fields
+        .iter()
+        .find(|(k, _)| k.ends_with(".id") || k.ends_with("_id"))
+    {
+        return v.to_string();
+    }
+
+    if let Some((_, v)) = tuple.fields.first_key_value() {
+        return v.to_string();
+    }
+
+    "default_entity".to_string()
+}
+
+/// Evaluate an AST expression over intermediate tuple fields and functions.
+/// Build scalar bindings without guessing unqualified aliases. Qualified tuple
+/// fields become record fields so the shared evaluator performs exact projection.
+pub fn scalar_bindings(
+    tuple: &IntermediateTuple,
+) -> Result<BTreeMap<String, brix_lower::l3_v2::L3ValueV2>, WorldError> {
+    use brix_lower::l3_v2::L3ValueV2;
+    let mut bindings = BTreeMap::new();
+    let mut records: BTreeMap<String, Vec<(String, L3ValueV2)>> = BTreeMap::new();
+    for (name, value) in &tuple.fields {
+        if let Some((binding, field)) = name.split_once('.') {
+            records
+                .entry(binding.to_owned())
+                .or_default()
+                .push((field.to_owned(), value.to_scalar()?));
+        } else {
+            bindings.insert(name.clone(), value.to_scalar()?);
+        }
+    }
+    for (binding, fields) in records {
+        bindings.insert(
+            binding,
+            L3ValueV2::Record {
+                nominal_config: "world.row".into(),
+                fields,
+            },
+        );
+    }
+    Ok(bindings)
+}
+
+/// Convenience entry point; maintained networks retain `CompiledWorldExpr`.
+pub fn eval_expr(
+    expr: &ast::Expr,
+    tuple: &IntermediateTuple,
+    functions: &BTreeMap<String, ast::Callable>,
+) -> Result<Value, WorldError> {
+    let bindings = scalar_bindings(tuple)?;
+    let compiled = brix_lower::world_expr::CompiledWorldExpr::new(
+        expr,
+        functions,
+        &bindings.keys().cloned().collect(),
+    )
+    .map_err(WorldError::NetworkError)?;
+    Value::from_scalar(compiled.eval(&bindings).map_err(WorldError::NetworkError)?)
+}

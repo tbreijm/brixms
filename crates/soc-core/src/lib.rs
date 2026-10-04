@@ -182,5 +182,8 @@ pub use saturate::{
     ViolationSite, CERTIFICATE_FORMAT_V1, DIVERGENCE_MARKER, QUIESCENCE_MARKER,
     SATURATION_PROFILE_V1,
 };
-pub use store::{ArcMap, PersistentMap};
+pub use store::{
+    ArcMap, CanonHasher, HamtMap, KeyHasher, MemoryNodeStore, ModuloHasher, NodeStore,
+    PersistentMap, TrieMap, TrieOpStats,
+};
 pub use witness_provider::{Candidate, WitnessProvider};

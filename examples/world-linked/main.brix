@@ -1,0 +1,5 @@
+use policy
+
+rel derived visible_orders =
+    select { id: o.id, customer: o.customer }
+    from o in policy::orders

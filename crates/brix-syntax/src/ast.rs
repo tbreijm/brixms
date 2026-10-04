@@ -57,6 +57,43 @@ pub enum Item {
     /// `decide NAME for BINDER in LIST_EXPR { propose ... }` — a per-entity
     /// commit pool, instantiated once per element of `LIST_EXPR` (ADR-0043).
     Decide(DecideDecl),
+    /// `export <item>` — explicit export modifier on a top-level item (ADR-0046).
+    Export(Box<Item>),
+    /// `rel input name: Type key key_field` — relational input declaration (ADR-0046).
+    RelInput(RelInputDecl),
+    /// `rel derived name = select ... from ...` — relational derived declaration (ADR-0046).
+    RelDerived(RelDerivedDecl),
+}
+
+/// `rel input NAME: TYPE key KEY` or `key (KEY1, KEY2, ...)` (ADR-0046).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelInputDecl {
+    pub name: String,
+    pub ty: Ty,
+    pub key_fields: Vec<String>,
+}
+
+/// `rel derived NAME = select ... from ... [where ...] [group by ...]` (ADR-0046).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelDerivedDecl {
+    pub name: String,
+    pub query: RelQuery,
+}
+
+/// A relational query in a `rel derived` declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelQuery {
+    pub select: Expr,
+    pub from: Vec<RelBinding>,
+    pub where_clause: Option<Expr>,
+    pub group_by: Vec<Expr>,
+}
+
+/// One binding in a relational `from` clause: `var in relation` or `relation`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelBinding {
+    pub var: String,
+    pub relation: String,
 }
 
 /// `decide NAME for BINDER in LIST_EXPR { propose ... }` (ADR-0043): declares
@@ -296,6 +333,8 @@ pub enum Expr {
         where_clause: Option<Box<Expr>>,
         yield_expr: Box<Expr>,
     },
+    /// `{ field: expr, ... }` — an anonymous record literal (ADR-0046).
+    AnonRecord(Vec<(String, Expr)>),
 }
 
 /// Binary operators. Arithmetic ops are ordinary; `Then`/`And` are the witness

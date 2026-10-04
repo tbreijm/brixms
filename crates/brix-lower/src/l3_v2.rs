@@ -1038,6 +1038,21 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
             ast::Item::Decide(d) => {
                 return Err(L3V2LowerError::ItemNotAllowed(format!("decide {}", d.name)))
             }
+            ast::Item::Export(_) => {
+                return Err(L3V2LowerError::ItemNotAllowed("export".to_string()))
+            }
+            ast::Item::RelInput(r) => {
+                return Err(L3V2LowerError::ItemNotAllowed(format!(
+                    "rel input {}",
+                    r.name
+                )))
+            }
+            ast::Item::RelDerived(r) => {
+                return Err(L3V2LowerError::ItemNotAllowed(format!(
+                    "rel derived {}",
+                    r.name
+                )))
+            }
         }
     }
 
@@ -1783,6 +1798,9 @@ pub(crate) fn lower_expr_v2(
                 where_clause: where_lowered,
                 yield_expr: yield_lowered,
             })
+        }
+        ast::Expr::AnonRecord(_) => {
+            Err(L3V2LowerError::Unsupported("anonymous record".to_string()))
         }
     }
 }

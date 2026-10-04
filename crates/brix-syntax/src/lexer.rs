@@ -39,6 +39,18 @@ pub enum TokenKind {
     Otherwise,
     /// `decide NAME for BINDER in LIST_EXPR { propose ... }` (ADR-0043).
     Decide,
+    /// `rel input ...` or `rel derived ...` (ADR-0046).
+    Rel,
+    /// `key <field>` or `key (<fields...>)` in `rel input` (ADR-0046).
+    Key,
+    /// `select <expr> from ...` in `rel derived` (ADR-0046).
+    Select,
+    /// `group by <exprs>` in `rel derived` (ADR-0046).
+    Group,
+    /// `by` in `group by` (ADR-0046).
+    By,
+    /// `export <item>` explicit export modifier (ADR-0046).
+    Export,
 
     // Identifiers & Literals
     Ident(String),
@@ -53,6 +65,7 @@ pub enum TokenKind {
     OpenBracket,  // [
     CloseBracket, // ]
     Colon,        // :
+    ColonColon,   // ::
     Equals,       // =
     Pipe,         // |
     Comma,        // ,
@@ -274,6 +287,12 @@ pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token
                     "yield" => TokenKind::Yield,
                     "otherwise" => TokenKind::Otherwise,
                     "decide" => TokenKind::Decide,
+                    "rel" => TokenKind::Rel,
+                    "key" => TokenKind::Key,
+                    "select" => TokenKind::Select,
+                    "group" => TokenKind::Group,
+                    "by" => TokenKind::By,
+                    "export" => TokenKind::Export,
                     // `Derived`/`Audited`/`Proven` are deliberately NOT
                     // keywords. They are grade names only in grade position
                     // (after `@`), which the parser recognizes; everywhere
@@ -330,9 +349,15 @@ pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token
                 TokenKind::CloseBracket
             }
             ':' => {
-                i += 1;
-                col += 1;
-                TokenKind::Colon
+                if i + 1 < len && chars[i + 1] == ':' {
+                    i += 2;
+                    col += 2;
+                    TokenKind::ColonColon
+                } else {
+                    i += 1;
+                    col += 1;
+                    TokenKind::Colon
+                }
             }
             '=' => {
                 if i + 1 < len && chars[i + 1] == '>' {

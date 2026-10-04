@@ -457,6 +457,11 @@ impl Canonical for str {
         w.write_str(self);
     }
 }
+impl Canonical for &str {
+    fn canon_write(&self, w: &mut CanonWriter) {
+        w.write_str(self);
+    }
+}
 impl Canonical for String {
     fn canon_write(&self, w: &mut CanonWriter) {
         w.write_str(self);
@@ -500,7 +505,7 @@ pub struct CanonReader<'a> {
 
 /// Errors from canonical decoding. Non-minimal encodings are rejected so the
 /// "exactly one encoding per value" law is enforced on read as well as write.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanonError {
     /// Ran out of bytes mid-value.
     UnexpectedEof,
@@ -583,6 +588,73 @@ impl<'a> CanonReader<'a> {
         let slice = self.buf.get(self.pos..end).ok_or(CanonError::BadLength)?;
         self.pos = end;
         Ok(slice)
+    }
+}
+
+/// Types that can be decoded from a canonical byte stream produced by [`CanonWriter`].
+pub trait CanonDecode: Sized {
+    /// Read this value from `r`.
+    fn canon_read(r: &mut CanonReader<'_>) -> Result<Self, CanonError>;
+
+    /// Decode from a complete canonical byte slice. Fails if trailing unconsumed bytes remain.
+    fn from_canon_bytes(bytes: &[u8]) -> Result<Self, CanonError> {
+        let mut r = CanonReader::new(bytes);
+        let val = Self::canon_read(&mut r)?;
+        if !r.is_empty() {
+            return Err(CanonError::BadLength);
+        }
+        Ok(val)
+    }
+}
+
+impl CanonDecode for u64 {
+    fn canon_read(r: &mut CanonReader<'_>) -> Result<Self, CanonError> {
+        r.read_uint()
+    }
+}
+
+impl CanonDecode for u128 {
+    fn canon_read(r: &mut CanonReader<'_>) -> Result<Self, CanonError> {
+        r.read_uint128()
+    }
+}
+
+impl CanonDecode for i64 {
+    fn canon_read(r: &mut CanonReader<'_>) -> Result<Self, CanonError> {
+        r.read_int()
+    }
+}
+
+impl CanonDecode for i128 {
+    fn canon_read(r: &mut CanonReader<'_>) -> Result<Self, CanonError> {
+        r.read_int128()
+    }
+}
+
+impl CanonDecode for bool {
+    fn canon_read(r: &mut CanonReader<'_>) -> Result<Self, CanonError> {
+        r.read_bool()
+    }
+}
+
+impl CanonDecode for String {
+    fn canon_read(r: &mut CanonReader<'_>) -> Result<Self, CanonError> {
+        let bytes = r.read_bytes()?;
+        std::str::from_utf8(bytes)
+            .map(|s| s.to_string())
+            .map_err(|_| CanonError::BadLength)
+    }
+}
+
+impl CanonDecode for Digest {
+    fn canon_read(r: &mut CanonReader<'_>) -> Result<Self, CanonError> {
+        let bytes = r.read_bytes()?;
+        if bytes.len() != 32 {
+            return Err(CanonError::BadLength);
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(bytes);
+        Ok(Digest::from_bytes(arr))
     }
 }
 

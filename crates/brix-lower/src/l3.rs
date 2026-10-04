@@ -236,6 +236,9 @@ pub enum L3LowerError {
     /// as the desugaring of a named-field sum variant. Not part of the v1
     /// executable fragment.
     AnonymousRecordTypeNotAllowed,
+    /// An anonymous record literal (`{ a: e }`) in a rule/let body. Not part of the v1
+    /// executable fragment.
+    AnonymousRecordLiteralNotAllowed,
     /// A `config`, direct or indirect, cyclically references itself through
     /// nominal field/variant-parameter types (ADR-0012 §3.1: "direct or
     /// mutually recursive nominal configs are rejected in v1"). `cycle` lists
@@ -420,6 +423,21 @@ pub fn lower_l3_plan(
             ast::Item::Commit(c) => return Err(L3LowerError::CommitItemNotAllowed(c.name.clone())),
             ast::Item::Input(i) => return Err(L3LowerError::InputItemNotAllowed(i.name.clone())),
             ast::Item::Decide(d) => return Err(L3LowerError::DecideItemNotAllowed(d.name.clone())),
+            ast::Item::Export(_) => {
+                return Err(L3LowerError::FnItemNotAllowed("export".to_string()));
+            }
+            ast::Item::RelInput(r) => {
+                return Err(L3LowerError::InputItemNotAllowed(format!(
+                    "rel input {}",
+                    r.name
+                )));
+            }
+            ast::Item::RelDerived(r) => {
+                return Err(L3LowerError::FnItemNotAllowed(format!(
+                    "rel derived {}",
+                    r.name
+                )));
+            }
             ast::Item::Config(_) | ast::Item::Let(_) | ast::Item::Rule(_) => {}
         }
     }
@@ -840,6 +858,7 @@ fn normalize_static_value(expr: &ast::Expr, env: &NormEnv) -> Result<L3ValueV1, 
         ast::Expr::Lambda { .. } => Err(L3LowerError::ListSyntaxNotAllowed("lambda")),
         ast::Expr::ListLit(_) => Err(L3LowerError::ListSyntaxNotAllowed("list literal")),
         ast::Expr::Comprehension { .. } => Err(L3LowerError::ListSyntaxNotAllowed("comprehension")),
+        ast::Expr::AnonRecord(_) => Err(L3LowerError::AnonymousRecordLiteralNotAllowed),
     }
 }
 

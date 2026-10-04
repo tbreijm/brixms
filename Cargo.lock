@@ -95,6 +95,7 @@ dependencies = [
  "brix-semantic",
  "brix-syntax",
  "serde_json",
+ "soc-core",
 ]
 
 [[package]]

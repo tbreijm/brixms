@@ -844,6 +844,12 @@ fn check_expr_bounds(
             }
             check_expr_bounds(yield_expr, depth + 1, node_count)
         }
+        ast::Expr::AnonRecord(fields) => {
+            for (_, val) in fields {
+                check_expr_bounds(val, depth + 1, node_count)?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1465,6 +1471,23 @@ pub fn lower_finite_decision_plan(
             }
             ast::Item::Use(path) => {
                 return Err(FiniteDecisionLowerError::UnresolvedImport(path.clone()));
+            }
+            ast::Item::Export(_) => {
+                return Err(FiniteDecisionLowerError::ItemNotAllowed(
+                    "export".to_string(),
+                ));
+            }
+            ast::Item::RelInput(r) => {
+                return Err(FiniteDecisionLowerError::ItemNotAllowed(format!(
+                    "rel input {}",
+                    r.name
+                )));
+            }
+            ast::Item::RelDerived(r) => {
+                return Err(FiniteDecisionLowerError::ItemNotAllowed(format!(
+                    "rel derived {}",
+                    r.name
+                )));
             }
         }
     }
