@@ -12,6 +12,7 @@ pub mod network;
 pub mod oracle;
 pub mod paths;
 pub mod persistent;
+pub mod reference;
 pub mod revision;
 pub mod session;
 pub mod staging;
