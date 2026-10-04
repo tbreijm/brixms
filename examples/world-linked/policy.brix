@@ -6,9 +6,3 @@ export rel derived fulfillment =
     select { order_id: o.id, customer: o.customer, sku: o.sku, qty: o.qty, express: o.express, available: i.available, carrier: s.carrier }
     from o in orders, i in inventory, s in shipping
     where o.sku == i.sku and o.sku == s.sku
-
-decide dispatch for f in fulfillment {
-    propose ship_express priority 10 when f.express == "yes" and f.available >= f.qty = "air_express"
-    propose ship_standard priority 20 when f.express != "yes" and f.available >= f.qty = "ground_standard"
-    propose backorder priority 50 when f.available < f.qty = "backorder_hold"
-}

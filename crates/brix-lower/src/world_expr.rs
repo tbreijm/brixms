@@ -12,6 +12,97 @@ pub struct CompiledWorldExpr {
     schemas: Arc<BTreeMap<String, L3Schema>>,
 }
 
+/// Rewrite `and` (`ast::BinOp::And`) to logical `&&` (`ast::BinOp::AndAnd`)
+/// throughout an expression tree.
+///
+/// The shared scalar lowerer (`l3_v2::lower_expr_v2`) refuses `BinOp::And`
+/// because in the legacy finite-decision profile `and`/`then` are the
+/// witness-tensor/sequential composition operators (ADR-0002), not logical
+/// conjunction, and that refusal must stay intact for legacy programs.
+///
+/// The world/relational profile (ADR-0046 §3.5) has no witness-composition
+/// surface at all and uses the keyword `and` purely as logical conjunction in
+/// `where`/`when` predicates (mirroring `relation_dag::split_and_predicates`,
+/// which already folds `and` and `&&` together for join/filter predicates).
+/// Guard and value expressions inside `decide ... propose ... when` blocks —
+/// and helper function bodies reachable from the world profile — never go
+/// through `relation_dag`'s predicate splitting, so they must be normalized
+/// here, at the one place all world-profile scalar expressions are compiled.
+fn normalize_world_and(expr: &ast::Expr) -> ast::Expr {
+    use ast::Expr;
+    match expr {
+        Expr::Num(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Var(_) => expr.clone(),
+        Expr::Record { config, fields } => Expr::Record {
+            config: config.clone(),
+            fields: fields
+                .iter()
+                .map(|(n, e)| (n.clone(), normalize_world_and(e)))
+                .collect(),
+        },
+        Expr::Field(base, field) => Expr::Field(Box::new(normalize_world_and(base)), field.clone()),
+        Expr::Call { func, args } => Expr::Call {
+            func: func.clone(),
+            args: args.iter().map(normalize_world_and).collect(),
+        },
+        Expr::Bin { op, lhs, rhs } => {
+            let op = if matches!(op, ast::BinOp::And) {
+                ast::BinOp::AndAnd
+            } else {
+                *op
+            };
+            Expr::Bin {
+                op,
+                lhs: Box::new(normalize_world_and(lhs)),
+                rhs: Box::new(normalize_world_and(rhs)),
+            }
+        }
+        Expr::Match {
+            scrutinee,
+            arms,
+            proving_exhaustive,
+        } => Expr::Match {
+            scrutinee: Box::new(normalize_world_and(scrutinee)),
+            arms: arms
+                .iter()
+                .map(|a| ast::MatchArm {
+                    pattern: a.pattern.clone(),
+                    body: normalize_world_and(&a.body),
+                })
+                .collect(),
+            proving_exhaustive: *proving_exhaustive,
+        },
+        Expr::Prove(e) => Expr::Prove(Box::new(normalize_world_and(e))),
+        Expr::Why(e) => Expr::Why(Box::new(normalize_world_and(e))),
+        Expr::Audit(e) => Expr::Audit(Box::new(normalize_world_and(e))),
+        Expr::Not(e) => Expr::Not(Box::new(normalize_world_and(e))),
+        Expr::Lambda { param, body } => Expr::Lambda {
+            param: param.clone(),
+            body: Box::new(normalize_world_and(body)),
+        },
+        Expr::ListLit(items) => Expr::ListLit(items.iter().map(normalize_world_and).collect()),
+        Expr::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => Expr::Comprehension {
+            generators: generators
+                .iter()
+                .map(|(n, e)| (n.clone(), normalize_world_and(e)))
+                .collect(),
+            where_clause: where_clause
+                .as_ref()
+                .map(|e| Box::new(normalize_world_and(e))),
+            yield_expr: Box::new(normalize_world_and(yield_expr)),
+        },
+        Expr::AnonRecord(fields) => Expr::AnonRecord(
+            fields
+                .iter()
+                .map(|(n, e)| (n.clone(), normalize_world_and(e)))
+                .collect(),
+        ),
+    }
+}
+
 fn contract(ty: &ast::Ty) -> Result<L3SchemaType, String> {
     match ty {
         ast::Ty::Named(name) => Ok(match name.as_str() {
@@ -49,9 +140,18 @@ impl CompiledWorldExpr {
             .collect();
         let empty_set = BTreeSet::new();
         let empty_map = BTreeMap::new();
-        let lower = |expr, names: &BTreeSet<String>| {
+        let lower = |expr: &ast::Expr, names: &BTreeSet<String>| {
+            let normalized = normalize_world_and(expr);
             l3_v2::lower_expr_v2(
-                expr, names, names, &empty_set, &empty_map, &empty_map, &arities, false, true,
+                &normalized,
+                names,
+                names,
+                &empty_set,
+                &empty_map,
+                &empty_map,
+                &arities,
+                false,
+                true,
             )
             .map_err(|e| format!("world expression lowering: {e:?}"))
         };

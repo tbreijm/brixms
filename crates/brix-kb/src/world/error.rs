@@ -203,9 +203,7 @@ impl From<soc_core::store::StorageError> for WorldError {
             soc_core::store::StorageError::MissingNode(d) => Self::MissingObject(d),
             soc_core::store::StorageError::CorruptedNode(d) => Self::CorruptedObject(d),
             soc_core::store::StorageError::DecodeError(ce) => Self::Canon(ce),
-            soc_core::store::StorageError::Io(s) => {
-                Self::Io(std::io::Error::new(std::io::ErrorKind::Other, s))
-            }
+            soc_core::store::StorageError::Io(s) => Self::Io(std::io::Error::other(s)),
         }
     }
 }

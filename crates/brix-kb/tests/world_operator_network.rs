@@ -19,7 +19,7 @@ fn create_network_from_source(src: &str) -> WorldNetwork {
 fn make_record_tuple(fields: &[(&str, &str)]) -> WorldTuple {
     let mut rec = TupleRecord::new();
     for (k, v) in fields {
-        rec.set_str(*k, *v);
+        rec.set_str(*k, v);
     }
     rec.to_tuple()
 }

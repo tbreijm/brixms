@@ -519,12 +519,11 @@ impl WorldSession {
         let rev_val: serde_json::Value =
             serde_json::from_slice(&rev_bytes).map_err(|e| WorldError::Json(e.to_string()))?;
         let current_rev = WorldRevision::from_json(&rev_val)?;
-        if manifest.program_required {
-            if current_rev.program_digest != Some(manifest.program_digest) {
-                return Err(WorldError::InvalidSchema(
-                    "executable world revision is not bound to its manifest program digest".into(),
-                ));
-            }
+        if manifest.program_required && current_rev.program_digest != Some(manifest.program_digest)
+        {
+            return Err(WorldError::InvalidSchema(
+                "executable world revision is not bound to its manifest program digest".into(),
+            ));
         }
 
         // Lazy hydration: construct TrieMaps from Merkle root digests without loading full tries

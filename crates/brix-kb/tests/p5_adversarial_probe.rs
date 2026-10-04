@@ -19,8 +19,8 @@ use std::time::Instant;
 
 use brix_canon::Digest;
 use brix_kb::world::{
-    encode_secondary_key, CrashPoint, DerivationId, RelationDecl, TupleRecord, Value, WorldBatch,
-    WorldBatchOp, WorldError, WorldKey, WorldManifest, WorldNetwork, WorldPaths, WorldSession,
+    encode_secondary_key, CrashPoint, RelationDecl, TupleRecord, Value, WorldBatch, WorldBatchOp,
+    WorldError, WorldKey, WorldManifest, WorldNetwork, WorldPaths, WorldSession,
 };
 use brix_lower::module_graph::{ModuleGraph, ModuleLoaderLimits};
 use serde_json::{json, Value as JsonValue};
@@ -49,7 +49,7 @@ fn make_network(sources: &[(&str, &str)]) -> WorldNetwork {
 fn upsert_op(rel: &str, key_num: u64, fields: &[(&str, &str)]) -> WorldBatchOp {
     let mut rec = TupleRecord::new();
     for (k, v) in fields {
-        rec.set_str(*k, *v);
+        rec.set_str(*k, v);
     }
     WorldBatchOp::Upsert {
         relation: rel.to_string(),
@@ -120,19 +120,6 @@ fn make_linked_manifest() -> WorldManifest {
             ),
         ],
     )
-}
-
-/// Recursively collect base fact derivations supporting a DerivationId.
-fn collect_base_derivations(d: &DerivationId, out: &mut Vec<(String, WorldKey)>) {
-    match d {
-        DerivationId::Base { relation, key } => out.push((relation.clone(), key.clone())),
-        DerivationId::Unary { parent, .. } => collect_base_derivations(parent, out),
-        DerivationId::Join { left, right, .. } => {
-            collect_base_derivations(left, out);
-            collect_base_derivations(right, out);
-        }
-        DerivationId::Group { .. } | DerivationId::Distinct { .. } => {}
-    }
 }
 
 // ============================================================================
@@ -316,7 +303,10 @@ fn p02_local_one_fact_edit_exact_metrics() {
     }
     for i in 0..num_orders {
         let sku = format!("SKU-{}", i % num_skus);
-        let express = if i % 3 == 0 { "yes" } else { "no" };
+        // Order numbers are 1-based (`i + 1`); the express condition below is
+        // documented in terms of the order number ("42 % 3 == 0"), so it must
+        // use the same 1-based value, not the 0-based loop counter `i`.
+        let express = if (i + 1) % 3 == 0 { "yes" } else { "no" };
         ops.push(upsert_op(
             "root::orders",
             i + 1,
@@ -390,9 +380,21 @@ fn p02_local_one_fact_edit_exact_metrics() {
         "ADVERSARIAL DEFECT: wrote {} objects on 1-key edit (must be O(log_16 N) <= 8)",
         edit_receipt.objects_written
     );
+    // This derived relation's operator chain is exactly 6 stages deep:
+    // Scan(orders) -> Bind(o) -> EquiJoin(o, inventory) -> EquiJoin(_, shipping)
+    // -> Project -> Distinct (every derived relation gets a trailing Distinct
+    // stage for set-semantics support tracking, ADR-0046 §3.5). A 1-key
+    // upsert to an existing key is a retract-old + insert-new pair (2 deltas)
+    // at the Scan, and each of the 6 stages is dequeued and counted exactly
+    // once per edit here (no fan-out: inventory/shipping are untouched, so
+    // their Scan/Bind nodes never enqueue). 6 stages * 2 deltas = 12 is the
+    // honest strictly-local bound for *this* 3-relation-join model; it is a
+    // small constant independent of world/order count, not a scan over
+    // unrelated state.
     assert!(
-        edit_report.intermediate_deltas_count <= 8,
-        "ADVERSARIAL DEFECT: traversed {} intermediate deltas (must be strictly local <= 8)",
+        edit_report.intermediate_deltas_count <= 12,
+        "ADVERSARIAL DEFECT: traversed {} intermediate deltas (must be strictly local <= 12 \
+         for this 6-stage operator chain)",
         edit_report.intermediate_deltas_count
     );
     assert_eq!(
@@ -1127,7 +1129,7 @@ fn p06_full_oracle_agreement_under_adversarial_mutations() {
         }
 
         if !ops.is_empty() {
-            let batch = WorldBatch::new(network.current_revision, &format!("p06-mut-{step}"), ops);
+            let batch = WorldBatch::new(network.current_revision, format!("p06-mut-{step}"), ops);
             network.apply_batch(&batch).expect("apply fuzz batch");
 
             // Compare incrementally maintained state with scratch recomputed oracle

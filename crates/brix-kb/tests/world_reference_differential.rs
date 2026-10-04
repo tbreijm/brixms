@@ -86,7 +86,7 @@ fn make_pair(src: &str) -> (WorldNetwork, reference::ReferenceProgram) {
 fn upsert_op(rel: &str, key_num: u64, fields: &[(&str, &str)]) -> WorldBatchOp {
     let mut rec = TupleRecord::new();
     for (k, v) in fields {
-        rec.set_str(*k, *v);
+        rec.set_str(*k, v);
     }
     WorldBatchOp::Upsert {
         relation: rel.to_string(),

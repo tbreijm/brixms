@@ -72,12 +72,11 @@ fn a02_idempotency_key_reuse_with_different_payload_must_be_rejected() {
     s.apply_batch(WorldBatch::new(0, "k", vec![up(1, "first")]))
         .unwrap();
     let r = s.apply_batch(WorldBatch::new(1, "k", vec![up(1, "SECOND-DIFFERENT")]));
-    match r {
-        Ok(rc) => assert!(
+    if let Ok(rc) = r {
+        assert!(
             !rc.is_idempotent_replay,
             "different payload under same key was silently acked as replay"
-        ),
-        Err(_) => {}
+        );
     }
 }
 

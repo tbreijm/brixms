@@ -29,7 +29,7 @@ fn make_network(sources: &[(&str, &str)]) -> WorldNetwork {
 fn upsert_op(rel: &str, key_num: u64, fields: &[(&str, &str)]) -> WorldBatchOp {
     let mut rec = TupleRecord::new();
     for (k, v) in fields {
-        rec.set_str(*k, *v);
+        rec.set_str(*k, v);
     }
     WorldBatchOp::Upsert {
         relation: rel.to_string(),
@@ -998,7 +998,7 @@ decide dispatch for f in fulfillment {
         }
 
         if !ops.is_empty() {
-            let batch = WorldBatch::new(network.current_revision, &format!("fuzz-{step}"), ops);
+            let batch = WorldBatch::new(network.current_revision, format!("fuzz-{step}"), ops);
             network.apply_batch(&batch).expect("fuzz batch failed");
 
             // Verify 100% equivalence between incremental state and scratch recomputation

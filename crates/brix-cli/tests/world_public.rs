@@ -104,6 +104,34 @@ fn binary_world_lifecycle_uses_structured_tuples_and_decisions() {
     assert_eq!(applied["ok"], true);
     assert_eq!(applied["revision"], 1);
     assert_eq!(applied["changed_keys_count"], 3);
+    assert_eq!(applied["is_idempotent_replay"], false);
+
+    // Cached prior results must be distinguishable from a freshly committed
+    // batch (ADR-0046 §4 P5 bullet): resubmitting the identical batch (same
+    // idempotency key, same payload) through the same public CLI path
+    // returns the cached receipt rather than re-deliberating.
+    let replay_json = parse_stdout(
+        binary()
+            .args(["world", "batch", "--json"])
+            .arg(&world)
+            .arg(&batch_file)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(replay_json["ok"], true);
+    assert_eq!(replay_json["revision"], 1, "replay must not advance HEAD");
+    assert_eq!(replay_json["is_idempotent_replay"], true);
+    let replay_human = binary()
+        .args(["world", "batch"])
+        .arg(&world)
+        .arg(&batch_file)
+        .output()
+        .unwrap();
+    let replay_stdout = String::from_utf8_lossy(&replay_human.stdout);
+    assert!(
+        replay_stdout.contains("Idempotent replay"),
+        "human output must distinguish a cached replay from a fresh commit: {replay_stdout}"
+    );
 
     let query = parse_stdout(
         binary()
@@ -126,7 +154,7 @@ fn binary_world_lifecycle_uses_structured_tuples_and_decisions() {
             .unwrap(),
     );
     assert_eq!(decisions["ok"], true);
-    assert!(!decisions["settlements"]["policy::dispatch"]
+    assert!(!decisions["settlements"]["main::dispatch"]
         .as_object()
         .unwrap()
         .is_empty());
@@ -160,6 +188,104 @@ fn binary_world_init_fails_closed_for_missing_or_corrupt_program_input() {
     let corrupt_json: Value = serde_json::from_slice(&corrupt.stdout).unwrap();
     assert_eq!(corrupt_json["ok"], false);
     assert!(!corrupt_world.exists());
+    // A missing import (an unresolvable dependency) is a missing input, not a
+    // generic network error: the two failure json's `status` must differ,
+    // each distinguishing its own category (ADR-0046 §4 P5 bullet).
+    assert_eq!(
+        corrupt_json["status"], "missing-input",
+        "unresolved import must report status 'missing-input': {corrupt_json}"
+    );
+}
+
+/// ADR-0046 §4 P5 requires missing inputs, unsupported operators, exhaustion,
+/// and cached prior results to be distinguishable in human and JSON output.
+/// Cached-replay is covered by `binary_world_lifecycle_uses_structured_tuples_and_decisions`'s
+/// `is_idempotent_replay` assertion; this test covers the other three
+/// failure categories through the real CLI binary.
+#[test]
+fn binary_world_errors_distinguish_status_categories() {
+    let scratch = Scratch::new("status-categories");
+
+    // Unsupported operator: a recursive relation cycle is rejected at
+    // lowering (ADR-0046 §3.5), not silently miscounted as a network error.
+    let cyclic = scratch.path().join("cyclic.brix");
+    fs::write(
+        &cyclic,
+        "rel input orders: { id: Str } key id\n\
+         rel derived a = select { id: x.id } from x in b\n\
+         rel derived b = select { id: y.id } from y in a\n",
+    )
+    .unwrap();
+    let cyclic_out = binary()
+        .args(["world", "init", "--json"])
+        .arg(scratch.path().join("cyclic-world"))
+        .arg(&cyclic)
+        .output()
+        .unwrap();
+    let cyclic_json: Value = serde_json::from_slice(&cyclic_out.stdout).unwrap();
+    assert_eq!(cyclic_json["ok"], false);
+    assert_eq!(
+        cyclic_json["status"], "unsupported-operator",
+        "recursive relation cycle must report status 'unsupported-operator': {cyclic_json}"
+    );
+    // The human-readable (non-JSON) path carries the same distinguishing
+    // status word, not just the JSON path.
+    let cyclic_human = binary()
+        .args(["world", "init"])
+        .arg(scratch.path().join("cyclic-world-human"))
+        .arg(&cyclic)
+        .output()
+        .unwrap();
+    let cyclic_stderr = String::from_utf8_lossy(&cyclic_human.stderr);
+    assert!(
+        cyclic_stderr.contains("unsupported-operator"),
+        "human output must name the status category: {cyclic_stderr}"
+    );
+
+    // Resource exhaustion: a single module exceeding the bounded-loader byte
+    // limit is refused before unbounded allocation (ADR-0046 §3.4/§3.8), and
+    // must not collapse into the same bucket as a missing input.
+    let oversized = scratch.path().join("oversized.brix");
+    let mut src = String::from("rel input orders: { id: Str } key id\n//");
+    src.push_str(&"x".repeat(1_100_000));
+    fs::write(&oversized, src).unwrap();
+    let oversized_out = binary()
+        .args(["world", "init", "--json"])
+        .arg(scratch.path().join("oversized-world"))
+        .arg(&oversized)
+        .output()
+        .unwrap();
+    let oversized_json: Value = serde_json::from_slice(&oversized_out.stdout).unwrap();
+    assert_eq!(oversized_json["ok"], false);
+    assert_eq!(
+        oversized_json["status"], "resource-exhaustion",
+        "module exceeding the byte limit must report status 'resource-exhaustion': {oversized_json}"
+    );
+
+    // Missing input: an unresolvable import is distinct from both of the above.
+    let missing_import = scratch.path().join("missing-import.brix");
+    fs::write(&missing_import, "use nonexistent_module\n").unwrap();
+    let missing_import_out = binary()
+        .args(["world", "init", "--json"])
+        .arg(scratch.path().join("missing-import-world"))
+        .arg(&missing_import)
+        .output()
+        .unwrap();
+    let missing_import_json: Value = serde_json::from_slice(&missing_import_out.stdout).unwrap();
+    assert_eq!(missing_import_json["ok"], false);
+    assert_eq!(missing_import_json["status"], "missing-input");
+
+    // All three statuses observed above must be pairwise distinct.
+    let statuses = [
+        cyclic_json["status"].as_str().unwrap(),
+        oversized_json["status"].as_str().unwrap(),
+        missing_import_json["status"].as_str().unwrap(),
+    ];
+    assert_eq!(
+        statuses.iter().collect::<std::collections::BTreeSet<_>>().len(),
+        3,
+        "unsupported-operator / resource-exhaustion / missing-input must be pairwise distinct: {statuses:?}"
+    );
 }
 
 #[test]
@@ -170,8 +296,8 @@ fn stdio_world_methods_dispatch_real_lifecycle_calls() {
         json!({"id":1,"method":"world.init","params":{"dir":world,"program":{"path":linked_program()}}}),
         json!({"id":2,"method":"world.batch","params":{"dir":world,"batch":batch()}}),
         json!({"id":3,"method":"world.query","params":{"dir":world,"relation":"policy::orders"}}),
-        json!({"id":4,"method":"world.decisions","params":{"dir":world,"decide":"policy::dispatch"}}),
-        json!({"id":5,"method":"world.explain","params":{"dir":world,"entity":"order-1","decide":"policy::dispatch"}}),
+        json!({"id":4,"method":"world.decisions","params":{"dir":world,"decide":"main::dispatch"}}),
+        json!({"id":5,"method":"world.explain","params":{"dir":world,"entity":"order-1","decide":"main::dispatch"}}),
     ];
     let mut child = binary()
         .args(["serve", "--stdio"])
@@ -205,7 +331,7 @@ fn stdio_world_methods_dispatch_real_lifecycle_calls() {
         assert_eq!(line["exit_code"], 0, "response {line}");
     }
     assert_eq!(lines[2]["result"]["entries"][0]["tuple"]["customer"], "Ada");
-    assert!(!lines[3]["result"]["settlements"]["policy::dispatch"]
+    assert!(!lines[3]["result"]["settlements"]["main::dispatch"]
         .as_object()
         .unwrap()
         .is_empty());

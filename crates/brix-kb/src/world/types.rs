@@ -14,6 +14,9 @@ impl WorldKey {
         Self(bytes)
     }
 
+    // Not `std::str::FromStr`: this is an infallible canonical-encoding
+    // constructor (parallel to `from_u64` below), not string parsing.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         let mut w = CanonWriter::new();
         w.write_str(s);
@@ -40,7 +43,7 @@ impl WorldKey {
     }
 
     pub fn from_hex(s: &str) -> Result<Self, WorldError> {
-        if s.len() % 2 != 0 {
+        if !s.len().is_multiple_of(2) {
             return Err(WorldError::InvalidCursor("odd hex length".to_string()));
         }
         let mut bytes = Vec::with_capacity(s.len() / 2);
@@ -86,6 +89,9 @@ impl WorldTuple {
         Self(bytes)
     }
 
+    // Not `std::str::FromStr`: this is an infallible canonical-encoding
+    // constructor (parallel to `from_bytes` below), not string parsing.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         let mut w = CanonWriter::new();
         w.write_str(s);

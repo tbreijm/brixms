@@ -507,6 +507,46 @@ fn execute_explain(dir: &Path, entity: &str, decide_filter: Option<&str>, json_o
     EXIT_SUCCESS
 }
 
+/// `WorldError::NetworkError` carries the stringified module-load/link and
+/// relational-lowering errors (`ModuleLinkError`, `RelationalLowerError`,
+/// world-expression lowering), which are not its own `WorldError` variants.
+/// Classify their messages into the P5 status taxonomy (ADR-0046 §4 P5:
+/// missing inputs / unsupported operators / exhaustion / cached prior
+/// results must be distinguishable) so a missing import, a bounded-loader
+/// limit refusal, and a genuinely unsupported relational construct are not
+/// all flattened into one generic "network-error" bucket.
+fn classify_network_error(msg: &str) -> (&'static str, u8) {
+    if msg.contains("was not found") || msg.contains("unresolved symbol") {
+        // A missing module/package import, or a reference to a symbol that
+        // does not exist in the resolved closure: a missing input, exactly
+        // like `WorldError::UnknownRelation`/`ManifestNotFound`.
+        ("missing-input", EXIT_REJECTED_OR_UNKNOWN)
+    } else if msg.contains("exhaust") || msg.contains("exceeded limit") {
+        // `ModuleLinkError::{ImportDepthExceeded,ModuleCountExceeded,
+        // ModuleBytesExceeded,TotalBytesExceeded}`: a bounded-loader refusal
+        // of insufficiently provisioned work (ADR-0046 §3.8), the world
+        // profile's operational-exhaustion case.
+        ("resource-exhaustion", EXIT_REJECTED_OR_UNKNOWN)
+    } else if msg.contains("no settled decision") {
+        ("missing-decision", EXIT_REJECTED_OR_UNKNOWN)
+    } else if msg.contains("unsupported relational profile")
+        || msg.contains("not admitted in profile")
+        || msg.contains("is not exported")
+        || msg.contains("cycle detected")
+        || msg.contains("Unsupported(")
+        || msg.contains("world expression lowering")
+    {
+        // `RelationalLowerError::{RecursiveRelationCycle,UnstratifiedNegation,
+        // UnsupportedNegation}`, `ModuleLinkError::{Cycle,NonExportedAccess}`,
+        // and world-expression lowering refusals: the program asks for a
+        // construct this profile does not admit, distinct from a missing
+        // input or an exhausted budget.
+        ("unsupported-operator", EXIT_USAGE_OR_IO)
+    } else {
+        ("network-error", EXIT_REJECTED_OR_UNKNOWN)
+    }
+}
+
 fn print_world_error(cmd: &str, err: &WorldError, json_out: bool) -> u8 {
     let (status, exit_code) = match err {
         WorldError::UnknownRelation(_)
@@ -524,15 +564,7 @@ fn print_world_error(cmd: &str, err: &WorldError, json_out: bool) -> u8 {
         | WorldError::CorruptedHead(_)
         | WorldError::CorruptedRevision { .. }
         | WorldError::CorruptedObject(_) => ("io-or-corruption", EXIT_USAGE_OR_IO),
-        WorldError::NetworkError(msg) => {
-            if msg.contains("exhaust") {
-                ("resource-exhaustion", EXIT_REJECTED_OR_UNKNOWN)
-            } else if msg.contains("no settled decision") {
-                ("missing-decision", EXIT_REJECTED_OR_UNKNOWN)
-            } else {
-                ("network-error", EXIT_REJECTED_OR_UNKNOWN)
-            }
-        }
+        WorldError::NetworkError(msg) => classify_network_error(msg),
         _ => ("unknown-error", EXIT_REJECTED_OR_UNKNOWN),
     };
 

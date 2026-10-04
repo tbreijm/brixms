@@ -109,6 +109,11 @@ pub struct WorldRevision {
 }
 
 impl WorldRevision {
+    /// Every field is independently load-bearing for the revision digest
+    /// (`compute_digest` hashes them in this exact order); a params struct
+    /// would just move the same 13 fields one level of indirection away
+    /// without reducing the real arity this constructor has to bind.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         seq: u64,
         timestamp: impl Into<String>,

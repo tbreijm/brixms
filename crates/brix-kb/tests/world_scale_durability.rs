@@ -114,18 +114,19 @@ fn test_world_exceeding_4mib_survival_and_lazy_cold_reopen() {
     );
 
     // Apply a second batch with modifications and retractions
-    let mut update_ops = Vec::new();
-    // Update order 100
-    update_ops.push(WorldBatchOp::Upsert {
-        relation: "orders".to_string(),
-        key: WorldKey::from_u64(100),
-        tuple: order_tuple("customer_00000:total_99999:status_completed"),
-    });
-    // Remove order 200
-    update_ops.push(WorldBatchOp::Remove {
-        relation: "orders".to_string(),
-        key: WorldKey::from_u64(200),
-    });
+    let update_ops = vec![
+        // Update order 100
+        WorldBatchOp::Upsert {
+            relation: "orders".to_string(),
+            key: WorldKey::from_u64(100),
+            tuple: order_tuple("customer_00000:total_99999:status_completed"),
+        },
+        // Remove order 200
+        WorldBatchOp::Remove {
+            relation: "orders".to_string(),
+            key: WorldKey::from_u64(200),
+        },
+    ];
 
     let batch2 = WorldBatch::new(1, "batch-updates-and-retracts", update_ops);
     oracle.apply_batch(&batch2).expect("oracle apply batch2");

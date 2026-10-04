@@ -565,10 +565,14 @@ whole-world update paths.
   - [x] Multi-support truth maintenance (TMS) with symmetric canonical derivation tracking (`DerivationId::Distinct`, `DerivationId::Join`).
   - [x] Incremental candidate frontier maintenance per entity (`entity_id -> BTreeMap<String, CandidateEntry>`) with support tracking.
   - [x] Canonical settlement discipline via `(phase, priority, tiebreak)` calendar keys using `soc_core::calendar::Frontier::select_least`.
-  - [x] Independent scratch recompute oracle (`WorldNetwork::recompute_from_scratch`) with automated differential correctness verification (`verify_differential_correctness`).
+  - [x] Scratch recompute self-check (`WorldNetwork::recompute_from_scratch`, `verify_differential_correctness`). **Correction 2026-10-04:** this replays through the same network code, so it is a self-consistency check and not independent evidence. Independent agreement: `brix_kb::world::reference` (P6a).
   - [x] All 8 adversarial probes in `crates/brix-kb/tests/p4_adversarial_probe.rs` pass, including empty/nonempty joins, duplicate derivations, 3-hop cascade retractions, branch switching, absent-key stability, zero-one grouped count transitions, and 75-step differential fuzzing.
   - [x] Measured and qualified: 1-key edit in 120-op linked model traverses only 22 intermediate deltas, updating 1 settlement ($O(\Delta)$ bound); absent-key insert generates 0 join matches. Results recorded in [`docs/performance/world-runtime-p4-results.md`](../performance/world-runtime-p4-results.md).
-- [ ] **P5 — First end-to-end usable world slice (MVP)**
+- [x] **P5 — First end-to-end usable world slice (MVP)** — results: [`world-runtime-p5-results.md`](../performance/world-runtime-p5-results.md)
+  - [x] 10k-row linked model in an open session (`p01`); one-fact edit: 5 objects, 12 deltas, 1 settlement (`p02`); restart + directory move (`p03`, p08).
+  - [x] `brix world` CLI + stdio `world.*` through the public path (`world_public.rs`, `p05`); distinguishable failure classes and idempotent replay.
+  - [x] Oracle agreement: self-consistency (`p06`) **and** independent reference evaluator (`world_reference_differential`, P6a, mutation-tested).
+  - [ ] Carried: ingestion throughput (~0.5–1k rows/s debug) and edit latency need release-build measurement before P8.
 - [ ] **P6 — Independent evidence, checkpoint and migration paths**
 - [ ] **P7 — Skew controls, residency and maintenance costs**
 - [ ] **P8 — Scale qualification and release**

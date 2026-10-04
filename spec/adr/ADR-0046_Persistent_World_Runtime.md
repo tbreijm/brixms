@@ -133,6 +133,13 @@ commit decision from (fulfill_order)
 - **Numeric Semantics:** All arithmetic preserves ADR-0045 exact integer, bounded `Decimal`, and `F64` semantics. Sum aggregates over floats are deferred to prevent order-dependent rounding drift.
 - **Scalar Helpers:** Pure functions are evaluated through `brix-lower`'s shared evaluator (`l3_v2.rs`), memoized by `(code_digest, arg_values)`.
 
+**Conjunction in the world profile (decided 2026-10-04).** Inside world-profile expressions (relation
+predicates, `decide … when` guards, proposal values, and helper bodies compiled by
+`brix_lower::world_expr`), `and` means logical conjunction. It is equivalent to `&&`, short-circuits the
+same way, and lowers to `BinOp::AndAnd`. The legacy finite-decision v2 profile still refuses `and`/`then`
+as witness composition (ADR-0002). No program accepted before this change changes meaning: v2 never
+evaluated `and`. `then` has no world-profile meaning and stays refused.
+
 ### 3.6 Atomic Batch Changes and Settlement Discipline
 
 - **Batch Envelope (`brix.world.batch@1`):**

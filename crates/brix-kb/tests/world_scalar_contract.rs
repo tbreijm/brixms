@@ -40,7 +40,7 @@ fn schema_decoding_preserves_reserved_strings() {
     assert!(Value::from_typed_bytes(&[255], &str_ty).is_err());
     assert!(Value::Str("true".into()).as_bool().is_err());
     assert!(Value::Int(1).as_bool().is_err());
-    assert_eq!(Value::Bool(true).as_bool().unwrap(), true);
+    assert!(Value::Bool(true).as_bool().unwrap());
 }
 
 #[test]

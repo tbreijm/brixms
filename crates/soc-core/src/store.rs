@@ -1132,7 +1132,7 @@ impl<
         cursor: Option<(&[u8; 32], &K)>,
         limit: usize,
         store: &S,
-    ) -> Result<(Vec<(K, V)>, Option<([u8; 32], K)>), StorageError> {
+    ) -> TriePageResult<K, V> {
         let mut out = Vec::with_capacity(limit.min(1024));
         if limit == 0 {
             return Ok((out, None));
@@ -1255,6 +1255,14 @@ pub enum StorageError {
     DecodeError(CanonError),
     Io(String),
 }
+
+/// Result of a paginated trie traversal: the page's entries, and the
+/// `(hash, key)` cursor to resume from, if the page was not the last.
+type TriePageResult<K, V> = Result<(Vec<(K, V)>, Option<([u8; 32], K)>), StorageError>;
+
+/// Result of a recursive node removal: the replacement subtree (`None` if the
+/// subtree became empty), and whether a key was actually removed.
+type RemoveNodeResult<K, V> = Result<(Option<Arc<Node<K, V>>>, bool), StorageError>;
 
 impl std::fmt::Display for StorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1480,10 +1488,7 @@ impl FileNodeStore {
 
     pub fn flush(&self) -> std::io::Result<()> {
         if self.write_failed.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "node write failed in FileNodeStore",
-            ));
+            return Err(std::io::Error::other("node write failed in FileNodeStore"));
         }
         let mut pending = self
             .pending_files
@@ -1565,9 +1570,7 @@ fn resolve_node<K: CanonDecode + Canonical + Ord, V: CanonDecode + Canonical, S:
 ) -> Result<Arc<Node<K, V>>, StorageError> {
     match &**node {
         Node::Lazy(d) => {
-            let bytes = store
-                .get_node(d)
-                .ok_or_else(|| StorageError::MissingNode(*d))?;
+            let bytes = store.get_node(d).ok_or(StorageError::MissingNode(*d))?;
             let decoded = decode_node_verified::<K, V>(&bytes, d)
                 .map_err(|_| StorageError::CorruptedNode(*d))?;
             Ok(Arc::new(decoded))
@@ -1785,7 +1788,7 @@ fn remove_recursive_store<
     depth: usize,
     stats: &mut TrieOpStats,
     store: &S,
-) -> Result<(Option<Arc<Node<K, V>>>, bool), StorageError> {
+) -> RemoveNodeResult<K, V> {
     let resolved = resolve_node(node, store)?;
     stats.nodes_visited += 1;
     match &*resolved {
