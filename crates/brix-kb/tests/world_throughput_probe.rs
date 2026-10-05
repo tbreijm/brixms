@@ -200,6 +200,7 @@ fn io_delta(before: StoreIoStats, after: StoreIoStats) -> StoreIoStats {
         bytes_read: after.bytes_read - before.bytes_read,
         writes: after.writes - before.writes,
         bytes_written: after.bytes_written - before.bytes_written,
+        physical_writes: after.physical_writes - before.physical_writes,
         files_synced: after.files_synced - before.files_synced,
         directories_synced: after.directories_synced - before.directories_synced,
     }
@@ -207,8 +208,8 @@ fn io_delta(before: StoreIoStats, after: StoreIoStats) -> StoreIoStats {
 
 fn print_io(label: &str, s: &StoreIoStats) {
     println!(
-        "  {label}: reads={} bytes_read={} writes={} bytes_written={} files_synced={} directories_synced={}",
-        s.reads, s.bytes_read, s.writes, s.bytes_written, s.files_synced, s.directories_synced
+        "  {label}: reads={} bytes_read={} writes={} bytes_written={} physical_writes={} files_synced={} directories_synced={}",
+        s.reads, s.bytes_read, s.writes, s.bytes_written, s.physical_writes, s.files_synced, s.directories_synced
     );
 }
 

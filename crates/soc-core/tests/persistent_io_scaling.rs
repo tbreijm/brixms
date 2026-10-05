@@ -180,7 +180,9 @@ fn file_store_flush_syncs_only_new_objects_once() {
     assert_eq!(before_flush.writes, expected_new_files);
     store.flush().expect("flush new objects");
     let after_flush = store.io_stats();
-    assert_eq!(after_flush.files_synced, expected_new_files);
+    assert_eq!(after_flush.files_synced, 1);
+    assert!(after_flush.physical_writes < expected_new_files);
+    assert_eq!(after_flush.directories_synced, 2);
     assert!(after_flush.directories_synced > 0);
     assert!(after_flush.directories_synced <= expected_new_files + 1);
 
