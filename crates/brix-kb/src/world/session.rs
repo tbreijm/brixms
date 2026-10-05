@@ -1335,6 +1335,11 @@ impl WorldSession {
         let rev_val: serde_json::Value =
             serde_json::from_slice(&rev_bytes).map_err(|e| WorldError::Json(e.to_string()))?;
         let rev = WorldRevision::from_json(&rev_val)?;
+        if rev.seq != seq {
+            return Err(WorldError::InvalidSchema(format!(
+                "revision file {seq} contains revision {}", rev.seq
+            )));
+        }
         if self.manifest.program_required
             && rev.program_digest != Some(self.manifest.program_digest)
         {
@@ -1530,15 +1535,7 @@ impl WorldSession {
         decide_filter: Option<&str>,
         entity_id: &str,
     ) -> Result<Option<(String, SettledDecision)>, WorldError> {
-        if seq > self.current_revision { return Err(WorldError::RevisionNotFound(seq)); }
-        let rev_file = self.paths.revision_file(seq);
-        if !rev_file.exists() {
-            return Err(WorldError::RevisionNotFound(seq));
-        }
-        let rev_bytes = fs::read(rev_file)?;
-        let rev_val: serde_json::Value =
-            serde_json::from_slice(&rev_bytes).map_err(|e| WorldError::Json(e.to_string()))?;
-        let rev = WorldRevision::from_json(&rev_val)?;
+        let rev = self.pin_revision(seq)?.revision;
         if rev.schema != super::revision::REVISION_SCHEMA_V2 {
             return Err(WorldError::NetworkError("legacy-history-unavailable: revision@1 did not persist decision evidence".into()));
         }
