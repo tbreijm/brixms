@@ -223,8 +223,12 @@ impl FileNodeStore {
                 .checked_add(entry.length)
                 .filter(|end| *end <= start)
                 .ok_or_else(|| invalid("pack body out of bounds"))?;
+            let digest = digest_at(&record, 0);
+            if state.index.contains_key(&digest) {
+                return Err(invalid("duplicate digest across pack index"));
+            }
             state.index.insert(
-                digest_at(&record, 0),
+                digest,
                 Location {
                     path: path.clone(),
                     entry,
@@ -407,8 +411,7 @@ impl FileNodeStore {
         })())
     }
 
-    fn read_entry(&self, path: &Path, entry: &Entry) -> io::Result<Vec<u8>> {
-        let mut file = File::open(path)?;
+    fn read_entry(&self, mut file: File, entry: &Entry) -> io::Result<Vec<u8>> {
         file.seek(SeekFrom::Start(entry.offset))?;
         let mut bytes = vec![0; entry.length as usize];
         file.read_exact(&mut bytes)?;
@@ -453,11 +456,14 @@ impl NodeStore for FileNodeStore {
                     .map_err(|_| invalid("poisoned pack index"))?;
                 self.check()?;
                 if let Some(location) = state.index.get(digest) {
-                    Some((location.path.clone(), location.entry.clone()))
+                    Some((File::open(location.path.as_ref())?, location.entry.clone()))
                 } else if let Some(pending) = state.pending.as_mut() {
                     if let Some(&idx) = pending.lookup.get(digest) {
                         pending.writer.flush()?;
-                        Some((Arc::new(pending.path.clone()), pending.entries[idx].1.clone()))
+                        // Open the temporary pack while holding the state lock. A cloned
+                        // handle may flush immediately after we release it, renaming this
+                        // path; the open file descriptor remains valid across that rename.
+                        Some((File::open(&pending.path)?, pending.entries[idx].1.clone()))
                     } else {
                         None
                     }
@@ -465,8 +471,8 @@ impl NodeStore for FileNodeStore {
                     None
                 }
             };
-            if let Some((path, entry)) = target {
-                return self.read_entry(&path, &entry).map(Some);
+            if let Some((file, entry)) = target {
+                return self.read_entry(file, &entry).map(Some);
             }
             match fs::read(self.object_path(digest)) {
                 Ok(bytes) => {
