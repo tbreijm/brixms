@@ -141,7 +141,7 @@ fn invalid_binding_field_and_duplicate_alias_fail_closed() {
 fn root_let_and_decide_cannot_bypass_export_visibility() {
     for root in [
         "use lib\nlet x = lib::hidden(1)",
-        "use lib\nrel input rows: { id: Int } key id\ndecide choice for row in rows { propose p priority 1 when true = lib::hidden(row.id) }",
+        "use lib\nrel input rows: { id: Int } key id\ndecide choice for row in rows per id { propose p priority 1 when true = lib::hidden(row.id) }",
     ] {
         // The first case specifically exercises the former root-item bypass.
         let graph = graph(&[("root", root), ("lib", "fn hidden(x: Int): Int = x")]);

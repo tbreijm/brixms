@@ -210,6 +210,10 @@ impl Parser {
                 let tok = self.advance().clone();
                 Ok(("export".to_string(), tok))
             }
+            TokenKind::Per => {
+                let tok = self.advance().clone();
+                Ok(("per".to_string(), tok))
+            }
             other => Err(self.error(format!(
                 "Expected identifier, found {:?} in {}",
                 other, context
@@ -262,6 +266,7 @@ impl Parser {
                     | TokenKind::Rel
                     | TokenKind::Select
                     | TokenKind::Export
+                    | TokenKind::Per
                         if scan + 2 < self.tokens.len() =>
                     {
                         return self.tokens[scan + 2].kind == TokenKind::Colon;
@@ -786,13 +791,28 @@ impl Parser {
         Ok(CommitDecl { name, candidates })
     }
 
-    /// `decide NAME for BINDER in LIST_EXPR { propose ... }` (ADR-0043).
+    /// `decide NAME for BINDER in LIST_EXPR [per FIELD] { propose ... }`
+    /// (ADR-0043; `per` added ADR-0046, decided 2026-10-04). `per` sits after
+    /// the list expression and before the block's opening brace: that is the
+    /// only position where it parses unambiguously, since `LIST_EXPR` is a
+    /// full expression and `per` (a contextual identifier everywhere else,
+    /// like `rel`/`select`/`export`) would otherwise be consumable as a
+    /// trailing field access or call target inside the expression grammar.
+    /// Anchoring it immediately before `{` — which already unambiguously ends
+    /// `LIST_EXPR` — means the parser never has to guess whether a bare `per`
+    /// token belongs to the expression or to this clause.
     fn parse_decide_decl(&mut self) -> Result<DecideDecl, ParseError> {
         let name = self.expect_ident("decide declaration name")?.0;
         self.consume(TokenKind::For, "decide declaration 'for'")?;
         let binder = self.expect_ident("decide declaration binder")?.0;
         self.consume(TokenKind::In, "decide declaration 'in'")?;
         let list = self.parse_expr()?;
+        let per = if self.check(&TokenKind::Per) {
+            self.advance();
+            Some(self.expect_ident("decide declaration 'per' field")?.0)
+        } else {
+            None
+        };
         self.consume(TokenKind::OpenBrace, "decide block '{'")?;
         let mut proposals = Vec::new();
         while !self.check(&TokenKind::CloseBrace) && !self.is_at_end() {
@@ -804,6 +824,7 @@ impl Parser {
             name,
             binder,
             list,
+            per,
             proposals,
         })
     }
@@ -1155,6 +1176,7 @@ impl Parser {
             TokenKind::Rel => self.parse_ident_expr("rel".to_string()),
             TokenKind::Select => self.parse_ident_expr("select".to_string()),
             TokenKind::Export => self.parse_ident_expr("export".to_string()),
+            TokenKind::Per => self.parse_ident_expr("per".to_string()),
             TokenKind::OpenBrace => self.parse_anon_record_expr(),
             other => Err(self.error(format!("Unexpected token {:?} in expression", other))),
         }

@@ -230,7 +230,7 @@ rel derived priority_customer =
     from c in customer, t in tag
     where c.id == t.customer
 
-decide priority_dispatch for p in priority_customer {
+decide priority_dispatch for p in priority_customer per customer {
     propose expedite priority 1 when true = "expedite_shipment"
 }
 "#;
@@ -409,7 +409,7 @@ rel derived ready_queue =
     from v in valid_orders
     where v.status == "approved"
 
-decide dispatch for r in ready_queue {
+decide dispatch for r in ready_queue per id {
     propose ship priority 5 when true = "ship_packet"
 }
 "#;
@@ -502,7 +502,7 @@ rel derived active_orders =
     select { id: o.id, express: o.express, status: o.status }
     from o in order
 
-decide fulfillment for o in active_orders {
+decide fulfillment for o in active_orders per id {
     propose expedite priority 10 when o.express == "yes" = "overnight"
     propose standard priority 20 when o.status == "open" = "ground"
 }
@@ -586,7 +586,7 @@ decide fulfillment for o in active_orders {
     let tie_src = r#"
 rel input item: { id: Str } key id
 rel derived items = select { id: i.id } from i in item
-decide tie_choice for i in items {
+decide tie_choice for i in items per id {
     propose cand_alpha priority 50 when true = "alpha"
     propose cand_beta priority 50 when true = "beta"
 }
@@ -641,7 +641,7 @@ rel derived fulfillment =
     from o in order, w in warehouse
     where o.sku == w.sku
 
-decide dispatch for f in fulfillment {
+decide dispatch for f in fulfillment per order_id {
     propose ship priority 1 when true = f.loc
 }
 "#;
@@ -880,7 +880,7 @@ rel derived sku_summary =
     from o in order
     group by o.sku
 
-decide dispatch for f in fulfillment {
+decide dispatch for f in fulfillment per order_id {
     propose expedite priority 10 when f.available > 5 = "fast_track"
     propose standard priority 30 when f.available <= 5 = "standard_queue"
 }
@@ -1032,7 +1032,7 @@ rel derived order_counts =
     from o in order
     group by o.sku
 
-decide shipping for f in fulfillment {
+decide shipping for f in fulfillment per order_id {
     propose expedite priority 10 when f.qty > 5 = "air"
     propose ground priority 20 when f.qty <= 5 = "truck"
 }

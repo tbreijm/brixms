@@ -77,7 +77,7 @@ rel derived fulfillment =
     from o in orders, i in inventory, s in shipping
     where o.sku == i.sku and o.sku == s.sku
 
-decide dispatch for f in fulfillment {
+decide dispatch for f in fulfillment per order_id {
     propose ship_express priority 10 when f.express == "yes" and f.available >= f.qty = "air_express"
     propose ship_standard priority 20 when f.express != "yes" and f.available >= f.qty = "ground_standard"
     propose backorder priority 50 when f.available < f.qty = "backorder_hold"

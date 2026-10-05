@@ -30,10 +30,12 @@
 //! What genuinely **is** shared, and why each is safe to share:
 //!
 //! 1. **`brix_lower::relation_dag::{RelationDag, OperatorNode, FieldRef, GroupProjection,
-//!    lower_relations}`** — the lowered operator DAG and its node/AST types. This is the
-//!    *specification* of which operators exist and how they are wired, not an evaluation
-//!    strategy. Both engines are handed the same DAG and are free to evaluate it however they
-//!    like; sharing the DAG's shape is sharing the problem statement, not the solution.
+//!    lower_relations, resolve_decide_source_relation}`** — the lowered operator DAG and its
+//!    node/AST types, plus the pure rule for which relation a `decide` block's `list` names.
+//!    This is the *specification* of which operators exist and how they are wired, not an
+//!    evaluation strategy. Both engines are handed the same DAG and are free to evaluate it
+//!    however they like; sharing the DAG's shape (and the decide/relation resolution rule) is
+//!    sharing the problem statement, not the solution.
 //! 2. **`brix_syntax::ast`** (`Expr`, `Ty`, `ProposeDecl`, `Callable`, …) and
 //!    **`brix_lower::module_graph::LinkedProgram`** — the surface AST and linked-program
 //!    container. Same rationale: these are the program *text*, not an engine.
@@ -68,49 +70,33 @@
 //!    copies stop agreeing on tie-break digests and the differential test in
 //!    `tests/world_reference_differential.rs` catches the drift.
 //!
-//! ## The entity-id extraction rule is an unspecified heuristic, treated as a frozen spec
+//! ## Entity identity is an explicit, declared field (ADR-0046, decided 2026-10-04)
 //!
-//! `network.rs::extract_entity_id` (the function that decides which field of a decide
-//! block's bound row names the entity being decided about) is **not specified by any ADR
-//! text** — it is a heuristic fallback chain: explicit `propose(deps...)` dependency, then
-//! `entity_id`/`{binder}.entity_id`, then `order_id`/`{binder}.order_id`, then `id`/`{binder}.id`,
-//! then `key`/`{binder}.key`, then the first field whose name ends in `.id` or `_id`
-//! (alphabetically first, since the row is a `BTreeMap`), then the alphabetically-first field
-//! of any name, then the literal string `"default_entity"`. Because it is unspecified rather
-//! than documented, this module cannot derive it independently from an ADR; instead
-//! [`extract_entity_id`] below is a from-scratch re-implementation of that exact fallback
-//! chain, written by reading `network.rs`'s current behavior and copying the *rule*, not the
-//! code. It lives in one small, clearly-labeled, easily-swappable function precisely because
-//! the rule is expected to be frozen/formalized in a later P6 PR — when that happens, only
-//! this one function needs to change. `tests/world_reference_differential.rs` includes a
-//! dedicated case (`entity_id_fallback_precedence`) exercising a row carrying both `entity_id`
-//! and `order_id` with different values, to pin down today's precedence order.
+//! Earlier than this, `network.rs::extract_entity_id` inferred which field of a decide
+//! block's bound row named the entity being decided about via an **unspecified heuristic**
+//! fallback chain, and this module carried an independently-written copy of that same
+//! heuristic to stay behaviorally comparable. Tony's 2026-10-04 decision retired both: a
+//! world-profile `decide` block must now write `per <field>` explicitly (enforced at lowering
+//! by `brix_lower::relation_dag::lower_relations`), and [`extract_entity_id`] below reads that
+//! declared field directly — no fallback chain, no naming-convention guessing. A tuple missing
+//! the declared field is a typed [`WorldError`], never a silent default.
 //!
-//! ## One behavioral assumption: propose values are a pure function of entity identity
+//! ## World execution profile admissibility
 //!
-//! `network.rs` records a candidate's `value` only on the **first** support it sees for a
-//! given `(decide, entity, candidate_name)`; a later distinct supporting row with a
-//! *different* value is silently ignored (the existing `CandidateEntry.value` is never
-//! revisited). Because that "first" is whichever support arrives first in **incremental
-//! batch-application order** — and this module instead evaluates every distinct supporting
-//! row of a full snapshot with no notion of arrival order — there is no order-independent way
-//! to replicate that specific tie-break. Rather than silently picking an arbitrary winner
-//! (which could paper over a real bug), [`evaluate`] treats "every distinct supporting row
-//! agrees on the proposed value" as an invariant and returns a [`WorldError::NetworkError`]
-//! naming the conflicting values if it is ever violated. This has not been observed to fire in
-//! the differential suite's generators (which deliberately keep a propose's `value` expression
-//! a function of the bound entity, not of incidental per-row fields), and is flagged here as a
-//! known order-dependence risk in `network.rs` rather than something this oracle papers over.
+//! Both engines refuse differing values for the same (decide, entity, proposal).
+//! Equal values retain independent supports. Refusal is atomic and does not select
+//! a first-arriving support. This restriction belongs to `brix.world.exec@1`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_lower::module_graph::{LinkedProgram, QualifiedName};
 use brix_lower::relation_dag::{
-    lower_relations, GroupProjection, OperatorId, OperatorNode, RelationDag,
+    lower_relations, resolve_decide_source_relation, GroupProjection, OperatorId, OperatorNode,
+    RelationDag,
 };
 use brix_lower::world_expr::CompiledWorldExpr;
-use brix_syntax::ast::{self, Expr};
+use brix_syntax::ast;
 use soc_core::calendar::Key;
 
 use super::codec::TupleRecord;
@@ -335,48 +321,20 @@ fn build_grouped_row(
     row
 }
 
-/// The unspecified `network.rs::extract_entity_id` heuristic, re-implemented from scratch
-/// (see module docs). Kept isolated in this one function so it is trivial to swap when the
-/// rule is formalized in a later P6 PR.
-fn extract_entity_id(eval_row: &Row, binder: &str, propose: &ast::ProposeDecl) -> String {
-    if !propose.deps.is_empty() {
-        let dep = &propose.deps[0];
-        if let Some(v) = eval_row.get(dep).or_else(|| {
-            dep.split_once('.')
-                .and_then(|(_, field)| eval_row.get(field))
-        }) {
-            return v.to_string();
-        }
-    }
-
-    let candidates = [
-        "entity_id".to_string(),
-        format!("{binder}.entity_id"),
-        "order_id".to_string(),
-        format!("{binder}.order_id"),
-        "id".to_string(),
-        format!("{binder}.id"),
-        "key".to_string(),
-        format!("{binder}.key"),
-    ];
-    for c in &candidates {
-        if let Some(v) = eval_row.get(c) {
-            return v.to_string();
-        }
-    }
-
-    if let Some((_, v)) = eval_row
-        .iter()
-        .find(|(k, _)| k.ends_with(".id") || k.ends_with("_id"))
-    {
-        return v.to_string();
-    }
-
-    if let Some((_, v)) = eval_row.iter().next() {
-        return v.to_string();
-    }
-
-    "default_entity".to_string()
+/// Extract a row's entity identity from its declared `per <field>`
+/// (ADR-0046, decided 2026-10-04), independently re-derived from `network.rs`'s
+/// `entity_id_for` by reading the same declared field, not by calling its
+/// code (see module docs). A row missing the declared field is a typed error,
+/// never a silent default.
+fn extract_entity_id(eval_row: &Row, binder: &str, per_field: &str) -> Result<String, WorldError> {
+    get_qualified(eval_row, binder, per_field)
+        .map(|v| v.to_string())
+        .ok_or_else(|| {
+            WorldError::NetworkError(format!(
+                "reference evaluator: decide entity field '{per_field}' missing from bound row \
+                 (binder '{binder}')"
+            ))
+        })
 }
 
 /// Calendar tie-break digest, reproduced byte-for-byte from `network.rs`'s
@@ -405,6 +363,9 @@ pub struct DecideSpec {
     pub name: String,
     pub binder: String,
     pub source_relation: String,
+    /// Declared entity-identity field (ADR-0046, decided 2026-10-04); see
+    /// `network::DecideBlock::per_field`.
+    pub per_field: String,
     pub proposals: Vec<ast::ProposeDecl>,
 }
 
@@ -496,29 +457,26 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
 
     let mut decides = Vec::new();
     for (qname, decl) in &program.decides {
-        let mut source_relation = None;
-        if let Expr::Var(v) = &decl.list {
-            if dag.relation_outputs.contains_key(v) {
-                source_relation = Some(v.clone());
-            } else {
-                let qualified = format!("{}::{v}", program.root_module);
-                if dag.relation_outputs.contains_key(&qualified) {
-                    source_relation = Some(qualified);
-                } else if let Some(found) = dag
-                    .relation_outputs
-                    .keys()
-                    .find(|k| k.ends_with(&format!("::{v}")))
-                {
-                    source_relation = Some(found.clone());
-                }
-            }
-        }
+        let source_relation = resolve_decide_source_relation(
+            &decl.list,
+            &qname.module,
+            &dag.relation_outputs,
+        );
 
         if let Some(src) = source_relation {
+            // `lower_relations` above already refused a relational decide with
+            // no declared `per` field; this is defensive, not reachable.
+            let per_field = decl.per.clone().ok_or_else(|| {
+                WorldError::NetworkError(format!(
+                    "reference evaluator: decide '{qname}' resolved to relation '{src}' with no \
+                     'per' field (expected lower_relations to have refused this)"
+                ))
+            })?;
             decides.push(DecideSpec {
                 name: qname.to_string(),
                 binder: decl.binder.clone(),
                 source_relation: src,
+                per_field,
                 proposals: decl.proposals.clone(),
             });
         }
@@ -724,7 +682,7 @@ pub fn evaluate(
             }
 
             for propose in &decide.proposals {
-                let entity_id = extract_entity_id(&eval_row, &decide.binder, propose);
+                let entity_id = extract_entity_id(&eval_row, &decide.binder, &decide.per_field)?;
                 let guard_passed =
                     eval_expr(&propose.guard, &eval_row, &program.functions)?.as_bool()?;
                 if !guard_passed {
@@ -823,80 +781,44 @@ mod tests {
             .collect()
     }
 
-    fn dummy_propose(name: &str) -> ast::ProposeDecl {
-        ast::ProposeDecl {
-            name: name.to_string(),
-            deps: Vec::new(),
-            priority: 10,
-            guard: ast::Expr::Bool(true),
-            value: ast::Expr::Bool(true),
-            deps_declared: false,
-            otherwise: false,
-        }
-    }
-
-    /// `extract_entity_id` must prefer `entity_id` over `order_id`/`id`/`key` and over the
-    /// alphabetically-first `*_id`/`.id`-suffixed field, when more than one is present on the
-    /// same row with *different* values — pinning down today's (unspecified-by-ADR) fallback
-    /// precedence per the coordinator note on this task.
+    /// `extract_entity_id` reads exactly the declared `per` field — bare or
+    /// binder-qualified — and ignores every other id-shaped field on the row.
     #[test]
-    fn entity_id_fallback_precedence() {
+    fn entity_id_reads_declared_field_only() {
         let eval_row = row(&[
             ("entity_id", Value::Str("E1".into())),
             ("order_id", Value::Str("O1".into())),
             ("id", Value::Str("I1".into())),
-            ("other_field", Value::Str("zz".into())),
         ]);
-        let propose = dummy_propose("p");
-        assert_eq!(extract_entity_id(&eval_row, "f", &propose), "E1");
+        assert_eq!(
+            extract_entity_id(&eval_row, "f", "order_id").unwrap(),
+            "O1",
+            "declared field wins regardless of naming-convention precedence"
+        );
+        assert_eq!(extract_entity_id(&eval_row, "f", "id").unwrap(), "I1");
     }
 
-    /// With no `entity_id`, `order_id` must win over `id`/`key`/other `*_id` fields.
+    /// The declared field may be read either bare or binder-qualified
+    /// (`get_qualified`'s existing convention), matching how a bound row
+    /// carries both spellings of every field.
     #[test]
-    fn entity_id_fallback_order_id_before_id() {
-        let eval_row = row(&[
-            ("order_id", Value::Str("O1".into())),
-            ("id", Value::Str("I1".into())),
-            ("sku_id", Value::Str("S1".into())),
-        ]);
-        let propose = dummy_propose("p");
-        assert_eq!(extract_entity_id(&eval_row, "f", &propose), "O1");
+    fn entity_id_reads_binder_qualified_field() {
+        let eval_row = row(&[("f.entity_id", Value::Str("E1".into()))]);
+        assert_eq!(
+            extract_entity_id(&eval_row, "f", "entity_id").unwrap(),
+            "E1"
+        );
     }
 
-    /// With none of the named candidates present, the alphabetically-first `*_id`/`.id`
-    /// field wins (BTreeMap iteration order).
+    /// A row missing the declared field is a typed error, never a silent
+    /// default (contrast the retired heuristic's `"default_entity"` fallback).
     #[test]
-    fn entity_id_fallback_any_id_suffixed_field() {
-        let eval_row = row(&[
-            ("zz_id", Value::Str("Z1".into())),
-            ("aa_id", Value::Str("A1".into())),
-            ("other", Value::Str("not it".into())),
-        ]);
-        let propose = dummy_propose("p");
-        assert_eq!(extract_entity_id(&eval_row, "f", &propose), "A1");
-    }
-
-    /// With nothing id-shaped at all, the alphabetically-first field of any name wins.
-    #[test]
-    fn entity_id_fallback_first_field() {
-        let eval_row = row(&[
-            ("zebra", Value::Str("Z".into())),
-            ("apple", Value::Str("A".into())),
-        ]);
-        let propose = dummy_propose("p");
-        assert_eq!(extract_entity_id(&eval_row, "f", &propose), "A");
-    }
-
-    /// An explicit `propose(dep)` dependency always wins over every heuristic fallback.
-    #[test]
-    fn entity_id_explicit_dep_wins() {
-        let eval_row = row(&[
-            ("entity_id", Value::Str("E1".into())),
-            ("custom_key", Value::Str("C1".into())),
-        ]);
-        let mut propose = dummy_propose("p");
-        propose.deps = vec!["custom_key".to_string()];
-        propose.deps_declared = true;
-        assert_eq!(extract_entity_id(&eval_row, "f", &propose), "C1");
+    fn entity_id_missing_declared_field_is_a_typed_error() {
+        let eval_row = row(&[("other_field", Value::Str("zz".into()))]);
+        let err = extract_entity_id(&eval_row, "f", "entity_id").unwrap_err();
+        assert!(
+            matches!(err, WorldError::NetworkError(_)),
+            "missing declared entity field must be a typed WorldError, not a default: {err:?}"
+        );
     }
 }

@@ -35,7 +35,7 @@ rel derived fulfillment =
     from o in order, b in backorder
     where o.sku == b.sku and b.available >= o.qty and o.status == "pending"
 
-decide fulfill for f in fulfillment {
+decide fulfill for f in fulfillment per order_id {
     propose fulfill_order priority 1 when f.qty > 0 = f.order_id
 }
 "#;
@@ -99,7 +99,7 @@ rel derived fulfillment =
     from o in order, b in backorder
     where o.sku == b.sku and b.available >= o.qty and o.status == "pending"
 
-decide fulfill for f in fulfillment {
+decide fulfill for f in fulfillment per order_id {
     propose fulfill_order priority 1 when f.qty > 0 = f.order_id
 }
 "#;
@@ -372,7 +372,7 @@ fn test_last_support_removal_in_candidate_frontier() {
     let src = r#"
 rel input alert: { id: Str, entity_id: Str, code: Str } key id
 
-decide incident for a in alert {
+decide incident for a in alert per entity_id {
     propose raise_ticket priority 1 when a.code == "ERR" = a.entity_id
 }
 "#;
@@ -469,7 +469,7 @@ rel derived linked_parent_child =
     from p in parent_item, c in active_children
     where p.id == c.parent_id
 
-decide group_decision for l in linked_parent_child {
+decide group_decision for l in linked_parent_child per child_id {
     propose handle_item priority 1 when true = l.child_id
 }
 "#;
@@ -653,7 +653,7 @@ fn test_canonical_settlement_priority_and_tiebreak() {
     let src = r#"
 rel input task: { id: Str, tier: Str } key id
 
-decide schedule for t in task {
+decide schedule for t in task per id {
     propose urgent priority 1 when t.tier == "P1" = "urgent_handling"
     propose standard priority 5 when true = "standard_handling"
 }

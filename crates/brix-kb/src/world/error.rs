@@ -12,6 +12,8 @@ pub enum CrashPoint {
     BeforeObjectsFsync,
     /// Crash after objects fsync, but before revision journal record fsync.
     AfterObjectsFsyncBeforeRevisionFsync,
+    /// Crash after durable decision delta, before revision publication.
+    AfterDecisionDeltaFsyncBeforeRevisionFsync,
     /// Crash after revision journal record fsync, but before atomic HEAD rename.
     AfterRevisionFsyncBeforeHeadRename,
     /// Crash after atomic HEAD rename, but before parent directory fsync.
@@ -25,6 +27,7 @@ impl fmt::Display for CrashPoint {
             Self::AfterObjectsFsyncBeforeRevisionFsync => {
                 write!(f, "crash after objects fsync before revision fsync")
             }
+            Self::AfterDecisionDeltaFsyncBeforeRevisionFsync => write!(f, "crash after decision delta fsync before revision fsync"),
             Self::AfterRevisionFsyncBeforeHeadRename => {
                 write!(f, "crash after revision fsync before HEAD rename")
             }

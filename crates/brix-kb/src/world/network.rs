@@ -16,150 +16,25 @@
 
 use super::persistent::{PMap, PSet};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::sync::Arc;
 
 use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_lower::module_graph::LinkedProgram;
 use brix_lower::relation_dag::{
-    lower_relations, FieldRef, GroupProjection, OperatorId, OperatorNode, RelationDag,
+    lower_relations, resolve_decide_source_relation, FieldRef, GroupProjection, OperatorId,
+    OperatorNode, RelationDag,
 };
-use brix_syntax::ast::{self, Expr};
+use brix_syntax::ast;
 use soc_core::calendar::{Frontier, Key};
 use soc_core::store::TrieMap;
+
+pub use super::decision_codec::{compute_decision_root, decision_key, decision_tuple, decode_settled_decision, encode_decision_delta, SettledDecision, Value};
+use super::decision_codec::canon_write_value;
 
 use super::batch::{WorldBatch, WorldBatchOp};
 use super::codec::TupleRecord;
 use super::error::WorldError;
 use super::types::{WorldKey, WorldTuple};
-
-/// A scalar value admitted in relational operators and expressions.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum Value {
-    /// Internal absence sentinel; never an admissible expression value.
-    Null,
-    Bool(bool),
-    Int(i64),
-    Str(String),
-    F64(brix_canon::FiniteF64),
-    Decimal(brix_canon::Decimal),
-}
-
-impl std::hash::Hash for Value {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(self).hash(state);
-        match self {
-            Self::Null => {}
-            Self::Bool(v) => v.hash(state),
-            Self::Int(v) => v.hash(state),
-            Self::Str(v) => v.hash(state),
-            Self::F64(v) => v.to_string().hash(state),
-            Self::Decimal(v) => {
-                v.unscaled().hash(state);
-                v.scale().hash(state);
-            }
-        }
-    }
-}
-
-impl Value {
-    pub fn as_bool(&self) -> Result<bool, WorldError> {
-        match self {
-            Self::Bool(v) => Ok(*v),
-            _ => Err(WorldError::NetworkError(
-                "Unknown(EvaluationFault): guard must be Bool".into(),
-            )),
-        }
-    }
-    pub fn as_int(&self) -> Option<i64> {
-        if let Self::Int(v) = self {
-            Some(*v)
-        } else {
-            None
-        }
-    }
-    pub fn as_str(&self) -> Option<&str> {
-        if let Self::Str(v) = self {
-            Some(v)
-        } else {
-            None
-        }
-    }
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.to_string().into_bytes()
-    }
-    /// Untyped byte payloads remain strings; schemas alone select numeric decoding.
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        Self::Str(String::from_utf8_lossy(bytes).into_owned())
-    }
-    pub fn from_str_val(s: &str) -> Self {
-        Self::Str(s.to_owned())
-    }
-    pub fn from_typed_bytes(bytes: &[u8], ty: &ast::Ty) -> Result<Self, WorldError> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|e| WorldError::NetworkError(format!("invalid scalar UTF-8: {e}")))?;
-        let invalid = || WorldError::NetworkError(format!("invalid {ty:?} scalar {text:?}"));
-        match ty {
-            ast::Ty::Named(name) => match name.as_str() {
-                "Str" => Ok(Self::Str(text.to_owned())),
-                "Int" => text.parse().map(Self::Int).map_err(|_| invalid()),
-                "Bool" => match text {
-                    "true" => Ok(Self::Bool(true)),
-                    "false" => Ok(Self::Bool(false)),
-                    _ => Err(invalid()),
-                },
-                "F64" => text.parse().map(Self::F64).map_err(|_| invalid()),
-                "Decimal" => brix_canon::decimal_parse(text)
-                    .map(Self::Decimal)
-                    .map_err(|_| invalid()),
-                _ => Err(invalid()),
-            },
-            _ => Err(invalid()),
-        }
-    }
-    pub fn to_scalar(&self) -> Result<brix_lower::l3_v2::L3ValueV2, WorldError> {
-        use brix_lower::l3_v2::L3ValueV2 as V;
-        Ok(match self {
-            Self::Bool(v) => V::Bool(*v),
-            Self::Int(v) => V::Int(*v),
-            Self::Str(v) => V::Str(v.clone()),
-            Self::F64(v) => V::F64(*v),
-            Self::Decimal(v) => V::Decimal(*v),
-            Self::Null => {
-                return Err(WorldError::NetworkError(
-                    "Unknown(EvaluationFault): absent scalar value".into(),
-                ))
-            }
-        })
-    }
-    pub fn from_scalar(v: brix_lower::l3_v2::L3ValueV2) -> Result<Self, WorldError> {
-        use brix_lower::l3_v2::L3ValueV2 as V;
-        Ok(match v {
-            V::Bool(v) => Self::Bool(v),
-            V::Int(v) => Self::Int(v),
-            V::Str(v) => Self::Str(v),
-            V::F64(v) => Self::F64(v),
-            V::Decimal(v) => Self::Decimal(v),
-            _ => {
-                return Err(WorldError::NetworkError(
-                    "expression result is not a scalar".into(),
-                ))
-            }
-        })
-    }
-}
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Null => write!(f, "null"),
-            Self::Bool(v) => write!(f, "{v}"),
-            Self::Int(v) => write!(f, "{v}"),
-            Self::Str(v) => write!(f, "{v}"),
-            Self::F64(v) => write!(f, "{v}"),
-            Self::Decimal(v) => write!(f, "{}", brix_canon::decimal_format(*v)),
-        }
-    }
-}
 
 /// An intermediate tuple carrying evaluated fields in operator pipeline execution.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
@@ -342,30 +217,6 @@ pub struct CandidateEntry {
     pub supports: PSet<DerivationId>,
 }
 
-/// A deterministic settled decision chosen by canonical settlement discipline.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct SettledDecision {
-    pub entity_id: String,
-    pub candidate_name: String,
-    pub priority: u64,
-    pub phase: u64,
-    pub value: Value,
-    pub calendar_key: Key,
-}
-
-impl SettledDecision {
-    pub fn to_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "entity_id": self.entity_id,
-            "candidate_name": self.candidate_name,
-            "priority": self.priority,
-            "phase": self.phase,
-            "value": self.value.to_string(),
-            "calendar_key": format!("phase={},priority={},tiebreak={}", self.calendar_key.phase, self.calendar_key.priority, self.calendar_key.tiebreak.to_hex()),
-        })
-    }
-}
-
 /// Explanation of an individual candidate in a decide deliberation.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CandidateExplanation {
@@ -426,44 +277,18 @@ impl DecisionExplanation {
     }
 }
 
-/// Compute a deterministic canonical Blake3 digest across all settled decisions.
-pub fn compute_decision_root(
-    settlements: &BTreeMap<String, BTreeMap<String, SettledDecision>>,
-) -> Digest {
-    let mut tree = TrieMap::new();
-    for (decide, entities) in settlements {
-        for (entity, decision) in entities {
-            tree = tree.insert(decision_key(decide, entity), decision_tuple(decision));
-        }
-    }
-    tree.root_digest()
-}
-
-fn decision_key(decide: &str, entity: &str) -> WorldKey {
-    let mut w = CanonWriter::new();
-    w.write_tag("brix.world.decision-key@1");
-    w.write_str(decide);
-    w.write_str(entity);
-    WorldKey::new(w.finish())
-}
-
-fn decision_tuple(decision: &SettledDecision) -> WorldTuple {
-    let mut w = CanonWriter::new();
-    w.write_tag("brix.world.decision@1");
-    w.write_ident(&decision.candidate_name);
-    w.write_uint(decision.priority);
-    w.write_uint(decision.phase);
-    canon_write_value(&decision.value, &mut w);
-    w.write_bytes(decision.calendar_key.tiebreak.as_bytes());
-    WorldTuple::new(w.finish())
-}
-
 /// A compiled decide block scoping candidates to individual entities.
 #[derive(Clone, Debug)]
 pub struct DecideBlock {
     pub name: String,
     pub binder: String,
     pub source_relation: String,
+    /// Declared entity-identity field (ADR-0046, decided 2026-10-04): the
+    /// field of the bound row (qualified `binder.field` or bare `field`)
+    /// whose value names the entity this instance of the block decides about.
+    /// `lower_relations` refuses any world-profile `decide` lacking this, so
+    /// by the time a `DecideBlock` exists it is always present.
+    pub per_field: String,
     pub proposals: Vec<ast::ProposeDecl>,
 }
 
@@ -484,35 +309,6 @@ pub fn compute_candidate_calendar_key(
     canon_write_value(value, &mut w);
     let tiebreak = w.digest(Domain::Value);
     Key::new(phase, priority, tiebreak)
-}
-
-/// The state maintained inside an operator node.
-fn canon_write_value(value: &Value, w: &mut CanonWriter) {
-    match value {
-        Value::Int(i) => {
-            w.write_uint(1);
-            w.write_int(*i);
-        }
-        Value::Str(s) => {
-            w.write_uint(2);
-            w.write_str(s);
-        }
-        Value::Bool(b) => {
-            w.write_uint(3);
-            w.write_uint(if *b { 1 } else { 0 });
-        }
-        Value::Null => {
-            w.write_uint(0);
-        }
-        Value::F64(v) => {
-            w.write_uint(4);
-            v.canon_write(w);
-        }
-        Value::Decimal(v) => {
-            w.write_uint(5);
-            v.canon_write(w);
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -575,7 +371,11 @@ pub struct NetworkDeltaReport {
     pub derived_tuples_retracted: usize,
     pub candidates_inserted: usize,
     pub candidates_retracted: usize,
+    /// Settlements this batch added or changed, keyed by decide block then entity.
     pub settlements: BTreeMap<String, BTreeMap<String, SettledDecision>>,
+    /// Entities whose settlement this batch removed (quiescence: no candidate
+    /// survives), keyed by decide block (ADR-0046 P6 G3, decided 2026-10-04).
+    pub removed_settlements: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// The maintained operator network running bounded incremental evaluations (ADR-0046 §3.5, §3.7).
@@ -590,7 +390,11 @@ pub struct WorldNetwork {
     pub derived_relations: PMap<String, PSet<TupleRecord>>,
     pub decides: PMap<String, DecideBlock>,
     decision_subscribers: PMap<String, Vec<String>>,
-    decision_tree: TrieMap<WorldKey, WorldTuple>,
+    /// Content-addressed trie of settled decisions, keyed by [`decision_key`].
+    /// `pub(crate)` so `session.rs` can persist its nodes to the durable node
+    /// store (ADR-0046 P6 G2, decided 2026-10-04) without this module owning
+    /// any filesystem concern.
+    pub(crate) decision_tree: TrieMap<WorldKey, WorldTuple>,
     pub candidate_frontier: PMap<String, PMap<String, PMap<String, CandidateEntry>>>,
     pub functions: Arc<BTreeMap<String, ast::Callable>>,
     pub current_revision: u64,
@@ -786,29 +590,28 @@ impl WorldNetwork {
         let mut decides = Vec::new();
 
         for (qname, decl) in &program.decides {
-            let mut source_relation = None;
-            if let Expr::Var(v) = &decl.list {
-                if dag.relation_outputs.contains_key(v) {
-                    source_relation = Some(v.clone());
-                } else {
-                    let qualified = format!("{}::{v}", program.root_module);
-                    if dag.relation_outputs.contains_key(&qualified) {
-                        source_relation = Some(qualified);
-                    } else if let Some(found) = dag
-                        .relation_outputs
-                        .keys()
-                        .find(|k| k.ends_with(&format!("::{v}")))
-                    {
-                        source_relation = Some(found.clone());
-                    }
-                }
-            }
+            let source_relation = resolve_decide_source_relation(
+                &decl.list,
+                &qname.module,
+                &dag.relation_outputs,
+            );
 
             if let Some(src) = source_relation {
+                // `lower_relations` (called above) already refused any decide
+                // resolving to a relation without a declared `per` field, so
+                // this is unreachable in practice; still handled as a typed
+                // error rather than a panic, defensively.
+                let per_field = decl.per.clone().ok_or_else(|| {
+                    WorldError::NetworkError(format!(
+                        "decide '{qname}' resolved to relation '{src}' with no 'per' field \
+                         (expected lower_relations to have refused this)"
+                    ))
+                })?;
                 decides.push(DecideBlock {
                     name: qname.to_string(),
                     binder: decl.binder.clone(),
                     source_relation: src,
+                    per_field,
                     proposals: decl.proposals.clone(),
                 });
             }
@@ -1406,7 +1209,9 @@ impl WorldNetwork {
                 .flatten()
             {
                 let decide = &self.decides[decide_name];
-                for delta in rel_deltas {
+                // Apply all removals first so a valid replacement batch does not
+                // transiently conflict with the supports it replaces.
+                for delta in rel_deltas.iter().filter(|d| !d.is_insert()).chain(rel_deltas.iter().filter(|d| d.is_insert())) {
                     let is_ins = delta.is_insert();
                     let (tuple, deriv) = match delta {
                         TupleDelta::Insert { tuple, derivation }
@@ -1419,7 +1224,8 @@ impl WorldNetwork {
                     }
 
                     for propose in &decide.proposals {
-                        let entity_id = extract_entity_id(&eval_tuple, &decide.binder, propose);
+                        let entity_id =
+                            entity_id_for(&eval_tuple, &decide.binder, &decide.per_field)?;
                         touched_entities.insert((decide.name.clone(), entity_id.clone()));
 
                         if is_ins {
@@ -1443,6 +1249,21 @@ impl WorldNetwork {
                                     .or_default()
                                     .entry(entity_id.clone())
                                     .or_default();
+
+                                // Order-independence (ADR-0046, decided 2026-10-04): two
+                                // distinct supporting rows for the same (decide, entity,
+                                // candidate) proposing *different* values is a typed fault,
+                                // never resolved by "whichever support arrived first" —
+                                // matching `reference.rs`, which already rejects this.
+                                if let Some(existing) = entity_map.get(&propose.name) {
+                                    if existing.value != val {
+                                        return Err(WorldError::NetworkError(format!(
+                                            "conflicting support values for decide '{}' entity \
+                                             '{entity_id}' candidate '{}': {:?} vs {val:?}",
+                                            decide.name, propose.name, existing.value
+                                        )));
+                                    }
+                                }
 
                                 let entry =
                                     entity_map.entry(propose.name.clone()).or_insert_with(|| {
@@ -1491,14 +1312,17 @@ impl WorldNetwork {
             }
             let key = decision_key(&decide, &entity);
             if let Some(decision) = self.get_settlement(&decide, &entity) {
-                self.decision_tree = self.decision_tree.insert(key, decision_tuple(&decision));
+                let tuple = decision_tuple(&decision);
+                if self.decision_tree.get(&key) == Some(&tuple) { continue; }
+                self.decision_tree = self.decision_tree.insert(key, tuple);
                 report
                     .settlements
                     .entry(decide)
                     .or_default()
                     .insert(entity, decision);
-            } else {
+            } else if self.decision_tree.get(&key).is_some() {
                 self.decision_tree = self.decision_tree.remove(&key);
+                report.removed_settlements.entry(decide).or_default().insert(entity);
             }
         }
         self.current_revision += 1;
@@ -1787,54 +1611,26 @@ fn build_grouped_tuple(
     tuple
 }
 
-fn extract_entity_id(
+/// Extract a tuple's entity identity using the world profile's declared
+/// `per <field>` (ADR-0046 §3.5, decided 2026-10-04). Replaces the retired
+/// `extract_entity_id` heuristic fallback chain: an unspecified heuristic
+/// cannot be independently reproduced (see `reference.rs`'s former copy of
+/// it), so entity identity is now an explicit, lowering-checked part of the
+/// `decide` declaration. A tuple missing the declared field is a typed fault,
+/// never a silent `"default_entity"` fallback.
+fn entity_id_for(
     tuple: &IntermediateTuple,
     binder: &str,
-    propose: &ast::ProposeDecl,
-) -> String {
-    if !propose.deps.is_empty() {
-        let dep = &propose.deps[0];
-        if let Some(v) = tuple.get(dep).or_else(|| {
-            if let Some((_, f)) = dep.split_once('.') {
-                tuple.get(f)
-            } else {
-                None
-            }
-        }) {
-            return v.to_string();
-        }
-    }
-
-    let candidates = [
-        "entity_id",
-        &format!("{binder}.entity_id"),
-        "order_id",
-        &format!("{binder}.order_id"),
-        "id",
-        &format!("{binder}.id"),
-        "key",
-        &format!("{binder}.key"),
-    ];
-
-    for c in candidates {
-        if let Some(v) = tuple.get(c) {
-            return v.to_string();
-        }
-    }
-
-    if let Some((_, v)) = tuple
-        .fields
-        .iter()
-        .find(|(k, _)| k.ends_with(".id") || k.ends_with("_id"))
-    {
-        return v.to_string();
-    }
-
-    if let Some((_, v)) = tuple.fields.first_key_value() {
-        return v.to_string();
-    }
-
-    "default_entity".to_string()
+    per_field: &str,
+) -> Result<String, WorldError> {
+    tuple
+        .get_qualified(binder, per_field)
+        .map(|v| v.to_string())
+        .ok_or_else(|| {
+            WorldError::NetworkError(format!(
+                "decide entity field '{per_field}' missing from bound row (binder '{binder}')"
+            ))
+        })
 }
 
 /// Evaluate an AST expression over intermediate tuple fields and functions.

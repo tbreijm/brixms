@@ -57,7 +57,7 @@ rel derived sku_order_counts =
     from f in fulfillment
     group by f.sku
 
-decide dispatch for f in fulfillment {
+decide dispatch for f in fulfillment per order_id {
     propose ship_express priority 10 when f.express == "yes" && f.available >= f.qty = "air_express"
     propose ship_standard priority 20 when f.express != "yes" && f.available >= f.qty = "ground_standard"
     propose backorder priority 50 when f.available < f.qty = "backorder_hold"
@@ -524,11 +524,11 @@ fn named_op_variety_coverage() {
 /// `order_id`-shaped fields, verified to settle under the `entity_id`-wins precedence that
 /// both the network and the independent reference agree on.
 #[test]
-fn entity_id_fallback_precedence_end_to_end() {
+fn explicit_entity_field_end_to_end() {
     let src = r#"
 rel input widgets: { entity_id: Str, order_id: Str, ready: Str } key order_id
 
-decide pick for w in widgets {
+decide pick for w in widgets per entity_id {
     propose go priority 1 when w.ready == "yes" = "go"
 }
 "#;

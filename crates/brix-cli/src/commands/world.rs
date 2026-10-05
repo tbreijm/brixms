@@ -45,7 +45,8 @@ pub fn execute_world(op: &WorldOp, json_out: bool) -> u8 {
             dir,
             entity,
             decide,
-        } => execute_explain(dir, entity, decide.as_deref(), json_out),
+            rev,
+        } => execute_explain(dir, entity, decide.as_deref(), *rev, json_out),
     }
 }
 
@@ -134,6 +135,7 @@ fn execute_init(dir: &Path, program: &Path, package_paths: &[PathBuf], json_out:
             "revision": session.current_revision,
             "digest": session.current_revision_digest.map(|d| d.to_hex()),
             "relations": relations,
+            "exec_profile": session.exec_profile.as_ref().map(|p| p.to_json()),
         });
         crate::json::emit_result_json(&res);
     } else {
@@ -146,6 +148,25 @@ fn execute_init(dir: &Path, program: &Path, package_paths: &[PathBuf], json_out:
                 .map(|d| d.to_hex())
                 .unwrap_or_default()
         );
+        if let Some(profile) = &session.exec_profile {
+            println!(
+                "  Exec Profile: {} (evaluator: {}, crate: {})",
+                brix_kb::world::EXEC_PROFILE_SCHEMA,
+                profile.evaluator,
+                profile.crate_version
+            );
+            println!(
+                "    Module Loader Limits: depth={} modules={} module_bytes={} total_bytes={}",
+                profile.module_loader_limits.depth,
+                profile.module_loader_limits.modules,
+                profile.module_loader_limits.module_bytes,
+                profile.module_loader_limits.total_bytes
+            );
+            println!(
+                "    Numeric Semantics: {}; Settlement: {}",
+                profile.numeric_semantics, profile.settlement
+            );
+        }
     }
     EXIT_SUCCESS
 }
@@ -430,11 +451,68 @@ fn execute_show(dir: &Path, rev_opt: Option<u64>, json_out: bool) -> u8 {
     EXIT_SUCCESS
 }
 
-fn execute_explain(dir: &Path, entity: &str, decide_filter: Option<&str>, json_out: bool) -> u8 {
+fn execute_explain(
+    dir: &Path,
+    entity: &str,
+    decide_filter: Option<&str>,
+    rev: Option<u64>,
+    json_out: bool,
+) -> u8 {
     let session = match WorldSession::open(dir) {
         Ok(s) => s,
         Err(e) => return print_world_error("world explain", &e, json_out),
     };
+
+    // A past revision (ADR-0046 P6 G2, decided 2026-10-04): read the real
+    // persisted historical decision from the node store, never a replay.
+    // Only the live head gets the richer in-memory deliberation below (full
+    // candidate list, contributing base facts) — a past revision's candidate
+    // frontier is not persisted, only its settled winners.
+    if let Some(seq) = rev {
+        if seq != session.current_revision {
+            let found = match session.historical_settlement(seq, decide_filter, entity) {
+                Ok(f) => f,
+                Err(e) => return print_world_error("world explain", &e, json_out),
+            };
+            let Some((decide_name, settlement)) = found else {
+                let err = WorldError::NetworkError(format!(
+                    "no settled decision found for entity '{entity}' at revision {seq}"
+                ));
+                return print_world_error("world explain", &err, json_out);
+            };
+            if json_out {
+                let res = json!({
+                    "schema": WORLD_JSON_SCHEMA,
+                    "command": "world explain",
+                    "ok": true,
+                    "authority": "derived",
+                    "revision": seq,
+                    "explanation": {
+                        "entity_id": settlement.entity_id,
+                        "decide_name": decide_name,
+                        "winning_candidate": settlement.candidate_name,
+                        "value": settlement.value.to_string(),
+                        "priority": settlement.priority,
+                        "phase": settlement.phase,
+                    },
+                });
+                crate::json::emit_result_json(&res);
+            } else {
+                println!("Historical decision at revision {seq} for entity '{entity}':");
+                println!("  authority: Derived");
+                println!("  Decide Block: {decide_name}");
+                println!(
+                    "  Winner: {} (priority {}, value: {})",
+                    settlement.candidate_name, settlement.priority, settlement.value
+                );
+                println!(
+                    "  (read from the persisted decision trie at revision {seq}; full candidate \
+                     deliberation is only available at the current head)"
+                );
+            }
+            return EXIT_SUCCESS;
+        }
+    }
 
     let explanation = match decide_filter {
         Some(d) => session.explain_decision_for(d, entity).or_else(|| {
