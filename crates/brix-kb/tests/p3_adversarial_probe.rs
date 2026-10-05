@@ -108,7 +108,12 @@ fn a04_missing_object_must_be_an_error_not_absent() {
         .unwrap();
     s.close().unwrap();
     for sub in fs::read_dir(dir.join("objects")).unwrap().flatten() {
-        let _ = fs::remove_dir_all(sub.path());
+        let path = sub.path();
+        if path.is_dir() {
+            let _ = fs::remove_dir_all(path);
+        } else {
+            let _ = fs::remove_file(path);
+        }
     }
     let s = WorldSession::open(&dir).unwrap();
     let got = s.get("orders", &WorldKey::from_u64(1));
@@ -127,16 +132,21 @@ fn a05_tampered_object_must_be_detected() {
         .unwrap();
     s.close().unwrap();
     let mut tampered_count = 0;
-    for sub in fs::read_dir(dir.join("objects")).unwrap().flatten() {
-        for f in fs::read_dir(sub.path()).unwrap().flatten() {
-            let mut b = fs::read(f.path()).unwrap();
+    fn tamper_objects(path: &std::path::Path, tampered_count: &mut usize) {
+        if path.is_dir() {
+            for entry in fs::read_dir(path).unwrap().flatten() {
+                tamper_objects(&entry.path(), tampered_count);
+            }
+        } else if path.is_file() {
+            let mut b = fs::read(path).unwrap();
             if let Some(pos) = b.windows(8).position(|w| w == b"ORIGINAL") {
                 b[pos] = b'T'; // TRIGINAL
-                fs::write(f.path(), b).unwrap();
-                tampered_count += 1;
+                fs::write(path, b).unwrap();
+                *tampered_count += 1;
             }
         }
     }
+    tamper_objects(&dir.join("objects"), &mut tampered_count);
     assert!(
         tampered_count > 0,
         "at least one object must contain ORIGINAL"
