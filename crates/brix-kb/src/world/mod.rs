@@ -4,9 +4,11 @@
 //! envelope ([`WorldBatch`]), compact revision records ([`WorldRevision`]), chunked
 //! bulk ingestion, and the bounded full-recompute correctness oracle ([`WorldOracle`]).
 
+pub mod audit;
 pub mod batch;
 pub mod codec;
 pub mod error;
+pub mod import_kb;
 pub mod manifest;
 pub mod network;
 pub mod oracle;
