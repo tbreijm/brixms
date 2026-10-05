@@ -827,10 +827,12 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
                 .get("decide")
                 .and_then(Value::as_str)
                 .map(|s| s.to_string());
+            let rev = optional_u64_field(params, "rev");
             WorldOp::Explain {
                 dir,
                 entity,
                 decide,
+                rev,
             }
         }
         other => return Err(("unknown-method", format!("unknown method 'world.{other}'"))),

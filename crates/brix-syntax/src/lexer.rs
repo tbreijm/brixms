@@ -51,6 +51,9 @@ pub enum TokenKind {
     By,
     /// `export <item>` explicit export modifier (ADR-0046).
     Export,
+    /// `per <field>` explicit entity-identity binding in a world-profile
+    /// `decide` block (ADR-0046, decided 2026-10-04).
+    Per,
 
     // Identifiers & Literals
     Ident(String),
@@ -293,6 +296,7 @@ pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token
                     "group" => TokenKind::Group,
                     "by" => TokenKind::By,
                     "export" => TokenKind::Export,
+                    "per" => TokenKind::Per,
                     // `Derived`/`Audited`/`Proven` are deliberately NOT
                     // keywords. They are grade names only in grade position
                     // (after `@`), which the parser recognizes; everywhere

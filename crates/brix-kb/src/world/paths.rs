@@ -51,6 +51,18 @@ impl WorldPaths {
         self.revisions_dir().join(format!(".{seq}.tmp"))
     }
 
+    /// Durable body of one revision's decision delta (ADR-0046 P6 G2/G3,
+    /// decided 2026-10-04): the canonical encoding whose digest is the
+    /// revision record's `decision_delta_digest`. Written and fsynced before
+    /// the revision record itself (`WorldSession::apply_batch`).
+    pub fn decision_delta_file(&self, seq: u64) -> PathBuf {
+        self.revisions_dir().join(format!("{seq}.decisions"))
+    }
+
+    pub fn decision_delta_tmp_file(&self, seq: u64) -> PathBuf {
+        self.revisions_dir().join(format!(".{seq}.decisions.tmp"))
+    }
+
     pub fn staging_upload_dir(&self, upload_id: &str) -> PathBuf {
         self.staging_dir().join(upload_id)
     }

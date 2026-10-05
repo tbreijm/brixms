@@ -113,6 +113,7 @@ pub enum WorldOp {
         dir: PathBuf,
         entity: String,
         decide: Option<String>,
+        rev: Option<u64>,
     },
 }
 
@@ -1720,6 +1721,7 @@ fn parse_world_explain_args(args: &[String], json: bool) -> Result<WorldOp, CliU
     let cmd_name = "world explain";
     let mut positionals = Vec::new();
     let mut decide = None;
+    let mut rev = None;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -1737,6 +1739,18 @@ fn parse_world_explain_args(args: &[String], json: bool) -> Result<WorldOp, CliU
             decide = Some(args[i].clone());
         } else if let Some(val) = arg.strip_prefix("--decide=") {
             decide = Some(val.to_string());
+        } else if arg == "--rev" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--rev'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            rev = Some(parse_rev(&args[i], cmd_name, json)?);
+        } else if let Some(val) = arg.strip_prefix("--rev=") {
+            rev = Some(parse_rev(val, cmd_name, json)?);
         } else if arg.starts_with('-') {
             return Err(CliUsageError::usage(
                 format!("unknown option: '{arg}'"),
@@ -1768,6 +1782,7 @@ fn parse_world_explain_args(args: &[String], json: bool) -> Result<WorldOp, CliU
         dir,
         entity,
         decide,
+        rev,
     })
 }
 

@@ -96,17 +96,25 @@ pub struct RelBinding {
     pub relation: String,
 }
 
-/// `decide NAME for BINDER in LIST_EXPR { propose ... }` (ADR-0043): declares
-/// a commit pool that is instantiated once per element of the list named by
-/// `list`, in list order. Every nested `propose` is scoped to this block —
-/// its guard/value may additionally read `binder`, bound to the current
-/// element — but its *name* is checked for uniqueness program-wide, exactly
-/// like a top-level `propose`.
+/// `decide NAME for BINDER in LIST_EXPR [per FIELD] { propose ... }` (ADR-0043,
+/// `per` added ADR-0046): declares a commit pool that is instantiated once per
+/// element of the list named by `list`, in list order. Every nested `propose`
+/// is scoped to this block — its guard/value may additionally read `binder`,
+/// bound to the current element — but its *name* is checked for uniqueness
+/// program-wide, exactly like a top-level `propose`.
+///
+/// `per FIELD` explicitly names the field of the bound element that identifies
+/// *which entity* this instance of the block is deciding about (decided
+/// 2026-10-04). It is optional at the grammar level — the legacy
+/// finite-decision profile (ADR-0043) never reads it — but the world profile
+/// (ADR-0046) requires it at lowering for any `decide` whose `list` resolves
+/// to a relational source; see `brix_lower::relation_dag::lower_relations`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecideDecl {
     pub name: String,
     pub binder: String,
     pub list: Expr,
+    pub per: Option<String>,
     pub proposals: Vec<ProposeDecl>,
 }
 

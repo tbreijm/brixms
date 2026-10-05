@@ -8,6 +8,15 @@ use super::error::WorldError;
 use super::types::WorldKey;
 
 pub const REVISION_SCHEMA: &str = "brix.world.revision@1";
+/// `brix.world.revision@2` (ADR-0046 P6, decided 2026-10-04): additive over
+/// `@1` — binds `decision_delta_digest`, the digest of the per-revision
+/// decision delta body (`network::encode_decision_delta`), persisted
+/// durably by `session.rs` before the revision record itself. `@1` records
+/// decode unchanged (`decision_delta_digest` reads back as `None`), and the
+/// revision digest formula for `@1` records is untouched byte-for-byte —
+/// the new field only enters the hash for `@2` records (see
+/// `WorldRevision::compute_digest`).
+pub const REVISION_SCHEMA_V2: &str = "brix.world.revision@2";
 const REVISION_TAG: &str = "brix.world.revision@1";
 
 /// Settlement status of the world state following batch application.
@@ -105,14 +114,23 @@ pub struct WorldRevision {
     pub decision_root: Option<Digest>,
     pub changed_keys: BTreeMap<String, Vec<WorldKey>>,
     pub status: SettlementStatus,
+    /// Digest of this revision's decision delta body (`brix.world.revision@2`
+    /// only, ADR-0046 P6, decided 2026-10-04); `None` for `@1` records and for
+    /// any revision with no attached decision network.
+    pub decision_delta_digest: Option<Digest>,
+    pub exec_profile_digest: Option<Digest>,
     pub revision_digest: Digest,
 }
 
 impl WorldRevision {
     /// Every field is independently load-bearing for the revision digest
     /// (`compute_digest` hashes them in this exact order); a params struct
-    /// would just move the same 13 fields one level of indirection away
+    /// would just move the same 14 fields one level of indirection away
     /// without reducing the real arity this constructor has to bind.
+    ///
+    /// Always writes `brix.world.revision@2`: see [`REVISION_SCHEMA_V2`].
+    /// `@1` records only arise by decoding bytes written before this change
+    /// (`from_json`), never from this constructor.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         seq: u64,
@@ -128,10 +146,13 @@ impl WorldRevision {
         decision_root: Option<Digest>,
         changed_keys: BTreeMap<String, Vec<WorldKey>>,
         status: SettlementStatus,
+        decision_delta_digest: Option<Digest>,
     ) -> Self {
         let ts = timestamp.into();
         let ikey = idempotency_key.into();
+        let schema = REVISION_SCHEMA_V2.to_string();
         let digest = Self::compute_digest(
+            &schema,
             seq,
             &ts,
             expected_base_revision,
@@ -145,10 +166,12 @@ impl WorldRevision {
             &decision_root,
             &changed_keys,
             &status,
+            &decision_delta_digest,
+            &None,
         );
 
         Self {
-            schema: REVISION_SCHEMA.to_string(),
+            schema,
             seq,
             timestamp: ts,
             expected_base_revision,
@@ -162,12 +185,20 @@ impl WorldRevision {
             decision_root,
             changed_keys,
             status,
+            decision_delta_digest,
+            exec_profile_digest: None,
             revision_digest: digest,
         }
     }
 
+    /// Version-dispatched digest formula. `schema == REVISION_SCHEMA`
+    /// (`@1`) reproduces today's byte-for-byte formula exactly, with
+    /// `decision_delta_digest` contributing nothing — not even a presence
+    /// tag — so every historical `@1` record still verifies. `@2` appends an
+    /// explicit presence-tagged `decision_delta_digest` block after `status`.
     #[allow(clippy::too_many_arguments)]
     fn compute_digest(
+        schema: &str,
         seq: u64,
         timestamp: &str,
         expected_base_revision: u64,
@@ -181,10 +212,12 @@ impl WorldRevision {
         decision_root: &Option<Digest>,
         changed_keys: &BTreeMap<String, Vec<WorldKey>>,
         status: &SettlementStatus,
+        decision_delta_digest: &Option<Digest>,
+        exec_profile_digest: &Option<Digest>,
     ) -> Digest {
         let mut w = CanonWriter::new();
         w.write_tag(REVISION_TAG);
-        w.write_ident(REVISION_SCHEMA);
+        w.write_ident(schema);
         w.write_uint(seq);
         w.write_str(timestamp);
         w.write_uint(expected_base_revision);
@@ -236,7 +269,30 @@ impl WorldRevision {
             }
         }
         status.canon_write(&mut w);
+        if schema == REVISION_SCHEMA_V2 {
+            match decision_delta_digest {
+                None => w.write_uint(0),
+                Some(d) => {
+                    w.write_uint(1);
+                    w.write_bytes(d.as_bytes());
+                }
+            }
+        }
+        if schema == REVISION_SCHEMA_V2 {
+            match exec_profile_digest { None => w.write_uint(0), Some(d) => { w.write_uint(1); w.write_bytes(d.as_bytes()); } }
+        }
         w.digest(Domain::Value)
+    }
+
+    /// Bind the producing execution profile into the revision identity.
+    pub fn bind_exec_profile(mut self, digest: Option<Digest>) -> Self {
+        self.exec_profile_digest = digest;
+        self.revision_digest = Self::compute_digest(&self.schema, self.seq, &self.timestamp,
+            self.expected_base_revision, &self.idempotency_key, &self.batch_digest,
+            &self.program_digest, &self.previous_revision_digest, &self.relation_roots,
+            &self.relation_cardinalities, &self.secondary_index_roots, &self.decision_root,
+            &self.changed_keys, &self.status, &self.decision_delta_digest, &self.exec_profile_digest);
+        self
     }
 
     pub fn to_json(&self) -> JsonValue {
@@ -272,6 +328,8 @@ impl WorldRevision {
             "decision_root": self.decision_root.map(|d| d.to_hex()),
             "changed_keys": changed_json,
             "status": self.status.to_json(),
+            "decision_delta_digest": self.decision_delta_digest.map(|d| d.to_hex()),
+            "exec_profile_digest": self.exec_profile_digest.map(|d| d.to_hex()),
             "revision_digest": self.revision_digest.to_hex(),
         })
     }
@@ -281,9 +339,9 @@ impl WorldRevision {
             .get("schema")
             .and_then(|x| x.as_str())
             .ok_or_else(|| WorldError::Json("revision missing 'schema'".to_string()))?;
-        if schema != REVISION_SCHEMA {
+        if schema != REVISION_SCHEMA && schema != REVISION_SCHEMA_V2 {
             return Err(WorldError::InvalidSchema(format!(
-                "expected revision schema {REVISION_SCHEMA}, got {schema}"
+                "expected revision schema {REVISION_SCHEMA} or {REVISION_SCHEMA_V2}, got {schema}"
             )));
         }
 
@@ -488,6 +546,26 @@ impl WorldRevision {
             .ok_or_else(|| WorldError::Json("revision missing 'status'".to_string()))
             .and_then(SettlementStatus::from_json)?;
 
+        let read_optional_digest = |field: &str| -> Result<Option<Digest>, WorldError> {
+            match v.get(field) {
+                None | Some(JsonValue::Null) => Ok(None),
+                Some(JsonValue::String(hex)) => {
+                    if hex.len() != 64 || !hex.is_ascii() { return Err(WorldError::Json(format!("invalid {field}"))); }
+                    let mut bytes = [0u8; 32];
+                    for (i, byte) in bytes.iter_mut().enumerate() {
+                        *byte = u8::from_str_radix(&hex[i*2..i*2+2],16).map_err(|_| WorldError::Json(format!("invalid {field}")))?;
+                    }
+                    Ok(Some(Digest::from_bytes(bytes)))
+                },
+                _ => Err(WorldError::Json(format!("invalid {field}"))),
+            }
+        };
+        let decision_delta_digest = read_optional_digest("decision_delta_digest")?;
+        let exec_profile_digest = read_optional_digest("exec_profile_digest")?;
+        if schema == REVISION_SCHEMA && (decision_delta_digest.is_some() || exec_profile_digest.is_some()) {
+            return Err(WorldError::InvalidSchema("v1 revision cannot bind v2 evidence".into()));
+        }
+
         let rev_hex = v
             .get("revision_digest")
             .and_then(|x| x.as_str())
@@ -511,6 +589,7 @@ impl WorldRevision {
         let revision_digest = Digest::from_bytes(d_bytes);
 
         let computed_digest = Self::compute_digest(
+            schema,
             seq,
             &timestamp,
             expected_base_revision,
@@ -524,6 +603,8 @@ impl WorldRevision {
             &decision_root,
             &changed_keys,
             &status,
+            &decision_delta_digest,
+            &exec_profile_digest,
         );
 
         if computed_digest != revision_digest {
@@ -549,7 +630,123 @@ impl WorldRevision {
             decision_root,
             changed_keys,
             status,
+            decision_delta_digest,
+            exec_profile_digest,
             revision_digest,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[allow(clippy::type_complexity)]
+    fn sample_fields() -> (
+        BTreeMap<String, Digest>,
+        BTreeMap<String, usize>,
+        BTreeMap<String, Digest>,
+        BTreeMap<String, Vec<WorldKey>>,
+    ) {
+        let mut relation_roots = BTreeMap::new();
+        relation_roots.insert(
+            "orders".to_string(),
+            Digest::of(Domain::Value, b"orders-root"),
+        );
+        let mut relation_cardinalities = BTreeMap::new();
+        relation_cardinalities.insert("orders".to_string(), 3usize);
+        let secondary_index_roots = BTreeMap::new();
+        let mut changed_keys = BTreeMap::new();
+        changed_keys.insert("orders".to_string(), vec![WorldKey::from_str("k1")]);
+        (
+            relation_roots,
+            relation_cardinalities,
+            secondary_index_roots,
+            changed_keys,
+        )
+    }
+
+    /// A fresh `WorldRevision::new` always writes `@2` and round-trips its
+    /// `decision_delta_digest` through JSON unchanged.
+    #[test]
+    fn v2_round_trips_through_json_with_decision_delta_digest() {
+        let (relation_roots, relation_cardinalities, secondary_index_roots, changed_keys) =
+            sample_fields();
+        let delta_digest = Digest::of(Domain::Value, b"some-decision-delta");
+        let rev = WorldRevision::new(
+            1,
+            "2026-10-04T00:00:00Z",
+            0,
+            "idem-1",
+            None,
+            None,
+            None,
+            relation_roots,
+            relation_cardinalities,
+            secondary_index_roots,
+            Some(Digest::of(Domain::Value, b"decision-root")),
+            changed_keys,
+            SettlementStatus::Committed,
+            Some(delta_digest),
+        );
+        assert_eq!(rev.schema, REVISION_SCHEMA_V2);
+        assert_eq!(rev.decision_delta_digest, Some(delta_digest));
+        let json = rev.to_json();
+        let decoded = WorldRevision::from_json(&json).expect("v2 round-trip must decode");
+        assert_eq!(decoded, rev);
+    }
+
+    /// A `brix.world.revision@1` record written before `decision_delta_digest`
+    /// existed must still decode, with the field reading back as `None`, and
+    /// its digest must match the pre-existing `@1` formula byte-for-byte —
+    /// schema `@1` skips the new field entirely, not even a presence tag, so
+    /// no historical `@1` record is invalidated by this change.
+    #[test]
+    fn v1_record_without_the_field_still_decodes_with_unaffected_digest() {
+        let (relation_roots, relation_cardinalities, secondary_index_roots, changed_keys) =
+            sample_fields();
+        let status = SettlementStatus::Committed;
+        let decision_root = Some(Digest::of(Domain::Value, b"decision-root"));
+        let old_digest = WorldRevision::compute_digest(
+            REVISION_SCHEMA,
+            1,
+            "2026-10-04T00:00:00Z",
+            0,
+            "idem-1",
+            &None,
+            &None,
+            &None,
+            &relation_roots,
+            &relation_cardinalities,
+            &secondary_index_roots,
+            &decision_root,
+            &changed_keys,
+            &status,
+            &None,
+            &None,
+        );
+        let v1_json = json!({
+            "schema": REVISION_SCHEMA,
+            "seq": 1u64,
+            "timestamp": "2026-10-04T00:00:00Z",
+            "expected_base_revision": 0u64,
+            "idempotency_key": "idem-1",
+            "batch_digest": JsonValue::Null,
+            "program_digest": JsonValue::Null,
+            "previous_revision_digest": JsonValue::Null,
+            "relation_roots": { "orders": relation_roots["orders"].to_hex() },
+            "relation_cardinalities": { "orders": 3u64 },
+            "secondary_index_roots": {},
+            "decision_root": decision_root.unwrap().to_hex(),
+            "changed_keys": { "orders": [ changed_keys["orders"][0].to_hex() ] },
+            "status": status.to_json(),
+            "revision_digest": old_digest.to_hex(),
+        });
+        // Deliberately no "decision_delta_digest" key at all: that is exactly
+        // the shape of every `@1` record on disk before this change.
+        let decoded = WorldRevision::from_json(&v1_json).expect("v1 record must still decode");
+        assert_eq!(decoded.schema, REVISION_SCHEMA);
+        assert_eq!(decoded.decision_delta_digest, None);
+        assert_eq!(decoded.revision_digest, old_digest);
     }
 }

@@ -4,6 +4,7 @@
 //! envelope ([`WorldBatch`]), compact revision records ([`WorldRevision`]), chunked
 //! bulk ingestion, and the bounded full-recompute correctness oracle ([`WorldOracle`]).
 
+pub mod decision_codec;
 pub mod batch;
 pub mod codec;
 pub mod error;
@@ -23,16 +24,17 @@ pub use codec::{encode_secondary_key, extract_indexed_field, TupleRecord, TUPLE_
 pub use error::{CrashPoint, WorldError};
 pub use manifest::{RelationDecl, WorldManifest, WORLD_PROFILE, WORLD_SCHEMA};
 pub use network::{
-    compute_candidate_calendar_key, compute_decision_root, eval_expr, CandidateEntry,
+    compute_candidate_calendar_key, compute_decision_root, decision_key, decision_tuple,
+    decode_settled_decision, encode_decision_delta, eval_expr, CandidateEntry,
     CandidateExplanation, DecideBlock, DecisionExplanation, DerivationId, IntermediateTuple,
     NetworkDeltaReport, OperatorState, SettledDecision, TupleDelta, Value, WorldNetwork,
     WorldNetworkState,
 };
 pub use oracle::{DiffEvent, WorldOracle};
 pub use paths::WorldPaths;
-pub use revision::{SettlementStatus, WorldRevision, REVISION_SCHEMA};
+pub use revision::{SettlementStatus, WorldRevision, REVISION_SCHEMA, REVISION_SCHEMA_V2};
 pub use session::{
-    DiffPage, QueryPage, RevisionReceipt, SecondaryIndexCursor, SecondaryIndexPage, WorldSession,
-    WorldSnapshot,
+    DiffPage, ExecModuleLoaderLimits, ExecProfileV1, QueryPage, RevisionReceipt,
+    SecondaryIndexCursor, SecondaryIndexPage, WorldSession, WorldSnapshot, EXEC_PROFILE_SCHEMA,
 };
 pub use types::{WorldCursor, WorldKey, WorldTuple};

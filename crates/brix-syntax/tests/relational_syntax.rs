@@ -187,16 +187,57 @@ let rel = 3
 let key = 4
 let group = 5
 let by = 6
+let per = 7
 
 fn f(select: Int): Int = select
 fn g(export: Int): Int = export
 fn h(rel: Int): Int = rel
+fn i(per: Int): Int = per
 
-config T = { rel: Int, select: Str, export: Bool }
-fn make_t(): T = { rel: 10, select: "text", export: true }
+config T = { rel: Int, select: Str, export: Bool, per: Int }
+fn make_t(): T = { rel: 10, select: "text", export: true, per: 1 }
 "#;
     let module = parse(src).expect("legacy identifiers and contextual keywords must parse cleanly");
-    assert_eq!(module.items.len(), 11);
+    assert_eq!(module.items.len(), 13);
+}
+
+#[test]
+fn test_decide_requires_per_field_to_parse_and_stays_contextual_elsewhere() {
+    let src = r#"
+rel input order: { id: Str, qty: Int } key id
+
+decide fulfill for o in order per id {
+    propose fulfill_order priority 1 when o.qty > 0 = o.id
+}
+"#;
+    let module = parse(src).expect("should parse decide with explicit 'per' field");
+    assert_eq!(module.items.len(), 2);
+    match &module.items[1] {
+        Item::Decide(d) => {
+            assert_eq!(d.name, "fulfill");
+            assert_eq!(d.binder, "o");
+            assert_eq!(d.per.as_deref(), Some("id"));
+        }
+        other => panic!("expected Decide, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_decide_without_per_still_parses_as_none() {
+    // The grammar itself does not require 'per' (the legacy finite-decision
+    // profile never writes it); the world-profile requirement is enforced at
+    // lowering (`brix_lower::relation_dag::lower_relations`), not parsing.
+    let src = r#"
+propose only_candidate priority 1 when true = 1
+decide pick for x in things {
+    propose go priority 1 when true = x
+}
+"#;
+    let module = parse(src).expect("decide without 'per' must still parse");
+    match &module.items[1] {
+        Item::Decide(d) => assert_eq!(d.per, None),
+        other => panic!("expected Decide, got {:?}", other),
+    }
 }
 
 #[test]

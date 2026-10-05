@@ -132,6 +132,13 @@ pub enum RelationalLowerError {
     MissingEquiJoinPredicate { left: String, right: String },
     /// Unsupported expression in query.
     UnsupportedExpression(String),
+    /// A `decide` block whose `list` resolves to a relational source has no
+    /// explicit `per <field>` entity-identity binding (ADR-0046, decided
+    /// 2026-10-04). The world profile requires it; the heuristic that used to
+    /// infer an entity field from naming conventions is retired. The legacy
+    /// finite-decision profile (ADR-0043) is unaffected: a `decide` whose
+    /// `list` is not a relation output never reaches this check.
+    DecideMissingEntityField { decide: String },
 }
 
 impl fmt::Display for RelationalLowerError {
@@ -168,6 +175,14 @@ impl fmt::Display for RelationalLowerError {
                 )
             }
             Self::UnsupportedExpression(msg) => write!(f, "unsupported expression in query: {msg}"),
+            Self::DecideMissingEntityField { decide } => {
+                write!(
+                    f,
+                    "decide block '{decide}' decides over a relational source but declares no \
+                     'per <field>' entity-identity binding; the world profile (ADR-0046) requires \
+                     it explicitly — add 'per <field>' naming the bound row's entity-identifying field"
+                )
+            }
         }
     }
 }
@@ -257,7 +272,106 @@ pub fn lower_relations(program: &LinkedProgram) -> Result<RelationDag, Relationa
         }
     }
 
+    // Entity identity (ADR-0046, decided 2026-10-04): any `decide` block whose
+    // `list` names a relation in this DAG is a world-profile decide and must
+    // declare `per <field>` explicitly. A `decide` whose `list` is not a known
+    // relation belongs to the legacy finite-decision profile (ADR-0043) and is
+    // out of scope here — this is the same resolution rule `network.rs` and
+    // `reference.rs` use to decide which `decide` blocks they instantiate.
+    let schemas = decision_field_schemas(&dag, program);
+    for (qname, decl) in &program.decides {
+        if let Some(source) = resolve_decide_source_relation(&decl.list, &qname.module, &dag.relation_outputs) {
+            let per = decl.per.as_ref().ok_or_else(|| RelationalLowerError::DecideMissingEntityField { decide: qname.to_string() })?;
+            let fields = &schemas[dag.relation_outputs[&source].0];
+            match fields.get(per) {
+                Some(ast::Ty::Named(t)) if matches!(t.as_str(), "Str" | "Int" | "Bool" | "F64" | "Decimal") => {},
+                other => return Err(RelationalLowerError::UnsupportedExpression(format!(
+                    "decide '{qname}' per field '{per}' must exist and have a scalar type; got {other:?}"
+                ))),
+            }
+        }
+    }
+
     Ok(dag)
+}
+
+/// Resolve the relation that a `decide` block's `list` expression names, if
+/// any. Returns `None` when `list` is not a bare `Var` naming a relation
+/// output in `relation_outputs` — such a `decide` is out of scope for the
+/// world profile (it belongs to the legacy finite-decision profile, ADR-0043,
+/// whose `list` is an ordinary expression, not a relation reference).
+///
+/// Shared by [`lower_relations`]'s entity-identity check and by the two
+/// independent evaluators (`brix_kb::world::network`, `brix_kb::world::reference`)
+/// that each instantiate `decide` blocks over the same lowered DAG — a single
+/// resolution rule, reused as the *problem statement*, not as shared
+/// evaluation logic (see `reference.rs`'s module docs on what independence
+/// does and does not require).
+pub fn resolve_decide_source_relation(
+    list: &Expr,
+    root_module: &str,
+    relation_outputs: &BTreeMap<String, OperatorId>,
+) -> Option<String> {
+    let Expr::Var(v) = list else {
+        return None;
+    };
+    if relation_outputs.contains_key(v) {
+        return Some(v.clone());
+    }
+    let qualified = format!("{root_module}::{v}");
+    if relation_outputs.contains_key(&qualified) {
+        return Some(qualified);
+    }
+    None
+}
+
+/// Propagate output field types through the acyclic DAG for entity-field validation.
+fn decision_field_schemas(dag: &RelationDag, program: &LinkedProgram) -> Vec<BTreeMap<String, ast::Ty>> {
+    fn expr_ty(e: &Expr, fields: &BTreeMap<String, ast::Ty>, program: &LinkedProgram) -> Option<ast::Ty> {
+        match e {
+            Expr::Var(v) => fields.get(v).cloned(),
+            Expr::Field(base, field) => match base.as_ref() {
+                Expr::Var(v) => fields.get(&format!("{v}.{field}")).cloned(),
+                _ => None,
+            },
+            Expr::Str(_) => Some(ast::Ty::Named("Str".into())),
+            Expr::Bool(_) | Expr::Not(_) => Some(ast::Ty::Named("Bool".into())),
+            Expr::Num(n) => Some(ast::Ty::Named(if n.contains('.') { "F64" } else { "Int" }.into())),
+            Expr::Bin { op, lhs, .. } => match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => expr_ty(lhs, fields, program),
+                _ => Some(ast::Ty::Named("Bool".into())),
+            },
+            Expr::Call { func, .. } => program.functions.iter().find(|(k,_)| k.to_string() == *func).and_then(|(_, f)| f.ret.clone()),
+            _ => None,
+        }
+    }
+    let mut schemas: Vec<BTreeMap<String, ast::Ty>> = Vec::new();
+    for node in &dag.nodes {
+        let fields = match node {
+            OperatorNode::Scan { relation, schema, .. } => {
+                let fields = match schema {
+                    ast::Ty::Record(f) => Some(f),
+                    ast::Ty::Named(name) => {
+                        let owner = owner_module(relation);
+                        let (module, local) = name.rsplit_once("::").unwrap_or((owner, name));
+                        program.configs.get(&crate::module_graph::QualifiedName::new(module, local)).and_then(|c| match &c.body { ast::ConfigBody::Record(f) => Some(f), _ => None })
+                    },
+                    _ => None,
+                };
+                fields.into_iter().flatten().map(|f| (f.name.clone(), f.ty.clone())).collect()
+            },
+            OperatorNode::Bind { input, alias } => schemas[input.0].iter().map(|(k,v)| (format!("{alias}.{k}"), v.clone())).collect(),
+            OperatorNode::Filter { input, .. } | OperatorNode::Distinct { input } => schemas[input.0].clone(),
+            OperatorNode::EquiJoin { left, right, .. } => { let mut f = schemas[left.0].clone(); f.extend(schemas[right.0].clone()); f },
+            OperatorNode::Project { input, projections } => projections.iter().filter_map(|(k,e)| expr_ty(e, &schemas[input.0], program).map(|t| (k.clone(),t))).collect(),
+            OperatorNode::GroupedCount { input, group_keys, projections } => projections.iter().filter_map(|(k,p)| match p {
+                GroupProjection::Count => Some((k.clone(), ast::Ty::Named("Int".into()))),
+                GroupProjection::Key(i) => expr_ty(&group_keys[*i], &schemas[input.0], program).map(|t| (k.clone(), t)),
+            }).collect(),
+        };
+        schemas.push(fields);
+    }
+    schemas
 }
 
 enum RelationSource {

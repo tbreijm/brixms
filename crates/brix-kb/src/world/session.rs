@@ -396,6 +396,148 @@ impl WorldSnapshot {
     }
 }
 
+/// Schema tag for [`ExecProfileV1`] (ADR-0046 P6 §1.1).
+pub const EXEC_PROFILE_SCHEMA: &str = "brix.world.exec@1";
+
+/// Module-loader resource limits as recorded in [`ExecProfileV1`] — the same
+/// four bounds as `brix_lower::module_graph::ModuleLoaderLimits`, named per
+/// the P6 audit contract (`depth`/`modules`/`module_bytes`/`total_bytes`)
+/// rather than that type's internal field names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ExecModuleLoaderLimits {
+    pub depth: usize,
+    pub modules: usize,
+    pub module_bytes: usize,
+    pub total_bytes: usize,
+}
+
+/// Recorded, **non-authoritative** execution profile (`brix.world.exec@1`,
+/// ADR-0046 P6 §1.1, decided 2026-10-04): written into `program.json` at
+/// `world init` as an additive field (older files simply lack it — see
+/// [`WorldSession::open`]). A verifier *compares* this to its own profile and
+/// refuses on mismatch; it never adopts limits from an untrusted artifact
+/// (ADR-0046 §3.8, "host operational limits must never be relaxed by an
+/// untrusted artifact").
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ExecProfileV1 {
+    /// Which evaluator produced the world this profile is recorded in —
+    /// `"brix-world-net@1"` for the maintained incremental `WorldNetwork`, or
+    /// `"brix-world-ref@1"` for the independent reference evaluator.
+    pub evaluator: String,
+    pub crate_version: String,
+    pub module_loader_limits: ExecModuleLoaderLimits,
+    pub numeric_semantics: String,
+    pub settlement: String,
+}
+
+impl ExecProfileV1 {
+    /// This crate's current profile for worlds driven by [`WorldNetwork`].
+    pub fn current_for_network() -> Self {
+        let limits = ModuleLoaderLimits::default();
+        Self {
+            evaluator: "brix-world-net@1".to_string(),
+            crate_version: env!("CARGO_PKG_VERSION").to_string(),
+            module_loader_limits: ExecModuleLoaderLimits {
+                depth: limits.max_import_depth,
+                modules: limits.max_import_modules,
+                module_bytes: limits.max_module_source_bytes,
+                total_bytes: limits.max_total_source_bytes,
+            },
+            numeric_semantics: "ADR-0045".to_string(),
+            settlement: "least-key(phase,priority,tiebreak)".to_string(),
+        }
+    }
+
+    /// Canonical profile identity, including the candidate-value admissibility rule.
+    pub fn digest(&self) -> Digest {
+        let mut w = CanonWriter::new();
+        w.write_tag(EXEC_PROFILE_SCHEMA);
+        w.write_str(&self.evaluator);
+        w.write_str(&self.crate_version);
+        for n in [self.module_loader_limits.depth, self.module_loader_limits.modules,
+            self.module_loader_limits.module_bytes, self.module_loader_limits.total_bytes] { w.write_uint(n as u64); }
+        w.write_str(&self.numeric_semantics);
+        w.write_str(&self.settlement);
+        w.write_str("same-proposal-entity-supports-must-agree@1");
+        w.digest(Domain::Value)
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "profile": EXEC_PROFILE_SCHEMA,
+            "evaluator": self.evaluator,
+            "crate_version": self.crate_version,
+            "module_loader_limits": {
+                "depth": self.module_loader_limits.depth,
+                "modules": self.module_loader_limits.modules,
+                "module_bytes": self.module_loader_limits.module_bytes,
+                "total_bytes": self.module_loader_limits.total_bytes,
+            },
+            "numeric_semantics": self.numeric_semantics,
+            "settlement": self.settlement,
+        })
+    }
+
+    pub fn from_json(v: &serde_json::Value) -> Result<Self, WorldError> {
+        let profile = v
+            .get("profile")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| WorldError::Json("exec_profile missing 'profile'".into()))?;
+        if profile != EXEC_PROFILE_SCHEMA {
+            return Err(WorldError::InvalidSchema(format!(
+                "expected exec profile {EXEC_PROFILE_SCHEMA}, got {profile}"
+            )));
+        }
+        let evaluator = v
+            .get("evaluator")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| WorldError::Json("exec_profile missing 'evaluator'".into()))?
+            .to_string();
+        let crate_version = v
+            .get("crate_version")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| WorldError::Json("exec_profile missing 'crate_version'".into()))?
+            .to_string();
+        let limits_val = v.get("module_loader_limits").ok_or_else(|| {
+            WorldError::Json("exec_profile missing 'module_loader_limits'".into())
+        })?;
+        let get_usize = |field: &str| -> Result<usize, WorldError> {
+            limits_val
+                .get(field)
+                .and_then(|x| x.as_u64())
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| {
+                    WorldError::Json(format!(
+                        "exec_profile.module_loader_limits missing '{field}'"
+                    ))
+                })
+        };
+        let module_loader_limits = ExecModuleLoaderLimits {
+            depth: get_usize("depth")?,
+            modules: get_usize("modules")?,
+            module_bytes: get_usize("module_bytes")?,
+            total_bytes: get_usize("total_bytes")?,
+        };
+        let numeric_semantics = v
+            .get("numeric_semantics")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| WorldError::Json("exec_profile missing 'numeric_semantics'".into()))?
+            .to_string();
+        let settlement = v
+            .get("settlement")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| WorldError::Json("exec_profile missing 'settlement'".into()))?
+            .to_string();
+        Ok(Self {
+            evaluator,
+            crate_version,
+            module_loader_limits,
+            numeric_semantics,
+            settlement,
+        })
+    }
+}
+
 /// The active persistent world runtime session.
 pub struct WorldSession {
     pub root: PathBuf,
@@ -409,6 +551,10 @@ pub struct WorldSession {
     pub committed_idempotency_keys: BTreeMap<String, CommittedBatchInfo>,
     pub crash_injector: Option<CrashPoint>,
     pub network: Option<WorldNetwork>,
+    /// Recorded (non-authoritative) execution profile (ADR-0046 P6 §1.1,
+    /// decided 2026-10-04); `None` for a storage-only world or a
+    /// `program.json` written before this field existed.
+    pub exec_profile: Option<ExecProfileV1>,
 }
 
 impl WorldSession {
@@ -461,6 +607,7 @@ impl WorldSession {
             None,
             BTreeMap::new(),
             SettlementStatus::Committed,
+            None,
         );
         let rev0_bytes = serde_json::to_vec_pretty(&rev0.to_json())
             .map_err(|e| WorldError::Json(e.to_string()))?;
@@ -478,6 +625,7 @@ impl WorldSession {
             committed_idempotency_keys: BTreeMap::new(),
             crash_injector: None,
             network: None,
+            exec_profile: None,
         })
     }
 
@@ -519,6 +667,13 @@ impl WorldSession {
         let rev_val: serde_json::Value =
             serde_json::from_slice(&rev_bytes).map_err(|e| WorldError::Json(e.to_string()))?;
         let current_rev = WorldRevision::from_json(&rev_val)?;
+        let head_fields: Vec<_> = head_line.split_whitespace().collect();
+        if current_rev.seq != current_revision || head_fields.len() > 2 ||
+           (head_fields.len() == 1 && current_revision != 0) ||
+           (head_fields.len() == 2 && head_fields[1] != current_rev.revision_digest.to_hex()) {
+            return Err(WorldError::CorruptedHead("HEAD revision digest mismatch".into()));
+        }
+
         if manifest.program_required && current_rev.program_digest != Some(manifest.program_digest)
         {
             return Err(WorldError::InvalidSchema(
@@ -603,6 +758,7 @@ impl WorldSession {
             committed_idempotency_keys,
             crash_injector: None,
             network: None,
+            exec_profile: None,
         };
 
         let program_file = session.paths.root.join("program.json");
@@ -656,8 +812,32 @@ impl WorldSession {
             let network = WorldNetwork::from_program(&linked)?;
             validate_program_relations(&session.manifest, &network)?;
             session.set_network(network)?;
+
+            // Additive field (ADR-0046 P6 §1.1, decided 2026-10-04): a
+            // `program.json` written before `exec_profile` existed simply
+            // lacks the key, and decodes as `None` here, not a default-valued
+            // profile — the file still opens either way.
+            if let Some(profile_val) = val.get("exec_profile") {
+                session.exec_profile = Some(ExecProfileV1::from_json(profile_val)?);
+            }
         }
 
+        if let Some(bound) = current_rev.exec_profile_digest {
+            if session.exec_profile.as_ref().map(ExecProfileV1::digest) != Some(bound) {
+                return Err(WorldError::InvalidSchema("execution profile digest mismatch".into()));
+            }
+        }
+        if let Some(profile) = &session.exec_profile {
+            if profile != &ExecProfileV1::current_for_network() {
+                return Err(WorldError::InvalidSchema("unsupported execution profile".into()));
+            }
+        }
+        if current_rev.decision_delta_digest.is_some() { session.decision_delta(current_revision)?; }
+        if let (Some(expected), Some(net)) = (current_rev.decision_root, &session.network) {
+            if net.decision_root() != expected {
+                return Err(WorldError::NetworkError("restored decision root mismatch".into()));
+            }
+        }
         Ok(session)
     }
 
@@ -797,18 +977,24 @@ impl WorldSession {
         let normalized_ops = batch.validate_and_normalize()?;
 
         // Stage operator network updates and deliberation if network is present
-        let (staged_network, decision_root) = if let Some(ref net) = self.network {
-            let mut sn = net.clone();
-            sn.apply_ops_staged(&normalized_ops)?;
-            let d_root = if sn.decides.is_empty() {
-                None
+        let (staged_network, decision_root, decision_delta_digest, decision_delta_body) =
+            if let Some(ref net) = self.network {
+                let mut sn = net.clone();
+                let delta_report = sn.apply_ops_staged(&normalized_ops)?;
+                if sn.decides.is_empty() {
+                    (Some(sn), None, None, None)
+                } else {
+                    let d_root = Some(sn.decision_root());
+                    let body = super::network::encode_decision_delta(
+                        &delta_report.settlements,
+                        &delta_report.removed_settlements,
+                    );
+                    let d_delta_digest = Some(Digest::of(Domain::Value, &body));
+                    (Some(sn), d_root, d_delta_digest, Some(body))
+                }
             } else {
-                Some(sn.decision_root())
+                (None, None, None, None)
             };
-            (Some(sn), d_root)
-        } else {
-            (None, None)
-        };
 
         // 4. Stage updates across relations and maintain changed keys
         let mut staged_relations = self.relations.clone();
@@ -999,6 +1185,14 @@ impl WorldSession {
             objects_written += trie.persist_to_store(&mut self.node_store);
             secondary_index_roots.insert(sec_name.clone(), trie.root_digest());
         }
+        // Persist the settled-decision trie's own nodes (ADR-0046 P6 G2,
+        // decided 2026-10-04): previously only its root digest reached the
+        // revision record, so historical settlements could not be read back
+        // without replaying every base record. Same persistence seam as the
+        // relation/secondary-index tries above — same crash-recovery story.
+        if let Some(ref sn) = staged_network {
+            objects_written += sn.decision_tree.persist_to_store(&mut self.node_store);
+        }
 
         // Crash injection seam 1
         if self.crash_injector == Some(CrashPoint::BeforeObjectsFsync) {
@@ -1015,8 +1209,29 @@ impl WorldSession {
             ));
         }
 
-        // 6. Assemble revision record
         let new_seq = self.current_revision + 1;
+
+        // Write the decision-delta body durably BEFORE the revision record
+        // (ADR-0046 P6 G2/G3, decided 2026-10-04): tmp-write, fsync, rename —
+        // the same atomic-write discipline as the revision record itself, one
+        // step earlier in the publication order. An uncommitted attempt may
+        // leave an orphaned `{seq}.decisions` file; harmless, since nothing
+        // ever reads one without the matching revision record's digest.
+        if let Some(ref body) = decision_delta_body {
+            let tmp_delta_file = self.paths.decision_delta_tmp_file(new_seq);
+            fs::write(&tmp_delta_file, body)?;
+            {
+                let f = fs::File::open(&tmp_delta_file)?;
+                f.sync_all()?;
+            }
+            fs::rename(&tmp_delta_file, self.paths.decision_delta_file(new_seq))?;
+            fs::File::open(self.paths.revisions_dir())?.sync_all()?;
+        }
+
+        if self.crash_injector == Some(CrashPoint::AfterDecisionDeltaFsyncBeforeRevisionFsync) {
+            return Err(WorldError::InjectedCrash(CrashPoint::AfterDecisionDeltaFsyncBeforeRevisionFsync));
+        }
+        // 6. Assemble revision record
         let mut relation_roots = BTreeMap::new();
         let mut relation_cardinalities = BTreeMap::new();
         for (rel, trie) in &staged_relations {
@@ -1040,7 +1255,8 @@ impl WorldSession {
             decision_root,
             changed_keys.clone(),
             SettlementStatus::Committed,
-        );
+            decision_delta_digest,
+        ).bind_exec_profile(self.exec_profile.as_ref().map(ExecProfileV1::digest));
 
         let rev_json = serde_json::to_vec_pretty(&new_revision.to_json())
             .map_err(|e| WorldError::Json(e.to_string()))?;
@@ -1110,6 +1326,7 @@ impl WorldSession {
 
     /// Pin an immutable read snapshot at revision `seq`.
     pub fn pin_revision(&self, seq: u64) -> Result<WorldSnapshot, WorldError> {
+        if seq > self.current_revision { return Err(WorldError::RevisionNotFound(seq)); }
         let rev_file = self.paths.revision_file(seq);
         if !rev_file.exists() {
             return Err(WorldError::RevisionNotFound(seq));
@@ -1275,6 +1492,84 @@ impl WorldSession {
             .explain_decision_for(decide_name, entity_key)
     }
 
+    /// Read and authenticate a committed revision's canonical decision changes.
+    /// Legacy records have no trustworthy delta body and explicitly refuse.
+    pub fn decision_delta(&self, seq: u64) -> Result<super::decision_codec::DecisionDelta, WorldError> {
+        let snapshot = self.pin_revision(seq)?;
+        let rev = snapshot.revision;
+        if rev.schema != super::revision::REVISION_SCHEMA_V2 {
+            return Err(WorldError::NetworkError("legacy-history-unavailable".into()));
+        }
+        let Some(expected) = rev.decision_delta_digest else {
+            if rev.decision_root.is_some() { return Err(WorldError::NetworkError("missing decision delta digest".into())); }
+            return Ok(BTreeMap::new());
+        };
+        let path = self.paths.decision_delta_file(seq);
+        const MAX_BYTES: u64 = 64 * 1024 * 1024;
+        if fs::metadata(&path)?.len() > MAX_BYTES { return Err(WorldError::NetworkError("decision delta byte limit".into())); }
+        let bytes = fs::read(path)?;
+        if Digest::of(Domain::Value, &bytes) != expected {
+            return Err(WorldError::NetworkError("decision delta digest mismatch".into()));
+        }
+        super::decision_codec::decode_decision_delta(&bytes, 1_000_000)
+    }
+
+    /// Read a settled decision directly from the persisted decision trie at a
+    /// past revision (ADR-0046 P6 G2, decided 2026-10-04) — `brix world
+    /// explain --rev n` reads real historical evidence from the node store,
+    /// not a replay. Decide-block declarations never change after genesis
+    /// (`save_program_closure` refuses re-binding once revisions exist), so
+    /// the *current* session's known decide names are valid candidates to
+    /// search at any past revision of the same program. Returns `Ok(None)`
+    /// when revision `seq` records no settlement for `entity_id` in any
+    /// (optionally filtered) decide block — distinct from a decode failure,
+    /// which is a typed error.
+    pub fn historical_settlement(
+        &self,
+        seq: u64,
+        decide_filter: Option<&str>,
+        entity_id: &str,
+    ) -> Result<Option<(String, SettledDecision)>, WorldError> {
+        if seq > self.current_revision { return Err(WorldError::RevisionNotFound(seq)); }
+        let rev_file = self.paths.revision_file(seq);
+        if !rev_file.exists() {
+            return Err(WorldError::RevisionNotFound(seq));
+        }
+        let rev_bytes = fs::read(rev_file)?;
+        let rev_val: serde_json::Value =
+            serde_json::from_slice(&rev_bytes).map_err(|e| WorldError::Json(e.to_string()))?;
+        let rev = WorldRevision::from_json(&rev_val)?;
+        if rev.schema != super::revision::REVISION_SCHEMA_V2 {
+            return Err(WorldError::NetworkError("legacy-history-unavailable: revision@1 did not persist decision evidence".into()));
+        }
+        let Some(decision_root) = rev.decision_root else {
+            return Ok(None);
+        };
+
+        let known_decides: Vec<String> = self
+            .network
+            .as_ref()
+            .map(|n| n.decides.keys().cloned().collect())
+            .unwrap_or_default();
+        let candidates: Vec<String> = match decide_filter {
+            Some(d) => known_decides
+                .into_iter()
+                .filter(|k| k == d || k.ends_with(&format!("::{d}")))
+                .collect(),
+            None => known_decides,
+        };
+
+        let tree = TrieMap::<WorldKey, WorldTuple>::from_root_digest(decision_root, 0);
+        for decide_name in candidates {
+            let key = super::network::decision_key(&decide_name, entity_id);
+            if let Some(tuple) = tree.get_with_store(&key, &self.node_store)? {
+                let settled = super::network::decode_settled_decision(entity_id, tuple.as_bytes())?;
+                return Ok(Some((decide_name, settled)));
+            }
+        }
+        Ok(None)
+    }
+
     /// Attach an operator network to this session and hydrate it with existing committed base records.
     pub fn set_network(&mut self, mut network: WorldNetwork) -> Result<(), WorldError> {
         let mut ops = Vec::new();
@@ -1312,15 +1607,18 @@ impl WorldSession {
                 "cannot change executable program after world revisions exist".into(),
             ));
         }
+        let exec_profile = ExecProfileV1::current_for_network();
         let val = serde_json::json!({
             "schema": "brix.world.program@1",
             "root_module": root_module,
             "sources": closure_sources,
             "program_manifest_digest": closure_digest.to_hex(),
+            "exec_profile": exec_profile.to_json(),
         });
         let bytes = serde_json::to_vec_pretty(&val).map_err(|e| WorldError::Json(e.to_string()))?;
         atomic_write(&self.paths.root.join("program.json"), &bytes)?;
-        if self.manifest.program_digest != closure_digest || !self.manifest.program_required {
+        self.exec_profile = Some(exec_profile);
+        if self.current_revision == 0 || self.manifest.program_digest != closure_digest || !self.manifest.program_required {
             let mut bound_manifest = self.manifest.clone();
             bound_manifest.program_digest = closure_digest;
             bound_manifest.program_required = true;
@@ -1347,7 +1645,8 @@ impl WorldSession {
                 genesis.decision_root,
                 genesis.changed_keys,
                 genesis.status,
-            );
+                genesis.decision_delta_digest,
+            ).bind_exec_profile(self.exec_profile.as_ref().map(ExecProfileV1::digest));
             let manifest_bytes = serde_json::to_vec_pretty(&bound_manifest.to_json())
                 .map_err(|e| WorldError::Json(e.to_string()))?;
             let revision_bytes = serde_json::to_vec_pretty(&rebound.to_json())

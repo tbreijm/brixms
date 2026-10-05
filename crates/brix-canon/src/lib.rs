@@ -589,6 +589,17 @@ impl<'a> CanonReader<'a> {
         self.pos = end;
         Ok(slice)
     }
+
+    /// Read exactly `n` raw, unframed bytes. For the handful of fixed-width
+    /// encodings written via [`CanonWriter::write_raw`] (no length prefix —
+    /// e.g. [`FiniteF64`]'s 8-byte big-endian bit pattern), where the width is
+    /// a property of the *type*, not the data, so no prefix is written.
+    pub fn read_raw(&mut self, n: usize) -> Result<&'a [u8], CanonError> {
+        let end = self.pos.checked_add(n).ok_or(CanonError::BadLength)?;
+        let slice = self.buf.get(self.pos..end).ok_or(CanonError::BadLength)?;
+        self.pos = end;
+        Ok(slice)
+    }
 }
 
 /// Types that can be decoded from a canonical byte stream produced by [`CanonWriter`].
