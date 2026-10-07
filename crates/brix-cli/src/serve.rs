@@ -67,7 +67,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::cli::{KbOp, VerifyProfile};
+use crate::cli::{KbOp, VerifyProfile, WorldOp};
 use crate::json::with_captured_result;
 
 /// Schema identifier for both the request and response envelopes.
@@ -96,6 +96,15 @@ const SUPPORTED_METHODS: &[&str] = &[
     "kb.diff",
     "kb.audit",
     "kb.verify",
+    "world.init",
+    "world.batch",
+    "world.query",
+    "world.decisions",
+    "world.explain",
+    "world.show",
+    "world.audit",
+    "world.verify",
+    "world.import-kb",
 ];
 
 /// Run the `brix serve --stdio` loop against `stdin`/`stdout`, returning the
@@ -277,6 +286,7 @@ fn dispatch(request: &Request) -> Result<(u8, Value), DispatchError> {
         }
         "test" => dispatch_test(&request.params),
         m if m.starts_with("kb.") => dispatch_kb(&m["kb.".len()..], &request.params),
+        m if m.starts_with("world.") => dispatch_world(&m["world.".len()..], &request.params),
         other => Err((
             "unknown-method",
             format!(
@@ -695,6 +705,194 @@ fn dispatch_kb(op_name: &str, params: &Value) -> Result<(u8, Value), DispatchErr
     Ok((exit_code, result))
 }
 
+// ---------------------------------------------------------------------------
+// world.*
+// ---------------------------------------------------------------------------
+
+fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), DispatchError> {
+    let mut workspace: Option<TempWorkspace> = None;
+    let dir = PathBuf::from(required_str_field(params, "dir")?);
+
+    let op = match op_name {
+        "init" => {
+            let program_spec = params.get("program").cloned().unwrap_or(Value::Null);
+            let program = resolve_program_path(&mut workspace, &program_spec, "program")?;
+            let package_paths = string_array_field(params, "package_paths")?;
+            WorldOp::Init {
+                dir,
+                program,
+                package_paths,
+            }
+        }
+        "batch" => {
+            let batch_file = if let Some(bf) = params.get("batch_file").and_then(Value::as_str) {
+                PathBuf::from(bf)
+            } else if let Some(batch_val) = params.get("batch") {
+                if let Some(path_str) = batch_val.as_str() {
+                    PathBuf::from(path_str)
+                } else if let Some(obj) = batch_val.as_object() {
+                    if let Some(p) = obj.get("path").and_then(Value::as_str) {
+                        PathBuf::from(p)
+                    } else if let Some(s) = obj.get("source").and_then(Value::as_str) {
+                        if workspace.is_none() {
+                            workspace = Some(TempWorkspace::create()?);
+                        }
+                        workspace.as_ref().unwrap().write("batch.json", s)?
+                    } else {
+                        let serialized = serde_json::to_string(batch_val).map_err(|e| {
+                            (
+                                "invalid-params",
+                                format!("'batch': failed to serialize: {e}"),
+                            )
+                        })?;
+                        if workspace.is_none() {
+                            workspace = Some(TempWorkspace::create()?);
+                        }
+                        workspace
+                            .as_ref()
+                            .unwrap()
+                            .write("batch.json", &serialized)?
+                    }
+                } else if batch_val.is_array() {
+                    let serialized = serde_json::to_string(batch_val).map_err(|e| {
+                        (
+                            "invalid-params",
+                            format!("'batch': failed to serialize: {e}"),
+                        )
+                    })?;
+                    if workspace.is_none() {
+                        workspace = Some(TempWorkspace::create()?);
+                    }
+                    workspace
+                        .as_ref()
+                        .unwrap()
+                        .write("batch.json", &serialized)?
+                } else {
+                    return Err((
+                        "invalid-params",
+                        "'batch': expected file path, object, or array".to_string(),
+                    ));
+                }
+            } else {
+                return Err((
+                    "invalid-params",
+                    "missing required field 'batch' or 'batch_file'".to_string(),
+                ));
+            };
+            WorldOp::Batch { dir, batch_file }
+        }
+        "query" => {
+            let relation = required_str_field(params, "relation")?.to_string();
+            let cursor = params
+                .get("cursor")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let limit = optional_u64_field(params, "limit").and_then(|n| usize::try_from(n).ok());
+            WorldOp::Query {
+                dir,
+                relation,
+                cursor,
+                limit,
+            }
+        }
+        "decisions" | "decide" => {
+            let decide = params
+                .get("decide")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let entity = match params.get("entity") {
+                Some(Value::String(s)) => Some(s.clone()),
+                Some(Value::Number(n)) => Some(n.to_string()),
+                _ => None,
+            };
+            WorldOp::Decide {
+                dir,
+                decide,
+                entity,
+            }
+        }
+        "show" => {
+            let rev = optional_u64_field(params, "rev");
+            WorldOp::Show { dir, rev }
+        }
+        "explain" => {
+            let entity = match params.get("entity") {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Number(n)) => n.to_string(),
+                _ => {
+                    return Err((
+                        "invalid-params",
+                        "missing required field 'entity'".to_string(),
+                    ))
+                }
+            };
+            let decide = params
+                .get("decide")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let rev = optional_u64_field(params, "rev");
+            WorldOp::Explain {
+                dir,
+                entity,
+                decide,
+                rev,
+            }
+        }
+        "audit" => {
+            let out_str = match required_str_field(params, "out") {
+                Ok(s) => s,
+                Err(_) => required_str_field(params, "bundle")?,
+            };
+            let out = PathBuf::from(out_str);
+            let from_checkpoint = optional_u64_field(params, "from_checkpoint")
+                .or_else(|| optional_u64_field(params, "checkpoint"));
+            WorldOp::Audit {
+                dir,
+                out,
+                from_checkpoint,
+            }
+        }
+        "verify" => {
+            let expect_head = required_str_field(params, "expect_head")?.to_string();
+            let expect_program = required_str_field(params, "expect_program")?.to_string();
+            let trust_checkpoint = params
+                .get("trust_checkpoint")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let max_work = optional_u64_field(params, "max_work");
+            let in_place = params
+                .get("in_place")
+                .and_then(Value::as_str)
+                .map(PathBuf::from);
+            let bundle = params
+                .get("bundle")
+                .and_then(Value::as_str)
+                .map(PathBuf::from);
+            WorldOp::Verify {
+                expect_head,
+                expect_program,
+                trust_checkpoint,
+                max_work,
+                in_place,
+                bundle,
+            }
+        }
+        "import-kb" | "import_kb" => {
+            let kb_dir = PathBuf::from(required_str_field(params, "kb_dir")?);
+            let world_dir = match required_str_field(params, "world_dir") {
+                Ok(s) => PathBuf::from(s),
+                Err(_) => dir,
+            };
+            WorldOp::ImportKb { kb_dir, world_dir }
+        }
+        other => return Err(("unknown-method", format!("unknown method 'world.{other}'"))),
+    };
+
+    let (result, exit_code) =
+        with_captured_result(|| crate::commands::world::execute_world(&op, true));
+    Ok((exit_code, result))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,6 +903,38 @@ mod tests {
         assert_eq!(v["schema"], "brix.serve.hello@1");
         assert_eq!(v["protocol"], SERVE_SCHEMA);
         assert!(v["methods"].as_array().unwrap().contains(&json!("check")));
+        assert!(v["methods"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("world.init")));
+        assert!(v["methods"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("world.batch")));
+        assert!(v["methods"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("world.query")));
+        assert!(v["methods"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("world.decisions")));
+        assert!(v["methods"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("world.explain")));
+        assert!(v["methods"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("world.audit")));
+        assert!(v["methods"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("world.verify")));
+        assert!(v["methods"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("world.import-kb")));
     }
 
     #[test]

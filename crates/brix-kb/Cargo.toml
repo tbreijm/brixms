@@ -11,6 +11,7 @@ brix-syntax = { path = "../brix-syntax" }
 brix-lower = { path = "../brix-lower" }
 brix-canon = { workspace = true }
 brix-semantic = { workspace = true }
+soc-core = { path = "../soc-core" }
 serde_json = { workspace = true }
 
 [dev-dependencies]

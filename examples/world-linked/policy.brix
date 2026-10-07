@@ -1,0 +1,8 @@
+export rel input orders: { id: Str, customer: Str, sku: Str, qty: Int, express: Str } key id
+export rel input inventory: { id: Str, sku: Str, available: Int } key id
+export rel input shipping: { id: Str, sku: Str, carrier: Str } key id
+
+export rel derived fulfillment =
+    select { order_id: o.id, customer: o.customer, sku: o.sku, qty: o.qty, express: o.express, available: i.available, carrier: s.carrier }
+    from o in orders, i in inventory, s in shipping
+    where o.sku == i.sku and o.sku == s.sku

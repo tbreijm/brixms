@@ -153,6 +153,10 @@
       "to": "brix-syntax"
     },
     {
+      "from": "brix-kb",
+      "to": "soc-core"
+    },
+    {
       "from": "brix-kernel",
       "to": "brix-canon"
     },

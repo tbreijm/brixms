@@ -21,5 +21,13 @@ harness = false
 name = "arc_map_insert"
 harness = false
 
+[[bench]]
+name = "world_frontier_delta"
+harness = false
+
+[[bench]]
+name = "trie_map_insert"
+harness = false
+
 [lints]
 workspace = true

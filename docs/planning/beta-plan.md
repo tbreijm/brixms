@@ -4,6 +4,13 @@
 keeps the open design questions for each milestone; this document says what
 to invest in, in what order, and why.*
 
+**2026-10-03 execution update:** Following `v0.1.0-alpha.3`, the
+[persistent world runtime handoff](./persistent-world-runtime-plan.md) defines
+the next build: linked relational models, durable incremental updates, and
+measured scaling under uneven submodel sizes. It advances the knowledge-model
+and incremental-revision investments together. The review below remains the
+September baseline; the handoff describes proposed work, not shipped support.
+
 ## Verdict
 
 BrixMS has a rare core: decisions that are deterministic, replayable, and

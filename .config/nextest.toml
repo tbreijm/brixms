@@ -1,0 +1,13 @@
+# Opt-in local verification profile; CI's existing default profile is unchanged.
+[profile.local]
+test-threads = 4
+fail-fast = false
+retries = 0
+slow-timeout = "30s"
+status-level = "pass"
+final-status-level = "slow"
+
+[profile.local.junit]
+path = "junit.xml"
+store-success-output = false
+store-failure-output = true

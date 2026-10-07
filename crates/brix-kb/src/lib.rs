@@ -42,6 +42,7 @@ pub mod pipeline;
 pub mod revision;
 pub mod snapshot_io;
 pub mod strict_json;
+pub mod world;
 
 #[cfg(test)]
 mod lifecycle_tests;

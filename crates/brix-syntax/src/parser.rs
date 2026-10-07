@@ -186,6 +186,34 @@ impl Parser {
                 let tok = self.advance().clone();
                 Ok((s, tok))
             }
+            TokenKind::Key => {
+                let tok = self.advance().clone();
+                Ok(("key".to_string(), tok))
+            }
+            TokenKind::Group => {
+                let tok = self.advance().clone();
+                Ok(("group".to_string(), tok))
+            }
+            TokenKind::By => {
+                let tok = self.advance().clone();
+                Ok(("by".to_string(), tok))
+            }
+            TokenKind::Rel => {
+                let tok = self.advance().clone();
+                Ok(("rel".to_string(), tok))
+            }
+            TokenKind::Select => {
+                let tok = self.advance().clone();
+                Ok(("select".to_string(), tok))
+            }
+            TokenKind::Export => {
+                let tok = self.advance().clone();
+                Ok(("export".to_string(), tok))
+            }
+            TokenKind::Per => {
+                let tok = self.advance().clone();
+                Ok(("per".to_string(), tok))
+            }
             other => Err(self.error(format!(
                 "Expected identifier, found {:?} in {}",
                 other, context
@@ -193,19 +221,55 @@ impl Parser {
         }
     }
 
+    fn parse_qualified_name(&mut self, context: &str) -> Result<String, ParseError> {
+        let mut name = self.expect_ident(context)?.0;
+        while self.check(&TokenKind::ColonColon) {
+            self.advance();
+            let seg = self.expect_ident(&format!("{context} segment"))?.0;
+            name.push_str("::");
+            name.push_str(&seg);
+        }
+        Ok(name)
+    }
+
     fn is_record_literal_ahead(&self) -> bool {
         if let TokenKind::Ident(id) = self.peek() {
-            if !id.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+            let mut scan = self.pos;
+            let mut last_id = id.clone();
+            scan += 1;
+            while scan + 1 < self.tokens.len() && self.tokens[scan].kind == TokenKind::ColonColon {
+                match &self.tokens[scan + 1].kind {
+                    TokenKind::Ident(seg) => {
+                        last_id = seg.clone();
+                        scan += 2;
+                    }
+                    _ => break,
+                }
+            }
+            if !last_id
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
+            {
                 return false;
             }
-            if self.pos + 1 < self.tokens.len()
-                && self.tokens[self.pos + 1].kind == TokenKind::OpenBrace
-                && self.pos + 2 < self.tokens.len()
+            if scan < self.tokens.len()
+                && self.tokens[scan].kind == TokenKind::OpenBrace
+                && scan + 1 < self.tokens.len()
             {
-                match &self.tokens[self.pos + 2].kind {
+                match &self.tokens[scan + 1].kind {
                     TokenKind::CloseBrace => return true,
-                    TokenKind::Ident(_) if self.pos + 3 < self.tokens.len() => {
-                        return self.tokens[self.pos + 3].kind == TokenKind::Colon;
+                    TokenKind::Ident(_)
+                    | TokenKind::Key
+                    | TokenKind::Group
+                    | TokenKind::By
+                    | TokenKind::Rel
+                    | TokenKind::Select
+                    | TokenKind::Export
+                    | TokenKind::Per
+                        if scan + 2 < self.tokens.len() =>
+                    {
+                        return self.tokens[scan + 2].kind == TokenKind::Colon;
                     }
                     _ => {}
                 }
@@ -334,16 +398,131 @@ impl Parser {
                 self.advance();
                 self.parse_decide_decl().map(Item::Decide)
             }
+            TokenKind::Export => {
+                self.advance();
+                if self.check(&TokenKind::Export) {
+                    return Err(self.error("redundant 'export' modifier"));
+                }
+                if self.check(&TokenKind::Use) {
+                    return Err(self.error("'export' cannot be applied to 'use'"));
+                }
+                self.enter()?;
+                let inner = self.parse_item();
+                self.leave();
+                let inner = inner?;
+                if matches!(inner, Item::Export(_)) {
+                    return Err(self.error("redundant 'export' modifier"));
+                }
+                if matches!(inner, Item::Use(_)) {
+                    return Err(self.error("'export' cannot be applied to 'use'"));
+                }
+                Ok(Item::Export(Box::new(inner)))
+            }
+            TokenKind::Rel => {
+                self.advance();
+                if self.check(&TokenKind::Input) {
+                    self.advance();
+                    self.parse_rel_input_decl().map(Item::RelInput)
+                } else if matches!(self.peek(), TokenKind::Ident(s) if s == "derived") {
+                    self.advance();
+                    self.parse_rel_derived_decl().map(Item::RelDerived)
+                } else {
+                    Err(self.error("Expected 'input' or 'derived' after 'rel'"))
+                }
+            }
             other => Err(self.error(format!("Unexpected token {:?} at top-level item", other))),
         }
     }
 
-    /// `use brix.soc` — a dotted package path.
+    fn parse_rel_input_decl(&mut self) -> Result<RelInputDecl, ParseError> {
+        let name = self.expect_ident("rel input name")?.0;
+        self.consume(TokenKind::Colon, "rel input ':'")?;
+        let ty = self.parse_ty()?;
+        self.consume(TokenKind::Key, "rel input 'key'")?;
+        let key_fields = if self.check(&TokenKind::OpenParen) {
+            self.advance();
+            let fields = self.parse_comma_separated(TokenKind::CloseParen, |p| {
+                p.expect_ident("key field name").map(|(s, _)| s)
+            })?;
+            self.consume(TokenKind::CloseParen, "rel input key list ')'")?;
+            fields
+        } else {
+            let field = self.expect_ident("key field name")?.0;
+            vec![field]
+        };
+        Ok(RelInputDecl {
+            name,
+            ty,
+            key_fields,
+        })
+    }
+
+    fn parse_rel_derived_decl(&mut self) -> Result<RelDerivedDecl, ParseError> {
+        let name = self.expect_ident("rel derived name")?.0;
+        self.consume(TokenKind::Equals, "rel derived '='")?;
+        self.consume(TokenKind::Select, "rel derived 'select'")?;
+        let select = self.parse_expr()?;
+        self.consume(TokenKind::From, "rel derived 'from'")?;
+        let mut from = Vec::new();
+        loop {
+            let var = self.expect_ident("relation binding variable")?.0;
+            let relation = if self.check(&TokenKind::In) {
+                self.advance();
+                self.parse_qualified_name("relation name")?
+            } else {
+                var.clone()
+            };
+            from.push(RelBinding { var, relation });
+            if self.check(&TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        let where_clause = if self.check(&TokenKind::Where) {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        let group_by = if self.check(&TokenKind::Group) {
+            self.advance();
+            self.consume(TokenKind::By, "group 'by'")?;
+            let mut exprs = Vec::new();
+            loop {
+                exprs.push(self.parse_expr()?);
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            exprs
+        } else {
+            Vec::new()
+        };
+        Ok(RelDerivedDecl {
+            name,
+            query: RelQuery {
+                select,
+                from,
+                where_clause,
+                group_by,
+            },
+        })
+    }
+
+    /// `use brix.soc` — a dotted or qualified package path.
     fn parse_use_path(&mut self) -> Result<String, ParseError> {
         let mut path = self.expect_ident("package name")?.0;
-        while self.check(&TokenKind::Dot) {
-            self.advance();
-            path.push('.');
+        while self.check(&TokenKind::Dot) || self.check(&TokenKind::ColonColon) {
+            if self.check(&TokenKind::Dot) {
+                self.advance();
+                path.push('.');
+            } else {
+                self.advance();
+                path.push_str("::");
+            }
             path.push_str(&self.expect_ident("package path segment")?.0);
         }
         Ok(path)
@@ -612,13 +791,28 @@ impl Parser {
         Ok(CommitDecl { name, candidates })
     }
 
-    /// `decide NAME for BINDER in LIST_EXPR { propose ... }` (ADR-0043).
+    /// `decide NAME for BINDER in LIST_EXPR [per FIELD] { propose ... }`
+    /// (ADR-0043; `per` added ADR-0046, decided 2026-10-04). `per` sits after
+    /// the list expression and before the block's opening brace: that is the
+    /// only position where it parses unambiguously, since `LIST_EXPR` is a
+    /// full expression and `per` (a contextual identifier everywhere else,
+    /// like `rel`/`select`/`export`) would otherwise be consumable as a
+    /// trailing field access or call target inside the expression grammar.
+    /// Anchoring it immediately before `{` — which already unambiguously ends
+    /// `LIST_EXPR` — means the parser never has to guess whether a bare `per`
+    /// token belongs to the expression or to this clause.
     fn parse_decide_decl(&mut self) -> Result<DecideDecl, ParseError> {
         let name = self.expect_ident("decide declaration name")?.0;
         self.consume(TokenKind::For, "decide declaration 'for'")?;
         let binder = self.expect_ident("decide declaration binder")?.0;
         self.consume(TokenKind::In, "decide declaration 'in'")?;
         let list = self.parse_expr()?;
+        let per = if self.check(&TokenKind::Per) {
+            self.advance();
+            Some(self.expect_ident("decide declaration 'per' field")?.0)
+        } else {
+            None
+        };
         self.consume(TokenKind::OpenBrace, "decide block '{'")?;
         let mut proposals = Vec::new();
         while !self.check(&TokenKind::CloseBrace) && !self.is_at_end() {
@@ -630,6 +824,7 @@ impl Parser {
             name,
             binder,
             list,
+            per,
             proposals,
         })
     }
@@ -686,24 +881,32 @@ impl Parser {
     }
 
     fn parse_ty(&mut self) -> Result<Ty, ParseError> {
-        let name = self.expect_ident("type name")?.0;
-        // `List<Int>` — a parameterized config at an instantiation. The `<`
-        // is unambiguous here because a type position has no comparison.
-        let base_ty = if self.check(&TokenKind::Lt) {
+        let base_ty = if self.check(&TokenKind::OpenBrace) {
             self.advance();
-            let mut args = Vec::new();
-            loop {
-                args.push(self.parse_ty()?);
-                if self.check(&TokenKind::Comma) {
-                    self.advance();
-                } else {
-                    break;
-                }
-            }
-            self.consume(TokenKind::Gt, "type argument list '>'")?;
-            Ty::App(name, args)
+            let fields =
+                self.parse_comma_separated(TokenKind::CloseBrace, |p| p.parse_field_decl())?;
+            self.consume(TokenKind::CloseBrace, "record type '}'")?;
+            Ty::Record(fields)
         } else {
-            Ty::Named(name)
+            let name = self.parse_qualified_name("type name")?;
+            // `List<Int>` — a parameterized config at an instantiation. The `<`
+            // is unambiguous here because a type position has no comparison.
+            if self.check(&TokenKind::Lt) {
+                self.advance();
+                let mut args = Vec::new();
+                loop {
+                    args.push(self.parse_ty()?);
+                    if self.check(&TokenKind::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.consume(TokenKind::Gt, "type argument list '>'")?;
+                Ty::App(name, args)
+            } else {
+                Ty::Named(name)
+            }
         };
         if self.check(&TokenKind::At) {
             self.advance();
@@ -967,8 +1170,29 @@ impl Parser {
             TokenKind::OpenBracket => self.parse_list_expr(),
             TokenKind::For => self.parse_comprehension_expr(),
             TokenKind::Ident(id) => self.parse_ident_expr(id),
+            TokenKind::Key => self.parse_ident_expr("key".to_string()),
+            TokenKind::Group => self.parse_ident_expr("group".to_string()),
+            TokenKind::By => self.parse_ident_expr("by".to_string()),
+            TokenKind::Rel => self.parse_ident_expr("rel".to_string()),
+            TokenKind::Select => self.parse_ident_expr("select".to_string()),
+            TokenKind::Export => self.parse_ident_expr("export".to_string()),
+            TokenKind::Per => self.parse_ident_expr("per".to_string()),
+            TokenKind::OpenBrace => self.parse_anon_record_expr(),
             other => Err(self.error(format!("Unexpected token {:?} in expression", other))),
         }
+    }
+
+    #[inline(never)]
+    fn parse_anon_record_expr(&mut self) -> Result<Expr, ParseError> {
+        self.advance();
+        let fields = self.parse_comma_separated(TokenKind::CloseBrace, |p| {
+            let fname = p.expect_ident("anonymous record field name")?.0;
+            p.consume(TokenKind::Colon, "':' in anonymous record")?;
+            let fexpr = p.parse_expr()?;
+            Ok((fname, fexpr))
+        })?;
+        self.consume(TokenKind::CloseBrace, "anonymous record '}'")?;
+        Ok(Expr::AnonRecord(fields))
     }
 
     // Recursive primary-expression alternatives have separate frames so the
@@ -1040,9 +1264,17 @@ impl Parser {
     }
 
     #[inline(never)]
-    fn parse_ident_expr(&mut self, id: String) -> Result<Expr, ParseError> {
-        if self.is_record_literal_ahead() {
-            self.advance(); // consume config name
+    fn parse_ident_expr(&mut self, first_id: String) -> Result<Expr, ParseError> {
+        let is_record = self.is_record_literal_ahead();
+        let mut id = first_id;
+        self.advance();
+        while self.check(&TokenKind::ColonColon) {
+            self.advance();
+            let seg = self.expect_ident("path segment")?.0;
+            id.push_str("::");
+            id.push_str(&seg);
+        }
+        if is_record {
             self.advance(); // consume '{'
             let fields = self.parse_comma_separated(TokenKind::CloseBrace, |p| {
                 let fname = p.expect_ident("record field name")?.0;
@@ -1052,17 +1284,13 @@ impl Parser {
             })?;
             self.consume(TokenKind::CloseBrace, "record literal '}'")?;
             Ok(Expr::Record { config: id, fields })
-        } else {
+        } else if self.check(&TokenKind::OpenParen) {
             self.advance();
-            if self.check(&TokenKind::OpenParen) {
-                self.advance();
-                let args =
-                    self.parse_comma_separated(TokenKind::CloseParen, |p| p.parse_call_arg())?;
-                self.consume(TokenKind::CloseParen, "function call ')'")?;
-                Ok(Expr::Call { func: id, args })
-            } else {
-                Ok(Expr::Var(id))
-            }
+            let args = self.parse_comma_separated(TokenKind::CloseParen, |p| p.parse_call_arg())?;
+            self.consume(TokenKind::CloseParen, "function call ')'")?;
+            Ok(Expr::Call { func: id, args })
+        } else {
+            Ok(Expr::Var(id))
         }
     }
 

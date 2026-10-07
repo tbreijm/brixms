@@ -6,6 +6,7 @@ pub mod run;
 pub mod test;
 pub mod verify;
 pub mod why;
+pub mod world;
 
 use std::path::PathBuf;
 

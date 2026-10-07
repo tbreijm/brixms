@@ -20,7 +20,7 @@
 //! tick from the oracle-shared candidate enumeration and commits its least
 //! key into the `D_O = 1 + O×X` coalgebra.
 
-use brix_canon::{CanonWriter, Canonical, Digest};
+use brix_canon::{CanonDecode, CanonError, CanonReader, CanonWriter, Canonical, Digest};
 use std::collections::BTreeMap;
 
 /// `K = (phase, priority, tiebreak)` (ADR-0002 §8.1).
@@ -82,6 +82,20 @@ impl Canonical for Key {
     }
 }
 
+impl CanonDecode for Key {
+    fn canon_read(r: &mut CanonReader<'_>) -> Result<Self, CanonError> {
+        let phase = r.read_uint()?;
+        let priority = r.read_uint()?;
+        let tiebreak_bytes = r.read_bytes()?;
+        if tiebreak_bytes.len() != 32 {
+            return Err(CanonError::BadLength);
+        }
+        let mut tiebreak = [0u8; 32];
+        tiebreak.copy_from_slice(tiebreak_bytes);
+        Ok(Key::new(phase, priority, Digest::from_bytes(tiebreak)))
+    }
+}
+
 /// The `B^uk_{K,O}` unique-key discipline was violated: `key` was already
 /// bound to `existing` in the [`Frontier`], and a different `attempted`
 /// value was proposed for the *same* key. ADR-0002 §1/§8.1's `B^uk` is a
@@ -107,6 +121,53 @@ pub enum FrontierDeltaError<V> {
     /// An addition collided with an existing, different value at its key
     /// (the B^uk unique-key discipline — see [`KeyConflict`]).
     InsertConflict(KeyConflict<V>),
+}
+
+enum UndoAction<V> {
+    Reinsert(Key, V),
+    Remove(Key),
+}
+
+/// Transactional change overlay guard that ensures safe atomic publication:
+/// on any error or panic, all modifications performed during delta application
+/// are automatically rolled back in reverse order, leaving the underlying map
+/// unchanged without having cloned the whole map (ADR-0046, P1).
+struct RollbackOverlay<'a, V> {
+    entries: &'a mut BTreeMap<Key, V>,
+    undo_log: Vec<UndoAction<V>>,
+    committed: bool,
+}
+
+impl<'a, V> RollbackOverlay<'a, V> {
+    fn new(entries: &'a mut BTreeMap<Key, V>) -> Self {
+        Self {
+            entries,
+            undo_log: Vec::new(),
+            committed: false,
+        }
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+        self.undo_log.clear();
+    }
+}
+
+impl<'a, V> Drop for RollbackOverlay<'a, V> {
+    fn drop(&mut self) {
+        if !self.committed {
+            while let Some(action) = self.undo_log.pop() {
+                match action {
+                    UndoAction::Reinsert(k, v) => {
+                        self.entries.insert(k, v);
+                    }
+                    UndoAction::Remove(k) => {
+                        self.entries.remove(&k);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The unique-key deliberation frontier `B^uk_{K,O}` for one tick: a
@@ -188,12 +249,62 @@ impl<V: Clone + PartialEq> Frontier<V> {
     /// (each key must be present **and equal** to `expected`), then insert each
     /// addition under the same B^uk discipline as [`insert`](Self::insert)
     /// (idempotent on an equal existing value, `InsertConflict` on a different
-    /// one). The whole delta is staged on a private copy and only published if
-    /// **every** operation succeeds; on any error the frontier is left exactly
-    /// as it was. This is the L3 adapter's committed-step frontier maintenance
-    /// (ADR-0012 §2.6, §4.7): a committed head candidate is removed and at most
-    /// one successor candidate inserted, transactionally.
+    /// one).
+    ///
+    /// Changes are staged using a validated change overlay with safe atomic
+    /// publication: if any operation fails, the undo log rolls back all
+    /// staged changes in reverse order, leaving the frontier exactly as it
+    /// was. The cost is strictly O(|Δ| log |frontier|) without copying the
+    /// entire frontier (ADR-0046, P1).
     pub fn apply_delta(
+        &mut self,
+        removals: &[(Key, V)],
+        additions: &[(Key, V)],
+    ) -> Result<(), FrontierDeltaError<V>> {
+        let mut overlay = RollbackOverlay::new(&mut self.entries);
+
+        for (key, expected) in removals {
+            match overlay.entries.get(key) {
+                Some(v) if v == expected => {
+                    let removed_v = overlay.entries.remove(key).expect("key confirmed present");
+                    overlay.undo_log.push(UndoAction::Reinsert(*key, removed_v));
+                }
+                Some(v) => {
+                    return Err(FrontierDeltaError::RemoveMismatch(KeyConflict {
+                        key: *key,
+                        existing: v.clone(),
+                        attempted: expected.clone(),
+                    }));
+                }
+                None => return Err(FrontierDeltaError::RemoveMissing(*key)),
+            }
+        }
+
+        for (key, value) in additions {
+            match overlay.entries.get(key) {
+                None => {
+                    overlay.entries.insert(*key, value.clone());
+                    overlay.undo_log.push(UndoAction::Remove(*key));
+                }
+                Some(v) if v == value => {}
+                Some(v) => {
+                    return Err(FrontierDeltaError::InsertConflict(KeyConflict {
+                        key: *key,
+                        existing: v.clone(),
+                        attempted: value.clone(),
+                    }));
+                }
+            }
+        }
+
+        overlay.commit();
+        Ok(())
+    }
+
+    /// Deliberately naive reference implementation of `apply_delta` that clones the
+    /// entire frontier map into a staged copy before applying changes.
+    /// Retained as a negative control for scaling tests (ADR-0046 §3.3, §5).
+    pub fn naive_apply_delta(
         &mut self,
         removals: &[(Key, V)],
         additions: &[(Key, V)],

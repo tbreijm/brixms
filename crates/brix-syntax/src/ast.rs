@@ -57,19 +57,64 @@ pub enum Item {
     /// `decide NAME for BINDER in LIST_EXPR { propose ... }` — a per-entity
     /// commit pool, instantiated once per element of `LIST_EXPR` (ADR-0043).
     Decide(DecideDecl),
+    /// `export <item>` — explicit export modifier on a top-level item (ADR-0046).
+    Export(Box<Item>),
+    /// `rel input name: Type key key_field` — relational input declaration (ADR-0046).
+    RelInput(RelInputDecl),
+    /// `rel derived name = select ... from ...` — relational derived declaration (ADR-0046).
+    RelDerived(RelDerivedDecl),
 }
 
-/// `decide NAME for BINDER in LIST_EXPR { propose ... }` (ADR-0043): declares
-/// a commit pool that is instantiated once per element of the list named by
-/// `list`, in list order. Every nested `propose` is scoped to this block —
-/// its guard/value may additionally read `binder`, bound to the current
-/// element — but its *name* is checked for uniqueness program-wide, exactly
-/// like a top-level `propose`.
+/// `rel input NAME: TYPE key KEY` or `key (KEY1, KEY2, ...)` (ADR-0046).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelInputDecl {
+    pub name: String,
+    pub ty: Ty,
+    pub key_fields: Vec<String>,
+}
+
+/// `rel derived NAME = select ... from ... [where ...] [group by ...]` (ADR-0046).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelDerivedDecl {
+    pub name: String,
+    pub query: RelQuery,
+}
+
+/// A relational query in a `rel derived` declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelQuery {
+    pub select: Expr,
+    pub from: Vec<RelBinding>,
+    pub where_clause: Option<Expr>,
+    pub group_by: Vec<Expr>,
+}
+
+/// One binding in a relational `from` clause: `var in relation` or `relation`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelBinding {
+    pub var: String,
+    pub relation: String,
+}
+
+/// `decide NAME for BINDER in LIST_EXPR [per FIELD] { propose ... }` (ADR-0043,
+/// `per` added ADR-0046): declares a commit pool that is instantiated once per
+/// element of the list named by `list`, in list order. Every nested `propose`
+/// is scoped to this block — its guard/value may additionally read `binder`,
+/// bound to the current element — but its *name* is checked for uniqueness
+/// program-wide, exactly like a top-level `propose`.
+///
+/// `per FIELD` explicitly names the field of the bound element that identifies
+/// *which entity* this instance of the block is deciding about (decided
+/// 2026-10-04). It is optional at the grammar level — the legacy
+/// finite-decision profile (ADR-0043) never reads it — but the world profile
+/// (ADR-0046) requires it at lowering for any `decide` whose `list` resolves
+/// to a relational source; see `brix_lower::relation_dag::lower_relations`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DecideDecl {
     pub name: String,
     pub binder: String,
     pub list: Expr,
+    pub per: Option<String>,
     pub proposals: Vec<ProposeDecl>,
 }
 
@@ -296,6 +341,8 @@ pub enum Expr {
         where_clause: Option<Box<Expr>>,
         yield_expr: Box<Expr>,
     },
+    /// `{ field: expr, ... }` — an anonymous record literal (ADR-0046).
+    AnonRecord(Vec<(String, Expr)>),
 }
 
 /// Binary operators. Arithmetic ops are ordinary; `Then`/`And` are the witness

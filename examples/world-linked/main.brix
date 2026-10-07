@@ -1,0 +1,16 @@
+use policy
+
+rel derived visible_orders =
+    select { id: o.id, customer: o.customer }
+    from o in policy::orders
+
+// The decide block is declared here, at the consuming program's root, not in
+// `policy` itself: a plain `use` brings in `policy`'s relation *definitions*,
+// but must never silently execute another model's decisions (ADR-0046 §3.4).
+// This decision is the explicit connection the root program makes to the
+// imported `fulfillment` relation.
+decide dispatch for f in policy::fulfillment per order_id {
+    propose ship_express priority 10 when f.express == "yes" and f.available >= f.qty = "air_express"
+    propose ship_standard priority 20 when f.express != "yes" and f.available >= f.qty = "ground_standard"
+    propose backorder priority 50 when f.available < f.qty = "backorder_hold"
+}

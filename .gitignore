@@ -8,3 +8,8 @@ Cargo.lock.orig
 
 # Claude Code local worktrees / session state
 .claude/
+
+# Caches and build artifacts
+__pycache__/
+*.pyc
+.brix-cache/

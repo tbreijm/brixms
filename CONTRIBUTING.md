@@ -57,6 +57,33 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test  --workspace
 ```
 
+For faster local test runs, use the same parallel runner as CI:
+
+```sh
+python3 scripts/test_workspace.py
+# Focused iteration; this does not replace the workspace release gate:
+python3 scripts/test_workspace.py -p brix-kb -j 4
+```
+
+This requires [cargo-nextest](https://nexte.st/docs/installation/). The script
+runs all non-ignored unit/integration tests, then Cargo doctests, preserving a
+failure from either phase. It reports phase timings and writes test timings and
+failures to `target/nextest/local/junit.xml` under the workspace root (nextest's
+report directory is separate from Cargo's configurable build directory).
+Use `--target-dir` or `CARGO_TARGET_DIR` to reuse an existing build; `--build-jobs`
+controls compilation concurrency and `-j` controls test concurrency. The default
+is two build jobs and four test processes. There are no automatic retries or
+new timeouts that terminate slow tests. Ignored large acceptance workloads must
+still be run explicitly for release qualification. Avoid running the full suite
+twice concurrently against an actively changing checkout.
+
+On macOS, a long pause even for a test binary's `--list` command is launch
+overhead, not time spent in its test bodies. Nextest documents
+[XProtect/Gatekeeper startup delays and Developer Tools settings](https://nexte.st/docs/installation/macos/).
+Check that separately from compile time; rerun unchanged binaries before
+attributing a cold-to-warm improvement to the test runner. The script does not
+change system security settings.
+
 CI green-gates all three. PRs are kept small (≤ ~500 generated lines); `insta`
 snapshots make canon-vector and codegen drift reviewable at a glance. Frozen
 artifacts — `vectors/` after G0, the oracle after G1 — change only through a

@@ -71,10 +71,67 @@ pub enum Command {
         op: KbOp,
         json: bool,
     },
+    /// `brix world <op> ...` — the persistent world runtime (ADR-0046).
+    World {
+        op: WorldOp,
+        json: bool,
+    },
     /// `brix serve --stdio` — the embeddable JSON-lines protocol (ADR-0044).
     Serve,
     Help,
     Version,
+}
+
+/// A `brix world` sub-operation and its arguments (ADR-0046 P5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorldOp {
+    Init {
+        dir: PathBuf,
+        program: PathBuf,
+        package_paths: Vec<PathBuf>,
+    },
+    Batch {
+        dir: PathBuf,
+        batch_file: PathBuf,
+    },
+    Query {
+        dir: PathBuf,
+        relation: String,
+        cursor: Option<String>,
+        limit: Option<usize>,
+    },
+    Decide {
+        dir: PathBuf,
+        decide: Option<String>,
+        entity: Option<String>,
+    },
+    Show {
+        dir: PathBuf,
+        rev: Option<u64>,
+    },
+    Explain {
+        dir: PathBuf,
+        entity: String,
+        decide: Option<String>,
+        rev: Option<u64>,
+    },
+    Audit {
+        dir: PathBuf,
+        out: PathBuf,
+        from_checkpoint: Option<u64>,
+    },
+    Verify {
+        expect_head: String,
+        expect_program: String,
+        trust_checkpoint: Option<String>,
+        max_work: Option<u64>,
+        in_place: Option<PathBuf>,
+        bundle: Option<PathBuf>,
+    },
+    ImportKb {
+        kb_dir: PathBuf,
+        world_dir: PathBuf,
+    },
 }
 
 /// A `brix kb` sub-operation and its arguments.
@@ -231,6 +288,7 @@ where
         "whynot" => parse_why_args(subcmd_args, json_requested, true),
         "test" => parse_test_args(subcmd_args, json_requested),
         "kb" => parse_kb_args(subcmd_args, json_requested),
+        "world" => parse_world_args(subcmd_args, json_requested),
         "serve" => parse_serve_args(subcmd_args),
         _ => Err(CliUsageError::usage(
             format!("unknown command: '{subcmd}'\nRun 'brix --help' for usage details."),
@@ -1363,6 +1421,656 @@ fn parse_rev(raw: &str, cmd_name: &str, json: bool) -> Result<u64, CliUsageError
             Some(cmd_name.to_string()),
         )
     })
+}
+
+pub fn parse_world_args(args: &[String], json: bool) -> Result<Command, CliUsageError> {
+    if args.is_empty() {
+        return Err(CliUsageError::usage(
+            "missing sub-command for 'brix world'\nUsage: brix world <init|batch|query|decide|show|explain|audit|verify|import-kb> ...".to_string(),
+            json,
+            Some("world".to_string()),
+        ));
+    }
+    let sub = &args[0];
+    let rest = &args[1..];
+    let op = match sub.as_str() {
+        "init" => parse_world_init_args(rest, json)?,
+        "batch" => parse_world_batch_args(rest, json)?,
+        "query" => parse_world_query_args(rest, json)?,
+        "decide" => parse_world_decide_args(rest, json)?,
+        "show" => parse_world_show_args(rest, json)?,
+        "explain" => parse_world_explain_args(rest, json)?,
+        "audit" => parse_world_audit_args(rest, json)?,
+        "verify" => parse_world_verify_args(rest, json)?,
+        "import-kb" => parse_world_import_kb_args(rest, json)?,
+        other => {
+            return Err(CliUsageError::usage(
+                format!("unknown 'brix world' sub-command: '{other}'"),
+                json,
+                Some("world".to_string()),
+            ))
+        }
+    };
+    Ok(Command::World { op, json })
+}
+
+fn parse_world_init_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
+    let cmd_name = "world init";
+    let mut positionals = Vec::new();
+    let mut package_paths = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json"
+            || try_parse_package_path_flag(arg, args, &mut i, &mut package_paths, cmd_name, json)?
+        {
+            // Handled
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+    if positionals.len() < 2 {
+        return Err(CliUsageError::usage(
+            format!("missing required operands for '{cmd_name}': requires DIR and PROGRAM"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 2 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[2].display()),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    let program = positionals.pop().unwrap();
+    let dir = positionals.pop().unwrap();
+    Ok(WorldOp::Init {
+        dir,
+        program,
+        package_paths,
+    })
+}
+
+fn parse_world_batch_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
+    let cmd_name = "world batch";
+    let mut positionals = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json" {
+            // Handled
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+    if positionals.len() < 2 {
+        return Err(CliUsageError::usage(
+            format!("missing required operands for '{cmd_name}': requires DIR and BATCH_FILE"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 2 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[2].display()),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    let batch_file = positionals.pop().unwrap();
+    let dir = positionals.pop().unwrap();
+    Ok(WorldOp::Batch { dir, batch_file })
+}
+
+fn parse_world_query_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
+    let cmd_name = "world query";
+    let mut positionals = Vec::new();
+    let mut cursor = None;
+    let mut limit = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json" {
+            // Handled
+        } else if arg == "--cursor" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--cursor'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            cursor = Some(args[i].clone());
+        } else if let Some(val) = arg.strip_prefix("--cursor=") {
+            cursor = Some(val.to_string());
+        } else if arg == "--limit" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--limit'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            let n: usize = args[i].parse().map_err(|_| {
+                CliUsageError::usage(
+                    format!("invalid limit: '{}' (expected positive integer)", args[i]),
+                    json,
+                    Some(cmd_name.to_string()),
+                )
+            })?;
+            limit = Some(n);
+        } else if let Some(val) = arg.strip_prefix("--limit=") {
+            let n: usize = val.parse().map_err(|_| {
+                CliUsageError::usage(
+                    format!("invalid limit: '{val}' (expected positive integer)"),
+                    json,
+                    Some(cmd_name.to_string()),
+                )
+            })?;
+            limit = Some(n);
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(arg.clone());
+        }
+        i += 1;
+    }
+    if positionals.len() < 2 {
+        return Err(CliUsageError::usage(
+            format!("missing required operands for '{cmd_name}': requires DIR and RELATION"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 2 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[2]),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    let relation = positionals.pop().unwrap();
+    let dir = PathBuf::from(positionals.pop().unwrap());
+    Ok(WorldOp::Query {
+        dir,
+        relation,
+        cursor,
+        limit,
+    })
+}
+
+fn parse_world_decide_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
+    let cmd_name = "world decide";
+    let mut positionals = Vec::new();
+    let mut decide = None;
+    let mut entity = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json" {
+            // Handled
+        } else if arg == "--decide" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--decide'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            decide = Some(args[i].clone());
+        } else if let Some(val) = arg.strip_prefix("--decide=") {
+            decide = Some(val.to_string());
+        } else if arg == "--entity" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--entity'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            entity = Some(args[i].clone());
+        } else if let Some(val) = arg.strip_prefix("--entity=") {
+            entity = Some(val.to_string());
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+    if positionals.is_empty() {
+        return Err(CliUsageError::usage(
+            format!("missing required operand for '{cmd_name}': requires DIR"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 1 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[1].display()),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    let dir = positionals.pop().unwrap();
+    Ok(WorldOp::Decide {
+        dir,
+        decide,
+        entity,
+    })
+}
+
+fn parse_world_show_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
+    let cmd_name = "world show";
+    let mut positionals = Vec::new();
+    let mut rev = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json" {
+            // Handled
+        } else if arg == "--rev" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--rev'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            rev = Some(parse_rev(&args[i], cmd_name, json)?);
+        } else if let Some(val) = arg.strip_prefix("--rev=") {
+            rev = Some(parse_rev(val, cmd_name, json)?);
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+    if positionals.is_empty() {
+        return Err(CliUsageError::usage(
+            format!("missing required operand for '{cmd_name}': requires DIR"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 1 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[1].display()),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    let dir = positionals.pop().unwrap();
+    Ok(WorldOp::Show { dir, rev })
+}
+
+fn parse_world_explain_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
+    let cmd_name = "world explain";
+    let mut positionals = Vec::new();
+    let mut decide = None;
+    let mut rev = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json" {
+            // Handled
+        } else if arg == "--decide" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--decide'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            decide = Some(args[i].clone());
+        } else if let Some(val) = arg.strip_prefix("--decide=") {
+            decide = Some(val.to_string());
+        } else if arg == "--rev" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--rev'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            rev = Some(parse_rev(&args[i], cmd_name, json)?);
+        } else if let Some(val) = arg.strip_prefix("--rev=") {
+            rev = Some(parse_rev(val, cmd_name, json)?);
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(arg.clone());
+        }
+        i += 1;
+    }
+    if positionals.len() < 2 {
+        return Err(CliUsageError::usage(
+            format!("missing required operands for '{cmd_name}': requires DIR and ENTITY"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 2 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[2]),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    let entity = positionals.pop().unwrap();
+    let dir = PathBuf::from(positionals.pop().unwrap());
+    Ok(WorldOp::Explain {
+        dir,
+        entity,
+        decide,
+        rev,
+    })
+}
+
+fn parse_world_audit_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
+    let cmd_name = "world audit";
+    let mut positionals = Vec::new();
+    let mut out = None;
+    let mut from_checkpoint = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json" {
+            // Handled
+        } else if arg == "--out" || arg == "-o" || arg == "--bundle" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    format!("missing value for '{arg}'"),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            out = Some(PathBuf::from(&args[i]));
+        } else if let Some(val) = arg.strip_prefix("--out=") {
+            out = Some(PathBuf::from(val));
+        } else if let Some(val) = arg.strip_prefix("--bundle=") {
+            out = Some(PathBuf::from(val));
+        } else if arg == "--from-checkpoint" || arg == "--checkpoint" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    format!("missing value for '{arg}'"),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            from_checkpoint = Some(parse_rev(&args[i], cmd_name, json)?);
+        } else if let Some(val) = arg.strip_prefix("--from-checkpoint=") {
+            from_checkpoint = Some(parse_rev(val, cmd_name, json)?);
+        } else if let Some(val) = arg.strip_prefix("--checkpoint=") {
+            from_checkpoint = Some(parse_rev(val, cmd_name, json)?);
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+    if positionals.is_empty() {
+        return Err(CliUsageError::usage(
+            format!("missing required DIR operand for '{cmd_name}'"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 1 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[1].display()),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    let Some(out) = out else {
+        return Err(CliUsageError::usage(
+            format!("missing required '--out <file>' option for '{cmd_name}'"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    };
+    Ok(WorldOp::Audit {
+        dir: positionals.remove(0),
+        out,
+        from_checkpoint,
+    })
+}
+
+fn parse_world_verify_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
+    let cmd_name = "world verify";
+    let mut positionals = Vec::new();
+    let mut expect_head = None;
+    let mut expect_program = None;
+    let mut trust_checkpoint = None;
+    let mut max_work = None;
+    let mut in_place = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json" {
+            // Handled
+        } else if arg == "--expect-head" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--expect-head'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            expect_head = Some(args[i].clone());
+        } else if let Some(val) = arg.strip_prefix("--expect-head=") {
+            expect_head = Some(val.to_string());
+        } else if arg == "--expect-program" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--expect-program'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            expect_program = Some(args[i].clone());
+        } else if let Some(val) = arg.strip_prefix("--expect-program=") {
+            expect_program = Some(val.to_string());
+        } else if arg == "--trust-checkpoint" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--trust-checkpoint'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            trust_checkpoint = Some(args[i].clone());
+        } else if let Some(val) = arg.strip_prefix("--trust-checkpoint=") {
+            trust_checkpoint = Some(val.to_string());
+        } else if arg == "--max-work" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--max-work'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            let n = args[i].parse::<u64>().map_err(|_| {
+                CliUsageError::usage(
+                    format!("invalid --max-work value: '{}' (expected integer)", args[i]),
+                    json,
+                    Some(cmd_name.to_string()),
+                )
+            })?;
+            max_work = Some(n);
+        } else if let Some(val) = arg.strip_prefix("--max-work=") {
+            let n = val.parse::<u64>().map_err(|_| {
+                CliUsageError::usage(
+                    format!("invalid --max-work value: '{val}' (expected integer)"),
+                    json,
+                    Some(cmd_name.to_string()),
+                )
+            })?;
+            max_work = Some(n);
+        } else if arg == "--in-place" {
+            if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                i += 1;
+                in_place = Some(PathBuf::from(&args[i]));
+            } else {
+                in_place = Some(PathBuf::new());
+            }
+        } else if let Some(val) = arg.strip_prefix("--in-place=") {
+            in_place = Some(PathBuf::from(val));
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+
+    let Some(expect_head) = expect_head else {
+        return Err(CliUsageError::usage(
+            format!("missing required '--expect-head <hex>' option for '{cmd_name}'"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    };
+    let Some(expect_program) = expect_program else {
+        return Err(CliUsageError::usage(
+            format!("missing required '--expect-program <hex>' option for '{cmd_name}'"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    };
+
+    let mut bundle = None;
+    if let Some(ref p) = in_place {
+        if p.as_os_str().is_empty() {
+            if positionals.is_empty() {
+                return Err(CliUsageError::usage(
+                    format!("missing required DIR operand for '{cmd_name} --in-place'"),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            in_place = Some(positionals.remove(0));
+        }
+    } else {
+        if positionals.is_empty() {
+            return Err(CliUsageError::usage(
+                format!("missing required BUNDLE operand or '--in-place <dir>' for '{cmd_name}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        }
+        bundle = Some(positionals.remove(0));
+    }
+
+    if !positionals.is_empty() {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[0].display()),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+
+    Ok(WorldOp::Verify {
+        expect_head,
+        expect_program,
+        trust_checkpoint,
+        max_work,
+        in_place,
+        bundle,
+    })
+}
+
+fn parse_world_import_kb_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
+    let cmd_name = "world import-kb";
+    let mut positionals = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json" {
+            // Handled
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+    if positionals.len() < 2 {
+        return Err(CliUsageError::usage(
+            format!("missing required operands for '{cmd_name}': requires KB_DIR and WORLD_DIR"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 2 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[2].display()),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    let world_dir = positionals.pop().unwrap();
+    let kb_dir = positionals.pop().unwrap();
+    Ok(WorldOp::ImportKb { kb_dir, world_dir })
 }
 
 pub fn print_help() {

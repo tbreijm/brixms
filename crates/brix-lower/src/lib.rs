@@ -31,7 +31,9 @@ pub mod l3_regime;
 pub mod l3_run;
 pub mod l3_v2;
 pub mod let_eval;
+pub mod module_graph;
 pub mod packages;
+pub mod relation_dag;
 pub use audit_bundle::{
     check_finite_decision_audit_input_bundle_from_module_v1,
     check_finite_decision_audit_input_bundle_from_module_with_inputs_v1,
@@ -99,10 +101,22 @@ pub use l3_run::{
     SettlementRunId, SettlementRunV1, SettlementStopV1,
 };
 pub use let_eval::{evaluate_let_module, LetEvalOutcome};
+pub use module_graph::{
+    compute_affected_modules, ExportKind, ExportedSymbol, LinkedProgram, LoadedModule, ModuleGraph,
+    ModuleLinkError, ModuleLoaderLimits, ModuleManifestEntry, ProgramGraphManifest, QualifiedName,
+};
+pub use relation_dag::{
+    decision_field_schemas, derive_binding_names, derive_decide_binding_names, lower_relations,
+    OperatorId, OperatorNode, RelationDag, RelationalLowerError,
+};
 pub use soc_core::{
     decode_audit_input_bundle_v1, encode_audit_input_bundle_v1, AuditDecodeLimits,
     BundleCheckError, BundleDecodeError, BundleProducerError, SettlementAuditInputBundleIdV1,
     SettlementAuditInputBundleV1,
+};
+pub use world_expr::{
+    build_nominal_schemas, expr_compilations, helper_compilations, reset_compilation_counters,
+    CompiledProgramEnv, CompiledWorldExpr,
 };
 
 use brix_elaborate::{elaborate_tree, ElaborationResult, RealizesTree};
@@ -973,6 +987,9 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
         ast::Expr::Comprehension { .. } => Err(LowerError::Unsupported(
             "comprehensions not in L2-first fragment".to_string(),
         )),
+        ast::Expr::AnonRecord(_) => Err(LowerError::Unsupported(
+            "anonymous records not in L2-first fragment".to_string(),
+        )),
     }
 }
 
@@ -1397,6 +1414,12 @@ fn check_declared_field_types(
             }
             check_declared_field_types(yield_expr, ctx, ty_ctx)
         }
+        ast::Expr::AnonRecord(fields) => {
+            for (_, expr) in fields {
+                check_declared_field_types(expr, ctx, ty_ctx)?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1696,3 +1719,6 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
 
     results
 }
+
+/// Shared scalar evaluation for persistent world expressions.
+pub mod world_expr;

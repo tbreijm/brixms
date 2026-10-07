@@ -169,11 +169,15 @@ fn resolve_one(
     stack.pop();
 
     for item in &parsed.items {
+        let decl = match item {
+            Item::Export(inner) => inner.as_ref(),
+            other => other,
+        };
         // Declarations only. A library's bindings are its examples.
-        if !matches!(item, Item::Config(_) | Item::Fn(_)) {
+        if !matches!(decl, Item::Config(_) | Item::Fn(_)) {
             continue;
         }
-        let Some(name) = declared_name(item) else {
+        let Some(name) = declared_name(decl) else {
             continue;
         };
         if let Some(first) = origin.get(&name) {
@@ -184,7 +188,7 @@ fn resolve_one(
             });
         }
         origin.insert(name, path.to_string());
-        imported.push(item.clone());
+        imported.push(decl.clone());
     }
 
     loaded.insert(path.to_string());
@@ -204,6 +208,9 @@ fn declared_name(item: &Item) -> Option<String> {
         Item::Commit(c) => Some(c.name.clone()),
         Item::Input(i) => Some(i.name.clone()),
         Item::Decide(d) => Some(d.name.clone()),
+        Item::Export(inner) => declared_name(inner),
+        Item::RelInput(r) => Some(r.name.clone()),
+        Item::RelDerived(r) => Some(r.name.clone()),
         Item::Show(_) | Item::Use(_) => None,
     }
 }
