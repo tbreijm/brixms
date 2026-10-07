@@ -34,8 +34,15 @@ impl Drop for Scratch {
     }
 }
 
+fn brix_bin() -> PathBuf {
+    std::env::var_os("CARGO_BIN_EXE_brix")
+        .or_else(|| std::env::var_os("NEXTEST_BIN_EXE_brix"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_brix")))
+}
+
 fn binary() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_brix"))
+    Command::new(brix_bin())
 }
 
 fn repo_root() -> PathBuf {
