@@ -49,6 +49,12 @@ pub struct StoreIoStats {
     pub physical_writes: u64,
     pub files_synced: u64,
     pub directories_synced: u64,
+    /// In-memory node cache hits.
+    pub cache_hits: u64,
+    /// In-memory node cache misses requiring disk reads.
+    pub cache_misses: u64,
+    /// Nodes evicted from in-memory cache to bound memory.
+    pub evictions: u64,
 }
 
 #[derive(Debug, Default)]
@@ -60,6 +66,9 @@ struct Counters {
     physical_writes: AtomicU64,
     files_synced: AtomicU64,
     directories_synced: AtomicU64,
+    cache_hits: AtomicU64,
+    cache_misses: AtomicU64,
+    evictions: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -98,11 +107,27 @@ struct Pending {
     lookup: BTreeMap<Digest, usize>,
     end: u64,
 }
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct State {
     index: BTreeMap<Digest, Location>,
     pending: Option<Pending>,
     root_synced: bool,
+    node_cache: BTreeMap<Digest, Vec<u8>>,
+    cache_lru: std::collections::VecDeque<Digest>,
+    max_cached_nodes: usize,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            index: BTreeMap::new(),
+            pending: None,
+            root_synced: false,
+            node_cache: BTreeMap::new(),
+            cache_lru: std::collections::VecDeque::new(),
+            max_cached_nodes: 16_384,
+        }
+    }
 }
 
 /// Durable, content-addressed node packs with legacy `objects/xx/*.bin` reads.
@@ -253,7 +278,30 @@ impl FileNodeStore {
             physical_writes: self.io.physical_writes.load(Ordering::Relaxed),
             files_synced: self.io.files_synced.load(Ordering::Relaxed),
             directories_synced: self.io.directories_synced.load(Ordering::Relaxed),
+            cache_hits: self.io.cache_hits.load(Ordering::Relaxed),
+            cache_misses: self.io.cache_misses.load(Ordering::Relaxed),
+            evictions: self.io.evictions.load(Ordering::Relaxed),
         }
+    }
+
+    /// Set maximum number of nodes cached in memory. Evicts excess nodes immediately.
+    pub fn set_cache_capacity(&self, max_nodes: usize) {
+        if let Ok(mut state) = self.state.lock() {
+            state.max_cached_nodes = max_nodes;
+            while state.node_cache.len() > state.max_cached_nodes {
+                if let Some(old) = state.cache_lru.pop_front() {
+                    state.node_cache.remove(&old);
+                    self.io.evictions.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Number of nodes currently resident in the in-memory cache.
+    pub fn cached_nodes_count(&self) -> usize {
+        self.state.lock().map_or(0, |s| s.node_cache.len())
     }
 
     pub fn objects_dir(&self) -> &Path {
@@ -448,45 +496,75 @@ impl NodeStore for FileNodeStore {
 
     fn get_node(&self, digest: &Digest) -> Option<Vec<u8>> {
         self.io.reads.fetch_add(1, Ordering::Relaxed);
-        self.latch((|| {
-            let target = {
-                let mut state = self
-                    .state
-                    .lock()
-                    .map_err(|_| invalid("poisoned pack index"))?;
-                self.check()?;
-                if let Some(location) = state.index.get(digest) {
-                    Some((File::open(location.path.as_ref())?, location.entry.clone()))
-                } else if let Some(pending) = state.pending.as_mut() {
-                    if let Some(&idx) = pending.lookup.get(digest) {
-                        pending.writer.flush()?;
-                        // Open the temporary pack while holding the state lock. A cloned
-                        // handle may flush immediately after we release it, renaming this
-                        // path; the open file descriptor remains valid across that rename.
-                        Some((File::open(&pending.path)?, pending.entries[idx].1.clone()))
+        if self.check().is_err() {
+            return None;
+        }
+        // 1. Check in-memory LRU cache
+        if let Ok(state) = self.state.lock() {
+            if let Some(bytes) = state.node_cache.get(digest) {
+                self.io.cache_hits.fetch_add(1, Ordering::Relaxed);
+                return Some(bytes.clone());
+            }
+        }
+        self.io.cache_misses.fetch_add(1, Ordering::Relaxed);
+
+        let result = self
+            .latch((|| {
+                let target = {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .map_err(|_| invalid("poisoned pack index"))?;
+                    self.check()?;
+                    if let Some(location) = state.index.get(digest) {
+                        Some((File::open(location.path.as_ref())?, location.entry.clone()))
+                    } else if let Some(pending) = state.pending.as_mut() {
+                        if let Some(&idx) = pending.lookup.get(digest) {
+                            pending.writer.flush()?;
+                            // Open the temporary pack while holding the state lock. A cloned
+                            // handle may flush immediately after we release it, renaming this
+                            // path; the open file descriptor remains valid across that rename.
+                            Some((File::open(&pending.path)?, pending.entries[idx].1.clone()))
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
-                } else {
-                    None
+                };
+                if let Some((file, entry)) = target {
+                    return self.read_entry(file, &entry).map(Some);
                 }
-            };
-            if let Some((file, entry)) = target {
-                return self.read_entry(file, &entry).map(Some);
-            }
-            match fs::read(self.object_path(digest)) {
-                Ok(bytes) => {
-                    self.io
-                        .bytes_read
-                        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                    Ok(Some(bytes))
+                match fs::read(self.object_path(digest)) {
+                    Ok(bytes) => {
+                        self.io
+                            .bytes_read
+                            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                        Ok(Some(bytes))
+                    }
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+                    Err(err) => Err(err),
                 }
-                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
-                Err(err) => Err(err),
+            })())
+            .ok()
+            .flatten();
+
+        if let Some(ref bytes) = result {
+            if let Ok(mut state) = self.state.lock() {
+                state.node_cache.insert(*digest, bytes.clone());
+                state.cache_lru.push_back(*digest);
+                while state.node_cache.len() > state.max_cached_nodes {
+                    if let Some(old) = state.cache_lru.pop_front() {
+                        state.node_cache.remove(&old);
+                        self.io.evictions.fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        break;
+                    }
+                }
             }
-        })())
-        .ok()
-        .flatten()
+        }
+
+        result
     }
 
     fn put_node(&mut self, digest: Digest, bytes: Vec<u8>) {

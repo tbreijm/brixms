@@ -118,23 +118,77 @@ fn contract(ty: &ast::Ty) -> Result<L3SchemaType, String> {
     }
 }
 
-impl CompiledWorldExpr {
-    pub fn new(
-        expr: &ast::Expr,
-        helpers: &BTreeMap<String, ast::Callable>,
-        bindings: &BTreeSet<String>,
-    ) -> Result<Self, String> {
-        Self::with_schemas(expr, helpers, bindings, Arc::new(BTreeMap::new()))
-    }
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Supply linked nominal schemas when helpers accept or return records.
-    pub fn with_schemas(
-        expr: &ast::Expr,
+static HELPER_COMPILATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+static EXPR_COMPILATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+pub fn helper_compilations() -> usize {
+    HELPER_COMPILATION_COUNT.load(Ordering::SeqCst)
+}
+
+pub fn expr_compilations() -> usize {
+    EXPR_COMPILATION_COUNT.load(Ordering::SeqCst)
+}
+
+pub fn reset_compilation_counters() {
+    HELPER_COMPILATION_COUNT.store(0, Ordering::SeqCst);
+    EXPR_COMPILATION_COUNT.store(0, Ordering::SeqCst);
+}
+
+/// Convert linked nominal configs into L3 nominal schemas.
+pub fn build_nominal_schemas(
+    configs: &BTreeMap<crate::module_graph::QualifiedName, ast::ConfigDecl>,
+) -> Result<Arc<BTreeMap<String, L3Schema>>, String> {
+    use crate::l3_v2::L3SchemaBody;
+    let mut schemas = BTreeMap::new();
+    for (qname, decl) in configs {
+        let body = match &decl.body {
+            ast::ConfigBody::Record(fields) => {
+                let mut map = BTreeMap::new();
+                for f in fields {
+                    map.insert(f.name.clone(), contract(&f.ty)?);
+                }
+                L3SchemaBody::Record(map)
+            }
+            ast::ConfigBody::Sum(variants) => {
+                let mut vars = Vec::new();
+                for v in variants {
+                    let mut payloads = Vec::new();
+                    for p in &v.params {
+                        payloads.push(contract(p)?);
+                    }
+                    vars.push((v.name.clone(), payloads));
+                }
+                L3SchemaBody::Sum(vars)
+            }
+        };
+        let schema = L3Schema {
+            name: qname.to_string(),
+            body,
+        };
+        schemas.insert(qname.to_string(), schema.clone());
+        schemas.insert(decl.name.clone(), schema);
+    }
+    Ok(Arc::new(schemas))
+}
+
+/// Immutable compiled program environment containing compiled helper functions,
+/// arities, and linked nominal schemas.
+/// Built once per linked program and shared via `Arc`.
+#[derive(Clone, Debug)]
+pub struct CompiledProgramEnv {
+    pub arities: Arc<BTreeMap<String, usize>>,
+    pub functions: Arc<BTreeMap<String, L3FunctionDef>>,
+    pub schemas: Arc<BTreeMap<String, L3Schema>>,
+}
+
+impl CompiledProgramEnv {
+    pub fn new(
         helpers: &BTreeMap<String, ast::Callable>,
-        bindings: &BTreeSet<String>,
         schemas: Arc<BTreeMap<String, L3Schema>>,
     ) -> Result<Self, String> {
-        let arities = helpers
+        let arities: BTreeMap<String, usize> = helpers
             .iter()
             .map(|(name, f)| (name.clone(), f.params.len()))
             .collect();
@@ -157,6 +211,7 @@ impl CompiledWorldExpr {
         };
         let mut functions = BTreeMap::new();
         for (name, f) in helpers {
+            HELPER_COMPILATION_COUNT.fetch_add(1, Ordering::SeqCst);
             let names = f.params.iter().map(|p| p.name.clone()).collect();
             let params = f
                 .params
@@ -175,19 +230,103 @@ impl CompiledWorldExpr {
             );
         }
         Ok(Self {
-            expr: lower(expr, bindings)?,
+            arities: Arc::new(arities),
             functions: Arc::new(functions),
             schemas,
         })
     }
 
-    pub fn eval(&self, bindings: &BTreeMap<String, L3ValueV2>) -> Result<L3ValueV2, String> {
+    /// Construct the compiled environment directly from a linked program.
+    pub fn from_linked_program(
+        program: &crate::module_graph::LinkedProgram,
+    ) -> Result<Arc<Self>, String> {
+        let schemas = build_nominal_schemas(&program.configs)?;
+        let mut helpers = BTreeMap::new();
+        for (qname, callable) in &program.functions {
+            helpers.insert(qname.to_string(), callable.clone());
+            helpers.insert(callable.name.clone(), callable.clone());
+        }
+        let env = Self::new(&helpers, schemas)?;
+        Ok(Arc::new(env))
+    }
+
+    /// Compile an individual expression in this environment.
+    /// Does not recompile helpers!
+    pub fn compile_expr(
+        &self,
+        expr: &ast::Expr,
+        bindings: &BTreeSet<String>,
+    ) -> Result<CompiledWorldExpr, String> {
+        EXPR_COMPILATION_COUNT.fetch_add(1, Ordering::SeqCst);
+        let empty_set = BTreeSet::new();
+        let empty_map = BTreeMap::new();
+        let normalized = normalize_world_and(expr);
+        let lowered = l3_v2::lower_expr_v2(
+            &normalized,
+            bindings,
+            bindings,
+            &empty_set,
+            &empty_map,
+            &empty_map,
+            &self.arities,
+            false,
+            true,
+        )
+        .map_err(|e| format!("world expression lowering: {e:?}"))?;
+
+        Ok(CompiledWorldExpr {
+            expr: lowered,
+            functions: self.functions.clone(),
+            schemas: self.schemas.clone(),
+        })
+    }
+}
+
+impl CompiledWorldExpr {
+    pub fn new(
+        expr: &ast::Expr,
+        helpers: &BTreeMap<String, ast::Callable>,
+        bindings: &BTreeSet<String>,
+    ) -> Result<Self, String> {
+        Self::with_schemas(expr, helpers, bindings, Arc::new(BTreeMap::new()))
+    }
+
+    /// Supply linked nominal schemas when helpers accept or return records.
+    pub fn with_schemas(
+        expr: &ast::Expr,
+        helpers: &BTreeMap<String, ast::Callable>,
+        bindings: &BTreeSet<String>,
+        schemas: Arc<BTreeMap<String, L3Schema>>,
+    ) -> Result<Self, String> {
+        let env = CompiledProgramEnv::new(helpers, schemas)?;
+        env.compile_expr(expr, bindings)
+    }
+
+    /// Compile an expression using a precompiled program environment.
+    pub fn compile(
+        env: &CompiledProgramEnv,
+        expr: &ast::Expr,
+        bindings: &BTreeSet<String>,
+    ) -> Result<Self, String> {
+        env.compile_expr(expr, bindings)
+    }
+
+    pub fn eval_with_budget(
+        &self,
+        bindings: &BTreeMap<String, L3ValueV2>,
+        max_steps: Option<usize>,
+    ) -> Result<(L3ValueV2, usize), String> {
         let mut env = EvalEnv::new()
             .with_functions(self.functions.clone())
             .with_schemas(self.schemas.clone());
         for (name, value) in bindings {
             env = env.with_let(name, value.clone());
         }
-        l3_v2::eval(&self.expr, &env).map_err(|fault| format!("Unknown(EvaluationFault): {fault}"))
+        l3_v2::eval_with_budget(&self.expr, &env, max_steps)
+            .map_err(|fault| format!("Unknown(EvaluationFault): {fault}"))
+    }
+
+    pub fn eval(&self, bindings: &BTreeMap<String, L3ValueV2>) -> Result<L3ValueV2, String> {
+        self.eval_with_budget(bindings, None).map(|(val, _)| val)
     }
 }

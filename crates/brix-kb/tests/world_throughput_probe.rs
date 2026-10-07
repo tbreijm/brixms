@@ -203,6 +203,9 @@ fn io_delta(before: StoreIoStats, after: StoreIoStats) -> StoreIoStats {
         physical_writes: after.physical_writes - before.physical_writes,
         files_synced: after.files_synced - before.files_synced,
         directories_synced: after.directories_synced - before.directories_synced,
+        cache_hits: after.cache_hits - before.cache_hits,
+        cache_misses: after.cache_misses - before.cache_misses,
+        evictions: after.evictions - before.evictions,
     }
 }
 

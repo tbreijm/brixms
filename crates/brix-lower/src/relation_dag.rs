@@ -280,8 +280,14 @@ pub fn lower_relations(program: &LinkedProgram) -> Result<RelationDag, Relationa
     // `reference.rs` use to decide which `decide` blocks they instantiate.
     let schemas = decision_field_schemas(&dag, program);
     for (qname, decl) in &program.decides {
-        if let Some(source) = resolve_decide_source_relation(&decl.list, &qname.module, &dag.relation_outputs) {
-            let per = decl.per.as_ref().ok_or_else(|| RelationalLowerError::DecideMissingEntityField { decide: qname.to_string() })?;
+        if let Some(source) =
+            resolve_decide_source_relation(&decl.list, &qname.module, &dag.relation_outputs)
+        {
+            let per = decl.per.as_ref().ok_or_else(|| {
+                RelationalLowerError::DecideMissingEntityField {
+                    decide: qname.to_string(),
+                }
+            })?;
             let fields = &schemas[dag.relation_outputs[&source].0];
             match fields.get(per) {
                 Some(ast::Ty::Named(t)) if matches!(t.as_str(), "Str" | "Int" | "Bool" | "F64" | "Decimal") => {},
@@ -325,9 +331,16 @@ pub fn resolve_decide_source_relation(
     None
 }
 
-/// Propagate output field types through the acyclic DAG for entity-field validation.
-fn decision_field_schemas(dag: &RelationDag, program: &LinkedProgram) -> Vec<BTreeMap<String, ast::Ty>> {
-    fn expr_ty(e: &Expr, fields: &BTreeMap<String, ast::Ty>, program: &LinkedProgram) -> Option<ast::Ty> {
+/// Propagate output field types through the acyclic DAG for entity-field validation and expression precompilation.
+pub fn decision_field_schemas(
+    dag: &RelationDag,
+    program: &LinkedProgram,
+) -> Vec<BTreeMap<String, ast::Ty>> {
+    fn expr_ty(
+        e: &Expr,
+        fields: &BTreeMap<String, ast::Ty>,
+        program: &LinkedProgram,
+    ) -> Option<ast::Ty> {
         match e {
             Expr::Var(v) => fields.get(v).cloned(),
             Expr::Field(base, field) => match base.as_ref() {
@@ -336,42 +349,120 @@ fn decision_field_schemas(dag: &RelationDag, program: &LinkedProgram) -> Vec<BTr
             },
             Expr::Str(_) => Some(ast::Ty::Named("Str".into())),
             Expr::Bool(_) | Expr::Not(_) => Some(ast::Ty::Named("Bool".into())),
-            Expr::Num(n) => Some(ast::Ty::Named(if n.contains('.') { "F64" } else { "Int" }.into())),
+            Expr::Num(n) => Some(ast::Ty::Named(
+                if n.contains('.') { "F64" } else { "Int" }.into(),
+            )),
             Expr::Bin { op, lhs, .. } => match op {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => expr_ty(lhs, fields, program),
                 _ => Some(ast::Ty::Named("Bool".into())),
             },
-            Expr::Call { func, .. } => program.functions.iter().find(|(k,_)| k.to_string() == *func).and_then(|(_, f)| f.ret.clone()),
+            Expr::Call { func, .. } => program
+                .functions
+                .iter()
+                .find(|(k, _)| k.to_string() == *func)
+                .and_then(|(_, f)| f.ret.clone()),
             _ => None,
         }
     }
     let mut schemas: Vec<BTreeMap<String, ast::Ty>> = Vec::new();
     for node in &dag.nodes {
         let fields = match node {
-            OperatorNode::Scan { relation, schema, .. } => {
+            OperatorNode::Scan {
+                relation, schema, ..
+            } => {
                 let fields = match schema {
                     ast::Ty::Record(f) => Some(f),
                     ast::Ty::Named(name) => {
                         let owner = owner_module(relation);
                         let (module, local) = name.rsplit_once("::").unwrap_or((owner, name));
-                        program.configs.get(&crate::module_graph::QualifiedName::new(module, local)).and_then(|c| match &c.body { ast::ConfigBody::Record(f) => Some(f), _ => None })
-                    },
+                        program
+                            .configs
+                            .get(&crate::module_graph::QualifiedName::new(module, local))
+                            .and_then(|c| match &c.body {
+                                ast::ConfigBody::Record(f) => Some(f),
+                                _ => None,
+                            })
+                    }
                     _ => None,
                 };
-                fields.into_iter().flatten().map(|f| (f.name.clone(), f.ty.clone())).collect()
-            },
-            OperatorNode::Bind { input, alias } => schemas[input.0].iter().map(|(k,v)| (format!("{alias}.{k}"), v.clone())).collect(),
-            OperatorNode::Filter { input, .. } | OperatorNode::Distinct { input } => schemas[input.0].clone(),
-            OperatorNode::EquiJoin { left, right, .. } => { let mut f = schemas[left.0].clone(); f.extend(schemas[right.0].clone()); f },
-            OperatorNode::Project { input, projections } => projections.iter().filter_map(|(k,e)| expr_ty(e, &schemas[input.0], program).map(|t| (k.clone(),t))).collect(),
-            OperatorNode::GroupedCount { input, group_keys, projections } => projections.iter().filter_map(|(k,p)| match p {
-                GroupProjection::Count => Some((k.clone(), ast::Ty::Named("Int".into()))),
-                GroupProjection::Key(i) => expr_ty(&group_keys[*i], &schemas[input.0], program).map(|t| (k.clone(), t)),
-            }).collect(),
+                fields
+                    .into_iter()
+                    .flatten()
+                    .map(|f| (f.name.clone(), f.ty.clone()))
+                    .collect()
+            }
+            OperatorNode::Bind { input, alias } => {
+                let mut map = BTreeMap::new();
+                for (k, v) in &schemas[input.0] {
+                    map.insert(format!("{alias}.{k}"), v.clone());
+                    map.insert(k.clone(), v.clone());
+                }
+                map
+            }
+            OperatorNode::Filter { input, .. } | OperatorNode::Distinct { input } => {
+                schemas[input.0].clone()
+            }
+            OperatorNode::EquiJoin { left, right, .. } => {
+                let mut f = schemas[left.0].clone();
+                f.extend(schemas[right.0].clone());
+                f
+            }
+            OperatorNode::Project { input, projections } => projections
+                .iter()
+                .map(|(k, e)| {
+                    let ty = expr_ty(e, &schemas[input.0], program)
+                        .unwrap_or_else(|| ast::Ty::Named("Any".into()));
+                    (k.clone(), ty)
+                })
+                .collect(),
+            OperatorNode::GroupedCount {
+                input,
+                group_keys,
+                projections,
+            } => projections
+                .iter()
+                .filter_map(|(k, p)| match p {
+                    GroupProjection::Count => Some((k.clone(), ast::Ty::Named("Int".into()))),
+                    GroupProjection::Key(i) => {
+                        expr_ty(&group_keys[*i], &schemas[input.0], program).map(|t| (k.clone(), t))
+                    }
+                })
+                .collect(),
         };
         schemas.push(fields);
     }
     schemas
+}
+
+/// Derive the available scalar binding names for an operator's input schema.
+pub fn derive_binding_names(schema: &BTreeMap<String, ast::Ty>) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for key in schema.keys() {
+        if let Some((binding, field)) = key.split_once('.') {
+            names.insert(binding.to_string());
+            names.insert(field.to_string());
+        }
+        names.insert(key.clone());
+    }
+    names
+}
+
+/// Derive the available scalar binding names for a decide block over an input schema and binder.
+pub fn derive_decide_binding_names(
+    schema: &BTreeMap<String, ast::Ty>,
+    binder: &str,
+) -> BTreeSet<String> {
+    let mut names = derive_binding_names(schema);
+    names.insert(binder.to_string());
+    for k in schema.keys() {
+        names.insert(k.clone());
+        names.insert(format!("{binder}.{k}"));
+        if let Some((_, col)) = k.split_once('.') {
+            names.insert(col.to_string());
+            names.insert(format!("{binder}.{col}"));
+        }
+    }
+    names
 }
 
 enum RelationSource {

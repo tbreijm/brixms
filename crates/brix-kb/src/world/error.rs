@@ -27,7 +27,9 @@ impl fmt::Display for CrashPoint {
             Self::AfterObjectsFsyncBeforeRevisionFsync => {
                 write!(f, "crash after objects fsync before revision fsync")
             }
-            Self::AfterDecisionDeltaFsyncBeforeRevisionFsync => write!(f, "crash after decision delta fsync before revision fsync"),
+            Self::AfterDecisionDeltaFsyncBeforeRevisionFsync => {
+                write!(f, "crash after decision delta fsync before revision fsync")
+            }
             Self::AfterRevisionFsyncBeforeHeadRename => {
                 write!(f, "crash after revision fsync before HEAD rename")
             }
@@ -101,6 +103,8 @@ pub enum WorldError {
     InvalidIndexDeclaration(String),
     /// Relational operator network or deliberation error.
     NetworkError(String),
+    /// Computational budget or work limit exhausted.
+    BudgetExhausted,
 }
 
 impl fmt::Display for WorldError {
@@ -169,6 +173,7 @@ impl fmt::Display for WorldError {
                 write!(f, "invalid secondary index declaration: {msg}")
             }
             Self::NetworkError(msg) => write!(f, "network error: {msg}"),
+            Self::BudgetExhausted => write!(f, "computational budget exhausted"),
         }
     }
 }

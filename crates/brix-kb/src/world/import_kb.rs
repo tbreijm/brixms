@@ -460,7 +460,7 @@ mod tests {
             ),
         )
         .unwrap();
-        kb_ops::assert_inputs(kb_root, &[update_path.clone()], &[]).expect("kb assert");
+        kb_ops::assert_inputs(kb_root, std::slice::from_ref(&update_path), &[]).expect("kb assert");
         std::fs::remove_file(update_path).unwrap();
     }
 
@@ -623,5 +623,4 @@ mod tests {
         cleanup_kb(&kb_dir);
         std::fs::remove_dir_all(&world_dir).ok();
     }
-
 }

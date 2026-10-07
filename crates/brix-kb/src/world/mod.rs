@@ -20,6 +20,7 @@ pub mod revision;
 pub mod session;
 pub mod staging;
 pub mod types;
+pub mod verify;
 
 pub use batch::{WorldBatch, WorldBatchOp, BATCH_SCHEMA};
 pub use codec::{encode_secondary_key, extract_indexed_field, TupleRecord, TUPLE_MAGIC_V1};

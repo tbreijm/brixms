@@ -106,12 +106,17 @@ pub use module_graph::{
     ModuleLinkError, ModuleLoaderLimits, ModuleManifestEntry, ProgramGraphManifest, QualifiedName,
 };
 pub use relation_dag::{
-    lower_relations, OperatorId, OperatorNode, RelationDag, RelationalLowerError,
+    decision_field_schemas, derive_binding_names, derive_decide_binding_names, lower_relations,
+    OperatorId, OperatorNode, RelationDag, RelationalLowerError,
 };
 pub use soc_core::{
     decode_audit_input_bundle_v1, encode_audit_input_bundle_v1, AuditDecodeLimits,
     BundleCheckError, BundleDecodeError, BundleProducerError, SettlementAuditInputBundleIdV1,
     SettlementAuditInputBundleV1,
+};
+pub use world_expr::{
+    build_nominal_schemas, expr_compilations, helper_compilations, reset_compilation_counters,
+    CompiledProgramEnv, CompiledWorldExpr,
 };
 
 use brix_elaborate::{elaborate_tree, ElaborationResult, RealizesTree};

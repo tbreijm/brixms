@@ -31,6 +31,8 @@
 //! revision digest for free, through the existing authority, rather than this
 //! module re-deriving `WorldRevision`'s hash scheme a second time.
 
+use std::collections::BTreeMap;
+
 use brix_canon::{read_decimal, CanonError, CanonReader, CanonWriter, Digest, Domain, FiniteF64};
 
 use super::error::WorldError;
@@ -314,7 +316,121 @@ pub struct ExecProfileV1 {
     pub settlement: String,
 }
 
+impl Default for ExecProfileV1 {
+    fn default() -> Self {
+        Self {
+            profile: crate::world::EXEC_PROFILE_SCHEMA.to_string(),
+            evaluator: "brix-world-net@1".to_string(),
+            crate_version: env!("CARGO_PKG_VERSION").to_string(),
+            module_loader_limits: ModuleLoaderLimitsV1 {
+                depth: 16,
+                modules: 256,
+                module_bytes: 1024 * 1024,
+                total_bytes: 8 * 1024 * 1024,
+            },
+            numeric_semantics: "ADR-0045".to_string(),
+            settlement: "least-key(phase,priority,tiebreak)".to_string(),
+        }
+    }
+}
+
 impl ExecProfileV1 {
+    pub fn current_for_network() -> Self {
+        Self::default()
+    }
+
+    pub fn digest(&self) -> Digest {
+        let mut w = CanonWriter::new();
+        w.write_tag(crate::world::EXEC_PROFILE_SCHEMA);
+        w.write_str(&self.evaluator);
+        w.write_str(&self.crate_version);
+        for n in [
+            self.module_loader_limits.depth,
+            self.module_loader_limits.modules,
+            self.module_loader_limits.module_bytes,
+            self.module_loader_limits.total_bytes,
+        ] {
+            w.write_uint(n);
+        }
+        w.write_str(&self.numeric_semantics);
+        w.write_str(&self.settlement);
+        w.write_str("same-proposal-entity-supports-must-agree@1");
+        w.digest(Domain::Value)
+    }
+
+    pub fn from_json(v: &serde_json::Value) -> Result<Self, WorldError> {
+        let profile = v
+            .get("profile")
+            .and_then(|x| x.as_str())
+            .unwrap_or("brix.world@1")
+            .to_string();
+        let evaluator = v
+            .get("evaluator")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| WorldError::Json("missing evaluator in exec_profile".into()))?
+            .to_string();
+        let crate_version = v
+            .get("crate_version")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| WorldError::Json("missing crate_version in exec_profile".into()))?
+            .to_string();
+        let numeric_semantics = v
+            .get("numeric_semantics")
+            .and_then(|x| x.as_str())
+            .unwrap_or("ADR-0045")
+            .to_string();
+        let settlement = v
+            .get("settlement")
+            .and_then(|x| x.as_str())
+            .unwrap_or("least-key(phase,priority,tiebreak)")
+            .to_string();
+        let limits = if let Some(l) = v.get("module_loader_limits") {
+            ModuleLoaderLimitsV1 {
+                depth: l.get("depth").and_then(|x| x.as_u64()).unwrap_or(16),
+                modules: l.get("modules").and_then(|x| x.as_u64()).unwrap_or(256),
+                module_bytes: l
+                    .get("module_bytes")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(1024 * 1024),
+                total_bytes: l
+                    .get("total_bytes")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(8 * 1024 * 1024),
+            }
+        } else {
+            ModuleLoaderLimitsV1 {
+                depth: 16,
+                modules: 256,
+                module_bytes: 1024 * 1024,
+                total_bytes: 8 * 1024 * 1024,
+            }
+        };
+        Ok(Self {
+            profile,
+            evaluator,
+            crate_version,
+            module_loader_limits: limits,
+            numeric_semantics,
+            settlement,
+        })
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "profile": self.profile,
+            "evaluator": self.evaluator,
+            "crate_version": self.crate_version,
+            "module_loader_limits": {
+                "depth": self.module_loader_limits.depth,
+                "modules": self.module_loader_limits.modules,
+                "module_bytes": self.module_loader_limits.module_bytes,
+                "total_bytes": self.module_loader_limits.total_bytes,
+            },
+            "numeric_semantics": self.numeric_semantics,
+            "settlement": self.settlement,
+        })
+    }
+
     fn canon_write(&self, w: &mut CanonWriter) {
         write_text(w, &self.profile);
         write_text(w, &self.evaluator);
@@ -448,12 +564,22 @@ impl DecisionTupleV1 {
 /// set, and the complete settlement map, both sorted.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CheckpointStateV1 {
+    pub record: WorldRevision,
     pub relations: Vec<(String, Vec<(WorldKey, WorldTuple)>)>,
     pub decisions: Vec<(String, String, DecisionTupleV1)>,
 }
 
 impl CheckpointStateV1 {
+    pub fn digest(&self) -> Digest {
+        let mut w = CanonWriter::new();
+        self.canon_write(&mut w);
+        w.digest(Domain::Value)
+    }
+
     fn canon_write(&self, w: &mut CanonWriter) {
+        let record_bytes =
+            serde_json::to_vec(&self.record.to_json()).expect("WorldRevision::to_json serializes");
+        w.write_bytes(&record_bytes);
         w.write_uint(self.relations.len() as u64);
         for (rel, rows) in &self.relations {
             write_text(w, rel);
@@ -475,6 +601,18 @@ impl CheckpointStateV1 {
         r: &mut CanonReader<'_>,
         limits: &WorldAuditDecodeLimits,
     ) -> Result<Self, WorldAuditBundleError> {
+        let record_bytes = r.read_bytes()?;
+        if record_bytes.len() > limits.max_tuple_bytes {
+            return Err(WorldAuditBundleError::TupleBytesExceeded {
+                limit: limits.max_tuple_bytes,
+                found: record_bytes.len(),
+            });
+        }
+        let record_val: serde_json::Value = serde_json::from_slice(record_bytes)
+            .map_err(|e| WorldAuditBundleError::Revision(WorldError::Json(e.to_string())))?;
+        let record =
+            WorldRevision::from_json(&record_val).map_err(WorldAuditBundleError::Revision)?;
+
         let rel_count = read_count(r, limits.max_checkpoint_rows, |found| {
             WorldAuditBundleError::CheckpointRowsExceeded {
                 limit: limits.max_checkpoint_rows,
@@ -543,6 +681,7 @@ impl CheckpointStateV1 {
         }
 
         Ok(Self {
+            record,
             relations,
             decisions,
         })
@@ -560,7 +699,7 @@ pub enum ScopeV1 {
     Checkpoint {
         seq: u64,
         revision_digest: Digest,
-        state: CheckpointStateV1,
+        state: Box<CheckpointStateV1>,
     },
 }
 
@@ -602,7 +741,7 @@ impl ScopeV1 {
                 Ok(ScopeV1::Checkpoint {
                     seq,
                     revision_digest,
-                    state,
+                    state: Box::new(state),
                 })
             }
             other => Err(WorldAuditBundleError::UnknownScopeTag(other)),
@@ -1007,14 +1146,27 @@ pub fn build_genesis_bundle_from_session(
         let snapshot = session.pin_revision(seq)?;
         let record = snapshot.revision.clone();
 
-        if record.decision_root.is_some() {
-            return Err(WorldError::NetworkError(format!(
-                "world-audit-bundle producer: revision {seq} has a decision_root; \
-                 historical decision_delta is not reconstructible from the public \
-                 WorldSession API at f1ec1b8 (P6 G2/G3) — see audit.rs \
-                 build_genesis_bundle_from_session doc comment"
-            )));
-        }
+        let decision_delta = if record.decision_root.is_some() {
+            session
+                .decision_delta(seq)?
+                .into_iter()
+                .map(|((d, e), opt)| {
+                    (
+                        d,
+                        e,
+                        opt.map(|s| DecisionTupleV1 {
+                            candidate_name: s.candidate_name,
+                            priority: s.priority,
+                            phase: s.phase,
+                            value: s.value,
+                            tiebreak: s.calendar_key.tiebreak,
+                        }),
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         let mut source_delta = Vec::new();
         for (relation, keys) in &record.changed_keys {
@@ -1032,7 +1184,7 @@ pub fn build_genesis_bundle_from_session(
         revisions.push(RevisionEntryV1 {
             record,
             source_delta,
-            decision_delta: Vec::new(),
+            decision_delta,
         });
     }
 
@@ -1043,6 +1195,139 @@ pub fn build_genesis_bundle_from_session(
         program,
         exec_profile,
         scope: ScopeV1::Genesis,
+        revisions,
+        head: HeadRefV1 {
+            seq: head_seq,
+            revision_digest: head_revision_digest,
+        },
+    })
+}
+
+/// Build a checkpoint-scoped audit bundle covering a suffix from `checkpoint_seq` to HEAD.
+pub fn build_checkpoint_bundle_from_session(
+    session: &WorldSession,
+    checkpoint_seq: u64,
+    program: ProgramClosureV1,
+    exec_profile: ExecProfileV1,
+) -> Result<WorldAuditBundleV1, WorldError> {
+    if checkpoint_seq == 0 {
+        return build_genesis_bundle_from_session(session, program, exec_profile);
+    }
+    let head_seq = session.current_revision();
+    if checkpoint_seq > head_seq {
+        return Err(WorldError::RevisionNotFound(checkpoint_seq));
+    }
+
+    let checkpoint_snapshot = session.pin_revision(checkpoint_seq)?;
+    let mut relations = Vec::new();
+    for rel_name in session.manifest().relations.keys() {
+        let mut rows = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = checkpoint_snapshot.query_page(rel_name, cursor.as_deref(), 1000)?;
+            for (key, tuple) in page.entries {
+                rows.push((key, tuple));
+            }
+            if !page.has_more {
+                break;
+            }
+            cursor = page.next_cursor;
+        }
+        rows.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        relations.push((rel_name.clone(), rows));
+    }
+    relations.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut decisions_map: BTreeMap<(String, String), DecisionTupleV1> = BTreeMap::new();
+    for s in 1..=checkpoint_seq {
+        for ((d, e), opt) in session.decision_delta(s)? {
+            if let Some(dec) = opt {
+                decisions_map.insert(
+                    (d, e),
+                    DecisionTupleV1 {
+                        candidate_name: dec.candidate_name,
+                        priority: dec.priority,
+                        phase: dec.phase,
+                        value: dec.value,
+                        tiebreak: dec.calendar_key.tiebreak,
+                    },
+                );
+            } else {
+                decisions_map.remove(&(d, e));
+            }
+        }
+    }
+    let mut decisions = Vec::new();
+    for ((d, e), tuple) in decisions_map {
+        decisions.push((d, e, tuple));
+    }
+    decisions.sort_by(|a, b| (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str())));
+
+    let state = CheckpointStateV1 {
+        record: checkpoint_snapshot.revision.clone(),
+        relations,
+        decisions,
+    };
+
+    let mut revisions = Vec::new();
+    for seq in (checkpoint_seq + 1)..=head_seq {
+        let prev_snapshot = session.pin_revision(seq - 1)?;
+        let snapshot = session.pin_revision(seq)?;
+        let record = snapshot.revision.clone();
+
+        let decision_delta = if record.decision_root.is_some() {
+            session
+                .decision_delta(seq)?
+                .into_iter()
+                .map(|((d, e), opt)| {
+                    (
+                        d,
+                        e,
+                        opt.map(|s| DecisionTupleV1 {
+                            candidate_name: s.candidate_name,
+                            priority: s.priority,
+                            phase: s.phase,
+                            value: s.value,
+                            tiebreak: s.calendar_key.tiebreak,
+                        }),
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let mut source_delta = Vec::new();
+        for (relation, keys) in &record.changed_keys {
+            for key in keys {
+                let before = prev_snapshot.get(relation, key)?;
+                let after = snapshot.get(relation, key)?;
+                if before != after {
+                    source_delta.push((relation.clone(), key.clone(), after));
+                }
+            }
+        }
+        source_delta
+            .sort_by(|a, b| (a.0.as_str(), a.1.as_bytes()).cmp(&(b.0.as_str(), b.1.as_bytes())));
+
+        revisions.push(RevisionEntryV1 {
+            record,
+            source_delta,
+            decision_delta,
+        });
+    }
+
+    let head_revision_digest = session.pin_revision(head_seq)?.revision.revision_digest;
+
+    Ok(WorldAuditBundleV1 {
+        world_manifest: session.manifest().clone(),
+        program,
+        exec_profile,
+        scope: ScopeV1::Checkpoint {
+            seq: checkpoint_seq,
+            revision_digest: checkpoint_snapshot.revision.revision_digest,
+            state: Box::new(state),
+        },
         revisions,
         head: HeadRefV1 {
             seq: head_seq,
@@ -1062,7 +1347,7 @@ mod tests {
         ExecProfileV1 {
             profile: "brix.world.exec@1".to_string(),
             evaluator: "brix-world-net@1".to_string(),
-            crate_version: "0.1.0-alpha.3".to_string(),
+            crate_version: env!("CARGO_PKG_VERSION").to_string(),
             module_loader_limits: ModuleLoaderLimitsV1 {
                 depth: 16,
                 modules: 256,
@@ -1118,6 +1403,7 @@ mod tests {
             None,
             BTreeMap::new(),
             SettlementStatus::Committed,
+            None,
         )
     }
 

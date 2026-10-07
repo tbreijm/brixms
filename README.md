@@ -47,6 +47,9 @@ The source checkout currently supports:
   commands;
 - a persistent, revisable knowledge base (`brix kb`) with replay-checked
   history;
+- a persistent incremental world runtime (`brix world`) with keyed relational
+  facts, resumable operator networks, fair quanta scheduling, durable retention
+  pins, checkpoint audit export, and independent verification;
 - a JSON-lines server (`brix serve --stdio`) and a small standard-library
   Python client;
 - a Rust runtime with deterministic settlement, an incremental engine, a
@@ -192,13 +195,13 @@ The `brix` executable must be built or installed separately. See
 
 ## Releases
 
-The current workspace version is `0.1.0-alpha.3`. Its prerelease archives
+The current workspace version is `0.1.0-alpha.4`. Its prerelease archives
 target macOS Apple Silicon (`aarch64-apple-darwin`) and Linux x86_64
 (`x86_64-unknown-linux-gnu`); each has a SHA-256 sidecar. Download the exact
 tagged asset from the [GitHub Releases page](https://github.com/tbreijm/brixms/releases):
 
 ```bash
-VERSION=v0.1.0-alpha.3
+VERSION=v0.1.0-alpha.4
 TARGET=x86_64-unknown-linux-gnu # or aarch64-apple-darwin
 curl -LO "https://github.com/tbreijm/brixms/releases/download/${VERSION}/brix-${VERSION}-${TARGET}.tar.gz"
 curl -LO "https://github.com/tbreijm/brixms/releases/download/${VERSION}/brix-${VERSION}-${TARGET}.tar.gz.sha256"

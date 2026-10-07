@@ -67,11 +67,32 @@ impl WorldPaths {
         self.staging_dir().join(upload_id)
     }
 
+    pub fn pins_file(&self) -> PathBuf {
+        self.root.join("pins.json")
+    }
+
+    pub fn pins_tmp_file(&self) -> PathBuf {
+        self.root.join(".pins.tmp")
+    }
+
+    pub fn receipts_dir(&self) -> PathBuf {
+        self.root.join("receipts")
+    }
+
+    pub fn receipt_file(&self, seq: u64) -> PathBuf {
+        self.receipts_dir().join(format!("{seq}.json"))
+    }
+
+    pub fn receipt_tmp_file(&self, seq: u64) -> PathBuf {
+        self.receipts_dir().join(format!(".{seq}.tmp"))
+    }
+
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
         fs::create_dir_all(&self.root)?;
         fs::create_dir_all(self.objects_dir())?;
         fs::create_dir_all(self.revisions_dir())?;
         fs::create_dir_all(self.staging_dir())?;
+        fs::create_dir_all(self.receipts_dir())?;
         Ok(())
     }
 }

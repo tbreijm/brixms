@@ -4,6 +4,12 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use brix_canon::Digest;
+use brix_kb::world::audit::{
+    build_checkpoint_bundle_from_session, build_genesis_bundle_from_session,
+    decode_world_audit_bundle_v1, ExecProfileV1, ProgramClosureV1, ScopeV1, WorldAuditDecodeLimits,
+};
+use brix_kb::world::verify::{verify_world_audit_bundle, VerifyOptions};
 use brix_kb::world::{TupleRecord, WorldBatch, WorldError, WorldKey, WorldSession};
 use brix_lower::module_graph::{ModuleGraph, ModuleLoaderLimits};
 use serde_json::json;
@@ -47,6 +53,28 @@ pub fn execute_world(op: &WorldOp, json_out: bool) -> u8 {
             decide,
             rev,
         } => execute_explain(dir, entity, decide.as_deref(), *rev, json_out),
+        WorldOp::Audit {
+            dir,
+            out,
+            from_checkpoint,
+        } => execute_audit(dir, out, *from_checkpoint, json_out),
+        WorldOp::Verify {
+            expect_head,
+            expect_program,
+            trust_checkpoint,
+            max_work,
+            in_place,
+            bundle,
+        } => execute_verify(
+            expect_head,
+            expect_program,
+            trust_checkpoint.as_deref(),
+            *max_work,
+            in_place.as_deref(),
+            bundle.as_deref(),
+            json_out,
+        ),
+        WorldOp::ImportKb { kb_dir, world_dir } => execute_import_kb(kb_dir, world_dir, json_out),
     }
 }
 
@@ -134,6 +162,7 @@ fn execute_init(dir: &Path, program: &Path, package_paths: &[PathBuf], json_out:
             "dir": dir.display().to_string(),
             "revision": session.current_revision,
             "digest": session.current_revision_digest.map(|d| d.to_hex()),
+            "program_digest": session.manifest().program_digest.to_hex(),
             "relations": relations,
             "exec_profile": session.exec_profile.as_ref().map(|p| p.to_json()),
         });
@@ -659,4 +688,372 @@ fn print_world_error(cmd: &str, err: &WorldError, json_out: bool) -> u8 {
         eprintln!("brix {cmd}: {status}: {err}");
     }
     exit_code
+}
+
+fn parse_digest_hex(hex: &str) -> Result<Digest, String> {
+    if hex.len() != 64 {
+        return Err(format!("expected 64 hex chars, got {}", hex.len()));
+    }
+    let mut bytes = [0u8; 32];
+    for (i, byte) in bytes.iter_mut().enumerate() {
+        let chunk = &hex[i * 2..i * 2 + 2];
+        *byte = u8::from_str_radix(chunk, 16).map_err(|e| format!("invalid hex '{chunk}': {e}"))?;
+    }
+    Ok(Digest::from_bytes(bytes))
+}
+
+fn load_program_closure_from_dir(
+    dir: &Path,
+    default_manifest_digest: Digest,
+) -> Result<(ProgramClosureV1, ExecProfileV1), WorldError> {
+    let program_path = dir.join("program.json");
+    if program_path.exists() {
+        let bytes = fs::read(&program_path)?;
+        let val: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| WorldError::Json(e.to_string()))?;
+        let root_mod = val
+            .get("root_module")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let mut sources = Vec::new();
+        if let Some(src_map) = val.get("sources").and_then(|x| x.as_object()) {
+            for (k, v) in src_map {
+                if let Some(s) = v.as_str() {
+                    sources.push((k.clone(), s.to_string()));
+                }
+            }
+        }
+        sources.sort_by(|a, b| a.0.cmp(&b.0));
+        let program_manifest_digest =
+            if let Some(hex) = val.get("program_manifest_digest").and_then(|x| x.as_str()) {
+                parse_digest_hex(hex).map_err(|e| {
+                    WorldError::InvalidSchema(format!("invalid program_manifest_digest: {e}"))
+                })?
+            } else {
+                default_manifest_digest
+            };
+        let ep = if let Some(p) = val.get("exec_profile") {
+            ExecProfileV1::from_json(p)?
+        } else {
+            ExecProfileV1::default()
+        };
+        Ok((
+            ProgramClosureV1 {
+                root_module: root_mod,
+                sources,
+                program_manifest_digest,
+            },
+            ep,
+        ))
+    } else {
+        Ok((
+            ProgramClosureV1 {
+                root_module: String::new(),
+                sources: Vec::new(),
+                program_manifest_digest: default_manifest_digest,
+            },
+            ExecProfileV1::default(),
+        ))
+    }
+}
+
+fn execute_audit(
+    dir: &Path,
+    bundle_out: &Path,
+    from_checkpoint: Option<u64>,
+    json_out: bool,
+) -> u8 {
+    let session = match WorldSession::open(dir) {
+        Ok(s) => s,
+        Err(e) => return print_world_error("world audit", &e, json_out),
+    };
+
+    let (program_closure, exec_profile) =
+        match load_program_closure_from_dir(dir, session.manifest().program_digest) {
+            Ok(p) => p,
+            Err(e) => return print_world_error("world audit", &e, json_out),
+        };
+
+    let bundle = if let Some(cp_seq) = from_checkpoint {
+        match build_checkpoint_bundle_from_session(&session, cp_seq, program_closure, exec_profile)
+        {
+            Ok(b) => b,
+            Err(e) => return print_world_error("world audit", &e, json_out),
+        }
+    } else {
+        match build_genesis_bundle_from_session(&session, program_closure, exec_profile) {
+            Ok(b) => b,
+            Err(e) => return print_world_error("world audit", &e, json_out),
+        }
+    };
+
+    let limits = WorldAuditDecodeLimits::default();
+    let encoded_bytes = match bundle.encode(&limits) {
+        Ok(b) => b,
+        Err(e) => {
+            return print_world_error(
+                "world audit",
+                &WorldError::NetworkError(e.to_string()),
+                json_out,
+            )
+        }
+    };
+
+    if let Some(parent) = bundle_out.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = fs::create_dir_all(parent);
+        }
+    }
+    if let Err(e) = fs::write(bundle_out, &encoded_bytes) {
+        return print_world_error("world audit", &WorldError::Io(e), json_out);
+    }
+
+    let scope_str = match &bundle.scope {
+        ScopeV1::Genesis => "complete-from-genesis".to_string(),
+        ScopeV1::Checkpoint { seq, .. } => format!("checkpoint-suffix ({seq}..HEAD)"),
+    };
+
+    let bundle_id = bundle.id();
+    if json_out {
+        let res = json!({
+            "schema": WORLD_JSON_SCHEMA,
+            "command": "world audit",
+            "ok": true,
+            "dir": dir.display().to_string(),
+            "bundle": bundle_out.display().to_string(),
+            "bundle_id": bundle_id.to_hex(),
+            "head_seq": bundle.head.seq,
+            "head_digest": bundle.head.revision_digest.to_hex(),
+            "scope": scope_str,
+            "revisions_count": bundle.revisions.len(),
+        });
+        crate::json::emit_result_json(&res);
+    } else {
+        println!("dir: {}", dir.display());
+        println!("bundle: {}", bundle_out.display());
+        println!("bundle_id: {}", bundle_id.to_hex());
+        println!("head_seq: {}", bundle.head.seq);
+        println!("head_digest: {}", bundle.head.revision_digest.to_hex());
+        println!("scope: {scope_str}");
+        println!("revisions: {}", bundle.revisions.len());
+    }
+    EXIT_SUCCESS
+}
+
+fn execute_verify(
+    expect_head_hex: &str,
+    expect_program_hex: &str,
+    trust_checkpoint_hex: Option<&str>,
+    max_work: Option<u64>,
+    in_place: Option<&Path>,
+    bundle_path: Option<&Path>,
+    json_out: bool,
+) -> u8 {
+    let expect_head = match parse_digest_hex(expect_head_hex) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("brix world verify: invalid --expect-head hex: {e}");
+            return EXIT_USAGE_OR_IO;
+        }
+    };
+    let expect_program = match parse_digest_hex(expect_program_hex) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("brix world verify: invalid --expect-program hex: {e}");
+            return EXIT_USAGE_OR_IO;
+        }
+    };
+    let trust_checkpoint = if let Some(hex) = trust_checkpoint_hex {
+        match parse_digest_hex(hex) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                eprintln!("brix world verify: invalid --trust-checkpoint hex: {e}");
+                return EXIT_USAGE_OR_IO;
+            }
+        }
+    } else {
+        None
+    };
+
+    let limits = WorldAuditDecodeLimits::default();
+    let options = VerifyOptions {
+        expect_head,
+        expect_program,
+        trust_checkpoint,
+        limits,
+        max_work,
+    };
+
+    let bundle = if let Some(dir) = in_place {
+        let session = match WorldSession::open(dir) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("brix world verify: failed to open world for in-place verification: {e}");
+                return EXIT_USAGE_OR_IO;
+            }
+        };
+        let (program_closure, exec_profile) =
+            match load_program_closure_from_dir(dir, session.manifest().program_digest) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("brix world verify: failed to load program closure: {e}");
+                    return EXIT_USAGE_OR_IO;
+                }
+            };
+        match build_genesis_bundle_from_session(&session, program_closure, exec_profile) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("brix world verify: failed to build in-place audit bundle: {e}");
+                return EXIT_USAGE_OR_IO;
+            }
+        }
+    } else if let Some(path) = bundle_path {
+        let bytes = match fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("brix world verify: failed to read bundle file: {e}");
+                return EXIT_USAGE_OR_IO;
+            }
+        };
+        match decode_world_audit_bundle_v1(&bytes, &limits) {
+            Ok(b) => b,
+            Err(e) => {
+                let refusal = format!("Unknown(bundle-decode-error:{e})");
+                if json_out {
+                    let res = json!({
+                        "schema": "brix.cli.world-verify-result@1",
+                        "command": "world verify",
+                        "ok": false,
+                        "status": "unknown",
+                        "errors": [refusal],
+                    });
+                    crate::json::emit_result_json(&res);
+                } else {
+                    println!("{refusal}");
+                }
+                return EXIT_REJECTED_OR_UNKNOWN;
+            }
+        }
+    } else {
+        eprintln!("brix world verify: either <bundle> or --in-place <dir> is required");
+        return EXIT_USAGE_OR_IO;
+    };
+
+    match verify_world_audit_bundle(&bundle, &options) {
+        Ok(report) => {
+            if json_out {
+                let settlements_json: Vec<serde_json::Value> = report
+                    .verified_settlements
+                    .iter()
+                    .map(|(seq, decide, ent, cand)| {
+                        json!({
+                            "seq": seq,
+                            "decide": decide,
+                            "entity": ent,
+                            "candidate": cand,
+                            "status": "audited",
+                        })
+                    })
+                    .collect();
+                let res = json!({
+                    "schema": "brix.cli.world-verify-result@1",
+                    "command": "world verify",
+                    "ok": true,
+                    "status": "audited",
+                    "scope": report.scope,
+                    "head_revision": report.head_revision,
+                    "head_digest": report.head_digest.to_hex(),
+                    "program_digest": report.program_digest.to_hex(),
+                    "work": {
+                        "tuples_decoded": report.work.tuples_decoded,
+                        "trie_nodes_built": report.work.trie_nodes_built,
+                        "index_rows_rebuilt": report.work.index_rows_rebuilt,
+                        "candidates_evaluated": report.work.candidates_evaluated,
+                        "settlements_computed": report.work.settlements_computed,
+                        "revisions_replayed": report.work.revisions_replayed,
+                    },
+                    "settlements": settlements_json,
+                });
+                crate::json::emit_result_json(&res);
+            } else {
+                println!("scope: {}", report.scope);
+                println!("status: audited");
+                println!("head_revision: {}", report.head_revision);
+                println!("head_digest: {}", report.head_digest.to_hex());
+                println!("program_digest: {}", report.program_digest.to_hex());
+                println!(
+                    "work: tuples_decoded={} trie_nodes_built={} index_rows_rebuilt={} candidates_evaluated={} settlements_computed={} revisions_replayed={}",
+                    report.work.tuples_decoded,
+                    report.work.trie_nodes_built,
+                    report.work.index_rows_rebuilt,
+                    report.work.candidates_evaluated,
+                    report.work.settlements_computed,
+                    report.work.revisions_replayed,
+                );
+                println!("settlements: {} audited", report.verified_settlements.len());
+            }
+            EXIT_SUCCESS
+        }
+        Err(err) => {
+            let refusal = err.to_string();
+            if json_out {
+                let res = json!({
+                    "schema": "brix.cli.world-verify-result@1",
+                    "command": "world verify",
+                    "ok": false,
+                    "status": "unknown",
+                    "errors": [refusal],
+                });
+                crate::json::emit_result_json(&res);
+            } else {
+                println!("{refusal}");
+            }
+            EXIT_REJECTED_OR_UNKNOWN
+        }
+    }
+}
+
+fn execute_import_kb(kb_dir: &Path, world_dir: &Path, json_out: bool) -> u8 {
+    match brix_kb::world::import_kb::import_kb(kb_dir, world_dir) {
+        Ok(report) => {
+            if json_out {
+                let res = json!({
+                    "schema": WORLD_JSON_SCHEMA,
+                    "command": "world import-kb",
+                    "ok": true,
+                    "kb_dir": kb_dir.display().to_string(),
+                    "world_dir": world_dir.display().to_string(),
+                    "kb_head_seq": report.kb_head_seq,
+                    "world_head_seq": report.world_head_seq,
+                    "provenance_path": report.provenance_path.display().to_string(),
+                });
+                crate::json::emit_result_json(&res);
+            } else {
+                println!("imported KB v1 directory into world:");
+                println!("  kb_dir: {}", kb_dir.display());
+                println!("  world_dir: {}", world_dir.display());
+                println!("  kb_head_seq: {}", report.kb_head_seq);
+                println!("  world_head_seq: {}", report.world_head_seq);
+                println!("  provenance: {}", report.provenance_path.display());
+            }
+            EXIT_SUCCESS
+        }
+        Err(err) => {
+            let refusal = err.to_string();
+            if json_out {
+                let res = json!({
+                    "schema": WORLD_JSON_SCHEMA,
+                    "command": "world import-kb",
+                    "ok": false,
+                    "status": "unknown",
+                    "errors": [refusal],
+                });
+                crate::json::emit_result_json(&res);
+            } else {
+                println!("{refusal}");
+            }
+            EXIT_REJECTED_OR_UNKNOWN
+        }
+    }
 }

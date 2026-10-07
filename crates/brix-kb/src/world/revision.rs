@@ -279,7 +279,13 @@ impl WorldRevision {
             }
         }
         if schema == REVISION_SCHEMA_V2 {
-            match exec_profile_digest { None => w.write_uint(0), Some(d) => { w.write_uint(1); w.write_bytes(d.as_bytes()); } }
+            match exec_profile_digest {
+                None => w.write_uint(0),
+                Some(d) => {
+                    w.write_uint(1);
+                    w.write_bytes(d.as_bytes());
+                }
+            }
         }
         w.digest(Domain::Value)
     }
@@ -287,12 +293,47 @@ impl WorldRevision {
     /// Bind the producing execution profile into the revision identity.
     pub fn bind_exec_profile(mut self, digest: Option<Digest>) -> Self {
         self.exec_profile_digest = digest;
-        self.revision_digest = Self::compute_digest(&self.schema, self.seq, &self.timestamp,
-            self.expected_base_revision, &self.idempotency_key, &self.batch_digest,
-            &self.program_digest, &self.previous_revision_digest, &self.relation_roots,
-            &self.relation_cardinalities, &self.secondary_index_roots, &self.decision_root,
-            &self.changed_keys, &self.status, &self.decision_delta_digest, &self.exec_profile_digest);
+        self.revision_digest = Self::compute_digest(
+            &self.schema,
+            self.seq,
+            &self.timestamp,
+            self.expected_base_revision,
+            &self.idempotency_key,
+            &self.batch_digest,
+            &self.program_digest,
+            &self.previous_revision_digest,
+            &self.relation_roots,
+            &self.relation_cardinalities,
+            &self.secondary_index_roots,
+            &self.decision_root,
+            &self.changed_keys,
+            &self.status,
+            &self.decision_delta_digest,
+            &self.exec_profile_digest,
+        );
         self
+    }
+
+    /// Recomputes the revision digest from the record fields.
+    pub fn compute_digest_for_record(&self) -> Digest {
+        Self::compute_digest(
+            &self.schema,
+            self.seq,
+            &self.timestamp,
+            self.expected_base_revision,
+            &self.idempotency_key,
+            &self.batch_digest,
+            &self.program_digest,
+            &self.previous_revision_digest,
+            &self.relation_roots,
+            &self.relation_cardinalities,
+            &self.secondary_index_roots,
+            &self.decision_root,
+            &self.changed_keys,
+            &self.status,
+            &self.decision_delta_digest,
+            &self.exec_profile_digest,
+        )
     }
 
     pub fn to_json(&self) -> JsonValue {
@@ -550,20 +591,27 @@ impl WorldRevision {
             match v.get(field) {
                 None | Some(JsonValue::Null) => Ok(None),
                 Some(JsonValue::String(hex)) => {
-                    if hex.len() != 64 || !hex.is_ascii() { return Err(WorldError::Json(format!("invalid {field}"))); }
+                    if hex.len() != 64 || !hex.is_ascii() {
+                        return Err(WorldError::Json(format!("invalid {field}")));
+                    }
                     let mut bytes = [0u8; 32];
                     for (i, byte) in bytes.iter_mut().enumerate() {
-                        *byte = u8::from_str_radix(&hex[i*2..i*2+2],16).map_err(|_| WorldError::Json(format!("invalid {field}")))?;
+                        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+                            .map_err(|_| WorldError::Json(format!("invalid {field}")))?;
                     }
                     Ok(Some(Digest::from_bytes(bytes)))
-                },
+                }
                 _ => Err(WorldError::Json(format!("invalid {field}"))),
             }
         };
         let decision_delta_digest = read_optional_digest("decision_delta_digest")?;
         let exec_profile_digest = read_optional_digest("exec_profile_digest")?;
-        if schema == REVISION_SCHEMA && (decision_delta_digest.is_some() || exec_profile_digest.is_some()) {
-            return Err(WorldError::InvalidSchema("v1 revision cannot bind v2 evidence".into()));
+        if schema == REVISION_SCHEMA
+            && (decision_delta_digest.is_some() || exec_profile_digest.is_some())
+        {
+            return Err(WorldError::InvalidSchema(
+                "v1 revision cannot bind v2 evidence".into(),
+            ));
         }
 
         let rev_hex = v
@@ -706,7 +754,8 @@ mod tests {
         let (relation_roots, relation_cardinalities, secondary_index_roots, changed_keys) =
             sample_fields();
         let status = SettlementStatus::Committed;
-        let decision_root = Some(Digest::of(Domain::Value, b"decision-root"));
+        let decision_root_digest = Digest::of(Domain::Value, b"decision-root");
+        let decision_root = Some(decision_root_digest);
         let old_digest = WorldRevision::compute_digest(
             REVISION_SCHEMA,
             1,
@@ -737,7 +786,7 @@ mod tests {
             "relation_roots": { "orders": relation_roots["orders"].to_hex() },
             "relation_cardinalities": { "orders": 3u64 },
             "secondary_index_roots": {},
-            "decision_root": decision_root.unwrap().to_hex(),
+            "decision_root": decision_root_digest.to_hex(),
             "changed_keys": { "orders": [ changed_keys["orders"][0].to_hex() ] },
             "status": status.to_json(),
             "revision_digest": old_digest.to_hex(),

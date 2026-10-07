@@ -88,14 +88,15 @@
 //! a first-arriving support. This restriction belongs to `brix.world.exec@1`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_lower::module_graph::{LinkedProgram, QualifiedName};
 use brix_lower::relation_dag::{
-    lower_relations, resolve_decide_source_relation, GroupProjection, OperatorId, OperatorNode,
-    RelationDag,
+    decision_field_schemas, derive_binding_names, derive_decide_binding_names, lower_relations,
+    resolve_decide_source_relation, GroupProjection, OperatorId, OperatorNode, RelationDag,
 };
-use brix_lower::world_expr::CompiledWorldExpr;
+use brix_lower::world_expr::{CompiledProgramEnv, CompiledWorldExpr};
 use brix_syntax::ast;
 use soc_core::calendar::Key;
 
@@ -117,6 +118,7 @@ pub enum Value {
 }
 
 impl Value {
+    #[allow(dead_code)]
     fn as_bool(&self) -> Result<bool, WorldError> {
         match self {
             Self::Bool(v) => Ok(*v),
@@ -290,6 +292,7 @@ fn scalar_bindings(
     Ok(bindings)
 }
 
+#[allow(dead_code)]
 fn eval_expr(
     expr: &ast::Expr,
     row: &Row,
@@ -356,6 +359,15 @@ fn candidate_tiebreak_digest(
     w.digest(Domain::Value)
 }
 
+/// A precompiled proposal entry within a reference decide block.
+#[derive(Clone, Debug)]
+pub struct CompiledReferencePropose {
+    pub name: String,
+    pub priority: u64,
+    pub guard: CompiledWorldExpr,
+    pub value: CompiledWorldExpr,
+}
+
 /// A compiled decide block, independently defined from `network::DecideBlock` (same four
 /// fields, separate type — see module docs).
 #[derive(Clone, Debug)]
@@ -367,6 +379,7 @@ pub struct DecideSpec {
     /// `network::DecideBlock::per_field`.
     pub per_field: String,
     pub proposals: Vec<ast::ProposeDecl>,
+    pub compiled_proposals: Vec<CompiledReferencePropose>,
 }
 
 /// A candidate surviving in the frontier for one entity, independently defined from
@@ -409,6 +422,24 @@ pub struct ReferenceState {
     pub settlements: BTreeMap<String, BTreeMap<String, ReferenceSettlement>>,
 }
 
+/// Precompiled expression sites for a reference operator node.
+#[derive(Clone, Debug)]
+pub enum CompiledOperator {
+    Scan,
+    Bind,
+    Filter {
+        compiled_predicate: CompiledWorldExpr,
+    },
+    Project {
+        compiled_projections: Vec<(String, CompiledWorldExpr)>,
+    },
+    EquiJoin,
+    Distinct,
+    GroupedCount {
+        compiled_group_keys: Vec<CompiledWorldExpr>,
+    },
+}
+
 /// A resolved program ready for [`evaluate`]: the lowered DAG, extracted decide specs, and
 /// the flat helper-function table. Independently assembled from a [`LinkedProgram`] by
 /// [`from_program`] — the only genuinely shared step is [`lower_relations`] itself (see
@@ -418,6 +449,8 @@ pub struct ReferenceProgram {
     pub dag: RelationDag,
     pub decides: Vec<DecideSpec>,
     pub functions: BTreeMap<String, ast::Callable>,
+    pub compiled_operators: Vec<CompiledOperator>,
+    pub program_env: Option<Arc<CompiledProgramEnv>>,
 }
 
 /// Resolve a [`LinkedProgram`] into a [`ReferenceProgram`]. Independently re-implements the
@@ -455,13 +488,59 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
         }
     }
 
+    let program_env =
+        CompiledProgramEnv::from_linked_program(program).map_err(WorldError::NetworkError)?;
+    let op_schemas = decision_field_schemas(&dag, program);
+
+    let mut compiled_operators = Vec::with_capacity(dag.nodes.len());
+    for node in &dag.nodes {
+        match node {
+            OperatorNode::Scan { .. } => compiled_operators.push(CompiledOperator::Scan),
+            OperatorNode::Bind { .. } => compiled_operators.push(CompiledOperator::Bind),
+            OperatorNode::Filter { input, predicate } => {
+                let bindings = derive_binding_names(&op_schemas[input.0]);
+                let compiled_predicate = program_env
+                    .compile_expr(predicate, &bindings)
+                    .map_err(WorldError::NetworkError)?;
+                compiled_operators.push(CompiledOperator::Filter { compiled_predicate });
+            }
+            OperatorNode::Project { input, projections } => {
+                let bindings = derive_binding_names(&op_schemas[input.0]);
+                let mut compiled_projections = Vec::with_capacity(projections.len());
+                for (name, expr) in projections {
+                    let compiled = program_env
+                        .compile_expr(expr, &bindings)
+                        .map_err(WorldError::NetworkError)?;
+                    compiled_projections.push((name.clone(), compiled));
+                }
+                compiled_operators.push(CompiledOperator::Project {
+                    compiled_projections,
+                });
+            }
+            OperatorNode::EquiJoin { .. } => compiled_operators.push(CompiledOperator::EquiJoin),
+            OperatorNode::Distinct { .. } => compiled_operators.push(CompiledOperator::Distinct),
+            OperatorNode::GroupedCount {
+                input, group_keys, ..
+            } => {
+                let bindings = derive_binding_names(&op_schemas[input.0]);
+                let mut compiled_group_keys = Vec::with_capacity(group_keys.len());
+                for expr in group_keys {
+                    let compiled = program_env
+                        .compile_expr(expr, &bindings)
+                        .map_err(WorldError::NetworkError)?;
+                    compiled_group_keys.push(compiled);
+                }
+                compiled_operators.push(CompiledOperator::GroupedCount {
+                    compiled_group_keys,
+                });
+            }
+        }
+    }
+
     let mut decides = Vec::new();
     for (qname, decl) in &program.decides {
-        let source_relation = resolve_decide_source_relation(
-            &decl.list,
-            &qname.module,
-            &dag.relation_outputs,
-        );
+        let source_relation =
+            resolve_decide_source_relation(&decl.list, &qname.module, &dag.relation_outputs);
 
         if let Some(src) = source_relation {
             // `lower_relations` above already refused a relational decide with
@@ -472,12 +551,34 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                      'per' field (expected lower_relations to have refused this)"
                 ))
             })?;
+            let op_id = dag.relation_outputs.get(&src).ok_or_else(|| {
+                WorldError::NetworkError(format!(
+                    "decide '{qname}' unknown source relation '{src}'"
+                ))
+            })?;
+            let bindings = derive_decide_binding_names(&op_schemas[op_id.0], &decl.binder);
+            let mut compiled_proposals = Vec::with_capacity(decl.proposals.len());
+            for prop in &decl.proposals {
+                let guard = program_env
+                    .compile_expr(&prop.guard, &bindings)
+                    .map_err(WorldError::NetworkError)?;
+                let value = program_env
+                    .compile_expr(&prop.value, &bindings)
+                    .map_err(WorldError::NetworkError)?;
+                compiled_proposals.push(CompiledReferencePropose {
+                    name: prop.name.clone(),
+                    priority: prop.priority,
+                    guard,
+                    value,
+                });
+            }
             decides.push(DecideSpec {
                 name: qname.to_string(),
                 binder: decl.binder.clone(),
                 source_relation: src,
                 per_field,
                 proposals: decl.proposals.clone(),
+                compiled_proposals,
             });
         }
     }
@@ -492,20 +593,91 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
         dag,
         decides,
         functions,
+        compiled_operators,
+        program_env: Some(program_env),
     })
 }
 
 /// Evaluate a resolved program against a full base-relation snapshot by plain set semantics,
 /// with no incremental state of any kind. See module docs for exactly what is and is not
-/// independent of `network.rs`.
-pub fn evaluate(
+/// Meter tracking active computational work performed by the reference evaluator.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReferenceWorkMeter {
+    pub tuples_scanned: u64,
+    pub rows_evaluated: u64,
+    pub join_pairs_evaluated: u64,
+    pub expressions_evaluated: u64,
+    pub candidates_evaluated: u64,
+    pub settlements_computed: u64,
+}
+
+impl ReferenceWorkMeter {
+    pub fn total_work(&self) -> u64 {
+        self.tuples_scanned
+            .saturating_add(self.rows_evaluated)
+            .saturating_add(self.join_pairs_evaluated)
+            .saturating_add(self.expressions_evaluated)
+            .saturating_add(self.candidates_evaluated)
+            .saturating_add(self.settlements_computed)
+    }
+}
+
+#[inline]
+fn charge_work(
+    meter: &mut ReferenceWorkMeter,
+    work_offset: u64,
+    max_work: Option<u64>,
+) -> Result<(), WorldError> {
+    if let Some(max) = max_work {
+        if work_offset.saturating_add(meter.total_work()) > max {
+            return Err(WorldError::BudgetExhausted);
+        }
+    }
+    Ok(())
+}
+
+fn eval_compiled_with_budget(
+    compiled: &brix_lower::world_expr::CompiledWorldExpr,
+    bindings: &BTreeMap<String, brix_lower::l3_v2::L3ValueV2>,
+    meter: &mut ReferenceWorkMeter,
+    work_offset: u64,
+    max_work: Option<u64>,
+) -> Result<brix_lower::l3_v2::L3ValueV2, WorldError> {
+    if let Some(max) = max_work {
+        if work_offset.saturating_add(meter.total_work()) >= max {
+            return Err(WorldError::BudgetExhausted);
+        }
+    }
+    let remaining_steps = max_work.map(|m| {
+        let used = work_offset.saturating_add(meter.total_work());
+        (m.saturating_sub(used) as usize).max(1)
+    });
+    let (val, steps) = compiled
+        .eval_with_budget(bindings, remaining_steps)
+        .map_err(|e| {
+            if e.contains("ResourceExhausted") || e.contains("step limit exceeded") {
+                WorldError::BudgetExhausted
+            } else {
+                WorldError::NetworkError(e)
+            }
+        })?;
+    meter.expressions_evaluated += (steps as u64).max(1);
+    charge_work(meter, work_offset, max_work)?;
+    Ok(val)
+}
+
+/// Evaluate a resolved program with active budget and work metering.
+pub fn evaluate_with_budget(
     program: &ReferenceProgram,
     base_relations: &BTreeMap<String, BTreeMap<WorldKey, WorldTuple>>,
+    meter: &mut ReferenceWorkMeter,
+    max_work: Option<u64>,
+    work_offset: u64,
 ) -> Result<ReferenceState, WorldError> {
     let dag = &program.dag;
     let mut operator_outputs: Vec<Vec<Row>> = Vec::with_capacity(dag.nodes.len());
 
-    for node in &dag.nodes {
+    for (idx, node) in dag.nodes.iter().enumerate() {
         let rows = match node {
             OperatorNode::Scan {
                 relation, schema, ..
@@ -519,6 +691,8 @@ pub fn evaluate(
                 let records = base_relations.get(relation).unwrap_or(&empty);
                 let mut rows = Vec::with_capacity(records.len());
                 for tuple in records.values() {
+                    meter.tuples_scanned += 1;
+                    charge_work(meter, work_offset, max_work)?;
                     let rec = TupleRecord::from_tuple(tuple)?;
                     if rec.fields.len() != fields.len() {
                         return Err(WorldError::NetworkError(format!(
@@ -542,32 +716,72 @@ pub fn evaluate(
                 }
                 rows
             }
-            OperatorNode::Bind { input, alias } => operator_outputs[input.0]
-                .iter()
-                .map(|row| {
+            OperatorNode::Bind { input, alias } => {
+                let mut bound_rows = Vec::with_capacity(operator_outputs[input.0].len());
+                for row in &operator_outputs[input.0] {
+                    meter.rows_evaluated += 1;
+                    charge_work(meter, work_offset, max_work)?;
                     let mut bound = Row::new();
                     for (k, v) in row {
                         bound.insert(format!("{alias}.{k}"), v.clone());
                         bound.insert(k.clone(), v.clone());
                     }
-                    bound
-                })
-                .collect(),
-            OperatorNode::Filter { input, predicate } => {
+                    bound_rows.push(bound);
+                }
+                bound_rows
+            }
+            OperatorNode::Filter { input, .. } => {
+                let compiled_pred = match &program.compiled_operators[idx] {
+                    CompiledOperator::Filter { compiled_predicate } => compiled_predicate,
+                    _ => unreachable!(),
+                };
                 let mut out = Vec::new();
                 for row in &operator_outputs[input.0] {
-                    if eval_expr(predicate, row, &program.functions)?.as_bool()? {
+                    meter.rows_evaluated += 1;
+                    charge_work(meter, work_offset, max_work)?;
+                    let bindings = scalar_bindings(row)?;
+                    let l3_val = eval_compiled_with_budget(
+                        compiled_pred,
+                        &bindings,
+                        meter,
+                        work_offset,
+                        max_work,
+                    )?;
+                    let passed = match l3_val {
+                        brix_lower::l3_v2::L3ValueV2::Bool(b) => b,
+                        other => {
+                            return Err(WorldError::NetworkError(format!(
+                                "reference evaluator: filter predicate must be Bool, got {other:?}"
+                            )))
+                        }
+                    };
+                    if passed {
                         out.push(row.clone());
                     }
                 }
                 out
             }
-            OperatorNode::Project { input, projections } => {
+            OperatorNode::Project { input, .. } => {
+                let compiled_projs = match &program.compiled_operators[idx] {
+                    CompiledOperator::Project {
+                        compiled_projections,
+                    } => compiled_projections,
+                    _ => unreachable!(),
+                };
                 let mut out = Vec::with_capacity(operator_outputs[input.0].len());
                 for row in &operator_outputs[input.0] {
+                    meter.rows_evaluated += 1;
+                    let bindings = scalar_bindings(row)?;
                     let mut projected = Row::new();
-                    for (name, expr) in projections {
-                        projected.insert(name.clone(), eval_expr(expr, row, &program.functions)?);
+                    for (name, compiled) in compiled_projs {
+                        let l3_val = eval_compiled_with_budget(
+                            compiled,
+                            &bindings,
+                            meter,
+                            work_offset,
+                            max_work,
+                        )?;
+                        projected.insert(name.clone(), Value::from_scalar(l3_val)?);
                     }
                     out.push(projected);
                 }
@@ -581,6 +795,25 @@ pub fn evaluate(
             } => {
                 let left_rows = &operator_outputs[left.0];
                 let right_rows = &operator_outputs[right.0];
+
+                let mut right_index: BTreeMap<Vec<Value>, Vec<&Row>> = BTreeMap::new();
+                for r in right_rows {
+                    let rkey: Vec<Value> = right_keys
+                        .iter()
+                        .map(|k| {
+                            get_qualified(r, &k.binding, &k.field)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    WorldError::NetworkError(format!(
+                                        "missing join field {}.{}",
+                                        k.binding, k.field
+                                    ))
+                                })
+                        })
+                        .collect::<Result<_, _>>()?;
+                    right_index.entry(rkey).or_default().push(r);
+                }
+
                 let mut out = Vec::new();
                 for l in left_rows {
                     let lkey: Vec<Value> = left_keys
@@ -596,21 +829,10 @@ pub fn evaluate(
                                 })
                         })
                         .collect::<Result<_, _>>()?;
-                    for r in right_rows {
-                        let rkey: Vec<Value> = right_keys
-                            .iter()
-                            .map(|k| {
-                                get_qualified(r, &k.binding, &k.field)
-                                    .cloned()
-                                    .ok_or_else(|| {
-                                        WorldError::NetworkError(format!(
-                                            "missing join field {}.{}",
-                                            k.binding, k.field
-                                        ))
-                                    })
-                            })
-                            .collect::<Result<_, _>>()?;
-                        if lkey == rkey {
+                    if let Some(matches) = right_index.get(&lkey) {
+                        for r in matches {
+                            meter.join_pairs_evaluated += 1;
+                            charge_work(meter, work_offset, max_work)?;
                             out.push(merge_rows(l, r));
                         }
                     }
@@ -618,20 +840,41 @@ pub fn evaluate(
                 out
             }
             OperatorNode::Distinct { input } => {
-                let set: BTreeSet<Row> = operator_outputs[input.0].iter().cloned().collect();
+                let mut set: BTreeSet<Row> = BTreeSet::new();
+                for row in &operator_outputs[input.0] {
+                    meter.rows_evaluated += 1;
+                    charge_work(meter, work_offset, max_work)?;
+                    set.insert(row.clone());
+                }
                 set.into_iter().collect()
             }
             OperatorNode::GroupedCount {
                 input,
-                group_keys,
+                group_keys: _,
                 projections,
             } => {
+                let compiled_keys = match &program.compiled_operators[idx] {
+                    CompiledOperator::GroupedCount {
+                        compiled_group_keys,
+                    } => compiled_group_keys,
+                    _ => unreachable!(),
+                };
                 let mut groups: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
                 for row in &operator_outputs[input.0] {
-                    let key: Vec<Value> = group_keys
-                        .iter()
-                        .map(|e| eval_expr(e, row, &program.functions))
-                        .collect::<Result<_, _>>()?;
+                    meter.rows_evaluated += 1;
+                    charge_work(meter, work_offset, max_work)?;
+                    let bindings = scalar_bindings(row)?;
+                    let mut key = Vec::with_capacity(compiled_keys.len());
+                    for compiled in compiled_keys {
+                        let l3_val = eval_compiled_with_budget(
+                            compiled,
+                            &bindings,
+                            meter,
+                            work_offset,
+                            max_work,
+                        )?;
+                        key.push(Value::from_scalar(l3_val)?);
+                    }
                     *groups.entry(key).or_insert(0) += 1;
                 }
                 groups
@@ -681,14 +924,38 @@ pub fn evaluate(
                 eval_row.insert(format!("{}.{k}", decide.binder), v.clone());
             }
 
-            for propose in &decide.proposals {
+            for (p_idx, propose) in decide.proposals.iter().enumerate() {
+                let compiled_prop = &decide.compiled_proposals[p_idx];
+                meter.candidates_evaluated += 1;
+                charge_work(meter, work_offset, max_work)?;
                 let entity_id = extract_entity_id(&eval_row, &decide.binder, &decide.per_field)?;
-                let guard_passed =
-                    eval_expr(&propose.guard, &eval_row, &program.functions)?.as_bool()?;
+                let bindings = scalar_bindings(&eval_row)?;
+                let guard_l3 = eval_compiled_with_budget(
+                    &compiled_prop.guard,
+                    &bindings,
+                    meter,
+                    work_offset,
+                    max_work,
+                )?;
+                let guard_passed = match guard_l3 {
+                    brix_lower::l3_v2::L3ValueV2::Bool(b) => b,
+                    other => {
+                        return Err(WorldError::NetworkError(format!(
+                            "reference evaluator: guard must be Bool, got {other:?}"
+                        )))
+                    }
+                };
                 if !guard_passed {
                     continue;
                 }
-                let val = eval_expr(&propose.value, &eval_row, &program.functions)?;
+                let val_l3 = eval_compiled_with_budget(
+                    &compiled_prop.value,
+                    &bindings,
+                    meter,
+                    work_offset,
+                    max_work,
+                )?;
+                let val = Value::from_scalar(val_l3)?;
 
                 let entity_map = entities.entry(entity_id.clone()).or_default();
                 match entity_map.get_mut(&propose.name) {
@@ -740,6 +1007,8 @@ pub fn evaluate(
                 .filter(|c| c.support_count > 0)
                 .min_by_key(|c| c.calendar_key)
             {
+                meter.settlements_computed += 1;
+                charge_work(meter, work_offset, max_work)?;
                 decide_settlements.insert(
                     entity_id.clone(),
                     ReferenceSettlement {
@@ -768,6 +1037,16 @@ pub fn evaluate(
         candidate_frontier,
         settlements,
     })
+}
+
+/// Evaluate a resolved program against a full base-relation snapshot by plain set semantics,
+/// with no incremental state of any kind. Convenience wrapper over [`evaluate_with_budget`].
+pub fn evaluate(
+    program: &ReferenceProgram,
+    base_relations: &BTreeMap<String, BTreeMap<WorldKey, WorldTuple>>,
+) -> Result<ReferenceState, WorldError> {
+    let mut meter = ReferenceWorkMeter::default();
+    evaluate_with_budget(program, base_relations, &mut meter, None, 0)
 }
 
 #[cfg(test)]

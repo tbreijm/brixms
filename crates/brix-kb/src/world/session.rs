@@ -289,6 +289,74 @@ impl WorldLockGuard {
 // The OS releases the lock when the handle closes, including process termination.
 // Do not unlink the lock file: a replacement inode would allow a second writer.
 
+/// Tracks reader and checkpoint pins to protect revisions from compaction.
+#[derive(Clone, Debug, Default)]
+pub struct PinRegistry {
+    next_pin_id: u64,
+    reader_pins: BTreeMap<u64, (u64, std::time::Instant)>,
+    checkpoint_pins: std::collections::BTreeSet<u64>,
+}
+
+impl PinRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn pin_reader(&mut self, seq: u64) -> u64 {
+        self.next_pin_id += 1;
+        let id = self.next_pin_id;
+        self.reader_pins
+            .insert(id, (seq, std::time::Instant::now()));
+        id
+    }
+
+    pub fn unpin_reader(&mut self, pin_id: u64) -> bool {
+        self.reader_pins.remove(&pin_id).is_some()
+    }
+
+    pub fn pin_checkpoint(&mut self, seq: u64) {
+        self.checkpoint_pins.insert(seq);
+    }
+
+    pub fn unpin_checkpoint(&mut self, seq: u64) -> bool {
+        self.checkpoint_pins.remove(&seq)
+    }
+
+    pub fn checkpoint_pins(&self) -> &std::collections::BTreeSet<u64> {
+        &self.checkpoint_pins
+    }
+
+    pub fn is_pinned(&self, seq: u64) -> bool {
+        if self.checkpoint_pins.contains(&seq) {
+            return true;
+        }
+        self.reader_pins.values().any(|&(s, _)| s == seq)
+    }
+
+    pub fn pinned_revisions(&self) -> std::collections::BTreeSet<u64> {
+        let mut set = self.checkpoint_pins.clone();
+        for &(seq, _) in self.reader_pins.values() {
+            set.insert(seq);
+        }
+        set
+    }
+
+    pub fn cleanup_expired(&mut self, max_age: std::time::Duration) {
+        let now = std::time::Instant::now();
+        self.reader_pins
+            .retain(|_, &mut (_, created)| now.duration_since(created) <= max_age);
+    }
+}
+
+/// Outcome of a history compaction run.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CompactionReport {
+    pub revisions_reclaimed: usize,
+    pub revisions_retained: usize,
+    pub bytes_reclaimed: u64,
+    pub pinned_revisions: std::collections::BTreeSet<u64>,
+}
+
 /// An immutable read snapshot pinned to a specific revision.
 #[derive(Clone, Debug)]
 pub struct WorldSnapshot {
@@ -454,8 +522,14 @@ impl ExecProfileV1 {
         w.write_tag(EXEC_PROFILE_SCHEMA);
         w.write_str(&self.evaluator);
         w.write_str(&self.crate_version);
-        for n in [self.module_loader_limits.depth, self.module_loader_limits.modules,
-            self.module_loader_limits.module_bytes, self.module_loader_limits.total_bytes] { w.write_uint(n as u64); }
+        for n in [
+            self.module_loader_limits.depth,
+            self.module_loader_limits.modules,
+            self.module_loader_limits.module_bytes,
+            self.module_loader_limits.total_bytes,
+        ] {
+            w.write_uint(n as u64);
+        }
         w.write_str(&self.numeric_semantics);
         w.write_str(&self.settlement);
         w.write_str("same-proposal-entity-supports-must-agree@1");
@@ -555,6 +629,8 @@ pub struct WorldSession {
     /// decided 2026-10-04); `None` for a storage-only world or a
     /// `program.json` written before this field existed.
     pub exec_profile: Option<ExecProfileV1>,
+    /// Retention pins protecting revisions from compaction.
+    pub pins: PinRegistry,
 }
 
 impl WorldSession {
@@ -626,6 +702,7 @@ impl WorldSession {
             crash_injector: None,
             network: None,
             exec_profile: None,
+            pins: PinRegistry::default(),
         })
     }
 
@@ -668,10 +745,14 @@ impl WorldSession {
             serde_json::from_slice(&rev_bytes).map_err(|e| WorldError::Json(e.to_string()))?;
         let current_rev = WorldRevision::from_json(&rev_val)?;
         let head_fields: Vec<_> = head_line.split_whitespace().collect();
-        if current_rev.seq != current_revision || head_fields.len() > 2 ||
-           (head_fields.len() == 1 && current_revision != 0) ||
-           (head_fields.len() == 2 && head_fields[1] != current_rev.revision_digest.to_hex()) {
-            return Err(WorldError::CorruptedHead("HEAD revision digest mismatch".into()));
+        if current_rev.seq != current_revision
+            || head_fields.len() > 2
+            || (head_fields.len() == 1 && current_revision != 0)
+            || (head_fields.len() == 2 && head_fields[1] != current_rev.revision_digest.to_hex())
+        {
+            return Err(WorldError::CorruptedHead(
+                "HEAD revision digest mismatch".into(),
+            ));
         }
 
         if manifest.program_required && current_rev.program_digest != Some(manifest.program_digest)
@@ -713,11 +794,11 @@ impl WorldSession {
             }
         }
 
-        // Scan past revision headers for idempotency keys
+        // Scan receipts and revision headers for idempotency keys
         let mut committed_idempotency_keys = BTreeMap::new();
-        if let Ok(entries) = fs::read_dir(paths.revisions_dir()) {
-            for entry in entries.flatten() {
-                if let Ok(content) = fs::read_to_string(entry.path()) {
+        let parse_receipt_or_rev =
+            |path: &std::path::Path, committed_keys: &mut BTreeMap<String, CommittedBatchInfo>| {
+                if let Ok(content) = fs::read_to_string(path) {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
                         if let (Some(seq), Some(ikey), Some(d_hex)) = (
                             v.get("seq").and_then(|x| x.as_u64()),
@@ -730,7 +811,7 @@ impl WorldSession {
                                         .get("batch_digest")
                                         .and_then(|x| x.as_str())
                                         .and_then(|s| hex_to_digest(s).ok());
-                                    committed_idempotency_keys.insert(
+                                    committed_keys.insert(
                                         ikey.to_string(),
                                         CommittedBatchInfo {
                                             seq,
@@ -741,6 +822,28 @@ impl WorldSession {
                                 }
                             }
                         }
+                    }
+                }
+            };
+
+        if let Ok(entries) = fs::read_dir(paths.receipts_dir()) {
+            for entry in entries.flatten() {
+                parse_receipt_or_rev(&entry.path(), &mut committed_idempotency_keys);
+            }
+        }
+        if let Ok(entries) = fs::read_dir(paths.revisions_dir()) {
+            for entry in entries.flatten() {
+                parse_receipt_or_rev(&entry.path(), &mut committed_idempotency_keys);
+            }
+        }
+
+        // Restore persisted checkpoint pins
+        let mut pins = PinRegistry::default();
+        if paths.pins_file().exists() {
+            if let Ok(bytes) = fs::read(paths.pins_file()) {
+                if let Ok(list) = serde_json::from_slice::<Vec<u64>>(&bytes) {
+                    for seq in list {
+                        pins.pin_checkpoint(seq);
                     }
                 }
             }
@@ -759,6 +862,7 @@ impl WorldSession {
             crash_injector: None,
             network: None,
             exec_profile: None,
+            pins,
         };
 
         let program_file = session.paths.root.join("program.json");
@@ -824,18 +928,26 @@ impl WorldSession {
 
         if let Some(bound) = current_rev.exec_profile_digest {
             if session.exec_profile.as_ref().map(ExecProfileV1::digest) != Some(bound) {
-                return Err(WorldError::InvalidSchema("execution profile digest mismatch".into()));
+                return Err(WorldError::InvalidSchema(
+                    "execution profile digest mismatch".into(),
+                ));
             }
         }
         if let Some(profile) = &session.exec_profile {
             if profile != &ExecProfileV1::current_for_network() {
-                return Err(WorldError::InvalidSchema("unsupported execution profile".into()));
+                return Err(WorldError::InvalidSchema(
+                    "unsupported execution profile".into(),
+                ));
             }
         }
-        if current_rev.decision_delta_digest.is_some() { session.decision_delta(current_revision)?; }
+        if current_rev.decision_delta_digest.is_some() {
+            session.decision_delta(current_revision)?;
+        }
         if let (Some(expected), Some(net)) = (current_rev.decision_root, &session.network) {
             if net.decision_root() != expected {
-                return Err(WorldError::NetworkError("restored decision root mismatch".into()));
+                return Err(WorldError::NetworkError(
+                    "restored decision root mismatch".into(),
+                ));
             }
         }
         Ok(session)
@@ -934,6 +1046,15 @@ impl WorldSession {
 
     /// Apply a transactional mutation batch.
     pub fn apply_batch(&mut self, batch: WorldBatch) -> Result<RevisionReceipt, WorldError> {
+        self.apply_batch_bounded(batch, None)
+    }
+
+    /// Apply a transactional mutation batch with explicit execution resource bounds.
+    pub fn apply_batch_bounded(
+        &mut self,
+        batch: WorldBatch,
+        limits: Option<&super::network::NetworkLimits>,
+    ) -> Result<RevisionReceipt, WorldError> {
         let _lock = WorldLockGuard::acquire(&self.root)?;
 
         // Verify disk HEAD matches in-memory current_revision
@@ -980,7 +1101,10 @@ impl WorldSession {
         let (staged_network, decision_root, decision_delta_digest, decision_delta_body) =
             if let Some(ref net) = self.network {
                 let mut sn = net.clone();
-                let delta_report = sn.apply_ops_staged(&normalized_ops)?;
+                let delta_report = sn.apply_ops_staged_bounded(
+                    &normalized_ops,
+                    limits.unwrap_or(&super::network::NetworkLimits::default()),
+                )?;
                 if sn.decides.is_empty() {
                     (Some(sn), None, None, None)
                 } else {
@@ -1229,7 +1353,9 @@ impl WorldSession {
         }
 
         if self.crash_injector == Some(CrashPoint::AfterDecisionDeltaFsyncBeforeRevisionFsync) {
-            return Err(WorldError::InjectedCrash(CrashPoint::AfterDecisionDeltaFsyncBeforeRevisionFsync));
+            return Err(WorldError::InjectedCrash(
+                CrashPoint::AfterDecisionDeltaFsyncBeforeRevisionFsync,
+            ));
         }
         // 6. Assemble revision record
         let mut relation_roots = BTreeMap::new();
@@ -1256,7 +1382,8 @@ impl WorldSession {
             changed_keys.clone(),
             SettlementStatus::Committed,
             decision_delta_digest,
-        ).bind_exec_profile(self.exec_profile.as_ref().map(ExecProfileV1::digest));
+        )
+        .bind_exec_profile(self.exec_profile.as_ref().map(ExecProfileV1::digest));
 
         let rev_json = serde_json::to_vec_pretty(&new_revision.to_json())
             .map_err(|e| WorldError::Json(e.to_string()))?;
@@ -1269,6 +1396,24 @@ impl WorldSession {
         }
         fs::rename(&tmp_rev_file, self.paths.revision_file(new_seq))?;
         fs::File::open(self.paths.revisions_dir())?.sync_all()?;
+
+        // Durable idempotency receipt (preserved independently across compaction)
+        let receipt_info = serde_json::json!({
+            "seq": new_seq,
+            "idempotency_key": batch.idempotency_key,
+            "revision_digest": new_revision.revision_digest.to_hex(),
+            "batch_digest": batch_digest.to_hex(),
+        });
+        let receipt_json = serde_json::to_vec_pretty(&receipt_info)
+            .map_err(|e| WorldError::Json(e.to_string()))?;
+        let tmp_receipt_file = self.paths.receipt_tmp_file(new_seq);
+        fs::write(&tmp_receipt_file, receipt_json)?;
+        {
+            let f = fs::File::open(&tmp_receipt_file)?;
+            f.sync_all()?;
+        }
+        fs::rename(&tmp_receipt_file, self.paths.receipt_file(new_seq))?;
+        fs::File::open(self.paths.receipts_dir())?.sync_all()?;
 
         // Crash injection seam 3
         if self.crash_injector == Some(CrashPoint::AfterRevisionFsyncBeforeHeadRename) {
@@ -1326,7 +1471,9 @@ impl WorldSession {
 
     /// Pin an immutable read snapshot at revision `seq`.
     pub fn pin_revision(&self, seq: u64) -> Result<WorldSnapshot, WorldError> {
-        if seq > self.current_revision { return Err(WorldError::RevisionNotFound(seq)); }
+        if seq > self.current_revision {
+            return Err(WorldError::RevisionNotFound(seq));
+        }
         let rev_file = self.paths.revision_file(seq);
         if !rev_file.exists() {
             return Err(WorldError::RevisionNotFound(seq));
@@ -1337,7 +1484,8 @@ impl WorldSession {
         let rev = WorldRevision::from_json(&rev_val)?;
         if rev.seq != seq {
             return Err(WorldError::InvalidSchema(format!(
-                "revision file {seq} contains revision {}", rev.seq
+                "revision file {seq} contains revision {}",
+                rev.seq
             )));
         }
         if self.manifest.program_required
@@ -1373,6 +1521,113 @@ impl WorldSession {
             secondary_indexes,
             node_store: self.node_store.clone(),
         })
+    }
+
+    /// Pin a revision for an active reader, returning an opaque pin handle ID.
+    pub fn pin_reader(&mut self, seq: u64) -> Result<u64, WorldError> {
+        if seq > self.current_revision || !self.paths.revision_file(seq).exists() {
+            return Err(WorldError::RevisionNotFound(seq));
+        }
+        Ok(self.pins.pin_reader(seq))
+    }
+
+    /// Release an active reader pin.
+    pub fn unpin_reader(&mut self, pin_id: u64) -> bool {
+        self.pins.unpin_reader(pin_id)
+    }
+
+    fn persist_pins(&self) -> Result<(), WorldError> {
+        let list: Vec<u64> = self.pins.checkpoint_pins().iter().copied().collect();
+        let bytes =
+            serde_json::to_vec_pretty(&list).map_err(|e| WorldError::Json(e.to_string()))?;
+        let tmp = self.paths.pins_tmp_file();
+        fs::write(&tmp, bytes)?;
+        {
+            let f = fs::File::open(&tmp)?;
+            f.sync_all()?;
+        }
+        fs::rename(&tmp, self.paths.pins_file())?;
+        fs::File::open(&self.root)?.sync_all()?;
+        Ok(())
+    }
+
+    /// Pin a revision as an audit checkpoint or evidence anchor.
+    pub fn pin_checkpoint(&mut self, seq: u64) -> Result<(), WorldError> {
+        if seq > self.current_revision || !self.paths.revision_file(seq).exists() {
+            return Err(WorldError::RevisionNotFound(seq));
+        }
+        self.pins.pin_checkpoint(seq);
+        self.persist_pins()?;
+        Ok(())
+    }
+
+    /// Release a checkpoint pin.
+    pub fn unpin_checkpoint(&mut self, seq: u64) -> bool {
+        let removed = self.pins.unpin_checkpoint(seq);
+        if removed {
+            let _ = self.persist_pins();
+        }
+        removed
+    }
+
+    /// Check whether a revision is currently protected from compaction.
+    pub fn is_revision_pinned(&self, seq: u64) -> bool {
+        seq == 0 || seq == self.current_revision || self.pins.is_pinned(seq)
+    }
+
+    /// Measure total retained history bytes across all revision records and decision deltas.
+    pub fn measure_retained_bytes(&self) -> Result<u64, WorldError> {
+        let mut total_bytes = 0u64;
+        let rev_dir = self.paths.revisions_dir();
+        if rev_dir.exists() {
+            for entry in fs::read_dir(&rev_dir)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    total_bytes += entry.metadata()?.len();
+                }
+            }
+        }
+        Ok(total_bytes)
+    }
+
+    /// Compact historical revision logs up to `up_to_seq` (inclusive), skipping pinned revisions.
+    pub fn compact_history(&mut self, up_to_seq: u64) -> Result<CompactionReport, WorldError> {
+        let _lock = WorldLockGuard::acquire(&self.root)?;
+        let mut report = CompactionReport::default();
+        let limit = up_to_seq.min(self.current_revision);
+
+        for seq in 1..=limit {
+            if self.is_revision_pinned(seq) {
+                report.pinned_revisions.insert(seq);
+                report.revisions_retained += 1;
+                continue;
+            }
+
+            let mut reclaimed_any = false;
+            let rev_path = self.paths.revision_file(seq);
+            if rev_path.exists() {
+                if let Ok(meta) = fs::metadata(&rev_path) {
+                    report.bytes_reclaimed += meta.len();
+                }
+                let _ = fs::remove_file(&rev_path);
+                reclaimed_any = true;
+            }
+
+            let delta_path = self.paths.decision_delta_file(seq);
+            if delta_path.exists() {
+                if let Ok(meta) = fs::metadata(&delta_path) {
+                    report.bytes_reclaimed += meta.len();
+                }
+                let _ = fs::remove_file(&delta_path);
+                reclaimed_any = true;
+            }
+
+            if reclaimed_any {
+                report.revisions_reclaimed += 1;
+            }
+        }
+
+        Ok(report)
     }
 
     /// Paginate records from a relation.
@@ -1499,22 +1754,35 @@ impl WorldSession {
 
     /// Read and authenticate a committed revision's canonical decision changes.
     /// Legacy records have no trustworthy delta body and explicitly refuse.
-    pub fn decision_delta(&self, seq: u64) -> Result<super::decision_codec::DecisionDelta, WorldError> {
+    pub fn decision_delta(
+        &self,
+        seq: u64,
+    ) -> Result<super::decision_codec::DecisionDelta, WorldError> {
         let snapshot = self.pin_revision(seq)?;
         let rev = snapshot.revision;
         if rev.schema != super::revision::REVISION_SCHEMA_V2 {
-            return Err(WorldError::NetworkError("legacy-history-unavailable".into()));
+            return Err(WorldError::NetworkError(
+                "legacy-history-unavailable".into(),
+            ));
         }
         let Some(expected) = rev.decision_delta_digest else {
-            if rev.decision_root.is_some() { return Err(WorldError::NetworkError("missing decision delta digest".into())); }
+            if rev.decision_root.is_some() {
+                return Err(WorldError::NetworkError(
+                    "missing decision delta digest".into(),
+                ));
+            }
             return Ok(BTreeMap::new());
         };
         let path = self.paths.decision_delta_file(seq);
         const MAX_BYTES: u64 = 64 * 1024 * 1024;
-        if fs::metadata(&path)?.len() > MAX_BYTES { return Err(WorldError::NetworkError("decision delta byte limit".into())); }
+        if fs::metadata(&path)?.len() > MAX_BYTES {
+            return Err(WorldError::NetworkError("decision delta byte limit".into()));
+        }
         let bytes = fs::read(path)?;
         if Digest::of(Domain::Value, &bytes) != expected {
-            return Err(WorldError::NetworkError("decision delta digest mismatch".into()));
+            return Err(WorldError::NetworkError(
+                "decision delta digest mismatch".into(),
+            ));
         }
         super::decision_codec::decode_decision_delta(&bytes, 1_000_000)
     }
@@ -1537,7 +1805,9 @@ impl WorldSession {
     ) -> Result<Option<(String, SettledDecision)>, WorldError> {
         let rev = self.pin_revision(seq)?.revision;
         if rev.schema != super::revision::REVISION_SCHEMA_V2 {
-            return Err(WorldError::NetworkError("legacy-history-unavailable: revision@1 did not persist decision evidence".into()));
+            return Err(WorldError::NetworkError(
+                "legacy-history-unavailable: revision@1 did not persist decision evidence".into(),
+            ));
         }
         let Some(decision_root) = rev.decision_root else {
             return Ok(None);
@@ -1615,7 +1885,10 @@ impl WorldSession {
         let bytes = serde_json::to_vec_pretty(&val).map_err(|e| WorldError::Json(e.to_string()))?;
         atomic_write(&self.paths.root.join("program.json"), &bytes)?;
         self.exec_profile = Some(exec_profile);
-        if self.current_revision == 0 || self.manifest.program_digest != closure_digest || !self.manifest.program_required {
+        if self.current_revision == 0
+            || self.manifest.program_digest != closure_digest
+            || !self.manifest.program_required
+        {
             let mut bound_manifest = self.manifest.clone();
             bound_manifest.program_digest = closure_digest;
             bound_manifest.program_required = true;
@@ -1643,7 +1916,8 @@ impl WorldSession {
                 genesis.changed_keys,
                 genesis.status,
                 genesis.decision_delta_digest,
-            ).bind_exec_profile(self.exec_profile.as_ref().map(ExecProfileV1::digest));
+            )
+            .bind_exec_profile(self.exec_profile.as_ref().map(ExecProfileV1::digest));
             let manifest_bytes = serde_json::to_vec_pretty(&bound_manifest.to_json())
                 .map_err(|e| WorldError::Json(e.to_string()))?;
             let revision_bytes = serde_json::to_vec_pretty(&rebound.to_json())

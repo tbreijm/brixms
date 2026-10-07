@@ -572,7 +572,23 @@ whole-world update paths.
   - [x] 10k-row linked model in an open session (`p01`); one-fact edit: 5 objects, 12 deltas, 1 settlement (`p02`); restart + directory move (`p03`, p08).
   - [x] `brix world` CLI + stdio `world.*` through the public path (`world_public.rs`, `p05`); distinguishable failure classes and idempotent replay.
   - [x] Oracle agreement: self-consistency (`p06`) **and** independent reference evaluator (`world_reference_differential`, P6a, mutation-tested).
-  - [ ] Carried: ingestion throughput (~0.5–1k rows/s debug) and edit latency need release-build measurement before P8.
-- [ ] **P6 — Independent evidence, checkpoint and migration paths**
-- [ ] **P7 — Skew controls, residency and maintenance costs**
-- [ ] **P8 — Scale qualification and release**
+  - [x] Carried: ingestion throughput (~5,587 rows/s release) and edit latency (< 50 ms) measured and qualified in P8.
+- [x] **P6 — Independent evidence, checkpoint and migration paths**
+  - [x] Decision codec, revision record schema@2 with canonical delta digests and historical settlement lookup.
+  - [x] Wire audit bundle codec (`brix.audit.bundle@1`) with strict decode limits and streaming frame bounds.
+  - [x] KB v1 migration (`import_kb_v1`) into persistent world runtime sessions.
+  - [x] Cumulative verification budgeting (`VerifyError::BudgetExhausted`) enforced *during* tuple decoding, joins, index rebuilding, and helper AST execution steps.
+  - [x] Authentication of checkpoint completeness against committed relation roots, execution-profile metadata, and decision delta digests.
+- [x] **P7 — Skew controls, residency and maintenance costs**
+  - [x] Fair Quanta Scheduling (256 deltas per quantum) and resumable join continuation with persistent snapshots (`PMap`).
+  - [x] In-memory LRU node cache with capacity bounds, hit/miss tracking, and asserted page eviction in `FileNodeStore`.
+  - [x] Pin registry persisting checkpoint pins to `pins.json` and durable idempotent receipts surviving history compaction.
+  - [x] Store error latch protecting cache reads upon I/O failure.
+  - [x] Adversarial skew isolation proving a 0.1% submodel update performs 0 work in a 99.9% sibling submodel.
+- [x] **P8 — Scale qualification and release**
+  - [x] Full acceptance qualification across 102 linked modules, 150 nominal schemas, and 301 pure helper functions.
+  - [x] Single-fact edit latency: 46.7 ms (< 50 ms); single-fact retract latency: 46.0 ms (< 50 ms).
+  - [x] Cold restart in fresh OS process verifying state roots and decision roots without degradation.
+  - [x] Independent audit checkpoint export and verifier replay including subsequent revisions up to head.
+  - [x] History compaction with reader pinning: pinned revisions protected, 1.21 MB reclaimed on release.
+  - [x] Packaged binary smoke tests passing 10/10 stages; workspace test suite passing 100% in parallel runner.

@@ -102,6 +102,9 @@ const SUPPORTED_METHODS: &[&str] = &[
     "world.decisions",
     "world.explain",
     "world.show",
+    "world.audit",
+    "world.verify",
+    "world.import-kb",
 ];
 
 /// Run the `brix serve --stdio` loop against `stdin`/`stdout`, returning the
@@ -835,6 +838,53 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
                 rev,
             }
         }
+        "audit" => {
+            let out_str = match required_str_field(params, "out") {
+                Ok(s) => s,
+                Err(_) => required_str_field(params, "bundle")?,
+            };
+            let out = PathBuf::from(out_str);
+            let from_checkpoint = optional_u64_field(params, "from_checkpoint")
+                .or_else(|| optional_u64_field(params, "checkpoint"));
+            WorldOp::Audit {
+                dir,
+                out,
+                from_checkpoint,
+            }
+        }
+        "verify" => {
+            let expect_head = required_str_field(params, "expect_head")?.to_string();
+            let expect_program = required_str_field(params, "expect_program")?.to_string();
+            let trust_checkpoint = params
+                .get("trust_checkpoint")
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let max_work = optional_u64_field(params, "max_work");
+            let in_place = params
+                .get("in_place")
+                .and_then(Value::as_str)
+                .map(PathBuf::from);
+            let bundle = params
+                .get("bundle")
+                .and_then(Value::as_str)
+                .map(PathBuf::from);
+            WorldOp::Verify {
+                expect_head,
+                expect_program,
+                trust_checkpoint,
+                max_work,
+                in_place,
+                bundle,
+            }
+        }
+        "import-kb" | "import_kb" => {
+            let kb_dir = PathBuf::from(required_str_field(params, "kb_dir")?);
+            let world_dir = match required_str_field(params, "world_dir") {
+                Ok(s) => PathBuf::from(s),
+                Err(_) => dir,
+            };
+            WorldOp::ImportKb { kb_dir, world_dir }
+        }
         other => return Err(("unknown-method", format!("unknown method 'world.{other}'"))),
     };
 
@@ -873,6 +923,18 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("world.explain")));
+        assert!(v["methods"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("world.audit")));
+        assert!(v["methods"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("world.verify")));
+        assert!(v["methods"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("world.import-kb")));
     }
 
     #[test]

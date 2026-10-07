@@ -1,12 +1,12 @@
 //! Canonical settlement value and delta encoding. No evaluator state or selection logic.
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
+use super::error::WorldError;
+use super::types::{WorldKey, WorldTuple};
 use brix_canon::{CanonReader, CanonWriter, Canonical, Digest};
 use brix_syntax::ast;
 use soc_core::calendar::Key;
 use soc_core::store::TrieMap;
-use super::error::WorldError;
-use super::types::{WorldKey, WorldTuple};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 /// A scalar value admitted in relational operators and expressions.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -213,16 +213,19 @@ fn canon_read_value(r: &mut CanonReader<'_>) -> Result<Value, WorldError> {
             )
         }
         3 => Value::Bool(match r.read_uint().map_err(canon_decode_err)? {
-            0 => false, 1 => true,
+            0 => false,
+            1 => true,
             _ => return Err(WorldError::NetworkError("invalid decision boolean".into())),
         }),
         4 => {
             let raw = r.read_raw(8).map_err(canon_decode_err)?;
             let mut bits = [0u8; 8];
             bits.copy_from_slice(raw);
-            Value::F64(brix_canon::FiniteF64::from_bits(u64::from_be_bytes(bits)).map_err(
-                |e| WorldError::NetworkError(format!("corrupt decision tuple: invalid F64: {e:?}")),
-            )?)
+            Value::F64(
+                brix_canon::FiniteF64::from_bits(u64::from_be_bytes(bits)).map_err(|e| {
+                    WorldError::NetworkError(format!("corrupt decision tuple: invalid F64: {e:?}"))
+                })?,
+            )
         }
         5 => Value::Decimal(brix_canon::read_decimal(r).map_err(canon_decode_err)?),
         other => {
@@ -244,7 +247,9 @@ pub fn decode_settled_decision(
 ) -> Result<SettledDecision, WorldError> {
     let mut r = CanonReader::new(bytes);
     if r.read_bytes().map_err(canon_decode_err)? != b"brix.world.decision@1" {
-        return Err(WorldError::NetworkError("invalid decision tuple tag".into()));
+        return Err(WorldError::NetworkError(
+            "invalid decision tuple tag".into(),
+        ));
     }
     let candidate_name = std::str::from_utf8(r.read_bytes().map_err(canon_decode_err)?)
         .map_err(|e| WorldError::NetworkError(format!("invalid candidate_name UTF-8: {e}")))?
@@ -274,7 +279,9 @@ pub fn decode_settled_decision(
         calendar_key: Key::new(phase, priority, Digest::from_bytes(tb)),
     };
     if decision_tuple(&decision).as_bytes() != bytes {
-        return Err(WorldError::NetworkError("noncanonical decision tuple".into()));
+        return Err(WorldError::NetworkError(
+            "noncanonical decision tuple".into(),
+        ));
     }
     Ok(decision)
 }
@@ -348,30 +355,47 @@ pub(crate) fn canon_write_value(value: &Value, w: &mut CanonWriter) {
     }
 }
 
-
 /// A complete per-revision change map, including settlement deletions.
 pub type DecisionDelta = BTreeMap<(String, String), Option<SettledDecision>>;
 
 /// Bounded strict decoding: check count before looping; frame lengths before copies.
-pub fn decode_decision_delta(bytes: &[u8], max_entries: usize) -> Result<DecisionDelta, WorldError> {
+pub fn decode_decision_delta(
+    bytes: &[u8],
+    max_entries: usize,
+) -> Result<DecisionDelta, WorldError> {
     let err = || WorldError::NetworkError("invalid decision delta encoding".into());
     let mut r = CanonReader::new(bytes);
-    if r.read_bytes().map_err(canon_decode_err)? != b"brix.world.decision-delta@1" { return Err(err()); }
+    if r.read_bytes().map_err(canon_decode_err)? != b"brix.world.decision-delta@1" {
+        return Err(err());
+    }
     let count = usize::try_from(r.read_uint().map_err(canon_decode_err)?).map_err(|_| err())?;
-    if count > max_entries || count > bytes.len() / 3 { return Err(err()); }
+    if count > max_entries || count > bytes.len() / 3 {
+        return Err(err());
+    }
     let mut out = BTreeMap::new();
     for _ in 0..count {
-        let decide = std::str::from_utf8(r.read_bytes().map_err(canon_decode_err)?).map_err(|_| err())?.to_owned();
-        let entity = std::str::from_utf8(r.read_bytes().map_err(canon_decode_err)?).map_err(|_| err())?.to_owned();
+        let decide = std::str::from_utf8(r.read_bytes().map_err(canon_decode_err)?)
+            .map_err(|_| err())?
+            .to_owned();
+        let entity = std::str::from_utf8(r.read_bytes().map_err(canon_decode_err)?)
+            .map_err(|_| err())?
+            .to_owned();
         let key = (decide, entity);
-        if out.last_key_value().is_some_and(|(prev,_)| prev >= &key) { return Err(err()); }
+        if out.last_key_value().is_some_and(|(prev, _)| prev >= &key) {
+            return Err(err());
+        }
         let value = match r.read_uint().map_err(canon_decode_err)? {
             0 => None,
-            1 => Some(decode_settled_decision(&key.1, r.read_bytes().map_err(canon_decode_err)?)?),
+            1 => Some(decode_settled_decision(
+                &key.1,
+                r.read_bytes().map_err(canon_decode_err)?,
+            )?),
             _ => return Err(err()),
         };
         out.insert(key, value);
     }
-    if !r.is_empty() { return Err(err()); }
+    if !r.is_empty() {
+        return Err(err());
+    }
     Ok(out)
 }

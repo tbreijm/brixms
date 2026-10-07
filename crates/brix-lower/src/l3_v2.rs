@@ -2303,33 +2303,42 @@ pub fn eval(e: &L3ExprV2, env: &EvalEnv) -> Result<L3ValueV2, EvalFault> {
         let mut budget = None;
         return eval_internal(e, env, &mut budget, None);
     }
+    eval_with_budget(e, env, None).map(|(val, _)| val)
+}
+
+/// Evaluate a v2 expression to a value with explicit step limit and step accounting.
+pub fn eval_with_budget(
+    e: &L3ExprV2,
+    env: &EvalEnv,
+    max_steps: Option<usize>,
+) -> Result<(L3ValueV2, usize), EvalFault> {
+    let steps_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let steps_c = steps_counter.clone();
+    let max = max_steps.unwrap_or(MAX_CALL_STEPS);
     let budgeted = move || {
         let mut budget = Some(EvalBudget {
+            max_steps: max,
             run_work: env.run_work.clone(),
             ..EvalBudget::default()
         });
         let value = eval_internal(e, env, &mut budget, None)?;
+        let spent = budget.as_ref().map_or(0, |b| b.steps);
+        steps_c.store(spent, std::sync::atomic::Ordering::Relaxed);
         budget.as_mut().map_or(Ok(()), EvalBudget::flush_run_work)?;
         Ok(value)
     };
-    // Only a helper call can recurse (ADR-0042); without helpers, native
-    // stack depth is bounded by expression nesting, so the budgeted
-    // evaluation runs on the caller's thread.
-    if env.functions.is_empty() {
-        return budgeted();
-    }
-    // See `EVAL_THREAD_STACK_BYTES`: with helpers in scope, evaluation runs
-    // on a dedicated, generously sized stack rather than trusting the
-    // caller's thread — the budget decides admission, not the native stack.
-    // `eval_internal` is total, so a failure here means the OS refused the
-    // thread or a defect panicked; both are reported as a resource fault,
-    // never propagated as a panic.
-    with_eval_stack(budgeted).unwrap_or_else(|| {
-        Err(EvalFault::ResourceExhausted {
-            limit: EVAL_THREAD_STACK_BYTES,
-            detail: "the bounded evaluation thread could not run".to_string(),
-        })
-    })
+    let value = if env.functions.is_empty() {
+        budgeted()?
+    } else {
+        with_eval_stack(budgeted).unwrap_or_else(|| {
+            Err(EvalFault::ResourceExhausted {
+                limit: EVAL_THREAD_STACK_BYTES,
+                detail: "the bounded evaluation thread could not run".to_string(),
+            })
+        })?
+    };
+    let steps = steps_counter.load(std::sync::atomic::Ordering::Relaxed);
+    Ok((value, steps))
 }
 
 /// Whether `e` reaches a list/relational form anywhere in its tree
