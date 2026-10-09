@@ -236,7 +236,10 @@ fn body_corruption_is_latched_and_semantic_digest_is_still_verified() {
 }
 
 #[test]
-fn duplicate_digest_across_packs_is_rejected_on_open() {
+fn duplicate_digest_across_packs_is_tolerated_and_reads_identically() {
+    // The sorted-idx open path cannot cheaply detect cross-pack duplicates
+    // (that would be O(total nodes)). Content addressing makes them benign:
+    // either copy yields the same checksummed bytes.
     let dir = TestDir::new("duplicate-pack-digest");
     let mut first = FileNodeStore::new(dir.path()).expect("open first writer");
     let mut second = FileNodeStore::new(dir.path()).expect("open second writer");
@@ -247,10 +250,8 @@ fn duplicate_digest_across_packs_is_rejected_on_open() {
     first.flush().expect("publish first pack");
     second.flush().expect("publish second pack");
 
-    assert!(
-        FileNodeStore::new(dir.path()).is_err(),
-        "ambiguous duplicate digest entries must not depend on directory order"
-    );
+    let reopened = FileNodeStore::new(dir.path()).expect("duplicates are benign");
+    assert_eq!(reopened.get_node(&digest), Some(b"same object".to_vec()));
 }
 
 #[test]

@@ -11,10 +11,23 @@
 //! published packs. Body checksums are checked on every read; trie decoding also
 //! verifies the semantic Merkle ID. Unpublished .tmp files are never indexed.
 //!
-//! Cold open reads O(all pack index bytes), retains O(unique node metadata), and
-//! does not scan bodies. Warm lookup is O(log unique nodes); flush writes only
-//! the new batch index. Body buffering is fixed at 64 KiB, with one requested
+//! Sorted sidecar index (`<pack>.idx`, derived data, pack format unchanged):
+//! magic `BRIXIDX1`, record count u64 BE, the pack's footer chain checksum[32],
+//! a 256-entry cumulative fanout table (u32 BE, by first digest byte), then
+//! `count` 80-byte records in the same layout as the pack index but sorted by
+//! digest, then a 32-byte chain checksum over those sorted records. The idx is
+//! bound to its pack by count and chain checksum. Cold open reads the 56-byte
+//! footer and the 1072-byte idx header of every pack (O(packs), independent of
+//! node count); a missing, stale, or structurally damaged idx is rebuilt once
+//! from the (fully validated) pack. Lookup consults the in-memory fanout, then
+//! binary-searches the records with positional reads through a bounded cache
+//! of open idx files; every hit is bounds-checked and bodies stay checksummed.
+//! `verify_indexes` fully re-derives each idx from its pack for audits.
+//! Index files are fsynced before the pack is renamed into place, but that
+//! sync is not counted in `files_synced` (it is derived data).
+//! Body buffering is fixed at 64 KiB, with one requested
 //! body allocated per read. Clones share the index and pending writer.
+//! Identical digests in several packs are tolerated (content-addressed).
 
 use super::NodeStore;
 use brix_canon::{Digest, Domain};
@@ -32,6 +45,9 @@ const FOOTER: u64 = 56;
 const MAX_BODY: u64 = 64 * 1024 * 1024;
 const MAX_COUNT: u64 = 1 << 32;
 const MAX_PACK: u64 = 1 << 48;
+const IDX_MAGIC: &[u8; 8] = b"BRIXIDX1";
+const IDX_HEADER: u64 = 8 + 8 + 32 + 256 * 4;
+const IDX_CACHE_FILES: usize = 64;
 static NONCE: AtomicU64 = AtomicU64::new(0);
 
 /// Actual filesystem work, shared by cloned handles to one store.
@@ -94,10 +110,15 @@ struct Entry {
     length: u64,
     checksum: Digest,
 }
+/// One published pack: metadata only; records live in the sorted idx file.
 #[derive(Debug)]
-struct Location {
+struct PackRef {
     path: Arc<PathBuf>,
-    entry: Entry,
+    idx_path: PathBuf,
+    /// Offset of the pack's own index region (upper bound for bodies).
+    start: u64,
+    count: u64,
+    fanout: Box<[u32; 256]>,
 }
 #[derive(Debug)]
 struct Pending {
@@ -109,7 +130,9 @@ struct Pending {
 }
 #[derive(Debug)]
 struct State {
-    index: BTreeMap<Digest, Location>,
+    packs: Vec<PackRef>,
+    /// Bounded LRU of open idx files, most recent last: (pack number, file).
+    idx_files: Vec<(usize, File)>,
     pending: Option<Pending>,
     root_synced: bool,
     node_cache: BTreeMap<Digest, Vec<u8>>,
@@ -117,10 +140,76 @@ struct State {
     max_cached_nodes: usize,
 }
 
+impl State {
+    /// Locate a published node: fanout range, then binary search by positional
+    /// reads. Every hit is bounds-checked against the owning pack.
+    fn find(&mut self, digest: &Digest) -> io::Result<Option<(Arc<PathBuf>, Entry)>> {
+        let first = digest.as_bytes()[0] as usize;
+        for n in (0..self.packs.len()).rev() {
+            let pack = &self.packs[n];
+            let lo = if first == 0 {
+                0
+            } else {
+                u64::from(pack.fanout[first - 1])
+            };
+            let hi = u64::from(pack.fanout[first]);
+            if lo >= hi {
+                continue;
+            }
+            let (path, start, idx_path) = (pack.path.clone(), pack.start, pack.idx_path.clone());
+            let slot = match self.idx_files.iter().position(|(id, _)| *id == n) {
+                Some(i) => i,
+                None => {
+                    if self.idx_files.len() >= IDX_CACHE_FILES {
+                        self.idx_files.remove(0);
+                    }
+                    self.idx_files.push((n, File::open(&idx_path)?));
+                    self.idx_files.len() - 1
+                }
+            };
+            let last = self.idx_files.len() - 1;
+            self.idx_files.swap(slot, last);
+            let mut file = &self.idx_files[last].1;
+            let (mut lo, mut hi) = (lo, hi);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                file.seek(SeekFrom::Start(IDX_HEADER + mid * RECORD))?;
+                let mut record = [0; RECORD as usize];
+                file.read_exact(&mut record)?;
+                let found = digest_at(&record, 0);
+                match found.cmp(digest) {
+                    std::cmp::Ordering::Less => lo = mid + 1,
+                    std::cmp::Ordering::Greater => hi = mid,
+                    std::cmp::Ordering::Equal => {
+                        let entry = Entry {
+                            offset: u64_at(&record, 32),
+                            length: u64_at(&record, 40),
+                            checksum: digest_at(&record, 48),
+                        };
+                        if entry.offset < 8
+                            || entry.length == 0
+                            || entry.length > MAX_BODY
+                            || entry
+                                .offset
+                                .checked_add(entry.length)
+                                .is_none_or(|e| e > start)
+                        {
+                            return Err(invalid("idx record out of pack bounds"));
+                        }
+                        return Ok(Some((path, entry)));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
 impl Default for State {
     fn default() -> Self {
         Self {
-            index: BTreeMap::new(),
+            packs: Vec::new(),
+            idx_files: Vec::new(),
             pending: None,
             root_synced: false,
             node_cache: BTreeMap::new(),
@@ -189,19 +278,25 @@ impl FileNodeStore {
             .state
             .lock()
             .map_err(|_| invalid("poisoned pack index"))?;
+        let mut packs = Vec::new();
         for item in fs::read_dir(&store.objects_dir)? {
             let path = item?.path();
             if path.extension().and_then(|s| s.to_str()) == Some("pack") {
-                store.load_index(&path, &mut state)?;
+                packs.push(path);
             }
+        }
+        packs.sort();
+        for path in packs {
+            let pack = store.open_pack(&path)?;
+            state.packs.push(pack);
         }
         drop(state);
         Ok(store)
     }
 
-    fn load_index(&self, path: &Path, state: &mut State) -> io::Result<()> {
-        let mut file = BufReader::new(File::open(path)?);
-        let size = file.get_ref().metadata()?.len();
+    /// Read and validate only the pack footer; returns (index start, count, chain).
+    fn read_footer(&self, file: &mut File) -> io::Result<(u64, u64, Digest)> {
+        let size = file.metadata()?.len();
         if !(8 + RECORD + FOOTER..=MAX_PACK).contains(&size) {
             return Err(invalid("invalid pack size"));
         }
@@ -227,10 +322,19 @@ impl FileNodeStore {
         {
             return Err(invalid("invalid pack footer"));
         }
+        self.io.bytes_read.fetch_add(8 + FOOTER, Ordering::Relaxed);
+        Ok((start, count, digest_at(&footer, 16)))
+    }
+
+    /// Full validation of a pack's own index; O(count). Used to (re)build an idx.
+    fn scan_pack(&self, path: &Path) -> io::Result<(Vec<(Digest, Entry)>, Digest)> {
+        let mut file = File::open(path)?;
+        let (start, count, footer_chain) = self.read_footer(&mut file)?;
+        let mut file = BufReader::new(file);
         file.seek(SeekFrom::Start(start))?;
-        let path = Arc::new(path.to_path_buf());
         let mut chain = chain_start();
         let mut expected_offset = 8;
+        let mut entries = Vec::with_capacity(count as usize);
         for _ in 0..count {
             let mut record = [0; RECORD as usize];
             file.read_exact(&mut record)?;
@@ -248,24 +352,142 @@ impl FileNodeStore {
                 .checked_add(entry.length)
                 .filter(|end| *end <= start)
                 .ok_or_else(|| invalid("pack body out of bounds"))?;
-            let digest = digest_at(&record, 0);
-            if state.index.contains_key(&digest) {
-                return Err(invalid("duplicate digest across pack index"));
-            }
-            state.index.insert(
-                digest,
-                Location {
-                    path: path.clone(),
-                    entry,
-                },
-            );
+            entries.push((digest_at(&record, 0), entry));
         }
-        if expected_offset != start || chain != digest_at(&footer, 16) {
+        if expected_offset != start || chain != footer_chain {
             return Err(invalid("pack index checksum mismatch"));
         }
         self.io
             .bytes_read
-            .fetch_add(8 + FOOTER + count * RECORD, Ordering::Relaxed);
+            .fetch_add(count * RECORD, Ordering::Relaxed);
+        Ok((entries, footer_chain))
+    }
+
+    /// Open one published pack: footer + idx header only; rebuild idx if unusable.
+    fn open_pack(&self, path: &Path) -> io::Result<PackRef> {
+        let mut file = File::open(path)?;
+        let (start, count, chain) = self.read_footer(&mut file)?;
+        let idx_path = path.with_extension("idx");
+        let fanout = match self.read_idx_header(&idx_path, count, &chain) {
+            Ok(fanout) => fanout,
+            Err(_) => {
+                let (mut entries, chain) = self.scan_pack(path)?;
+                let tmp = self.write_idx_tmp(&idx_path, &mut entries, &chain)?;
+                fs::rename(&tmp, &idx_path)?;
+                self.read_idx_header(&idx_path, count, &chain)?
+            }
+        };
+        Ok(PackRef {
+            path: Arc::new(path.to_path_buf()),
+            idx_path,
+            start,
+            count,
+            fanout,
+        })
+    }
+
+    fn read_idx_header(
+        &self,
+        idx_path: &Path,
+        count: u64,
+        chain: &Digest,
+    ) -> io::Result<Box<[u32; 256]>> {
+        let mut file = File::open(idx_path)?;
+        let size = file.metadata()?.len();
+        if count
+            .checked_mul(RECORD)
+            .and_then(|n| n.checked_add(IDX_HEADER + 32))
+            != Some(size)
+        {
+            return Err(invalid("idx size mismatch"));
+        }
+        let mut header = vec![0; IDX_HEADER as usize];
+        file.read_exact(&mut header)?;
+        self.io.bytes_read.fetch_add(IDX_HEADER, Ordering::Relaxed);
+        if &header[..8] != IDX_MAGIC
+            || u64_at(&header, 8) != count
+            || digest_at(&header, 16) != *chain
+        {
+            return Err(invalid("idx header does not match pack"));
+        }
+        let mut fanout = Box::new([0u32; 256]);
+        let mut previous = 0u32;
+        for (i, slot) in fanout.iter_mut().enumerate() {
+            let at = 48 + i * 4;
+            let v = u32::from_be_bytes(header[at..at + 4].try_into().expect("fixed framing"));
+            if v < previous {
+                return Err(invalid("idx fanout not monotone"));
+            }
+            *slot = v;
+            previous = v;
+        }
+        if u64::from(previous) != count {
+            return Err(invalid("idx fanout total mismatch"));
+        }
+        Ok(fanout)
+    }
+
+    /// Write a sorted idx to a unique temp file (fsynced); caller renames it.
+    fn write_idx_tmp(
+        &self,
+        idx_path: &Path,
+        entries: &mut [(Digest, Entry)],
+        pack_chain: &Digest,
+    ) -> io::Result<PathBuf> {
+        entries.sort_by_key(|a| a.0);
+        let mut fanout = [0u32; 256];
+        for (digest, _) in entries.iter() {
+            fanout[digest.as_bytes()[0] as usize] += 1;
+        }
+        let mut total = 0u32;
+        for slot in &mut fanout {
+            total += *slot;
+            *slot = total;
+        }
+        let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
+        let tmp = idx_path.with_extension(format!("{}.{nonce}.tmp", std::process::id()));
+        let file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let mut writer = BufWriter::with_capacity(
+            64 * 1024,
+            CountedFile {
+                file,
+                io: self.io.clone(),
+            },
+        );
+        writer.write_all(IDX_MAGIC)?;
+        writer.write_all(&(entries.len() as u64).to_be_bytes())?;
+        writer.write_all(pack_chain.as_bytes())?;
+        for v in fanout {
+            writer.write_all(&v.to_be_bytes())?;
+        }
+        let mut chain = chain_start();
+        for (digest, entry) in entries.iter() {
+            let record = encode_entry(digest, entry);
+            writer.write_all(&record)?;
+            chain = chain_next(chain, &record);
+        }
+        writer.write_all(chain.as_bytes())?;
+        writer.flush()?;
+        writer.get_ref().file.sync_all()?;
+        Ok(tmp)
+    }
+
+    /// Audit: re-derive every idx from its pack (O(total nodes)) and require
+    /// byte equality. Never called on the open or lookup paths.
+    pub fn verify_indexes(&self) -> io::Result<()> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| invalid("poisoned pack index"))?;
+        for pack in &state.packs {
+            let (mut entries, chain) = self.scan_pack(&pack.path)?;
+            let tmp = self.write_idx_tmp(&pack.idx_path, &mut entries, &chain)?;
+            let expected = fs::read(&tmp);
+            let _ = fs::remove_file(&tmp);
+            if expected? != fs::read(&pack.idx_path)? {
+                return Err(invalid("idx does not match its pack"));
+            }
+        }
         Ok(())
     }
 
@@ -371,7 +593,8 @@ impl FileNodeStore {
     /// Diagnostic traversal; never used by point reads, writes, or publication.
     pub fn node_count(&self) -> usize {
         let state = self.state.lock().expect("poisoned pack index");
-        let mut count = state.index.len() + state.pending.as_ref().map_or(0, |p| p.entries.len());
+        let mut count = state.packs.iter().map(|p| p.count as usize).sum::<usize>()
+            + state.pending.as_ref().map_or(0, |p| p.entries.len());
         if let Ok(dirs) = fs::read_dir(&self.objects_dir) {
             for dir in dirs.flatten() {
                 if let Ok(files) = fs::read_dir(dir.path()) {
@@ -436,7 +659,11 @@ impl FileNodeStore {
             pending.writer.get_ref().file.sync_all()?;
             self.io.files_synced.fetch_add(1, Ordering::Relaxed);
             let published = pending.path.with_extension("pack");
+            let idx_path = published.with_extension("idx");
+            let mut sorted = pending.entries.clone();
+            let idx_tmp = self.write_idx_tmp(&idx_path, &mut sorted, &chain)?;
             fs::rename(&pending.path, &published)?;
+            fs::rename(&idx_tmp, &idx_path)?;
             File::open(&self.objects_dir)?.sync_all()?;
             self.io.directories_synced.fetch_add(1, Ordering::Relaxed);
             if !state.root_synced {
@@ -445,16 +672,22 @@ impl FileNodeStore {
                 state.root_synced = true;
             }
             let pending = state.pending.take().expect("pending pack");
-            let path = Arc::new(published);
-            for (digest, entry) in pending.entries {
-                state.index.insert(
-                    digest,
-                    Location {
-                        path: path.clone(),
-                        entry,
-                    },
-                );
+            let mut fanout = Box::new([0u32; 256]);
+            for (digest, _) in &pending.entries {
+                fanout[digest.as_bytes()[0] as usize] += 1;
             }
+            let mut total = 0u32;
+            for slot in fanout.iter_mut() {
+                total += *slot;
+                *slot = total;
+            }
+            state.packs.push(PackRef {
+                path: Arc::new(published),
+                idx_path,
+                start: pending.end,
+                count: pending.entries.len() as u64,
+                fanout,
+            });
             Ok(())
         })())
     }
@@ -476,12 +709,12 @@ impl FileNodeStore {
 impl NodeStore for FileNodeStore {
     fn contains(&self, digest: &Digest) -> bool {
         self.latch((|| {
-            let state = self
+            let mut state = self
                 .state
                 .lock()
                 .map_err(|_| invalid("poisoned pack index"))?;
             self.check()?;
-            if state.index.contains_key(digest)
+            if state.find(digest)?.is_some()
                 || state
                     .pending
                     .as_ref()
@@ -516,8 +749,8 @@ impl NodeStore for FileNodeStore {
                         .lock()
                         .map_err(|_| invalid("poisoned pack index"))?;
                     self.check()?;
-                    if let Some(location) = state.index.get(digest) {
-                        Some((File::open(location.path.as_ref())?, location.entry.clone()))
+                    if let Some((path, entry)) = state.find(digest)? {
+                        Some((File::open(path.as_ref())?, entry))
                     } else if let Some(pending) = state.pending.as_mut() {
                         if let Some(&idx) = pending.lookup.get(digest) {
                             pending.writer.flush()?;
@@ -574,7 +807,7 @@ impl NodeStore for FileNodeStore {
                 .lock()
                 .map_err(|_| invalid("poisoned pack index"))?;
             self.check()?;
-            if state.index.contains_key(&digest)
+            if state.find(&digest)?.is_some()
                 || state
                     .pending
                     .as_ref()
