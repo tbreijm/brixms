@@ -16,7 +16,7 @@
 
 use super::deriv_intern::{deriv_ref, intern, persist_interned, resolve};
 use super::persistent::{PMap, PSet};
-use super::state_codec::{DNode, JoinEntry, StateCodec, SubRoot, ValueList};
+use super::state_codec::{DNode, JoinEntry, StateCodec, SubRoot, SupportRef, ValueList};
 use super::state_store::{PageCursor, SMap, SSet, StateStore, DEFAULT_NODE_CACHE_BYTES};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -460,19 +460,48 @@ impl JoinSide {
     }
 }
 
+/// The supports of one key, as read from a [`SupportIndex`].
+pub(crate) enum Supports {
+    None,
+    One(Digest),
+    Many(SSet<Digest>),
+}
+
+impl Supports {
+    pub(crate) fn members(&self, store: &StateStore) -> Result<Vec<Digest>, WorldError> {
+        match self {
+            Supports::None => Ok(Vec::new()),
+            Supports::One(d) => Ok(vec![*d]),
+            Supports::Many(set) => {
+                let mut out = Vec::with_capacity(set.len());
+                let mut cursor = None;
+                loop {
+                    let (rows, next) = set.page(cursor.as_ref(), 256, store)?;
+                    out.extend(rows);
+                    match next {
+                        Some(c) => cursor = Some(c),
+                        None => break,
+                    }
+                }
+                Ok(out)
+            }
+        }
+    }
+}
+
 /// A persisted "key -> set of supporting derivations" index (Distinct, GroupedCount).
 ///
-/// `outer` maps each key to the [`SubRoot`] of its inner `SSet<DerivRef>`; `hot` holds the
-/// inner sets modified (and so not yet reachable from the store) since the last
-/// dehydration. The inner set's length is the support count. `L` is the key type of the
-/// legacy oracle shadow.
+/// `outer` maps each key to its [`SupportRef`]: a single support inline, two or more as the
+/// [`SubRoot`] of an inner `SSet<DerivRef>` (canonical: one representation per support
+/// set). `hot` holds the inner sets of `Sub` keys modified (and so not yet reachable from
+/// the store) since the last dehydration. `L` is the key type of the legacy oracle shadow.
 #[derive(Clone, Debug)]
 pub struct SupportIndex<K, L = K>
 where
     K: StateCodec + Ord + Clone + 'static + Send + Sync,
     L: Ord + Clone,
 {
-    pub outer: SMap<K, SubRoot>,
+    pub outer: SMap<K, SupportRef>,
     pub hot: PMap<K, SSet<Digest>>,
     /// Shadow of the pre-store implementation, kept until M4 (see `join_oracle`).
     #[cfg(any(test, feature = "r0-oracle"))]
@@ -503,28 +532,30 @@ where
     K: StateCodec + Ord + Clone + 'static + Send + Sync,
     L: Ord + Clone,
 {
-    /// The inner support set for `key`, from `hot` if modified, else from the persisted
-    /// index; empty if absent.
-    pub(crate) fn read(&self, key: &K, store: &StateStore) -> Result<SSet<Digest>, WorldError> {
+    /// The supports for `key`, from `hot` if modified, else from the persisted index.
+    pub(crate) fn read(&self, key: &K, store: &StateStore) -> Result<Supports, WorldError> {
         if let Some(m) = self.hot.get(key) {
-            return Ok(m.clone());
+            return Ok(Supports::Many(m.clone()));
         }
-        Ok(self
-            .outer
-            .get(key, store)?
-            .map(SSet::from_sub_root)
-            .unwrap_or_default())
+        Ok(match self.outer.get(key, store)? {
+            None => Supports::None,
+            Some(SupportRef::Inline(d)) => Supports::One(d),
+            Some(SupportRef::Sub(s)) => Supports::Many(SSet::from_sub_root(s)),
+        })
     }
 
-    /// Record the new inner set for `key`; an empty set removes the key everywhere.
-    fn write(&mut self, key: K, inner: SSet<Digest>, store: &StateStore) -> Result<(), WorldError> {
-        if inner.is_empty() {
-            self.hot.remove(&key);
-            self.outer = self.outer.remove(&key, store)?;
-        } else {
-            self.outer = self.outer.upsert(key.clone(), inner.sub_root(), store)?;
-            self.hot.insert(key, inner);
-        }
+    /// Store a set of two or more supports.
+    fn write_many(
+        &mut self,
+        key: K,
+        inner: SSet<Digest>,
+        store: &StateStore,
+    ) -> Result<(), WorldError> {
+        debug_assert!(inner.len() >= 2);
+        self.outer = self
+            .outer
+            .upsert(key.clone(), SupportRef::Sub(inner.sub_root()), store)?;
+        self.hot.insert(key, inner);
         Ok(())
     }
 
@@ -535,12 +566,29 @@ where
         r: Digest,
         store: &StateStore,
     ) -> Result<(usize, usize), WorldError> {
-        let set = self.read(&key, store)?;
-        let old = set.len();
-        let set = set.insert(r, store)?;
-        let new = set.len();
-        self.write(key, set, store)?;
-        Ok((old, new))
+        match self.read(&key, store)? {
+            Supports::None => {
+                self.outer = self.outer.upsert(key, SupportRef::Inline(r), store)?;
+                Ok((0, 1))
+            }
+            Supports::One(d) => {
+                if d == r {
+                    return Ok((1, 1));
+                }
+                let set = SSet::new().insert(d, store)?.insert(r, store)?;
+                self.write_many(key, set, store)?;
+                Ok((1, 2))
+            }
+            Supports::Many(set) => {
+                let old = set.len();
+                let set = set.insert(r, store)?;
+                let new = set.len();
+                if new != old {
+                    self.write_many(key, set, store)?;
+                }
+                Ok((old, new))
+            }
+        }
     }
 
     /// Remove support `r` for `key`; returns the support count before and after
@@ -551,29 +599,53 @@ where
         r: &Digest,
         store: &StateStore,
     ) -> Result<(usize, usize), WorldError> {
-        let set = self.read(key, store)?;
-        if set.is_empty() {
-            return Ok((0, 0));
+        match self.read(key, store)? {
+            Supports::None => Ok((0, 0)),
+            Supports::One(d) => {
+                if d != *r {
+                    return Ok((1, 1));
+                }
+                self.hot.remove(key);
+                self.outer = self.outer.remove(key, store)?;
+                Ok((1, 0))
+            }
+            Supports::Many(set) => {
+                let old = set.len();
+                let set = set.remove(r, store)?;
+                let new = set.len();
+                if new == old {
+                    return Ok((old, new));
+                }
+                if new == 1 {
+                    let (rows, _) = set.page(None, 1, store)?;
+                    let left = rows.into_iter().next().ok_or_else(|| {
+                        WorldError::NetworkError("support set lost its last member".to_string())
+                    })?;
+                    self.hot.remove(key);
+                    self.outer = self
+                        .outer
+                        .upsert(key.clone(), SupportRef::Inline(left), store)?;
+                } else {
+                    self.write_many(key.clone(), set, store)?;
+                }
+                Ok((old, new))
+            }
         }
-        let old = set.len();
-        let set = set.remove(r, store)?;
-        let new = set.len();
-        self.write(key.clone(), set, store)?;
-        Ok((old, new))
     }
 
-    /// Every key with its inner support set (hot-aware), in outer trie order.
-    pub(crate) fn entries(&self, store: &StateStore) -> Result<Vec<(K, SSet<Digest>)>, WorldError> {
+    /// Every key with its supports (hot-aware), in outer trie order.
+    pub(crate) fn entries(&self, store: &StateStore) -> Result<Vec<(K, Vec<Digest>)>, WorldError> {
         let mut out = Vec::with_capacity(self.outer.len());
         let mut cursor = None;
         loop {
             let (rows, next) = self.outer.page(cursor.as_ref(), 256, store)?;
-            for (k, sub) in rows {
-                let set = match self.hot.get(&k) {
-                    Some(m) => m.clone(),
-                    None => SSet::from_sub_root(sub),
+            for (k, sref) in rows {
+                let sup = match (self.hot.get(&k), sref) {
+                    (Some(m), _) => Supports::Many(m.clone()),
+                    (None, SupportRef::Inline(d)) => Supports::One(d),
+                    (None, SupportRef::Sub(s)) => Supports::Many(SSet::from_sub_root(s)),
                 };
-                out.push((k, set));
+                out.push((k, sup.members(store)?));
             }
             match next {
                 Some(c) => cursor = Some(c),
@@ -583,7 +655,7 @@ where
         Ok(out)
     }
 
-    fn persist(&self, store: &StateStore) -> usize {
+    pub(crate) fn persist(&self, store: &StateStore) -> usize {
         let mut n = 0;
         for inner in self.hot.values() {
             n += inner.persist(store);
@@ -591,7 +663,7 @@ where
         n + self.outer.persist(store)
     }
 
-    fn dehydrated(&self, store: &StateStore) -> Result<Self, WorldError> {
+    pub(crate) fn dehydrated(&self, store: &StateStore) -> Result<Self, WorldError> {
         Ok(Self {
             outer: self.outer.dehydrate(store)?,
             hot: PMap::new(),
@@ -2424,24 +2496,16 @@ impl WorldNetwork {
         })
     }
 
-    /// Resolve an inner support set to its derivations.
+    /// Resolve support refs to their derivations.
     fn resolve_support_set(
         &self,
-        set: &SSet<Digest>,
+        refs: &[Digest],
         max_depth: usize,
     ) -> Result<BTreeSet<DerivationId>, WorldError> {
         let mut out = BTreeSet::new();
-        let mut cursor = None;
-        loop {
-            let (rows, next) = set.page(cursor.as_ref(), 256, &self.state)?;
-            for r in rows {
-                let d = resolve(&r, &self.intern_pending, &self.state, max_depth)?;
-                out.insert((*d).clone());
-            }
-            match next {
-                Some(c) => cursor = Some(c),
-                None => break,
-            }
+        for r in refs {
+            let d = resolve(r, &self.intern_pending, &self.state, max_depth)?;
+            out.insert((*d).clone());
         }
         Ok(out)
     }

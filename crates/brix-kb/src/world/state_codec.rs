@@ -607,6 +607,43 @@ impl StateCodec for SubRoot {
     }
 }
 
+/// Outer value of a support index: a single support is stored inline, two or more as a
+/// nested set. The representation is canonical: `Inline` iff exactly one support, `Sub`
+/// (with `len >= 2`) otherwise, so a given support set always has one encoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SupportRef {
+    Inline(Digest),
+    Sub(SubRoot),
+}
+
+impl StateCodec for SupportRef {
+    fn state_write(&self, w: &mut CanonWriter) {
+        match self {
+            SupportRef::Inline(d) => {
+                w.write_uint(0);
+                w.write_bytes(d.as_bytes());
+            }
+            SupportRef::Sub(s) => {
+                w.write_uint(1);
+                s.state_write(w);
+            }
+        }
+    }
+    fn state_read(r: &mut CanonReader<'_>) -> Res<Self> {
+        match r.read_uint()? {
+            0 => Ok(SupportRef::Inline(read_digest(r)?)),
+            1 => {
+                let s = SubRoot::state_read(r)?;
+                if s.len < 2 {
+                    return noncanon("support sub-set with fewer than two members");
+                }
+                Ok(SupportRef::Sub(s))
+            }
+            _ => noncanon("unknown support ref tag"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CandidateEntry (stored form)
 // ---------------------------------------------------------------------------

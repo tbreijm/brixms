@@ -21,7 +21,7 @@ use super::network::{
     DerivationId, IntermediateTuple, JoinSide, OperatorState, Value, WorldNetwork,
 };
 use super::persistent::{PMap, PSet};
-use super::state_codec::{JoinEntry, SubRoot, ValueList};
+use super::state_codec::{JoinEntry, SubRoot, SupportRef, ValueList};
 use super::state_store::{SMap, SSet, StateStore, DEFAULT_NODE_CACHE_BYTES};
 
 /// Apply one delta to the legacy shadow and return the opposite side's matches
@@ -141,13 +141,18 @@ fn legacy_support_root<L: Ord + Clone, K>(
 where
     K: super::state_codec::StateCodec + Ord + Clone + 'static + Send + Sync,
 {
-    let mut outer: SMap<K, SubRoot> = SMap::new();
+    let mut outer: SMap<K, SupportRef> = SMap::new();
     for (k, set) in legacy.iter() {
-        let mut inner: SSet<Digest> = SSet::new();
-        for d in set.iter() {
-            inner = inner.insert(deriv_ref(d), store)?;
-        }
-        outer = outer.upsert(to_key(k), inner.sub_root(), store)?;
+        let sref = if set.len() == 1 {
+            SupportRef::Inline(deriv_ref(set.iter().next().expect("len is 1")))
+        } else {
+            let mut inner: SSet<Digest> = SSet::new();
+            for d in set.iter() {
+                inner = inner.insert(deriv_ref(d), store)?;
+            }
+            SupportRef::Sub(inner.sub_root())
+        };
+        outer = outer.upsert(to_key(k), sref, store)?;
     }
     Ok(outer.sub_root())
 }
@@ -259,6 +264,61 @@ rel derived ok =
         assert_eq!(net.join_index_roots(), net.legacy_roots().unwrap());
         assert_eq!(net.distinct_roots(), net.legacy_distinct_roots().unwrap());
         assert_eq!(net.group_roots(), net.legacy_group_roots().unwrap());
+    }
+
+    fn base_ref(i: u64) -> Digest {
+        deriv_ref(&DerivationId::Base {
+            relation: "r".to_string(),
+            key: WorldKey::from_u64(i),
+        })
+    }
+
+    proptest::proptest! {
+        /// A given support set has exactly one representation, whatever order of adds and
+        /// removes (including transient extras and duplicates) produced it, and whether or
+        /// not the index was persisted and dehydrated on the way.
+        #[test]
+        fn support_representation_is_canonical(
+            target in proptest::collection::btree_set(0u64..8, 0..6),
+            extras in proptest::collection::btree_set(8u64..14, 0..5),
+            mult in 1u64..13,
+            dehydrate in proptest::bool::ANY,
+        ) {
+            use super::super::network::SupportIndex;
+            let store = StateStore::memory(0);
+            let key = ValueList(vec![Value::Int(1)]);
+            let mut a: SupportIndex<ValueList, Vec<Value>> = SupportIndex::default();
+            for i in &target {
+                a.add(key.clone(), base_ref(*i), &store).unwrap();
+            }
+
+            let mut b: SupportIndex<ValueList, Vec<Value>> = SupportIndex::default();
+            let mut seq: Vec<u64> = target.iter().chain(extras.iter()).cloned().collect();
+            seq.sort_by_key(|i| (i * mult) % 13);
+            for (n, i) in seq.iter().enumerate() {
+                b.add(key.clone(), base_ref(*i), &store).unwrap();
+                b.add(key.clone(), base_ref(*i), &store).unwrap(); // duplicate add
+                if dehydrate && n % 2 == 0 {
+                    b.persist(&store);
+                    b = b.dehydrated(&store).unwrap();
+                }
+            }
+            for i in &extras {
+                b.remove(&key, &base_ref(*i), &store).unwrap();
+                b.remove(&key, &base_ref(*i), &store).unwrap(); // absent remove
+            }
+            proptest::prop_assert_eq!(a.outer.root(), b.outer.root());
+            proptest::prop_assert_eq!(a.outer.len(), b.outer.len());
+            let want = match target.len() {
+                0 => None,
+                1 => Some(SupportRef::Inline(base_ref(*target.iter().next().unwrap()))),
+                n => Some(SupportRef::Sub(SubRoot { root: b.read(&key, &store).map(|s| match s {
+                    super::super::network::Supports::Many(m) => m.root(),
+                    _ => unreachable!(),
+                }).unwrap(), len: n as u64 })),
+            };
+            proptest::prop_assert_eq!(b.outer.get(&key, &store).unwrap(), want);
+        }
     }
 
     #[test]
