@@ -836,7 +836,7 @@ impl CandidateFrontier {
 
     /// Add support `item` to candidate `ck` (record `rec`, to be written back by the
     /// caller). Idempotent for a support already present.
-    fn add_support(
+    pub(crate) fn add_support(
         &mut self,
         ck: &CandKey,
         rec: &mut CandidateRec,
@@ -867,7 +867,7 @@ impl CandidateFrontier {
 
     /// Remove the support with id `id` from candidate `ck`; returns how many remain (the
     /// caller drops the candidate at 0).
-    fn remove_support(
+    pub(crate) fn remove_support(
         &mut self,
         ck: &CandKey,
         rec: &mut CandidateRec,
@@ -927,6 +927,40 @@ impl CandidateFrontier {
             legacy: self.legacy.clone(),
         })
     }
+}
+
+/// The net effect of one batch's deltas on a relation, retractions first.
+///
+/// A `(tuple, derivation)` pair inserted and retracted within the batch (a join result that
+/// exists only transiently) cancels out. Applying all retractions before all insertions
+/// without cancelling first would retract the not-yet-present pair and then insert it,
+/// leaving a candidate (and a settlement) for a tuple that is no longer derived.
+fn net_effect(deltas: &[TupleDelta]) -> Vec<&TupleDelta> {
+    if deltas.iter().all(TupleDelta::is_insert) || deltas.iter().all(|d| !d.is_insert()) {
+        return deltas.iter().collect();
+    }
+    let key = |d: &TupleDelta| (d.derivation().c.clone(), d.tuple().clone());
+    let mut balance: BTreeMap<(CompactDeriv, IntermediateTuple), i64> = BTreeMap::new();
+    for d in deltas {
+        *balance.entry(key(d)).or_default() += if d.is_insert() { 1 } else { -1 };
+    }
+    let mut emitted = BTreeSet::new();
+    let mut retractions = Vec::new();
+    let mut insertions = Vec::new();
+    for d in deltas {
+        let k = key(d);
+        let b = balance[&k];
+        if (b > 0 && d.is_insert() || b < 0 && !d.is_insert()) && emitted.insert((k, d.is_insert()))
+        {
+            if d.is_insert() {
+                insertions.push(d);
+            } else {
+                retractions.push(d);
+            }
+        }
+    }
+    retractions.extend(insertions);
+    retractions
 }
 
 fn verify_bucket(key: &FrontierKey, bucket: &FrontierBucket) -> Result<(), WorldError> {
@@ -2563,11 +2597,7 @@ impl WorldNetwork {
                 .flatten()
             {
                 let decide = &self.decides[decide_name];
-                for delta in rel_deltas
-                    .iter()
-                    .filter(|d| !d.is_insert())
-                    .chain(rel_deltas.iter().filter(|d| d.is_insert()))
-                {
+                for delta in net_effect(rel_deltas) {
                     let is_ins = delta.is_insert();
                     let (tuple, deriv) = match delta {
                         TupleDelta::Insert { tuple, derivation }
@@ -2802,6 +2832,14 @@ impl WorldNetwork {
 
             #[cfg(any(test, feature = "r0-oracle"))]
             {
+                if self
+                    .candidate_frontier
+                    .legacy
+                    .get(&decide)
+                    .is_some_and(|entities| entities.is_empty())
+                {
+                    self.candidate_frontier.legacy.remove(&decide);
+                }
                 let legacy = super::join_oracle::legacy_settlement(
                     &self.candidate_frontier.legacy,
                     &decide,

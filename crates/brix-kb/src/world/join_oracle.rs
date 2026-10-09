@@ -471,6 +471,152 @@ rel derived ok =
         }
     }
 
+    fn one_field(v: Value) -> IntermediateTuple {
+        let mut t = IntermediateTuple::new();
+        t.insert("v", v);
+        t
+    }
+
+    /// Several derivations collapsing to one tuple: the final state does not depend on the
+    /// order the supports arrive or leave (the pre-M3 `PSet<TupleRecord>` dropped the tuple
+    /// as soon as any one derivation was retracted).
+    #[test]
+    fn derived_supports_collapse_is_order_independent() {
+        use super::super::network::DerivedSupports;
+        let store = StateStore::memory(0);
+        let t = one_field(Value::Int(7));
+        let (d1, d2) = (base_ref(1), base_ref(2));
+
+        let mut roots = BTreeSet::new();
+        // (is_insert, which): every interleaving that ends with d2 alone supporting `t`.
+        let plans: [&[(bool, u8)]; 4] = [
+            &[(true, 1), (true, 2), (false, 1)],
+            &[(true, 2), (true, 1), (false, 1)],
+            &[(true, 1), (false, 1), (true, 2)],
+            &[(true, 2), (true, 1), (true, 1), (false, 1), (false, 1)],
+        ];
+        for plan in plans {
+            let mut idx = DerivedSupports::default();
+            for &(ins, which) in plan {
+                let id = if which == 1 { d1 } else { d2 };
+                if ins {
+                    idx.add(t.clone(), id, &store).unwrap();
+                } else {
+                    idx.remove(&t, &id, &store).unwrap();
+                }
+            }
+            assert_eq!(idx.keys(&store).unwrap(), vec![t.clone()], "{plan:?}");
+            roots.insert(idx.outer.root());
+        }
+        assert_eq!(roots.len(), 1, "final index must not depend on the order");
+
+        // The legacy set loses the tuple on the first retraction, whatever else supports it.
+        let mut legacy: PSet<TupleRecord> = PSet::new();
+        legacy.insert(t.to_tuple_record());
+        legacy.insert(t.to_tuple_record());
+        legacy.remove(&t.to_tuple_record());
+        assert!(
+            legacy.is_empty(),
+            "documents the bug the support index fixes"
+        );
+    }
+
+    /// `Int(1)` and `Str("1")` share Display bytes, so the legacy set collapsed them into one
+    /// record and removing either removed both; typed keys keep two entries, and only the
+    /// observable `TupleRecord` view shows one record.
+    #[test]
+    fn derived_supports_keep_int_one_and_str_one_apart() {
+        use super::super::network::DerivedSupports;
+        let store = StateStore::memory(0);
+        let (a, b) = (one_field(Value::Int(1)), one_field(Value::Str("1".into())));
+        assert_eq!(a.to_tuple_record(), b.to_tuple_record());
+
+        let mut idx = DerivedSupports::default();
+        idx.add(a.clone(), base_ref(1), &store).unwrap();
+        idx.add(b.clone(), base_ref(2), &store).unwrap();
+        assert_eq!(idx.len(), 2);
+        idx.remove(&a, &base_ref(1), &store).unwrap();
+        assert_eq!(idx.keys(&store).unwrap(), vec![b.clone()]);
+        // The record view still lists "1" (supported by the Str tuple).
+        let view: BTreeSet<TupleRecord> = idx
+            .keys(&store)
+            .unwrap()
+            .iter()
+            .map(IntermediateTuple::to_tuple_record)
+            .collect();
+        assert_eq!(view.len(), 1);
+        idx.remove(&b, &base_ref(2), &store).unwrap();
+        assert!(idx.is_empty());
+        assert_eq!(idx.outer.root(), DerivedSupports::default().outer.root());
+
+        // Legacy: one record, removed by either retraction.
+        let mut legacy: PSet<TupleRecord> = PSet::new();
+        legacy.insert(a.to_tuple_record());
+        legacy.insert(b.to_tuple_record());
+        legacy.remove(&a.to_tuple_record());
+        assert!(legacy.is_empty());
+    }
+
+    /// A candidate's supports are canonical: inline for one, a nested set for two or more,
+    /// whatever order they came and went, and whether or not the frontier was persisted and
+    /// dehydrated on the way.
+    #[test]
+    fn frontier_supports_representation_is_canonical() {
+        use super::super::network::CandidateFrontier;
+        use super::super::state_codec::CandKey;
+        let store = StateStore::memory(0);
+        let ck = CandKey::new("d", "e", "c");
+        let deriv = |i: u64| {
+            CompactDeriv::from_derivation(&DerivationId::Base {
+                relation: "r".to_string(),
+                key: WorldKey::from_u64(i),
+            })
+        };
+        let rec_with = |i: u64| CandidateRec {
+            head: CandidateHead {
+                priority: 1,
+                phase: 0,
+                value: Value::Int(1),
+                calendar_key: soc_core::calendar::Key::new(0, 1, Digest::from_bytes([0; 32])),
+            },
+            supports: SupportRef::Inline(deriv(i)),
+        };
+        let build = |order: &[u64], dehydrate: bool| {
+            let mut fr = CandidateFrontier::default();
+            let mut rec = rec_with(order[0]);
+            for (n, i) in order[1..].iter().enumerate() {
+                fr.add_support(&ck, &mut rec, deriv(*i), &store).unwrap();
+                if dehydrate && n % 2 == 0 {
+                    // Persist the nested set and drop the hot copy, as a commit does.
+                    for inner in fr.hot.values() {
+                        inner.persist(&store);
+                    }
+                    fr.hot = PMap::new();
+                }
+            }
+            (fr, rec)
+        };
+        let (_, a) = build(&[1, 2, 3, 4], false);
+        let (_, b) = build(&[4, 2, 1, 3], true);
+        assert_eq!(a.supports, b.supports);
+        assert!(matches!(a.supports, SupportRef::Sub(s) if s.len == 4));
+
+        // Shrinking back to one support returns to the inline form.
+        let (mut fr, mut rec) = build(&[1, 2, 3], true);
+        for i in [2u64, 3] {
+            let left = fr
+                .remove_support(&ck, &mut rec, &deriv(i).digest(), &store)
+                .unwrap();
+            assert_eq!(left, if i == 2 { 2 } else { 1 });
+        }
+        assert_eq!(rec.supports, SupportRef::Inline(deriv(1)));
+        assert!(fr.hot.is_empty());
+        let left = fr
+            .remove_support(&ck, &mut rec, &deriv(1).digest(), &store)
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
     #[test]
     fn distinct_keys_are_typed_not_display_collapsed() {
         let store = StateStore::memory(0);

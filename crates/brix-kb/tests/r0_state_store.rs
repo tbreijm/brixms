@@ -1,8 +1,10 @@
-//! R0 Phase 2 M2: store-backed Distinct and GroupedCount state (with the M1 join indexes).
+//! R0 Phase 2 M2/M3: store-backed join, Distinct, GroupedCount, derived-relation, candidate
+//! frontier and decision state.
 //!
-//! Run with `--features brix-kb/r0-oracle` to also compare every root against the legacy
-//! `PMap` shadow (`legacy_roots`); without the feature the tests still check behaviour
-//! against a never-persisted control network and the independent reference evaluator.
+//! Run with `--features brix-kb/r0-oracle` to also compare every root and view against the
+//! legacy shadows (`legacy_roots`, `legacy_derived_state`, `legacy_frontier_state`, ...);
+//! without the feature the tests still check behaviour against a never-persisted control
+//! network and the independent reference evaluator.
 //!
 //! The model and fuzz generator mirror `world_reference_differential.rs`. At every fuzz step
 //! the persisted network is persisted, flushed and dehydrated (so the next batch reads
@@ -12,9 +14,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+use brix_kb::world::network::compute_decision_root;
 use brix_kb::world::reference;
 use brix_kb::world::state_store::{StateStore, DEFAULT_NODE_CACHE_BYTES};
-use brix_kb::world::{TupleRecord, WorldBatch, WorldBatchOp, WorldKey, WorldNetwork};
+use brix_kb::world::{TupleRecord, WorldBatch, WorldBatchOp, WorldError, WorldKey, WorldNetwork};
 use brix_lower::module_graph::{ModuleGraph, ModuleLoaderLimits};
 use proptest::prelude::*;
 use soc_core::store::NodeStore;
@@ -237,9 +240,79 @@ fn assert_legacy_roots(net: &WorldNetwork, label: &str) {
         net.legacy_roots().unwrap(),
         "[{label}] join roots != legacy"
     );
+    let state = net.current_state().unwrap();
+    assert_eq!(
+        state.derived_relations,
+        net.legacy_derived_state(),
+        "[{label}] derived relations != legacy"
+    );
+    assert_eq!(
+        state.candidate_frontier,
+        net.legacy_frontier_state(),
+        "[{label}] candidate frontier != legacy"
+    );
+    assert_eq!(
+        net.all_settlements().unwrap(),
+        net.legacy_settlements(),
+        "[{label}] settlements != legacy"
+    );
+    assert_eq!(
+        net.frontier_root(),
+        net.legacy_frontier_root().unwrap(),
+        "[{label}] frontier root != legacy"
+    );
+    assert_eq!(
+        net.decision_sub_root(),
+        net.legacy_decision_sub_root(),
+        "[{label}] decision trie != legacy"
+    );
 }
 #[cfg(not(feature = "r0-oracle"))]
 fn assert_legacy_roots(_net: &WorldNetwork, _label: &str) {}
+
+/// Every observable root and view of `net` equals the never-persisted `control`'s, and the
+/// decision root is the canonical one for the settlements.
+fn assert_same_state(net: &WorldNetwork, control: &WorldNetwork, label: &str) {
+    assert_eq!(net.derived_roots(), control.derived_roots(), "[{label}]");
+    assert_eq!(net.frontier_root(), control.frontier_root(), "[{label}]");
+    assert_eq!(
+        net.decision_sub_root(),
+        control.decision_sub_root(),
+        "[{label}]"
+    );
+    let settlements = net.all_settlements().unwrap();
+    assert_eq!(
+        net.decision_root(),
+        compute_decision_root(&settlements),
+        "[{label}] decision root is not the canonical root of the settlements"
+    );
+    for (decide, entities) in &settlements {
+        for entity in entities.keys() {
+            assert_eq!(
+                net.explain_decision_for(decide, entity).unwrap(),
+                control.explain_decision_for(decide, entity).unwrap(),
+                "[{label}] explanation of {decide}/{entity} diverged"
+            );
+            assert_eq!(
+                net.get_candidates(decide, entity).unwrap(),
+                control.get_candidates(decide, entity).unwrap(),
+                "[{label}] candidates of {decide}/{entity} diverged"
+            );
+            assert_eq!(
+                net.get_settlement(decide, entity).unwrap().as_ref(),
+                Some(&entities[entity]),
+                "[{label}]"
+            );
+        }
+    }
+    for rel in net.derived_relations.keys() {
+        assert_eq!(
+            net.get_derived_tuples(rel).unwrap(),
+            control.get_derived_tuples(rel).unwrap(),
+            "[{label}] derived {rel} diverged"
+        );
+    }
+}
 
 fn persist_and_dehydrate(net: &WorldNetwork) -> WorldNetwork {
     net.persist_state().unwrap();
@@ -283,6 +356,7 @@ fn run_fuzz(seed: u64, steps: usize, quantum: usize, backend: Backend) {
             control.all_settlements().unwrap(),
             "[{label}] settlements diverged"
         );
+        assert_same_state(&net, &control, &label);
         assert_eq!(net.distinct_roots(), control.distinct_roots(), "[{label}]");
         assert_eq!(net.group_roots(), control.group_roots(), "[{label}]");
         assert_eq!(
@@ -425,6 +499,96 @@ fn missing_state_nodes_are_errors_not_empty() {
     }
 }
 
+fn is_typed_state_error(e: &WorldError) -> bool {
+    matches!(
+        e,
+        WorldError::CorruptState(_) | WorldError::MissingState(_) | WorldError::State(_)
+    )
+}
+
+fn touch_existing_entity() -> WorldBatchOp {
+    upsert_op(
+        "root::orders",
+        5000,
+        &[
+            ("id", "O-5000"),
+            ("customer", "C"),
+            ("sku", "SKU-0"),
+            ("qty", "2"),
+            ("express", "yes"),
+        ],
+    )
+}
+
+/// Negative control for the M3 structures: a flipped or missing frontier / decision node is
+/// a typed state error on every read path that reaches it, never an empty frontier or an
+/// absent settlement.
+#[test]
+fn frontier_and_decision_nodes_are_typed_errors_not_empty() {
+    let probe = seeded_net(8);
+    assert!(probe.frontier_root().len > 0, "need a non-empty frontier");
+    assert!(probe.decision_sub_root().len > 0, "need decisions");
+
+    let flip = |net: &WorldNetwork, root| {
+        let mut store = net.state_store().clone();
+        let mut bytes = store.get_node(&root).expect("root persisted");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        store.put_node(root, bytes);
+    };
+
+    // Frontier: flipped.
+    let net = seeded_net(8);
+    flip(&net, net.frontier_root().root);
+    let e = net.all_settlements().expect_err("flipped frontier root");
+    assert!(is_typed_state_error(&e), "{e:?}");
+    assert!(net.current_state().is_err());
+    assert!(net.explain_decision("O-5000").is_err());
+    assert!(net.get_settlement("root::dispatch", "O-5000").is_err());
+    assert!(net.get_candidates("root::dispatch", "O-5000").is_err());
+    let batch = WorldBatch::new(net.current_revision, "t", vec![touch_existing_entity()]);
+    let e = net
+        .clone()
+        .apply_batch(&batch)
+        .expect_err("apply over flipped frontier");
+    assert!(is_typed_state_error(&e), "{e:?}");
+
+    // Frontier: deleted (a store that never held the nodes).
+    let net = seeded_net(8);
+    let mut gone = net.clone();
+    gone.attach_state_store(StateStore::memory(0));
+    let e = gone.all_settlements().expect_err("missing frontier");
+    assert!(
+        matches!(e, WorldError::MissingState(_)),
+        "absence must be MissingState, got {e:?}"
+    );
+    assert!(gone.explain_decision("O-5000").is_err());
+
+    // Decisions: flipped. Reads that do not touch the decision trie keep working; an apply
+    // that settles an entity fails.
+    let net = seeded_net(8);
+    flip(&net, net.decision_sub_root().root);
+    assert!(net.all_settlements().is_ok());
+    let e = net
+        .clone()
+        .apply_batch(&batch)
+        .expect_err("apply over flipped decisions");
+    assert!(is_typed_state_error(&e), "{e:?}");
+
+    // Decisions: deleted.
+    let net = seeded_net(8);
+    let mut gone = net.clone();
+    gone.attach_state_store(StateStore::memory(0));
+    let e = gone
+        .clone()
+        .apply_batch(&batch)
+        .expect_err("apply with no decision nodes");
+    assert!(
+        matches!(e, WorldError::MissingState(_) | WorldError::CorruptState(_)),
+        "{e:?}"
+    );
+}
+
 fn base_facts() -> impl Strategy<Value = Vec<(u8, u8, u8, u8)>> {
     // (relation 0..3, key 0..6, sku 0..3, qty/avail 0..4)
     proptest::collection::vec((0u8..3, 0u8..6, 0u8..3, 0u8..4), 1..40)
@@ -548,7 +712,134 @@ proptest! {
         prop_assert_eq!(a.distinct_roots(), b.distinct_roots());
         prop_assert_eq!(a.group_roots(), b.group_roots());
         prop_assert_eq!(a.join_index_roots(), b.join_index_roots());
+        prop_assert_eq!(a.derived_roots(), b.derived_roots());
+        prop_assert_eq!(a.all_settlements().unwrap(), b.all_settlements().unwrap());
+        prop_assert_eq!(a.frontier_root(), b.frontier_root());
+        prop_assert_eq!(a.decision_sub_root(), b.decision_sub_root());
+        prop_assert_eq!(a.decision_root(), b.decision_root());
+        prop_assert_eq!(a.all_settlements().unwrap(), b.all_settlements().unwrap());
         prop_assert_eq!(a.current_state().unwrap().derived_relations, b.current_state().unwrap().derived_relations);
         assert_legacy_roots(&b, "proptest");
+    }
+}
+
+/// R0 M3 hardening: the plain `TrieMap` operations treat an unhydrated node as empty (get,
+/// iter, remove) or panic (insert); soc-core now makes all four fail loudly on one. This test
+/// shows network state can never reach them: (1) `network.rs` names no `TrieMap` at all, so
+/// every persisted collection is an `SMap`/`SSet` that only exposes store-aware, fallible
+/// operations; (2) a fully dehydrated network (every trie `Lazy`) serves every public API
+/// without panicking; (3) with its nodes gone, every API returns a typed error and none panics.
+#[test]
+fn network_state_cannot_reach_plain_trie_ops() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    // (1) static
+    let src = include_str!("../src/world/network.rs");
+    for (n, line) in src.lines().enumerate() {
+        let code = line.split("//").next().unwrap_or("");
+        assert!(
+            !code.contains("TrieMap"),
+            "network.rs:{} names TrieMap: {line}",
+            n + 1
+        );
+    }
+
+    // (2) dynamic: everything lazy, every API works.
+    let net = seeded_net(8);
+    assert!(net.decision_sub_root().len > 0 && net.frontier_root().len > 0);
+    let exercise = |net: &WorldNetwork| -> Vec<Result<(), WorldError>> {
+        let batch = WorldBatch::new(net.current_revision, "t", vec![touch_existing_entity()]);
+        let mut staged = net.clone();
+        vec![
+            net.current_state().map(|_| ()),
+            net.all_settlements().map(|_| ()),
+            net.get_derived_tuples("root::fulfillment").map(|_| ()),
+            net.get_candidates("root::dispatch", "O-5000").map(|_| ()),
+            net.get_settlement("root::dispatch", "O-5000").map(|_| ()),
+            net.explain_decision("O-5000").map(|_| ()),
+            net.explain_decision_for("root::dispatch", "O-5000")
+                .map(|_| ()),
+            net.verify_differential_correctness(),
+            staged.apply_batch(&batch).map(|_| ()),
+            staged.persist_state().map(|_| ()),
+            staged.dehydrated().map(|_| ()),
+        ]
+    };
+    for (i, r) in exercise(&net).into_iter().enumerate() {
+        r.unwrap_or_else(|e| panic!("api #{i} failed on healthy lazy state: {e}"));
+    }
+
+    // (3) nodes gone: typed errors, no panic.
+    let mut gone = net.clone();
+    gone.attach_state_store(StateStore::memory(0));
+    let results = catch_unwind(AssertUnwindSafe(|| exercise(&gone)))
+        .expect("no API may panic on missing state");
+    let errors = results.iter().filter(|r| r.is_err()).count();
+    assert!(errors >= 8, "expected the read paths to fail, got {errors}");
+}
+
+/// Regression: a join result that exists only transiently inside one batch (derived by one
+/// delta, retracted by another) must leave no candidate and no settlement. Before M3 the
+/// frontier applied all retractions first, then all insertions, so the retraction found
+/// nothing to remove and the insertion left a stale candidate and decision behind.
+#[test]
+fn transient_derivation_within_a_batch_leaves_no_candidate() {
+    for q in [1, 3, 256] {
+        let (mut n, refprog) = make(q);
+        apply(
+            &mut n,
+            "1",
+            vec![
+                upsert_op(
+                    "root::shipping",
+                    300,
+                    &[
+                        ("id", "S-300"),
+                        ("sku", "SKU-2"),
+                        ("carrier", "Air"),
+                        ("lead_days", "0"),
+                    ],
+                ),
+                upsert_op(
+                    "root::inventory",
+                    203,
+                    &[("id", "I-203"), ("sku", "SKU-2"), ("available", "0")],
+                ),
+            ],
+        );
+        // The order joins the old inventory row in this batch, which the same batch moves
+        // to another sku: the fulfillment tuple is derived and retracted within the batch.
+        apply(
+            &mut n,
+            "2",
+            vec![
+                upsert_op(
+                    "root::orders",
+                    100,
+                    &[
+                        ("id", "O-100"),
+                        ("customer", "C"),
+                        ("sku", "SKU-2"),
+                        ("qty", "0"),
+                        ("express", "yes"),
+                    ],
+                ),
+                upsert_op(
+                    "root::inventory",
+                    203,
+                    &[("id", "I-203"), ("sku", "SKU-0"), ("available", "0")],
+                ),
+            ],
+        );
+        let state = n.current_state().unwrap();
+        assert!(state.settlements.is_empty(), "q={q}: stale settlement");
+        assert!(
+            state.candidate_frontier.is_empty(),
+            "q={q}: stale candidate"
+        );
+        assert_eq!(n.frontier_root().len, 0, "q={q}");
+        let r = reference::evaluate(&refprog, &state.base_relations).unwrap();
+        assert_eq!(state.derived_relations, r.derived_relations, "q={q}");
+        n.verify_differential_correctness().unwrap();
     }
 }
