@@ -402,8 +402,11 @@ pub enum DNode {
         relation: String,
         key: WorldKey,
     },
+    /// A maximal chain of unary derivation steps, outermost operator first (never empty);
+    /// `parent` is the first non-unary node. Collapsing chains is canonical (one node per
+    /// maximal chain) and cuts the number of stored nodes.
     Unary {
-        op: OperatorId,
+        ops: Vec<OperatorId>,
         parent: Digest,
     },
     Join {
@@ -445,9 +448,12 @@ impl StateCodec for DNode {
                 w.write_str(relation);
                 w.write_bytes(key.as_bytes());
             }
-            DNode::Unary { op, parent } => {
+            DNode::Unary { ops, parent } => {
                 w.write_uint(D_UNARY);
-                w.write_uint(op.0 as u64);
+                w.write_uint(ops.len() as u64);
+                for op in ops {
+                    w.write_uint(op.0 as u64);
+                }
                 w.write_bytes(parent.as_bytes());
             }
             DNode::Join { op, left, right } => {
@@ -476,9 +482,16 @@ impl StateCodec for DNode {
                 Ok(DNode::Base { relation, key })
             }
             D_UNARY => {
-                let op = read_op(r)?;
+                let n = r.read_uint()?;
+                if n == 0 {
+                    return noncanon("empty unary chain");
+                }
+                let mut ops = Vec::new();
+                for _ in 0..n {
+                    ops.push(read_op(r)?);
+                }
                 let parent = read_digest(r)?;
-                Ok(DNode::Unary { op, parent })
+                Ok(DNode::Unary { ops, parent })
             }
             D_JOIN => {
                 let op = read_op(r)?;

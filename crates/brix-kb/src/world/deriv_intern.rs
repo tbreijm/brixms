@@ -24,10 +24,18 @@ fn build(d: &DerivationId, mut sink: Option<&mut PMap<Digest, DNode>>) -> Digest
             relation: relation.clone(),
             key: key.clone(),
         },
-        DerivationId::Unary { op, parent } => DNode::Unary {
-            op: *op,
-            parent: build(parent, sink.as_deref_mut()),
-        },
+        DerivationId::Unary { op, parent } => {
+            let mut ops = vec![*op];
+            let mut inner: &DerivationId = parent;
+            while let DerivationId::Unary { op, parent } = inner {
+                ops.push(*op);
+                inner = parent;
+            }
+            DNode::Unary {
+                ops,
+                parent: build(inner, sink.as_deref_mut()),
+            }
+        }
         DerivationId::Join { op, left, right } => DNode::Join {
             op: *op,
             left: build(left, sink.as_deref_mut()),
@@ -106,16 +114,21 @@ fn resolve_rec(
     }
     let (value, height) = match fetch(r, pending, store)? {
         DNode::Base { relation, key } => (DerivationId::Base { relation, key }, 1),
-        DNode::Unary { op, parent } => {
-            let p = resolve_rec(&parent, pending, store, depth_left - 1, memo)?;
-            let h = 1 + memo[&parent].1;
-            (
-                DerivationId::Unary {
+        DNode::Unary { ops, parent } => {
+            let n = ops.len();
+            if n >= depth_left {
+                return Err(StateError::Codec(StateCodecError::DepthExceeded));
+            }
+            let p = resolve_rec(&parent, pending, store, depth_left - n, memo)?;
+            let h = n + memo[&parent].1;
+            let mut value = (*p).clone();
+            for op in ops.into_iter().rev() {
+                value = DerivationId::Unary {
                     op,
-                    parent: Box::new((*p).clone()),
-                },
-                h,
-            )
+                    parent: Box::new(value),
+                };
+            }
+            (value, h)
         }
         DNode::Join { op, left, right } => {
             let l = resolve_rec(&left, pending, store, depth_left - 1, memo)?;
