@@ -1806,20 +1806,21 @@ impl WorldNetwork {
                 }
             }
 
-            // Propagate out_deltas
+            // Propagate out_deltas. Each consumer of the batch gets a copy except the last,
+            // which takes ownership (avoids one full clone of every batch).
             if !out_deltas.is_empty() {
-                report.intermediate_deltas_count += out_deltas.len();
+                let n_out = out_deltas.len();
+                report.intermediate_deltas_count += n_out;
+                let outputs = self.output_relations.get(&op_id);
+                let down = self.downstream.get(&op_id);
+                let mut uses_left = outputs.map_or(0, |o| o.len()) + down.map_or(0, |d| d.len());
 
-                if let Some(outputs) = self.output_relations.get(&op_id) {
+                if let Some(outputs) = outputs {
                     for rel_name in outputs {
                         *diagnostics
                             .relation_deltas
                             .entry(rel_name.clone())
-                            .or_default() += out_deltas.len() as u64;
-                        relation_deltas
-                            .entry(rel_name.clone())
-                            .or_default()
-                            .extend(out_deltas.clone());
+                            .or_default() += n_out as u64;
 
                         if !self.base_relations.contains_key(rel_name) {
                             for od in &out_deltas {
@@ -1845,15 +1846,32 @@ impl WorldNetwork {
                                 }
                             }
                         }
+
+                        uses_left -= 1;
+                        let batch = if uses_left == 0 {
+                            std::mem::take(&mut out_deltas)
+                        } else {
+                            out_deltas.clone()
+                        };
+                        relation_deltas
+                            .entry(rel_name.clone())
+                            .or_default()
+                            .extend(batch);
                     }
                 }
 
-                if let Some(down) = self.downstream.get(&op_id) {
+                if let Some(down) = down {
                     for consumer in down {
-                        for od in &out_deltas {
+                        uses_left -= 1;
+                        let batch = if uses_left == 0 {
+                            std::mem::take(&mut out_deltas)
+                        } else {
+                            out_deltas.clone()
+                        };
+                        for od in batch {
                             enqueue(
                                 *consumer,
-                                OperatorWorkItem::Delta(od.clone()),
+                                OperatorWorkItem::Delta(od),
                                 &mut operator_queues,
                                 &mut ready_operators,
                                 &mut in_ready,

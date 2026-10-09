@@ -1874,6 +1874,7 @@ impl WorldSession {
             .map_or(DEFAULT_NODE_CACHE_BYTES, |n| {
                 usize::try_from(n).unwrap_or(usize::MAX)
             });
+        let cache = std::env::var("R0_NC").ok().and_then(|v| v.parse().ok()).unwrap_or(cache); // TEMP
         network.attach_state_store(StateStore::from_file(self.node_store.clone(), cache));
         if !ops.is_empty() {
             network.apply_ops(&ops)?;
