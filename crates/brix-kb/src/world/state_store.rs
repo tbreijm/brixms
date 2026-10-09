@@ -64,7 +64,7 @@ impl From<StateCodecError> for StateError {
 }
 
 /// Default decoded-node cache budget for a [`StateStore`] (64 MiB).
-pub const DEFAULT_NODE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+pub const DEFAULT_NODE_CACHE_BYTES: usize = 128 * 1024 * 1024;
 
 enum Backend {
     Memory(MemoryNodeStore),
