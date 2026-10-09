@@ -34,3 +34,19 @@ Differential per fuzz step: restore vs `open_replay` vs fresh replay (roots, all
 ## Milestones
 M0 codecs, StateStore, SMap, SubRoot, cache, dehydrate, TrieMap hardening | M1 join index (benchmark replay cost early) | M2 Distinct + GroupedCount | M3 derived, frontier, decision_tree via store ops; Result APIs | M4 header, revision @3, restore, `open_replay`, `open_mode`, crash points, full differential | M5 BaseView + base dedupe | M6 soc-core `.idx`, idempotency trie, Atlas acceptance (high risk).
 Restore enables only at M4; earlier steps guarded by in-process root equality.
+
+## Release target
+R0 Phase 2 ships as **alpha.5**.
+
+## M0 deviations folded into the plan (2026-10-09, M0 = 6348187)
+Each is resolved in a named milestone; none may be left as a known gap at alpha.5.
+
+| # | M0 deviation | Resolution | Milestone |
+|---|---|---|---|
+| 1 | `StateStore` cache holds raw node bytes; `NodeStore` exposes only bytes and TrieMap decodes internally, so every access re-decodes (the problem the design wanted fixed) | soc-core change: decoded-node cache inside the store-aware TrieMap paths (or `NodeStore::get_decoded`), keyed (TypeId,Digest), bounded by `node_cache_bytes`. Benchmark decode share before/after. | M1 (needed before join-index perf is judged); finalised M6 |
+| 2 | `NodeStore::get_node -> Option` maps I/O errors to `MissingNode` | Change trait to `Result<Option<_>, StorageError>` (soc-core, all impls and callers); `StateError::Io` then real. Prevents an I/O blip being reported as corruption/absence. | M6 (with pack index rework) |
+| 3 | Trie decode failures reported as generic `CorruptedNode` | Carry the codec error as a source in `StorageError`/`StateError` so negative controls can assert the specific cause | M4 (negative-control suite) |
+| 4 | `StateError` not integrated with `WorldError` | Add `WorldError::State(StateError)` with typed variants (CorruptState, MissingState, ValidityMismatch) mapped to the hard-error open policy; used by open/commit | M3 (first Result APIs), finished M4 |
+| 5 | TrieMap hardening (Lazy-as-empty) skipped because wrapper avoids plain ops | Still required: `decision_tree` uses plain ops until M3 moves it to `SMap`. After M3, make plain ops on Lazy nodes `debug_assert`/error-returning, or make them private to soc-core, so no caller can regress. Add a test that asserts the plain ops are unreachable for network state. | M3 |
+
+Process: after each milestone, Opus re-checks this table and the design for new deviations before the next milestone starts.
