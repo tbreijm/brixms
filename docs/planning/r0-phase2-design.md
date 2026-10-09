@@ -63,3 +63,21 @@ Process: after each milestone, Opus re-checks this table and the design for new 
 
 Tasks: A (soc-core cache + state_store.rs) and B (interning/codecs/error.rs) parallel; then C (network.rs join conversion + `join_oracle.rs`, old PMap impl kept as oracle until M4) with D (session wiring, manifest `node_cache_bytes`) in parallel against agreed signatures; then E (tests/r0_join_store.rs, bench fields).
 Gate (100k release, 2 runs vs baseline): load <=1.3x (13.8 s); one-row batch <100 ms and objects_written <=3x; cold open <=1.25x; RSS <= baseline; decode share down vs cache disabled.
+
+## M7: operational policy seam (heuristic now, learned policy later)
+Decision (user, 2026-10-09): ship a heuristic policy plus a clean seam so a learned/RL policy can replace it later. Must not change output: policies are operational per ADR-0046 s3.8 (may affect latency/memory/refusal, never state roots, settlements, or explanations).
+
+**Seam.** `trait StatePolicy: Send + Sync` in brix-kb (world/policy.rs), held by `StateStore`/`WorldSession`, default `HeuristicPolicy`. All methods are pure functions of an explicit, loggable `PolicyInput` (no hidden clocks or randomness; any randomness takes a seed from the input) so runs are reproducible and replayable:
+- `warm_set(open_ctx) -> Vec<Digest>`: nodes to prefetch at open (top decision-trie levels, each operator's root branch, hot paths from the access sidecar).
+- `cache_admit(node_meta) -> Admit` / eviction hints for the decoded-node cache.
+- `scheduling_quantum(program_stats, queue_depth) -> usize`.
+- `persist_plan(delta_stats) -> {flush_now, dehydrate, compact_packs}`.
+- `admission(op_ctx) -> Admit | Defer | Refuse(reason)` (feeds existing verification budgets).
+Policy outputs are clamped by hard invariants in the engine (min/max quantum, never skip persisting before HEAD rename, never refuse a replay verify), so a bad or learned policy can degrade speed but not correctness.
+
+**Heuristic v1.** Frequency/recency access counters per trie root and depth (CLOCK second chance already in the decoded cache), warm top-K levels plus last-session hot set from a small `access.sidecar` (best-effort cache, never authoritative, ignored if stale), quantum from observed per-quantum latency with a fixed bound, compaction when pack count exceeds a threshold, persist after every commit.
+
+**Trace for RL.** Structured, opt-in `PolicyTrace` log (JSONL): `{seq, input, decision, outcome{latency_us, bytes_read, cache_hits/misses, rss}}` per decision point, versioned schema `brix.world.policy-trace@1`, written outside the node store (never part of revisions or roots). A `replay-policy` harness re-runs a recorded trace against any `StatePolicy` offline (counterfactual cache-hit simulation for warm_set/cache_admit; latency model for quantum), and a `PolicyEnv` adapter exposes the decision points as a gym-style (obs, action, reward) interface behind a cargo feature so an external trainer can drive it. Reward is defined by the host (e.g. cold-open ms + weighted RSS); the repo ships only a reference reward and the Atlas benchmark as eval.
+
+**Rules.** Default build contains no ML dependency. Policy selected by `world.json` `policy: "heuristic" | "external:<id>"`; recorded in the operational policy record. Differential tests run every fuzz world under heuristic, a random policy and an adversarial policy and require identical roots/settlements/explanations (proves the policy cannot change output). Benchmark gates are evaluated with the heuristic policy only.
+Milestone: M7, after M4 (restore) since warm_set needs the restore path; trace logging hooks can land earlier in M1-M4 at StateStore (record node touches per query).
