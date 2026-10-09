@@ -1238,6 +1238,12 @@ pub trait NodeStore {
     fn decoded_cache(&self) -> Option<&DecodedNodeCache> {
         None
     }
+    /// Observation hook: a store-aware trie operation resolved the node `digest` (`hit`: from
+    /// the decoded-node cache; otherwise read and decoded from the store, `bytes` encoded
+    /// bytes). Purely informational, never affects results; the default does nothing and
+    /// costs nothing after monomorphization.
+    #[inline(always)]
+    fn note_touch(&self, _digest: &Digest, _hit: bool, _bytes: usize) {}
 }
 
 /// Byte-bounded cache of decoded, digest-verified trie nodes keyed by
@@ -1634,10 +1640,12 @@ fn resolve_node<
             let cache = store.decoded_cache();
             if let Some(c) = cache {
                 if let Some(hit) = c.get::<Node<K, V>>(d) {
+                    store.note_touch(d, true, 0);
                     return Ok(hit);
                 }
             }
             let bytes = store.get_node(d).ok_or(StorageError::MissingNode(*d))?;
+            store.note_touch(d, false, bytes.len());
             // Digest verified exactly once, before the node can enter the cache.
             let decoded = decode_node_verified::<K, V>(&bytes, d)
                 .map_err(|_| StorageError::CorruptedNode(*d))?;

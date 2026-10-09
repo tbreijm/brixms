@@ -20,6 +20,7 @@ use soc_core::store::{
     DecodedNodeCache, FileNodeStore, MemoryNodeStore, NodeStore, StorageError, TrieMap,
 };
 
+use super::policy_trace::{PolicyTrace, Recorder, TraceOp, TraceScope};
 pub use super::state_codec::SubRoot;
 use super::state_codec::{St, StateCodec, StateCodecError};
 
@@ -74,6 +75,8 @@ enum Backend {
 struct Inner {
     backend: RwLock<Backend>,
     cache: DecodedNodeCache,
+    /// Opt-in node-touch trace (R0 M7); off unless a sink was installed.
+    recorder: Arc<Recorder>,
 }
 
 /// Shared handle to the persisted node store plus its read cache.
@@ -94,6 +97,7 @@ impl StateStore {
             inner: Arc::new(Inner {
                 backend: RwLock::new(backend),
                 cache: DecodedNodeCache::new(node_cache_bytes),
+                recorder: Arc::default(),
             }),
         }
     }
@@ -139,6 +143,26 @@ impl StateStore {
     pub fn cache_used_bytes(&self) -> usize {
         self.inner.cache.used_bytes()
     }
+
+    /// Start recording node touches into a fresh in-memory [`PolicyTrace`] holding at most
+    /// `cap` records (see `policy_trace`). Shared by every clone of this store. Recording
+    /// never changes a result; with no trace installed (the default) the cost is one relaxed
+    /// atomic load per node resolution.
+    pub fn enable_policy_trace(&self, cap: usize) -> PolicyTrace {
+        let trace = PolicyTrace::new(cap);
+        self.inner.recorder.enable(trace.clone());
+        trace
+    }
+
+    /// Stop recording (the trace handle keeps what it already holds).
+    pub fn disable_policy_trace(&self) {
+        self.inner.recorder.disable();
+    }
+
+    /// Label the node touches made while the returned guard lives (innermost wins).
+    pub fn trace_scope(&self, label: &'static str) -> TraceScope {
+        TraceScope::new(&self.inner.recorder, label)
+    }
 }
 
 impl NodeStore for StateStore {
@@ -154,7 +178,21 @@ impl NodeStore for StateStore {
         Some(&self.inner.cache)
     }
 
+    #[inline]
+    fn note_touch(&self, digest: &Digest, hit: bool, bytes: usize) {
+        if self.inner.recorder.is_on() {
+            self.inner
+                .recorder
+                .record(TraceOp::NodeRead, digest, hit, bytes);
+        }
+    }
+
     fn put_node(&mut self, digest: Digest, bytes: Vec<u8>) {
+        if self.inner.recorder.is_on() {
+            self.inner
+                .recorder
+                .record(TraceOp::NodeWrite, &digest, false, bytes.len());
+        }
         let mut backend = self.inner.backend.write().expect("state store lock");
         match &mut *backend {
             Backend::Memory(m) => m.put_node(digest, bytes),
@@ -163,6 +201,11 @@ impl NodeStore for StateStore {
     }
 
     fn put_new_node(&mut self, digest: Digest, bytes: Vec<u8>) {
+        if self.inner.recorder.is_on() {
+            self.inner
+                .recorder
+                .record(TraceOp::NodeWrite, &digest, false, bytes.len());
+        }
         let mut backend = self.inner.backend.write().expect("state store lock");
         match &mut *backend {
             Backend::Memory(m) => m.put_node(digest, bytes),

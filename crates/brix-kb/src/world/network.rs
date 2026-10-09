@@ -1756,6 +1756,7 @@ impl WorldNetwork {
         ops: &[WorldBatchOp],
         limits: &NetworkLimits,
     ) -> Result<NetworkDeltaReport, WorldError> {
+        let _scope = self.state.trace_scope("apply");
         let mut report = NetworkDeltaReport {
             revision: self.current_revision + 1,
             ops_applied: ops.len(),
@@ -2827,7 +2828,7 @@ impl WorldNetwork {
             let settlement = match staged_buckets.get(&FrontierKey::new(&decide, &entity)) {
                 Some(Some(bucket)) => settle(&entity, bucket),
                 Some(None) => None,
-                None => self.get_settlement(&decide, &entity)?,
+                None => self.settlement_of(&decide, &entity)?,
             };
 
             #[cfg(any(test, feature = "r0-oracle"))]
@@ -2912,6 +2913,7 @@ impl WorldNetwork {
         &self,
         relation: &str,
     ) -> Result<Option<Vec<TupleRecord>>, WorldError> {
+        let _scope = self.state.trace_scope("query");
         let Some(rel) = self.derived_relations.get(relation) else {
             return Ok(None);
         };
@@ -2943,6 +2945,7 @@ impl WorldNetwork {
         decide: &str,
         entity_id: &str,
     ) -> Result<Option<BTreeMap<String, CandidateEntry>>, WorldError> {
+        let _scope = self.state.trace_scope("query");
         let Some(bucket) = self
             .candidate_frontier
             .bucket(&FrontierKey::new(decide, entity_id), &self.state)?
@@ -2990,6 +2993,16 @@ impl WorldNetwork {
         decide: &str,
         entity_id: &str,
     ) -> Result<Option<SettledDecision>, WorldError> {
+        let _scope = self.state.trace_scope("query");
+        self.settlement_of(decide, entity_id)
+    }
+
+    /// [`Self::get_settlement`] without opening a trace scope (used inside an apply).
+    fn settlement_of(
+        &self,
+        decide: &str,
+        entity_id: &str,
+    ) -> Result<Option<SettledDecision>, WorldError> {
         Ok(self
             .candidate_frontier
             .bucket(&FrontierKey::new(decide, entity_id), &self.state)?
@@ -3000,6 +3013,7 @@ impl WorldNetwork {
     pub fn all_settlements(
         &self,
     ) -> Result<BTreeMap<String, BTreeMap<String, SettledDecision>>, WorldError> {
+        let _scope = self.state.trace_scope("query");
         let mut out: BTreeMap<String, BTreeMap<String, SettledDecision>> = BTreeMap::new();
         for (key, bucket) in self.candidate_frontier.all_buckets(&self.state)? {
             if let Some(decision) = settle(&key.entity, &bucket) {
@@ -3013,6 +3027,7 @@ impl WorldNetwork {
 
     /// Capture current observable network state.
     pub fn current_state(&self) -> Result<WorldNetworkState, WorldError> {
+        let _scope = self.state.trace_scope("query");
         let mut distinct_supports = BTreeMap::new();
         for (idx, state) in self.operator_states.iter() {
             if let OperatorState::Distinct { supports, .. } = state {
@@ -3196,6 +3211,7 @@ impl WorldNetwork {
         decide_name: &str,
         entity_id: &str,
     ) -> Result<Option<DecisionExplanation>, WorldError> {
+        let _scope = self.state.trace_scope("query");
         let Some(bucket) = self
             .candidate_frontier
             .bucket(&FrontierKey::new(decide_name, entity_id), &self.state)?

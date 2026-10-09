@@ -778,6 +778,101 @@ fn network_state_cannot_reach_plain_trie_ops() {
     assert!(errors >= 8, "expected the read paths to fail, got {errors}");
 }
 
+fn cached_dehydrated_net() -> WorldNetwork {
+    let (mut net, _) = make(8);
+    net.attach_state_store(StateStore::memory(DEFAULT_NODE_CACHE_BYTES));
+    let mut gen = Gen::new(99);
+    for i in 0..250 {
+        let ops = gen.step();
+        if !ops.is_empty() {
+            apply(&mut net, &format!("t-{i}"), ops);
+        }
+    }
+    persist_and_dehydrate(&net)
+}
+
+/// R0 M7 trace hook: opt-in, schema `brix.world.policy-trace@1`, labels touches by scope,
+/// distinguishes cache hits from store reads, bounded, and never changes a result.
+#[test]
+fn policy_trace_records_node_touches_without_changing_results() {
+    use brix_kb::world::policy_trace::{TraceOp, POLICY_TRACE_SCHEMA};
+
+    // Off by default: nothing recorded, nothing to read.
+    let net = cached_dehydrated_net();
+    let store = net.state_store().clone();
+    let off_state = net.current_state().unwrap();
+
+    let trace = store.enable_policy_trace(1_000_000);
+    assert!(trace.is_empty(), "records start empty");
+
+    // A cold query reads nodes from the store (misses), labelled "query".
+    let first = net.all_settlements().unwrap();
+    let cold = trace.take();
+    assert!(!cold.is_empty());
+    assert!(cold.iter().all(|r| r.scope == "query"));
+    assert!(cold.iter().all(|r| r.op == TraceOp::NodeRead));
+    assert!(cold.iter().any(|r| r.hit) || cold.iter().any(|r| !r.hit));
+    for r in &cold {
+        assert!(store.has_node(&r.digest), "touched node is a real node");
+        assert_eq!(r.hit, r.bytes == 0, "bytes are reported for reads only");
+    }
+    // Sequence numbers are dense from 0.
+    assert!(cold.iter().enumerate().all(|(i, r)| r.seq == i as u64));
+
+    // The same query again is served from the decoded-node cache at least in part.
+    let again = net.all_settlements().unwrap();
+    assert_eq!(first, again);
+    let warm = trace.take();
+    assert!(warm.iter().any(|r| r.hit), "warm query must hit the cache");
+    assert!(warm.first().map(|r| r.seq) == cold.last().map(|r| r.seq + 1));
+
+    // An apply is labelled "apply" and its persist writes nodes (outside any scope).
+    let mut staged = net.clone();
+    let batch = WorldBatch::new(staged.current_revision, "t", vec![touch_existing_entity()]);
+    staged.apply_batch(&batch).unwrap();
+    staged.persist_state().unwrap();
+    let applied = trace.take();
+    assert!(applied
+        .iter()
+        .any(|r| r.scope == "apply" && r.op == TraceOp::NodeRead));
+    assert!(applied
+        .iter()
+        .any(|r| r.op == TraceOp::NodeWrite && r.scope.is_empty()));
+
+    // JSONL form.
+    let jsonl = trace.to_jsonl();
+    assert!(jsonl.is_empty(), "take() emptied the sink");
+    net.current_state().unwrap();
+    for line in trace.to_jsonl().lines() {
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(v["schema"], POLICY_TRACE_SCHEMA);
+        for field in ["seq", "scope", "op", "digest", "hit", "bytes"] {
+            assert!(v.get(field).is_some(), "missing {field} in {line}");
+        }
+    }
+
+    // Recording never changes a result.
+    assert_eq!(net.current_state().unwrap(), off_state);
+
+    // Disabled again: further work records nothing.
+    store.disable_policy_trace();
+    let before = trace.len();
+    net.current_state().unwrap();
+    assert_eq!(trace.len(), before);
+}
+
+#[test]
+fn policy_trace_is_bounded_and_clones_share_the_sink() {
+    let net = cached_dehydrated_net();
+    let store = net.state_store().clone();
+    let trace = store.enable_policy_trace(5);
+    net.clone().all_settlements().unwrap();
+    assert_eq!(trace.len(), 5);
+    assert!(trace.dropped() > 0, "overflow is counted, not stored");
+    let seqs: Vec<u64> = trace.records().iter().map(|r| r.seq).collect();
+    assert_eq!(seqs, vec![0, 1, 2, 3, 4]);
+}
+
 /// Regression: a join result that exists only transiently inside one batch (derived by one
 /// delta, retracted by another) must leave no candidate and no settlement. Before M3 the
 /// frontier applied all retractions first, then all insertions, so the retraction found
