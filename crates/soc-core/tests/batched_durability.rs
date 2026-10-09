@@ -320,7 +320,6 @@ fn test_roots_come_out_identical_whatever_batch_split_or_storage_layout() {
     map_mem.persist_to_store(&mut mem_store);
 
     // Save all nodes from memory store to legacy loose files
-    let legacy_store = FileNodeStore::new(dir_legacy.path()).expect("create store");
     // Manually write one node to verify legacy read
     let hex = expected_root.to_hex();
     let prefix = &hex[..2];
@@ -332,7 +331,9 @@ fn test_roots_come_out_identical_whatever_batch_split_or_storage_layout() {
         fs::write(&legacy_node_path, &bytes).expect("write legacy node");
     }
 
-    // Verify FileNodeStore can read the legacy file directly
+    // Verify FileNodeStore can read the legacy file directly (legacy shards are
+    // discovered at open, so the store is created after the layout exists).
+    let legacy_store = FileNodeStore::new(dir_legacy.path()).expect("create store");
     assert!(legacy_store.contains(&expected_root));
     assert!(legacy_store.get_node(&expected_root).is_some());
 }

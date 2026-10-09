@@ -48,6 +48,21 @@ const MAX_PACK: u64 = 1 << 48;
 const IDX_MAGIC: &[u8; 8] = b"BRIXIDX1";
 const IDX_HEADER: u64 = 8 + 8 + 32 + 256 * 4;
 const IDX_CACHE_FILES: usize = 64;
+const PACK_CACHE_FILES: usize = 32;
+const BUCKET_READ: u64 = 256;
+const KNOWN_CAP: usize = 1 << 18;
+
+#[cfg(unix)]
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
+}
+
+#[cfg(not(unix))]
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    let mut file = file.try_clone()?;
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(buf)
+}
 static NONCE: AtomicU64 = AtomicU64::new(0);
 
 /// Actual filesystem work, shared by cloned handles to one store.
@@ -119,6 +134,71 @@ struct PackRef {
     start: u64,
     count: u64,
     fanout: Box<[u32; 256]>,
+    /// In-memory membership filter over this pack's digests (no false negatives).
+    /// Built for free at flush; for packs found at open it is built lazily once
+    /// the pack has been probed `FILTER_AFTER_PROBES` times.
+    filter: Option<Bloom>,
+    probes: u32,
+}
+
+/// Probes of an opened pack (via binary search) before its filter is built.
+const FILTER_AFTER_PROBES: u32 = 256;
+
+/// Plain Bloom filter keyed directly on (already uniform) digest bytes.
+#[derive(Debug)]
+struct Bloom {
+    bits: Vec<u64>,
+    mask: u64,
+}
+
+impl Bloom {
+    const K: u32 = 5;
+
+    fn with_capacity(count: u64) -> Self {
+        // 16 bits per entry, rounded up to a power of two (>= 64 bits).
+        let nbits = (count.max(1) * 16).next_power_of_two().max(64);
+        Self {
+            bits: vec![0; (nbits / 64) as usize],
+            mask: nbits - 1,
+        }
+    }
+
+    fn hashes(digest: &Digest) -> (u64, u64) {
+        let b = digest.as_bytes();
+        let h1 = u64::from_le_bytes(b[8..16].try_into().expect("32-byte digest"));
+        let h2 = u64::from_le_bytes(b[16..24].try_into().expect("32-byte digest")) | 1;
+        (h1, h2)
+    }
+
+    fn insert(&mut self, digest: &Digest) {
+        let (h1, h2) = Self::hashes(digest);
+        for i in 0..Self::K {
+            let bit = h1.wrapping_add(u64::from(i).wrapping_mul(h2)) & self.mask;
+            self.bits[(bit >> 6) as usize] |= 1 << (bit & 63);
+        }
+    }
+
+    fn may_contain(&self, digest: &Digest) -> bool {
+        let (h1, h2) = Self::hashes(digest);
+        (0..Self::K).all(|i| {
+            let bit = h1.wrapping_add(u64::from(i).wrapping_mul(h2)) & self.mask;
+            self.bits[(bit >> 6) as usize] & (1 << (bit & 63)) != 0
+        })
+    }
+}
+
+/// Read every digest of an idx file (sequential) into a filter.
+fn build_filter(idx_path: &Path, count: u64) -> io::Result<Bloom> {
+    let mut file = File::open(idx_path)?;
+    file.seek(SeekFrom::Start(IDX_HEADER))?;
+    let mut reader = BufReader::with_capacity(256 * 1024, file);
+    let mut bloom = Bloom::with_capacity(count);
+    let mut record = [0; RECORD as usize];
+    for _ in 0..count {
+        reader.read_exact(&mut record)?;
+        bloom.insert(&digest_at(&record, 0));
+    }
+    Ok(bloom)
 }
 #[derive(Debug)]
 struct Pending {
@@ -133,6 +213,12 @@ struct State {
     packs: Vec<PackRef>,
     /// Bounded LRU of open idx files, most recent last: (pack number, file).
     idx_files: Vec<(usize, File)>,
+    /// Bounded cache of open pack files (positional reads, no shared offset).
+    pack_files: Vec<(Arc<PathBuf>, Arc<File>)>,
+    /// Digests recently confirmed present in a published pack (bounded; cleared when
+    /// full). Packs are immutable and never removed while open, so a positive entry
+    /// cannot go stale; it only saves repeated index lookups of shared subtrees.
+    known: std::collections::HashSet<Digest>,
     pending: Option<Pending>,
     root_synced: bool,
     node_cache: BTreeMap<Digest, Vec<u8>>,
@@ -141,6 +227,36 @@ struct State {
 }
 
 impl State {
+    fn cache_insert(&mut self, digest: Digest, bytes: Vec<u8>, io: &Counters) {
+        if self.node_cache.insert(digest, bytes).is_none() {
+            self.cache_lru.push_back(digest);
+        }
+        while self.node_cache.len() > self.max_cached_nodes {
+            let Some(old) = self.cache_lru.pop_front() else {
+                break;
+            };
+            if self.node_cache.remove(&old).is_some() {
+                io.evictions.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Shared open handle for a published pack (bounded cache, most recent last).
+    fn pack_file(&mut self, path: &Arc<PathBuf>) -> io::Result<Arc<File>> {
+        if let Some(i) = self.pack_files.iter().position(|(p, _)| p == path) {
+            let item = self.pack_files.remove(i);
+            let file = item.1.clone();
+            self.pack_files.push(item);
+            return Ok(file);
+        }
+        let file = Arc::new(File::open(path.as_ref())?);
+        if self.pack_files.len() >= PACK_CACHE_FILES {
+            self.pack_files.remove(0);
+        }
+        self.pack_files.push((path.clone(), file.clone()));
+        Ok(file)
+    }
+
     /// Locate a published node: fanout range, then binary search by positional
     /// reads. Every hit is bounds-checked against the owning pack.
     fn find(&mut self, digest: &Digest) -> io::Result<Option<(Arc<PathBuf>, Entry)>> {
@@ -157,6 +273,18 @@ impl State {
                 continue;
             }
             let (path, start, idx_path) = (pack.path.clone(), pack.start, pack.idx_path.clone());
+            if self.packs[n].filter.is_none() {
+                let pack = &mut self.packs[n];
+                pack.probes = pack.probes.saturating_add(1);
+                if pack.probes > FILTER_AFTER_PROBES {
+                    pack.filter = Some(build_filter(&pack.idx_path, pack.count)?);
+                }
+            }
+            if let Some(filter) = &self.packs[n].filter {
+                if !filter.may_contain(digest) {
+                    continue;
+                }
+            }
             let slot = match self.idx_files.iter().position(|(id, _)| *id == n) {
                 Some(i) => i,
                 None => {
@@ -169,22 +297,39 @@ impl State {
             };
             let last = self.idx_files.len() - 1;
             self.idx_files.swap(slot, last);
-            let mut file = &self.idx_files[last].1;
+            let file = &self.idx_files[last].1;
             let (mut lo, mut hi) = (lo, hi);
+            // Narrow large buckets with single-record positional reads, then read
+            // the remaining (at most BUCKET_READ) records in one syscall.
+            while hi - lo > BUCKET_READ {
+                let mid = lo + (hi - lo) / 2;
+                let mut digest_bytes = [0u8; 32];
+                read_exact_at(file, &mut digest_bytes, IDX_HEADER + mid * RECORD)?;
+                match Digest::from_bytes(digest_bytes).cmp(digest) {
+                    std::cmp::Ordering::Less => lo = mid + 1,
+                    std::cmp::Ordering::Greater => hi = mid,
+                    std::cmp::Ordering::Equal => {
+                        lo = mid;
+                        hi = mid + 1;
+                    }
+                }
+            }
+            let mut bucket = vec![0u8; ((hi - lo) * RECORD) as usize];
+            read_exact_at(file, &mut bucket, IDX_HEADER + lo * RECORD)?;
+            let base = lo;
             while lo < hi {
                 let mid = lo + (hi - lo) / 2;
-                file.seek(SeekFrom::Start(IDX_HEADER + mid * RECORD))?;
-                let mut record = [0; RECORD as usize];
-                file.read_exact(&mut record)?;
-                let found = digest_at(&record, 0);
+                let at = ((mid - base) * RECORD) as usize;
+                let record = &bucket[at..at + RECORD as usize];
+                let found = digest_at(record, 0);
                 match found.cmp(digest) {
                     std::cmp::Ordering::Less => lo = mid + 1,
                     std::cmp::Ordering::Greater => hi = mid,
                     std::cmp::Ordering::Equal => {
                         let entry = Entry {
-                            offset: u64_at(&record, 32),
-                            length: u64_at(&record, 40),
-                            checksum: digest_at(&record, 48),
+                            offset: u64_at(record, 32),
+                            length: u64_at(record, 40),
+                            checksum: digest_at(record, 48),
                         };
                         if entry.offset < 8
                             || entry.length == 0
@@ -210,11 +355,13 @@ impl Default for State {
         Self {
             packs: Vec::new(),
             idx_files: Vec::new(),
+            pack_files: Vec::new(),
+            known: std::collections::HashSet::new(),
             pending: None,
             root_synced: false,
             node_cache: BTreeMap::new(),
             cache_lru: std::collections::VecDeque::new(),
-            max_cached_nodes: 16_384,
+            max_cached_nodes: 65_536,
         }
     }
 }
@@ -231,6 +378,9 @@ pub struct FileNodeStore {
     state: Arc<Mutex<State>>,
     failed: Arc<AtomicBool>,
     io: Arc<Counters>,
+    /// Legacy `objects/xx/` shard directories that existed at open (legacy files are
+    /// read-only history; shards created after open are not consulted until reopen).
+    legacy_shards: Arc<Vec<AtomicBool>>,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -273,6 +423,7 @@ impl FileNodeStore {
             state: Arc::new(Mutex::new(State::default())),
             failed: Arc::new(AtomicBool::new(false)),
             io: Arc::new(Counters::default()),
+            legacy_shards: Arc::new((0..256).map(|_| AtomicBool::new(false)).collect()),
         };
         let mut state = store
             .state
@@ -283,6 +434,14 @@ impl FileNodeStore {
             let path = item?.path();
             if path.extension().and_then(|s| s.to_str()) == Some("pack") {
                 packs.push(path);
+            } else if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.len() == 2 {
+                        if let Ok(byte) = u8::from_str_radix(name, 16) {
+                            store.legacy_shards[byte as usize].store(true, Ordering::Relaxed);
+                        }
+                    }
+                }
             }
         }
         packs.sort();
@@ -383,6 +542,8 @@ impl FileNodeStore {
             start,
             count,
             fanout,
+            filter: None,
+            probes: 0,
         })
     }
 
@@ -537,7 +698,14 @@ impl FileNodeStore {
             .join(format!("{}.bin", &hex[2..]))
     }
 
+    fn legacy_shard_present(&self, digest: &Digest) -> bool {
+        self.legacy_shards[digest.as_bytes()[0] as usize].load(Ordering::Relaxed)
+    }
+
     fn legacy_contains(&self, digest: &Digest) -> io::Result<bool> {
+        if !self.legacy_shard_present(digest) {
+            return Ok(false);
+        }
         match fs::metadata(self.object_path(digest)) {
             Ok(meta) if meta.is_file() => Ok(true),
             Ok(_) => Err(invalid("legacy node is not a file")),
@@ -673,8 +841,10 @@ impl FileNodeStore {
             }
             let pending = state.pending.take().expect("pending pack");
             let mut fanout = Box::new([0u32; 256]);
+            let mut filter = Bloom::with_capacity(pending.entries.len() as u64);
             for (digest, _) in &pending.entries {
                 fanout[digest.as_bytes()[0] as usize] += 1;
+                filter.insert(digest);
             }
             let mut total = 0u32;
             for slot in fanout.iter_mut() {
@@ -687,15 +857,16 @@ impl FileNodeStore {
                 start: pending.end,
                 count: pending.entries.len() as u64,
                 fanout,
+                filter: Some(filter),
+                probes: 0,
             });
             Ok(())
         })())
     }
 
-    fn read_entry(&self, mut file: File, entry: &Entry) -> io::Result<Vec<u8>> {
-        file.seek(SeekFrom::Start(entry.offset))?;
+    fn read_entry(&self, file: &File, entry: &Entry) -> io::Result<Vec<u8>> {
         let mut bytes = vec![0; entry.length as usize];
-        file.read_exact(&mut bytes)?;
+        read_exact_at(file, &mut bytes, entry.offset)?;
         self.io
             .bytes_read
             .fetch_add(entry.length, Ordering::Relaxed);
@@ -714,11 +885,20 @@ impl NodeStore for FileNodeStore {
                 .lock()
                 .map_err(|_| invalid("poisoned pack index"))?;
             self.check()?;
-            if state.find(digest)?.is_some()
-                || state
-                    .pending
-                    .as_ref()
-                    .is_some_and(|p| p.lookup.contains_key(digest))
+            if state.known.contains(digest) {
+                return Ok(true);
+            }
+            if state.find(digest)?.is_some() {
+                if state.known.len() >= KNOWN_CAP {
+                    state.known.clear();
+                }
+                state.known.insert(*digest);
+                return Ok(true);
+            }
+            if state
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.lookup.contains_key(digest))
             {
                 return Ok(true);
             }
@@ -750,14 +930,14 @@ impl NodeStore for FileNodeStore {
                         .map_err(|_| invalid("poisoned pack index"))?;
                     self.check()?;
                     if let Some((path, entry)) = state.find(digest)? {
-                        Some((File::open(path.as_ref())?, entry))
+                        Some((state.pack_file(&path)?, entry))
                     } else if let Some(pending) = state.pending.as_mut() {
                         if let Some(&idx) = pending.lookup.get(digest) {
                             pending.writer.flush()?;
                             // Open the temporary pack while holding the state lock. A cloned
                             // handle may flush immediately after we release it, renaming this
                             // path; the open file descriptor remains valid across that rename.
-                            Some((File::open(&pending.path)?, pending.entries[idx].1.clone()))
+                            Some((Arc::new(File::open(&pending.path)?), pending.entries[idx].1.clone()))
                         } else {
                             None
                         }
@@ -766,7 +946,10 @@ impl NodeStore for FileNodeStore {
                     }
                 };
                 if let Some((file, entry)) = target {
-                    return self.read_entry(file, &entry).map(Some);
+                    return self.read_entry(&file, &entry).map(Some);
+                }
+                if !self.legacy_shard_present(digest) {
+                    return Ok(None);
                 }
                 match fs::read(self.object_path(digest)) {
                     Ok(bytes) => {
@@ -784,16 +967,7 @@ impl NodeStore for FileNodeStore {
 
         if let Some(ref bytes) = result {
             if let Ok(mut state) = self.state.lock() {
-                state.node_cache.insert(*digest, bytes.clone());
-                state.cache_lru.push_back(*digest);
-                while state.node_cache.len() > state.max_cached_nodes {
-                    if let Some(old) = state.cache_lru.pop_front() {
-                        state.node_cache.remove(&old);
-                        self.io.evictions.fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        break;
-                    }
-                }
+                state.cache_insert(*digest, bytes.clone(), &self.io);
             }
         }
 
@@ -846,6 +1020,8 @@ impl NodeStore for FileNodeStore {
             pending.entries.push((digest, entry));
             pending.end = end;
             self.io.writes.fetch_add(1, Ordering::Relaxed);
+            // Write-through: freshly written nodes are the likeliest next reads.
+            state.cache_insert(digest, bytes, &self.io);
             Ok(())
         })());
     }
