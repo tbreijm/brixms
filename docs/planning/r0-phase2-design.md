@@ -81,3 +81,25 @@ Policy outputs are clamped by hard invariants in the engine (min/max quantum, ne
 
 **Rules.** Default build contains no ML dependency. Policy selected by `world.json` `policy: "heuristic" | "external:<id>"`; recorded in the operational policy record. Differential tests run every fuzz world under heuristic, a random policy and an adversarial policy and require identical roots/settlements/explanations (proves the policy cannot change output). Benchmark gates are evaluated with the heuristic policy only.
 Milestone: M7, after M4 (restore) since warm_set needs the restore path; trace logging hooks can land earlier in M1-M4 at StateStore (record node touches per query).
+
+## M3 results (derived, frontier, decisions; Result APIs; M7 trace hook)
+Commits: d0dd24e (soc-core plain TrieMap ops panic on lazy nodes), d4474df, b138387, e9909bd, 52052bf.
+
+- Derived relations: every lowered `select` ends in a Distinct, so a derived relation is a view over that operator's typed support index (`DerivedRel::DistinctOutput`); other output operators get a support-counted `Counted` index (unused by lowered programs today).
+- Frontier: `SMap<(decide, entity), FrontierBucket>`; candidate supports inline (one) or `Sub` (two or more, hot map until dehydrated). Buckets are read once, edited in memory and written once per entity per batch.
+- Decision trie: `SMap<WorldKey, WorldTuple>`, node encoding and roots unchanged. Network state names no `TrieMap`; test `network_state_cannot_reach_plain_trie_ops`.
+- `WorldError` gains `CorruptState`, `MissingState`, `ValidityMismatch`; query APIs return `Result`.
+- M7 hook: `StateStore::enable_policy_trace`, schema `brix.world.policy-trace@1`; default off.
+
+Bench (100k, release, post-M2 re-measured same machine): load 13.27 s -> 14.5-14.8 s (+9.5..+11.5%), cold open 9.03 -> 8.8-9.0 s, one-row batch 54.8 -> 50-74 ms (noisy), objects 44 -> 50, RSS after open 1236 -> 724-747 MB, disk 446 -> 498 MB, `decisions_ms` 44 -> ~900 (cold read from store).
+
+### Pre-existing bug found
+The frontier applied all retractions before all insertions per relation. A (tuple, derivation) derived and retracted within one batch left a stale candidate and settlement. Reproduced on 57cd4e1 (post-M2). Fixed by netting the batch's deltas first (e9909bd); regression `transient_derivation_within_a_batch_leaves_no_candidate`.
+
+### New gaps
+1. M4 header must hash `frontier_root` (supports nested in it), `decision_sub_root` and operator roots; `derived_roots()` for `DistinctOutput` relations returns the Distinct root, so list derived roots only for `Counted` relations.
+2. `get_candidates`/`current_state`/explain expand supports to full derivations (O(supports)); bulk readers should use `get_settlement`/`all_settlements`.
+3. `all_settlements` pages and verifies every bucket: ~0.9 s per 80k entities cold; M7 `warm_set` could prefetch.
+4. `legacy_*` oracle shadows must be removed at M4; the per-delta `legacy_derived` assert would diverge if a `Counted` relation ever has multiple supports.
+5. Retracting a never-inserted support is a silent no-op; netting assumes a well-formed delta stream.
+6. Load remains ~+10% over post-M2 (extra frontier trie persisted and scanned); further wins would need cheaper candidate support encoding (Inline supports carry the full Distinct tuple key).
