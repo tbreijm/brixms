@@ -9,15 +9,16 @@
 
 #![deny(unsafe_code)]
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use brix_canon::{Digest, Domain};
-use soc_core::store::{FileNodeStore, MemoryNodeStore, NodeStore, StorageError, TrieMap};
+use soc_core::store::{
+    DecodedNodeCache, FileNodeStore, MemoryNodeStore, NodeStore, StorageError, TrieMap,
+};
 
 pub use super::state_codec::SubRoot;
 use super::state_codec::{St, StateCodec, StateCodecError};
@@ -67,62 +68,9 @@ enum Backend {
     File(FileNodeStore),
 }
 
-/// Byte-bounded LRU of verified-on-decode node bytes.
-struct Lru {
-    cap: usize,
-    used: usize,
-    tick: u64,
-    map: BTreeMap<Digest, (Arc<Vec<u8>>, u64)>,
-    order: BTreeMap<u64, Digest>,
-}
-
-impl Lru {
-    fn new(cap: usize) -> Self {
-        Self {
-            cap,
-            used: 0,
-            tick: 0,
-            map: BTreeMap::new(),
-            order: BTreeMap::new(),
-        }
-    }
-
-    fn get(&mut self, d: &Digest) -> Option<Arc<Vec<u8>>> {
-        self.tick += 1;
-        let tick = self.tick;
-        let (bytes, old) = self.map.get_mut(d)?;
-        self.order.remove(old);
-        *old = tick;
-        self.order.insert(tick, *d);
-        Some(bytes.clone())
-    }
-
-    fn put(&mut self, d: Digest, bytes: Arc<Vec<u8>>) {
-        if bytes.len() > self.cap {
-            return;
-        }
-        if let Some((old_bytes, old_tick)) = self.map.remove(&d) {
-            self.used -= old_bytes.len();
-            self.order.remove(&old_tick);
-        }
-        self.tick += 1;
-        self.used += bytes.len();
-        self.order.insert(self.tick, d);
-        self.map.insert(d, (bytes, self.tick));
-        while self.used > self.cap {
-            let Some((_, victim)) = self.order.pop_first() else {
-                break;
-            };
-            if let Some((b, _)) = self.map.remove(&victim) {
-                self.used -= b.len();
-            }
-        }
-    }
-}
-
 struct Inner {
     backend: RwLock<Backend>,
-    cache: Mutex<Lru>,
+    cache: DecodedNodeCache,
 }
 
 /// Shared handle to the persisted node store plus its read cache.
@@ -142,7 +90,7 @@ impl StateStore {
         Self {
             inner: Arc::new(Inner {
                 backend: RwLock::new(backend),
-                cache: Mutex::new(Lru::new(node_cache_bytes)),
+                cache: DecodedNodeCache::new(node_cache_bytes),
             }),
         }
     }
@@ -186,34 +134,21 @@ impl StateStore {
 
     /// Bytes currently held by the read cache.
     pub fn cache_used_bytes(&self) -> usize {
-        self.inner.cache.lock().expect("state cache lock").used
+        self.inner.cache.used_bytes()
     }
 }
 
 impl NodeStore for StateStore {
     fn get_node(&self, digest: &Digest) -> Option<Vec<u8>> {
-        if let Some(b) = self
-            .inner
-            .cache
-            .lock()
-            .expect("state cache lock")
-            .get(digest)
-        {
-            return Some((*b).clone());
+        let backend = self.inner.backend.read().expect("state store lock");
+        match &*backend {
+            Backend::Memory(m) => m.get_node(digest),
+            Backend::File(f) => f.get_node(digest),
         }
-        let bytes = {
-            let backend = self.inner.backend.read().expect("state store lock");
-            match &*backend {
-                Backend::Memory(m) => m.get_node(digest),
-                Backend::File(f) => f.get_node(digest),
-            }
-        }?;
-        self.inner
-            .cache
-            .lock()
-            .expect("state cache lock")
-            .put(*digest, Arc::new(bytes.clone()));
-        Some(bytes)
+    }
+
+    fn decoded_cache(&self) -> Option<&DecodedNodeCache> {
+        Some(&self.inner.cache)
     }
 
     fn put_node(&mut self, digest: Digest, bytes: Vec<u8>) {
@@ -225,16 +160,6 @@ impl NodeStore for StateStore {
     }
 
     fn contains(&self, digest: &Digest) -> bool {
-        if self
-            .inner
-            .cache
-            .lock()
-            .expect("state cache lock")
-            .map
-            .contains_key(digest)
-        {
-            return true;
-        }
         let backend = self.inner.backend.read().expect("state store lock");
         match &*backend {
             Backend::Memory(m) => m.contains(digest),
@@ -269,13 +194,21 @@ impl<K: Clone, V: Clone> Clone for SMap<K, V> {
     }
 }
 
-impl<K: StateCodec + Ord + Clone, V: StateCodec + Clone> Default for SMap<K, V> {
+impl<
+        K: StateCodec + Ord + Clone + 'static + Send + Sync,
+        V: StateCodec + Clone + 'static + Send + Sync,
+    > Default for SMap<K, V>
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<K: StateCodec + Ord + Clone, V: StateCodec + Clone> SMap<K, V> {
+impl<
+        K: StateCodec + Ord + Clone + 'static + Send + Sync,
+        V: StateCodec + Clone + 'static + Send + Sync,
+    > SMap<K, V>
+{
     pub fn new() -> Self {
         Self {
             trie: TrieMap::new(),
@@ -380,6 +313,24 @@ impl<K: StateCodec + Ord + Clone, V: StateCodec + Clone> SMap<K, V> {
     }
 }
 
+impl<K, V> fmt::Debug for SMap<K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SMap")
+            .field("root", &self.trie.root_digest().to_hex())
+            .field("len", &self.trie.len())
+            .finish()
+    }
+}
+
+impl<K> fmt::Debug for SSet<K> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SSet")
+            .field("root", &self.map.trie.root_digest().to_hex())
+            .field("len", &self.map.trie.len())
+            .finish()
+    }
+}
+
 /// A persisted set of `K`.
 pub struct SSet<K> {
     map: SMap<K, ()>,
@@ -393,13 +344,13 @@ impl<K: Clone> Clone for SSet<K> {
     }
 }
 
-impl<K: StateCodec + Ord + Clone> Default for SSet<K> {
+impl<K: StateCodec + Ord + Clone + 'static + Send + Sync> Default for SSet<K> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<K: StateCodec + Ord + Clone> SSet<K> {
+impl<K: StateCodec + Ord + Clone + 'static + Send + Sync> SSet<K> {
     pub fn new() -> Self {
         Self { map: SMap::new() }
     }
@@ -690,6 +641,55 @@ mod tests {
             d.get(&ValueList(vec![Value::Int(i)]), &store).unwrap();
         }
         assert!(store.cache_used_bytes() <= 2048);
+    }
+
+    #[test]
+    fn second_get_on_dehydrated_map_does_zero_decodes() {
+        let store = StateStore::memory(1 << 22);
+        let m = build(&store, &(0..200).collect::<Vec<_>>());
+        m.persist(&store);
+        let d = m.dehydrate(&store).unwrap();
+        let k = ValueList(vec![Value::Int(77)]);
+        assert_eq!(d.get(&k, &store).unwrap(), Some(tup(77)));
+        let after_first = store.inner.cache.decode_count();
+        assert!(after_first > 0);
+        assert_eq!(d.get(&k, &store).unwrap(), Some(tup(77)));
+        assert_eq!(store.inner.cache.decode_count(), after_first);
+    }
+
+    #[test]
+    fn corrupt_node_is_never_cached() {
+        let mut raw = MemoryNodeStore::new();
+        let scratch = StateStore::memory(0);
+        let m = build(&scratch, &(0..30).collect::<Vec<_>>());
+        let mut s = scratch.clone();
+        m.trie.persist_to_store(&mut s);
+        if let Backend::Memory(mem) = &*scratch.inner.backend.read().unwrap() {
+            raw = mem.clone();
+        }
+        let root = m.root();
+        let mut bytes = raw.get_node(&root).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        raw.put_node(root, bytes);
+        let store = StateStore::from_memory(raw, 1 << 20);
+        let d: SMap<ValueList, IntermediateTuple> = SMap::from_root(root, 30);
+        let k = ValueList(vec![Value::Int(3)]);
+        for _ in 0..2 {
+            assert!(d.get(&k, &store).is_err());
+        }
+        assert!(!store.inner.cache.contains_digest(&root));
+        assert_eq!(store.cache_used_bytes(), 0);
+        assert_eq!(store.inner.cache.decode_count(), 0);
+    }
+
+    #[test]
+    fn debug_prints_root_and_len() {
+        let m: SMap<ValueList, u64> = SMap::new();
+        let s = format!("{m:?}");
+        assert!(s.contains("root") && s.contains("len: 0"), "{s}");
+        let set: SSet<DerivationId> = SSet::new();
+        assert!(format!("{set:?}").contains("len: 0"));
     }
 
     #[test]
