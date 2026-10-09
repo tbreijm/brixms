@@ -99,6 +99,13 @@ impl IntermediateTuple {
     }
 }
 
+/// The typed, injective key identifying a distinct tuple inside
+/// [`DerivationId::Distinct`]; decodable back to the tuple with
+/// [`StateCodec::state_from_bytes`].
+pub fn distinct_key(tuple: &IntermediateTuple) -> Vec<u8> {
+    tuple.state_bytes()
+}
+
 /// A derivation identifier uniquely tracking justifications for TMS truth maintenance.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum DerivationId {
@@ -121,6 +128,12 @@ pub enum DerivationId {
         group_key: Vec<Value>,
     },
     /// Canonical derivation for a distinct tuple produced by set semantics.
+    ///
+    /// `tuple_key` is [`distinct_key`] of the tuple: the *typed* injective state encoding.
+    /// (Before R0 M2 part 2 it was the Display-based `Value::to_bytes` encoding, under which
+    /// `Int(1)` and `Str("1")` -- likewise `Bool(true)`/`Str("true")`, `Null`/`Str("null")` --
+    /// produced the same key. The two now stay distinct; that is an intentional semantic
+    /// change, only observable when a column holds mixed dynamic types.)
     Distinct { op: OperatorId, tuple_key: Vec<u8> },
 }
 
@@ -1931,7 +1944,7 @@ impl WorldNetwork {
                             };
                             let store = &self.state;
 
-                            let tuple_key = tuple.to_tuple_record().to_tuple().0;
+                            let tuple_key = distinct_key(&tuple);
                             let out_deriv = Derivation::distinct(op_id, tuple_key);
 
                             #[cfg(any(test, feature = "r0-oracle"))]
@@ -2584,12 +2597,12 @@ impl WorldNetwork {
                 if let Some(OperatorState::Distinct { supports, .. }) =
                     self.operator_states.get(&op.0)
                 {
-                    for (tuple, items) in supports.entries(&self.state)? {
-                        if tuple.to_tuple_record().to_tuple().0 == *tuple_key {
-                            for p in self.expand_supports(&items)? {
-                                self.collect_base_facts_for_derivation(&p, out)?;
-                            }
-                        }
+                    // Keyed lookup: the typed key decodes back to the Distinct tuple.
+                    let tuple = IntermediateTuple::state_from_bytes(tuple_key)
+                        .map_err(|e| WorldError::from(StateError::from(e)))?;
+                    let items = supports.read(&tuple, &self.state)?.members(&self.state)?;
+                    for p in self.expand_supports(&items)? {
+                        self.collect_base_facts_for_derivation(&p, out)?;
                     }
                 }
             }
