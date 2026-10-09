@@ -50,3 +50,16 @@ Each is resolved in a named milestone; none may be left as a known gap at alpha.
 | 5 | TrieMap hardening (Lazy-as-empty) skipped because wrapper avoids plain ops | Still required: `decision_tree` uses plain ops until M3 moves it to `SMap`. After M3, make plain ops on Lazy nodes `debug_assert`/error-returning, or make them private to soc-core, so no caller can regress. Add a test that asserts the plain ops are unreachable for network state. | M3 |
 
 Process: after each milestone, Opus re-checks this table and the design for new deviations before the next milestone starts.
+
+## M1 plan (Opus review of 99e8fd8) — new gaps 6-11
+| # | Gap | Fix |
+|---|---|---|
+| 6 | DerivationId interning not implemented (state_codec.rs:293-391 inlines full trees) | Task B: `DNode`/`DerivRef=Digest(brix.world.deriv-node@1)`, raw content-addressed objects, `intern_pending` in network; no GC (record for M4) |
+| 7 | Nested SubRoot inner tries have no persistence path and are invisible within a batch | Task C: `JoinSide{outer: SMap<ValueList,SubRoot>, hot: PMap<ValueList,SMap<Digest,JoinEntry>>}`; persist hot inner maps then outer |
+| 8 | No decoded-node cache (`resolve_node` soc-core/store.rs:1389 decodes+rehashes each access) | Task A: `DecodedNodeCache` (TypeId,Digest)->Arc<dyn Any>, `NodeStore::decoded_cache()`; replaces StateStore byte LRU |
+| 9 | Join match order changes (DerivationId Ord -> hash order) | Oracle compares sets; pull derived support-count fix forward from M3 if it diverges |
+| 10 | Replay at open builds tries never persisted -> first commit writes O(world) | Persist+dehydrate at end of `set_network` (session.rs:1841-1861) |
+| 11 | SMap lacks Debug; no `WorldError::State` | Bring minimal `WorldError::State(StateError)` + Debug forward from M3 |
+
+Tasks: A (soc-core cache + state_store.rs) and B (interning/codecs/error.rs) parallel; then C (network.rs join conversion + `join_oracle.rs`, old PMap impl kept as oracle until M4) with D (session wiring, manifest `node_cache_bytes`) in parallel against agreed signatures; then E (tests/r0_join_store.rs, bench fields).
+Gate (100k release, 2 runs vs baseline): load <=1.3x (13.8 s); one-row batch <100 ms and objects_written <=3x; cold open <=1.25x; RSS <= baseline; decode share down vs cache disabled.
