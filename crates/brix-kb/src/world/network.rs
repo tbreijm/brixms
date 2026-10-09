@@ -1561,21 +1561,32 @@ impl WorldNetwork {
                             remaining_quantum.max(1).min(remaining_matches)
                         };
 
-                        let key_str = format!(
-                            "{op_id:?}:{}",
-                            join_key
-                                .iter()
-                                .map(|v| v.to_string())
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        );
-
                         let (page, next_cursor) = if take_count == 0 {
                             (Vec::new(), None)
                         } else {
                             matches.page(cursor.as_ref(), take_count, store)?
                         };
                         let own_deriv = deriv;
+                        // Diagnostics are accumulated per page and flushed once (also on the
+                        // budget-exhausted exits), instead of one string clone and three map
+                        // updates per match.
+                        let mut page_matches = 0u64;
+                        let flush_diag = |diagnostics: &mut NetworkDiagnostics, n: u64| {
+                            if n == 0 {
+                                return;
+                            }
+                            *diagnostics.operator_work.entry(op_id).or_default() += n;
+                            *diagnostics.join_fanout.entry(op_id).or_default() += n;
+                            let key_str = format!(
+                                "{op_id:?}:{}",
+                                join_key
+                                    .iter()
+                                    .map(|v| v.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            );
+                            *diagnostics.hot_join_keys.entry(key_str).or_default() += n;
+                        };
 
                         for (_, entry) in page.iter() {
                             let other_tuple = &entry.tuple;
@@ -1602,17 +1613,12 @@ impl WorldNetwork {
                             work_in_slice += 1;
                             total_work += 1;
                             total_matches += 1;
-                            *diagnostics.operator_work.entry(op_id).or_default() += 1;
-                            *diagnostics.join_fanout.entry(op_id).or_default() += 1;
-                            *diagnostics
-                                .hot_join_keys
-                                .entry(key_str.clone())
-                                .or_default() += 1;
+                            page_matches += 1;
 
-                            if limits.max_work.is_some_and(|max| total_work > max) {
-                                return Err(WorldError::BudgetExhausted);
-                            }
-                            if limits.max_matches.is_some_and(|max| total_matches > max) {
+                            if limits.max_work.is_some_and(|max| total_work > max)
+                                || limits.max_matches.is_some_and(|max| total_matches > max)
+                            {
+                                flush_diag(&mut diagnostics, page_matches);
                                 return Err(WorldError::BudgetExhausted);
                             }
 
@@ -1629,6 +1635,7 @@ impl WorldNetwork {
                             }
                         }
 
+                        flush_diag(&mut diagnostics, page_matches);
                         let new_remaining = remaining.saturating_sub(page.len());
                         if new_remaining > 0 && next_cursor.is_some() {
                             operator_queues.entry(op_id).or_default().push_front(

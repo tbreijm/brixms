@@ -1298,6 +1298,12 @@ impl DecodedNodeCache {
         node.downcast::<T>().ok()
     }
 
+    /// Whether a node of type `T` is cached under `digest` (does not touch recency).
+    pub fn contains<T: std::any::Any + Send + Sync>(&self, digest: &Digest) -> bool {
+        let key = (std::any::TypeId::of::<T>(), *digest);
+        self.lock().map.contains_key(&key)
+    }
+
     /// Insert a verified node whose encoding was `encoded_len` bytes (cost = 2x).
     pub fn insert<T: std::any::Any + Send + Sync>(
         &self,
@@ -2043,7 +2049,13 @@ fn persist_node_recursive<
         return;
     }
     let digest = node.digest();
-    if store.contains(&digest) {
+    // A decoded node is cached only after it was read from, or written to, the store, so a
+    // cache hit proves the node is already stored without probing the pack indexes.
+    if store
+        .decoded_cache()
+        .is_some_and(|c| c.contains::<Node<K, V>>(&digest))
+        || store.contains(&digest)
+    {
         return;
     }
     if let Node::Branch(branch) = &**node {
