@@ -1173,6 +1173,11 @@ pub trait NodeStore {
     fn get_node(&self, digest: &Digest) -> Option<Vec<u8>>;
     /// Store raw serialized bytes for a node under its Merkle [`Digest`].
     fn put_node(&mut self, digest: Digest, bytes: Vec<u8>);
+    /// Like [`Self::put_node`] for a node the caller has just checked is absent
+    /// (`contains` returned false); stores may skip their own existence probe.
+    fn put_new_node(&mut self, digest: Digest, bytes: Vec<u8>) {
+        self.put_node(digest, bytes);
+    }
     /// Whether `digest` exists in the store.
     fn contains(&self, digest: &Digest) -> bool {
         self.get_node(digest).is_some()
@@ -2065,7 +2070,7 @@ fn persist_node_recursive<
     }
     let bytes = encode_node(node);
     let encoded_len = bytes.len();
-    store.put_node(digest, bytes);
+    store.put_new_node(digest, bytes);
     *count += 1;
     // Write-through: the next store-aware access (after the in-memory tree is
     // dehydrated) finds this node decoded instead of re-reading and re-hashing it.

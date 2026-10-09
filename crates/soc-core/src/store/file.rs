@@ -975,18 +975,31 @@ impl NodeStore for FileNodeStore {
     }
 
     fn put_node(&mut self, digest: Digest, bytes: Vec<u8>) {
+        self.put_node_impl(digest, bytes, true);
+    }
+
+    fn put_new_node(&mut self, digest: Digest, bytes: Vec<u8>) {
+        self.put_node_impl(digest, bytes, false);
+    }
+}
+
+impl FileNodeStore {
+    /// Append a node. With `check_existing` the node is skipped when already stored; callers
+    /// that have just established absence (via `contains`) pass `false` to avoid a second probe.
+    fn put_node_impl(&mut self, digest: Digest, bytes: Vec<u8>, check_existing: bool) {
         let _ = self.latch((|| {
             let mut state = self
                 .state
                 .lock()
                 .map_err(|_| invalid("poisoned pack index"))?;
             self.check()?;
-            if state.find(&digest)?.is_some()
+            if check_existing
+                && (state.find(&digest)?.is_some()
                 || state
                     .pending
                     .as_ref()
                     .is_some_and(|p| p.lookup.contains_key(&digest))
-                || self.legacy_contains(&digest)?
+                || self.legacy_contains(&digest)?)
             {
                 return Ok(());
             }

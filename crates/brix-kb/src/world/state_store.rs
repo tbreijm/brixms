@@ -202,6 +202,14 @@ impl NodeStore for StateStore {
         }
     }
 
+    fn put_new_node(&mut self, digest: Digest, bytes: Vec<u8>) {
+        let mut backend = self.inner.backend.write().expect("state store lock");
+        match &mut *backend {
+            Backend::Memory(m) => m.put_node(digest, bytes),
+            Backend::File(f) => f.put_new_node(digest, bytes),
+        }
+    }
+
     fn contains(&self, digest: &Digest) -> bool {
         let backend = self.inner.backend.read().expect("state store lock");
         match &*backend {
