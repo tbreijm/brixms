@@ -19,6 +19,8 @@ pub mod reference;
 pub mod revision;
 pub mod session;
 pub mod staging;
+pub mod state_codec;
+pub mod state_store;
 pub mod types;
 pub mod verify;
 
