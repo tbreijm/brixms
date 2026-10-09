@@ -14,7 +14,10 @@
 
 #![deny(unsafe_code)]
 
+use super::deriv_intern::{deriv_ref, intern, persist_interned, resolve};
 use super::persistent::{PMap, PSet};
+use super::state_codec::{DNode, JoinEntry, SubRoot, ValueList};
+use super::state_store::{PageCursor, SMap, StateStore, DEFAULT_NODE_CACHE_BYTES};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -221,8 +224,10 @@ pub enum OperatorWorkItem {
         delta: TupleDelta,
         is_left: bool,
         join_key: Vec<Value>,
-        matches: PMap<DerivationId, IntermediateTuple>,
-        next_idx: usize,
+        /// Snapshot of the opposite side's inner map for `join_key`.
+        matches: SMap<Digest, JoinEntry>,
+        cursor: Option<PageCursor<Digest>>,
+        remaining: usize,
     },
 }
 
@@ -230,9 +235,7 @@ pub enum OperatorWorkItem {
 fn work_item_queued_count(item: &OperatorWorkItem) -> usize {
     match item {
         OperatorWorkItem::Delta(_) => 1,
-        OperatorWorkItem::JoinContinuation {
-            matches, next_idx, ..
-        } => matches.len().saturating_sub(*next_idx).max(1),
+        OperatorWorkItem::JoinContinuation { remaining, .. } => (*remaining).max(1),
     }
 }
 
@@ -395,6 +398,68 @@ pub fn compute_candidate_calendar_key(
     Key::new(phase, priority, tiebreak)
 }
 
+/// One side of a join index: join key -> inner map of the tuples (with interned
+/// derivation refs) currently supporting that key.
+///
+/// `outer` is the persisted index (key -> inner [`SubRoot`]); `hot` holds the inner maps
+/// modified (and so not yet reachable from the store) since the last dehydration.
+#[derive(Clone, Debug, Default)]
+pub struct JoinSide {
+    pub outer: SMap<ValueList, SubRoot>,
+    pub hot: PMap<ValueList, SMap<Digest, JoinEntry>>,
+    /// Shadow of the pre-store implementation, kept until M4 (see `join_oracle`).
+    #[cfg(any(test, feature = "r0-oracle"))]
+    pub(crate) legacy: PMap<Vec<Value>, PMap<DerivationId, IntermediateTuple>>,
+}
+
+impl JoinSide {
+    /// The inner map for `key`, from `hot` if modified, else from the persisted index.
+    fn read(
+        &self,
+        key: &ValueList,
+        store: &StateStore,
+    ) -> Result<Option<SMap<Digest, JoinEntry>>, WorldError> {
+        if let Some(m) = self.hot.get(key) {
+            return Ok(Some(m.clone()));
+        }
+        Ok(self.outer.get(key, store)?.map(SMap::from_sub_root))
+    }
+
+    /// Record the new inner map for `key`; an empty map removes the key everywhere.
+    fn write(
+        &mut self,
+        key: ValueList,
+        inner: SMap<Digest, JoinEntry>,
+        store: &StateStore,
+    ) -> Result<(), WorldError> {
+        if inner.is_empty() {
+            self.hot.remove(&key);
+            self.outer = self.outer.remove(&key, store)?;
+        } else {
+            self.outer = self.outer.upsert(key.clone(), inner.sub_root(), store)?;
+            self.hot.insert(key, inner);
+        }
+        Ok(())
+    }
+
+    fn persist(&self, store: &StateStore) -> usize {
+        let mut n = 0;
+        for inner in self.hot.values() {
+            n += inner.persist(store);
+        }
+        n + self.outer.persist(store)
+    }
+
+    fn dehydrated(&self, store: &StateStore) -> Result<Self, WorldError> {
+        Ok(Self {
+            outer: self.outer.dehydrate(store)?,
+            hot: PMap::new(),
+            #[cfg(any(test, feature = "r0-oracle"))]
+            legacy: self.legacy.clone(),
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum OperatorState {
     Scan {
@@ -422,8 +487,8 @@ pub enum OperatorState {
         right: OperatorId,
         left_keys: Vec<FieldRef>,
         right_keys: Vec<FieldRef>,
-        left_index: PMap<Vec<Value>, PMap<DerivationId, IntermediateTuple>>,
-        right_index: PMap<Vec<Value>, PMap<DerivationId, IntermediateTuple>>,
+        left_side: JoinSide,
+        right_side: JoinSide,
     },
     Distinct {
         input: OperatorId,
@@ -489,6 +554,10 @@ pub struct WorldNetwork {
     pub program_env: Option<Arc<CompiledProgramEnv>>,
     pub current_revision: u64,
     pub scheduling_quantum: usize,
+    /// Node store backing persisted operator state (join indexes, interned derivations).
+    state: StateStore,
+    /// Interned derivation nodes not yet written to the store.
+    intern_pending: PMap<Digest, DNode>,
 }
 
 impl WorldNetwork {
@@ -569,8 +638,8 @@ impl WorldNetwork {
                             right: *right,
                             left_keys: left_keys.clone(),
                             right_keys: right_keys.clone(),
-                            left_index: PMap::new(),
-                            right_index: PMap::new(),
+                            left_side: JoinSide::default(),
+                            right_side: JoinSide::default(),
                         },
                     );
                 }
@@ -631,7 +700,89 @@ impl WorldNetwork {
             program_env: None,
             current_revision: 0,
             scheduling_quantum: DEFAULT_SCHEDULING_QUANTUM,
+            state: StateStore::memory(DEFAULT_NODE_CACHE_BYTES),
+            intern_pending: PMap::new(),
         }
+    }
+
+    /// Back operator state with `store` (call before any data is applied).
+    pub fn attach_state_store(&mut self, store: StateStore) {
+        self.state = store;
+    }
+
+    /// The store backing persisted operator state.
+    pub fn state_store(&self) -> &StateStore {
+        &self.state
+    }
+
+    /// Write all not-yet-persisted join state (inner maps, then outer indexes, then
+    /// interned derivation nodes). Returns the number of objects written. The caller
+    /// flushes the store.
+    pub fn persist_state(&self) -> Result<usize, WorldError> {
+        let mut n = 0;
+        for (_, state) in self.operator_states.iter() {
+            if let OperatorState::EquiJoin {
+                left_side,
+                right_side,
+                ..
+            } = state
+            {
+                n += left_side.persist(&self.state);
+                n += right_side.persist(&self.state);
+            }
+        }
+        n += persist_interned(&self.intern_pending, &self.state)?;
+        Ok(n)
+    }
+
+    /// A copy holding only store references for persisted state. Requires
+    /// [`Self::persist_state`] (and a flush) first; fails if a root is not persisted.
+    pub fn dehydrated(&self) -> Result<Self, WorldError> {
+        let mut out = self.clone();
+        for (idx, state) in self.operator_states.iter() {
+            if let OperatorState::EquiJoin {
+                left,
+                right,
+                left_keys,
+                right_keys,
+                left_side,
+                right_side,
+            } = state
+            {
+                out.operator_states.insert(
+                    *idx,
+                    OperatorState::EquiJoin {
+                        left: *left,
+                        right: *right,
+                        left_keys: left_keys.clone(),
+                        right_keys: right_keys.clone(),
+                        left_side: left_side.dehydrated(&self.state)?,
+                        right_side: right_side.dehydrated(&self.state)?,
+                    },
+                );
+            }
+        }
+        out.intern_pending = PMap::new();
+        Ok(out)
+    }
+
+    /// Per join operator, the `(left, right)` outer index roots.
+    pub fn join_index_roots(&self) -> BTreeMap<OperatorId, (SubRoot, SubRoot)> {
+        let mut out = BTreeMap::new();
+        for (idx, state) in self.operator_states.iter() {
+            if let OperatorState::EquiJoin {
+                left_side,
+                right_side,
+                ..
+            } = state
+            {
+                out.insert(
+                    OperatorId(*idx),
+                    (left_side.outer.sub_root(), right_side.outer.sub_root()),
+                );
+            }
+        }
+        out
     }
 
     /// Set scheduling quantum (work units per operator slice).
@@ -713,8 +864,8 @@ impl WorldNetwork {
                     right: *right,
                     left_keys: left_keys.clone(),
                     right_keys: right_keys.clone(),
-                    left_index: PMap::new(),
-                    right_index: PMap::new(),
+                    left_side: JoinSide::default(),
+                    right_side: JoinSide::default(),
                 },
                 OperatorState::Distinct { input, .. } => OperatorState::Distinct {
                     input: *input,
@@ -737,6 +888,7 @@ impl WorldNetwork {
             op_states.insert(*idx, cleared_state);
         }
         fresh.operator_states = op_states;
+        fresh.intern_pending = PMap::new();
         fresh
     }
 
@@ -1285,19 +1437,22 @@ impl WorldNetwork {
                         right: _,
                         left_keys,
                         right_keys,
-                        left_index,
-                        right_index,
+                        left_side,
+                        right_side,
                     } => {
                         let left_op = *left;
+                        let store = &self.state;
+                        let max_depth = self.dag.nodes.len() + 1;
 
-                        let (delta, is_left, join_key, matches, next_idx) = match item {
+                        let (delta, is_left, join_key, matches, cursor, remaining) = match item {
                             OperatorWorkItem::JoinContinuation {
                                 delta,
                                 is_left,
                                 join_key,
                                 matches,
-                                next_idx,
-                            } => (delta, is_left, join_key, matches, next_idx),
+                                cursor,
+                                remaining,
+                            } => (delta, is_left, join_key, matches, cursor, remaining),
                             OperatorWorkItem::Delta(delta) => {
                                 let (tuple, deriv) = match &delta {
                                     TupleDelta::Insert { tuple, derivation }
@@ -1336,47 +1491,51 @@ impl WorldNetwork {
                                     .collect::<Result<_, _>>()?;
 
                                 let is_ins = delta.is_insert();
-                                let matches: PMap<DerivationId, IntermediateTuple> = if is_left {
-                                    if is_ins {
-                                        let m =
-                                            right_index.get(&join_key).cloned().unwrap_or_default();
-                                        left_index
-                                            .entry(join_key.clone())
-                                            .or_default()
-                                            .insert(deriv.clone(), tuple.clone());
-                                        m
-                                    } else {
-                                        if let Some(matching_lefts) = left_index.get_mut(&join_key)
-                                        {
-                                            matching_lefts.remove(deriv);
-                                            if matching_lefts.is_empty() {
-                                                left_index.remove(&join_key);
-                                            }
-                                        }
-                                        right_index.get(&join_key).cloned().unwrap_or_default()
-                                    }
+                                let (own, other) = if is_left {
+                                    (left_side, right_side)
                                 } else {
-                                    if is_ins {
-                                        let m =
-                                            left_index.get(&join_key).cloned().unwrap_or_default();
-                                        right_index
-                                            .entry(join_key.clone())
-                                            .or_default()
-                                            .insert(deriv.clone(), tuple.clone());
-                                        m
-                                    } else {
-                                        if let Some(matching_rights) =
-                                            right_index.get_mut(&join_key)
-                                        {
-                                            matching_rights.remove(deriv);
-                                            if matching_rights.is_empty() {
-                                                right_index.remove(&join_key);
-                                            }
-                                        }
-                                        left_index.get(&join_key).cloned().unwrap_or_default()
-                                    }
+                                    (right_side, left_side)
                                 };
-                                (delta, is_left, join_key, matches, 0)
+
+                                #[cfg(any(test, feature = "r0-oracle"))]
+                                let legacy_matches = super::join_oracle::shadow_step(
+                                    own, other, &join_key, deriv, tuple, is_ins,
+                                );
+
+                                let vk = ValueList(join_key.clone());
+                                let own_ref = if is_ins {
+                                    intern(deriv, &mut self.intern_pending)
+                                } else {
+                                    deriv_ref(deriv)
+                                };
+                                let existing = own.read(&vk, store)?;
+                                if is_ins {
+                                    let inner = existing.unwrap_or_default().upsert(
+                                        own_ref,
+                                        JoinEntry {
+                                            tuple: tuple.clone(),
+                                            deriv: own_ref,
+                                        },
+                                        store,
+                                    )?;
+                                    own.write(vk.clone(), inner, store)?;
+                                } else if let Some(inner) = existing {
+                                    let inner = inner.remove(&own_ref, store)?;
+                                    own.write(vk.clone(), inner, store)?;
+                                }
+                                let matches = other.read(&vk, store)?.unwrap_or_default();
+
+                                #[cfg(any(test, feature = "r0-oracle"))]
+                                super::join_oracle::assert_same_matches(
+                                    &legacy_matches,
+                                    &matches,
+                                    &self.intern_pending,
+                                    store,
+                                    max_depth,
+                                )?;
+
+                                let remaining = matches.len();
+                                (delta, is_left, join_key, matches, None, remaining)
                             }
                         };
 
@@ -1387,7 +1546,7 @@ impl WorldNetwork {
                         };
 
                         let remaining_quantum = quantum.saturating_sub(work_in_slice);
-                        let remaining_matches = matches.len().saturating_sub(next_idx);
+                        let remaining_matches = remaining;
                         if remaining_matches > 0 {
                             if limits.max_matches.is_some_and(|max| total_matches >= max) {
                                 return Err(WorldError::BudgetExhausted);
@@ -1411,23 +1570,31 @@ impl WorldNetwork {
                                 .join(",")
                         );
 
-                        for (other_deriv, other_tuple) in
-                            matches.iter().skip(next_idx).take(take_count)
-                        {
+                        let (page, next_cursor) = if take_count == 0 {
+                            (Vec::new(), None)
+                        } else {
+                            matches.page(cursor.as_ref(), take_count, store)?
+                        };
+                        let own_deriv = deriv;
+
+                        for (_, entry) in page.iter() {
+                            let other_tuple = &entry.tuple;
+                            let other_deriv =
+                                resolve(&entry.deriv, &self.intern_pending, store, max_depth)?;
                             let (comp_tuple, comp_deriv) = if is_left {
                                 let composite = tuple.merge(other_tuple);
                                 let comp_deriv = DerivationId::Join {
                                     op: op_id,
-                                    left: Box::new(deriv.clone()),
-                                    right: Box::new(other_deriv.clone()),
+                                    left: Box::new(own_deriv.clone()),
+                                    right: Box::new((*other_deriv).clone()),
                                 };
                                 (composite, comp_deriv)
                             } else {
                                 let composite = other_tuple.merge(tuple);
                                 let comp_deriv = DerivationId::Join {
                                     op: op_id,
-                                    left: Box::new(other_deriv.clone()),
-                                    right: Box::new(deriv.clone()),
+                                    left: Box::new((*other_deriv).clone()),
+                                    right: Box::new(own_deriv.clone()),
                                 };
                                 (composite, comp_deriv)
                             };
@@ -1462,15 +1629,16 @@ impl WorldNetwork {
                             }
                         }
 
-                        let new_next_idx = next_idx + take_count;
-                        if new_next_idx < matches.len() {
+                        let new_remaining = remaining.saturating_sub(page.len());
+                        if new_remaining > 0 && next_cursor.is_some() {
                             operator_queues.entry(op_id).or_default().push_front(
                                 OperatorWorkItem::JoinContinuation {
                                     delta,
                                     is_left,
                                     join_key,
                                     matches,
-                                    next_idx: new_next_idx,
+                                    cursor: next_cursor,
+                                    remaining: new_remaining,
                                 },
                             );
                         }

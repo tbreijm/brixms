@@ -11,6 +11,8 @@ pub mod decision_codec;
 pub mod deriv_intern;
 pub mod error;
 pub mod import_kb;
+#[cfg(any(test, feature = "r0-oracle"))]
+pub mod join_oracle;
 pub mod manifest;
 pub mod network;
 pub mod oracle;
