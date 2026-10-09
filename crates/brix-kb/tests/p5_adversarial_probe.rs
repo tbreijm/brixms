@@ -391,9 +391,14 @@ fn p02_local_one_fact_edit_exact_metrics() {
     // honest strictly-local bound for *this* 3-relation-join model; it is a
     // small constant independent of world/order count, not a scan over
     // unrelated state.
+    //
+    // R2 (decisions as relations) appends one more stage: the decide's winner
+    // relation, which retracts the old winner row and asserts the new one
+    // (2 deltas). The honest bound is therefore 7 stages * 2 deltas = 14, still
+    // a constant independent of world size.
     assert!(
-        edit_report.intermediate_deltas_count <= 12,
-        "ADVERSARIAL DEFECT: traversed {} intermediate deltas (must be strictly local <= 12 \
+        edit_report.intermediate_deltas_count <= 14,
+        "ADVERSARIAL DEFECT: traversed {} intermediate deltas (must be strictly local <= 14 \
          for this 6-stage operator chain)",
         edit_report.intermediate_deltas_count
     );

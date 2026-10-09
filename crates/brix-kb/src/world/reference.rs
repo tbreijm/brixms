@@ -608,21 +608,198 @@ fn eval_expr(
 fn build_grouped_row(
     projections: &[(String, GroupProjection)],
     key_vals: &[Value],
-    count: usize,
-) -> Row {
+    values: &[Vec<Option<Value>>],
+) -> Result<Row, WorldError> {
     let mut row = Row::new();
-    for (name, proj) in projections {
+    for (idx, (name, proj)) in projections.iter().enumerate() {
         match proj {
             GroupProjection::Key(idx) => {
                 let v = key_vals.get(*idx).cloned().unwrap_or(Value::Null);
                 row.insert(name.clone(), v);
             }
             GroupProjection::Count => {
-                row.insert(name.clone(), Value::Int(count as i64));
+                row.insert(name.clone(), Value::Int(values.len() as i64));
+            }
+            GroupProjection::SumInt(_) => {
+                let mut sum = 0i128;
+                for value in values.iter().filter_map(|row| row[idx].as_ref()) {
+                    let Value::Int(value) = value else {
+                        return Err(WorldError::NetworkError(
+                            "reference Int sum received non-Int".into(),
+                        ));
+                    };
+                    sum = sum.checked_add(i128::from(*value)).ok_or_else(|| {
+                        WorldError::NetworkError(
+                            "reference grouped Int accumulator overflow".into(),
+                        )
+                    })?;
+                }
+                row.insert(
+                    name.clone(),
+                    Value::Int(i64::try_from(sum).map_err(|_| {
+                        WorldError::NetworkError("reference grouped Int sum overflow".into())
+                    })?),
+                );
+            }
+            GroupProjection::SumDecimal(_) => {
+                let mut sum = ReferenceWideDecimal::default();
+                let mut scale = 0u8;
+                for value in values.iter().filter_map(|row| row[idx].as_ref()) {
+                    let Value::Decimal(value) = value else {
+                        return Err(WorldError::NetworkError(
+                            "reference Decimal sum received non-Decimal".into(),
+                        ));
+                    };
+                    if value.scale() > scale {
+                        sum.mul_pow10(value.scale() - scale);
+                        scale = value.scale();
+                    }
+                    let mut addend = ReferenceWideDecimal::from_i128(value.unscaled());
+                    addend.mul_pow10(scale - value.scale());
+                    sum.add_assign(&addend);
+                }
+                row.insert(
+                    name.clone(),
+                    Value::Decimal(sum.to_decimal(scale).ok_or_else(|| {
+                        WorldError::NetworkError("reference grouped Decimal sum overflow".into())
+                    })?),
+                );
+            }
+            GroupProjection::Min(_) | GroupProjection::Max(_) => {
+                let selected = if matches!(proj, GroupProjection::Min(_)) {
+                    values.iter().filter_map(|row| row[idx].as_ref()).min()
+                } else {
+                    values.iter().filter_map(|row| row[idx].as_ref()).max()
+                };
+                row.insert(name.clone(), selected.cloned().unwrap_or(Value::Null));
             }
         }
     }
-    row
+    Ok(row)
+}
+
+#[derive(Default)]
+struct ReferenceWideDecimal {
+    negative: bool,
+    digits: Vec<u8>,
+}
+
+impl ReferenceWideDecimal {
+    fn from_i128(value: i128) -> Self {
+        let mut magnitude = value.unsigned_abs();
+        let mut digits = Vec::new();
+        while magnitude != 0 {
+            digits.push((magnitude % 10) as u8);
+            magnitude /= 10;
+        }
+        Self {
+            negative: value < 0,
+            digits,
+        }
+    }
+
+    fn mul_pow10(&mut self, power: u8) {
+        if !self.digits.is_empty() {
+            self.digits
+                .splice(0..0, std::iter::repeat(0).take(power as usize));
+        }
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        if other.digits.is_empty() {
+            return;
+        }
+        if self.digits.is_empty() {
+            *self = Self {
+                negative: other.negative,
+                digits: other.digits.clone(),
+            };
+            return;
+        }
+        if self.negative == other.negative {
+            let mut carry = 0u8;
+            for index in 0..self.digits.len().max(other.digits.len()) {
+                if index == self.digits.len() {
+                    self.digits.push(0);
+                }
+                let sum =
+                    self.digits[index] + other.digits.get(index).copied().unwrap_or(0) + carry;
+                self.digits[index] = sum % 10;
+                carry = sum / 10;
+            }
+            if carry != 0 {
+                self.digits.push(carry);
+            }
+            return;
+        }
+        let ordering = self
+            .digits
+            .len()
+            .cmp(&other.digits.len())
+            .then_with(|| self.digits.iter().rev().cmp(other.digits.iter().rev()));
+        match ordering {
+            std::cmp::Ordering::Equal => {
+                self.digits.clear();
+                self.negative = false;
+            }
+            std::cmp::Ordering::Greater => self.sub_abs(other),
+            std::cmp::Ordering::Less => {
+                let mut result = Self {
+                    negative: other.negative,
+                    digits: other.digits.clone(),
+                };
+                result.sub_abs(self);
+                *self = result;
+            }
+        }
+    }
+
+    fn sub_abs(&mut self, other: &Self) {
+        let mut borrow = 0i8;
+        for index in 0..self.digits.len() {
+            let mut digit = self.digits[index] as i8
+                - other.digits.get(index).copied().unwrap_or(0) as i8
+                - borrow;
+            if digit < 0 {
+                digit += 10;
+                borrow = 1;
+            } else {
+                borrow = 0;
+            }
+            self.digits[index] = digit as u8;
+        }
+        while self.digits.last() == Some(&0) {
+            self.digits.pop();
+        }
+        if self.digits.is_empty() {
+            self.negative = false;
+        }
+    }
+
+    fn to_decimal(&self, scale: u8) -> Option<brix_canon::Decimal> {
+        let mut value = Self {
+            negative: self.negative,
+            digits: self.digits.clone(),
+        };
+        let mut scale = scale;
+        while scale > 0 && value.digits.first() == Some(&0) {
+            value.digits.remove(0);
+            scale -= 1;
+        }
+        let magnitude = value.digits.iter().rev().try_fold(0u128, |sum, digit| {
+            sum.checked_mul(10)?.checked_add(*digit as u128)
+        })?;
+        let unscaled = if value.negative {
+            if magnitude == i128::MAX as u128 + 1 {
+                i128::MIN
+            } else {
+                -i128::try_from(magnitude).ok()?
+            }
+        } else {
+            i128::try_from(magnitude).ok()?
+        };
+        Some(brix_canon::Decimal::new(unscaled, scale))
+    }
 }
 
 /// Extract a row's entity identity from its declared `per <field>`
@@ -679,6 +856,7 @@ pub struct DecideSpec {
     /// Declared entity-identity field (ADR-0046, decided 2026-10-04); see
     /// `network::DecideBlock::per_field`.
     pub per_field: String,
+    pub per_type: ast::Ty,
     pub proposals: Vec<ast::ProposeDecl>,
     pub compiled_proposals: Vec<CompiledReferencePropose>,
 }
@@ -738,6 +916,7 @@ pub enum CompiledOperator {
     Distinct,
     GroupedCount {
         compiled_group_keys: Vec<CompiledWorldExpr>,
+        compiled_aggregates: Vec<Option<CompiledWorldExpr>>,
     },
 }
 
@@ -797,6 +976,7 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
     for node in &dag.nodes {
         match node {
             OperatorNode::Scan { .. } => compiled_operators.push(CompiledOperator::Scan),
+            OperatorNode::DecisionRows { .. } => compiled_operators.push(CompiledOperator::Scan),
             OperatorNode::Bind { .. } => compiled_operators.push(CompiledOperator::Bind),
             OperatorNode::Filter { input, predicate } => {
                 let bindings = derive_binding_names(&op_schemas[input.0]);
@@ -821,7 +1001,10 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
             OperatorNode::EquiJoin { .. } => compiled_operators.push(CompiledOperator::EquiJoin),
             OperatorNode::Distinct { .. } => compiled_operators.push(CompiledOperator::Distinct),
             OperatorNode::GroupedCount {
-                input, group_keys, ..
+                input,
+                group_keys,
+                projections,
+                ..
             } => {
                 let bindings = derive_binding_names(&op_schemas[input.0]);
                 let mut compiled_group_keys = Vec::with_capacity(group_keys.len());
@@ -831,8 +1014,24 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                         .map_err(WorldError::NetworkError)?;
                     compiled_group_keys.push(compiled);
                 }
+                let compiled_aggregates = projections
+                    .iter()
+                    .map(|(_, projection)| {
+                        let expr = match projection {
+                            GroupProjection::SumInt(expr)
+                            | GroupProjection::SumDecimal(expr)
+                            | GroupProjection::Min(expr)
+                            | GroupProjection::Max(expr) => Some(expr),
+                            GroupProjection::Key(_) | GroupProjection::Count => None,
+                        };
+                        expr.map(|e| program_env.compile_expr(e, &bindings))
+                            .transpose()
+                            .map_err(WorldError::NetworkError)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 compiled_operators.push(CompiledOperator::GroupedCount {
                     compiled_group_keys,
+                    compiled_aggregates,
                 });
             }
         }
@@ -857,6 +1056,15 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                     "decide '{qname}' unknown source relation '{src}'"
                 ))
             })?;
+            let per_type = op_schemas[op_id.0]
+                .get(&format!("{}.{per_field}", decl.binder))
+                .or_else(|| op_schemas[op_id.0].get(&per_field))
+                .cloned()
+                .ok_or_else(|| {
+                    WorldError::NetworkError(format!(
+                        "reference decide '{qname}' per field '{per_field}' has no resolved type"
+                    ))
+                })?;
             let bindings = derive_decide_binding_names(&op_schemas[op_id.0], &decl.binder);
             let mut compiled_proposals = Vec::with_capacity(decl.proposals.len());
             for prop in &decl.proposals {
@@ -878,6 +1086,7 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                 binder: decl.binder.clone(),
                 source_relation: src,
                 per_field,
+                per_type,
                 proposals: decl.proposals.clone(),
                 compiled_proposals,
             });
@@ -975,6 +1184,58 @@ pub fn evaluate_with_budget(
     max_work: Option<u64>,
     work_offset: u64,
 ) -> Result<ReferenceState, WorldError> {
+    let mut staged_relations = base_relations.clone();
+    for _ in 0..=program.decides.len() {
+        let mut state =
+            evaluate_once_with_budget(program, &staged_relations, meter, max_work, work_offset)?;
+        let mut next_relations = staged_relations.clone();
+        for decide in &program.decides {
+            let mut rows = BTreeMap::new();
+            if let Some(entities) = state.settlements.get(&decide.name) {
+                for (entity_id, winner) in entities {
+                    let entity_value =
+                        Value::from_typed_bytes(entity_id.as_bytes(), &decide.per_type)?;
+                    let priority = i64::try_from(winner.priority).map_err(|_| {
+                        WorldError::NetworkError(format!(
+                            "reference winner priority for '{}' exceeds the winner row Int range",
+                            decide.name
+                        ))
+                    })?;
+                    let row = BTreeMap::from([
+                        (decide.per_field.clone(), entity_value),
+                        (
+                            "candidate".into(),
+                            Value::Str(winner.candidate_name.clone()),
+                        ),
+                        ("priority".into(), Value::Int(priority)),
+                        ("value".into(), winner.value.clone()),
+                    ]);
+                    rows.insert(
+                        WorldKey::new(row[&decide.per_field].to_bytes()),
+                        row_to_tuple_record(&row).to_tuple(),
+                    );
+                }
+            }
+            next_relations.insert(decide.name.clone(), rows);
+        }
+        if next_relations == staged_relations {
+            state.base_relations = base_relations.clone();
+            return Ok(state);
+        }
+        staged_relations = next_relations;
+    }
+    Err(WorldError::NetworkError(
+        "reference winner-row strata did not reach a fixed point despite acyclic lowering".into(),
+    ))
+}
+
+fn evaluate_once_with_budget(
+    program: &ReferenceProgram,
+    base_relations: &BTreeMap<String, BTreeMap<WorldKey, WorldTuple>>,
+    meter: &mut ReferenceWorkMeter,
+    max_work: Option<u64>,
+    work_offset: u64,
+) -> Result<ReferenceState, WorldError> {
     let dag = &program.dag;
     let mut operator_outputs: Vec<Vec<Row>> = Vec::with_capacity(dag.nodes.len());
 
@@ -982,6 +1243,10 @@ pub fn evaluate_with_budget(
         let rows = match node {
             OperatorNode::Scan {
                 relation, schema, ..
+            }
+            | OperatorNode::DecisionRows {
+                decide: relation,
+                schema,
             } => {
                 let ast::Ty::Record(fields) = schema else {
                     return Err(WorldError::NetworkError(format!(
@@ -1160,13 +1425,14 @@ pub fn evaluate_with_budget(
                 group_keys: _,
                 projections,
             } => {
-                let compiled_keys = match &program.compiled_operators[idx] {
+                let (compiled_keys, compiled_aggregates) = match &program.compiled_operators[idx] {
                     CompiledOperator::GroupedCount {
                         compiled_group_keys,
-                    } => compiled_group_keys,
+                        compiled_aggregates,
+                    } => (compiled_group_keys, compiled_aggregates),
                     _ => unreachable!(),
                 };
-                let mut groups: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
+                let mut groups: BTreeMap<Vec<Value>, Vec<Vec<Option<Value>>>> = BTreeMap::new();
                 for row in &operator_outputs[input.0] {
                     meter.rows_evaluated += 1;
                     charge_work(meter, work_offset, max_work)?;
@@ -1182,12 +1448,28 @@ pub fn evaluate_with_budget(
                         )?;
                         key.push(Value::from_scalar(l3_val)?);
                     }
-                    *groups.entry(key).or_insert(0) += 1;
+                    let mut aggregates = Vec::with_capacity(compiled_aggregates.len());
+                    for compiled in compiled_aggregates {
+                        let value = if let Some(compiled) = compiled {
+                            let l3_val = eval_compiled_with_budget(
+                                compiled,
+                                &bindings,
+                                meter,
+                                work_offset,
+                                max_work,
+                            )?;
+                            Some(Value::from_scalar(l3_val)?)
+                        } else {
+                            None
+                        };
+                        aggregates.push(value);
+                    }
+                    groups.entry(key).or_default().push(aggregates);
                 }
                 groups
                     .into_iter()
-                    .map(|(key, count)| build_grouped_row(projections, &key, count))
-                    .collect()
+                    .map(|(key, values)| build_grouped_row(projections, &key, &values))
+                    .collect::<Result<Vec<_>, _>>()?
             }
         };
         operator_outputs.push(rows);

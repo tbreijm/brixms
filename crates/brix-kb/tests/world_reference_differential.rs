@@ -64,6 +64,21 @@ decide dispatch for f in fulfillment per order_id {
 }
 "#;
 
+const DECISION_CHAIN_MODEL_SRC: &str = r#"
+rel input orders: { id: Str, quote: Int } key id
+decide approve for o in orders per id {
+    propose accepted priority 1 when o.quote > 0 = o.quote
+}
+rel derived approved_orders = select { id: a.id, quote: a.value } from a in approve
+decide review for a in approved_orders per id {
+    propose reviewed priority 2 when a.quote > 0 = a.quote
+}
+rel derived reviewed_orders = select { id: r.id, quote: r.value } from r in review
+decide dispatch for r in reviewed_orders per id {
+    propose dispatch priority 3 when r.quote > 0 = r.quote
+}
+"#;
+
 fn link(src: &str) -> LinkedProgram {
     let mut sources = BTreeMap::new();
     sources.insert("root".to_string(), src.to_string());
@@ -814,4 +829,33 @@ fn fuzz_battery_seed_2() {
 #[test]
 fn fuzz_battery_seed_3() {
     run_fuzz_battery(0x0BAD_C0FF_EE00_1234, 250);
+}
+
+#[test]
+fn three_stage_decision_chain_differential_fuzz() {
+    let (mut network, refprog) = make_pair(DECISION_CHAIN_MODEL_SRC);
+    let mut rng = Lcg(0xA71A_5EED_0046);
+    assert_agrees_with_reference(&network, &refprog, "decision-chain initial");
+
+    for step in 0..160u64 {
+        let id = rng.next_range(16) + 1;
+        let op = if rng.next_range(5) == 0 {
+            remove_op("root::orders", id)
+        } else {
+            let mut row = TupleRecord::new();
+            row.set_str("id", &format!("order-{id}"));
+            row.set_str("quote", &rng.next_range(5).to_string());
+            WorldBatchOp::Upsert {
+                relation: "root::orders".into(),
+                key: WorldKey::from_u64(id),
+                tuple: row.to_tuple(),
+            }
+        };
+        let label = format!("decision-chain seed=0xA71A5EED0046 step={step}");
+        apply(&mut network, &label, vec![op]);
+        assert_agrees_with_reference(&network, &refprog, &label);
+        network
+            .verify_differential_correctness()
+            .unwrap_or_else(|error| panic!("[{label}] incremental replay mismatch: {error}"));
+    }
 }

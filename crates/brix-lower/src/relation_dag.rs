@@ -42,6 +42,10 @@ pub struct FieldRef {
 pub enum GroupProjection {
     Key(usize),
     Count,
+    SumInt(Expr),
+    SumDecimal(Expr),
+    Min(Expr),
+    Max(Expr),
 }
 
 /// An operator node in the relational DAG.
@@ -53,6 +57,10 @@ pub enum OperatorNode {
         schema: ast::Ty,
         key_fields: Vec<String>,
     },
+    /// Runtime-owned settled winner rows for one per-entity decision.
+    /// The relation name is the qualified decide name; rows are published by
+    /// the world network only after the corresponding entity settles.
+    DecisionRows { decide: String, schema: ast::Ty },
     /// Introduce a query-local record binding. Each use has its own binding,
     /// including two uses of the same underlying relation in a self join.
     Bind { input: OperatorId, alias: String },
@@ -211,6 +219,30 @@ pub fn lower_relations(program: &LinkedProgram) -> Result<RelationDag, Relationa
         all_relations.insert(name, RelationSource::Derived(decl.clone()));
     }
 
+    // A decide is also a relation producer: its output is the one settled
+    // winner row per entity. Putting it in this graph makes stage ordering
+    // explicit and lets the same cycle check cover relation/decision cycles.
+    let decide_names: BTreeSet<String> = program.decides.keys().map(ToString::to_string).collect();
+    for (qname, decl) in &program.decides {
+        let source_is_world = match &decl.list {
+            Expr::Var(source) => {
+                let local = format!("{}::{source}", qname.module);
+                all_relations.contains_key(source)
+                    || all_relations.contains_key(&local)
+                    || decide_names.contains(source)
+                    || decide_names.contains(&local)
+            }
+            _ => false,
+        };
+        if source_is_world {
+            let name = qname.to_string();
+            if all_relations.contains_key(&name) {
+                return Err(RelationalLowerError::DuplicateRelation(name));
+            }
+            all_relations.insert(name, RelationSource::Decision(decl.clone()));
+        }
+    }
+
     // 1. Build relation dependency graph
     let mut dependencies: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (name, source) in &all_relations {
@@ -229,6 +261,19 @@ pub fn lower_relations(program: &LinkedProgram) -> Result<RelationDag, Relationa
                     deps.push(dep);
                 }
                 dependencies.insert(name.clone(), deps);
+            }
+            RelationSource::Decision(decide) => {
+                let dep = match &decide.list {
+                    Expr::Var(source_name) => {
+                        resolve_binding_relation(source_name, owner_module(name), &all_relations)?
+                    }
+                    _ => {
+                        return Err(RelationalLowerError::UnsupportedExpression(format!(
+                            "decide '{name}' must read a named relation to publish winner rows"
+                        )))
+                    }
+                };
+                dependencies.insert(name.clone(), vec![dep]);
             }
         }
     }
@@ -267,6 +312,62 @@ pub fn lower_relations(program: &LinkedProgram) -> Result<RelationDag, Relationa
                     program,
                     &mut dag,
                 )?;
+                dag.relation_outputs.insert(rel_name, op);
+            }
+            RelationSource::Decision(decide) => {
+                let source_rel = match &decide.list {
+                    Expr::Var(v) => {
+                        resolve_binding_relation(v, owner_module(&rel_name), &all_relations)?
+                    }
+                    _ => unreachable!("decision relation source validated above"),
+                };
+                let source_op = dag.relation_outputs[&source_rel];
+                let source_fields = decision_field_schemas(&dag, program)[source_op.0].clone();
+                let per_field = decide.per.as_ref().ok_or_else(|| {
+                    RelationalLowerError::DecideMissingEntityField {
+                        decide: rel_name.clone(),
+                    }
+                })?;
+                let key_ty = source_fields
+                    .get(&format!("{}.{}", decide.binder, per_field))
+                    .or_else(|| source_fields.get(per_field))
+                    .cloned()
+                    .ok_or_else(|| {
+                        RelationalLowerError::UnsupportedExpression(format!(
+                            "decide '{}' per field '{}' does not exist in source relation",
+                            rel_name, per_field
+                        ))
+                    })?;
+                if ["candidate", "priority", "value"].contains(&per_field.as_str()) {
+                    return Err(RelationalLowerError::UnsupportedExpression(format!(
+                        "decide '{}' per field '{}' collides with a reserved winner-row field",
+                        rel_name, per_field
+                    )));
+                }
+                let value_ty =
+                    infer_decision_value_type(decide, &source_fields, program, &rel_name)?;
+                let schema = ast::Ty::Record(vec![
+                    ast::FieldDecl {
+                        name: per_field.clone(),
+                        ty: key_ty,
+                    },
+                    ast::FieldDecl {
+                        name: "candidate".into(),
+                        ty: ast::Ty::Named("Str".into()),
+                    },
+                    ast::FieldDecl {
+                        name: "priority".into(),
+                        ty: ast::Ty::Named("Int".into()),
+                    },
+                    ast::FieldDecl {
+                        name: "value".into(),
+                        ty: value_ty,
+                    },
+                ]);
+                let op = dag.add_node(OperatorNode::DecisionRows {
+                    decide: rel_name.clone(),
+                    schema,
+                });
                 dag.relation_outputs.insert(rel_name, op);
             }
         }
@@ -391,6 +492,13 @@ pub fn decision_field_schemas(
                     .map(|f| (f.name.clone(), f.ty.clone()))
                     .collect()
             }
+            OperatorNode::DecisionRows { schema, .. } => match schema {
+                ast::Ty::Record(fields) => fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.ty.clone()))
+                    .collect(),
+                _ => BTreeMap::new(),
+            },
             OperatorNode::Bind { input, alias } => {
                 let mut map = BTreeMap::new();
                 for (k, v) in &schemas[input.0] {
@@ -422,7 +530,15 @@ pub fn decision_field_schemas(
             } => projections
                 .iter()
                 .filter_map(|(k, p)| match p {
-                    GroupProjection::Count => Some((k.clone(), ast::Ty::Named("Int".into()))),
+                    GroupProjection::Count | GroupProjection::SumInt(_) => {
+                        Some((k.clone(), ast::Ty::Named("Int".into())))
+                    }
+                    GroupProjection::SumDecimal(_) => {
+                        Some((k.clone(), ast::Ty::Named("Decimal".into())))
+                    }
+                    GroupProjection::Min(expr) | GroupProjection::Max(expr) => {
+                        expr_ty(expr, &schemas[input.0], program).map(|t| (k.clone(), t))
+                    }
                     GroupProjection::Key(i) => {
                         expr_ty(&group_keys[*i], &schemas[input.0], program).map(|t| (k.clone(), t))
                     }
@@ -468,6 +584,130 @@ pub fn derive_decide_binding_names(
 enum RelationSource {
     Input(ast::RelInputDecl),
     Derived(ast::RelDerivedDecl),
+    Decision(ast::DecideDecl),
+}
+
+fn infer_decision_value_type(
+    decide: &ast::DecideDecl,
+    source_fields: &BTreeMap<String, ast::Ty>,
+    program: &LinkedProgram,
+    decide_name: &str,
+) -> Result<ast::Ty, RelationalLowerError> {
+    fn infer(
+        expr: &Expr,
+        fields: &BTreeMap<String, ast::Ty>,
+        module: &str,
+        program: &LinkedProgram,
+    ) -> Option<ast::Ty> {
+        match expr {
+            Expr::Str(_) => Some(ast::Ty::Named("Str".into())),
+            Expr::Bool(_) => Some(ast::Ty::Named("Bool".into())),
+            Expr::Num(n) => Some(ast::Ty::Named(
+                if n.contains('.') { "F64" } else { "Int" }.into(),
+            )),
+            Expr::Var(v) => fields.get(v).cloned().or_else(|| {
+                let q = if v.contains("::") {
+                    v.clone()
+                } else {
+                    format!("{module}::{v}")
+                };
+                program
+                    .configs
+                    .iter()
+                    .find(|(name, c)| {
+                        name.to_string() == q && matches!(c.body, ast::ConfigBody::Sum(_))
+                    })
+                    .map(|(name, _)| ast::Ty::Named(name.to_string()))
+            }),
+            Expr::Field(base, field) => match base.as_ref() {
+                Expr::Var(alias) => fields.get(&format!("{alias}.{field}")).cloned(),
+                _ => None,
+            },
+            Expr::Record { config, .. } => {
+                let q = if config.contains("::") {
+                    config.clone()
+                } else {
+                    format!("{module}::{config}")
+                };
+                Some(ast::Ty::Named(q))
+            }
+            Expr::AnonRecord(record_fields) => Some(ast::Ty::Record(
+                record_fields
+                    .iter()
+                    .map(|(name, expr)| {
+                        Some(ast::FieldDecl {
+                            name: name.clone(),
+                            ty: infer(expr, fields, module, program)?,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            )),
+            Expr::Call { func, .. } => {
+                if let Some((_, f)) = program
+                    .functions
+                    .iter()
+                    .find(|(q, f)| q.to_string() == *func || f.name == *func)
+                {
+                    f.ret.clone()
+                } else {
+                    let q = if func.contains("::") {
+                        func.clone()
+                    } else {
+                        format!("{module}::{func}")
+                    };
+                    program
+                        .configs
+                        .iter()
+                        .find(|(name, c)| {
+                            name.to_string() == q && matches!(c.body, ast::ConfigBody::Sum(_))
+                        })
+                        .map(|(name, _)| ast::Ty::Named(name.to_string()))
+                }
+            }
+            Expr::Bin { op, .. } if op.is_comparison() || op.is_logical() => {
+                Some(ast::Ty::Named("Bool".into()))
+            }
+            Expr::Bin { lhs, .. } => infer(lhs, fields, module, program),
+            _ => None,
+        }
+    }
+    let mut fields = source_fields.clone();
+    for (name, ty) in source_fields {
+        if let Some((alias, field)) = name.split_once('.') {
+            if alias == &decide.binder {
+                fields.insert(field.to_string(), ty.clone());
+            }
+        } else {
+            fields.insert(format!("{}.{name}", decide.binder), ty.clone());
+        }
+    }
+    let module = decide_name.rsplit_once("::").map_or("", |(m, _)| m);
+    let mut result: Option<ast::Ty> = None;
+    for proposal in &decide.proposals {
+        i64::try_from(proposal.priority).map_err(|_| {
+            RelationalLowerError::UnsupportedExpression(format!(
+                "decide '{decide_name}' proposal '{}' priority {} exceeds the winner-row Int range",
+                proposal.name, proposal.priority
+            ))
+        })?;
+        let ty = infer(&proposal.value, &fields, module, program).ok_or_else(|| {
+            RelationalLowerError::UnsupportedExpression(format!(
+                "cannot infer proposal result type for decide '{decide_name}' candidate '{}'",
+                proposal.name
+            ))
+        })?;
+        if result.as_ref().is_some_and(|existing| existing != &ty) {
+            return Err(RelationalLowerError::UnsupportedExpression(format!(
+                "decide '{decide_name}' proposals have inconsistent result types: {result:?} and {ty:?}"
+            )));
+        }
+        result = Some(ty);
+    }
+    result.ok_or_else(|| {
+        RelationalLowerError::UnsupportedExpression(format!(
+            "decide '{decide_name}' has no proposals, so its winner-row value type is unknown"
+        ))
+    })
 }
 
 fn owner_module(qualified_name: &str) -> &str {
@@ -748,19 +988,51 @@ fn lower_derived_query(
             )));
         }
     }
-    let has_count = expr_contains_count(&query.select);
-    if !query.group_by.is_empty() || has_count {
+    let has_aggregate = expr_contains_aggregate(&query.select);
+    if !query.group_by.is_empty() || has_aggregate {
         let mut grouped_projections = Vec::new();
         for (name, expression) in projections {
             let projection = match &expression {
                 Expr::Call { func, args } if func == "count" && args.is_empty() => {
                     GroupProjection::Count
                 }
+                Expr::Call { func, args } if func == "sum" && args.len() == 1 => {
+                    let ty = expr_ty_for_aggregate(
+                        &args[0],
+                        &decision_field_schemas(dag, program)[current_op.0],
+                        program,
+                    );
+                    match ty.as_ref().and_then(|t| match t {
+                        ast::Ty::Named(n) => Some(n.as_str()),
+                        _ => None,
+                    }) {
+                        Some("Int") => GroupProjection::SumInt(args[0].clone()),
+                        Some("Decimal") => GroupProjection::SumDecimal(args[0].clone()),
+                        Some("F64") => {
+                            return Err(RelationalLowerError::UnsupportedExpression(
+                                "sum(F64) is refused; use exact Int or Decimal aggregation".into(),
+                            ))
+                        }
+                        _ => {
+                            return Err(RelationalLowerError::UnsupportedExpression(format!(
+                                "sum() requires Int or Decimal input, got {ty:?}"
+                            )))
+                        }
+                    }
+                }
+                Expr::Call { func, args } if func == "min" && args.len() == 1 => {
+                    validate_extremum_type(&args[0], dag, current_op, program)?;
+                    GroupProjection::Min(args[0].clone())
+                }
+                Expr::Call { func, args } if func == "max" && args.len() == 1 => {
+                    validate_extremum_type(&args[0], dag, current_op, program)?;
+                    GroupProjection::Max(args[0].clone())
+                }
                 _ => match query.group_by.iter().position(|key| key == &expression) {
                     Some(index) => GroupProjection::Key(index),
                     None => {
                         return Err(RelationalLowerError::UnsupportedExpression(format!(
-                            "grouped projection '{name}' must be an exact group key or count()"
+                            "grouped projection '{name}' must be a group key or supported aggregate"
                         )))
                     }
                 },
@@ -913,6 +1185,12 @@ fn validate_binding_fields(
                     }
                     _ => Some(vec!["value"]),
                 },
+                RelationSource::Decision(decide) => Some(vec![
+                    decide.per.as_deref().unwrap_or(""),
+                    "candidate",
+                    "priority",
+                    "value",
+                ]),
             };
             if let Some(fields) = fields {
                 if !fields.contains(&field.as_str()) {
@@ -1024,12 +1302,51 @@ fn match_equijoin_predicate(
     None
 }
 
-fn expr_contains_count(expr: &Expr) -> bool {
+fn expr_contains_aggregate(expr: &Expr) -> bool {
     match expr {
-        Expr::Call { func, .. } if func == "count" => true,
-        Expr::AnonRecord(fields) => fields.iter().any(|(_, e)| expr_contains_count(e)),
-        Expr::Field(base, _) => expr_contains_count(base),
-        Expr::Bin { lhs, rhs, .. } => expr_contains_count(lhs) || expr_contains_count(rhs),
+        Expr::Call { func, .. } if ["count", "sum", "min", "max"].contains(&func.as_str()) => true,
+        Expr::AnonRecord(fields) => fields.iter().any(|(_, e)| expr_contains_aggregate(e)),
+        Expr::Field(base, _) => expr_contains_aggregate(base),
+        Expr::Bin { lhs, rhs, .. } => expr_contains_aggregate(lhs) || expr_contains_aggregate(rhs),
         _ => false,
+    }
+}
+
+fn validate_extremum_type(
+    expr: &Expr,
+    dag: &RelationDag,
+    input: OperatorId,
+    program: &LinkedProgram,
+) -> Result<(), RelationalLowerError> {
+    let ty = decision_field_schemas(dag, program)
+        .get(input.0)
+        .and_then(|fields| expr_ty_for_aggregate(expr, fields, program));
+    if matches!(ty, Some(ast::Ty::Named(ref n)) if ["Int", "Decimal", "Str"].contains(&n.as_str()))
+    {
+        Ok(())
+    } else {
+        Err(RelationalLowerError::UnsupportedExpression(format!(
+            "min/max require Int, Decimal, or Str input, got {ty:?}"
+        )))
+    }
+}
+
+fn expr_ty_for_aggregate(
+    expr: &Expr,
+    fields: &BTreeMap<String, ast::Ty>,
+    program: &LinkedProgram,
+) -> Option<ast::Ty> {
+    match expr {
+        Expr::Var(v) => fields.get(v).cloned(),
+        Expr::Field(base, field) => match base.as_ref() {
+            Expr::Var(alias) => fields.get(&format!("{alias}.{field}")).cloned(),
+            _ => None,
+        },
+        Expr::Call { func, .. } => program
+            .functions
+            .iter()
+            .find(|(q, _)| q.to_string() == *func)
+            .and_then(|(_, f)| f.ret.clone()),
+        _ => None,
     }
 }

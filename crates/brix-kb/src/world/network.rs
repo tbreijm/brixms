@@ -115,6 +115,13 @@ pub enum DerivationId {
         op: OperatorId,
         group_key: Vec<Value>,
     },
+    /// A settled winner row supplied by a prior decision stratum.
+    Winner {
+        decide: String,
+        entity_id: String,
+        candidate: String,
+        revision: u64,
+    },
     /// Canonical derivation for a distinct tuple produced by set semantics.
     Distinct { op: OperatorId, tuple_key: Vec<u8> },
 }
@@ -146,6 +153,18 @@ impl DerivationId {
                     w.write_bytes(&v.to_bytes());
                 }
             }
+            Self::Winner {
+                decide,
+                entity_id,
+                candidate,
+                revision,
+            } => {
+                w.write_uint(6);
+                w.write_str(decide);
+                w.write_str(entity_id);
+                w.write_str(candidate);
+                w.write_uint(*revision);
+            }
             Self::Distinct { op, tuple_key } => {
                 w.write_uint(5);
                 w.write_uint(op.0 as u64);
@@ -174,7 +193,7 @@ impl DerivationId {
                 left.collect_base_facts(out);
                 right.collect_base_facts(out);
             }
-            Self::Group { .. } | Self::Distinct { .. } => {}
+            Self::Group { .. } | Self::Distinct { .. } | Self::Winner { .. } => {}
         }
     }
 }
@@ -328,6 +347,15 @@ pub struct DecisionExplanation {
     pub calendar_key: Option<Key>,
     pub candidates: Vec<CandidateExplanation>,
     pub contributing_facts: Vec<(String, WorldKey)>,
+    pub upstream_settlements: Vec<UpstreamSettlementLink>,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct UpstreamSettlementLink {
+    pub decide: String,
+    pub entity_id: String,
+    pub candidate: String,
+    pub revision: u64,
 }
 
 impl DecisionExplanation {
@@ -348,6 +376,12 @@ impl DecisionExplanation {
                     "key": key_repr,
                 })
             }).collect::<Vec<_>>(),
+            "upstream_settlements": self.upstream_settlements.iter().map(|link| serde_json::json!({
+                "decide": link.decide,
+                "entity_id": link.entity_id,
+                "candidate": link.candidate,
+                "revision": link.revision,
+            })).collect::<Vec<_>>(),
         })
     }
 }
@@ -373,6 +407,7 @@ pub struct DecideBlock {
     /// `lower_relations` refuses any world-profile `decide` lacking this, so
     /// by the time a `DecideBlock` exists it is always present.
     pub per_field: String,
+    pub per_type: ast::Ty,
     pub proposals: Vec<ast::ProposeDecl>,
     pub compiled_proposals: Vec<CompiledPropose>,
 }
@@ -435,8 +470,136 @@ pub enum OperatorState {
         group_keys: Vec<ast::Expr>,
         compiled_group_keys: Vec<CompiledWorldExpr>,
         projections: Vec<(String, GroupProjection)>,
-        groups: PMap<Vec<Value>, PSet<DerivationId>>,
+        compiled_aggregates: Vec<Option<CompiledWorldExpr>>,
+        groups: PMap<Vec<Value>, GroupAccumulator>,
     },
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GroupAccumulator {
+    supports: PSet<DerivationId>,
+    int_sums: Vec<i128>,
+    decimal_sums: Vec<WideSigned>,
+    decimal_scales: Vec<u8>,
+    ordered: Vec<BTreeMap<Value, usize>>,
+}
+
+/// A signed base-10 integer with no fixed precision ceiling. Decimal group
+/// totals use this while a batch is being accumulated, then narrow once the
+/// whole group stratum has settled.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct WideSigned {
+    negative: bool,
+    digits: Vec<u8>,
+}
+
+impl WideSigned {
+    fn from_i128(value: i128) -> Self {
+        let mut magnitude = value.unsigned_abs();
+        let mut digits = Vec::new();
+        while magnitude != 0 {
+            digits.push((magnitude % 10) as u8);
+            magnitude /= 10;
+        }
+        Self {
+            negative: value < 0,
+            digits,
+        }
+    }
+
+    fn mul_pow10(&mut self, power: u8) {
+        if !self.digits.is_empty() {
+            self.digits
+                .splice(0..0, std::iter::repeat_n(0, power as usize));
+        }
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        if other.digits.is_empty() {
+            return;
+        }
+        if self.digits.is_empty() {
+            *self = other.clone();
+            return;
+        }
+        if self.negative == other.negative {
+            let mut carry = 0u8;
+            for idx in 0..self.digits.len().max(other.digits.len()) {
+                if idx == self.digits.len() {
+                    self.digits.push(0);
+                }
+                let sum = self.digits[idx] + other.digits.get(idx).copied().unwrap_or(0) + carry;
+                self.digits[idx] = sum % 10;
+                carry = sum / 10;
+            }
+            if carry != 0 {
+                self.digits.push(carry);
+            }
+            return;
+        }
+        match self.abs_cmp(other) {
+            std::cmp::Ordering::Equal => {
+                self.digits.clear();
+                self.negative = false;
+            }
+            std::cmp::Ordering::Greater => self.sub_abs(other),
+            std::cmp::Ordering::Less => {
+                let mut result = other.clone();
+                result.sub_abs(self);
+                *self = result;
+            }
+        }
+    }
+
+    fn abs_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.digits
+            .len()
+            .cmp(&other.digits.len())
+            .then_with(|| self.digits.iter().rev().cmp(other.digits.iter().rev()))
+    }
+
+    fn sub_abs(&mut self, other: &Self) {
+        let mut borrow = 0i8;
+        for idx in 0..self.digits.len() {
+            let mut digit =
+                self.digits[idx] as i8 - other.digits.get(idx).copied().unwrap_or(0) as i8 - borrow;
+            if digit < 0 {
+                digit += 10;
+                borrow = 1;
+            } else {
+                borrow = 0;
+            }
+            self.digits[idx] = digit as u8;
+        }
+        while self.digits.last() == Some(&0) {
+            self.digits.pop();
+        }
+        if self.digits.is_empty() {
+            self.negative = false;
+        }
+    }
+
+    fn to_decimal(&self, scale: u8) -> Option<brix_canon::Decimal> {
+        let mut wide = self.clone();
+        let mut scale = scale;
+        while scale > 0 && wide.digits.first() == Some(&0) {
+            wide.digits.remove(0);
+            scale -= 1;
+        }
+        let magnitude = wide.digits.iter().rev().try_fold(0u128, |acc, digit| {
+            acc.checked_mul(10)?.checked_add(*digit as u128)
+        })?;
+        let signed = if wide.negative {
+            if magnitude == (i128::MAX as u128) + 1 {
+                i128::MIN
+            } else {
+                -i128::try_from(magnitude).ok()?
+            }
+        } else {
+            i128::try_from(magnitude).ok()?
+        };
+        Some(brix_canon::Decimal::new(signed, scale))
+    }
 }
 
 /// Fully observable snapshot of the network state for diffs and verification.
@@ -480,6 +643,8 @@ pub struct WorldNetwork {
     pub derived_relations: PMap<String, PSet<TupleRecord>>,
     pub decides: PMap<String, DecideBlock>,
     decision_subscribers: PMap<String, Vec<String>>,
+    virtual_relations: BTreeSet<String>,
+    winner_versions: PMap<(String, WorldKey), u64>,
     /// Content-addressed trie of settled decisions, keyed by [`decision_key`].
     /// `pub(crate)` so `session.rs` can persist its nodes to the durable node
     /// store (ADR-0046 P6 G2, decided 2026-10-04) without this module owning
@@ -499,6 +664,7 @@ impl WorldNetwork {
         let mut relation_subscribers: PMap<String, Vec<OperatorId>> = PMap::new();
         let mut downstream: PMap<OperatorId, Vec<OperatorId>> = PMap::new();
         let mut base_relations = PMap::new();
+        let mut virtual_relations = BTreeSet::new();
 
         for (idx, node) in dag.nodes.iter().enumerate() {
             let op_id = OperatorId(idx);
@@ -518,6 +684,31 @@ impl WorldNetwork {
                         OperatorState::Scan {
                             relation: relation.clone(),
                             key_fields: key_fields.clone(),
+                            schema: schema.clone(),
+                            records: PMap::new(),
+                        },
+                    );
+                }
+                OperatorNode::DecisionRows { decide, schema } => {
+                    virtual_relations.insert(decide.clone());
+                    let key_field = match schema {
+                        ast::Ty::Record(fields) => {
+                            fields.first().map(|f| f.name.clone()).unwrap_or_default()
+                        }
+                        _ => String::new(),
+                    };
+                    relation_subscribers
+                        .entry(decide.clone())
+                        .or_default()
+                        .push(op_id);
+                    // The virtual relation has the same maintained scan shape
+                    // as an input relation, but is populated only by the
+                    // settlement stage (never by source batch operations).
+                    operator_states.insert(
+                        idx,
+                        OperatorState::Scan {
+                            relation: decide.clone(),
+                            key_fields: vec![key_field],
                             schema: schema.clone(),
                             records: PMap::new(),
                         },
@@ -598,6 +789,7 @@ impl WorldNetwork {
                             group_keys: group_keys.clone(),
                             compiled_group_keys: Vec::new(),
                             projections: projections.clone(),
+                            compiled_aggregates: vec![None; projections.len()],
                             groups: PMap::new(),
                         },
                     );
@@ -626,6 +818,8 @@ impl WorldNetwork {
             derived_relations,
             decides: PMap::new(),
             decision_subscribers: PMap::new(),
+            virtual_relations,
+            winner_versions: PMap::new(),
             decision_tree: TrieMap::new(),
             candidate_frontier: PMap::new(),
             functions: Arc::new(BTreeMap::new()),
@@ -684,6 +878,7 @@ impl WorldNetwork {
             .map(|(k, _)| (k.clone(), PSet::new()))
             .collect();
         fresh.decision_tree = TrieMap::new();
+        fresh.winner_versions = PMap::new();
         fresh.candidate_frontier = PMap::new();
         fresh.current_revision = 0;
         let mut op_states = self.operator_states.clone();
@@ -726,12 +921,14 @@ impl WorldNetwork {
                     group_keys,
                     compiled_group_keys,
                     projections,
+                    compiled_aggregates,
                     ..
                 } => OperatorState::GroupedCount {
                     input: *input,
                     group_keys: group_keys.clone(),
                     compiled_group_keys: compiled_group_keys.clone(),
                     projections: projections.clone(),
+                    compiled_aggregates: compiled_aggregates.clone(),
                     groups: PMap::new(),
                 },
             };
@@ -811,7 +1008,9 @@ impl WorldNetwork {
                     }
                 }
                 OperatorNode::GroupedCount {
-                    input, group_keys, ..
+                    input,
+                    group_keys,
+                    projections,
                 } => {
                     let bindings = derive_binding_names(&op_schemas[input.0]);
                     let mut compiled_group_keys = Vec::with_capacity(group_keys.len());
@@ -821,12 +1020,29 @@ impl WorldNetwork {
                             .map_err(WorldError::NetworkError)?;
                         compiled_group_keys.push(compiled);
                     }
+                    let compiled_aggregates = projections
+                        .iter()
+                        .map(|(_, projection)| {
+                            let expr = match projection {
+                                GroupProjection::SumInt(expr)
+                                | GroupProjection::SumDecimal(expr)
+                                | GroupProjection::Min(expr)
+                                | GroupProjection::Max(expr) => Some(expr),
+                                GroupProjection::Key(_) | GroupProjection::Count => None,
+                            };
+                            expr.map(|e| program_env.compile_expr(e, &bindings))
+                                .transpose()
+                                .map_err(WorldError::NetworkError)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     if let Some(OperatorState::GroupedCount {
                         compiled_group_keys: ref mut cgk,
+                        compiled_aggregates: ref mut ca,
                         ..
                     }) = network.operator_states.get_mut(&idx)
                     {
                         *cgk = compiled_group_keys;
+                        *ca = compiled_aggregates;
                     }
                 }
                 _ => {}
@@ -853,6 +1069,15 @@ impl WorldNetwork {
                         "decide '{qname}' unknown source relation '{src}'"
                     ))
                 })?;
+                let per_type = op_schemas[op_id.0]
+                    .get(&format!("{}.{per_field}", decl.binder))
+                    .or_else(|| op_schemas[op_id.0].get(&per_field))
+                    .cloned()
+                    .ok_or_else(|| {
+                        WorldError::NetworkError(format!(
+                            "decide '{qname}' per field '{per_field}' has no resolved type"
+                        ))
+                    })?;
                 let bindings = derive_decide_binding_names(&op_schemas[op_id.0], &decl.binder);
                 let mut compiled_proposals = Vec::with_capacity(decl.proposals.len());
                 for prop in &decl.proposals {
@@ -874,6 +1099,7 @@ impl WorldNetwork {
                     binder: decl.binder.clone(),
                     source_relation: src,
                     per_field,
+                    per_type,
                     proposals: decl.proposals.clone(),
                     compiled_proposals,
                 });
@@ -945,6 +1171,15 @@ impl WorldNetwork {
         ops: &[WorldBatchOp],
         limits: &NetworkLimits,
     ) -> Result<NetworkDeltaReport, WorldError> {
+        self.apply_ops_staged_inner(ops, limits, false)
+    }
+
+    fn apply_ops_staged_inner(
+        &mut self,
+        ops: &[WorldBatchOp],
+        limits: &NetworkLimits,
+        allow_winner_rows: bool,
+    ) -> Result<NetworkDeltaReport, WorldError> {
         let mut report = NetworkDeltaReport {
             revision: self.current_revision + 1,
             ops_applied: ops.len(),
@@ -977,10 +1212,14 @@ impl WorldNetwork {
         // 1. Process base ops at Scan nodes
         for op in ops {
             let rel_name = op.relation();
-            let base_rel = self
-                .base_relations
-                .get_mut(rel_name)
-                .ok_or_else(|| WorldError::UnknownRelation(rel_name.to_string()))?;
+            let is_winner_relation = self.virtual_relations.contains(rel_name);
+            if is_winner_relation && !allow_winner_rows {
+                return Err(WorldError::UnknownRelation(rel_name.to_string()));
+            }
+            let mut base_rel = self.base_relations.get_mut(rel_name);
+            if base_rel.is_none() && !is_winner_relation {
+                return Err(WorldError::UnknownRelation(rel_name.to_string()));
+            }
 
             let scan_ops = self
                 .relation_subscribers
@@ -994,6 +1233,7 @@ impl WorldNetwork {
                     .expect("scan operator");
                 if let OperatorState::Scan {
                     relation,
+                    key_fields,
                     schema,
                     records,
                     ..
@@ -1001,10 +1241,34 @@ impl WorldNetwork {
                 {
                     match op {
                         WorldBatchOp::Upsert { key, tuple, .. } => {
-                            base_rel.insert(key.clone(), tuple.clone());
-                            let derivation = DerivationId::Base {
-                                relation: relation.clone(),
-                                key: key.clone(),
+                            if let Some(base_rel) = base_rel.as_mut() {
+                                base_rel.insert(key.clone(), tuple.clone());
+                            }
+                            let derivation = if is_winner_relation {
+                                let entity_id = Value::from_typed_bytes(
+                                    key.as_bytes(),
+                                    &schema_key_type(schema, &key_fields),
+                                )?
+                                .to_string();
+                                let candidate = TupleRecord::from_tuple(tuple)?
+                                    .get_str("candidate")
+                                    .ok_or_else(|| {
+                                        WorldError::NetworkError(
+                                            "winner relation row missing candidate".into(),
+                                        )
+                                    })?
+                                    .to_string();
+                                DerivationId::Winner {
+                                    decide: relation.clone(),
+                                    entity_id,
+                                    candidate,
+                                    revision: self.current_revision + 1,
+                                }
+                            } else {
+                                DerivationId::Base {
+                                    relation: relation.clone(),
+                                    key: key.clone(),
+                                }
                             };
 
                             let rec = TupleRecord::from_tuple(tuple)?;
@@ -1048,7 +1312,19 @@ impl WorldNetwork {
                                 }
                                 let ret_delta = TupleDelta::Retract {
                                     tuple: old_inter.clone(),
-                                    derivation: derivation.clone(),
+                                    derivation: if is_winner_relation {
+                                        winner_derivation_from_row(
+                                            relation,
+                                            old_inter,
+                                            &key_fields,
+                                            self.winner_versions
+                                                .get(&(relation.clone(), key.clone()))
+                                                .copied()
+                                                .unwrap_or(self.current_revision),
+                                        )?
+                                    } else {
+                                        derivation.clone()
+                                    },
                                 };
                                 enqueue(
                                     scan_op_id,
@@ -1063,6 +1339,12 @@ impl WorldNetwork {
                                 tuple: intermediate.clone(),
                                 derivation,
                             };
+                            if is_winner_relation {
+                                self.winner_versions.insert(
+                                    (relation.clone(), key.clone()),
+                                    self.current_revision + 1,
+                                );
+                            }
                             records.insert(key.clone(), (tuple.clone(), intermediate));
                             enqueue(
                                 scan_op_id,
@@ -1073,16 +1355,48 @@ impl WorldNetwork {
                             );
                         }
                         WorldBatchOp::Remove { key, .. } => {
-                            base_rel.remove(key);
+                            if let Some(base_rel) = base_rel.as_mut() {
+                                base_rel.remove(key);
+                            }
                             if let Some((_, old_inter)) = records.remove(key) {
-                                let derivation = DerivationId::Base {
-                                    relation: relation.clone(),
-                                    key: key.clone(),
+                                let derivation = if is_winner_relation {
+                                    let entity_id = old_inter
+                                        .get(&key_fields[0])
+                                        .map(ToString::to_string)
+                                        .unwrap_or_default();
+                                    let candidate = old_inter
+                                        .get("candidate")
+                                        .and_then(Value::as_str)
+                                        .ok_or_else(|| {
+                                            WorldError::NetworkError(
+                                                "winner relation row missing candidate".into(),
+                                            )
+                                        })?
+                                        .to_string();
+                                    DerivationId::Winner {
+                                        decide: relation.clone(),
+                                        entity_id,
+                                        candidate,
+                                        revision: self
+                                            .winner_versions
+                                            .get(&(relation.clone(), key.clone()))
+                                            .copied()
+                                            .unwrap_or(self.current_revision),
+                                    }
+                                } else {
+                                    DerivationId::Base {
+                                        relation: relation.clone(),
+                                        key: key.clone(),
+                                    }
                                 };
                                 let ret_delta = TupleDelta::Retract {
                                     tuple: old_inter,
                                     derivation,
                                 };
+                                if is_winner_relation {
+                                    self.winner_versions
+                                        .remove(&(relation.clone(), key.clone()));
+                                }
                                 enqueue(
                                     scan_op_id,
                                     OperatorWorkItem::Delta(ret_delta),
@@ -1109,14 +1423,28 @@ impl WorldNetwork {
         // 2. Fair round-robin propagation across all operators bounded by quantum
         let mut relation_deltas: BTreeMap<String, Vec<TupleDelta>> = BTreeMap::new();
         let quantum = self.scheduling_quantum.max(1);
+        let mut deferred_groups = BTreeSet::new();
 
         while let Some(op_id) = ready_operators.pop_front() {
             in_ready.remove(&op_id);
             let op_idx = op_id.0;
+            let is_group_operator =
+                matches!(self.dag.nodes[op_idx], OperatorNode::GroupedCount { .. });
+            if is_group_operator && has_pending_ancestor(op_id, &self.dag, &operator_queues) {
+                deferred_groups.insert(op_id);
+                continue;
+            }
             let mut work_in_slice: usize = 0;
             let mut out_deltas = Vec::new();
+            let mut grouped_before: BTreeMap<Vec<Value>, Option<IntermediateTuple>> =
+                BTreeMap::new();
+            let slice_quantum = if is_group_operator {
+                usize::MAX
+            } else {
+                quantum
+            };
 
-            while work_in_slice < quantum {
+            while work_in_slice < slice_quantum {
                 let Some(item) = operator_queues.get_mut(&op_id).and_then(|q| q.pop_front()) else {
                     break;
                 };
@@ -1320,12 +1648,16 @@ impl WorldNetwork {
                                     | DerivationId::Join { op, .. }
                                     | DerivationId::Group { op, .. }
                                     | DerivationId::Distinct { op, .. } => *op == left_op,
-                                    DerivationId::Base { relation, .. } => {
-                                        match &self.dag.nodes[left_op.0] {
-                                            OperatorNode::Scan { relation: r, .. } => r == relation,
-                                            _ => false,
+                                    DerivationId::Base { relation, .. }
+                                    | DerivationId::Winner {
+                                        decide: relation, ..
+                                    } => match &self.dag.nodes[left_op.0] {
+                                        OperatorNode::Scan { relation: r, .. } => r == relation,
+                                        OperatorNode::DecisionRows { decide, .. } => {
+                                            decide == relation
                                         }
-                                    }
+                                        _ => false,
+                                    },
                                 };
 
                                 let keys = if is_left { left_keys } else { right_keys };
@@ -1525,6 +1857,7 @@ impl WorldNetwork {
                         group_keys,
                         compiled_group_keys,
                         projections,
+                        compiled_aggregates,
                         groups,
                         ..
                     } => match item {
@@ -1567,76 +1900,144 @@ impl WorldNetwork {
                                     .collect::<Result<_, _>>()?
                             };
 
+                            let bindings = scalar_bindings(&tuple)?;
+                            let mut aggregate_values =
+                                Vec::with_capacity(compiled_aggregates.len());
+                            for compiled in compiled_aggregates {
+                                if let Some(compiled) = compiled {
+                                    diagnostics.expressions_evaluated += 1;
+                                    if limits
+                                        .max_expressions
+                                        .is_some_and(|max| diagnostics.expressions_evaluated > max)
+                                    {
+                                        return Err(WorldError::BudgetExhausted);
+                                    }
+                                    aggregate_values.push(Some(Value::from_scalar(
+                                        compiled
+                                            .eval(&bindings)
+                                            .map_err(WorldError::NetworkError)?,
+                                    )?));
+                                } else {
+                                    aggregate_values.push(None);
+                                }
+                            }
+                            let existing = groups.get(&key_vals).cloned();
+                            if !is_ins && existing.is_none() {
+                                continue;
+                            }
+                            grouped_before.entry(key_vals.clone()).or_insert_with(|| {
+                                existing.as_ref().map(|state| {
+                                    build_grouped_tuple(projections, &key_vals, state)
+                                        .expect("previously emitted group is representable")
+                                })
+                            });
+                            let mut state = existing
+                                .clone()
+                                .unwrap_or_else(|| empty_group_accumulator(projections));
+                            if state.supports.contains(&deriv) == is_ins {
+                                continue;
+                            }
                             if is_ins {
-                                let set = groups.entry(key_vals.clone()).or_default();
-                                let old_count = set.len();
-                                set.insert(deriv);
-                                let new_count = set.len();
-
-                                if new_count != old_count {
-                                    let out_deriv = DerivationId::Group {
-                                        op: op_id,
-                                        group_key: key_vals.clone(),
-                                    };
-                                    if old_count == 0 {
-                                        let out_tuple =
-                                            build_grouped_tuple(projections, &key_vals, 1);
-                                        out_deltas.push(TupleDelta::Insert {
-                                            tuple: out_tuple,
-                                            derivation: out_deriv,
-                                        });
-                                    } else {
-                                        let old_tuple =
-                                            build_grouped_tuple(projections, &key_vals, old_count);
-                                        let new_tuple =
-                                            build_grouped_tuple(projections, &key_vals, new_count);
-                                        out_deltas.push(TupleDelta::Retract {
-                                            tuple: old_tuple,
-                                            derivation: out_deriv.clone(),
-                                        });
-                                        out_deltas.push(TupleDelta::Insert {
-                                            tuple: new_tuple,
-                                            derivation: out_deriv,
-                                        });
+                                state.supports.insert(deriv);
+                            } else {
+                                state.supports.remove(&deriv);
+                            }
+                            for (idx, ((_, projection), value)) in
+                                projections.iter().zip(aggregate_values).enumerate()
+                            {
+                                let Some(value) = value else { continue };
+                                match projection {
+                                    GroupProjection::SumInt(_) => {
+                                        let Value::Int(value) = value else {
+                                            return Err(WorldError::NetworkError(
+                                                "grouped Int sum received non-Int".into(),
+                                            ));
+                                        };
+                                        let amount = i128::from(value);
+                                        state.int_sums[idx] = if is_ins {
+                                            state.int_sums[idx].checked_add(amount)
+                                        } else {
+                                            state.int_sums[idx].checked_sub(amount)
+                                        }
+                                        .ok_or_else(|| {
+                                            WorldError::NetworkError(
+                                                "grouped Int sum accumulator overflow".into(),
+                                            )
+                                        })?;
                                     }
-                                }
-                            } else if let Some(set) = groups.get_mut(&key_vals) {
-                                let old_count = set.len();
-                                set.remove(&deriv);
-                                let new_count = set.len();
-
-                                if new_count != old_count {
-                                    let out_deriv = DerivationId::Group {
-                                        op: op_id,
-                                        group_key: key_vals.clone(),
-                                    };
-                                    if new_count == 0 {
-                                        let old_tuple =
-                                            build_grouped_tuple(projections, &key_vals, 1);
-                                        groups.remove(&key_vals);
-                                        out_deltas.push(TupleDelta::Retract {
-                                            tuple: old_tuple,
-                                            derivation: out_deriv,
-                                        });
-                                    } else {
-                                        let old_tuple =
-                                            build_grouped_tuple(projections, &key_vals, old_count);
-                                        let new_tuple =
-                                            build_grouped_tuple(projections, &key_vals, new_count);
-                                        out_deltas.push(TupleDelta::Retract {
-                                            tuple: old_tuple,
-                                            derivation: out_deriv.clone(),
-                                        });
-                                        out_deltas.push(TupleDelta::Insert {
-                                            tuple: new_tuple,
-                                            derivation: out_deriv,
-                                        });
+                                    GroupProjection::SumDecimal(_) => {
+                                        let Value::Decimal(value) = value else {
+                                            return Err(WorldError::NetworkError(
+                                                "grouped Decimal sum received non-Decimal".into(),
+                                            ));
+                                        };
+                                        let value_scale = value.scale();
+                                        if value_scale > state.decimal_scales[idx] {
+                                            state.decimal_sums[idx]
+                                                .mul_pow10(value_scale - state.decimal_scales[idx]);
+                                            state.decimal_scales[idx] = value_scale;
+                                        }
+                                        let mut amount = WideSigned::from_i128(value.unscaled());
+                                        amount.mul_pow10(state.decimal_scales[idx] - value_scale);
+                                        if !is_ins {
+                                            amount.negative = !amount.negative;
+                                        }
+                                        state.decimal_sums[idx].add_assign(&amount);
                                     }
+                                    GroupProjection::Min(_) | GroupProjection::Max(_) => {
+                                        let multiset = &mut state.ordered[idx];
+                                        if is_ins {
+                                            *multiset.entry(value).or_default() += 1;
+                                        } else if let Some(count) = multiset.get_mut(&value) {
+                                            *count -= 1;
+                                            if *count == 0 {
+                                                multiset.remove(&value);
+                                            }
+                                        }
+                                    }
+                                    GroupProjection::Key(_) | GroupProjection::Count => {}
                                 }
+                            }
+                            if state.supports.is_empty() {
+                                groups.remove(&key_vals);
+                            } else {
+                                groups.insert(key_vals, state);
                             }
                         }
                         _ => unreachable!(),
                     },
+                }
+            }
+
+            if is_group_operator {
+                if let Some(OperatorState::GroupedCount {
+                    projections,
+                    groups,
+                    ..
+                }) = self.operator_states.get_mut(&op_idx)
+                {
+                    for (group_key, old_tuple) in grouped_before {
+                        let new_tuple = groups
+                            .get(&group_key)
+                            .map(|state| build_grouped_tuple(projections, &group_key, state))
+                            .transpose()?;
+                        if old_tuple == new_tuple {
+                            continue;
+                        }
+                        let derivation = DerivationId::Group {
+                            op: op_id,
+                            group_key,
+                        };
+                        if let Some(tuple) = old_tuple {
+                            out_deltas.push(TupleDelta::Retract {
+                                tuple,
+                                derivation: derivation.clone(),
+                            });
+                        }
+                        if let Some(tuple) = new_tuple {
+                            out_deltas.push(TupleDelta::Insert { tuple, derivation });
+                        }
+                    }
                 }
             }
 
@@ -1700,6 +2101,20 @@ impl WorldNetwork {
             if operator_queues.get(&op_id).is_some_and(|q| !q.is_empty()) && in_ready.insert(op_id)
             {
                 ready_operators.push_back(op_id);
+            }
+
+            let newly_ready: Vec<_> = deferred_groups
+                .iter()
+                .copied()
+                .filter(|group| !has_pending_ancestor(*group, &self.dag, &operator_queues))
+                .collect();
+            for group in newly_ready {
+                deferred_groups.remove(&group);
+                if operator_queues.get(&group).is_some_and(|q| !q.is_empty())
+                    && in_ready.insert(group)
+                {
+                    ready_operators.push_back(group);
+                }
             }
 
             let cur_q_len: usize = operator_queues
@@ -1905,8 +2320,87 @@ impl WorldNetwork {
             }
         }
         report.diagnostics = diagnostics;
+        let winner_ops = self.winner_row_ops(&report)?;
+        if !winner_ops.is_empty() {
+            let prior_revision = self.current_revision;
+            let used_work = report
+                .diagnostics
+                .operator_work
+                .values()
+                .copied()
+                .sum::<u64>();
+            let used_matches = report
+                .diagnostics
+                .join_fanout
+                .values()
+                .copied()
+                .sum::<u64>();
+            let used_expressions = report.diagnostics.expressions_evaluated;
+            let child_limits = NetworkLimits {
+                max_work: limits.max_work.map(|max| max.saturating_sub(used_work)),
+                max_matches: limits
+                    .max_matches
+                    .map(|max| max.saturating_sub(used_matches)),
+                max_expressions: limits
+                    .max_expressions
+                    .map(|max| max.saturating_sub(used_expressions)),
+                max_queued_deltas: limits.max_queued_deltas,
+            };
+            let nested = self.apply_ops_staged_inner(&winner_ops, &child_limits, true)?;
+            self.current_revision = prior_revision;
+            merge_stage_report(&mut report, nested);
+        }
         self.current_revision += 1;
         Ok(report)
+    }
+
+    fn winner_row_ops(&self, report: &NetworkDeltaReport) -> Result<Vec<WorldBatchOp>, WorldError> {
+        let mut changed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (decide, entities) in &report.settlements {
+            changed
+                .entry(decide.clone())
+                .or_default()
+                .extend(entities.keys().cloned());
+        }
+        for (decide, entities) in &report.removed_settlements {
+            changed
+                .entry(decide.clone())
+                .or_default()
+                .extend(entities.iter().cloned());
+        }
+        let mut ops = Vec::new();
+        for (name, entities) in changed {
+            let Some(decide) = self.decides.get(&name) else {
+                continue;
+            };
+            for entity_id in entities {
+                let entity_value = Value::from_typed_bytes(entity_id.as_bytes(), &decide.per_type)?;
+                let key = WorldKey::new(entity_value.to_bytes());
+                if let Some(winner) = self.get_settlement(&name, &entity_id) {
+                    let priority = i64::try_from(winner.priority).map_err(|_| {
+                        WorldError::NetworkError(format!(
+                            "winner priority for '{name}' exceeds the winner row Int range"
+                        ))
+                    })?;
+                    let mut row = TupleRecord::new();
+                    row.set(&decide.per_field, entity_value.to_bytes());
+                    row.set("candidate", Value::Str(winner.candidate_name).to_bytes());
+                    row.set("priority", Value::Int(priority).to_bytes());
+                    row.set("value", winner.value.to_bytes());
+                    ops.push(WorldBatchOp::Upsert {
+                        relation: name.clone(),
+                        key,
+                        tuple: row.to_tuple(),
+                    });
+                } else {
+                    ops.push(WorldBatchOp::Remove {
+                        relation: name.clone(),
+                        key,
+                    });
+                }
+            }
+        }
+        Ok(ops)
     }
 
     /// Canonical decision root, maintained only for affected entities.
@@ -2066,7 +2560,36 @@ impl WorldNetwork {
             )));
         }
 
-        if incremental_state.distinct_supports != scratch_state.distinct_supports {
+        // A scratch rebuild represents the current base state in one synthetic
+        // revision, while the incremental network retains each winner's actual
+        // settlement revision. Compare support topology and winner identity,
+        // while leaving the stored provenance links untouched.
+        let normalize_supports =
+            |supports: &BTreeMap<OperatorId, BTreeMap<TupleRecord, BTreeSet<DerivationId>>>| {
+                supports
+                    .iter()
+                    .map(|(op, tuples)| {
+                        (
+                            *op,
+                            tuples
+                                .iter()
+                                .map(|(tuple, derivations)| {
+                                    (
+                                        tuple.clone(),
+                                        derivations
+                                            .iter()
+                                            .map(normalize_derivation_revision)
+                                            .collect::<BTreeSet<_>>(),
+                                    )
+                                })
+                                .collect::<BTreeMap<_, _>>(),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            };
+        if normalize_supports(&incremental_state.distinct_supports)
+            != normalize_supports(&scratch_state.distinct_supports)
+        {
             return Err(WorldError::NetworkError(format!(
                 "differential mismatch in distinct supports: incremental={:?}, scratch={:?}",
                 incremental_state.distinct_supports, scratch_state.distinct_supports
@@ -2107,6 +2630,88 @@ impl WorldNetwork {
                 }
             }
             DerivationId::Group { .. } => {}
+            DerivationId::Winner {
+                decide,
+                entity_id,
+                candidate,
+                revision,
+            } => {
+                if let Some(entry) = self
+                    .candidate_frontier
+                    .get(decide)
+                    .and_then(|entities| entities.get(entity_id))
+                    .and_then(|candidates| candidates.get(candidate))
+                {
+                    for parent in &entry.supports {
+                        self.collect_base_facts_for_derivation(parent, out);
+                    }
+                }
+                let _ = revision;
+            }
+        }
+    }
+
+    fn collect_upstream_settlements_for_derivation(
+        &self,
+        deriv: &DerivationId,
+        out: &mut BTreeSet<UpstreamSettlementLink>,
+    ) {
+        match deriv {
+            DerivationId::Base { .. } => {}
+            DerivationId::Unary { parent, .. } => {
+                self.collect_upstream_settlements_for_derivation(parent, out);
+            }
+            DerivationId::Join { left, right, .. } => {
+                self.collect_upstream_settlements_for_derivation(left, out);
+                self.collect_upstream_settlements_for_derivation(right, out);
+            }
+            DerivationId::Distinct { op, tuple_key } => {
+                if let Some(OperatorState::Distinct { supports, .. }) =
+                    self.operator_states.get(&op.0)
+                {
+                    for (tuple, parents) in supports {
+                        if tuple.to_tuple_record().to_tuple().0 == *tuple_key {
+                            for parent in parents {
+                                self.collect_upstream_settlements_for_derivation(parent, out);
+                            }
+                        }
+                    }
+                }
+            }
+            DerivationId::Group { op, group_key } => {
+                if let Some(OperatorState::GroupedCount { groups, .. }) =
+                    self.operator_states.get(&op.0)
+                {
+                    if let Some(parents) = groups.get(group_key) {
+                        for parent in &parents.supports {
+                            self.collect_upstream_settlements_for_derivation(parent, out);
+                        }
+                    }
+                }
+            }
+            DerivationId::Winner {
+                decide,
+                entity_id,
+                candidate,
+                revision,
+            } => {
+                out.insert(UpstreamSettlementLink {
+                    decide: decide.clone(),
+                    entity_id: entity_id.clone(),
+                    candidate: candidate.clone(),
+                    revision: *revision,
+                });
+                if let Some(entry) = self
+                    .candidate_frontier
+                    .get(decide)
+                    .and_then(|entities| entities.get(entity_id))
+                    .and_then(|candidates| candidates.get(candidate))
+                {
+                    for parent in &entry.supports {
+                        self.collect_upstream_settlements_for_derivation(parent, out);
+                    }
+                }
+            }
         }
     }
 
@@ -2139,12 +2744,17 @@ impl WorldNetwork {
 
         let mut candidates = Vec::new();
         let mut contributing_base = BTreeSet::new();
+        let mut upstream_settlements = BTreeSet::new();
 
         if let Some(entity_candidates) = entity_candidates {
             for (cand_name, entry) in entity_candidates {
                 let winning = winning_name == Some(cand_name);
                 for deriv in &entry.supports {
                     self.collect_base_facts_for_derivation(deriv, &mut contributing_base);
+                    self.collect_upstream_settlements_for_derivation(
+                        deriv,
+                        &mut upstream_settlements,
+                    );
                 }
                 candidates.push(CandidateExplanation {
                     name: cand_name.clone(),
@@ -2182,28 +2792,237 @@ impl WorldNetwork {
             calendar_key: settlement.as_ref().map(|s| s.calendar_key),
             candidates,
             contributing_facts: contributing_base.into_iter().collect(),
+            upstream_settlements: upstream_settlements.into_iter().collect(),
         })
+    }
+}
+
+fn normalize_derivation_revision(derivation: &DerivationId) -> DerivationId {
+    match derivation {
+        DerivationId::Winner {
+            decide,
+            entity_id,
+            candidate,
+            ..
+        } => DerivationId::Winner {
+            decide: decide.clone(),
+            entity_id: entity_id.clone(),
+            candidate: candidate.clone(),
+            revision: 0,
+        },
+        DerivationId::Unary { op, parent } => DerivationId::Unary {
+            op: *op,
+            parent: Box::new(normalize_derivation_revision(parent)),
+        },
+        DerivationId::Join { op, left, right } => DerivationId::Join {
+            op: *op,
+            left: Box::new(normalize_derivation_revision(left)),
+            right: Box::new(normalize_derivation_revision(right)),
+        },
+        other => other.clone(),
     }
 }
 
 fn build_grouped_tuple(
     projections: &[(String, GroupProjection)],
     key_vals: &[Value],
-    count: usize,
-) -> IntermediateTuple {
+    state: &GroupAccumulator,
+) -> Result<IntermediateTuple, WorldError> {
     let mut tuple = IntermediateTuple::new();
-    for (name, proj) in projections {
+    for (idx, (name, proj)) in projections.iter().enumerate() {
         match proj {
             GroupProjection::Key(idx) => {
                 let v = key_vals.get(*idx).cloned().unwrap_or(Value::Null);
                 tuple.insert(name, v);
             }
             GroupProjection::Count => {
-                tuple.insert(name, Value::Int(count as i64));
+                tuple.insert(name, Value::Int(state.supports.len() as i64));
+            }
+            GroupProjection::SumInt(_) => {
+                tuple.insert(
+                    name,
+                    Value::Int(i64::try_from(state.int_sums[idx]).map_err(|_| {
+                        WorldError::NetworkError("grouped Int sum overflow".into())
+                    })?),
+                );
+            }
+            GroupProjection::SumDecimal(_) => {
+                let value = state.decimal_sums[idx]
+                    .to_decimal(state.decimal_scales[idx])
+                    .ok_or_else(|| {
+                        WorldError::NetworkError("grouped Decimal sum overflow".into())
+                    })?;
+                tuple.insert(name, Value::Decimal(value));
+            }
+            GroupProjection::Min(_) => {
+                tuple.insert(
+                    name,
+                    state.ordered[idx]
+                        .first_key_value()
+                        .map(|(value, _)| value.clone())
+                        .unwrap_or(Value::Null),
+                );
+            }
+            GroupProjection::Max(_) => {
+                tuple.insert(
+                    name,
+                    state.ordered[idx]
+                        .last_key_value()
+                        .map(|(value, _)| value.clone())
+                        .unwrap_or(Value::Null),
+                );
             }
         }
     }
-    tuple
+    Ok(tuple)
+}
+
+fn has_pending_ancestor(
+    operator: OperatorId,
+    dag: &RelationDag,
+    queues: &BTreeMap<OperatorId, std::collections::VecDeque<OperatorWorkItem>>,
+) -> bool {
+    let mut pending = Vec::new();
+    match &dag.nodes[operator.0] {
+        OperatorNode::Bind { input, .. }
+        | OperatorNode::Filter { input, .. }
+        | OperatorNode::Project { input, .. }
+        | OperatorNode::Distinct { input }
+        | OperatorNode::GroupedCount { input, .. } => pending.push(*input),
+        OperatorNode::EquiJoin { left, right, .. } => {
+            pending.push(*left);
+            pending.push(*right);
+        }
+        OperatorNode::Scan { .. } | OperatorNode::DecisionRows { .. } => return false,
+    }
+    let mut visited = BTreeSet::new();
+    while let Some(ancestor) = pending.pop() {
+        if !visited.insert(ancestor) {
+            continue;
+        }
+        if queues.get(&ancestor).is_some_and(|queue| !queue.is_empty()) {
+            return true;
+        }
+        match &dag.nodes[ancestor.0] {
+            OperatorNode::Bind { input, .. }
+            | OperatorNode::Filter { input, .. }
+            | OperatorNode::Project { input, .. }
+            | OperatorNode::Distinct { input }
+            | OperatorNode::GroupedCount { input, .. } => pending.push(*input),
+            OperatorNode::EquiJoin { left, right, .. } => {
+                pending.push(*left);
+                pending.push(*right);
+            }
+            OperatorNode::Scan { .. } | OperatorNode::DecisionRows { .. } => {}
+        }
+    }
+    false
+}
+
+fn empty_group_accumulator(projections: &[(String, GroupProjection)]) -> GroupAccumulator {
+    let mut int_sums = Vec::with_capacity(projections.len());
+    let mut decimal_sums = Vec::with_capacity(projections.len());
+    let mut decimal_scales = Vec::with_capacity(projections.len());
+    let mut ordered = Vec::with_capacity(projections.len());
+    for _ in projections {
+        int_sums.push(0);
+        decimal_sums.push(WideSigned::default());
+        decimal_scales.push(0);
+        ordered.push(BTreeMap::new());
+    }
+    GroupAccumulator {
+        supports: PSet::new(),
+        int_sums,
+        decimal_sums,
+        decimal_scales,
+        ordered,
+    }
+}
+
+fn schema_key_type(schema: &ast::Ty, key_fields: &[String]) -> ast::Ty {
+    let Some(key) = key_fields.first() else {
+        return ast::Ty::Named("Str".into());
+    };
+    match schema {
+        ast::Ty::Record(fields) => fields
+            .iter()
+            .find(|field| &field.name == key)
+            .map(|field| field.ty.clone())
+            .unwrap_or_else(|| ast::Ty::Named("Str".into())),
+        _ => ast::Ty::Named("Str".into()),
+    }
+}
+
+fn winner_derivation_from_row(
+    decide: &str,
+    row: &IntermediateTuple,
+    key_fields: &[String],
+    revision: u64,
+) -> Result<DerivationId, WorldError> {
+    let key_field = key_fields.first().ok_or_else(|| {
+        WorldError::NetworkError(format!(
+            "winner relation '{decide}' has no entity key field"
+        ))
+    })?;
+    let entity_id = row.get(key_field).map(ToString::to_string).ok_or_else(|| {
+        WorldError::NetworkError(format!(
+            "winner relation '{decide}' has no '{key_field}' value"
+        ))
+    })?;
+    let candidate = row
+        .get("candidate")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            WorldError::NetworkError(format!("winner relation '{decide}' has no candidate value"))
+        })?
+        .to_string();
+    Ok(DerivationId::Winner {
+        decide: decide.to_string(),
+        entity_id,
+        candidate,
+        revision,
+    })
+}
+
+fn merge_stage_report(into: &mut NetworkDeltaReport, next: NetworkDeltaReport) {
+    into.intermediate_deltas_count += next.intermediate_deltas_count;
+    into.derived_tuples_inserted += next.derived_tuples_inserted;
+    into.derived_tuples_retracted += next.derived_tuples_retracted;
+    into.candidates_inserted += next.candidates_inserted;
+    into.candidates_retracted += next.candidates_retracted;
+    for (decide, mut entities) in next.settlements {
+        into.settlements
+            .entry(decide)
+            .or_default()
+            .append(&mut entities);
+    }
+    for (decide, entities) in next.removed_settlements {
+        into.removed_settlements
+            .entry(decide)
+            .or_default()
+            .extend(entities);
+    }
+    for (op, count) in next.diagnostics.operator_work {
+        *into.diagnostics.operator_work.entry(op).or_default() += count;
+    }
+    for (relation, count) in next.diagnostics.relation_deltas {
+        *into
+            .diagnostics
+            .relation_deltas
+            .entry(relation)
+            .or_default() += count;
+    }
+    for (op, count) in next.diagnostics.join_fanout {
+        *into.diagnostics.join_fanout.entry(op).or_default() += count;
+    }
+    for (key, count) in next.diagnostics.hot_join_keys {
+        *into.diagnostics.hot_join_keys.entry(key).or_default() += count;
+    }
+    into.diagnostics.peak_queue_size = into
+        .diagnostics
+        .peak_queue_size
+        .max(next.diagnostics.peak_queue_size);
+    into.diagnostics.expressions_evaluated += next.diagnostics.expressions_evaluated;
 }
 
 /// Extract a tuple's entity identity using the world profile's declared

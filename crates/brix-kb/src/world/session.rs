@@ -4,7 +4,7 @@ use brix_canon::{CanonReader, CanonWriter, Digest, Domain};
 use brix_lower::module_graph::{LinkedProgram, ModuleGraph, ModuleLoaderLimits};
 use brix_lower::relation_dag::{lower_relations, OperatorNode};
 use soc_core::store::{FileNodeStore, TrieMap};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,9 @@ use super::batch::{WorldBatch, WorldBatchOp};
 use super::codec::{encode_secondary_key, extract_indexed_field, TupleRecord};
 use super::error::{CrashPoint, WorldError};
 use super::manifest::{RelationDecl, WorldManifest, WORLD_PROFILE};
-use super::network::{DecisionExplanation, SettledDecision, WorldNetwork};
+use super::network::{
+    DecisionExplanation, SettledDecision, UpstreamSettlementLink, WorldNetwork,
+};
 use super::oracle::DiffEvent;
 use super::paths::WorldPaths;
 use super::revision::{SettlementStatus, WorldRevision};
@@ -1747,9 +1749,111 @@ impl WorldSession {
         decide_name: &str,
         entity_key: &str,
     ) -> Option<DecisionExplanation> {
-        self.network
-            .as_ref()?
-            .explain_decision_for(decide_name, entity_key)
+        self.try_explain_decision_for(decide_name, entity_key)
+            .ok()
+            .flatten()
+    }
+
+    /// Explain the current settlement while propagating decision-journal
+    /// corruption instead of returning synthetic replay provenance.
+    pub fn try_explain_decision_for(
+        &self,
+        decide_name: &str,
+        entity_key: &str,
+    ) -> Result<Option<DecisionExplanation>, WorldError> {
+        let Some(mut explanation) = self
+            .network
+            .as_ref()
+            .and_then(|network| network.explain_decision_for(decide_name, entity_key))
+        else {
+            return Ok(None);
+        };
+        // A reopened network is hydrated from the current base snapshot in one
+        // synthetic batch. Recover durable settlement revisions from the
+        // committed decision journal so provenance never points at that
+        // synthetic replay revision.
+        let revisions = self.historical_settlement_revisions(
+            self.current_revision,
+            &explanation.upstream_settlements,
+        )?;
+        for link in &mut explanation.upstream_settlements {
+            if let Some(revision) = revisions.get(&(link.decide.clone(), link.entity_id.clone())) {
+                link.revision = *revision;
+            }
+        }
+        Ok(Some(explanation))
+    }
+
+    /// Rebuild the operator network from a retained historical relation root
+    /// and explain the settlement as it stood at that revision.
+    pub fn historical_explain_decision_for(
+        &self,
+        seq: u64,
+        decide_name: &str,
+        entity_key: &str,
+    ) -> Result<Option<DecisionExplanation>, WorldError> {
+        let snapshot = self.pin_revision(seq)?;
+        let Some(network) = self.network.as_ref() else {
+            return Ok(None);
+        };
+        let mut historical = network.clear_data();
+        let mut ops = Vec::new();
+        for (relation, trie) in &snapshot.relations {
+            if !network.base_relations.contains_key(relation) {
+                continue;
+            }
+            let (entries, _) = trie.iter_page_with_store(None, usize::MAX, &snapshot.node_store)?;
+            ops.extend(entries.into_iter().map(|(key, tuple)| WorldBatchOp::Upsert {
+                relation: relation.clone(),
+                key,
+                tuple,
+            }));
+        }
+        historical.apply_ops(&ops)?;
+        let mut explanation = historical.explain_decision_for(decide_name, entity_key);
+        if let Some(explanation) = &mut explanation {
+            let revisions = self.historical_settlement_revisions(
+                seq,
+                &explanation.upstream_settlements,
+            )?;
+            for link in &mut explanation.upstream_settlements {
+                let key = (link.decide.clone(), link.entity_id.clone());
+                link.revision = *revisions.get(&key).ok_or_else(|| {
+                    WorldError::NetworkError(format!(
+                        "historical provenance has no settlement journal entry for '{}' entity '{}' at revision {seq}",
+                        link.decide, link.entity_id
+                    ))
+                })?;
+            }
+        }
+        Ok(explanation)
+    }
+
+    fn historical_settlement_revisions(
+        &self,
+        seq: u64,
+        links: &[UpstreamSettlementLink],
+    ) -> Result<BTreeMap<(String, String), u64>, WorldError> {
+        let mut unresolved: BTreeSet<(String, String)> = links
+            .iter()
+            .map(|link| (link.decide.clone(), link.entity_id.clone()))
+            .collect();
+        let mut found = BTreeMap::new();
+        for revision in (1..=seq).rev() {
+            if unresolved.is_empty() { break; }
+            for (key, settlement) in self.decision_delta(revision)? {
+                if unresolved.remove(&key) {
+                    if settlement.is_some() { found.insert(key, revision); }
+                }
+            }
+        }
+        if !unresolved.is_empty() {
+            let (decide, entity) = unresolved.iter().next().unwrap();
+            return Err(WorldError::NetworkError(format!(
+                "historical provenance is missing a settlement journal entry for '{decide}' entity '{entity}' at revision {seq}"
+            )));
+        }
+        Ok(found)
     }
 
     /// Read and authenticate a committed revision's canonical decision changes.
