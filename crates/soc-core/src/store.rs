@@ -1184,26 +1184,88 @@ pub trait NodeStore {
     }
 }
 
-/// Byte-bounded LRU of decoded, digest-verified trie nodes keyed by
+/// Byte-bounded cache of decoded, digest-verified trie nodes keyed by
 /// `(TypeId of Node<K, V>, Digest)`. Cost of an entry is twice its encoded length.
 /// Only nodes that decoded and verified successfully are ever inserted.
+///
+/// Eviction is second-chance (CLOCK): a hit only sets a flag, so lookups and inserts are one
+/// hash-map operation each (digests are uniformly distributed, so their first bytes serve as
+/// the hash) instead of several ordered-map operations.
 pub struct DecodedNodeCache {
     inner: std::sync::Mutex<DecodedInner>,
+}
+
+type CacheKey = (std::any::TypeId, Digest);
+
+/// Hasher that reads the leading 8 bytes of a digest (already a cryptographic hash).
+#[derive(Default)]
+struct DigestHasher(u64);
+
+impl std::hash::Hasher for DigestHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        // Keys hash as (TypeId, [u8; 32]); mix everything cheaply, digest bytes dominate.
+        for chunk in bytes.chunks(8) {
+            let mut w = [0u8; 8];
+            w[..chunk.len()].copy_from_slice(chunk);
+            self.0 =
+                (self.0.rotate_left(5) ^ u64::from_le_bytes(w)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
 }
 
 struct DecodedInner {
     cap: usize,
     used: usize,
-    tick: u64,
+    seq: u64,
     decodes: u64,
-    map: BTreeMap<(std::any::TypeId, Digest), DecodedEntry>,
-    order: BTreeMap<u64, (std::any::TypeId, Digest)>,
+    map: std::collections::HashMap<
+        CacheKey,
+        DecodedEntry,
+        std::hash::BuildHasherDefault<DigestHasher>,
+    >,
+    queue: std::collections::VecDeque<(CacheKey, u64)>,
 }
 
 struct DecodedEntry {
     node: Arc<dyn std::any::Any + Send + Sync>,
     cost: usize,
-    tick: u64,
+    seq: u64,
+    referenced: bool,
+}
+
+impl DecodedInner {
+    fn evict_to_cap(&mut self) {
+        while self.used > self.cap {
+            let Some((key, seq)) = self.queue.pop_front() else {
+                break;
+            };
+            match self.map.get_mut(&key) {
+                Some(e) if e.seq == seq => {
+                    if e.referenced {
+                        e.referenced = false;
+                        self.queue.push_back((key, seq));
+                    } else {
+                        let cost = e.cost;
+                        self.map.remove(&key);
+                        self.used -= cost;
+                    }
+                }
+                _ => {} // stale queue slot
+            }
+        }
+        // Reinserted keys leave stale slots behind; compact if they pile up.
+        if self.queue.len() > 2 * self.map.len() + 1024 {
+            let map = &self.map;
+            self.queue
+                .retain(|(k, s)| map.get(k).is_some_and(|e| e.seq == *s));
+        }
+    }
 }
 
 impl DecodedNodeCache {
@@ -1213,10 +1275,10 @@ impl DecodedNodeCache {
             inner: std::sync::Mutex::new(DecodedInner {
                 cap: cap_bytes,
                 used: 0,
-                tick: 0,
+                seq: 0,
                 decodes: 0,
-                map: BTreeMap::new(),
-                order: BTreeMap::new(),
+                map: Default::default(),
+                queue: Default::default(),
             }),
         }
     }
@@ -1225,17 +1287,14 @@ impl DecodedNodeCache {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Cached node of type `T` for `digest`, refreshing its recency.
+    /// Cached node of type `T` for `digest`, marking it recently used.
     pub fn get<T: std::any::Any + Send + Sync>(&self, digest: &Digest) -> Option<Arc<T>> {
         let key = (std::any::TypeId::of::<T>(), *digest);
         let mut g = self.lock();
-        g.tick += 1;
-        let tick = g.tick;
         let e = g.map.get_mut(&key)?;
-        let old = std::mem::replace(&mut e.tick, tick);
+        e.referenced = true;
         let node = e.node.clone();
-        g.order.remove(&old);
-        g.order.insert(tick, key);
+        drop(g);
         node.downcast::<T>().ok()
     }
 
@@ -1253,23 +1312,22 @@ impl DecodedNodeCache {
         if cost > g.cap {
             return;
         }
-        if let Some(old) = g.map.remove(&key) {
+        g.seq += 1;
+        let seq = g.seq;
+        if let Some(old) = g.map.insert(
+            key,
+            DecodedEntry {
+                node,
+                cost,
+                seq,
+                referenced: false,
+            },
+        ) {
             g.used -= old.cost;
-            g.order.remove(&old.tick);
         }
-        g.tick += 1;
-        let tick = g.tick;
         g.used += cost;
-        g.order.insert(tick, key);
-        g.map.insert(key, DecodedEntry { node, cost, tick });
-        while g.used > g.cap {
-            let Some((_, victim)) = g.order.pop_first() else {
-                break;
-            };
-            if let Some(e) = g.map.remove(&victim) {
-                g.used -= e.cost;
-            }
-        }
+        g.queue.push_back((key, seq));
+        g.evict_to_cap();
     }
 
     /// Accounted bytes currently held.
