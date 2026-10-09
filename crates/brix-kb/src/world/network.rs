@@ -308,9 +308,10 @@ impl CandidateExplanation {
             "name": self.name,
             "priority": self.priority,
             "phase": self.phase,
-            "value": self.value.to_string(),
+            "value": self.value.to_json(),
             "supports_count": self.supports_count,
             "winning": self.winning,
+            "disposition": if self.winning { "selected" } else if self.supports_count == 0 { "ineligible" } else { "superseded" },
         })
     }
 }
@@ -335,7 +336,7 @@ impl DecisionExplanation {
             "entity_id": self.entity_id,
             "decide_name": self.decide_name,
             "winning_candidate": self.winning_candidate,
-            "value": self.value.as_ref().map(|v| v.to_string()),
+            "value": self.value.as_ref().map(|v| v.to_json()),
             "priority": self.priority,
             "phase": self.phase,
             "calendar_key": self.calendar_key.map(|k| format!("phase={},priority={},tiebreak={}", k.phase, k.priority, k.tiebreak.to_hex())),
@@ -1025,9 +1026,17 @@ impl WorldNetwork {
                                         field.name
                                     ))
                                 })?;
+                                let empty_schemas = BTreeMap::new();
+                                let schemas = self
+                                    .program_env
+                                    .as_ref()
+                                    .map(|pe| pe.schemas.as_ref())
+                                    .unwrap_or(&empty_schemas);
                                 intermediate.insert(
                                     field.name.clone(),
-                                    Value::from_typed_bytes(bytes, &field.ty)?,
+                                    Value::from_typed_bytes_with_schemas(
+                                        bytes, &field.ty, schemas,
+                                    )?,
                                 );
                             }
 
@@ -2117,28 +2126,50 @@ impl WorldNetwork {
         decide_name: &str,
         entity_id: &str,
     ) -> Option<DecisionExplanation> {
-        let decide_frontier = self.candidate_frontier.get(decide_name)?;
-        let entity_candidates = decide_frontier.get(entity_id)?;
+        let decide = self.decides.get(decide_name)?;
+        let decide_frontier = self.candidate_frontier.get(decide_name);
+        let entity_candidates = decide_frontier.and_then(|df| df.get(entity_id));
 
         let settlement = self.get_settlement(decide_name, entity_id);
+        if entity_candidates.is_none() && settlement.is_none() {
+            return None;
+        }
+
         let winning_name = settlement.as_ref().map(|s| &s.candidate_name);
 
         let mut candidates = Vec::new();
         let mut contributing_base = BTreeSet::new();
 
-        for (cand_name, entry) in entity_candidates {
-            let winning = winning_name == Some(cand_name);
-            for deriv in &entry.supports {
-                self.collect_base_facts_for_derivation(deriv, &mut contributing_base);
+        if let Some(entity_candidates) = entity_candidates {
+            for (cand_name, entry) in entity_candidates {
+                let winning = winning_name == Some(cand_name);
+                for deriv in &entry.supports {
+                    self.collect_base_facts_for_derivation(deriv, &mut contributing_base);
+                }
+                candidates.push(CandidateExplanation {
+                    name: cand_name.clone(),
+                    priority: entry.priority,
+                    phase: entry.phase,
+                    value: entry.value.clone(),
+                    supports_count: entry.supports.len(),
+                    winning,
+                });
             }
-            candidates.push(CandidateExplanation {
-                name: cand_name.clone(),
-                priority: entry.priority,
-                phase: entry.phase,
-                value: entry.value.clone(),
-                supports_count: entry.supports.len(),
-                winning,
-            });
+        }
+
+        // Also explain proposals that were declared in the decide block but were NOT admitted
+        // (e.g. guard evaluated to false or no matching rows).
+        for prop in &decide.proposals {
+            if !candidates.iter().any(|c| c.name == prop.name) {
+                candidates.push(CandidateExplanation {
+                    name: prop.name.clone(),
+                    priority: prop.priority,
+                    phase: 0,
+                    value: Value::Null,
+                    supports_count: 0,
+                    winning: false,
+                });
+            }
         }
 
         Some(DecisionExplanation {

@@ -1344,8 +1344,18 @@ impl Parser {
             }
         }
 
-        let (name, _) = self.expect_ident("pattern")?;
-        let is_capitalized = name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+        let (mut name, _) = self.expect_ident("pattern")?;
+        while self.check(&TokenKind::ColonColon) {
+            self.advance();
+            let (seg, _) = self.expect_ident("pattern path segment")?;
+            name.push_str("::");
+            name.push_str(&seg);
+        }
+        let last_segment = name.rsplit_once("::").map(|(_, s)| s).unwrap_or(&name);
+        let is_capitalized = last_segment
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase());
 
         if self.check(&TokenKind::OpenParen) {
             self.advance();

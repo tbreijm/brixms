@@ -43,7 +43,9 @@
 //!    WorldTuple}`) — a deterministic, versioned *serialization format*, not relational logic.
 //!    A bug here would corrupt both oracles identically, but the codec's correctness is
 //!    covered separately by `tests/world_tuple_codec.rs`, and this module's job is to catch
-//!    *relational/decision* bugs, not byte-codec bugs.
+//!    *relational/decision* bugs, not byte-codec bugs. The strict tagged input
+//!    decoder and structured-field framing marker are also shared transport
+//!    definitions; value conversion and canonical writing remain independent.
 //! 4. **The scalar expression evaluator** (`brix_lower::world_expr::CompiledWorldExpr`, via
 //!    `brix_lower::l3_v2`) — this lives in `brix-lower`, is already independent of
 //!    `WorldNetwork`'s incremental state (it is a pure function of an expression and a
@@ -101,6 +103,7 @@ use brix_syntax::ast;
 use soc_core::calendar::Key;
 
 use super::codec::TupleRecord;
+use super::decision_codec::STRUCTURED_PREFIX;
 use super::error::WorldError;
 use super::types::{WorldKey, WorldTuple};
 
@@ -115,6 +118,45 @@ pub enum Value {
     Str(String),
     F64(brix_canon::FiniteF64),
     Decimal(brix_canon::Decimal),
+    Record {
+        nominal: String,
+        fields: BTreeMap<String, Value>,
+    },
+    Variant {
+        nominal: String,
+        variant: String,
+        args: Vec<Value>,
+    },
+}
+
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Null => {}
+            Self::Bool(v) => v.hash(state),
+            Self::Int(v) => v.hash(state),
+            Self::Str(v) => v.hash(state),
+            Self::F64(v) => v.to_string().hash(state),
+            Self::Decimal(v) => {
+                v.unscaled().hash(state);
+                v.scale().hash(state);
+            }
+            Self::Record { nominal, fields } => {
+                nominal.hash(state);
+                fields.hash(state);
+            }
+            Self::Variant {
+                nominal,
+                variant,
+                args,
+            } => {
+                nominal.hash(state);
+                variant.hash(state);
+                args.hash(state);
+            }
+        }
+    }
 }
 
 impl Value {
@@ -131,31 +173,78 @@ impl Value {
     /// Decode a byte payload under a resolved scalar schema type. Mirrors the admissible
     /// scalar type set of the tuple codec/schema contract (ADR-0046 §3.2), re-derived from
     /// scratch rather than calling `network::Value::from_typed_bytes`.
+    #[allow(dead_code)]
     fn from_typed_bytes(bytes: &[u8], ty: &ast::Ty) -> Result<Self, WorldError> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|e| WorldError::NetworkError(format!("invalid scalar UTF-8: {e}")))?;
-        let invalid = || WorldError::NetworkError(format!("invalid {ty:?} scalar {text:?}"));
-        match ty {
-            ast::Ty::Named(name) => match name.as_str() {
-                "Str" => Ok(Self::Str(text.to_owned())),
-                "Int" => text.parse().map(Self::Int).map_err(|_| invalid()),
-                "Bool" => match text {
+        Self::from_typed_bytes_with_schemas(bytes, ty, &BTreeMap::new())
+    }
+
+    fn from_typed_bytes_with_schemas(
+        bytes: &[u8],
+        ty: &ast::Ty,
+        schemas: &BTreeMap<String, brix_lower::l3_v2::L3Schema>,
+    ) -> Result<Self, WorldError> {
+        use brix_lower::l3_v2::{validate_l3_value, L3SchemaType as T};
+        let ast::Ty::Named(name) = ty else {
+            return Err(WorldError::NetworkError(format!(
+                "unsupported field type {ty:?}"
+            )));
+        };
+        let text = || {
+            std::str::from_utf8(bytes)
+                .map_err(|e| WorldError::NetworkError(format!("invalid scalar UTF-8: {e}")))
+        };
+        let invalid = || WorldError::NetworkError(format!("invalid {name} scalar"));
+        match name.as_str() {
+            "Str" => return Ok(Self::Str(text()?.to_owned())),
+            "Int" => return text()?.parse().map(Self::Int).map_err(|_| invalid()),
+            "Bool" => {
+                return match text()? {
                     "true" => Ok(Self::Bool(true)),
                     "false" => Ok(Self::Bool(false)),
                     _ => Err(invalid()),
-                },
-                "F64" => text.parse().map(Self::F64).map_err(|_| invalid()),
-                "Decimal" => brix_canon::decimal_parse(text)
+                }
+            }
+            "F64" => return text()?.parse().map(Self::F64).map_err(|_| invalid()),
+            "Decimal" => {
+                return brix_canon::decimal_parse(text()?)
                     .map(Self::Decimal)
-                    .map_err(|_| invalid()),
-                _ => Err(invalid()),
-            },
-            _ => Err(invalid()),
+                    .map_err(|_| invalid())
+            }
+            _ => {}
         }
+        let value = if let Some(payload) = bytes.strip_prefix(STRUCTURED_PREFIX) {
+            let mut reader = brix_canon::CanonReader::new(payload);
+            let value = Self::canon_read(&mut reader)?;
+            if !reader.is_empty() {
+                return Err(WorldError::NetworkError(
+                    "trailing structured value bytes".into(),
+                ));
+            }
+            value.to_scalar()?
+        } else {
+            brix_lower::input::decode_world_value(bytes, &brix_lower::input::InputLimits::default())
+                .map_err(|e| WorldError::NetworkError(format!("invalid structured value: {e}")))?
+                .to_l3_value()
+        };
+        let expected = schemas
+            .get(name)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| name.clone());
+        validate_l3_value(&value, &T::Named(expected), schemas, "world input")
+            .map_err(|e| WorldError::NetworkError(format!("type validation error: {e}")))?;
+        Self::from_scalar(value)
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        self.to_string().into_bytes()
+        if matches!(self, Self::Record { .. } | Self::Variant { .. }) {
+            let mut writer = CanonWriter::new();
+            self.canon_write(&mut writer);
+            let mut bytes = STRUCTURED_PREFIX.to_vec();
+            bytes.extend(writer.finish());
+            bytes
+        } else {
+            self.to_string().into_bytes()
+        }
     }
 
     fn to_scalar(&self) -> Result<brix_lower::l3_v2::L3ValueV2, WorldError> {
@@ -166,6 +255,31 @@ impl Value {
             Self::Str(v) => V::Str(v.clone()),
             Self::F64(v) => V::F64(*v),
             Self::Decimal(v) => V::Decimal(*v),
+            Self::Record { nominal, fields } => {
+                let mut f_vec = Vec::new();
+                for (k, v) in fields {
+                    f_vec.push((k.clone(), v.to_scalar()?));
+                }
+                V::Record {
+                    nominal_config: nominal.clone(),
+                    fields: f_vec,
+                }
+            }
+            Self::Variant {
+                nominal,
+                variant,
+                args,
+            } => {
+                let mut a_vec = Vec::new();
+                for a in args {
+                    a_vec.push(a.to_scalar()?);
+                }
+                V::Ctor {
+                    nominal_sum: nominal.clone(),
+                    variant: variant.clone(),
+                    args: a_vec,
+                }
+            }
             Self::Null => {
                 return Err(WorldError::NetworkError(
                     "reference evaluator: absent scalar value".into(),
@@ -182,10 +296,147 @@ impl Value {
             V::Str(v) => Self::Str(v),
             V::F64(v) => Self::F64(v),
             V::Decimal(v) => Self::Decimal(v),
+            V::Record {
+                nominal_config,
+                fields,
+            } => {
+                let mut map = BTreeMap::new();
+                for (k, f_val) in fields {
+                    map.insert(k, Self::from_scalar(f_val)?);
+                }
+                Self::Record {
+                    nominal: nominal_config,
+                    fields: map,
+                }
+            }
+            V::Ctor {
+                nominal_sum,
+                variant,
+                args,
+            } => {
+                let mut a_vec = Vec::new();
+                for a in args {
+                    a_vec.push(Self::from_scalar(a)?);
+                }
+                Self::Variant {
+                    nominal: nominal_sum,
+                    variant,
+                    args: a_vec,
+                }
+            }
             _ => {
                 return Err(WorldError::NetworkError(
                     "reference evaluator: expression result is not a scalar".into(),
                 ))
+            }
+        })
+    }
+
+    fn canon_read(r: &mut brix_canon::CanonReader<'_>) -> Result<Self, WorldError> {
+        Self::canon_read_bounded(r, 0, &mut 4096)
+    }
+
+    fn canon_read_bounded(
+        r: &mut brix_canon::CanonReader<'_>,
+        depth: usize,
+        remaining: &mut usize,
+    ) -> Result<Self, WorldError> {
+        if depth >= 32 || *remaining == 0 {
+            return Err(WorldError::NetworkError(
+                "invalid or oversized structured reference value".into(),
+            ));
+        }
+        *remaining -= 1;
+        let canon_err = |e: brix_canon::CanonError| {
+            WorldError::NetworkError(format!("corrupt canonical value: {e:?}"))
+        };
+        let tag = r.read_uint().map_err(canon_err)?;
+        Ok(match tag {
+            0 => Value::Null,
+            1 => Value::Int(r.read_int().map_err(canon_err)?),
+            2 => {
+                let bytes = r.read_bytes().map_err(canon_err)?;
+                Value::Str(
+                    std::str::from_utf8(bytes)
+                        .map_err(|e| WorldError::NetworkError(format!("invalid Str UTF-8: {e}")))?
+                        .to_string(),
+                )
+            }
+            3 => Value::Bool(match r.read_uint().map_err(canon_err)? {
+                0 => false,
+                1 => true,
+                _ => return Err(WorldError::NetworkError("invalid decision boolean".into())),
+            }),
+            4 => {
+                let raw = r.read_raw(8).map_err(canon_err)?;
+                let mut bits = [0u8; 8];
+                bits.copy_from_slice(raw);
+                Value::F64(
+                    brix_canon::FiniteF64::from_bits(u64::from_be_bytes(bits)).map_err(|e| {
+                        WorldError::NetworkError(format!("corrupt value: invalid F64: {e:?}"))
+                    })?,
+                )
+            }
+            5 => Value::Decimal(brix_canon::read_decimal(r).map_err(canon_err)?),
+            6 => {
+                let nominal = std::str::from_utf8(r.read_bytes().map_err(canon_err)?)
+                    .map_err(|e| WorldError::NetworkError(format!("invalid nominal UTF-8: {e}")))?
+                    .to_string();
+                let count = usize::try_from(r.read_uint().map_err(canon_err)?)
+                    .map_err(|_| WorldError::NetworkError("invalid record field count".into()))?;
+                if count > 256 || count > *remaining {
+                    return Err(WorldError::NetworkError(
+                        "invalid or oversized structured reference value".into(),
+                    ));
+                }
+                let mut fields = BTreeMap::new();
+                for _ in 0..count {
+                    let name = std::str::from_utf8(r.read_bytes().map_err(canon_err)?)
+                        .map_err(|e| {
+                            WorldError::NetworkError(format!("invalid field name UTF-8: {e}"))
+                        })?
+                        .to_string();
+                    let val = Self::canon_read_bounded(r, depth + 1, remaining)?;
+                    if fields
+                        .last_key_value()
+                        .is_some_and(|(prev, _)| prev >= &name)
+                    {
+                        return Err(WorldError::NetworkError(
+                            "invalid or oversized structured reference value".into(),
+                        ));
+                    }
+                    fields.insert(name, val);
+                }
+                Value::Record { nominal, fields }
+            }
+            7 => {
+                let nominal = std::str::from_utf8(r.read_bytes().map_err(canon_err)?)
+                    .map_err(|e| WorldError::NetworkError(format!("invalid nominal UTF-8: {e}")))?
+                    .to_string();
+                let variant = std::str::from_utf8(r.read_bytes().map_err(canon_err)?)
+                    .map_err(|e| WorldError::NetworkError(format!("invalid variant UTF-8: {e}")))?
+                    .to_string();
+                let count = usize::try_from(r.read_uint().map_err(canon_err)?)
+                    .map_err(|_| WorldError::NetworkError("invalid variant arg count".into()))?;
+                if count > 256 || count > *remaining {
+                    return Err(WorldError::NetworkError(
+                        "invalid or oversized structured reference value".into(),
+                    ));
+                }
+                let mut args = Vec::with_capacity(count);
+                for _ in 0..count {
+                    args.push(Self::canon_read_bounded(r, depth + 1, remaining)?);
+                }
+                Value::Variant {
+                    nominal,
+                    variant,
+                    args,
+                }
+            }
+            other => {
+                return Err(WorldError::NetworkError(format!(
+                    "unknown value tag {other}"
+                )))
             }
         })
     }
@@ -217,6 +468,28 @@ impl Value {
                 w.write_uint(5);
                 v.canon_write(w);
             }
+            Value::Record { nominal, fields } => {
+                w.write_uint(6);
+                w.write_str(nominal);
+                w.write_uint(fields.len() as u64);
+                for (name, val) in fields {
+                    w.write_str(name);
+                    val.canon_write(w);
+                }
+            }
+            Value::Variant {
+                nominal,
+                variant,
+                args,
+            } => {
+                w.write_uint(7);
+                w.write_str(nominal);
+                w.write_str(variant);
+                w.write_uint(args.len() as u64);
+                for arg in args {
+                    arg.canon_write(w);
+                }
+            }
         }
     }
 }
@@ -230,6 +503,34 @@ impl std::fmt::Display for Value {
             Self::Str(v) => write!(f, "{v}"),
             Self::F64(v) => write!(f, "{v}"),
             Self::Decimal(v) => write!(f, "{}", brix_canon::decimal_format(*v)),
+            Self::Record { nominal, fields } => {
+                write!(f, "{nominal} {{")?;
+                for (i, (k, v)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{k}: {v}")?;
+                }
+                write!(f, "}}")
+            }
+            Self::Variant {
+                nominal: _,
+                variant,
+                args,
+            } => {
+                write!(f, "{variant}")?;
+                if !args.is_empty() {
+                    write!(f, "(")?;
+                    for (i, a) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{a}")?;
+                    }
+                    write!(f, ")")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -707,9 +1008,15 @@ pub fn evaluate_with_budget(
                                 field.name
                             ))
                         })?;
+                        let empty_schemas = BTreeMap::new();
+                        let schemas = program
+                            .program_env
+                            .as_ref()
+                            .map(|pe| pe.schemas.as_ref())
+                            .unwrap_or(&empty_schemas);
                         row.insert(
                             field.name.clone(),
-                            Value::from_typed_bytes(bytes, &field.ty)?,
+                            Value::from_typed_bytes_with_schemas(bytes, &field.ty, schemas)?,
                         );
                     }
                     rows.push(row);

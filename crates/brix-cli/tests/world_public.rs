@@ -343,3 +343,147 @@ fn stdio_world_methods_dispatch_real_lifecycle_calls() {
         .unwrap()
         .is_empty());
 }
+
+#[test]
+fn structured_world_values_survive_stdio_restart_history_and_audit() {
+    let scratch = Scratch::new("structured");
+    let world = scratch.path().join("world");
+    let program = scratch.path().join("atlas.brix");
+    fs::write(
+        &program,
+        r#"
+config Rec = { id: Str, amt: Int }
+config Decision = Approved(Rec) | Rejected
+fn positive(d: Decision): Bool = match d { Approved(r) => r.amt > 0 Rejected => false }
+rel input orders: { id: Str, amt: Int, status: Decision } key id
+rel derived ready = select { id:o.id, status:o.status } from o in orders where positive(o.status)
+decide approve for o in orders per id {
+ propose yes priority 10 when o.amt > 0 = Approved(Rec { id:o.id, amt:o.amt })
+ propose no priority 100 when true = Rejected
+}
+decide echo for r in ready per id { propose current priority 1 when true = r.status }
+decide record for o in orders per id { propose current priority 1 when true = Rec { id:o.id, amt:o.amt } }
+"#,
+    )
+    .unwrap();
+    let approved = json!({"type":"sum","nominal":"atlas::Decision","variant":"Approved","args":[{
+        "type":"record","nominal":"atlas::Rec","fields":[
+            {"name":"amt","value":{"type":"int","value":"5"}},
+            {"name":"id","value":{"type":"string","value":"order-1"}}
+        ]
+    }]});
+    let batch = |revision: u64, amount: i64| {
+        json!({
+            "schema":"brix.world.batch@1","expected_base_revision":revision,
+            "idempotency_key":format!("r1-{revision}"),"operations":[{
+                "op":"upsert","relation":"atlas::orders","key":"order-1",
+                "tuple":{"id":"order-1","amt":amount,"status":approved}
+            }]
+        })
+    };
+    let requests = [
+        json!({"id":1,"method":"world.init","params":{"dir":world,"program":{"path":program}}}),
+        json!({"id":2,"method":"world.batch","params":{"dir":world,"batch":batch(0,5)}}),
+        json!({"id":3,"method":"world.decisions","params":{"dir":world}}),
+        json!({"id":4,"method":"world.explain","params":{"dir":world,"entity":"order-1","decide":"atlas::approve"}}),
+        json!({"id":5,"method":"world.batch","params":{"dir":world,"batch":batch(1,0)}}),
+        json!({"id":6,"method":"world.decisions","params":{"dir":world}}),
+        json!({"id":7,"method":"world.explain","params":{"dir":world,"entity":"order-1","decide":"atlas::approve"}}),
+    ];
+    let mut child = binary()
+        .args(["serve", "--stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    for request in requests {
+        writeln!(child.stdin.as_mut().unwrap(), "{request}").unwrap();
+    }
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let replies: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(replies.len(), 7);
+    let candidates = replies[6]["result"]["explanation"]["candidates"]
+        .as_array()
+        .unwrap();
+    assert!(candidates
+        .iter()
+        .any(|c| c["name"] == "yes" && c["disposition"] == "ineligible"));
+    assert!(candidates
+        .iter()
+        .any(|c| c["name"] == "no" && c["disposition"] == "selected"));
+    for reply in &replies {
+        assert_eq!(reply["ok"], true, "{reply}");
+    }
+    assert_eq!(
+        replies[2]["result"]["settlements"]["atlas::approve"]["order-1"]["value"],
+        approved
+    );
+    assert_eq!(
+        replies[2]["result"]["settlements"]["atlas::echo"]["order-1"]["value"],
+        approved
+    );
+    assert_eq!(
+        replies[2]["result"]["settlements"]["atlas::record"]["order-1"]["value"],
+        approved["args"][0]
+    );
+    assert_eq!(
+        replies[5]["result"]["settlements"]["atlas::approve"]["order-1"]["value"]["variant"],
+        "Rejected"
+    );
+    // A separate process reloads the journal and historical candidate evidence.
+    let historical = parse_stdout(
+        binary()
+            .args(["world", "explain", "--json"])
+            .arg(&world)
+            .args(["order-1", "--decide", "atlas::approve", "--rev", "1"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(historical["explanation"]["value"], approved);
+    let current = parse_stdout(
+        binary()
+            .args(["world", "decide", "--json"])
+            .arg(&world)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        current["settlements"]["atlas::approve"]["order-1"]["value"]["variant"],
+        "Rejected"
+    );
+    let bundle = scratch.path().join("structured.brixaudit");
+    let audit = parse_stdout(
+        binary()
+            .args(["world", "audit", "--json"])
+            .arg(&world)
+            .arg("--out")
+            .arg(&bundle)
+            .output()
+            .unwrap(),
+    );
+    let verified = parse_stdout(
+        binary()
+            .args(["world", "verify", "--json"])
+            .args(["--expect-head", audit["head_digest"].as_str().unwrap()])
+            .args([
+                "--expect-program",
+                replies[0]["result"]["program_digest"].as_str().unwrap(),
+            ])
+            .arg(&bundle)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(verified["status"], "audited");
+    assert_eq!(verified["head_revision"], 2);
+}

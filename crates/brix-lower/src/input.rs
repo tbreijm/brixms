@@ -853,6 +853,41 @@ pub fn decode_input_shard(
     parser.parse_input_shard()
 }
 
+/// Decode one bounded tagged value for a world tuple field. The value shape is
+/// the same as structured input, with qualified nominal names admitted for linked
+/// packages. Legacy input envelopes retain their original identifier rules.
+pub fn decode_world_value(
+    bytes: &[u8],
+    limits: &InputLimits,
+) -> Result<InputValue, InputDecodeError> {
+    if bytes.len() > limits.max_file_bytes {
+        return Err(InputDecodeError::FileTooLarge {
+            limit: limits.max_file_bytes,
+            found: bytes.len() as u64,
+        });
+    }
+    let text = std::str::from_utf8(bytes).map_err(|e| InputDecodeError::SyntaxError {
+        message: format!("invalid UTF-8: {e}"),
+        offset: e.valid_up_to(),
+    })?;
+    let mut parser = StrictJsonParser::new(text, limits);
+    parser.qualified_nominals = true;
+    parser.skip_whitespace();
+    let value = parser.parse_tagged_value()?;
+    parser.skip_whitespace();
+    if parser.pos != bytes.len() {
+        return Err(InputDecodeError::TrailingBytes { offset: parser.pos });
+    }
+    if value_has_list(&value) {
+        return Err(InputDecodeError::InvalidType {
+            expected: "world value without lists",
+            found: "list".into(),
+            offset: 0,
+        });
+    }
+    Ok(value)
+}
+
 #[cfg(unix)]
 fn open_input_file(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -1086,6 +1121,7 @@ struct StrictJsonParser<'a> {
     depth: usize,
     value_depth: usize,
     value_nodes: usize,
+    qualified_nominals: bool,
 }
 
 impl<'a> StrictJsonParser<'a> {
@@ -1098,6 +1134,7 @@ impl<'a> StrictJsonParser<'a> {
             depth: 0,
             value_depth: 0,
             value_nodes: 0,
+            qualified_nominals: false,
         }
     }
 
@@ -1618,7 +1655,17 @@ impl<'a> StrictJsonParser<'a> {
                     raw_type = Some((self.parse_string(32)?, t_offset));
                 }
                 "value" => raw_value = Some(self.parse_raw_scalar_field()?),
-                "nominal" => nominal = Some(self.parse_input_name()?),
+                "nominal" => {
+                    nominal = Some(if self.qualified_nominals {
+                        let name = self.parse_string(self.limits.max_name_bytes)?;
+                        for segment in name.split("::") {
+                            validate_identifier(segment, self.limits.max_name_bytes)?;
+                        }
+                        name
+                    } else {
+                        self.parse_input_name()?
+                    });
+                }
                 "variant" => variant = Some(self.parse_input_name()?),
                 "args" => args = Some(self.parse_value_array()?),
                 "fields" => fields = Some(self.parse_record_fields()?),

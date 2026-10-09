@@ -61,6 +61,11 @@ pub enum ModuleLinkError {
     NonExportedAccess { module: String, symbol: String },
     /// Unresolved symbol reference.
     UnresolvedSymbol { module: String, symbol: String },
+    /// A constructor or nominal type has multiple visible definitions.
+    AmbiguousSymbol {
+        name: String,
+        alternatives: Vec<String>,
+    },
     /// Conflicting top-level declaration in flat scope.
     Conflict {
         name: String,
@@ -84,6 +89,9 @@ pub enum ModuleLinkError {
 impl fmt::Display for ModuleLinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AmbiguousSymbol { name, alternatives } => {
+                write!(f, "ambiguous symbol '{name}': {}", alternatives.join(", "))
+            }
             Self::NotFound(pkg) => write!(f, "module or package '{pkg}' was not found"),
             Self::Parse { module, error } => {
                 write!(f, "module '{module}' failed to parse: {error}")
@@ -493,6 +501,23 @@ impl ModuleGraph {
 
     /// Link the modules into a [`LinkedProgram`] with qualified symbols and dead-code reachability pruning.
     pub fn link(&self) -> Result<LinkedProgram, ModuleLinkError> {
+        // Resolve nominal names in their lexical module before pruning or
+        // compiling helpers. A process-wide constructor table cannot represent
+        // private types or two packages that use the same local type names.
+        let mut resolved = self.clone();
+        for (name, module) in &mut resolved.modules {
+            let resolver = NominalResolver {
+                graph: self,
+                module: name,
+            };
+            for item in &mut module.ast.items {
+                resolver.item(item)?;
+            }
+        }
+        resolved.link_resolved()
+    }
+
+    fn link_resolved(&self) -> Result<LinkedProgram, ModuleLinkError> {
         let root = self
             .modules
             .get(&self.root_module)
@@ -579,6 +604,7 @@ impl ModuleGraph {
             root_module: self.root_module.clone(),
             root_items: root_items.clone(),
             configs: all_configs.clone(),
+            available_configs: all_configs.clone(),
             functions: all_functions.clone(),
             rel_inputs: all_rel_inputs.clone(),
             rel_derived: all_rel_derived.clone(),
@@ -602,7 +628,7 @@ impl ModuleGraph {
                     item => item,
                 };
                 let mut deps = BTreeSet::new();
-                trace_item_deps(item, module_name, &mut deps);
+                trace_item_deps(item, module_name, &mut deps, &all_configs);
                 for dep in deps {
                     if dep.module != *module_name {
                         if !module.direct_imports.contains(&dep.module) || !known.contains(&dep) {
@@ -637,41 +663,81 @@ impl ModuleGraph {
                 Item::Config(c) => {
                     let q = QualifiedName::new(&self.root_module, &c.name);
                     reachable_symbols.insert(q.clone());
-                    trace_config_deps(c, &self.root_module, &mut reachable_symbols);
+                    trace_config_deps(c, &self.root_module, &mut reachable_symbols, &all_configs);
                 }
                 Item::Fn(f) => {
                     let q = QualifiedName::new(&self.root_module, &f.name);
                     reachable_symbols.insert(q.clone());
-                    trace_expr_deps(&f.body, &self.root_module, &mut reachable_symbols);
+                    trace_expr_deps(
+                        &f.body,
+                        &self.root_module,
+                        &mut reachable_symbols,
+                        &all_configs,
+                    );
                 }
                 Item::RelInput(r) => {
                     let q = QualifiedName::new(&self.root_module, &r.name);
                     reachable_symbols.insert(q);
-                    trace_ty_deps(&r.ty, &self.root_module, &mut reachable_symbols);
+                    trace_ty_deps(
+                        &r.ty,
+                        &self.root_module,
+                        &mut reachable_symbols,
+                        &all_configs,
+                    );
                 }
                 Item::RelDerived(r) => {
                     let q = QualifiedName::new(&self.root_module, &r.name);
                     reachable_symbols.insert(q);
-                    trace_rel_query_deps(&r.query, &self.root_module, &mut reachable_symbols);
+                    trace_rel_query_deps(
+                        &r.query,
+                        &self.root_module,
+                        &mut reachable_symbols,
+                        &all_configs,
+                    );
                 }
                 Item::Rule(r) => {
                     let q = QualifiedName::new(&self.root_module, &r.name);
                     reachable_symbols.insert(q);
-                    trace_expr_deps(&r.body, &self.root_module, &mut reachable_symbols);
+                    trace_expr_deps(
+                        &r.body,
+                        &self.root_module,
+                        &mut reachable_symbols,
+                        &all_configs,
+                    );
                 }
                 Item::Let(l) => {
-                    trace_expr_deps(&l.value, &self.root_module, &mut reachable_symbols);
+                    trace_expr_deps(
+                        &l.value,
+                        &self.root_module,
+                        &mut reachable_symbols,
+                        &all_configs,
+                    );
                 }
                 Item::Show(e) => {
-                    trace_expr_deps(e, &self.root_module, &mut reachable_symbols);
+                    trace_expr_deps(e, &self.root_module, &mut reachable_symbols, &all_configs);
                 }
                 Item::Decide(d) => {
                     let q = QualifiedName::new(&self.root_module, &d.name);
                     reachable_symbols.insert(q);
-                    trace_expr_deps(&d.list, &self.root_module, &mut reachable_symbols);
+                    trace_expr_deps(
+                        &d.list,
+                        &self.root_module,
+                        &mut reachable_symbols,
+                        &all_configs,
+                    );
                     for p in &d.proposals {
-                        trace_expr_deps(&p.guard, &self.root_module, &mut reachable_symbols);
-                        trace_expr_deps(&p.value, &self.root_module, &mut reachable_symbols);
+                        trace_expr_deps(
+                            &p.guard,
+                            &self.root_module,
+                            &mut reachable_symbols,
+                            &all_configs,
+                        );
+                        trace_expr_deps(
+                            &p.value,
+                            &self.root_module,
+                            &mut reachable_symbols,
+                            &all_configs,
+                        );
                     }
                 }
                 _ => {}
@@ -686,22 +752,27 @@ impl ModuleGraph {
             for q in current {
                 let mut deps = BTreeSet::new();
                 if let Some(f) = all_functions.get(&q) {
-                    trace_callable_deps(f, &q.module, &mut deps);
+                    trace_callable_deps(f, &q.module, &mut deps, &all_configs);
                 }
                 if let Some(input) = all_rel_inputs.get(&q) {
-                    trace_ty_deps(&input.ty, &q.module, &mut deps);
+                    trace_ty_deps(&input.ty, &q.module, &mut deps, &all_configs);
                 }
                 if let Some(rule) = all_rules.get(&q) {
-                    trace_callable_deps(rule, &q.module, &mut deps);
+                    trace_callable_deps(rule, &q.module, &mut deps, &all_configs);
                 }
                 if let Some(decide) = all_decides.get(&q) {
-                    trace_item_deps(&Item::Decide(decide.clone()), &q.module, &mut deps);
+                    trace_item_deps(
+                        &Item::Decide(decide.clone()),
+                        &q.module,
+                        &mut deps,
+                        &all_configs,
+                    );
                 }
                 if let Some(r) = all_rel_derived.get(&q) {
-                    trace_rel_query_deps(&r.query, &q.module, &mut deps);
+                    trace_rel_query_deps(&r.query, &q.module, &mut deps, &all_configs);
                 }
                 if let Some(c) = all_configs.get(&q) {
-                    trace_config_deps(c, &q.module, &mut deps);
+                    trace_config_deps(c, &q.module, &mut deps, &all_configs);
                 }
 
                 for dep in deps {
@@ -725,10 +796,31 @@ impl ModuleGraph {
             changed = reachable_symbols.len() > prev_len;
         }
 
-        // 3. Filter reachable items for the active plan
+        // 3. Filter reachable items for the active plan.
+        // Include reachable configs as well as configs from imported modules of reachable items,
+        // so constructor tables retain visibility of imported types and can detect ambiguities.
+        let mut all_needed_configs = reachable_symbols.clone();
+        for q in &reachable_symbols {
+            if let Some(m) = self.modules.get(&q.module) {
+                for imp in &m.direct_imports {
+                    for cfg_q in all_configs.keys() {
+                        if &cfg_q.module == imp && exported_symbols.contains(cfg_q) {
+                            all_needed_configs.insert(cfg_q.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         let active_configs: BTreeMap<QualifiedName, ast::ConfigDecl> = all_configs
-            .into_iter()
+            .iter()
             .filter(|(q, _)| reachable_symbols.contains(q))
+            .map(|(q, c)| (q.clone(), c.clone()))
+            .collect();
+
+        let available_configs: BTreeMap<QualifiedName, ast::ConfigDecl> = all_configs
+            .into_iter()
+            .filter(|(q, _)| all_needed_configs.contains(q))
             .collect();
 
         let active_functions: BTreeMap<QualifiedName, ast::Callable> = all_functions
@@ -750,6 +842,7 @@ impl ModuleGraph {
             root_module: self.root_module.clone(),
             root_items,
             configs: active_configs,
+            available_configs,
             functions: active_functions,
             rel_inputs: active_rel_inputs,
             rel_derived: active_rel_derived,
@@ -774,6 +867,7 @@ pub struct LinkedProgram {
     pub root_module: String,
     pub root_items: Vec<Item>,
     pub configs: BTreeMap<QualifiedName, ast::ConfigDecl>,
+    pub available_configs: BTreeMap<QualifiedName, ast::ConfigDecl>,
     pub functions: BTreeMap<QualifiedName, ast::Callable>,
     pub rel_inputs: BTreeMap<QualifiedName, ast::RelInputDecl>,
     pub rel_derived: BTreeMap<QualifiedName, ast::RelDerivedDecl>,
@@ -994,17 +1088,19 @@ fn trace_rel_query_deps(
     query: &ast::RelQuery,
     current_module: &str,
     reachable: &mut BTreeSet<QualifiedName>,
+    all_configs: &BTreeMap<QualifiedName, ast::ConfigDecl>,
 ) {
-    trace_expr_deps(&query.select, current_module, reachable);
+    trace_expr_deps(&query.select, current_module, reachable, all_configs);
     for binding in &query.from {
-        let q = resolve_symbol_ref(&binding.relation, current_module);
-        reachable.insert(q);
+        if let Some(q) = resolve_symbol_ref(&binding.relation, current_module, all_configs) {
+            reachable.insert(q);
+        }
     }
     if let Some(w) = &query.where_clause {
-        trace_expr_deps(w, current_module, reachable);
+        trace_expr_deps(w, current_module, reachable, all_configs);
     }
     for g in &query.group_by {
-        trace_expr_deps(g, current_module, reachable);
+        trace_expr_deps(g, current_module, reachable, all_configs);
     }
 }
 
@@ -1012,40 +1108,48 @@ fn trace_config_deps(
     config: &ast::ConfigDecl,
     current_module: &str,
     reachable: &mut BTreeSet<QualifiedName>,
+    all_configs: &BTreeMap<QualifiedName, ast::ConfigDecl>,
 ) {
     match &config.body {
         ast::ConfigBody::Record(fields) => {
             for f in fields {
-                trace_ty_deps(&f.ty, current_module, reachable);
+                trace_ty_deps(&f.ty, current_module, reachable, all_configs);
             }
         }
         ast::ConfigBody::Sum(variants) => {
             for v in variants {
                 for p in &v.params {
-                    trace_ty_deps(p, current_module, reachable);
+                    trace_ty_deps(p, current_module, reachable, all_configs);
                 }
             }
         }
     }
 }
 
-fn trace_ty_deps(ty: &ast::Ty, current_module: &str, reachable: &mut BTreeSet<QualifiedName>) {
+fn trace_ty_deps(
+    ty: &ast::Ty,
+    current_module: &str,
+    reachable: &mut BTreeSet<QualifiedName>,
+    all_configs: &BTreeMap<QualifiedName, ast::ConfigDecl>,
+) {
     match ty {
         ast::Ty::Named(name) => {
-            let q = resolve_symbol_ref(name, current_module);
-            reachable.insert(q);
+            if let Some(q) = resolve_symbol_ref(name, current_module, all_configs) {
+                reachable.insert(q);
+            }
         }
-        ast::Ty::Graded(inner, _) => trace_ty_deps(inner, current_module, reachable),
+        ast::Ty::Graded(inner, _) => trace_ty_deps(inner, current_module, reachable, all_configs),
         ast::Ty::Record(fields) => {
             for f in fields {
-                trace_ty_deps(&f.ty, current_module, reachable);
+                trace_ty_deps(&f.ty, current_module, reachable, all_configs);
             }
         }
         ast::Ty::App(name, args) => {
-            let q = resolve_symbol_ref(name, current_module);
-            reachable.insert(q);
+            if let Some(q) = resolve_symbol_ref(name, current_module, all_configs) {
+                reachable.insert(q);
+            }
             for a in args {
-                trace_ty_deps(a, current_module, reachable);
+                trace_ty_deps(a, current_module, reachable, all_configs);
             }
         }
     }
@@ -1055,52 +1159,63 @@ fn trace_expr_deps(
     expr: &ast::Expr,
     current_module: &str,
     reachable: &mut BTreeSet<QualifiedName>,
+    all_configs: &BTreeMap<QualifiedName, ast::ConfigDecl>,
 ) {
     match expr {
         ast::Expr::Var(name) => {
-            let q = resolve_symbol_ref(name, current_module);
-            reachable.insert(q);
+            if let Some(q) = resolve_symbol_ref(name, current_module, all_configs) {
+                reachable.insert(q);
+            }
         }
         ast::Expr::Call { func, args } => {
-            let q = resolve_symbol_ref(func, current_module);
-            reachable.insert(q);
+            if let Some(q) = resolve_symbol_ref(func, current_module, all_configs) {
+                reachable.insert(q);
+            }
             for a in args {
-                trace_expr_deps(a, current_module, reachable);
+                trace_expr_deps(a, current_module, reachable, all_configs);
             }
         }
         ast::Expr::Record { config, fields } => {
-            let q = resolve_symbol_ref(config, current_module);
-            reachable.insert(q);
+            if let Some(q) = resolve_symbol_ref(config, current_module, all_configs) {
+                reachable.insert(q);
+            }
             for (_, f) in fields {
-                trace_expr_deps(f, current_module, reachable);
+                trace_expr_deps(f, current_module, reachable, all_configs);
             }
         }
         ast::Expr::AnonRecord(fields) => {
             for (_, f) in fields {
-                trace_expr_deps(f, current_module, reachable);
+                trace_expr_deps(f, current_module, reachable, all_configs);
             }
         }
-        ast::Expr::Field(base, _) => trace_expr_deps(base, current_module, reachable),
+        ast::Expr::Field(base, _) => trace_expr_deps(base, current_module, reachable, all_configs),
         ast::Expr::Bin { lhs, rhs, .. } => {
-            trace_expr_deps(lhs, current_module, reachable);
-            trace_expr_deps(rhs, current_module, reachable);
+            trace_expr_deps(lhs, current_module, reachable, all_configs);
+            trace_expr_deps(rhs, current_module, reachable, all_configs);
         }
         ast::Expr::Match {
             scrutinee, arms, ..
         } => {
-            trace_expr_deps(scrutinee, current_module, reachable);
+            trace_expr_deps(scrutinee, current_module, reachable, all_configs);
             for arm in arms {
-                trace_expr_deps(&arm.body, current_module, reachable);
+                if let ast::Pattern::Ctor { name, .. } = &arm.pattern {
+                    if let Some(q) = resolve_symbol_ref(name, current_module, all_configs) {
+                        reachable.insert(q);
+                    }
+                }
+                trace_expr_deps(&arm.body, current_module, reachable, all_configs);
             }
         }
         ast::Expr::Not(inner)
         | ast::Expr::Prove(inner)
         | ast::Expr::Why(inner)
-        | ast::Expr::Audit(inner) => trace_expr_deps(inner, current_module, reachable),
-        ast::Expr::Lambda { body, .. } => trace_expr_deps(body, current_module, reachable),
+        | ast::Expr::Audit(inner) => trace_expr_deps(inner, current_module, reachable, all_configs),
+        ast::Expr::Lambda { body, .. } => {
+            trace_expr_deps(body, current_module, reachable, all_configs)
+        }
         ast::Expr::ListLit(items) => {
             for item in items {
-                trace_expr_deps(item, current_module, reachable);
+                trace_expr_deps(item, current_module, reachable, all_configs);
             }
         }
         ast::Expr::Comprehension {
@@ -1109,22 +1224,304 @@ fn trace_expr_deps(
             yield_expr,
         } => {
             for (_, gen) in generators {
-                trace_expr_deps(gen, current_module, reachable);
+                trace_expr_deps(gen, current_module, reachable, all_configs);
             }
             if let Some(w) = where_clause {
-                trace_expr_deps(w, current_module, reachable);
+                trace_expr_deps(w, current_module, reachable, all_configs);
             }
-            trace_expr_deps(yield_expr, current_module, reachable);
+            trace_expr_deps(yield_expr, current_module, reachable, all_configs);
         }
         ast::Expr::Num(_) | ast::Expr::Str(_) | ast::Expr::Bool(_) => {}
     }
 }
 
-fn resolve_symbol_ref(symbol: &str, current_module: &str) -> QualifiedName {
-    if let Some((mod_part, name_part)) = symbol.rsplit_once("::") {
-        QualifiedName::new(mod_part, name_part)
-    } else {
-        QualifiedName::new(current_module, symbol)
+fn resolve_symbol_ref(
+    symbol: &str,
+    current_module: &str,
+    _all_configs: &BTreeMap<QualifiedName, ast::ConfigDecl>,
+) -> Option<QualifiedName> {
+    if crate::l3_v2::is_reserved_list_operation_name(symbol)
+        || crate::l3_v2::NumericBuiltinV2::from_name(symbol).is_some()
+        || crate::l3_v2::DivModOpV2::from_name(symbol).is_some()
+    {
+        return None;
+    }
+
+    let parts: Vec<&str> = symbol.split("::").collect();
+    match parts.as_slice() {
+        [module, config, _variant] => Some(QualifiedName::new(*module, *config)),
+        [module, name] => Some(QualifiedName::new(*module, *name)),
+        _ => Some(QualifiedName::new(current_module, symbol)),
+    }
+}
+
+/// Lexical resolution for nominal types, constructors and helper calls.
+/// Relations retain their existing explicit module-resolution rules.
+struct NominalResolver<'a> {
+    graph: &'a ModuleGraph,
+    module: &'a str,
+}
+
+impl NominalResolver<'_> {
+    fn resolve(
+        &self,
+        name: &str,
+        constructor: bool,
+        function: bool,
+    ) -> Result<Option<String>, ModuleLinkError> {
+        let mut visible = BTreeSet::new();
+        let mut local = BTreeSet::new();
+        let mut hidden = None;
+        let imports = &self.graph.modules[self.module].direct_imports;
+        for (module, loaded) in &self.graph.modules {
+            for item in &loaded.ast.items {
+                let (item, exported) = match item {
+                    Item::Export(inner) => (inner.as_ref(), true),
+                    other => (other, false),
+                };
+                let mut candidates = Vec::new();
+                match item {
+                    Item::Config(config) if constructor => {
+                        if let ast::ConfigBody::Sum(variants) = &config.body {
+                            for variant in variants {
+                                let full = format!("{module}::{}::{}", config.name, variant.name);
+                                if name == variant.name
+                                    || name == format!("{}::{}", config.name, variant.name)
+                                    || name == format!("{module}::{}", variant.name)
+                                    || name == full
+                                {
+                                    candidates.push((config.name.clone(), full));
+                                }
+                            }
+                        }
+                    }
+                    Item::Config(config) if !function => {
+                        let full = format!("{module}::{}", config.name);
+                        if name == config.name || name == full {
+                            candidates.push((config.name.clone(), full));
+                        }
+                    }
+                    Item::Fn(callable) if function => {
+                        let full = format!("{module}::{}", callable.name);
+                        if name == callable.name || name == full {
+                            candidates.push((callable.name.clone(), full));
+                        }
+                    }
+                    _ => {}
+                }
+                for (declaration, full) in candidates {
+                    if module == self.module {
+                        local.insert(full.clone());
+                        visible.insert(full);
+                    } else if imports.contains(module) && exported {
+                        visible.insert(full);
+                    } else {
+                        hidden.get_or_insert((module.clone(), declaration, exported));
+                    }
+                }
+            }
+        }
+        // Local declarations shadow imports, just like other module symbols.
+        let candidates = if local.is_empty() { visible } else { local };
+        if candidates.len() > 1 {
+            return Err(ModuleLinkError::AmbiguousSymbol {
+                name: name.to_owned(),
+                alternatives: candidates.into_iter().collect(),
+            });
+        }
+        if let Some(found) = candidates.into_iter().next() {
+            return Ok(Some(found));
+        }
+        if let Some((module, symbol, exported)) = hidden {
+            return Err(if imports.contains(&module) && !exported {
+                ModuleLinkError::NonExportedAccess { module, symbol }
+            } else {
+                ModuleLinkError::UnresolvedSymbol { module, symbol }
+            });
+        }
+        Ok(None)
+    }
+
+    fn ty(&self, ty: &mut ast::Ty) -> Result<(), ModuleLinkError> {
+        match ty {
+            ast::Ty::Named(name) => {
+                if let Some(full) = self.resolve(name, false, false)? {
+                    *name = full;
+                }
+            }
+            ast::Ty::Graded(inner, _) => self.ty(inner)?,
+            ast::Ty::Record(fields) => {
+                for field in fields {
+                    self.ty(&mut field.ty)?;
+                }
+            }
+            ast::Ty::App(_, args) => {
+                for arg in args {
+                    self.ty(arg)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn expr(&self, expr: &mut ast::Expr, bound: &BTreeSet<String>) -> Result<(), ModuleLinkError> {
+        use ast::Expr;
+        match expr {
+            Expr::Var(name) if !bound.contains(name) => {
+                if let Some(full) = self.resolve(name, true, false)? {
+                    *name = full;
+                }
+            }
+            Expr::Call { func, args } => {
+                // User helpers and constructors are distinct source forms only
+                // after resolution; helper declarations take precedence.
+                if let Some(full) = self.resolve(func, false, true)? {
+                    *func = full;
+                } else if let Some(full) = self.resolve(func, true, false)? {
+                    *func = full;
+                }
+                for arg in args {
+                    self.expr(arg, bound)?;
+                }
+            }
+            Expr::Record { config, fields } => {
+                if let Some(full) = self.resolve(config, false, false)? {
+                    *config = full;
+                }
+                for (_, value) in fields {
+                    self.expr(value, bound)?;
+                }
+            }
+            Expr::AnonRecord(fields) => {
+                for (_, value) in fields {
+                    self.expr(value, bound)?;
+                }
+            }
+            Expr::Field(value, _)
+            | Expr::Not(value)
+            | Expr::Prove(value)
+            | Expr::Why(value)
+            | Expr::Audit(value) => self.expr(value, bound)?,
+            Expr::Bin { lhs, rhs, .. } => {
+                self.expr(lhs, bound)?;
+                self.expr(rhs, bound)?;
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                self.expr(scrutinee, bound)?;
+                for arm in arms {
+                    let mut arm_bound = bound.clone();
+                    if let ast::Pattern::Ctor { name, args } = &mut arm.pattern {
+                        if let Some(full) = self.resolve(name, true, false)? {
+                            *name = full;
+                        }
+                        for arg in args {
+                            if let ast::Pattern::Var(name) = arg {
+                                arm_bound.insert(name.clone());
+                            }
+                        }
+                    }
+                    self.expr(&mut arm.body, &arm_bound)?;
+                }
+            }
+            Expr::Lambda { param, body } => {
+                let mut scope = bound.clone();
+                scope.insert(param.clone());
+                self.expr(body, &scope)?;
+            }
+            Expr::ListLit(items) => {
+                for item in items {
+                    self.expr(item, bound)?;
+                }
+            }
+            Expr::Comprehension {
+                generators,
+                where_clause,
+                yield_expr,
+            } => {
+                let mut scope = bound.clone();
+                for (name, value) in generators {
+                    self.expr(value, &scope)?;
+                    scope.insert(name.clone());
+                }
+                if let Some(value) = where_clause {
+                    self.expr(value, &scope)?;
+                }
+                self.expr(yield_expr, &scope)?;
+            }
+            Expr::Var(_) | Expr::Num(_) | Expr::Str(_) | Expr::Bool(_) => {}
+        }
+        Ok(())
+    }
+
+    fn item(&self, item: &mut Item) -> Result<(), ModuleLinkError> {
+        match item {
+            Item::Export(inner) => self.item(inner)?,
+            Item::Config(config) => match &mut config.body {
+                ast::ConfigBody::Record(fields) => {
+                    for field in fields {
+                        self.ty(&mut field.ty)?;
+                    }
+                }
+                ast::ConfigBody::Sum(variants) => {
+                    for variant in variants {
+                        for ty in &mut variant.params {
+                            self.ty(ty)?;
+                        }
+                    }
+                }
+            },
+            Item::Fn(f) | Item::Rule(f) => {
+                for param in &mut f.params {
+                    if let Some(ty) = &mut param.ty {
+                        self.ty(ty)?;
+                    }
+                }
+                if let Some(ty) = &mut f.ret {
+                    self.ty(ty)?;
+                }
+                self.expr(
+                    &mut f.body,
+                    &f.params.iter().map(|p| p.name.clone()).collect(),
+                )?;
+            }
+            Item::RelInput(input) => self.ty(&mut input.ty)?,
+            Item::Input(input) => self.ty(&mut input.ty)?,
+            Item::RelDerived(derived) => {
+                let bound = derived.query.from.iter().map(|b| b.var.clone()).collect();
+                self.expr(&mut derived.query.select, &bound)?;
+                if let Some(value) = &mut derived.query.where_clause {
+                    self.expr(value, &bound)?;
+                }
+                for value in &mut derived.query.group_by {
+                    self.expr(value, &bound)?;
+                }
+            }
+            Item::Decide(decide) => {
+                self.expr(&mut decide.list, &BTreeSet::new())?;
+                let bound = BTreeSet::from([decide.binder.clone()]);
+                for proposal in &mut decide.proposals {
+                    self.expr(&mut proposal.guard, &bound)?;
+                    self.expr(&mut proposal.value, &bound)?;
+                }
+            }
+            Item::Let(binding) => {
+                if let Some(ty) = &mut binding.ty {
+                    self.ty(ty)?;
+                }
+                self.expr(&mut binding.value, &BTreeSet::new())?;
+            }
+            Item::Show(value) | Item::Witness { value, .. } => {
+                self.expr(value, &BTreeSet::new())?
+            }
+            Item::Propose(proposal) => {
+                self.expr(&mut proposal.guard, &BTreeSet::new())?;
+                self.expr(&mut proposal.value, &BTreeSet::new())?;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 
@@ -1140,41 +1537,55 @@ fn declaration_name(item: &Item) -> Option<&str> {
     }
 }
 
-fn trace_callable_deps(callable: &ast::Callable, module: &str, deps: &mut BTreeSet<QualifiedName>) {
-    trace_expr_deps(&callable.body, module, deps);
+fn trace_callable_deps(
+    callable: &ast::Callable,
+    module: &str,
+    deps: &mut BTreeSet<QualifiedName>,
+    all_configs: &BTreeMap<QualifiedName, ast::ConfigDecl>,
+) {
+    trace_expr_deps(&callable.body, module, deps, all_configs);
     for param in &callable.params {
         if let Some(ty) = &param.ty {
-            trace_ty_deps(ty, module, deps);
+            trace_ty_deps(ty, module, deps, all_configs);
         }
     }
     if let Some(ty) = &callable.ret {
-        trace_ty_deps(ty, module, deps);
+        trace_ty_deps(ty, module, deps, all_configs);
     }
 }
 
-fn trace_item_deps(item: &Item, module: &str, deps: &mut BTreeSet<QualifiedName>) {
+fn trace_item_deps(
+    item: &Item,
+    module: &str,
+    deps: &mut BTreeSet<QualifiedName>,
+    all_configs: &BTreeMap<QualifiedName, ast::ConfigDecl>,
+) {
     match item {
-        Item::Fn(callable) | Item::Rule(callable) => trace_callable_deps(callable, module, deps),
-        Item::Config(config) => trace_config_deps(config, module, deps),
-        Item::RelInput(input) => trace_ty_deps(&input.ty, module, deps),
-        Item::RelDerived(derived) => trace_rel_query_deps(&derived.query, module, deps),
+        Item::Fn(callable) | Item::Rule(callable) => {
+            trace_callable_deps(callable, module, deps, all_configs)
+        }
+        Item::Config(config) => trace_config_deps(config, module, deps, all_configs),
+        Item::RelInput(input) => trace_ty_deps(&input.ty, module, deps, all_configs),
+        Item::RelDerived(derived) => {
+            trace_rel_query_deps(&derived.query, module, deps, all_configs)
+        }
         Item::Let(binding) => {
-            trace_expr_deps(&binding.value, module, deps);
+            trace_expr_deps(&binding.value, module, deps, all_configs);
             if let Some(ty) = &binding.ty {
-                trace_ty_deps(ty, module, deps);
+                trace_ty_deps(ty, module, deps, all_configs);
             }
         }
-        Item::Show(expression) => trace_expr_deps(expression, module, deps),
+        Item::Show(expression) => trace_expr_deps(expression, module, deps, all_configs),
         Item::Decide(decide) => {
-            trace_expr_deps(&decide.list, module, deps);
+            trace_expr_deps(&decide.list, module, deps, all_configs);
             for proposal in &decide.proposals {
-                trace_expr_deps(&proposal.guard, module, deps);
-                trace_expr_deps(&proposal.value, module, deps);
+                trace_expr_deps(&proposal.guard, module, deps, all_configs);
+                trace_expr_deps(&proposal.value, module, deps, all_configs);
             }
         }
         Item::Propose(proposal) => {
-            trace_expr_deps(&proposal.guard, module, deps);
-            trace_expr_deps(&proposal.value, module, deps);
+            trace_expr_deps(&proposal.guard, module, deps, all_configs);
+            trace_expr_deps(&proposal.value, module, deps, all_configs);
         }
         _ => {}
     }

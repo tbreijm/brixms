@@ -254,20 +254,49 @@ impl From<WorldError> for VerifyError {
     }
 }
 
+fn convert_reference_value(v: &reference::Value) -> Value {
+    match v {
+        reference::Value::Null => Value::Null,
+        reference::Value::Bool(b) => Value::Bool(*b),
+        reference::Value::Int(i) => Value::Int(*i),
+        reference::Value::Str(st) => Value::Str(st.clone()),
+        reference::Value::F64(f) => Value::F64(*f),
+        reference::Value::Decimal(d) => Value::Decimal(*d),
+        reference::Value::Record { nominal, fields } => {
+            let mut map = std::collections::BTreeMap::new();
+            for (k, val) in fields {
+                map.insert(k.clone(), convert_reference_value(val));
+            }
+            Value::Record {
+                nominal: nominal.clone(),
+                fields: map,
+            }
+        }
+        reference::Value::Variant {
+            nominal,
+            variant,
+            args,
+        } => {
+            let mut vec = Vec::with_capacity(args.len());
+            for a in args {
+                vec.push(convert_reference_value(a));
+            }
+            Value::Variant {
+                nominal: nominal.clone(),
+                variant: variant.clone(),
+                args: vec,
+            }
+        }
+    }
+}
+
 fn convert_reference_settlement(s: &ReferenceSettlement) -> SettledDecision {
     SettledDecision {
         entity_id: s.entity_id.clone(),
         candidate_name: s.candidate_name.clone(),
         priority: s.priority,
         phase: s.phase,
-        value: match &s.value {
-            reference::Value::Null => Value::Null,
-            reference::Value::Bool(b) => Value::Bool(*b),
-            reference::Value::Int(i) => Value::Int(*i),
-            reference::Value::Str(st) => Value::Str(st.clone()),
-            reference::Value::F64(f) => Value::F64(*f),
-            reference::Value::Decimal(d) => Value::Decimal(*d),
-        },
+        value: convert_reference_value(&s.value),
         calendar_key: s.calendar_key,
     }
 }

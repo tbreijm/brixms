@@ -923,6 +923,11 @@ pub enum L3V2LowerError {
         form: &'static str,
         detail: &'static str,
     },
+    /// An ambiguous bare constructor reference matching multiple declared sum variants.
+    AmbiguousConstructor {
+        name: String,
+        alternatives: Vec<String>,
+    },
     /// A lambda (`x => expr`) reached lowering outside the one position that
     /// admits it: the second argument of a recognized fold/filter/map call
     /// (ADR-0037, ADR-0040). Lambdas are not first-class values.
@@ -932,6 +937,13 @@ pub enum L3V2LowerError {
 impl fmt::Display for L3V2LowerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AmbiguousConstructor { name, alternatives } => {
+                write!(
+                    f,
+                    "ambiguous constructor '{name}': qualified alternatives are [{}]",
+                    alternatives.join(", ")
+                )
+            }
             Self::ProfileMismatch { expected, found } => {
                 write!(
                     f,
@@ -1242,6 +1254,61 @@ pub(crate) fn lower_expr_v2(
     in_rule: bool,
     helper_enabled: bool,
 ) -> Result<L3ExprV2, L3V2LowerError> {
+    let empty_ambiguous = BTreeMap::new();
+    lower_expr_v2_impl(
+        e,
+        lets,
+        locals,
+        rules,
+        nullary,
+        variants_of,
+        functions,
+        in_rule,
+        helper_enabled,
+        &empty_ambiguous,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lower_expr_v2_with_ambiguous(
+    e: &ast::Expr,
+    lets: &BTreeSet<String>,
+    locals: &BTreeSet<String>,
+    rules: &BTreeSet<String>,
+    nullary: &BTreeMap<String, String>,
+    variants_of: &BTreeMap<String, String>,
+    functions: &BTreeMap<String, usize>,
+    in_rule: bool,
+    helper_enabled: bool,
+    ambiguous_ctors: &BTreeMap<String, Vec<String>>,
+) -> Result<L3ExprV2, L3V2LowerError> {
+    lower_expr_v2_impl(
+        e,
+        lets,
+        locals,
+        rules,
+        nullary,
+        variants_of,
+        functions,
+        in_rule,
+        helper_enabled,
+        ambiguous_ctors,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_expr_v2_impl(
+    e: &ast::Expr,
+    lets: &BTreeSet<String>,
+    locals: &BTreeSet<String>,
+    rules: &BTreeSet<String>,
+    nullary: &BTreeMap<String, String>,
+    variants_of: &BTreeMap<String, String>,
+    functions: &BTreeMap<String, usize>,
+    in_rule: bool,
+    helper_enabled: bool,
+    ambiguous_ctors: &BTreeMap<String, Vec<String>>,
+) -> Result<L3ExprV2, L3V2LowerError> {
     match e {
         ast::Expr::Num(s) => {
             if let Ok(n) = s.parse::<i64>() {
@@ -1255,15 +1322,25 @@ pub(crate) fn lower_expr_v2(
         ast::Expr::Str(s) => Ok(L3ExprV2::Str(s.clone())),
         ast::Expr::Bool(b) => Ok(L3ExprV2::Bool(*b)),
         ast::Expr::Var(name) => {
+            if helper_enabled && locals.contains(name) {
+                return Ok(L3ExprV2::LetRef(name.clone()));
+            }
+            if let Some(alts) = ambiguous_ctors.get(name) {
+                return Err(L3V2LowerError::AmbiguousConstructor {
+                    name: name.clone(),
+                    alternatives: alts.clone(),
+                });
+            }
             if helper_enabled {
                 // In helper-enabled lowering, parameters and match binders take lexical precedence.
                 if locals.contains(name) {
                     return Ok(L3ExprV2::LetRef(name.clone()));
                 }
                 if let Some(sum) = nullary.get(name) {
+                    let simple_variant = name.rsplit_once("::").map(|(_, v)| v).unwrap_or(name);
                     return Ok(L3ExprV2::NullaryVariant {
                         nominal_sum: sum.clone(),
-                        variant: name.clone(),
+                        variant: simple_variant.to_string(),
                     });
                 }
                 if lets.contains(name) {
@@ -1272,9 +1349,10 @@ pub(crate) fn lower_expr_v2(
             } else {
                 // Function-free profiles retain prior precedence: nullary constructors resolve first.
                 if let Some(sum) = nullary.get(name) {
+                    let simple_variant = name.rsplit_once("::").map(|(_, v)| v).unwrap_or(name);
                     return Ok(L3ExprV2::NullaryVariant {
                         nominal_sum: sum.clone(),
-                        variant: name.clone(),
+                        variant: simple_variant.to_string(),
                     });
                 }
                 if locals.contains(name) || lets.contains(name) {
@@ -1294,7 +1372,7 @@ pub(crate) fn lower_expr_v2(
             Err(L3V2LowerError::UnresolvedReference(name.clone()))
         }
         ast::Expr::Field(base, field) => Ok(L3ExprV2::Field(
-            Box::new(lower_expr_v2(
+            Box::new(lower_expr_v2_impl(
                 base,
                 lets,
                 locals,
@@ -1304,6 +1382,7 @@ pub(crate) fn lower_expr_v2(
                 functions,
                 in_rule,
                 helper_enabled,
+                ambiguous_ctors,
             )?),
             field.clone(),
         )),
@@ -1312,7 +1391,7 @@ pub(crate) fn lower_expr_v2(
             for (name, value) in fields {
                 out.push((
                     name.clone(),
-                    lower_expr_v2(
+                    lower_expr_v2_impl(
                         value,
                         lets,
                         locals,
@@ -1322,6 +1401,7 @@ pub(crate) fn lower_expr_v2(
                         functions,
                         in_rule,
                         helper_enabled,
+                        ambiguous_ctors,
                     )?,
                 ));
             }
@@ -1343,7 +1423,7 @@ pub(crate) fn lower_expr_v2(
                 let args = args
                     .iter()
                     .map(|a| {
-                        lower_expr_v2(
+                        lower_expr_v2_impl(
                             a,
                             lets,
                             locals,
@@ -1353,6 +1433,7 @@ pub(crate) fn lower_expr_v2(
                             functions,
                             in_rule,
                             helper_enabled,
+                            ambiguous_ctors,
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1365,7 +1446,7 @@ pub(crate) fn lower_expr_v2(
             // silent override of something the author wrote.
             if let Some(op) = FoldOpV2::from_name(func) {
                 let (list_expr, binder, body_expr) = expect_list_form(op.name(), args)?;
-                let list = Box::new(lower_expr_v2(
+                let list = Box::new(lower_expr_v2_impl(
                     list_expr,
                     lets,
                     locals,
@@ -1375,10 +1456,11 @@ pub(crate) fn lower_expr_v2(
                     functions,
                     in_rule,
                     helper_enabled,
+                    ambiguous_ctors,
                 )?);
                 let mut body_locals = locals.clone();
                 body_locals.insert(binder.to_string());
-                let body = Box::new(lower_expr_v2(
+                let body = Box::new(lower_expr_v2_impl(
                     body_expr,
                     lets,
                     &body_locals,
@@ -1388,6 +1470,7 @@ pub(crate) fn lower_expr_v2(
                     functions,
                     in_rule,
                     helper_enabled,
+                    ambiguous_ctors,
                 )?);
                 return Ok(L3ExprV2::Fold {
                     op,
@@ -1398,7 +1481,7 @@ pub(crate) fn lower_expr_v2(
             }
             if func == "filter" {
                 let (list_expr, binder, cond_expr) = expect_list_form("filter", args)?;
-                let list = Box::new(lower_expr_v2(
+                let list = Box::new(lower_expr_v2_impl(
                     list_expr,
                     lets,
                     locals,
@@ -1408,10 +1491,11 @@ pub(crate) fn lower_expr_v2(
                     functions,
                     in_rule,
                     helper_enabled,
+                    ambiguous_ctors,
                 )?);
                 let mut body_locals = locals.clone();
                 body_locals.insert(binder.to_string());
-                let cond = Box::new(lower_expr_v2(
+                let cond = Box::new(lower_expr_v2_impl(
                     cond_expr,
                     lets,
                     &body_locals,
@@ -1421,6 +1505,7 @@ pub(crate) fn lower_expr_v2(
                     functions,
                     in_rule,
                     helper_enabled,
+                    ambiguous_ctors,
                 )?);
                 return Ok(L3ExprV2::Filter {
                     list,
@@ -1430,7 +1515,7 @@ pub(crate) fn lower_expr_v2(
             }
             if func == "map" {
                 let (list_expr, binder, body_expr) = expect_list_form("map", args)?;
-                let list = Box::new(lower_expr_v2(
+                let list = Box::new(lower_expr_v2_impl(
                     list_expr,
                     lets,
                     locals,
@@ -1440,10 +1525,11 @@ pub(crate) fn lower_expr_v2(
                     functions,
                     in_rule,
                     helper_enabled,
+                    ambiguous_ctors,
                 )?);
                 let mut body_locals = locals.clone();
                 body_locals.insert(binder.to_string());
-                let body = Box::new(lower_expr_v2(
+                let body = Box::new(lower_expr_v2_impl(
                     body_expr,
                     lets,
                     &body_locals,
@@ -1453,6 +1539,7 @@ pub(crate) fn lower_expr_v2(
                     functions,
                     in_rule,
                     helper_enabled,
+                    ambiguous_ctors,
                 )?);
                 return Ok(L3ExprV2::Map {
                     list,
@@ -1468,7 +1555,7 @@ pub(crate) fn lower_expr_v2(
                         found: args.len(),
                     });
                 }
-                let inner = lower_expr_v2(
+                let inner = lower_expr_v2_impl(
                     &args[0],
                     lets,
                     locals,
@@ -1478,6 +1565,7 @@ pub(crate) fn lower_expr_v2(
                     functions,
                     in_rule,
                     helper_enabled,
+                    ambiguous_ctors,
                 )?;
                 return Ok(L3ExprV2::Len(Box::new(inner)));
             }
@@ -1489,7 +1577,7 @@ pub(crate) fn lower_expr_v2(
                         found: args.len(),
                     });
                 }
-                let inner = lower_expr_v2(
+                let inner = lower_expr_v2_impl(
                     &args[0],
                     lets,
                     locals,
@@ -1499,6 +1587,7 @@ pub(crate) fn lower_expr_v2(
                     functions,
                     in_rule,
                     helper_enabled,
+                    ambiguous_ctors,
                 )?;
                 return Ok(L3ExprV2::Distinct(Box::new(inner)));
             }
@@ -1512,7 +1601,7 @@ pub(crate) fn lower_expr_v2(
                 }
                 let mut out = Vec::new();
                 for a in args {
-                    out.push(lower_expr_v2(
+                    out.push(lower_expr_v2_impl(
                         a,
                         lets,
                         locals,
@@ -1522,6 +1611,7 @@ pub(crate) fn lower_expr_v2(
                         functions,
                         in_rule,
                         helper_enabled,
+                        ambiguous_ctors,
                     )?);
                 }
                 let mut it = out.into_iter();
@@ -1529,10 +1619,16 @@ pub(crate) fn lower_expr_v2(
                 let rhs = it.next().expect("arity checked above");
                 return Ok(L3ExprV2::IntDivMod(op, Box::new(lhs), Box::new(rhs)));
             }
+            if let Some(alts) = ambiguous_ctors.get(func) {
+                return Err(L3V2LowerError::AmbiguousConstructor {
+                    name: func.clone(),
+                    alternatives: alts.clone(),
+                });
+            }
             if let Some(sum) = variants_of.get(func).cloned() {
                 let mut out = Vec::new();
                 for a in args {
-                    out.push(lower_expr_v2(
+                    out.push(lower_expr_v2_impl(
                         a,
                         lets,
                         locals,
@@ -1542,11 +1638,13 @@ pub(crate) fn lower_expr_v2(
                         functions,
                         in_rule,
                         helper_enabled,
+                        ambiguous_ctors,
                     )?);
                 }
+                let simple_variant = func.rsplit_once("::").map(|(_, v)| v).unwrap_or(func);
                 Ok(L3ExprV2::Ctor {
                     nominal_sum: sum,
-                    variant: func.clone(),
+                    variant: simple_variant.to_string(),
                     args: out,
                 })
             } else if let Some(&expected_arity) = functions.get(func) {
@@ -1559,7 +1657,7 @@ pub(crate) fn lower_expr_v2(
                 }
                 let mut out = Vec::new();
                 for a in args {
-                    out.push(lower_expr_v2(
+                    out.push(lower_expr_v2_impl(
                         a,
                         lets,
                         locals,
@@ -1569,6 +1667,7 @@ pub(crate) fn lower_expr_v2(
                         functions,
                         in_rule,
                         helper_enabled,
+                        ambiguous_ctors,
                     )?);
                 }
                 Ok(L3ExprV2::Call {
@@ -1580,7 +1679,7 @@ pub(crate) fn lower_expr_v2(
             }
         }
         ast::Expr::Bin { op, lhs, rhs } => {
-            let l = Box::new(lower_expr_v2(
+            let l = Box::new(lower_expr_v2_impl(
                 lhs,
                 lets,
                 locals,
@@ -1590,8 +1689,9 @@ pub(crate) fn lower_expr_v2(
                 functions,
                 in_rule,
                 helper_enabled,
+                ambiguous_ctors,
             )?);
-            let r = Box::new(lower_expr_v2(
+            let r = Box::new(lower_expr_v2_impl(
                 rhs,
                 lets,
                 locals,
@@ -1601,6 +1701,7 @@ pub(crate) fn lower_expr_v2(
                 functions,
                 in_rule,
                 helper_enabled,
+                ambiguous_ctors,
             )?);
             match op {
                 ast::BinOp::Add => Ok(L3ExprV2::Arith(ArithOpV2::Add, l, r)),
@@ -1630,7 +1731,7 @@ pub(crate) fn lower_expr_v2(
         ast::Expr::Match {
             scrutinee, arms, ..
         } => {
-            let s = Box::new(lower_expr_v2(
+            let s = Box::new(lower_expr_v2_impl(
                 scrutinee,
                 lets,
                 locals,
@@ -1640,11 +1741,18 @@ pub(crate) fn lower_expr_v2(
                 functions,
                 in_rule,
                 helper_enabled,
+                ambiguous_ctors,
             )?);
             let mut out = Vec::new();
             for arm in arms {
                 let pat = match &arm.pattern {
                     ast::Pattern::Ctor { name, args } => {
+                        if let Some(alts) = ambiguous_ctors.get(name) {
+                            return Err(L3V2LowerError::AmbiguousConstructor {
+                                name: name.clone(),
+                                alternatives: alts.clone(),
+                            });
+                        }
                         let mut binders = Vec::new();
                         let mut seen_binders = BTreeSet::new();
                         for a in args {
@@ -1663,8 +1771,21 @@ pub(crate) fn lower_expr_v2(
                                 }
                             }
                         }
+                        let simple_variant = name.rsplit_once("::").map(|(_, v)| v).unwrap_or(name);
                         L3PatternV2::Ctor {
-                            variant: name.clone(),
+                            // Qualified patterns retain their nominal owner.
+                            // Legacy bare patterns keep their frozen encoding.
+                            variant: if name.contains("::") {
+                                let nominal = nullary
+                                    .get(name)
+                                    .or_else(|| variants_of.get(name))
+                                    .ok_or_else(|| {
+                                    L3V2LowerError::UnresolvedReference(name.clone())
+                                })?;
+                                format!("{nominal}::{simple_variant}")
+                            } else {
+                                simple_variant.to_string()
+                            },
                             binders,
                         }
                     }
@@ -1684,7 +1805,7 @@ pub(crate) fn lower_expr_v2(
                 }
                 out.push((
                     pat,
-                    lower_expr_v2(
+                    lower_expr_v2_impl(
                         &arm.body,
                         lets,
                         &arm_locals,
@@ -1694,6 +1815,7 @@ pub(crate) fn lower_expr_v2(
                         functions,
                         in_rule,
                         helper_enabled,
+                        ambiguous_ctors,
                     )?,
                 ));
             }
@@ -1703,7 +1825,7 @@ pub(crate) fn lower_expr_v2(
             })
         }
         ast::Expr::Not(inner) => {
-            let expr = Box::new(lower_expr_v2(
+            let expr = Box::new(lower_expr_v2_impl(
                 inner,
                 lets,
                 locals,
@@ -1713,6 +1835,7 @@ pub(crate) fn lower_expr_v2(
                 functions,
                 in_rule,
                 helper_enabled,
+                ambiguous_ctors,
             )?);
             Ok(L3ExprV2::Not(expr))
         }
@@ -1728,7 +1851,7 @@ pub(crate) fn lower_expr_v2(
         ast::Expr::ListLit(items) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(lower_expr_v2(
+                out.push(lower_expr_v2_impl(
                     item,
                     lets,
                     locals,
@@ -1738,6 +1861,7 @@ pub(crate) fn lower_expr_v2(
                     functions,
                     in_rule,
                     helper_enabled,
+                    ambiguous_ctors,
                 )?);
             }
             Ok(L3ExprV2::ListLit(out))
@@ -1750,7 +1874,7 @@ pub(crate) fn lower_expr_v2(
             let mut gen_locals = locals.clone();
             let mut out_generators = Vec::with_capacity(generators.len());
             for (binder, source) in generators {
-                let source_lowered = lower_expr_v2(
+                let source_lowered = lower_expr_v2_impl(
                     source,
                     lets,
                     &gen_locals,
@@ -1760,6 +1884,7 @@ pub(crate) fn lower_expr_v2(
                     functions,
                     in_rule,
                     helper_enabled,
+                    ambiguous_ctors,
                 )?;
                 out_generators.push((binder.clone(), source_lowered));
                 // A later generator or the `where` clause may reference an
@@ -1769,7 +1894,7 @@ pub(crate) fn lower_expr_v2(
                 gen_locals.insert(binder.clone());
             }
             let where_lowered = match where_clause {
-                Some(w) => Some(Box::new(lower_expr_v2(
+                Some(w) => Some(Box::new(lower_expr_v2_impl(
                     w,
                     lets,
                     &gen_locals,
@@ -1779,10 +1904,11 @@ pub(crate) fn lower_expr_v2(
                     functions,
                     in_rule,
                     helper_enabled,
+                    ambiguous_ctors,
                 )?)),
                 None => None,
             };
-            let yield_lowered = Box::new(lower_expr_v2(
+            let yield_lowered = Box::new(lower_expr_v2_impl(
                 yield_expr,
                 lets,
                 &gen_locals,
@@ -1792,6 +1918,7 @@ pub(crate) fn lower_expr_v2(
                 functions,
                 in_rule,
                 helper_enabled,
+                ambiguous_ctors,
             )?);
             Ok(L3ExprV2::Comprehension {
                 generators: out_generators,
@@ -1976,6 +2103,7 @@ pub struct EvalEnv {
     run_work: Option<Arc<std::sync::atomic::AtomicUsize>>,
     functions: Arc<BTreeMap<String, L3FunctionDef>>,
     schemas: Arc<BTreeMap<String, L3Schema>>,
+    checked_constructors: bool,
 }
 
 impl EvalEnv {
@@ -2020,6 +2148,13 @@ impl EvalEnv {
 
     pub fn with_schemas(mut self, schemas: Arc<BTreeMap<String, L3Schema>>) -> Self {
         self.schemas = schemas;
+        self
+    }
+
+    /// World values must be well-typed even when an intermediate constructor
+    /// is consumed by a field projection or match rather than returned.
+    pub(crate) fn with_checked_constructors(mut self) -> Self {
+        self.checked_constructors = true;
         self
     }
 
@@ -2562,11 +2697,29 @@ fn eval_internal_body(
             if let Some(b) = budget.as_mut() {
                 b.charge_allocation(1, nominal_sum.len() + variant.len())?;
             }
-            Ok(L3ValueV2::Ctor {
-                nominal_sum: nominal_sum.clone(),
-                variant: variant.clone(),
-                args: Vec::new(),
-            })
+            {
+                let value = L3ValueV2::Ctor {
+                    nominal_sum: nominal_sum.clone(),
+                    variant: variant.clone(),
+                    args: Vec::new(),
+                };
+                if env.checked_constructors && !nominal_sum.is_empty() {
+                    validate_l3_value(
+                        &value,
+                        &L3SchemaType::Named(nominal_sum.clone()),
+                        &env.schemas,
+                        "<constructor>",
+                    )
+                    .map_err(|detail| EvalFault::ContractViolation {
+                        func: nominal_sum.clone(),
+                        param: None,
+                        expected: "declared constructor shape".into(),
+                        found: detail.into(),
+                        path: None,
+                    })?;
+                }
+                Ok(value)
+            }
         }
         L3ExprV2::Ctor {
             nominal_sum,
@@ -2589,11 +2742,29 @@ fn eval_internal_body(
                 }
                 out.push(value);
             }
-            Ok(L3ValueV2::Ctor {
-                nominal_sum: nominal_sum.clone(),
-                variant: variant.clone(),
-                args: out,
-            })
+            {
+                let value = L3ValueV2::Ctor {
+                    nominal_sum: nominal_sum.clone(),
+                    variant: variant.clone(),
+                    args: out,
+                };
+                if env.checked_constructors && !nominal_sum.is_empty() {
+                    validate_l3_value(
+                        &value,
+                        &L3SchemaType::Named(nominal_sum.clone()),
+                        &env.schemas,
+                        "<constructor>",
+                    )
+                    .map_err(|detail| EvalFault::ContractViolation {
+                        func: nominal_sum.clone(),
+                        param: None,
+                        expected: "declared constructor shape".into(),
+                        found: detail.into(),
+                        path: None,
+                    })?;
+                }
+                Ok(value)
+            }
         }
         L3ExprV2::Record {
             nominal_config,
@@ -2619,10 +2790,28 @@ fn eval_internal_body(
                 }
                 out.push((name.clone(), value));
             }
-            Ok(L3ValueV2::Record {
-                nominal_config: nominal_config.clone(),
-                fields: out,
-            })
+            {
+                let value = L3ValueV2::Record {
+                    nominal_config: nominal_config.clone(),
+                    fields: out,
+                };
+                if env.checked_constructors && !nominal_config.is_empty() {
+                    validate_l3_value(
+                        &value,
+                        &L3SchemaType::Named(nominal_config.clone()),
+                        &env.schemas,
+                        "<constructor>",
+                    )
+                    .map_err(|detail| EvalFault::ContractViolation {
+                        func: nominal_config.clone(),
+                        param: None,
+                        expected: "declared constructor shape".into(),
+                        found: detail.into(),
+                        path: None,
+                    })?;
+                }
+                Ok(value)
+            }
         }
         L3ExprV2::Field(base, field) => match eval_internal(base, env, budget, current_func)? {
             L3ValueV2::Record { fields, .. } => fields
@@ -2745,7 +2934,13 @@ fn eval_internal_body(
                     variant: pv,
                     binders,
                 } = pat;
-                if pv != variant {
+                if let Some((expected_nominal, expected_variant)) = pv.rsplit_once("::") {
+                    if expected_variant != variant
+                        || !matches!(&v, L3ValueV2::Ctor { nominal_sum, .. } if nominal_sum == expected_nominal)
+                    {
+                        continue;
+                    }
+                } else if pv != variant {
                     continue;
                 }
                 if binders.len() != args.len() {
@@ -2861,6 +3056,7 @@ fn eval_internal_body(
                 run_work: env.run_work.clone(),
                 functions: env.functions.clone(),
                 schemas: def.schemas.clone(),
+                checked_constructors: env.checked_constructors,
             };
 
             let ret_res = eval_internal(&def.body, &fn_env, budget, Some(func.as_str()));
