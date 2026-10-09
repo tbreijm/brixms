@@ -20,10 +20,9 @@ fn cached_node_is_rejected_after_store_latches_a_read_error() {
     assert_eq!(store.get_node(&da), Some(a)); // warm cache
     let pack = fs::read_dir(store.objects_dir())
         .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().and_then(|s| s.to_str()) == Some("pack"))
+        .unwrap();
     let mut bytes = fs::read(&pack).unwrap();
     bytes[8 + 6] ^= 0xff; // corrupt B's body after A
     fs::write(&pack, bytes).unwrap();
