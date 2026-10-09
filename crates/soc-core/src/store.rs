@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 #[cfg(test)]
 use std::fs;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use brix_canon::{CanonDecode, CanonError, CanonReader, CanonWriter, Canonical, Digest, Domain};
 
@@ -198,18 +198,25 @@ pub struct LeafNode<K, V> {
     pub key: K,
     pub value: Arc<V>,
     pub hash: [u8; 32],
-    pub digest: Digest,
+    /// Computed on first use: nodes that are replaced before anyone asks for their digest
+    /// (most intermediate path copies inside a batch) never pay for hashing.
+    digest: OnceLock<Digest>,
 }
 
 impl<K: Canonical, V: Canonical> LeafNode<K, V> {
     pub fn new(key: K, value: Arc<V>, hash: [u8; 32]) -> Self {
-        let digest = Self::compute_digest(&key, &value, &hash);
         Self {
             key,
             value,
             hash,
-            digest,
+            digest: OnceLock::new(),
         }
+    }
+
+    pub fn digest(&self) -> Digest {
+        *self
+            .digest
+            .get_or_init(|| Self::compute_digest(&self.key, &self.value, &self.hash))
     }
 
     fn compute_digest(key: &K, value: &V, hash: &[u8; 32]) -> Digest {
@@ -228,18 +235,25 @@ impl<K: Canonical, V: Canonical> LeafNode<K, V> {
 pub struct CollisionNode<K, V> {
     pub hash: [u8; 32],
     pub entries: Vec<(K, Arc<V>)>,
-    pub digest: Digest,
+    digest: OnceLock<Digest>,
 }
 
 impl<K: Canonical + Ord, V: Canonical> CollisionNode<K, V> {
     pub fn new(hash: [u8; 32], mut entries: Vec<(K, Arc<V>)>) -> Self {
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        let digest = Self::compute_digest(&hash, &entries);
         Self {
             hash,
             entries,
-            digest,
+            digest: OnceLock::new(),
         }
+    }
+}
+
+impl<K: Canonical, V: Canonical> CollisionNode<K, V> {
+    pub fn digest(&self) -> Digest {
+        *self
+            .digest
+            .get_or_init(|| Self::compute_digest(&self.hash, &self.entries))
     }
 
     fn compute_digest(hash: &[u8; 32], entries: &[(K, Arc<V>)]) -> Digest {
@@ -264,22 +278,43 @@ pub struct BranchNode<K, V> {
     pub prefix: Vec<u8>,
     pub bitmap: u16,
     pub children: Vec<Arc<Node<K, V>>>,
-    pub digest: Digest,
+    digest: OnceLock<Digest>,
 }
 
-impl<K, V> BranchNode<K, V> {
+impl<K: Canonical, V: Canonical> BranchNode<K, V> {
     pub fn new(prefix: Vec<u8>, bitmap: u16, children: Vec<Arc<Node<K, V>>>) -> Self {
         debug_assert!(
             children.len() >= 2,
             "branch node must have at least 2 children"
         );
         debug_assert_eq!(bitmap.count_ones() as usize, children.len());
-        let digest = Self::compute_digest(&prefix, bitmap, &children);
         Self {
             prefix,
             bitmap,
             children,
-            digest,
+            digest: OnceLock::new(),
+        }
+    }
+
+    pub fn digest(&self) -> Digest {
+        *self
+            .digest
+            .get_or_init(|| Self::compute_digest(&self.prefix, self.bitmap, &self.children))
+    }
+
+    /// A branch with the given (already hashed) digest, for nodes rebuilt around lazy
+    /// children whose digest is known.
+    fn with_known_digest(
+        prefix: Vec<u8>,
+        bitmap: u16,
+        children: Vec<Arc<Node<K, V>>>,
+        digest: Digest,
+    ) -> Self {
+        Self {
+            prefix,
+            bitmap,
+            children,
+            digest: OnceLock::from(digest),
         }
     }
 
@@ -323,12 +358,12 @@ pub enum Node<K, V> {
     Lazy(Digest),
 }
 
-impl<K, V> Node<K, V> {
+impl<K: Canonical, V: Canonical> Node<K, V> {
     pub fn digest(&self) -> Digest {
         match self {
-            Node::Leaf(l) => l.digest,
-            Node::Collision(c) => c.digest,
-            Node::Branch(b) => b.digest,
+            Node::Leaf(l) => l.digest(),
+            Node::Collision(c) => c.digest(),
+            Node::Branch(b) => b.digest(),
             Node::Lazy(d) => *d,
         }
     }
@@ -800,6 +835,17 @@ impl<K, V, H: KeyHasher> TrieMap<K, V, H> {
         self.root.is_none()
     }
 
+    /// Whether two snapshots share the exact same root allocation (`Arc` pointer equality).
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        match (&self.root, &other.root) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl<K: Canonical, V: Canonical, H: KeyHasher> TrieMap<K, V, H> {
     /// Canonical root digest of the map.
     ///
     /// For an empty map, returns the fixed canonical empty digest `Digest::of(Domain::Value, b"brix:trie:empty:v1")`.
@@ -808,15 +854,6 @@ impl<K, V, H: KeyHasher> TrieMap<K, V, H> {
         match &self.root {
             None => Digest::of(Domain::Value, b"brix:trie:empty:v1"),
             Some(node) => node.digest(),
-        }
-    }
-
-    /// Whether two snapshots share the exact same root allocation (`Arc` pointer equality).
-    pub fn ptr_eq(&self, other: &Self) -> bool {
-        match (&self.root, &other.root) {
-            (None, None) => true,
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-            _ => false,
         }
     }
 }
@@ -2081,16 +2118,15 @@ fn persist_node_recursive<
         let shallow = match &**node {
             Node::Leaf(l) => Some(Node::Leaf(l.clone())),
             Node::Collision(c) => Some(Node::Collision(c.clone())),
-            Node::Branch(b) => Some(Node::Branch(BranchNode {
-                prefix: b.prefix.clone(),
-                bitmap: b.bitmap,
-                children: b
-                    .children
+            Node::Branch(b) => Some(Node::Branch(BranchNode::with_known_digest(
+                b.prefix.clone(),
+                b.bitmap,
+                b.children
                     .iter()
                     .map(|c| Arc::new(Node::Lazy(c.digest())))
                     .collect(),
-                digest: b.digest,
-            })),
+                digest,
+            ))),
             Node::Lazy(_) => None,
         };
         if let Some(n) = shallow {

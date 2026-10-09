@@ -324,7 +324,7 @@ impl<
     }
 }
 
-impl<K, V> fmt::Debug for SMap<K, V> {
+impl<K: StateCodec, V: StateCodec> fmt::Debug for SMap<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SMap")
             .field("root", &self.trie.root_digest().to_hex())
@@ -333,7 +333,7 @@ impl<K, V> fmt::Debug for SMap<K, V> {
     }
 }
 
-impl<K> fmt::Debug for SSet<K> {
+impl<K: StateCodec> fmt::Debug for SSet<K> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SSet")
             .field("root", &self.map.trie.root_digest().to_hex())
