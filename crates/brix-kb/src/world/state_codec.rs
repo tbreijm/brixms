@@ -456,43 +456,101 @@ impl<I: SupportItem> StateCodec for SupportRef<I> {
 }
 
 // ---------------------------------------------------------------------------
-// CandidateEntry (stored form)
+// Decision keys / candidate frontier (stored form)
 // ---------------------------------------------------------------------------
 
-/// Stored form of a [`CandidateEntry`]: identical fields, but `supports` is a [`SubRoot`]
-/// (a persisted `SSet<DerivationId>`) instead of an in-memory set.
+/// Key of a frontier bucket: one entity of one decide block.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FrontierKey {
+    pub decide: String,
+    pub entity: String,
+}
+
+impl FrontierKey {
+    pub fn new(decide: &str, entity: &str) -> Self {
+        Self {
+            decide: decide.to_string(),
+            entity: entity.to_string(),
+        }
+    }
+}
+
+impl StateCodec for FrontierKey {
+    fn state_write(&self, w: &mut CanonWriter) {
+        w.write_str(&self.decide);
+        w.write_str(&self.entity);
+    }
+    fn state_read(r: &mut CanonReader<'_>) -> Res<Self> {
+        Ok(Self {
+            decide: read_string(r)?,
+            entity: read_string(r)?,
+        })
+    }
+}
+
+/// Key of one candidate's support set: decide block, entity and candidate name.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CandKey {
+    pub decide: String,
+    pub entity: String,
+    pub candidate: String,
+}
+
+impl CandKey {
+    pub fn new(decide: &str, entity: &str, candidate: &str) -> Self {
+        Self {
+            decide: decide.to_string(),
+            entity: entity.to_string(),
+            candidate: candidate.to_string(),
+        }
+    }
+}
+
+impl StateCodec for CandKey {
+    fn state_write(&self, w: &mut CanonWriter) {
+        w.write_str(&self.decide);
+        w.write_str(&self.entity);
+        w.write_str(&self.candidate);
+    }
+    fn state_read(r: &mut CanonReader<'_>) -> Res<Self> {
+        Ok(Self {
+            decide: read_string(r)?,
+            entity: read_string(r)?,
+            candidate: read_string(r)?,
+        })
+    }
+}
+
+/// Stored head of a [`CandidateEntry`]: everything but its identity (decide, entity, name,
+/// which are the keys) and its supports (a separate [`super::network::SupportIndex`] keyed by
+/// [`CandKey`]). The calendar key is stored and re-checked against its recomputation on every
+/// read.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CandidateRecord {
-    pub candidate_name: String,
-    pub entity_id: String,
+pub struct CandidateHead {
     pub priority: u64,
     pub phase: u64,
     pub value: Value,
     pub calendar_key: Key,
-    pub supports: SubRoot,
 }
 
-impl CandidateRecord {
-    pub fn from_entry(entry: &CandidateEntry, supports: SubRoot) -> Self {
+impl CandidateHead {
+    pub fn from_entry(entry: &CandidateEntry) -> Self {
         Self {
-            candidate_name: entry.candidate_name.clone(),
-            entity_id: entry.entity_id.clone(),
             priority: entry.priority,
             phase: entry.phase,
             value: entry.value.clone(),
             calendar_key: entry.calendar_key,
-            supports,
         }
     }
 
     /// Check the stored calendar key against the recomputed one.
-    pub fn verify_calendar_key(&self, decide_name: &str) -> Res<()> {
+    pub fn verify(&self, decide: &str, entity: &str, candidate: &str) -> Res<()> {
         let expect = compute_candidate_calendar_key(
             self.phase,
             self.priority,
-            decide_name,
-            &self.entity_id,
-            &self.candidate_name,
+            decide,
+            entity,
+            candidate,
             &self.value,
         );
         if expect != self.calendar_key {
@@ -500,52 +558,72 @@ impl CandidateRecord {
         }
         Ok(())
     }
-
-    pub fn encode(&self) -> Vec<u8> {
-        self.state_bytes()
-    }
-
-    /// Decode a complete record and recompute/check its calendar key for `decide_name`.
-    pub fn decode_checked(bytes: &[u8], decide_name: &str) -> Res<Self> {
-        let rec = Self::state_from_bytes(bytes)?;
-        rec.verify_calendar_key(decide_name)?;
-        Ok(rec)
-    }
 }
 
-/// `StateCodec` decoding is structural only (the decide name is not available); callers
-/// must use [`CandidateRecord::decode_checked`] or [`CandidateRecord::verify_calendar_key`].
-impl StateCodec for CandidateRecord {
+impl StateCodec for CandidateHead {
     fn state_write(&self, w: &mut CanonWriter) {
-        w.write_str(&self.candidate_name);
-        w.write_str(&self.entity_id);
         w.write_uint(self.priority);
         w.write_uint(self.phase);
         self.value.state_write(w);
         w.write_uint(self.calendar_key.phase);
         w.write_uint(self.calendar_key.priority);
         w.write_bytes(self.calendar_key.tiebreak.as_bytes());
-        self.supports.state_write(w);
     }
     fn state_read(r: &mut CanonReader<'_>) -> Res<Self> {
-        let candidate_name = read_string(r)?;
-        let entity_id = read_string(r)?;
         let priority = r.read_uint()?;
         let phase = r.read_uint()?;
         let value = Value::state_read(r)?;
         let kphase = r.read_uint()?;
         let kprio = r.read_uint()?;
         let tiebreak = read_digest(r)?;
-        let supports = SubRoot::state_read(r)?;
         Ok(Self {
-            candidate_name,
-            entity_id,
             priority,
             phase,
             value,
             calendar_key: Key::new(kphase, kprio, tiebreak),
-            supports,
         })
+    }
+}
+
+/// All live candidates of one entity (never empty: an entity without candidates has no
+/// bucket), by candidate name.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct FrontierBucket(pub BTreeMap<String, CandidateHead>);
+
+impl StateCodec for FrontierBucket {
+    fn state_write(&self, w: &mut CanonWriter) {
+        w.write_uint(self.0.len() as u64);
+        for (name, head) in &self.0 {
+            w.write_str(name);
+            head.state_write(w);
+        }
+    }
+    fn state_read(r: &mut CanonReader<'_>) -> Res<Self> {
+        let n = r.read_uint()?;
+        if n == 0 {
+            return noncanon("empty frontier bucket");
+        }
+        let mut out = BTreeMap::new();
+        let mut prev: Option<String> = None;
+        for _ in 0..n {
+            let name = read_string(r)?;
+            if prev.as_ref().is_some_and(|p| *p >= name) {
+                return noncanon("frontier candidates not strictly sorted (unsorted or duplicate)");
+            }
+            let head = CandidateHead::state_read(r)?;
+            prev = Some(name.clone());
+            out.insert(name, head);
+        }
+        Ok(FrontierBucket(out))
+    }
+}
+
+impl StateCodec for super::types::WorldTuple {
+    fn state_write(&self, w: &mut CanonWriter) {
+        w.write_bytes(&self.0);
+    }
+    fn state_read(r: &mut CanonReader<'_>) -> Res<Self> {
+        Ok(super::types::WorldTuple(r.read_bytes()?.to_vec()))
     }
 }
 
@@ -676,24 +754,67 @@ mod tests {
     }
 
     #[test]
-    fn candidate_record_roundtrip_and_key_check() {
+    fn frontier_codecs_roundtrip_and_key_check() {
+        rt(&FrontierKey::new("d", "e"));
+        rt(&CandKey::new("d", "e", "c"));
         let value = Value::Int(5);
         let key = compute_candidate_calendar_key(2, 1, "dec", "e1", "c1", &value);
-        let rec = CandidateRecord {
-            candidate_name: "c1".into(),
-            entity_id: "e1".into(),
+        let head = CandidateHead {
             priority: 1,
             phase: 2,
             value,
             calendar_key: key,
-            supports: SubRoot::empty(),
         };
-        rt(&rec);
-        let b = rec.encode();
-        assert_eq!(CandidateRecord::decode_checked(&b, "dec").unwrap(), rec);
-        assert!(CandidateRecord::decode_checked(&b, "other").is_err());
-        let mut bad = rec.clone();
+        rt(&head);
+        head.verify("dec", "e1", "c1").unwrap();
+        assert!(head.verify("other", "e1", "c1").is_err());
+        assert!(head.verify("dec", "e1", "c2").is_err());
+        let mut bad = head.clone();
         bad.calendar_key = Key::new(2, 1, Digest::from_bytes([9; 32]));
-        assert!(CandidateRecord::decode_checked(&bad.encode(), "dec").is_err());
+        assert!(bad.verify("dec", "e1", "c1").is_err());
+        let mut bucket = FrontierBucket::default();
+        bucket.0.insert("c1".into(), head.clone());
+        bucket.0.insert("c2".into(), head);
+        rt(&bucket);
+    }
+
+    #[test]
+    fn frontier_bucket_rejects_empty_unsorted_and_duplicates() {
+        let head = CandidateHead {
+            priority: 0,
+            phase: 0,
+            value: Value::Null,
+            calendar_key: Key::new(0, 0, Digest::from_bytes([1; 32])),
+        };
+        assert!(
+            FrontierBucket::state_from_bytes(&FrontierBucket::default().state_bytes()).is_err()
+        );
+        for names in [["b", "a"], ["a", "a"]] {
+            let mut w = CanonWriter::new();
+            w.write_uint(2);
+            for n in names {
+                w.write_str(n);
+                head.state_write(&mut w);
+            }
+            assert!(matches!(
+                FrontierBucket::state_from_bytes(&w.finish()),
+                Err(StateCodecError::NonCanonical(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn world_tuple_codec_matches_canonical_trie_encoding() {
+        // The decision trie keeps its pre-M3 node encoding: WorldKey/WorldTuple state
+        // encodings equal their `Canonical` encodings, so decision roots do not change.
+        use brix_canon::Canonical;
+        let t = super::super::types::WorldTuple(vec![1, 2, 3]);
+        let mut w = CanonWriter::new();
+        t.canon_write(&mut w);
+        assert_eq!(t.state_bytes(), w.finish());
+        let k = WorldKey(vec![9, 8]);
+        let mut w = CanonWriter::new();
+        k.canon_write(&mut w);
+        assert_eq!(k.state_bytes(), w.finish());
     }
 }

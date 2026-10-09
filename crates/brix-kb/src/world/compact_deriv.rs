@@ -168,6 +168,26 @@ impl CompactDeriv {
         }
     }
 
+    /// Full structural check against the DAG without building the [`DerivationId`]: the leaf
+    /// count and the kind of every leaf match the unfold of the root operator. Used on every
+    /// derivation read back from the store (a stored entry that fails it is corrupt state).
+    pub fn check_shape(&self, dag: &RelationDag) -> Res<()> {
+        match &self.root {
+            DRoot::Base(_) => match &*self.leaves {
+                [Leaf::Base(_)] => Ok(()),
+                _ => noncanon("base root requires exactly one base leaf"),
+            },
+            DRoot::Op(op) => {
+                let mut i = 0usize;
+                shape(dag, *op, &self.leaves, &mut i)?;
+                if i != self.leaves.len() {
+                    return noncanon("derivation has more leaves than its operator unfolds to");
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Rebuild the exact [`DerivationId`]. Fails (typed) if the leaves do not match the
     /// unfold of the root operator (count or kind).
     pub fn expand(&self, dag: &RelationDag) -> Res<DerivationId> {
@@ -228,6 +248,34 @@ fn next_leaf<'a>(leaves: &'a [Leaf], i: &mut usize) -> Res<&'a Leaf> {
         .ok_or_else(|| StateCodecError::NonCanonical("derivation has too few leaves".into()))?;
     *i += 1;
     Ok(l)
+}
+
+fn shape(dag: &RelationDag, op: OperatorId, leaves: &[Leaf], i: &mut usize) -> Res<()> {
+    let node = dag
+        .nodes
+        .get(op.0)
+        .ok_or_else(|| StateCodecError::NonCanonical(format!("unknown operator {}", op.0)))?;
+    match node {
+        OperatorNode::Scan { .. } => match next_leaf(leaves, i)? {
+            Leaf::Base(_) => Ok(()),
+            _ => noncanon("scan operator expects a base leaf"),
+        },
+        OperatorNode::Bind { input, .. }
+        | OperatorNode::Filter { input, .. }
+        | OperatorNode::Project { input, .. } => shape(dag, *input, leaves, i),
+        OperatorNode::EquiJoin { left, right, .. } => {
+            shape(dag, *left, leaves, i)?;
+            shape(dag, *right, leaves, i)
+        }
+        OperatorNode::Distinct { .. } => match next_leaf(leaves, i)? {
+            Leaf::Distinct(_) => Ok(()),
+            _ => noncanon("distinct operator expects a distinct leaf"),
+        },
+        OperatorNode::GroupedCount { .. } => match next_leaf(leaves, i)? {
+            Leaf::Group(_) => Ok(()),
+            _ => noncanon("grouped-count operator expects a group leaf"),
+        },
+    }
 }
 
 fn unfold(dag: &RelationDag, op: OperatorId, leaves: &[Leaf], i: &mut usize) -> Res<DerivationId> {

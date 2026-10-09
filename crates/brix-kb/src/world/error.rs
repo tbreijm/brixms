@@ -105,8 +105,18 @@ pub enum WorldError {
     NetworkError(String),
     /// Computational budget or work limit exhausted.
     BudgetExhausted,
-    /// Persisted network-state store failure (missing/corrupt node, codec, I/O).
+    /// Persisted network-state store failure that is neither corruption nor absence
+    /// (I/O while flushing or opening the state store).
     State(super::state_store::StateError),
+    /// Persisted network state failed verification: a node did not hash to its address,
+    /// failed canonical decoding, or a stored derivation does not match its operator.
+    /// Never recoverable by retrying; the operator replays explicitly (`open_replay`).
+    CorruptState(super::state_store::StateError),
+    /// Persisted network state refers to a node or root the store does not hold.
+    MissingState(super::state_store::StateError),
+    /// Persisted network state was produced under a different validity key (program,
+    /// execution profile, compiler or codec version) than the one opening it.
+    ValidityMismatch(String),
 }
 
 impl fmt::Display for WorldError {
@@ -177,6 +187,9 @@ impl fmt::Display for WorldError {
             Self::NetworkError(msg) => write!(f, "network error: {msg}"),
             Self::BudgetExhausted => write!(f, "computational budget exhausted"),
             Self::State(e) => write!(f, "world state error: {e}"),
+            Self::CorruptState(e) => write!(f, "corrupt persisted world state: {e}"),
+            Self::MissingState(e) => write!(f, "missing persisted world state: {e}"),
+            Self::ValidityMismatch(m) => write!(f, "persisted world state validity mismatch: {m}"),
         }
     }
 }
@@ -185,7 +198,7 @@ impl std::error::Error for WorldError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
-            Self::State(e) => Some(e),
+            Self::State(e) | Self::CorruptState(e) | Self::MissingState(e) => Some(e),
             _ => None,
         }
     }
@@ -198,8 +211,18 @@ impl From<std::io::Error> for WorldError {
 }
 
 impl From<super::state_store::StateError> for WorldError {
+    /// Classify: absence is `MissingState`, any verification/decoding failure is
+    /// `CorruptState`, remaining I/O failures stay `State`.
     fn from(e: super::state_store::StateError) -> Self {
-        Self::State(e)
+        use super::state_store::StateError as S;
+        use soc_core::store::StorageError as St;
+        match &e {
+            S::Storage(St::MissingNode(_)) | S::RootNotPersisted(_) => Self::MissingState(e),
+            S::Storage(St::CorruptedNode(_) | St::DecodeError(_)) | S::Codec(_) => {
+                Self::CorruptState(e)
+            }
+            S::Storage(St::Io(_)) | S::Io(_) => Self::State(e),
+        }
     }
 }
 

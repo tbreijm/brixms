@@ -166,7 +166,7 @@ decide dept_winner for uo in user_orders per user_id {
 
     let ref_prog = reference::from_program(&linked).unwrap();
     let ref_state = reference::evaluate(&ref_prog, &base_relations).unwrap();
-    for (decide, entities) in net_q256.all_settlements() {
+    for (decide, entities) in net_q256.all_settlements().unwrap() {
         for (entity, dec) in entities {
             let ref_dec = ref_state
                 .settlements

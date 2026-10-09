@@ -184,7 +184,7 @@ fn assert_agrees_with_reference(
     refprog: &reference::ReferenceProgram,
     label: &str,
 ) {
-    let net_state = network.current_state();
+    let net_state = network.current_state().unwrap();
     let ref_state = reference::evaluate(refprog, &net_state.base_relations)
         .unwrap_or_else(|e| panic!("[{label}] reference evaluator failed: {e}"));
 
@@ -317,7 +317,7 @@ fn boolean_guard_regression_smoke_test() {
             ),
         ],
     );
-    let settlement = network.get_settlement("root::dispatch", "O-1");
+    let settlement = network.get_settlement("root::dispatch", "O-1").unwrap();
     assert_eq!(
         settlement.map(|s| s.candidate_name),
         Some("ship_express".to_string()),
@@ -396,12 +396,14 @@ fn named_op_variety_coverage() {
     assert_eq!(
         network
             .get_settlement("root::dispatch", "O-1")
+            .unwrap()
             .map(|s| s.candidate_name),
         Some("ship_express".to_string())
     );
     assert_eq!(
         network
             .get_settlement("root::dispatch", "O-2")
+            .unwrap()
             .map(|s| s.candidate_name),
         Some("backorder".to_string()),
         "O-2 wants 3 but only 1 available: backorder"
@@ -428,6 +430,7 @@ fn named_op_variety_coverage() {
     assert_eq!(
         network
             .get_settlement("root::dispatch", "O-2")
+            .unwrap()
             .map(|s| s.candidate_name),
         Some("ship_standard".to_string()),
         "lowering qty below available must flip the settled regime"
@@ -453,6 +456,7 @@ fn named_op_variety_coverage() {
     assert_eq!(
         network
             .get_derived_tuples("root::fulfillment")
+            .unwrap()
             .map(|v| v.len()),
         Some(2),
         "both orders now resolve to fulfillment rows via SKU-0's inventory/shipping"
@@ -474,6 +478,7 @@ fn named_op_variety_coverage() {
     assert_eq!(
         network
             .get_derived_tuples("root::fulfillment")
+            .unwrap()
             .map(|v| v.len()),
         Some(2),
         "a content-identical duplicate inventory row must not duplicate fulfillment tuples"
@@ -489,6 +494,7 @@ fn named_op_variety_coverage() {
     assert_eq!(
         network
             .get_derived_tuples("root::fulfillment")
+            .unwrap()
             .map(|v| v.len()),
         Some(2),
         "removing one of two duplicate supports must not retract the still-supported tuple"
@@ -504,6 +510,7 @@ fn named_op_variety_coverage() {
     assert_eq!(
         network
             .get_derived_tuples("root::fulfillment")
+            .unwrap()
             .map(|v| v.len()),
         Some(0),
         "removing the last support must retract the fulfillment tuple"
@@ -552,10 +559,11 @@ decide pick for w in widgets per entity_id {
     assert_eq!(
         network
             .get_settlement("root::pick", "E-1")
+            .unwrap()
             .map(|s| s.candidate_name),
         Some("go".to_string())
     );
-    assert_eq!(network.get_settlement("root::pick", "ORD-1"), None);
+    assert_eq!(network.get_settlement("root::pick", "ORD-1").unwrap(), None);
 }
 
 /// Negative control: the comparison itself must be able to detect a real disagreement. We
@@ -606,7 +614,7 @@ fn negative_control_corrupted_state_is_detected() {
     // uses elsewhere flags it as a real mismatch (verified by catching the panic, since
     // `assert_agrees_with_reference` is `assert_eq!`-based by design, matching every positive
     // check in this file rather than a separate boolean-returning code path).
-    let net_state = network.current_state();
+    let net_state = network.current_state().unwrap();
     let ref_state = reference::evaluate(&refprog, &net_state.base_relations).unwrap();
 
     let project = |settlements: &BTreeMap<String, BTreeMap<String, SettledDecision>>| {

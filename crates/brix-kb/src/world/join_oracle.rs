@@ -15,15 +15,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use brix_canon::Digest;
 use brix_lower::relation_dag::OperatorId;
 
+use super::codec::TupleRecord;
 use super::compact_deriv::CompactDeriv;
 use super::error::WorldError;
 use super::network::{
-    DerivationId, IntermediateTuple, JoinSide, OperatorState, Value, WorldNetwork,
+    CandidateEntry, DerivationId, IntermediateTuple, JoinSide, OperatorState, SettledDecision,
+    Value, WorldNetwork,
 };
 use super::persistent::{PMap, PSet};
-use super::state_codec::{JoinEntry, SubRoot, SupportItem, SupportRef, ValueList};
+use super::state_codec::{
+    CandKey, CandidateHead, FrontierBucket, FrontierKey, JoinEntry, SubRoot, SupportItem,
+    SupportRef, ValueList,
+};
 use super::state_store::{SMap, StateStore, DEFAULT_NODE_CACHE_BYTES};
+use super::types::{WorldKey, WorldTuple};
 use brix_lower::relation_dag::RelationDag;
+use soc_core::calendar::Frontier;
 
 /// Apply one delta to the legacy shadow and return the opposite side's matches
 /// (the pre-change `PMap` logic, unchanged).
@@ -171,7 +178,122 @@ where
     Ok(outer.sub_root())
 }
 
+/// Settlement of one entity computed with the pre-store logic over the legacy frontier.
+pub(crate) fn legacy_settlement(
+    legacy: &PMap<String, PMap<String, PMap<String, CandidateEntry>>>,
+    decide: &str,
+    entity: &str,
+) -> Option<SettledDecision> {
+    let entity_candidates = legacy.get(decide)?.get(entity)?;
+    let mut frontier: Frontier<&CandidateEntry> = Frontier::new();
+    for candidate in entity_candidates.values() {
+        if !candidate.supports.is_empty() {
+            let _ = frontier.insert(candidate.calendar_key, candidate);
+        }
+    }
+    let (key, candidate) = frontier.select_least()?;
+    Some(SettledDecision {
+        entity_id: candidate.entity_id.clone(),
+        candidate_name: candidate.candidate_name.clone(),
+        priority: candidate.priority,
+        phase: candidate.phase,
+        value: candidate.value.clone(),
+        calendar_key: key,
+    })
+}
+
 impl WorldNetwork {
+    /// Derived relations as the pre-M3 logic (a set of `TupleRecord`, no support counts)
+    /// computed them.
+    pub fn legacy_derived_state(&self) -> BTreeMap<String, BTreeSet<TupleRecord>> {
+        self.derived_relations
+            .iter()
+            .map(|(name, _)| {
+                (
+                    name.clone(),
+                    self.legacy_derived
+                        .get(name)
+                        .map(|s| s.iter().cloned().collect())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect()
+    }
+
+    /// Candidate frontier as the pre-M3 nested maps held it.
+    pub fn legacy_frontier_state(
+        &self,
+    ) -> BTreeMap<String, BTreeMap<String, BTreeMap<String, CandidateEntry>>> {
+        self.candidate_frontier
+            .legacy
+            .iter()
+            .map(|(d, ents)| {
+                (
+                    d.clone(),
+                    ents.iter()
+                        .map(|(e, cands)| {
+                            (
+                                e.clone(),
+                                cands.iter().map(|(c, v)| (c.clone(), v.clone())).collect(),
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// All settlements recomputed from the legacy frontier.
+    pub fn legacy_settlements(&self) -> BTreeMap<String, BTreeMap<String, SettledDecision>> {
+        let mut out: BTreeMap<String, BTreeMap<String, SettledDecision>> = BTreeMap::new();
+        for (d, ents) in self.candidate_frontier.legacy.iter() {
+            for (e, _) in ents.iter() {
+                if let Some(s) = legacy_settlement(&self.candidate_frontier.legacy, d, e) {
+                    out.entry(d.clone()).or_default().insert(e.clone(), s);
+                }
+            }
+        }
+        out
+    }
+
+    /// Frontier `(buckets, supports)` roots rebuilt from the legacy frontier content.
+    pub fn legacy_frontier_roots(&self) -> Result<(SubRoot, SubRoot), WorldError> {
+        let scratch = StateStore::memory(DEFAULT_NODE_CACHE_BYTES);
+        let mut buckets: SMap<FrontierKey, FrontierBucket> = SMap::new();
+        let mut supports: PMap<CandKey, PSet<DerivationId>> = PMap::new();
+        for (d, ents) in self.candidate_frontier.legacy.iter() {
+            for (e, cands) in ents.iter() {
+                let mut bucket = FrontierBucket::default();
+                for (c, entry) in cands.iter() {
+                    bucket.0.insert(c.clone(), CandidateHead::from_entry(entry));
+                    supports.insert(CandKey::new(d, e, c), entry.supports.clone());
+                }
+                buckets = buckets.upsert(FrontierKey::new(d, e), bucket, &scratch)?;
+            }
+        }
+        let sup_root = legacy_support_root(
+            &supports,
+            |k: &CandKey| k.clone(),
+            CompactDeriv::from_derivation,
+            &scratch,
+        )?;
+        Ok((buckets.sub_root(), sup_root))
+    }
+
+    /// Root and size of the settled-decision trie rebuilt from the legacy decisions with the
+    /// pre-M3 plain `TrieMap`.
+    pub fn legacy_decision_sub_root(&self) -> SubRoot {
+        let mut tree: soc_core::store::TrieMap<WorldKey, WorldTuple> =
+            soc_core::store::TrieMap::new();
+        for (k, v) in self.legacy_decisions.iter() {
+            tree = tree.insert(k.clone(), v.clone());
+        }
+        SubRoot {
+            root: tree.root_digest(),
+            len: tree.len() as u64,
+        }
+    }
+
     /// Distinct support index roots rebuilt from the legacy shadow content.
     pub fn legacy_distinct_roots(&self) -> Result<BTreeMap<OperatorId, SubRoot>, WorldError> {
         let scratch = StateStore::memory(DEFAULT_NODE_CACHE_BYTES);

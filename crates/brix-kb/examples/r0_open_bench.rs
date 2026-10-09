@@ -7,7 +7,7 @@
 //! * wall time of every load batch (superlinear growth shows up as rising per-batch time);
 //! * `WorldSession::open` (cold open) in a **fresh child process**, so RSS is not polluted by
 //!   the loader's high-water mark;
-//! * `all_settlements()` (world decisions) right after the cold open;
+//! * `all_settlements().unwrap()` (world decisions) right after the cold open;
 //! * one single-row correction batch right after the cold open;
 //! * RSS (via `ps -o rss=`) after open and after the one-row batch, and on-disk bytes.
 //!
@@ -153,7 +153,7 @@ fn run_child(dir: &Path) {
     let rss_after_open = rss_kb(pid);
 
     let t = Instant::now();
-    let settlements = session.all_settlements();
+    let settlements = session.all_settlements().unwrap();
     let decisions_ms = ms(t.elapsed());
     let decision_count: usize = settlements.values().map(|m| m.len()).sum();
 

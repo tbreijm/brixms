@@ -275,12 +275,12 @@ fn run_fuzz(seed: u64, steps: usize, quantum: usize, backend: Backend) {
         }
         assert_legacy_roots(&net, &label);
 
-        let got = net.try_current_state().unwrap();
-        let want = control.try_current_state().unwrap();
+        let got = net.current_state().unwrap();
+        let want = control.current_state().unwrap();
         assert_eq!(got, want, "[{label}] current_state diverged");
         assert_eq!(
-            net.all_settlements(),
-            control.all_settlements(),
+            net.all_settlements().unwrap(),
+            control.all_settlements().unwrap(),
             "[{label}] settlements diverged"
         );
         assert_eq!(net.distinct_roots(), control.distinct_roots(), "[{label}]");
@@ -365,7 +365,7 @@ fn seeded_net(quantum: usize) -> WorldNetwork {
 #[test]
 fn missing_state_nodes_are_errors_not_empty() {
     let net = seeded_net(8);
-    assert!(net.try_current_state().is_ok());
+    assert!(net.current_state().is_ok());
     for roots in [net.distinct_roots(), net.group_roots()] {
         assert!(roots.values().any(|r| r.len > 0), "need non-empty indexes");
     }
@@ -374,7 +374,7 @@ fn missing_state_nodes_are_errors_not_empty() {
     let mut gone = net.clone();
     gone.attach_state_store(StateStore::memory(0));
     let err = gone
-        .try_current_state()
+        .current_state()
         .expect_err("reading a deleted index must fail");
     let msg = err.to_string();
     assert!(
@@ -419,7 +419,7 @@ fn missing_state_nodes_are_errors_not_empty() {
         store.put_node(root, bytes);
         flipped.attach_state_store(store);
         assert!(
-            flipped.try_current_state().is_err(),
+            flipped.current_state().is_err(),
             "a flipped node must be detected"
         );
     }
@@ -548,7 +548,7 @@ proptest! {
         prop_assert_eq!(a.distinct_roots(), b.distinct_roots());
         prop_assert_eq!(a.group_roots(), b.group_roots());
         prop_assert_eq!(a.join_index_roots(), b.join_index_roots());
-        prop_assert_eq!(a.try_current_state().unwrap().derived_relations, b.try_current_state().unwrap().derived_relations);
+        prop_assert_eq!(a.current_state().unwrap().derived_relations, b.current_state().unwrap().derived_relations);
         assert_legacy_roots(&b, "proptest");
     }
 }

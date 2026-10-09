@@ -17,7 +17,8 @@
 use super::compact_deriv::{leaf_counts, CompactDeriv, DRoot, Derivation};
 use super::persistent::{PMap, PSet};
 use super::state_codec::{
-    JoinEntry, StateCodec, StateCodecError, SubRoot, SupportItem, SupportRef, ValueList,
+    CandKey, CandidateHead, FrontierBucket, FrontierKey, JoinEntry, StateCodec, StateCodecError,
+    SubRoot, SupportItem, SupportRef, ValueList,
 };
 use super::state_store::{PageCursor, SMap, StateError, StateStore, DEFAULT_NODE_CACHE_BYTES};
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,7 +34,6 @@ use brix_lower::relation_dag::{
 use brix_lower::world_expr::{CompiledProgramEnv, CompiledWorldExpr};
 use brix_syntax::ast;
 use soc_core::calendar::{Frontier, Key};
-use soc_core::store::TrieMap;
 
 use super::decision_codec::canon_write_value;
 pub use super::decision_codec::{
@@ -483,6 +483,14 @@ pub(crate) enum Supports<I: SupportItem> {
 }
 
 impl<I: SupportItem> Supports<I> {
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Supports::None => 0,
+            Supports::One(_) => 1,
+            Supports::Many(set) => set.len(),
+        }
+    }
+
     pub(crate) fn members(&self, store: &StateStore) -> Result<Vec<I>, WorldError> {
         match self {
             Supports::None => Ok(Vec::new()),
@@ -659,6 +667,30 @@ where
         }
     }
 
+    /// Number of keys with at least one support.
+    pub fn len(&self) -> usize {
+        self.outer.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.outer.is_empty()
+    }
+
+    /// Every key (outer trie order); reads only the outer index.
+    pub(crate) fn keys(&self, store: &StateStore) -> Result<Vec<K>, WorldError> {
+        let mut out = Vec::with_capacity(self.outer.len());
+        let mut cursor = None;
+        loop {
+            let (rows, next) = self.outer.page(cursor.as_ref(), 1024, store)?;
+            out.extend(rows.into_iter().map(|(k, _)| k));
+            match next {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
     /// Every key with its supports (hot-aware), in outer trie order.
     pub(crate) fn entries(&self, store: &StateStore) -> Result<Vec<(K, Vec<I>)>, WorldError> {
         let mut out = Vec::with_capacity(self.outer.len());
@@ -705,6 +737,114 @@ where
 pub type DistinctSupports = SupportIndex<IntermediateTuple, IntermediateTuple, CompactDeriv>;
 /// Grouped-count index, keyed by the group key values.
 pub type GroupSupports = SupportIndex<ValueList, Vec<Value>, Digest>;
+/// Contents of one derived relation: each distinct typed tuple with the digests of the
+/// derivations currently supporting it. A tuple is in the relation iff it has at least one
+/// support, so collapsing derivations (several rows projecting to one tuple) is
+/// order-independent, and `Int(1)` / `Str("1")` stay distinct (the pre-M3 set was keyed by
+/// the Display bytes of a `TupleRecord`, which collapsed them).
+pub type DerivedSupports = SupportIndex<IntermediateTuple, (), Digest>;
+/// Supports of the live candidates, keyed by decide, entity and candidate name.
+pub type CandidateSupports = SupportIndex<CandKey, (), CompactDeriv>;
+
+/// The candidate frontier, store-backed: per `(decide, entity)` a [`FrontierBucket`] of the
+/// live candidates' heads, plus a [`CandidateSupports`] index holding each candidate's
+/// support set (canonical `Inline | Sub`, like every other support index). A candidate is
+/// live iff it has a support; an entity without candidates has no bucket.
+#[derive(Clone, Debug, Default)]
+pub struct CandidateFrontier {
+    pub buckets: SMap<FrontierKey, FrontierBucket>,
+    pub supports: CandidateSupports,
+    /// Shadow of the pre-store implementation, kept until M4 (see `join_oracle`).
+    #[cfg(any(test, feature = "r0-oracle"))]
+    pub(crate) legacy: PMap<String, PMap<String, PMap<String, CandidateEntry>>>,
+}
+
+impl CandidateFrontier {
+    /// The live candidates of one entity, with every head's calendar key re-checked against
+    /// its recomputation (a mismatch is corrupt state).
+    pub fn bucket(
+        &self,
+        key: &FrontierKey,
+        store: &StateStore,
+    ) -> Result<Option<FrontierBucket>, WorldError> {
+        let Some(bucket) = self.buckets.get(key, store)? else {
+            return Ok(None);
+        };
+        for (name, head) in &bucket.0 {
+            head.verify(&key.decide, &key.entity, name)
+                .map_err(|e| WorldError::from(StateError::from(e)))?;
+        }
+        Ok(Some(bucket))
+    }
+
+    fn put_bucket(
+        &mut self,
+        key: FrontierKey,
+        bucket: FrontierBucket,
+        store: &StateStore,
+    ) -> Result<(), WorldError> {
+        self.buckets = if bucket.0.is_empty() {
+            self.buckets.remove(&key, store)?
+        } else {
+            self.buckets.upsert(key, bucket, store)?
+        };
+        Ok(())
+    }
+
+    /// Every entity bucket, in outer trie order.
+    pub(crate) fn all_buckets(
+        &self,
+        store: &StateStore,
+    ) -> Result<Vec<(FrontierKey, FrontierBucket)>, WorldError> {
+        let mut out = Vec::with_capacity(self.buckets.len());
+        let mut cursor = None;
+        loop {
+            let (rows, next) = self.buckets.page(cursor.as_ref(), 256, store)?;
+            for (k, b) in rows {
+                for (name, head) in &b.0 {
+                    head.verify(&k.decide, &k.entity, name)
+                        .map_err(|e| WorldError::from(StateError::from(e)))?;
+                }
+                out.push((k, b));
+            }
+            match next {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
+    fn persist(&self, store: &StateStore) -> usize {
+        self.buckets.persist(store) + self.supports.persist(store)
+    }
+
+    fn dehydrated(&self, store: &StateStore) -> Result<Self, WorldError> {
+        Ok(Self {
+            buckets: self.buckets.dehydrate(store)?,
+            supports: self.supports.dehydrated(store)?,
+            #[cfg(any(test, feature = "r0-oracle"))]
+            legacy: self.legacy.clone(),
+        })
+    }
+}
+
+/// The settled decision of one entity: the live candidate with the least calendar key.
+fn settle(entity: &str, bucket: &FrontierBucket) -> Option<SettledDecision> {
+    let mut frontier: Frontier<(&String, &CandidateHead)> = Frontier::new();
+    for (name, head) in &bucket.0 {
+        let _ = frontier.insert(head.calendar_key, (name, head));
+    }
+    let (key, (name, head)) = frontier.select_least()?;
+    Some(SettledDecision {
+        entity_id: entity.to_string(),
+        candidate_name: name.clone(),
+        priority: head.priority,
+        phase: head.phase,
+        value: head.value.clone(),
+        calendar_key: key,
+    })
+}
 
 #[derive(Clone, Debug)]
 pub enum OperatorState {
@@ -787,15 +927,23 @@ pub struct WorldNetwork {
     pub downstream: PMap<OperatorId, Vec<OperatorId>>,
     output_relations: PMap<OperatorId, Vec<String>>,
     pub base_relations: PMap<String, PMap<WorldKey, WorldTuple>>,
-    pub derived_relations: PMap<String, PSet<TupleRecord>>,
+    pub derived_relations: PMap<String, DerivedSupports>,
     pub decides: PMap<String, DecideBlock>,
     decision_subscribers: PMap<String, Vec<String>>,
-    /// Content-addressed trie of settled decisions, keyed by [`decision_key`].
-    /// `pub(crate)` so `session.rs` can persist its nodes to the durable node
-    /// store (ADR-0046 P6 G2, decided 2026-10-04) without this module owning
-    /// any filesystem concern.
-    pub(crate) decision_tree: TrieMap<WorldKey, WorldTuple>,
-    pub candidate_frontier: PMap<String, PMap<String, PMap<String, CandidateEntry>>>,
+    /// Content-addressed trie of settled decisions, keyed by [`decision_key`]
+    /// (ADR-0046 P6 G2). Store-backed: only fallible, store-aware operations are
+    /// reachable, so an unhydrated node can never read as an empty subtree. Its node
+    /// encoding is identical to the pre-M3 `TrieMap<WorldKey, WorldTuple>`, so decision
+    /// roots recorded in revisions are unchanged.
+    pub(crate) decision_tree: SMap<WorldKey, WorldTuple>,
+    pub candidate_frontier: CandidateFrontier,
+    /// Shadow of the pre-M3 derived relations (a set of `TupleRecord` without support
+    /// counts), kept until M4 (see `join_oracle`).
+    #[cfg(any(test, feature = "r0-oracle"))]
+    pub(crate) legacy_derived: PMap<String, PSet<TupleRecord>>,
+    /// Shadow of the settled decisions (plain map; the root is rebuilt on demand).
+    #[cfg(any(test, feature = "r0-oracle"))]
+    pub(crate) legacy_decisions: PMap<WorldKey, WorldTuple>,
     pub functions: Arc<BTreeMap<String, ast::Callable>>,
     pub program_env: Option<Arc<CompiledProgramEnv>>,
     pub current_revision: u64,
@@ -922,7 +1070,7 @@ impl WorldNetwork {
         let mut derived_relations = PMap::new();
         for (name, &op_id) in &dag.relation_outputs {
             if !matches!(dag.nodes[op_id.0], OperatorNode::Scan { .. }) {
-                derived_relations.insert(name.clone(), PSet::new());
+                derived_relations.insert(name.clone(), DerivedSupports::default());
             }
         }
 
@@ -941,8 +1089,12 @@ impl WorldNetwork {
             derived_relations,
             decides: PMap::new(),
             decision_subscribers: PMap::new(),
-            decision_tree: TrieMap::new(),
-            candidate_frontier: PMap::new(),
+            decision_tree: SMap::new(),
+            candidate_frontier: CandidateFrontier::default(),
+            #[cfg(any(test, feature = "r0-oracle"))]
+            legacy_derived: PMap::new(),
+            #[cfg(any(test, feature = "r0-oracle"))]
+            legacy_decisions: PMap::new(),
             functions: Arc::new(BTreeMap::new()),
             program_env: None,
             current_revision: 0,
@@ -967,6 +1119,11 @@ impl WorldNetwork {
     /// flushes the store.
     pub fn persist_state(&self) -> Result<usize, WorldError> {
         let mut n = 0;
+        for supports in self.derived_relations.values() {
+            n += supports.persist(&self.state);
+        }
+        n += self.candidate_frontier.persist(&self.state);
+        n += self.decision_tree.persist(&self.state);
         for (_, state) in self.operator_states.iter() {
             match state {
                 OperatorState::EquiJoin {
@@ -989,6 +1146,12 @@ impl WorldNetwork {
     /// [`Self::persist_state`] (and a flush) first; fails if a root is not persisted.
     pub fn dehydrated(&self) -> Result<Self, WorldError> {
         let mut out = self.clone();
+        for (name, supports) in self.derived_relations.iter() {
+            out.derived_relations
+                .insert(name.clone(), supports.dehydrated(&self.state)?);
+        }
+        out.candidate_frontier = self.candidate_frontier.dehydrated(&self.state)?;
+        out.decision_tree = self.decision_tree.dehydrate(&self.state)?;
         for (idx, state) in self.operator_states.iter() {
             match state {
                 OperatorState::EquiJoin {
@@ -1085,6 +1248,27 @@ impl WorldNetwork {
         out
     }
 
+    /// Per derived relation, the outer support index root.
+    pub fn derived_roots(&self) -> BTreeMap<String, SubRoot> {
+        self.derived_relations
+            .iter()
+            .map(|(name, s)| (name.clone(), s.outer.sub_root()))
+            .collect()
+    }
+
+    /// The candidate frontier roots: `(buckets, supports)`.
+    pub fn frontier_roots(&self) -> (SubRoot, SubRoot) {
+        (
+            self.candidate_frontier.buckets.sub_root(),
+            self.candidate_frontier.supports.outer.sub_root(),
+        )
+    }
+
+    /// Root and size of the settled-decision trie.
+    pub fn decision_sub_root(&self) -> SubRoot {
+        self.decision_tree.sub_root()
+    }
+
     /// Set scheduling quantum (work units per operator slice).
     pub fn with_scheduling_quantum(mut self, quantum: usize) -> Self {
         self.scheduling_quantum = quantum.max(1);
@@ -1131,10 +1315,15 @@ impl WorldNetwork {
         fresh.derived_relations = self
             .derived_relations
             .iter()
-            .map(|(k, _)| (k.clone(), PSet::new()))
+            .map(|(k, _)| (k.clone(), DerivedSupports::default()))
             .collect();
-        fresh.decision_tree = TrieMap::new();
-        fresh.candidate_frontier = PMap::new();
+        fresh.decision_tree = SMap::new();
+        fresh.candidate_frontier = CandidateFrontier::default();
+        #[cfg(any(test, feature = "r0-oracle"))]
+        {
+            fresh.legacy_derived = PMap::new();
+            fresh.legacy_decisions = PMap::new();
+        }
         fresh.current_revision = 0;
         let mut op_states = self.operator_states.clone();
         for (idx, state) in &self.operator_states {
@@ -1411,6 +1600,8 @@ impl WorldNetwork {
         let mut diagnostics = NetworkDiagnostics::default();
         let mut total_work: u64 = 0;
         let mut total_matches: u64 = 0;
+        #[cfg(any(test, feature = "r0-oracle"))]
+        let (mut legacy_candidates_inserted, mut legacy_candidates_retracted) = (0usize, 0usize);
 
         let enqueue =
             |op: OperatorId,
@@ -1880,6 +2071,12 @@ impl WorldNetwork {
                             if !entry.deriv.leaf_count_ok(counts) {
                                 return Err(corrupt_derivation());
                             }
+                            // Full leaf-kind check of a stored derivation; a mismatch is
+                            // corrupt state (also in release builds).
+                            entry
+                                .deriv
+                                .check_shape(&self.dag)
+                                .map_err(|e| WorldError::from(StateError::from(e)))?;
                             let other_deriv =
                                 Derivation::from_stored(entry.deriv.clone(), &self.dag)
                                     .map_err(|e| WorldError::from(StateError::from(e)))?;
@@ -2109,24 +2306,46 @@ impl WorldNetwork {
                             .or_default() += n_out as u64;
 
                         if !self.base_relations.contains_key(rel_name) {
+                            let store = &self.state;
+                            let supports =
+                                self.derived_relations.entry(rel_name.clone()).or_default();
                             for od in &out_deltas {
-                                let rec = od.tuple().to_tuple_record();
-                                if od.is_insert() {
-                                    if self
-                                        .derived_relations
-                                        .entry(rel_name.clone())
-                                        .or_default()
-                                        .insert(rec)
-                                    {
-                                        report.derived_tuples_inserted += 1;
+                                let is_ins = od.is_insert();
+                                let id = od.derivation().digest();
+
+                                #[cfg(any(test, feature = "r0-oracle"))]
+                                let legacy_changed = {
+                                    let set =
+                                        self.legacy_derived.entry(rel_name.clone()).or_default();
+                                    let rec = od.tuple().to_tuple_record();
+                                    if is_ins {
+                                        set.insert(rec)
+                                    } else {
+                                        set.remove(&rec)
                                     }
+                                };
+
+                                let (old, new) = if is_ins {
+                                    supports.add(od.tuple().clone(), id, store)?
                                 } else {
-                                    if self
-                                        .derived_relations
-                                        .entry(rel_name.clone())
-                                        .or_default()
-                                        .remove(&rec)
-                                    {
+                                    supports.remove(od.tuple(), &id, store)?
+                                };
+                                let changed = if is_ins {
+                                    old == 0 && new > 0
+                                } else {
+                                    old > 0 && new == 0
+                                };
+
+                                #[cfg(any(test, feature = "r0-oracle"))]
+                                assert_eq!(
+                                    changed, legacy_changed,
+                                    "store-backed derived relation diverged from the legacy oracle"
+                                );
+
+                                if changed {
+                                    if is_ins {
+                                        report.derived_tuples_inserted += 1;
+                                    } else {
                                         report.derived_tuples_retracted += 1;
                                     }
                                 }
@@ -2203,11 +2422,14 @@ impl WorldNetwork {
                         | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
                     };
 
-                    let did = deriv
-                        .expand(&self.dag)
-                        .map_err(|e| WorldError::from(StateError::from(e)))?;
                     #[cfg(any(test, feature = "r0-oracle"))]
-                    assert_eq!(&did, deriv.legacy(), "frontier derivation diverged");
+                    let did = {
+                        let did = deriv
+                            .expand(&self.dag)
+                            .map_err(|e| WorldError::from(StateError::from(e)))?;
+                        assert_eq!(&did, deriv.legacy(), "frontier derivation diverged");
+                        did
+                    };
 
                     let mut eval_tuple = tuple.clone();
                     for (k, v) in &tuple.fields {
@@ -2297,14 +2519,39 @@ impl WorldNetwork {
                                     &val,
                                 );
 
-                                let entity_map = self
-                                    .candidate_frontier
-                                    .entry(decide.name.clone())
-                                    .or_default()
-                                    .entry(entity_id.clone())
-                                    .or_default();
+                                #[cfg(any(test, feature = "r0-oracle"))]
+                                {
+                                    let entity_map = self
+                                        .candidate_frontier
+                                        .legacy
+                                        .entry(decide.name.clone())
+                                        .or_default()
+                                        .entry(entity_id.clone())
+                                        .or_default();
+                                    let entry = entity_map
+                                        .entry(propose.name.clone())
+                                        .or_insert_with(|| {
+                                            legacy_candidates_inserted += 1;
+                                            CandidateEntry {
+                                                candidate_name: propose.name.clone(),
+                                                entity_id: entity_id.clone(),
+                                                priority: propose.priority,
+                                                phase: 0,
+                                                value: val.clone(),
+                                                calendar_key: cal_key,
+                                                supports: PSet::new(),
+                                            }
+                                        });
+                                    entry.supports.insert(did.clone());
+                                }
 
-                                if let Some(existing) = entity_map.get(&propose.name) {
+                                let store = &self.state;
+                                let fk = FrontierKey::new(&decide.name, &entity_id);
+                                let mut bucket = self
+                                    .candidate_frontier
+                                    .bucket(&fk, store)?
+                                    .unwrap_or_default();
+                                if let Some(existing) = bucket.0.get(&propose.name) {
                                     if existing.value != val {
                                         return Err(WorldError::NetworkError(format!(
                                             "conflicting support values for decide '{}' entity \
@@ -2312,37 +2559,58 @@ impl WorldNetwork {
                                             decide.name, propose.name, existing.value
                                         )));
                                     }
-                                }
-
-                                let entry =
-                                    entity_map.entry(propose.name.clone()).or_insert_with(|| {
-                                        report.candidates_inserted += 1;
-                                        CandidateEntry {
-                                            candidate_name: propose.name.clone(),
-                                            entity_id: entity_id.clone(),
+                                } else {
+                                    report.candidates_inserted += 1;
+                                    bucket.0.insert(
+                                        propose.name.clone(),
+                                        CandidateHead {
                                             priority: propose.priority,
                                             phase: 0,
-                                            value: val.clone(),
+                                            value: val,
                                             calendar_key: cal_key,
-                                            supports: PSet::new(),
-                                        }
-                                    });
-
-                                entry.supports.insert(did.clone());
+                                        },
+                                    );
+                                    self.candidate_frontier.put_bucket(fk, bucket, store)?;
+                                }
+                                self.candidate_frontier.supports.add(
+                                    CandKey::new(&decide.name, &entity_id, &propose.name),
+                                    deriv.c.clone(),
+                                    store,
+                                )?;
                             }
-                        } else if let Some(decide_map) =
-                            self.candidate_frontier.get_mut(&decide.name)
-                        {
-                            if let Some(entity_map) = decide_map.get_mut(&entity_id) {
-                                if let Some(entry) = entity_map.get_mut(&propose.name) {
-                                    entry.supports.remove(&did);
-                                    if entry.supports.is_empty() {
-                                        entity_map.remove(&propose.name);
-                                        report.candidates_retracted += 1;
+                        } else {
+                            #[cfg(any(test, feature = "r0-oracle"))]
+                            if let Some(decide_map) =
+                                self.candidate_frontier.legacy.get_mut(&decide.name)
+                            {
+                                if let Some(entity_map) = decide_map.get_mut(&entity_id) {
+                                    if let Some(entry) = entity_map.get_mut(&propose.name) {
+                                        entry.supports.remove(&did);
+                                        if entry.supports.is_empty() {
+                                            entity_map.remove(&propose.name);
+                                            legacy_candidates_retracted += 1;
+                                        }
+                                    }
+                                    if entity_map.is_empty() {
+                                        decide_map.remove(&entity_id);
                                     }
                                 }
-                                if entity_map.is_empty() {
-                                    decide_map.remove(&entity_id);
+                            }
+
+                            let store = &self.state;
+                            let fk = FrontierKey::new(&decide.name, &entity_id);
+                            if let Some(mut bucket) = self.candidate_frontier.bucket(&fk, store)? {
+                                if bucket.0.contains_key(&propose.name) {
+                                    let (_, remaining) = self.candidate_frontier.supports.remove(
+                                        &CandKey::new(&decide.name, &entity_id, &propose.name),
+                                        &deriv.c.digest(),
+                                        store,
+                                    )?;
+                                    if remaining == 0 {
+                                        bucket.0.remove(&propose.name);
+                                        report.candidates_retracted += 1;
+                                        self.candidate_frontier.put_bucket(fk, bucket, store)?;
+                                    }
                                 }
                             }
                         }
@@ -2352,33 +2620,58 @@ impl WorldNetwork {
         }
 
         for (decide, entity) in touched_entities {
-            if self
-                .candidate_frontier
-                .get(&decide)
-                .is_some_and(|entities| entities.is_empty())
-            {
-                self.candidate_frontier.remove(&decide);
-            }
             let key = decision_key(&decide, &entity);
-            if let Some(decision) = self.get_settlement(&decide, &entity) {
+            let settlement = self.get_settlement(&decide, &entity)?;
+
+            #[cfg(any(test, feature = "r0-oracle"))]
+            {
+                let legacy = super::join_oracle::legacy_settlement(
+                    &self.candidate_frontier.legacy,
+                    &decide,
+                    &entity,
+                );
+                assert_eq!(
+                    settlement, legacy,
+                    "store-backed settlement diverged from the legacy oracle"
+                );
+                match &settlement {
+                    Some(d) => {
+                        self.legacy_decisions.insert(key.clone(), decision_tuple(d));
+                    }
+                    None => {
+                        self.legacy_decisions.remove(&key);
+                    }
+                }
+            }
+
+            if let Some(decision) = settlement {
                 let tuple = decision_tuple(&decision);
-                if self.decision_tree.get(&key) == Some(&tuple) {
+                if self.decision_tree.get(&key, &self.state)?.as_ref() == Some(&tuple) {
                     continue;
                 }
-                self.decision_tree = self.decision_tree.insert(key, tuple);
+                self.decision_tree = self.decision_tree.upsert(key, tuple, &self.state)?;
                 report
                     .settlements
                     .entry(decide)
                     .or_default()
                     .insert(entity, decision);
-            } else if self.decision_tree.get(&key).is_some() {
-                self.decision_tree = self.decision_tree.remove(&key);
+            } else if self.decision_tree.get(&key, &self.state)?.is_some() {
+                self.decision_tree = self.decision_tree.remove(&key, &self.state)?;
                 report
                     .removed_settlements
                     .entry(decide)
                     .or_default()
                     .insert(entity);
             }
+        }
+
+        #[cfg(any(test, feature = "r0-oracle"))]
+        {
+            assert_eq!(
+                (report.candidates_inserted, report.candidates_retracted),
+                (legacy_candidates_inserted, legacy_candidates_retracted),
+                "store-backed candidate counts diverged from the legacy oracle"
+            );
         }
         report.diagnostics = diagnostics;
         self.current_revision += 1;
@@ -2387,76 +2680,106 @@ impl WorldNetwork {
 
     /// Canonical decision root, maintained only for affected entities.
     pub fn decision_root(&self) -> Digest {
-        self.decision_tree.root_digest()
+        self.decision_tree.root()
     }
 
-    /// Retrieve all derived tuples produced for a relation.
-    pub fn get_derived_tuples(&self, relation: &str) -> Option<Vec<TupleRecord>> {
-        self.derived_relations
-            .get(relation)
-            .map(|set| set.iter().cloned().collect())
+    /// Retrieve all derived tuples produced for a relation, in `TupleRecord` order.
+    ///
+    /// `None` if `relation` is not a derived relation. Tuples are stored typed, so two
+    /// distinct typed tuples whose display bytes coincide (`Int(1)` vs `Str("1")`) are two
+    /// entries internally and collapse to one record only here, in the observable view.
+    pub fn get_derived_tuples(
+        &self,
+        relation: &str,
+    ) -> Result<Option<Vec<TupleRecord>>, WorldError> {
+        let Some(supports) = self.derived_relations.get(relation) else {
+            return Ok(None);
+        };
+        let records: BTreeSet<TupleRecord> = supports
+            .keys(&self.state)?
+            .iter()
+            .map(IntermediateTuple::to_tuple_record)
+            .collect();
+        Ok(Some(records.into_iter().collect()))
     }
 
-    /// Retrieve candidates for a specific decide block and entity.
+    /// Candidates (with their expanded supports) for a specific decide block and entity.
     pub fn get_candidates(
         &self,
         decide: &str,
         entity_id: &str,
-    ) -> Option<&PMap<String, CandidateEntry>> {
-        self.candidate_frontier.get(decide)?.get(entity_id)
+    ) -> Result<Option<BTreeMap<String, CandidateEntry>>, WorldError> {
+        let Some(bucket) = self
+            .candidate_frontier
+            .bucket(&FrontierKey::new(decide, entity_id), &self.state)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(self.candidate_entries(decide, entity_id, &bucket)?))
+    }
+
+    fn candidate_entries(
+        &self,
+        decide: &str,
+        entity_id: &str,
+        bucket: &FrontierBucket,
+    ) -> Result<BTreeMap<String, CandidateEntry>, WorldError> {
+        let mut out = BTreeMap::new();
+        for (name, head) in &bucket.0 {
+            let items = self
+                .candidate_frontier
+                .supports
+                .read(&CandKey::new(decide, entity_id, name), &self.state)?
+                .members(&self.state)?;
+            let mut supports = PSet::new();
+            for id in self.expand_supports(&items)? {
+                supports.insert(id);
+            }
+            out.insert(
+                name.clone(),
+                CandidateEntry {
+                    candidate_name: name.clone(),
+                    entity_id: entity_id.to_string(),
+                    priority: head.priority,
+                    phase: head.phase,
+                    value: head.value.clone(),
+                    calendar_key: head.calendar_key,
+                    supports,
+                },
+            );
+        }
+        Ok(out)
     }
 
     /// Deliberate and select the winning candidate for an entity using canonical settlement discipline.
-    pub fn get_settlement(&self, decide: &str, entity_id: &str) -> Option<SettledDecision> {
-        let decide_frontier = self.candidate_frontier.get(decide)?;
-        let entity_candidates = decide_frontier.get(entity_id)?;
-
-        let mut frontier: Frontier<&CandidateEntry> = Frontier::new();
-        for candidate in entity_candidates.values() {
-            if !candidate.supports.is_empty() {
-                let _ = frontier.insert(candidate.calendar_key, candidate);
-            }
-        }
-
-        let (key, candidate) = frontier.select_least()?;
-        Some(SettledDecision {
-            entity_id: candidate.entity_id.clone(),
-            candidate_name: candidate.candidate_name.clone(),
-            priority: candidate.priority,
-            phase: candidate.phase,
-            value: candidate.value.clone(),
-            calendar_key: key,
-        })
+    pub fn get_settlement(
+        &self,
+        decide: &str,
+        entity_id: &str,
+    ) -> Result<Option<SettledDecision>, WorldError> {
+        Ok(self
+            .candidate_frontier
+            .bucket(&FrontierKey::new(decide, entity_id), &self.state)?
+            .and_then(|bucket| settle(entity_id, &bucket)))
     }
 
     /// Settle decisions across all entities in all decide blocks.
-    pub fn all_settlements(&self) -> BTreeMap<String, BTreeMap<String, SettledDecision>> {
-        let mut out = BTreeMap::new();
-        for (decide_name, entity_map) in &self.candidate_frontier {
-            let mut entities = BTreeMap::new();
-            for entity_id in entity_map.keys() {
-                if let Some(decision) = self.get_settlement(decide_name, entity_id) {
-                    entities.insert(entity_id.clone(), decision);
-                }
-            }
-            if !entities.is_empty() {
-                out.insert(decide_name.clone(), entities);
+    pub fn all_settlements(
+        &self,
+    ) -> Result<BTreeMap<String, BTreeMap<String, SettledDecision>>, WorldError> {
+        let mut out: BTreeMap<String, BTreeMap<String, SettledDecision>> = BTreeMap::new();
+        for (key, bucket) in self.candidate_frontier.all_buckets(&self.state)? {
+            if let Some(decision) = settle(&key.entity, &bucket) {
+                out.entry(key.decide)
+                    .or_default()
+                    .insert(key.entity, decision);
             }
         }
-        out
+        Ok(out)
     }
 
     /// Capture current observable network state.
-    ///
-    /// Panics if persisted operator state cannot be read; use [`Self::try_current_state`]
-    /// to get the error (R0 M3 makes the query APIs `Result`).
-    pub fn current_state(&self) -> WorldNetworkState {
-        self.try_current_state()
-            .expect("operator state store unreadable; use try_current_state")
-    }
-
-    /// Fallible [`Self::current_state`].
-    pub fn try_current_state(&self) -> Result<WorldNetworkState, WorldError> {
+    pub fn current_state(&self) -> Result<WorldNetworkState, WorldError> {
         let mut distinct_supports = BTreeMap::new();
         for (idx, state) in self.operator_states.iter() {
             if let OperatorState::Distinct { supports, .. } = state {
@@ -2466,6 +2789,37 @@ impl WorldNetwork {
                 }
                 distinct_supports.insert(OperatorId(*idx), map);
             }
+        }
+
+        let mut derived_relations = BTreeMap::new();
+        for (name, supports) in self.derived_relations.iter() {
+            derived_relations.insert(
+                name.clone(),
+                supports
+                    .keys(&self.state)?
+                    .iter()
+                    .map(IntermediateTuple::to_tuple_record)
+                    .collect::<BTreeSet<_>>(),
+            );
+        }
+
+        let mut candidate_frontier: BTreeMap<
+            String,
+            BTreeMap<String, BTreeMap<String, CandidateEntry>>,
+        > = BTreeMap::new();
+        let mut settlements: BTreeMap<String, BTreeMap<String, SettledDecision>> = BTreeMap::new();
+        for (key, bucket) in self.candidate_frontier.all_buckets(&self.state)? {
+            if let Some(decision) = settle(&key.entity, &bucket) {
+                settlements
+                    .entry(key.decide.clone())
+                    .or_default()
+                    .insert(key.entity.clone(), decision);
+            }
+            let entries = self.candidate_entries(&key.decide, &key.entity, &bucket)?;
+            candidate_frontier
+                .entry(key.decide)
+                .or_default()
+                .insert(key.entity, entries);
         }
 
         Ok(WorldNetworkState {
@@ -2479,29 +2833,9 @@ impl WorldNetwork {
                     )
                 })
                 .collect(),
-            derived_relations: self
-                .derived_relations
-                .iter()
-                .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-                .collect(),
-            candidate_frontier: self
-                .candidate_frontier
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        v.iter()
-                            .map(|(k, v)| {
-                                (
-                                    k.clone(),
-                                    v.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-                                )
-                            })
-                            .collect(),
-                    )
-                })
-                .collect(),
-            settlements: self.all_settlements(),
+            derived_relations,
+            candidate_frontier,
+            settlements,
             distinct_supports,
         })
     }
@@ -2537,13 +2871,13 @@ impl WorldNetwork {
         }
 
         fresh.apply_ops(&ops)?;
-        fresh.try_current_state()
+        fresh.current_state()
     }
 
     /// Verify differential correctness: compare incrementally maintained state with oracle full recompute.
     pub fn verify_differential_correctness(&self) -> Result<(), WorldError> {
         let scratch_state = self.recompute_from_scratch()?;
-        let incremental_state = self.try_current_state()?;
+        let incremental_state = self.current_state()?;
 
         if incremental_state.derived_relations != scratch_state.derived_relations {
             return Err(WorldError::NetworkError(format!(
@@ -2612,58 +2946,53 @@ impl WorldNetwork {
     }
 
     /// Deliberate and explain the decision for an entity key across any matching decide block.
-    pub fn explain_decision(&self, entity_id: &str) -> Option<DecisionExplanation> {
-        for decide_name in self.candidate_frontier.keys() {
-            if let Some(exp) = self.explain_decision_for(decide_name, entity_id) {
-                return Some(exp);
+    pub fn explain_decision(
+        &self,
+        entity_id: &str,
+    ) -> Result<Option<DecisionExplanation>, WorldError> {
+        for decide_name in self.decides.keys() {
+            if let Some(exp) = self.explain_decision_for(decide_name, entity_id)? {
+                return Ok(Some(exp));
             }
         }
-        None
+        Ok(None)
     }
 
     /// Deliberate and explain the decision for an entity key in a specific decide block.
-    ///
-    /// Panics if persisted operator state cannot be read; use
-    /// [`Self::try_explain_decision_for`] for the error (R0 M3 makes this `Result`).
     pub fn explain_decision_for(
         &self,
         decide_name: &str,
         entity_id: &str,
-    ) -> Option<DecisionExplanation> {
-        self.try_explain_decision_for(decide_name, entity_id)
-            .expect("operator state store unreadable; use try_explain_decision_for")
-    }
-
-    /// Fallible [`Self::explain_decision_for`].
-    pub fn try_explain_decision_for(
-        &self,
-        decide_name: &str,
-        entity_id: &str,
     ) -> Result<Option<DecisionExplanation>, WorldError> {
-        let Some(decide_frontier) = self.candidate_frontier.get(decide_name) else {
-            return Ok(None);
-        };
-        let Some(entity_candidates) = decide_frontier.get(entity_id) else {
+        let Some(bucket) = self
+            .candidate_frontier
+            .bucket(&FrontierKey::new(decide_name, entity_id), &self.state)?
+        else {
             return Ok(None);
         };
 
-        let settlement = self.get_settlement(decide_name, entity_id);
+        let settlement = settle(entity_id, &bucket);
         let winning_name = settlement.as_ref().map(|s| &s.candidate_name);
 
         let mut candidates = Vec::new();
         let mut contributing_base = BTreeSet::new();
 
-        for (cand_name, entry) in entity_candidates {
+        for (cand_name, head) in &bucket.0 {
             let winning = winning_name == Some(cand_name);
-            for deriv in &entry.supports {
-                self.collect_base_facts_for_derivation(deriv, &mut contributing_base)?;
+            let supports = self.candidate_frontier.supports.read(
+                &CandKey::new(decide_name, entity_id, cand_name),
+                &self.state,
+            )?;
+            let items = supports.members(&self.state)?;
+            for deriv in self.expand_supports(&items)? {
+                self.collect_base_facts_for_derivation(&deriv, &mut contributing_base)?;
             }
             candidates.push(CandidateExplanation {
                 name: cand_name.clone(),
-                priority: entry.priority,
-                phase: entry.phase,
-                value: entry.value.clone(),
-                supports_count: entry.supports.len(),
+                priority: head.priority,
+                phase: head.phase,
+                value: head.value.clone(),
+                supports_count: supports.len(),
                 winning,
             });
         }

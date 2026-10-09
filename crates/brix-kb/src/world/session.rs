@@ -1321,7 +1321,8 @@ impl WorldSession {
         // without replaying every base record. Same persistence seam as the
         // relation/secondary-index tries above — same crash-recovery story.
         if let Some(ref sn) = staged_network {
-            objects_written += sn.decision_tree.persist_to_store(&mut self.node_store);
+            // Operator state, derived relations, the candidate frontier and the settled
+            // decision trie, through the one state store (same pack, same flush).
             objects_written += sn.persist_state()?;
         }
 
@@ -1681,14 +1682,24 @@ impl WorldSession {
     }
 
     /// Retrieve derived tuples for a relation from the active operator network.
-    pub fn get_derived(&self, relation: &str) -> Option<Vec<TupleRecord>> {
-        let net = self.network.as_ref()?;
-        net.get_derived_tuples(relation).or_else(|| {
-            net.derived_relations
-                .keys()
-                .find(|k| k.ends_with(&format!("::{relation}")))
-                .and_then(|k| net.get_derived_tuples(k))
-        })
+    ///
+    /// `Ok(None)` if there is no network or `relation` is not derived; `Err` if persisted
+    /// network state cannot be read (missing or corrupt node).
+    pub fn get_derived(&self, relation: &str) -> Result<Option<Vec<TupleRecord>>, WorldError> {
+        let Some(net) = self.network.as_ref() else {
+            return Ok(None);
+        };
+        if let Some(rows) = net.get_derived_tuples(relation)? {
+            return Ok(Some(rows));
+        }
+        match net
+            .derived_relations
+            .keys()
+            .find(|k| k.ends_with(&format!("::{relation}")))
+        {
+            Some(k) => net.get_derived_tuples(k),
+            None => Ok(None),
+        }
     }
 
     /// Query a paged slice of derived tuples from the active operator network.
@@ -1704,7 +1715,7 @@ impl WorldSession {
             ));
         }
         let records = self
-            .get_derived(relation)
+            .get_derived(relation)?
             .ok_or_else(|| WorldError::UnknownRelation(relation.to_string()))?;
 
         let offset = match cursor {
@@ -1745,16 +1756,24 @@ impl WorldSession {
     }
 
     /// Retrieve all settled decisions across all decide blocks.
-    pub fn all_settlements(&self) -> BTreeMap<String, BTreeMap<String, SettledDecision>> {
-        self.network
-            .as_ref()
-            .map(|n| n.all_settlements())
-            .unwrap_or_default()
+    pub fn all_settlements(
+        &self,
+    ) -> Result<BTreeMap<String, BTreeMap<String, SettledDecision>>, WorldError> {
+        match self.network.as_ref() {
+            Some(n) => n.all_settlements(),
+            None => Ok(BTreeMap::new()),
+        }
     }
 
     /// Explain the decision deliberation for an entity key.
-    pub fn explain_decision(&self, entity_key: &str) -> Option<DecisionExplanation> {
-        self.network.as_ref()?.explain_decision(entity_key)
+    pub fn explain_decision(
+        &self,
+        entity_key: &str,
+    ) -> Result<Option<DecisionExplanation>, WorldError> {
+        match self.network.as_ref() {
+            Some(n) => n.explain_decision(entity_key),
+            None => Ok(None),
+        }
     }
 
     /// Explain the decision deliberation for an entity key within a specific decide block.
@@ -1762,10 +1781,11 @@ impl WorldSession {
         &self,
         decide_name: &str,
         entity_key: &str,
-    ) -> Option<DecisionExplanation> {
-        self.network
-            .as_ref()?
-            .explain_decision_for(decide_name, entity_key)
+    ) -> Result<Option<DecisionExplanation>, WorldError> {
+        match self.network.as_ref() {
+            Some(n) => n.explain_decision_for(decide_name, entity_key),
+            None => Ok(None),
+        }
     }
 
     /// Read and authenticate a committed revision's canonical decision changes.

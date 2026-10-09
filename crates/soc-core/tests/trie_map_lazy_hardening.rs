@@ -55,9 +55,7 @@ fn store_aware_ops_read_through_lazy_nodes() {
     let (removed, _) = lazy.remove_with_store(&5, &store).unwrap();
     assert_eq!(removed.len(), 63);
     assert_eq!(removed.get_with_store(&5, &store).unwrap(), None);
-    let (rows, _) = lazy
-        .iter_page_with_store(None, usize::MAX, &store)
-        .unwrap();
+    let (rows, _) = lazy.iter_page_with_store(None, usize::MAX, &store).unwrap();
     assert_eq!(rows.len(), 64);
 }
 

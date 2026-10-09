@@ -97,7 +97,7 @@ fn historical_decisions_and_exact_deltas_survive_updates_retractions_and_reopen(
     world
         .apply_batch(batch(0, vec![upsert("a", 10), upsert("b", 20)]))
         .unwrap();
-    let original = world.all_settlements();
+    let original = world.all_settlements().unwrap();
     assert_eq!(original.len(), 2);
     let delta = world.decision_delta(1).unwrap();
     assert_eq!(
@@ -216,7 +216,7 @@ fn decision_codec_round_trips_every_scalar_and_refuses_malformed_evidence() {
     let dir = TestDir::new("codec");
     let mut world = dir.session();
     world.apply_batch(batch(0, vec![upsert("a", 10)])).unwrap();
-    let mut decision = world.all_settlements()["root::alpha"]["a"].clone();
+    let mut decision = world.all_settlements().unwrap()["root::alpha"]["a"].clone();
     for value in [
         Value::Int(i64::MIN),
         Value::Str("nul\0é".into()),
@@ -414,6 +414,6 @@ fn conflicting_support_values_refuse_atomically_in_both_orders() {
             .get("root::rows", &WorldKey::from_str("b"))
             .unwrap()
             .is_none());
-        assert_eq!(world.all_settlements()["root::alpha"].len(), 1);
+        assert_eq!(world.all_settlements().unwrap()["root::alpha"].len(), 1);
     }
 }

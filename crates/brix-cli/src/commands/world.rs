@@ -284,9 +284,13 @@ fn execute_query(
         Err(e) => return print_world_error("world query", &e, json_out),
     };
 
+    let derived_known = match session.get_derived(relation) {
+        Ok(rows) => rows.is_some(),
+        Err(e) => return print_world_error("world query", &e, json_out),
+    };
     let page = if session.relations.contains_key(relation) {
         session.query_page(relation, cursor, limit)
-    } else if session.get_derived(relation).is_some() {
+    } else if derived_known {
         session.query_derived_page(relation, cursor, limit)
     } else if let Some(qualified) = session
         .relations
@@ -394,7 +398,10 @@ fn execute_decide(
         Err(e) => return print_world_error("world decide", &e, json_out),
     };
 
-    let mut settlements = session.all_settlements();
+    let mut settlements = match session.all_settlements() {
+        Ok(s) => s,
+        Err(e) => return print_world_error("world decide", &e, json_out),
+    };
     if let Some(dec) = decide_filter {
         settlements.retain(|k, _| k == dec || k.ends_with(&format!("::{dec}")));
     }
@@ -544,18 +551,39 @@ fn execute_explain(
     }
 
     let explanation = match decide_filter {
-        Some(d) => session.explain_decision_for(d, entity).or_else(|| {
-            session
-                .network
-                .as_ref()
-                .and_then(|n| {
-                    n.candidate_frontier
-                        .keys()
-                        .find(|k| k.ends_with(&format!("::{d}")))
-                })
-                .and_then(|qualified| session.explain_decision_for(qualified, entity))
-        }),
+        Some(d) => match session.explain_decision_for(d, entity) {
+            Ok(Some(exp)) => Ok(Some(exp)),
+            Ok(None) => {
+                let qualified: Vec<String> = session
+                    .network
+                    .as_ref()
+                    .map(|n| {
+                        n.decides
+                            .keys()
+                            .filter(|k| k.ends_with(&format!("::{d}")))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut found = Ok(None);
+                for q in &qualified {
+                    match session.explain_decision_for(q, entity) {
+                        Ok(None) => continue,
+                        other => {
+                            found = other;
+                            break;
+                        }
+                    }
+                }
+                found
+            }
+            Err(e) => Err(e),
+        },
         None => session.explain_decision(entity),
+    };
+    let explanation = match explanation {
+        Ok(e) => e,
+        Err(e) => return print_world_error("world explain", &e, json_out),
     };
 
     let explanation = match explanation {

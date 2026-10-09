@@ -86,7 +86,7 @@ fn explanation_through_downstream_distinct_lists_exactly_the_right_facts() {
         vec![up(1, "A", "x"), up(2, "B", "x"), up(3, "C", "y")],
     );
 
-    let state = n.current_state();
+    let state = n.current_state().unwrap();
     let mut facts_by_tuple: BTreeMap<String, BTreeSet<WorldKey>> = BTreeMap::new();
     for supports in state.distinct_supports.values() {
         for (rec, sups) in supports {
@@ -115,7 +115,7 @@ fn explanation_through_downstream_distinct_lists_exactly_the_right_facts() {
     );
     n.verify_differential_correctness().unwrap();
     assert_eq!(
-        n.current_state().derived_relations["root::downstream"].len(),
+        n.current_state().unwrap().derived_relations["root::downstream"].len(),
         2
     );
 }
