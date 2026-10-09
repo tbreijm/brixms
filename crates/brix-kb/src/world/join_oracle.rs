@@ -24,7 +24,7 @@ use super::network::{
 };
 use super::persistent::{PMap, PSet};
 use super::state_codec::{
-    CandKey, CandidateHead, FrontierBucket, FrontierKey, JoinEntry, SubRoot, SupportItem,
+    CandidateHead, CandidateRec, FrontierBucket, FrontierKey, JoinEntry, SubRoot, SupportItem,
     SupportRef, ValueList,
 };
 use super::state_store::{SMap, StateStore, DEFAULT_NODE_CACHE_BYTES};
@@ -256,28 +256,39 @@ impl WorldNetwork {
         out
     }
 
-    /// Frontier `(buckets, supports)` roots rebuilt from the legacy frontier content.
-    pub fn legacy_frontier_roots(&self) -> Result<(SubRoot, SubRoot), WorldError> {
+    /// Frontier root rebuilt from the legacy frontier content (buckets with their supports
+    /// inline or as nested set roots).
+    pub fn legacy_frontier_root(&self) -> Result<SubRoot, WorldError> {
         let scratch = StateStore::memory(DEFAULT_NODE_CACHE_BYTES);
         let mut buckets: SMap<FrontierKey, FrontierBucket> = SMap::new();
-        let mut supports: PMap<CandKey, PSet<DerivationId>> = PMap::new();
         for (d, ents) in self.candidate_frontier.legacy.iter() {
             for (e, cands) in ents.iter() {
                 let mut bucket = FrontierBucket::default();
                 for (c, entry) in cands.iter() {
-                    bucket.0.insert(c.clone(), CandidateHead::from_entry(entry));
-                    supports.insert(CandKey::new(d, e, c), entry.supports.clone());
+                    let supports = if entry.supports.len() == 1 {
+                        SupportRef::Inline(CompactDeriv::from_derivation(
+                            entry.supports.iter().next().expect("len is 1"),
+                        ))
+                    } else {
+                        let mut inner: SMap<Digest, CompactDeriv> = SMap::new();
+                        for did in entry.supports.iter() {
+                            let c = CompactDeriv::from_derivation(did);
+                            inner = inner.upsert(c.digest(), c, &scratch)?;
+                        }
+                        SupportRef::Sub(inner.sub_root())
+                    };
+                    bucket.0.insert(
+                        c.clone(),
+                        CandidateRec {
+                            head: CandidateHead::from_entry(entry),
+                            supports,
+                        },
+                    );
                 }
                 buckets = buckets.upsert(FrontierKey::new(d, e), bucket, &scratch)?;
             }
         }
-        let sup_root = legacy_support_root(
-            &supports,
-            |k: &CandKey| k.clone(),
-            CompactDeriv::from_derivation,
-            &scratch,
-        )?;
-        Ok((buckets.sub_root(), sup_root))
+        Ok(buckets.sub_root())
     }
 
     /// Root and size of the settled-decision trie rebuilt from the legacy decisions with the

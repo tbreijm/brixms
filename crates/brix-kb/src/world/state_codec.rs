@@ -521,10 +521,9 @@ impl StateCodec for CandKey {
     }
 }
 
-/// Stored head of a [`CandidateEntry`]: everything but its identity (decide, entity, name,
-/// which are the keys) and its supports (a separate [`super::network::SupportIndex`] keyed by
-/// [`CandKey`]). The calendar key is stored and re-checked against its recomputation on every
-/// read.
+/// Head of a [`CandidateEntry`]: everything but its identity (decide, entity, name, which
+/// are the keys) and its supports. The calendar key is stored and re-checked against its
+/// recomputation on every read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CandidateHead {
     pub priority: u64,
@@ -585,17 +584,38 @@ impl StateCodec for CandidateHead {
     }
 }
 
+/// One live candidate as stored: its head and its supports, a single support inline and two
+/// or more as the [`SubRoot`] of a nested set (canonical, like every support index).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CandidateRec {
+    pub head: CandidateHead,
+    pub supports: SupportRef<CompactDeriv>,
+}
+
+impl StateCodec for CandidateRec {
+    fn state_write(&self, w: &mut CanonWriter) {
+        self.head.state_write(w);
+        self.supports.state_write(w);
+    }
+    fn state_read(r: &mut CanonReader<'_>) -> Res<Self> {
+        Ok(Self {
+            head: CandidateHead::state_read(r)?,
+            supports: SupportRef::state_read(r)?,
+        })
+    }
+}
+
 /// All live candidates of one entity (never empty: an entity without candidates has no
 /// bucket), by candidate name.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub struct FrontierBucket(pub BTreeMap<String, CandidateHead>);
+pub struct FrontierBucket(pub BTreeMap<String, CandidateRec>);
 
 impl StateCodec for FrontierBucket {
     fn state_write(&self, w: &mut CanonWriter) {
         w.write_uint(self.0.len() as u64);
-        for (name, head) in &self.0 {
+        for (name, rec) in &self.0 {
             w.write_str(name);
-            head.state_write(w);
+            rec.state_write(w);
         }
     }
     fn state_read(r: &mut CanonReader<'_>) -> Res<Self> {
@@ -610,9 +630,9 @@ impl StateCodec for FrontierBucket {
             if prev.as_ref().is_some_and(|p| *p >= name) {
                 return noncanon("frontier candidates not strictly sorted (unsorted or duplicate)");
             }
-            let head = CandidateHead::state_read(r)?;
+            let rec = CandidateRec::state_read(r)?;
             prev = Some(name.clone());
-            out.insert(name, head);
+            out.insert(name, rec);
         }
         Ok(FrontierBucket(out))
     }
@@ -773,8 +793,28 @@ mod tests {
         bad.calendar_key = Key::new(2, 1, Digest::from_bytes([9; 32]));
         assert!(bad.verify("dec", "e1", "c1").is_err());
         let mut bucket = FrontierBucket::default();
-        bucket.0.insert("c1".into(), head.clone());
-        bucket.0.insert("c2".into(), head);
+        bucket.0.insert(
+            "c1".into(),
+            CandidateRec {
+                head: head.clone(),
+                supports: SupportRef::Sub(SubRoot {
+                    root: Digest::from_bytes([3; 32]),
+                    len: 2,
+                }),
+            },
+        );
+        bucket.0.insert(
+            "c2".into(),
+            CandidateRec {
+                head,
+                supports: SupportRef::Inline(CompactDeriv::from_derivation(
+                    &super::super::network::DerivationId::Base {
+                        relation: "r".into(),
+                        key: WorldKey(vec![1]),
+                    },
+                )),
+            },
+        );
         rt(&bucket);
     }
 
@@ -789,18 +829,32 @@ mod tests {
         assert!(
             FrontierBucket::state_from_bytes(&FrontierBucket::default().state_bytes()).is_err()
         );
+        let rec = CandidateRec {
+            head,
+            supports: SupportRef::Sub(SubRoot {
+                root: Digest::from_bytes([3; 32]),
+                len: 2,
+            }),
+        };
         for names in [["b", "a"], ["a", "a"]] {
             let mut w = CanonWriter::new();
             w.write_uint(2);
             for n in names {
                 w.write_str(n);
-                head.state_write(&mut w);
+                rec.state_write(&mut w);
             }
             assert!(matches!(
                 FrontierBucket::state_from_bytes(&w.finish()),
                 Err(StateCodecError::NonCanonical(_))
             ));
         }
+        // A one-member Sub set is non-canonical (must be inline).
+        let mut single = rec.clone();
+        single.supports = SupportRef::Sub(SubRoot {
+            root: Digest::from_bytes([3; 32]),
+            len: 1,
+        });
+        assert!(CandidateRec::state_from_bytes(&single.state_bytes()).is_err());
     }
 
     #[test]

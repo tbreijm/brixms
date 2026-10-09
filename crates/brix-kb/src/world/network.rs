@@ -17,8 +17,8 @@
 use super::compact_deriv::{leaf_counts, CompactDeriv, DRoot, Derivation};
 use super::persistent::{PMap, PSet};
 use super::state_codec::{
-    CandKey, CandidateHead, FrontierBucket, FrontierKey, JoinEntry, StateCodec, StateCodecError,
-    SubRoot, SupportItem, SupportRef, ValueList,
+    CandKey, CandidateHead, CandidateRec, FrontierBucket, FrontierKey, JoinEntry, StateCodec,
+    StateCodecError, SubRoot, SupportItem, SupportRef, ValueList,
 };
 use super::state_store::{PageCursor, SMap, StateError, StateStore, DEFAULT_NODE_CACHE_BYTES};
 use std::collections::{BTreeMap, BTreeSet};
@@ -737,23 +737,35 @@ where
 pub type DistinctSupports = SupportIndex<IntermediateTuple, IntermediateTuple, CompactDeriv>;
 /// Grouped-count index, keyed by the group key values.
 pub type GroupSupports = SupportIndex<ValueList, Vec<Value>, Digest>;
-/// Contents of one derived relation: each distinct typed tuple with the digests of the
-/// derivations currently supporting it. A tuple is in the relation iff it has at least one
-/// support, so collapsing derivations (several rows projecting to one tuple) is
-/// order-independent, and `Int(1)` / `Str("1")` stay distinct (the pre-M3 set was keyed by
-/// the Display bytes of a `TupleRecord`, which collapsed them).
+/// Contents of a derived relation that is not a `Distinct` output: each distinct typed tuple
+/// with the digests of the derivations currently supporting it. A tuple is in the relation
+/// iff it has at least one support, so collapsing derivations (several rows projecting to
+/// one tuple) is order-independent, and `Int(1)` / `Str("1")` stay distinct (the pre-M3 set
+/// was keyed by the Display bytes of a `TupleRecord`, which collapsed them).
 pub type DerivedSupports = SupportIndex<IntermediateTuple, (), Digest>;
-/// Supports of the live candidates, keyed by decide, entity and candidate name.
-pub type CandidateSupports = SupportIndex<CandKey, (), CompactDeriv>;
 
-/// The candidate frontier, store-backed: per `(decide, entity)` a [`FrontierBucket`] of the
-/// live candidates' heads, plus a [`CandidateSupports`] index holding each candidate's
-/// support set (canonical `Inline | Sub`, like every other support index). A candidate is
-/// live iff it has a support; an entity without candidates has no bucket.
+/// How the contents of one derived relation are stored.
+#[derive(Clone, Debug)]
+pub enum DerivedRel {
+    /// The relation is the output of `Distinct` operator `op` (lowering ends every `select`
+    /// with one). Its tuples are exactly that operator's support-index keys, typed and with
+    /// one canonical derivation each, so they are not stored a second time.
+    DistinctOutput(OperatorId),
+    /// Any other output operator: a support-counted typed tuple index.
+    Counted(DerivedSupports),
+}
+
+/// The candidate frontier, store-backed: per `(decide, entity)` a [`FrontierBucket`] holding
+/// the live candidates, each with its head and its supports (a single support inline, two or
+/// more as the [`SubRoot`] of a nested set, canonical like every support index). A candidate
+/// is live iff it has a support; an entity without candidates has no bucket.
+///
+/// `hot` holds the nested support sets modified (and so not yet reachable from the store)
+/// since the last dehydration, keyed by candidate.
 #[derive(Clone, Debug, Default)]
 pub struct CandidateFrontier {
     pub buckets: SMap<FrontierKey, FrontierBucket>,
-    pub supports: CandidateSupports,
+    pub hot: PMap<CandKey, SMap<Digest, CompactDeriv>>,
     /// Shadow of the pre-store implementation, kept until M4 (see `join_oracle`).
     #[cfg(any(test, feature = "r0-oracle"))]
     pub(crate) legacy: PMap<String, PMap<String, PMap<String, CandidateEntry>>>,
@@ -770,23 +782,20 @@ impl CandidateFrontier {
         let Some(bucket) = self.buckets.get(key, store)? else {
             return Ok(None);
         };
-        for (name, head) in &bucket.0 {
-            head.verify(&key.decide, &key.entity, name)
-                .map_err(|e| WorldError::from(StateError::from(e)))?;
-        }
+        verify_bucket(key, &bucket)?;
         Ok(Some(bucket))
     }
 
+    /// Write an entity's bucket (an empty or absent bucket removes the entity).
     fn put_bucket(
         &mut self,
         key: FrontierKey,
-        bucket: FrontierBucket,
+        bucket: Option<FrontierBucket>,
         store: &StateStore,
     ) -> Result<(), WorldError> {
-        self.buckets = if bucket.0.is_empty() {
-            self.buckets.remove(&key, store)?
-        } else {
-            self.buckets.upsert(key, bucket, store)?
+        self.buckets = match bucket {
+            Some(b) if !b.0.is_empty() => self.buckets.upsert(key, b, store)?,
+            _ => self.buckets.remove(&key, store)?,
         };
         Ok(())
     }
@@ -801,10 +810,7 @@ impl CandidateFrontier {
         loop {
             let (rows, next) = self.buckets.page(cursor.as_ref(), 256, store)?;
             for (k, b) in rows {
-                for (name, head) in &b.0 {
-                    head.verify(&k.decide, &k.entity, name)
-                        .map_err(|e| WorldError::from(StateError::from(e)))?;
-                }
+                verify_bucket(&k, &b)?;
                 out.push((k, b));
             }
             match next {
@@ -815,25 +821,128 @@ impl CandidateFrontier {
         Ok(out)
     }
 
+    /// The supports of candidate `ck`, whose stored record is `rec`.
+    pub(crate) fn supports_of(&self, ck: &CandKey, rec: &CandidateRec) -> Supports<CompactDeriv> {
+        match &rec.supports {
+            SupportRef::Inline(d) => Supports::One(d.clone()),
+            SupportRef::Sub(s) => Supports::Many(
+                self.hot
+                    .get(ck)
+                    .cloned()
+                    .unwrap_or_else(|| SMap::from_sub_root(*s)),
+            ),
+        }
+    }
+
+    /// Add support `item` to candidate `ck` (record `rec`, to be written back by the
+    /// caller). Idempotent for a support already present.
+    fn add_support(
+        &mut self,
+        ck: &CandKey,
+        rec: &mut CandidateRec,
+        item: CompactDeriv,
+        store: &StateStore,
+    ) -> Result<(), WorldError> {
+        let set = match &rec.supports {
+            SupportRef::Inline(d) => {
+                if d.id() == item.id() {
+                    return Ok(());
+                }
+                SMap::new().upsert(d.id(), d.clone(), store)?
+            }
+            SupportRef::Sub(s) => self
+                .hot
+                .get(ck)
+                .cloned()
+                .unwrap_or_else(|| SMap::from_sub_root(*s)),
+        };
+        let old = set.len();
+        let set = set.upsert(item.id(), item, store)?;
+        if set.len() != old {
+            rec.supports = SupportRef::Sub(set.sub_root());
+            self.hot.insert(ck.clone(), set);
+        }
+        Ok(())
+    }
+
+    /// Remove the support with id `id` from candidate `ck`; returns how many remain (the
+    /// caller drops the candidate at 0).
+    fn remove_support(
+        &mut self,
+        ck: &CandKey,
+        rec: &mut CandidateRec,
+        id: &Digest,
+        store: &StateStore,
+    ) -> Result<usize, WorldError> {
+        match &rec.supports {
+            SupportRef::Inline(d) => {
+                if d.id() == *id {
+                    self.hot.remove(ck);
+                    Ok(0)
+                } else {
+                    Ok(1)
+                }
+            }
+            SupportRef::Sub(s) => {
+                let set = self
+                    .hot
+                    .get(ck)
+                    .cloned()
+                    .unwrap_or_else(|| SMap::from_sub_root(*s));
+                let old = set.len();
+                let set = set.remove(id, store)?;
+                let new = set.len();
+                if new == old {
+                    return Ok(old);
+                }
+                if new == 1 {
+                    let (rows, _) = set.page(None, 1, store)?;
+                    let (_, only) = rows.into_iter().next().ok_or_else(|| {
+                        WorldError::NetworkError("support set lost its last member".to_string())
+                    })?;
+                    rec.supports = SupportRef::Inline(only);
+                    self.hot.remove(ck);
+                } else {
+                    rec.supports = SupportRef::Sub(set.sub_root());
+                    self.hot.insert(ck.clone(), set);
+                }
+                Ok(new)
+            }
+        }
+    }
+
     fn persist(&self, store: &StateStore) -> usize {
-        self.buckets.persist(store) + self.supports.persist(store)
+        let mut n = 0;
+        for inner in self.hot.values() {
+            n += inner.persist(store);
+        }
+        n + self.buckets.persist(store)
     }
 
     fn dehydrated(&self, store: &StateStore) -> Result<Self, WorldError> {
         Ok(Self {
             buckets: self.buckets.dehydrate(store)?,
-            supports: self.supports.dehydrated(store)?,
+            hot: PMap::new(),
             #[cfg(any(test, feature = "r0-oracle"))]
             legacy: self.legacy.clone(),
         })
     }
 }
 
+fn verify_bucket(key: &FrontierKey, bucket: &FrontierBucket) -> Result<(), WorldError> {
+    for (name, rec) in &bucket.0 {
+        rec.head
+            .verify(&key.decide, &key.entity, name)
+            .map_err(|e| WorldError::from(StateError::from(e)))?;
+    }
+    Ok(())
+}
+
 /// The settled decision of one entity: the live candidate with the least calendar key.
 fn settle(entity: &str, bucket: &FrontierBucket) -> Option<SettledDecision> {
     let mut frontier: Frontier<(&String, &CandidateHead)> = Frontier::new();
-    for (name, head) in &bucket.0 {
-        let _ = frontier.insert(head.calendar_key, (name, head));
+    for (name, rec) in &bucket.0 {
+        let _ = frontier.insert(rec.head.calendar_key, (name, &rec.head));
     }
     let (key, (name, head)) = frontier.select_least()?;
     Some(SettledDecision {
@@ -927,7 +1036,7 @@ pub struct WorldNetwork {
     pub downstream: PMap<OperatorId, Vec<OperatorId>>,
     output_relations: PMap<OperatorId, Vec<String>>,
     pub base_relations: PMap<String, PMap<WorldKey, WorldTuple>>,
-    pub derived_relations: PMap<String, DerivedSupports>,
+    pub derived_relations: PMap<String, DerivedRel>,
     pub decides: PMap<String, DecideBlock>,
     decision_subscribers: PMap<String, Vec<String>>,
     /// Content-addressed trie of settled decisions, keyed by [`decision_key`]
@@ -1069,8 +1178,17 @@ impl WorldNetwork {
 
         let mut derived_relations = PMap::new();
         for (name, &op_id) in &dag.relation_outputs {
-            if !matches!(dag.nodes[op_id.0], OperatorNode::Scan { .. }) {
-                derived_relations.insert(name.clone(), DerivedSupports::default());
+            match dag.nodes[op_id.0] {
+                OperatorNode::Scan { .. } => {}
+                OperatorNode::Distinct { .. } => {
+                    derived_relations.insert(name.clone(), DerivedRel::DistinctOutput(op_id));
+                }
+                _ => {
+                    derived_relations.insert(
+                        name.clone(),
+                        DerivedRel::Counted(DerivedSupports::default()),
+                    );
+                }
             }
         }
 
@@ -1119,8 +1237,10 @@ impl WorldNetwork {
     /// flushes the store.
     pub fn persist_state(&self) -> Result<usize, WorldError> {
         let mut n = 0;
-        for supports in self.derived_relations.values() {
-            n += supports.persist(&self.state);
+        for rel in self.derived_relations.values() {
+            if let DerivedRel::Counted(supports) = rel {
+                n += supports.persist(&self.state);
+            }
         }
         n += self.candidate_frontier.persist(&self.state);
         n += self.decision_tree.persist(&self.state);
@@ -1146,9 +1266,13 @@ impl WorldNetwork {
     /// [`Self::persist_state`] (and a flush) first; fails if a root is not persisted.
     pub fn dehydrated(&self) -> Result<Self, WorldError> {
         let mut out = self.clone();
-        for (name, supports) in self.derived_relations.iter() {
-            out.derived_relations
-                .insert(name.clone(), supports.dehydrated(&self.state)?);
+        for (name, rel) in self.derived_relations.iter() {
+            if let DerivedRel::Counted(supports) = rel {
+                out.derived_relations.insert(
+                    name.clone(),
+                    DerivedRel::Counted(supports.dehydrated(&self.state)?),
+                );
+            }
         }
         out.candidate_frontier = self.candidate_frontier.dehydrated(&self.state)?;
         out.decision_tree = self.decision_tree.dehydrate(&self.state)?;
@@ -1248,20 +1372,28 @@ impl WorldNetwork {
         out
     }
 
-    /// Per derived relation, the outer support index root.
+    /// Per derived relation, the root of the index holding its tuples: the Distinct
+    /// operator's support index for a `Distinct` output (see [`DerivedRel`]), the relation's
+    /// own index otherwise.
     pub fn derived_roots(&self) -> BTreeMap<String, SubRoot> {
+        let distinct = self.distinct_roots();
         self.derived_relations
             .iter()
-            .map(|(name, s)| (name.clone(), s.outer.sub_root()))
+            .map(|(name, rel)| {
+                let root = match rel {
+                    DerivedRel::DistinctOutput(op) => {
+                        distinct.get(op).copied().unwrap_or_else(SubRoot::empty)
+                    }
+                    DerivedRel::Counted(s) => s.outer.sub_root(),
+                };
+                (name.clone(), root)
+            })
             .collect()
     }
 
-    /// The candidate frontier roots: `(buckets, supports)`.
-    pub fn frontier_roots(&self) -> (SubRoot, SubRoot) {
-        (
-            self.candidate_frontier.buckets.sub_root(),
-            self.candidate_frontier.supports.outer.sub_root(),
-        )
+    /// The candidate frontier root (buckets, with the supports nested in them).
+    pub fn frontier_root(&self) -> SubRoot {
+        self.candidate_frontier.buckets.sub_root()
     }
 
     /// Root and size of the settled-decision trie.
@@ -1315,7 +1447,13 @@ impl WorldNetwork {
         fresh.derived_relations = self
             .derived_relations
             .iter()
-            .map(|(k, _)| (k.clone(), DerivedSupports::default()))
+            .map(|(k, rel)| {
+                let cleared = match rel {
+                    DerivedRel::DistinctOutput(op) => DerivedRel::DistinctOutput(*op),
+                    DerivedRel::Counted(_) => DerivedRel::Counted(DerivedSupports::default()),
+                };
+                (k.clone(), cleared)
+            })
             .collect();
         fresh.decision_tree = SMap::new();
         fresh.candidate_frontier = CandidateFrontier::default();
@@ -2307,11 +2445,14 @@ impl WorldNetwork {
 
                         if !self.base_relations.contains_key(rel_name) {
                             let store = &self.state;
-                            let supports =
-                                self.derived_relations.entry(rel_name.clone()).or_default();
+                            let rel =
+                                self.derived_relations.get_mut(rel_name).ok_or_else(|| {
+                                    WorldError::NetworkError(format!(
+                                        "output relation {rel_name} has no derived index"
+                                    ))
+                                })?;
                             for od in &out_deltas {
                                 let is_ins = od.is_insert();
-                                let id = od.derivation().digest();
 
                                 #[cfg(any(test, feature = "r0-oracle"))]
                                 let legacy_changed = {
@@ -2325,15 +2466,23 @@ impl WorldNetwork {
                                     }
                                 };
 
-                                let (old, new) = if is_ins {
-                                    supports.add(od.tuple().clone(), id, store)?
-                                } else {
-                                    supports.remove(od.tuple(), &id, store)?
-                                };
-                                let changed = if is_ins {
-                                    old == 0 && new > 0
-                                } else {
-                                    old > 0 && new == 0
+                                let changed = match rel {
+                                    // A Distinct output emits only on 0 -> 1 / 1 -> 0 support
+                                    // transitions of its own index, which is the relation.
+                                    DerivedRel::DistinctOutput(_) => true,
+                                    DerivedRel::Counted(supports) => {
+                                        let id = od.derivation().digest();
+                                        let (old, new) = if is_ins {
+                                            supports.add(od.tuple().clone(), id, store)?
+                                        } else {
+                                            supports.remove(od.tuple(), &id, store)?
+                                        };
+                                        if is_ins {
+                                            old == 0 && new > 0
+                                        } else {
+                                            old > 0 && new == 0
+                                        }
+                                    }
                                 };
 
                                 #[cfg(any(test, feature = "r0-oracle"))]
@@ -2403,6 +2552,9 @@ impl WorldNetwork {
 
         // 3. Update candidate frontiers for decide blocks from relation deltas
         let mut touched_entities = BTreeSet::new();
+        // Buckets are read once, edited in memory across all deltas of the batch, and
+        // written back once per entity (`None`: the entity has no live candidate).
+        let mut staged_buckets: BTreeMap<FrontierKey, Option<FrontierBucket>> = BTreeMap::new();
         for (relation, rel_deltas) in &relation_deltas {
             for decide_name in self
                 .decision_subscribers
@@ -2547,36 +2699,48 @@ impl WorldNetwork {
 
                                 let store = &self.state;
                                 let fk = FrontierKey::new(&decide.name, &entity_id);
-                                let mut bucket = self
-                                    .candidate_frontier
-                                    .bucket(&fk, store)?
-                                    .unwrap_or_default();
-                                if let Some(existing) = bucket.0.get(&propose.name) {
-                                    if existing.value != val {
-                                        return Err(WorldError::NetworkError(format!(
-                                            "conflicting support values for decide '{}' entity \
-                                             '{entity_id}' candidate '{}': {:?} vs {val:?}",
-                                            decide.name, propose.name, existing.value
-                                        )));
-                                    }
-                                } else {
-                                    report.candidates_inserted += 1;
-                                    bucket.0.insert(
-                                        propose.name.clone(),
-                                        CandidateHead {
-                                            priority: propose.priority,
-                                            phase: 0,
-                                            value: val,
-                                            calendar_key: cal_key,
-                                        },
-                                    );
-                                    self.candidate_frontier.put_bucket(fk, bucket, store)?;
+                                if !staged_buckets.contains_key(&fk) {
+                                    let loaded = self.candidate_frontier.bucket(&fk, store)?;
+                                    staged_buckets.insert(fk.clone(), loaded);
                                 }
-                                self.candidate_frontier.supports.add(
-                                    CandKey::new(&decide.name, &entity_id, &propose.name),
-                                    deriv.c.clone(),
-                                    store,
-                                )?;
+                                let bucket = staged_buckets
+                                    .get_mut(&fk)
+                                    .expect("bucket staged above")
+                                    .get_or_insert_with(Default::default);
+                                let ck = CandKey::new(&decide.name, &entity_id, &propose.name);
+                                match bucket.0.get_mut(&propose.name) {
+                                    Some(rec) => {
+                                        if rec.head.value != val {
+                                            return Err(WorldError::NetworkError(format!(
+                                                "conflicting support values for decide '{}' \
+                                                 entity '{entity_id}' candidate '{}': {:?} vs \
+                                                 {val:?}",
+                                                decide.name, propose.name, rec.head.value
+                                            )));
+                                        }
+                                        self.candidate_frontier.add_support(
+                                            &ck,
+                                            rec,
+                                            deriv.c.clone(),
+                                            store,
+                                        )?;
+                                    }
+                                    None => {
+                                        report.candidates_inserted += 1;
+                                        bucket.0.insert(
+                                            propose.name.clone(),
+                                            CandidateRec {
+                                                head: CandidateHead {
+                                                    priority: propose.priority,
+                                                    phase: 0,
+                                                    value: val,
+                                                    calendar_key: cal_key,
+                                                },
+                                                supports: SupportRef::Inline(deriv.c.clone()),
+                                            },
+                                        );
+                                    }
+                                }
                             }
                         } else {
                             #[cfg(any(test, feature = "r0-oracle"))]
@@ -2599,17 +2763,26 @@ impl WorldNetwork {
 
                             let store = &self.state;
                             let fk = FrontierKey::new(&decide.name, &entity_id);
-                            if let Some(mut bucket) = self.candidate_frontier.bucket(&fk, store)? {
-                                if bucket.0.contains_key(&propose.name) {
-                                    let (_, remaining) = self.candidate_frontier.supports.remove(
-                                        &CandKey::new(&decide.name, &entity_id, &propose.name),
+                            if !staged_buckets.contains_key(&fk) {
+                                let loaded = self.candidate_frontier.bucket(&fk, store)?;
+                                staged_buckets.insert(fk.clone(), loaded);
+                            }
+                            let slot = staged_buckets.get_mut(&fk).expect("bucket staged above");
+                            if let Some(bucket) = slot.as_mut() {
+                                if let Some(rec) = bucket.0.get_mut(&propose.name) {
+                                    let ck = CandKey::new(&decide.name, &entity_id, &propose.name);
+                                    let remaining = self.candidate_frontier.remove_support(
+                                        &ck,
+                                        rec,
                                         &deriv.c.digest(),
                                         store,
                                     )?;
                                     if remaining == 0 {
                                         bucket.0.remove(&propose.name);
                                         report.candidates_retracted += 1;
-                                        self.candidate_frontier.put_bucket(fk, bucket, store)?;
+                                        if bucket.0.is_empty() {
+                                            *slot = None;
+                                        }
                                     }
                                 }
                             }
@@ -2621,7 +2794,11 @@ impl WorldNetwork {
 
         for (decide, entity) in touched_entities {
             let key = decision_key(&decide, &entity);
-            let settlement = self.get_settlement(&decide, &entity)?;
+            let settlement = match staged_buckets.get(&FrontierKey::new(&decide, &entity)) {
+                Some(Some(bucket)) => settle(&entity, bucket),
+                Some(None) => None,
+                None => self.get_settlement(&decide, &entity)?,
+            };
 
             #[cfg(any(test, feature = "r0-oracle"))]
             {
@@ -2665,6 +2842,11 @@ impl WorldNetwork {
             }
         }
 
+        for (fk, bucket) in staged_buckets {
+            self.candidate_frontier
+                .put_bucket(fk, bucket, &self.state)?;
+        }
+
         #[cfg(any(test, feature = "r0-oracle"))]
         {
             assert_eq!(
@@ -2692,15 +2874,29 @@ impl WorldNetwork {
         &self,
         relation: &str,
     ) -> Result<Option<Vec<TupleRecord>>, WorldError> {
-        let Some(supports) = self.derived_relations.get(relation) else {
+        let Some(rel) = self.derived_relations.get(relation) else {
             return Ok(None);
         };
-        let records: BTreeSet<TupleRecord> = supports
-            .keys(&self.state)?
+        let records: BTreeSet<TupleRecord> = self
+            .derived_tuples(rel)?
             .iter()
             .map(IntermediateTuple::to_tuple_record)
             .collect();
         Ok(Some(records.into_iter().collect()))
+    }
+
+    /// The typed tuples of one derived relation.
+    fn derived_tuples(&self, rel: &DerivedRel) -> Result<Vec<IntermediateTuple>, WorldError> {
+        match rel {
+            DerivedRel::Counted(supports) => supports.keys(&self.state),
+            DerivedRel::DistinctOutput(op) => match self.operator_states.get(&op.0) {
+                Some(OperatorState::Distinct { supports, .. }) => supports.keys(&self.state),
+                _ => Err(WorldError::NetworkError(format!(
+                    "derived relation refers to operator {} which is not a Distinct",
+                    op.0
+                ))),
+            },
+        }
     }
 
     /// Candidates (with their expanded supports) for a specific decide block and entity.
@@ -2725,11 +2921,10 @@ impl WorldNetwork {
         bucket: &FrontierBucket,
     ) -> Result<BTreeMap<String, CandidateEntry>, WorldError> {
         let mut out = BTreeMap::new();
-        for (name, head) in &bucket.0 {
+        for (name, rec) in &bucket.0 {
             let items = self
                 .candidate_frontier
-                .supports
-                .read(&CandKey::new(decide, entity_id, name), &self.state)?
+                .supports_of(&CandKey::new(decide, entity_id, name), rec)
                 .members(&self.state)?;
             let mut supports = PSet::new();
             for id in self.expand_supports(&items)? {
@@ -2740,10 +2935,10 @@ impl WorldNetwork {
                 CandidateEntry {
                     candidate_name: name.clone(),
                     entity_id: entity_id.to_string(),
-                    priority: head.priority,
-                    phase: head.phase,
-                    value: head.value.clone(),
-                    calendar_key: head.calendar_key,
+                    priority: rec.head.priority,
+                    phase: rec.head.phase,
+                    value: rec.head.value.clone(),
+                    calendar_key: rec.head.calendar_key,
                     supports,
                 },
             );
@@ -2792,11 +2987,10 @@ impl WorldNetwork {
         }
 
         let mut derived_relations = BTreeMap::new();
-        for (name, supports) in self.derived_relations.iter() {
+        for (name, rel) in self.derived_relations.iter() {
             derived_relations.insert(
                 name.clone(),
-                supports
-                    .keys(&self.state)?
+                self.derived_tuples(rel)?
                     .iter()
                     .map(IntermediateTuple::to_tuple_record)
                     .collect::<BTreeSet<_>>(),
@@ -2977,21 +3171,20 @@ impl WorldNetwork {
         let mut candidates = Vec::new();
         let mut contributing_base = BTreeSet::new();
 
-        for (cand_name, head) in &bucket.0 {
+        for (cand_name, rec) in &bucket.0 {
             let winning = winning_name == Some(cand_name);
-            let supports = self.candidate_frontier.supports.read(
-                &CandKey::new(decide_name, entity_id, cand_name),
-                &self.state,
-            )?;
+            let supports = self
+                .candidate_frontier
+                .supports_of(&CandKey::new(decide_name, entity_id, cand_name), rec);
             let items = supports.members(&self.state)?;
             for deriv in self.expand_supports(&items)? {
                 self.collect_base_facts_for_derivation(&deriv, &mut contributing_base)?;
             }
             candidates.push(CandidateExplanation {
                 name: cand_name.clone(),
-                priority: head.priority,
-                phase: head.phase,
-                value: head.value.clone(),
+                priority: rec.head.priority,
+                phase: rec.head.phase,
+                value: rec.head.value.clone(),
                 supports_count: supports.len(),
                 winning,
             });
