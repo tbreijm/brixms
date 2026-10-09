@@ -4,6 +4,8 @@ use brix_canon::{CanonReader, CanonWriter, Digest, Domain};
 use brix_lower::module_graph::{LinkedProgram, ModuleGraph, ModuleLoaderLimits};
 use brix_lower::relation_dag::{lower_relations, OperatorNode};
 use soc_core::store::{FileNodeStore, TrieMap};
+
+use super::state_store::{StateStore, DEFAULT_NODE_CACHE_BYTES};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -625,6 +627,8 @@ pub struct WorldSession {
     pub committed_idempotency_keys: BTreeMap<String, CommittedBatchInfo>,
     pub crash_injector: Option<CrashPoint>,
     pub network: Option<WorldNetwork>,
+    /// Diagnostic: post-commit dehydrations that failed (network kept hydrated).
+    pub dehydrate_failures: u64,
     /// Recorded (non-authoritative) execution profile (ADR-0046 P6 §1.1,
     /// decided 2026-10-04); `None` for a storage-only world or a
     /// `program.json` written before this field existed.
@@ -701,6 +705,7 @@ impl WorldSession {
             committed_idempotency_keys: BTreeMap::new(),
             crash_injector: None,
             network: None,
+            dehydrate_failures: 0,
             exec_profile: None,
             pins: PinRegistry::default(),
         })
@@ -861,6 +866,7 @@ impl WorldSession {
             committed_idempotency_keys,
             crash_injector: None,
             network: None,
+            dehydrate_failures: 0,
             exec_profile: None,
             pins,
         };
@@ -1316,6 +1322,7 @@ impl WorldSession {
         // relation/secondary-index tries above — same crash-recovery story.
         if let Some(ref sn) = staged_network {
             objects_written += sn.decision_tree.persist_to_store(&mut self.node_store);
+            objects_written += sn.persist_state()?;
         }
 
         // Crash injection seam 1
@@ -1448,7 +1455,16 @@ impl WorldSession {
         self.relations = staged_relations;
         self.secondary_indexes = staged_secondary_indexes;
         if let Some(sn) = staged_network {
-            self.network = Some(sn);
+            // The commit is already durable: dehydrating must never fail it. On the
+            // (unexpected) error keep the hydrated network, which is merely larger.
+            self.network = Some(match sn.dehydrated() {
+                Ok(d) => d,
+                Err(_) => {
+                    self.dehydrate_failures += 1;
+                    debug_assert!(false, "dehydrate after durable commit failed");
+                    sn
+                }
+            });
         }
         self.committed_idempotency_keys.insert(
             batch.idempotency_key.clone(),
@@ -1852,11 +1868,22 @@ impl WorldSession {
                 }
             }
         }
+        let cache = self
+            .manifest
+            .node_cache_bytes
+            .map_or(DEFAULT_NODE_CACHE_BYTES, |n| {
+                usize::try_from(n).unwrap_or(usize::MAX)
+            });
+        network.attach_state_store(StateStore::from_file(self.node_store.clone(), cache));
         if !ops.is_empty() {
             network.apply_ops(&ops)?;
         }
         network.current_revision = self.current_revision;
-        self.network = Some(network);
+        // Replay built tries that were never persisted; write them once and drop the
+        // in-memory copies so the first commit does not rewrite O(world).
+        network.persist_state()?;
+        self.node_store.flush()?;
+        self.network = Some(network.dehydrated()?);
         Ok(())
     }
 

@@ -113,6 +113,9 @@ pub struct WorldManifest {
     /// Missing values in older manifests decode as `false` (storage-only worlds).
     pub program_required: bool,
     pub relations: BTreeMap<String, RelationDecl>,
+    /// Decoded-node cache budget for persisted network state, in bytes. Operational
+    /// tuning only: not part of the manifest digest. `None` uses the default.
+    pub node_cache_bytes: Option<u64>,
 }
 
 impl WorldManifest {
@@ -134,6 +137,7 @@ impl WorldManifest {
             program_digest,
             program_required: false,
             relations: rel_map,
+            node_cache_bytes: None,
         }
     }
 
@@ -169,7 +173,7 @@ impl WorldManifest {
 
     pub fn to_json(&self) -> JsonValue {
         let rel_json: Vec<JsonValue> = self.relations.values().map(|r| r.to_json()).collect();
-        json!({
+        let mut v = json!({
             "schema": self.schema,
             "profile": self.profile,
             "world_id": self.world_id,
@@ -177,7 +181,11 @@ impl WorldManifest {
             "program_digest": self.program_digest.to_hex(),
             "program_required": self.program_required,
             "relations": rel_json,
-        })
+        });
+        if let (Some(n), Some(obj)) = (self.node_cache_bytes, v.as_object_mut()) {
+            obj.insert("node_cache_bytes".to_string(), json!(n));
+        }
+        v
     }
 
     pub fn from_json(v: &JsonValue) -> Result<Self, WorldError> {
@@ -254,6 +262,7 @@ impl WorldManifest {
                 .and_then(|x| x.as_bool())
                 .unwrap_or(false),
             relations,
+            node_cache_bytes: v.get("node_cache_bytes").and_then(|x| x.as_u64()),
         };
         manifest.validate()?;
         Ok(manifest)
