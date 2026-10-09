@@ -913,7 +913,11 @@ impl<K: Canonical + Ord + Clone, V: Canonical + Clone, H: KeyHasher> TrieMap<K, 
 
     /// Persist all unwritten nodes in this tree to `store`.
     /// Returns the number of new nodes written.
-    pub fn persist_to_store<S: NodeStore>(&self, store: &mut S) -> usize {
+    pub fn persist_to_store<S: NodeStore>(&self, store: &mut S) -> usize
+    where
+        K: 'static + Send + Sync,
+        V: 'static + Send + Sync,
+    {
         let mut count = 0;
         if let Some(root) = &self.root {
             persist_node_recursive(root, store, &mut count);
@@ -1968,7 +1972,11 @@ fn iter_page_recursive<
     }
 }
 
-fn persist_node_recursive<K: Canonical, V: Canonical, S: NodeStore>(
+fn persist_node_recursive<
+    K: Canonical + Clone + 'static + Send + Sync,
+    V: Canonical + Clone + 'static + Send + Sync,
+    S: NodeStore,
+>(
     node: &Arc<Node<K, V>>,
     store: &mut S,
     count: &mut usize,
@@ -1986,8 +1994,32 @@ fn persist_node_recursive<K: Canonical, V: Canonical, S: NodeStore>(
         }
     }
     let bytes = encode_node(node);
+    let encoded_len = bytes.len();
     store.put_node(digest, bytes);
     *count += 1;
+    // Write-through: the next store-aware access (after the in-memory tree is
+    // dehydrated) finds this node decoded instead of re-reading and re-hashing it.
+    // Children are stored as `Lazy` references so the cache never pins subtrees.
+    if let Some(cache) = store.decoded_cache() {
+        let shallow = match &**node {
+            Node::Leaf(l) => Some(Node::Leaf(l.clone())),
+            Node::Collision(c) => Some(Node::Collision(c.clone())),
+            Node::Branch(b) => Some(Node::Branch(BranchNode {
+                prefix: b.prefix.clone(),
+                bitmap: b.bitmap,
+                children: b
+                    .children
+                    .iter()
+                    .map(|c| Arc::new(Node::Lazy(c.digest())))
+                    .collect(),
+                digest: b.digest,
+            })),
+            Node::Lazy(_) => None,
+        };
+        if let Some(n) = shallow {
+            cache.insert::<Node<K, V>>(digest, Arc::new(n), encoded_len);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
