@@ -7,8 +7,8 @@
 pub mod audit;
 pub mod batch;
 pub mod codec;
+pub mod compact_deriv;
 pub mod decision_codec;
-pub mod deriv_intern;
 pub mod error;
 pub mod import_kb;
 #[cfg(any(test, feature = "r0-oracle"))]

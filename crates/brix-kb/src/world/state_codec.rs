@@ -1,6 +1,6 @@
 //! Injective canonical storage codecs for persisted network state (R0 Phase 2, M0).
 //!
-//! Version tag: [`STATE_CODEC_VERSION`] (`brix.world.state-value@1`).
+//! Version tag: [`STATE_CODEC_VERSION`] (`brix.world.state-value@2`).
 //!
 //! Unlike `Value::to_bytes` (Display-based, so `Int(1)` and `Str("1")` collide), every
 //! encoding here is typed and injective: distinct values encode to distinct bytes, and the
@@ -21,16 +21,14 @@ use brix_lower::relation_dag::OperatorId;
 use soc_core::calendar::Key;
 
 use super::codec::TupleRecord;
-use super::network::{
-    compute_candidate_calendar_key, CandidateEntry, DerivationId, IntermediateTuple, Value,
-};
+use super::compact_deriv::CompactDeriv;
+use super::network::{compute_candidate_calendar_key, CandidateEntry, IntermediateTuple, Value};
 use super::types::WorldKey;
 
-/// Codec version tag for persisted state values.
-pub const STATE_CODEC_VERSION: &str = "brix.world.state-value@1";
-
-/// Default bound on `DerivationId` nesting depth when decoding inside trie nodes.
-pub const DEFAULT_MAX_DERIVATION_DEPTH: usize = 4096;
+/// Codec version tag for persisted state values. `@2`: derivations are persisted as
+/// `brix.world.deriv@2` compact derivations (see `compact_deriv`); the validity key of a
+/// persisted network state must include this tag.
+pub const STATE_CODEC_VERSION: &str = "brix.world.state-value@2";
 
 /// Failure decoding a persisted state value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,8 +39,6 @@ pub enum StateCodecError {
     TrailingBytes,
     /// Unknown variant tag.
     UnknownTag(u64),
-    /// Derivation nesting exceeded the caller's depth bound.
-    DepthExceeded,
     /// Well-formed but not the canonical encoding of its value.
     NonCanonical(String),
 }
@@ -53,7 +49,6 @@ impl fmt::Display for StateCodecError {
             Self::Canon(e) => write!(f, "state codec: canonical read error: {e:?}"),
             Self::TrailingBytes => write!(f, "state codec: trailing bytes"),
             Self::UnknownTag(t) => write!(f, "state codec: unknown tag {t}"),
-            Self::DepthExceeded => write!(f, "state codec: derivation depth bound exceeded"),
             Self::NonCanonical(m) => write!(f, "state codec: non-canonical encoding: {m}"),
         }
     }
@@ -69,18 +64,18 @@ impl From<CanonError> for StateCodecError {
 
 type Res<T> = Result<T, StateCodecError>;
 
-fn noncanon<T>(msg: &str) -> Res<T> {
+pub(super) fn noncanon<T>(msg: &str) -> Res<T> {
     Err(StateCodecError::NonCanonical(msg.to_string()))
 }
 
-fn read_string(r: &mut CanonReader<'_>) -> Res<String> {
+pub(super) fn read_string(r: &mut CanonReader<'_>) -> Res<String> {
     let b = r.read_bytes()?;
     std::str::from_utf8(b)
         .map(str::to_owned)
         .map_err(|_| StateCodecError::Canon(CanonError::BadLength))
 }
 
-fn read_digest(r: &mut CanonReader<'_>) -> Res<Digest> {
+pub(super) fn read_digest(r: &mut CanonReader<'_>) -> Res<Digest> {
     let b = r.read_bytes()?;
     let arr: [u8; 32] = b
         .try_into()
@@ -274,261 +269,31 @@ impl StateCodec for Digest {
 }
 
 // ---------------------------------------------------------------------------
-// DerivationId
+// Operator ids / JoinEntry
 // ---------------------------------------------------------------------------
 
-const D_BASE: u64 = 1;
-const D_UNARY: u64 = 2;
-const D_JOIN: u64 = 3;
-const D_GROUP: u64 = 4;
-const D_DISTINCT: u64 = 5;
-
-fn read_op(r: &mut CanonReader<'_>) -> Res<OperatorId> {
+pub(super) fn read_op(r: &mut CanonReader<'_>) -> Res<OperatorId> {
     let n = usize::try_from(r.read_uint()?)
         .map_err(|_| StateCodecError::Canon(CanonError::BadLength))?;
     Ok(OperatorId(n))
 }
 
-/// Write the storage encoding of a derivation id (typed group keys, unlike `canon_write`).
-pub fn write_derivation_id(d: &DerivationId, w: &mut CanonWriter) {
-    match d {
-        DerivationId::Base { relation, key } => {
-            w.write_uint(D_BASE);
-            w.write_str(relation);
-            w.write_bytes(key.as_bytes());
-        }
-        DerivationId::Unary { op, parent } => {
-            w.write_uint(D_UNARY);
-            w.write_uint(op.0 as u64);
-            write_derivation_id(parent, w);
-        }
-        DerivationId::Join { op, left, right } => {
-            w.write_uint(D_JOIN);
-            w.write_uint(op.0 as u64);
-            write_derivation_id(left, w);
-            write_derivation_id(right, w);
-        }
-        DerivationId::Group { op, group_key } => {
-            w.write_uint(D_GROUP);
-            w.write_uint(op.0 as u64);
-            w.write_uint(group_key.len() as u64);
-            for v in group_key {
-                v.state_write(w);
-            }
-        }
-        DerivationId::Distinct { op, tuple_key } => {
-            w.write_uint(D_DISTINCT);
-            w.write_uint(op.0 as u64);
-            w.write_bytes(tuple_key);
-        }
-    }
-}
-
-/// Read a derivation id; nesting deeper than `max_depth` (counting the root as 1) is rejected.
-pub fn read_derivation_id(r: &mut CanonReader<'_>, max_depth: usize) -> Res<DerivationId> {
-    if max_depth == 0 {
-        return Err(StateCodecError::DepthExceeded);
-    }
-    match r.read_uint()? {
-        D_BASE => {
-            let relation = read_string(r)?;
-            let key = WorldKey(r.read_bytes()?.to_vec());
-            Ok(DerivationId::Base { relation, key })
-        }
-        D_UNARY => {
-            let op = read_op(r)?;
-            let parent = Box::new(read_derivation_id(r, max_depth - 1)?);
-            Ok(DerivationId::Unary { op, parent })
-        }
-        D_JOIN => {
-            let op = read_op(r)?;
-            let left = Box::new(read_derivation_id(r, max_depth - 1)?);
-            let right = Box::new(read_derivation_id(r, max_depth - 1)?);
-            Ok(DerivationId::Join { op, left, right })
-        }
-        D_GROUP => {
-            let op = read_op(r)?;
-            let n = r.read_uint()?;
-            let mut group_key = Vec::new();
-            for _ in 0..n {
-                group_key.push(Value::state_read(r)?);
-            }
-            Ok(DerivationId::Group { op, group_key })
-        }
-        D_DISTINCT => {
-            let op = read_op(r)?;
-            let tuple_key = r.read_bytes()?.to_vec();
-            Ok(DerivationId::Distinct { op, tuple_key })
-        }
-        t => Err(StateCodecError::UnknownTag(t)),
-    }
-}
-
-/// Encode a derivation id for storage.
-pub fn encode_derivation_id(d: &DerivationId) -> Vec<u8> {
-    let mut w = CanonWriter::new();
-    write_derivation_id(d, &mut w);
-    w.finish()
-}
-
-/// Decode a complete derivation id with an explicit depth bound (typically `dag.nodes.len()`
-/// plus one for the base leaf).
-pub fn decode_derivation_id(bytes: &[u8], max_depth: usize) -> Res<DerivationId> {
-    let mut r = CanonReader::new(bytes);
-    let d = read_derivation_id(&mut r, max_depth)?;
-    finish(&r, d)
-}
-
-impl StateCodec for DerivationId {
-    fn state_write(&self, w: &mut CanonWriter) {
-        write_derivation_id(self, w);
-    }
-    fn state_read(r: &mut CanonReader<'_>) -> Res<Self> {
-        read_derivation_id(r, DEFAULT_MAX_DERIVATION_DEPTH)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// DNode (interned derivation node) / JoinEntry
-// ---------------------------------------------------------------------------
-
-/// Domain tag mixed into the digest of an interned derivation node.
-pub const DERIV_NODE_DOMAIN: &str = "brix.world.deriv-node@1";
-
-/// One interned derivation node: like `DerivationId` but children are referenced by digest.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DNode {
-    Base {
-        relation: String,
-        key: WorldKey,
-    },
-    /// A maximal chain of unary derivation steps, outermost operator first (never empty);
-    /// `parent` is the first non-unary node. Collapsing chains is canonical (one node per
-    /// maximal chain) and cuts the number of stored nodes.
-    Unary {
-        ops: Vec<OperatorId>,
-        parent: Digest,
-    },
-    Join {
-        op: OperatorId,
-        left: Digest,
-        right: Digest,
-    },
-    Group {
-        op: OperatorId,
-        group_key: ValueList,
-    },
-    Distinct {
-        op: OperatorId,
-        tuple_key: Vec<u8>,
-    },
-}
-
-impl DNode {
-    /// Content address of this node (domain-separated digest of its canonical bytes).
-    pub fn digest(&self) -> Digest {
-        dnode_digest_of_bytes(&self.state_bytes())
-    }
-}
-
-/// Digest of already-encoded node bytes (used to verify objects read back from the store).
-pub fn dnode_digest_of_bytes(bytes: &[u8]) -> Digest {
-    let mut payload = Vec::with_capacity(DERIV_NODE_DOMAIN.len() + 1 + bytes.len());
-    payload.extend_from_slice(DERIV_NODE_DOMAIN.as_bytes());
-    payload.push(0);
-    payload.extend_from_slice(bytes);
-    Digest::of(brix_canon::Domain::Value, &payload)
-}
-
-impl StateCodec for DNode {
-    fn state_write(&self, w: &mut CanonWriter) {
-        match self {
-            DNode::Base { relation, key } => {
-                w.write_uint(D_BASE);
-                w.write_str(relation);
-                w.write_bytes(key.as_bytes());
-            }
-            DNode::Unary { ops, parent } => {
-                w.write_uint(D_UNARY);
-                w.write_uint(ops.len() as u64);
-                for op in ops {
-                    w.write_uint(op.0 as u64);
-                }
-                w.write_bytes(parent.as_bytes());
-            }
-            DNode::Join { op, left, right } => {
-                w.write_uint(D_JOIN);
-                w.write_uint(op.0 as u64);
-                w.write_bytes(left.as_bytes());
-                w.write_bytes(right.as_bytes());
-            }
-            DNode::Group { op, group_key } => {
-                w.write_uint(D_GROUP);
-                w.write_uint(op.0 as u64);
-                group_key.state_write(w);
-            }
-            DNode::Distinct { op, tuple_key } => {
-                w.write_uint(D_DISTINCT);
-                w.write_uint(op.0 as u64);
-                w.write_bytes(tuple_key);
-            }
-        }
-    }
-    fn state_read(r: &mut CanonReader<'_>) -> Res<Self> {
-        match r.read_uint()? {
-            D_BASE => {
-                let relation = read_string(r)?;
-                let key = WorldKey(r.read_bytes()?.to_vec());
-                Ok(DNode::Base { relation, key })
-            }
-            D_UNARY => {
-                let n = r.read_uint()?;
-                if n == 0 {
-                    return noncanon("empty unary chain");
-                }
-                let mut ops = Vec::new();
-                for _ in 0..n {
-                    ops.push(read_op(r)?);
-                }
-                let parent = read_digest(r)?;
-                Ok(DNode::Unary { ops, parent })
-            }
-            D_JOIN => {
-                let op = read_op(r)?;
-                let left = read_digest(r)?;
-                let right = read_digest(r)?;
-                Ok(DNode::Join { op, left, right })
-            }
-            D_GROUP => {
-                let op = read_op(r)?;
-                let group_key = ValueList::state_read(r)?;
-                Ok(DNode::Group { op, group_key })
-            }
-            D_DISTINCT => {
-                let op = read_op(r)?;
-                let tuple_key = r.read_bytes()?.to_vec();
-                Ok(DNode::Distinct { op, tuple_key })
-            }
-            t => Err(StateCodecError::UnknownTag(t)),
-        }
-    }
-}
-
-/// Join-index entry: the matched tuple plus the interned reference of its derivation.
+/// Join-index entry: the matched tuple plus its compact derivation (keyed in the index by
+/// the derivation's digest).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JoinEntry {
     pub tuple: IntermediateTuple,
-    pub deriv: Digest,
+    pub deriv: CompactDeriv,
 }
 
 impl StateCodec for JoinEntry {
     fn state_write(&self, w: &mut CanonWriter) {
         self.tuple.state_write(w);
-        w.write_bytes(self.deriv.as_bytes());
+        self.deriv.state_write(w);
     }
     fn state_read(r: &mut CanonReader<'_>) -> Res<Self> {
         let tuple = IntermediateTuple::state_read(r)?;
-        let deriv = read_digest(r)?;
+        let deriv = CompactDeriv::state_read(r)?;
         Ok(JoinEntry { tuple, deriv })
     }
 }
@@ -620,21 +385,54 @@ impl StateCodec for SubRoot {
     }
 }
 
+/// One support stored in a support index: identified by a digest; the inner set stores
+/// `id -> Val` (`Val` is `()` when the id alone is enough).
+pub trait SupportItem: StateCodec + Clone + PartialEq + fmt::Debug + 'static + Send + Sync {
+    type Val: StateCodec + Clone + 'static + Send + Sync;
+    fn id(&self) -> Digest;
+    fn val(&self) -> Self::Val;
+    fn from_parts(id: Digest, v: Self::Val) -> Self;
+}
+
+impl SupportItem for Digest {
+    type Val = ();
+    fn id(&self) -> Digest {
+        *self
+    }
+    fn val(&self) {}
+    fn from_parts(id: Digest, _: ()) -> Self {
+        id
+    }
+}
+
+impl SupportItem for CompactDeriv {
+    type Val = CompactDeriv;
+    fn id(&self) -> Digest {
+        self.digest()
+    }
+    fn val(&self) -> CompactDeriv {
+        self.clone()
+    }
+    fn from_parts(_: Digest, v: CompactDeriv) -> Self {
+        v
+    }
+}
+
 /// Outer value of a support index: a single support is stored inline, two or more as a
 /// nested set. The representation is canonical: `Inline` iff exactly one support, `Sub`
 /// (with `len >= 2`) otherwise, so a given support set always has one encoding.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SupportRef {
-    Inline(Digest),
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SupportRef<I: SupportItem> {
+    Inline(I),
     Sub(SubRoot),
 }
 
-impl StateCodec for SupportRef {
+impl<I: SupportItem> StateCodec for SupportRef<I> {
     fn state_write(&self, w: &mut CanonWriter) {
         match self {
             SupportRef::Inline(d) => {
                 w.write_uint(0);
-                w.write_bytes(d.as_bytes());
+                d.state_write(w);
             }
             SupportRef::Sub(s) => {
                 w.write_uint(1);
@@ -644,7 +442,7 @@ impl StateCodec for SupportRef {
     }
     fn state_read(r: &mut CanonReader<'_>) -> Res<Self> {
         match r.read_uint()? {
-            0 => Ok(SupportRef::Inline(read_digest(r)?)),
+            0 => Ok(SupportRef::Inline(I::state_read(r)?)),
             1 => {
                 let s = SubRoot::state_read(r)?;
                 if s.len < 2 {
@@ -782,42 +580,6 @@ mod tests {
         ]
     }
 
-    fn arb_deriv() -> impl Strategy<Value = DerivationId> {
-        let leaf = prop_oneof![
-            ("[a-z]{1,5}", proptest::collection::vec(any::<u8>(), 0..6)).prop_map(|(r, k)| {
-                DerivationId::Base {
-                    relation: r,
-                    key: WorldKey(k),
-                }
-            }),
-            (0usize..9, proptest::collection::vec(arb_value(), 0..3)).prop_map(|(o, g)| {
-                DerivationId::Group {
-                    op: OperatorId(o),
-                    group_key: g,
-                }
-            }),
-            (0usize..9, proptest::collection::vec(any::<u8>(), 0..6)).prop_map(|(o, t)| {
-                DerivationId::Distinct {
-                    op: OperatorId(o),
-                    tuple_key: t,
-                }
-            }),
-        ];
-        leaf.prop_recursive(4, 24, 2, |inner| {
-            prop_oneof![
-                (0usize..9, inner.clone()).prop_map(|(o, p)| DerivationId::Unary {
-                    op: OperatorId(o),
-                    parent: Box::new(p)
-                }),
-                (0usize..9, inner.clone(), inner).prop_map(|(o, l, r)| DerivationId::Join {
-                    op: OperatorId(o),
-                    left: Box::new(l),
-                    right: Box::new(r)
-                }),
-            ]
-        })
-    }
-
     proptest! {
         #[test]
         fn value_roundtrip(v in arb_value()) { rt(&v); }
@@ -825,13 +587,6 @@ mod tests {
         #[test]
         fn value_encoding_injective(a in arb_value(), b in arb_value()) {
             prop_assert_eq!(a == b, a.state_bytes() == b.state_bytes());
-        }
-
-        #[test]
-        fn derivation_roundtrip(d in arb_deriv()) {
-            rt(&d);
-            let depth = 64;
-            prop_assert_eq!(decode_derivation_id(&encode_derivation_id(&d), depth).unwrap(), d);
         }
 
         #[test]
@@ -852,20 +607,6 @@ mod tests {
             Value::Str("1".into()).state_bytes()
         );
         assert_eq!(Value::Int(1).to_bytes(), Value::Str("1".into()).to_bytes());
-    }
-
-    #[test]
-    fn group_keys_are_typed() {
-        let a = DerivationId::Group {
-            op: OperatorId(1),
-            group_key: vec![Value::Int(1)],
-        };
-        let b = DerivationId::Group {
-            op: OperatorId(1),
-            group_key: vec![Value::Str("1".into())],
-        };
-        assert_ne!(encode_derivation_id(&a), encode_derivation_id(&b));
-        rt(&a);
     }
 
     #[test]
@@ -932,37 +673,6 @@ mod tests {
         );
         assert!(Value::state_from_bytes(&[]).is_err());
         assert!(Value::state_from_bytes(&[0xff]).is_err());
-    }
-
-    #[test]
-    fn derivation_depth_bound_enforced() {
-        let mut d = DerivationId::Base {
-            relation: "r".into(),
-            key: WorldKey(vec![1]),
-        };
-        for _ in 0..5 {
-            d = DerivationId::Unary {
-                op: OperatorId(0),
-                parent: Box::new(d),
-            };
-        }
-        let b = encode_derivation_id(&d); // depth 6
-        assert!(decode_derivation_id(&b, 6).is_ok());
-        assert_eq!(
-            decode_derivation_id(&b, 5),
-            Err(StateCodecError::DepthExceeded)
-        );
-    }
-
-    #[test]
-    fn derivation_digest_unchanged_by_codec() {
-        let d = DerivationId::Group {
-            op: OperatorId(2),
-            group_key: vec![Value::Int(7)],
-        };
-        let before = d.digest();
-        let _ = encode_derivation_id(&d);
-        assert_eq!(d.digest(), before);
     }
 
     #[test]

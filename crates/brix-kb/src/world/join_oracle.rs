@@ -15,14 +15,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use brix_canon::Digest;
 use brix_lower::relation_dag::OperatorId;
 
-use super::deriv_intern::{deriv_ref, resolve};
+use super::compact_deriv::CompactDeriv;
 use super::error::WorldError;
 use super::network::{
     DerivationId, IntermediateTuple, JoinSide, OperatorState, Value, WorldNetwork,
 };
 use super::persistent::{PMap, PSet};
-use super::state_codec::{JoinEntry, SubRoot, SupportRef, ValueList};
-use super::state_store::{SMap, SSet, StateStore, DEFAULT_NODE_CACHE_BYTES};
+use super::state_codec::{JoinEntry, SubRoot, SupportItem, SupportRef, ValueList};
+use super::state_store::{SMap, StateStore, DEFAULT_NODE_CACHE_BYTES};
+use brix_lower::relation_dag::RelationDag;
 
 /// Apply one delta to the legacy shadow and return the opposite side's matches
 /// (the pre-change `PMap` logic, unchanged).
@@ -84,19 +85,29 @@ pub(crate) fn shadow_support_step<L: Ord + Clone>(
 pub(crate) fn assert_same_matches(
     legacy: &PMap<DerivationId, IntermediateTuple>,
     matches: &SMap<Digest, JoinEntry>,
-    pending: &PMap<Digest, super::state_codec::DNode>,
     store: &StateStore,
-    max_depth: usize,
+    dag: &RelationDag,
 ) -> Result<(), WorldError> {
     let mut got: BTreeSet<(DerivationId, IntermediateTuple)> = BTreeSet::new();
     let mut cursor = None;
     loop {
         let (rows, next) = matches.page(cursor.as_ref(), 256, store)?;
         for (k, e) in rows {
-            let d = resolve(&e.deriv, pending, store, max_depth)?;
-            assert_eq!(k, e.deriv, "join entry key must be its derivation ref");
-            assert_eq!(deriv_ref(&d), e.deriv, "interned ref must round-trip");
-            got.insert(((*d).clone(), e.tuple));
+            let d = e
+                .deriv
+                .expand(dag)
+                .map_err(super::state_store::StateError::from)?;
+            assert_eq!(
+                k,
+                e.deriv.digest(),
+                "join entry key must be its derivation digest"
+            );
+            assert_eq!(
+                CompactDeriv::from_derivation(&d),
+                e.deriv,
+                "compact derivation must round-trip"
+            );
+            got.insert((d, e.tuple));
         }
         match next {
             Some(c) => cursor = Some(c),
@@ -114,16 +125,17 @@ pub(crate) fn assert_same_matches(
 }
 
 fn legacy_side_root(side: &JoinSide, store: &StateStore) -> Result<SubRoot, WorldError> {
+    let compact = CompactDeriv::from_derivation;
     let mut outer: SMap<ValueList, SubRoot> = SMap::new();
     for (k, inner_legacy) in side.legacy.iter() {
         let mut inner: SMap<Digest, JoinEntry> = SMap::new();
         for (d, t) in inner_legacy.iter() {
-            let r = deriv_ref(d);
+            let c = compact(d);
             inner = inner.upsert(
-                r,
+                c.digest(),
                 JoinEntry {
                     tuple: t.clone(),
-                    deriv: r,
+                    deriv: c,
                 },
                 store,
             )?;
@@ -133,22 +145,24 @@ fn legacy_side_root(side: &JoinSide, store: &StateStore) -> Result<SubRoot, Worl
     Ok(outer.sub_root())
 }
 
-fn legacy_support_root<L: Ord + Clone, K>(
+fn legacy_support_root<L: Ord + Clone, K, I: SupportItem>(
     legacy: &PMap<L, PSet<DerivationId>>,
     to_key: impl Fn(&L) -> K,
+    to_item: impl Fn(&DerivationId) -> I,
     store: &StateStore,
 ) -> Result<SubRoot, WorldError>
 where
     K: super::state_codec::StateCodec + Ord + Clone + 'static + Send + Sync,
 {
-    let mut outer: SMap<K, SupportRef> = SMap::new();
+    let mut outer: SMap<K, SupportRef<I>> = SMap::new();
     for (k, set) in legacy.iter() {
         let sref = if set.len() == 1 {
-            SupportRef::Inline(deriv_ref(set.iter().next().expect("len is 1")))
+            SupportRef::Inline(to_item(set.iter().next().expect("len is 1")))
         } else {
-            let mut inner: SSet<Digest> = SSet::new();
+            let mut inner: SMap<Digest, I::Val> = SMap::new();
             for d in set.iter() {
-                inner = inner.insert(deriv_ref(d), store)?;
+                let item = to_item(d);
+                inner = inner.upsert(item.id(), item.val(), store)?;
             }
             SupportRef::Sub(inner.sub_root())
         };
@@ -169,6 +183,7 @@ impl WorldNetwork {
                     legacy_support_root(
                         &supports.legacy,
                         |k: &IntermediateTuple| k.clone(),
+                        CompactDeriv::from_derivation,
                         &scratch,
                     )?,
                 );
@@ -188,6 +203,7 @@ impl WorldNetwork {
                     legacy_support_root(
                         &groups.legacy,
                         |k: &Vec<Value>| ValueList(k.clone()),
+                        |d: &DerivationId| CompactDeriv::from_derivation(d).digest(),
                         &scratch,
                     )?,
                 );
@@ -267,10 +283,11 @@ rel derived ok =
     }
 
     fn base_ref(i: u64) -> Digest {
-        deriv_ref(&DerivationId::Base {
+        CompactDeriv::from_derivation(&DerivationId::Base {
             relation: "r".to_string(),
             key: WorldKey::from_u64(i),
         })
+        .digest()
     }
 
     proptest::proptest! {
@@ -287,12 +304,12 @@ rel derived ok =
             use super::super::network::SupportIndex;
             let store = StateStore::memory(0);
             let key = ValueList(vec![Value::Int(1)]);
-            let mut a: SupportIndex<ValueList, Vec<Value>> = SupportIndex::default();
+            let mut a: SupportIndex<ValueList, Vec<Value>, Digest> = SupportIndex::default();
             for i in &target {
                 a.add(key.clone(), base_ref(*i), &store).unwrap();
             }
 
-            let mut b: SupportIndex<ValueList, Vec<Value>> = SupportIndex::default();
+            let mut b: SupportIndex<ValueList, Vec<Value>, Digest> = SupportIndex::default();
             let mut seq: Vec<u64> = target.iter().chain(extras.iter()).cloned().collect();
             seq.sort_by_key(|i| (i * mult) % 13);
             for (n, i) in seq.iter().enumerate() {
