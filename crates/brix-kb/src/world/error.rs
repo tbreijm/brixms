@@ -105,6 +105,8 @@ pub enum WorldError {
     NetworkError(String),
     /// Computational budget or work limit exhausted.
     BudgetExhausted,
+    /// Persisted network-state store failure (missing/corrupt node, codec, I/O).
+    State(super::state_store::StateError),
 }
 
 impl fmt::Display for WorldError {
@@ -174,6 +176,7 @@ impl fmt::Display for WorldError {
             }
             Self::NetworkError(msg) => write!(f, "network error: {msg}"),
             Self::BudgetExhausted => write!(f, "computational budget exhausted"),
+            Self::State(e) => write!(f, "world state error: {e}"),
         }
     }
 }
@@ -182,6 +185,7 @@ impl std::error::Error for WorldError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
+            Self::State(e) => Some(e),
             _ => None,
         }
     }
@@ -190,6 +194,12 @@ impl std::error::Error for WorldError {
 impl From<std::io::Error> for WorldError {
     fn from(e: std::io::Error) -> Self {
         Self::Io(e)
+    }
+}
+
+impl From<super::state_store::StateError> for WorldError {
+    fn from(e: super::state_store::StateError) -> Self {
+        Self::State(e)
     }
 }
 

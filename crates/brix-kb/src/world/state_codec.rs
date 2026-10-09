@@ -389,6 +389,138 @@ impl StateCodec for DerivationId {
 }
 
 // ---------------------------------------------------------------------------
+// DNode (interned derivation node) / JoinEntry
+// ---------------------------------------------------------------------------
+
+/// Domain tag mixed into the digest of an interned derivation node.
+pub const DERIV_NODE_DOMAIN: &str = "brix.world.deriv-node@1";
+
+/// One interned derivation node: like `DerivationId` but children are referenced by digest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DNode {
+    Base {
+        relation: String,
+        key: WorldKey,
+    },
+    Unary {
+        op: OperatorId,
+        parent: Digest,
+    },
+    Join {
+        op: OperatorId,
+        left: Digest,
+        right: Digest,
+    },
+    Group {
+        op: OperatorId,
+        group_key: ValueList,
+    },
+    Distinct {
+        op: OperatorId,
+        tuple_key: Vec<u8>,
+    },
+}
+
+impl DNode {
+    /// Content address of this node (domain-separated digest of its canonical bytes).
+    pub fn digest(&self) -> Digest {
+        dnode_digest_of_bytes(&self.state_bytes())
+    }
+}
+
+/// Digest of already-encoded node bytes (used to verify objects read back from the store).
+pub fn dnode_digest_of_bytes(bytes: &[u8]) -> Digest {
+    let mut payload = Vec::with_capacity(DERIV_NODE_DOMAIN.len() + 1 + bytes.len());
+    payload.extend_from_slice(DERIV_NODE_DOMAIN.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(bytes);
+    Digest::of(brix_canon::Domain::Value, &payload)
+}
+
+impl StateCodec for DNode {
+    fn state_write(&self, w: &mut CanonWriter) {
+        match self {
+            DNode::Base { relation, key } => {
+                w.write_uint(D_BASE);
+                w.write_str(relation);
+                w.write_bytes(key.as_bytes());
+            }
+            DNode::Unary { op, parent } => {
+                w.write_uint(D_UNARY);
+                w.write_uint(op.0 as u64);
+                w.write_bytes(parent.as_bytes());
+            }
+            DNode::Join { op, left, right } => {
+                w.write_uint(D_JOIN);
+                w.write_uint(op.0 as u64);
+                w.write_bytes(left.as_bytes());
+                w.write_bytes(right.as_bytes());
+            }
+            DNode::Group { op, group_key } => {
+                w.write_uint(D_GROUP);
+                w.write_uint(op.0 as u64);
+                group_key.state_write(w);
+            }
+            DNode::Distinct { op, tuple_key } => {
+                w.write_uint(D_DISTINCT);
+                w.write_uint(op.0 as u64);
+                w.write_bytes(tuple_key);
+            }
+        }
+    }
+    fn state_read(r: &mut CanonReader<'_>) -> Res<Self> {
+        match r.read_uint()? {
+            D_BASE => {
+                let relation = read_string(r)?;
+                let key = WorldKey(r.read_bytes()?.to_vec());
+                Ok(DNode::Base { relation, key })
+            }
+            D_UNARY => {
+                let op = read_op(r)?;
+                let parent = read_digest(r)?;
+                Ok(DNode::Unary { op, parent })
+            }
+            D_JOIN => {
+                let op = read_op(r)?;
+                let left = read_digest(r)?;
+                let right = read_digest(r)?;
+                Ok(DNode::Join { op, left, right })
+            }
+            D_GROUP => {
+                let op = read_op(r)?;
+                let group_key = ValueList::state_read(r)?;
+                Ok(DNode::Group { op, group_key })
+            }
+            D_DISTINCT => {
+                let op = read_op(r)?;
+                let tuple_key = r.read_bytes()?.to_vec();
+                Ok(DNode::Distinct { op, tuple_key })
+            }
+            t => Err(StateCodecError::UnknownTag(t)),
+        }
+    }
+}
+
+/// Join-index entry: the matched tuple plus the interned reference of its derivation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JoinEntry {
+    pub tuple: IntermediateTuple,
+    pub deriv: Digest,
+}
+
+impl StateCodec for JoinEntry {
+    fn state_write(&self, w: &mut CanonWriter) {
+        self.tuple.state_write(w);
+        w.write_bytes(self.deriv.as_bytes());
+    }
+    fn state_read(r: &mut CanonReader<'_>) -> Res<Self> {
+        let tuple = IntermediateTuple::state_read(r)?;
+        let deriv = read_digest(r)?;
+        Ok(JoinEntry { tuple, deriv })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // IntermediateTuple / TupleRecord
 // ---------------------------------------------------------------------------
 
