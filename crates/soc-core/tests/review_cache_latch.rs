@@ -16,6 +16,9 @@ fn cached_node_is_rejected_after_store_latches_a_read_error() {
     store.put_node(da, a.clone());
     store.put_node(db, b.clone());
     store.flush().unwrap();
+    // Writes are cached write-through; reopen so only the explicitly warmed node is cached.
+    drop(store);
+    let store = FileNodeStore::new(&dir).unwrap();
 
     assert_eq!(store.get_node(&da), Some(a)); // warm cache
     let pack = fs::read_dir(store.objects_dir())
