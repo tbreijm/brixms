@@ -13,7 +13,8 @@ use std::fmt;
 use std::io;
 use std::marker::PhantomData;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, RwLock};
 
 use brix_canon::{Digest, Domain};
 use soc_core::store::{
@@ -21,6 +22,7 @@ use soc_core::store::{
 };
 
 pub use super::state_codec::SubRoot;
+use super::network::DerivationId;
 use super::state_codec::{St, StateCodec, StateCodecError};
 
 /// Error from a store-aware state operation.
@@ -71,9 +73,21 @@ enum Backend {
     File(FileNodeStore),
 }
 
+/// Resolved derivation trees keyed by their content-addressed ref, with each tree's height.
+type DerivEntry = (Arc<DerivationId>, usize);
+
+/// Two-generation bounded cache of resolved derivations. Entries are content addressed, so a
+/// hit is valid for every clone of the store regardless of which state produced it.
+struct DerivCache {
+    cap: usize,
+    young: BTreeMap<Digest, DerivEntry>,
+    old: BTreeMap<Digest, DerivEntry>,
+}
+
 struct Inner {
     backend: RwLock<Backend>,
     cache: DecodedNodeCache,
+    deriv_cache: Mutex<DerivCache>,
 }
 
 /// Shared handle to the persisted node store plus its read cache.
@@ -94,6 +108,11 @@ impl StateStore {
             inner: Arc::new(Inner {
                 backend: RwLock::new(backend),
                 cache: DecodedNodeCache::new(node_cache_bytes),
+                deriv_cache: Mutex::new(DerivCache {
+                    cap: (node_cache_bytes / 2048).max(16),
+                    young: BTreeMap::new(),
+                    old: BTreeMap::new(),
+                }),
             }),
         }
     }
@@ -133,6 +152,27 @@ impl StateStore {
     /// Whether the store holds a node with this digest.
     pub fn has_node(&self, digest: &Digest) -> bool {
         NodeStore::contains(self, digest)
+    }
+
+    /// Look up a resolved derivation by ref (see `deriv_intern::resolve`).
+    pub(crate) fn deriv_cache_get(&self, r: &Digest) -> Option<DerivEntry> {
+        let mut c = self.inner.deriv_cache.lock().expect("deriv cache lock");
+        if let Some(e) = c.young.get(r) {
+            return Some(e.clone());
+        }
+        let e = c.old.get(r)?.clone();
+        c.young.insert(*r, e.clone());
+        Some(e)
+    }
+
+    /// Remember a resolved derivation.
+    pub(crate) fn deriv_cache_put(&self, r: Digest, e: DerivEntry) {
+        let mut c = self.inner.deriv_cache.lock().expect("deriv cache lock");
+        if c.young.len() >= c.cap {
+            let young = std::mem::take(&mut c.young);
+            c.old = young;
+        }
+        c.young.insert(r, e);
     }
 
     /// Bytes currently held by the read cache.

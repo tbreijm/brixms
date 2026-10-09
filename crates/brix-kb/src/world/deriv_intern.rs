@@ -97,6 +97,13 @@ fn resolve_rec(
         }
         return Err(StateError::Codec(StateCodecError::DepthExceeded));
     }
+    if let Some((d, h)) = store.deriv_cache_get(r) {
+        if h > depth_left {
+            return Err(StateError::Codec(StateCodecError::DepthExceeded));
+        }
+        memo.insert(*r, (d.clone(), h));
+        return Ok(d);
+    }
     let (value, height) = match fetch(r, pending, store)? {
         DNode::Base { relation, key } => (DerivationId::Base { relation, key }, 1),
         DNode::Unary { op, parent } => {
@@ -134,6 +141,7 @@ fn resolve_rec(
     };
     let arc = Arc::new(value);
     memo.insert(*r, (arc.clone(), height));
+    store.deriv_cache_put(*r, (arc.clone(), height));
     Ok(arc)
 }
 
