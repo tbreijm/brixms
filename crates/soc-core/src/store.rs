@@ -421,8 +421,22 @@ fn get_recursive<'a, K: Canonical + Ord, V: Canonical>(
                 None => None,
             }
         }
-        Node::Lazy(_) => None,
+        Node::Lazy(_) => lazy_plain_op("get"),
     }
+}
+
+/// The plain (store-less) trie operations cannot look inside an unhydrated [`Node::Lazy`]
+/// subtree. Treating it as empty (the former behaviour of `get`, `iter` and `remove`) turns a
+/// not-yet-loaded subtree into silently wrong data, so reaching one is a logic error and fails
+/// loudly in every build. Callers holding lazily opened tries must use the `*_with_store`
+/// operations, which return a typed error for a missing or corrupt node instead.
+#[cold]
+#[inline(never)]
+fn lazy_plain_op(op: &str) -> ! {
+    panic!(
+        "TrieMap::{op} reached an unhydrated lazy node; use the `{op}_with_store`-style \
+         operation that reads through a NodeStore"
+    )
 }
 
 fn insert_recursive<K: Canonical + Ord + Clone, V: Canonical + Clone>(
@@ -615,7 +629,7 @@ fn insert_recursive<K: Canonical + Ord + Clone, V: Canonical + Clone>(
                 }
             }
         }
-        Node::Lazy(_) => panic!("cannot insert into unhydrated lazy node; use insert_with_store"),
+        Node::Lazy(_) => lazy_plain_op("insert"),
     }
 }
 
@@ -752,7 +766,7 @@ fn remove_recursive<K: Canonical + Ord + Clone, V: Canonical + Clone>(
                 }
             }
         }
-        Node::Lazy(_) => (Some(node.clone()), false),
+        Node::Lazy(_) => lazy_plain_op("remove"),
     }
 }
 
@@ -771,7 +785,7 @@ fn collect_entries<'a, K, V>(node: &'a Node<K, V>, out: &mut Vec<(&'a K, &'a V)>
                 collect_entries(child, out);
             }
         }
-        Node::Lazy(_) => {}
+        Node::Lazy(_) => lazy_plain_op("iter"),
     }
 }
 
