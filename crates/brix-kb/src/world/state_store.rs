@@ -9,11 +9,11 @@
 
 #![deny(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::marker::PhantomData;
 use std::path::Path;
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use brix_canon::{Digest, Domain};
@@ -21,8 +21,8 @@ use soc_core::store::{
     DecodedNodeCache, FileNodeStore, MemoryNodeStore, NodeStore, StorageError, TrieMap,
 };
 
-pub use super::state_codec::SubRoot;
 use super::network::DerivationId;
+pub use super::state_codec::SubRoot;
 use super::state_codec::{St, StateCodec, StateCodecError};
 
 /// Error from a store-aware state operation.

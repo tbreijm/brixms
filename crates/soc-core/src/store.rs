@@ -213,7 +213,7 @@ impl<K: Canonical, V: Canonical> LeafNode<K, V> {
     }
 
     fn compute_digest(key: &K, value: &V, hash: &[u8; 32]) -> Digest {
-        let mut w = CanonWriter::new();
+        let mut w = CanonWriter::with_capacity(192);
         w.write_tag("brix:trie:leaf:v1");
         w.write_bytes(hash);
         key.canon_write(&mut w);
@@ -284,7 +284,7 @@ impl<K, V> BranchNode<K, V> {
     }
 
     fn compute_digest(prefix: &[u8], bitmap: u16, children: &[Arc<Node<K, V>>]) -> Digest {
-        let mut w = CanonWriter::new();
+        let mut w = CanonWriter::with_capacity(48 + prefix.len() * 2 + children.len() * 34);
         w.write_tag("brix:trie:branch:v1");
         w.write_uint(prefix.len() as u64);
         for &nib in prefix {
@@ -1229,6 +1229,8 @@ struct DecodedInner {
     used: usize,
     seq: u64,
     decodes: u64,
+    // Lookup/eviction only; iteration order never reaches a semantic path.
+    #[allow(clippy::disallowed_types)]
     map: std::collections::HashMap<
         CacheKey,
         DecodedEntry,

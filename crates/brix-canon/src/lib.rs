@@ -194,6 +194,13 @@ impl CanonWriter {
         Self::default()
     }
 
+    /// A fresh writer with room for `cap` bytes (avoids regrowth when the size is known).
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(cap),
+        }
+    }
+
     /// Consume the writer, returning the canonical byte string.
     pub fn finish(self) -> Vec<u8> {
         self.buf

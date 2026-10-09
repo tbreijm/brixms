@@ -218,6 +218,8 @@ struct State {
     /// Digests recently confirmed present in a published pack (bounded; cleared when
     /// full). Packs are immutable and never removed while open, so a positive entry
     /// cannot go stale; it only saves repeated index lookups of shared subtrees.
+    // Membership tests only (never iterated).
+    #[allow(clippy::disallowed_types)]
     known: std::collections::HashSet<Digest>,
     pending: Option<Pending>,
     root_synced: bool,
@@ -356,6 +358,7 @@ impl Default for State {
             packs: Vec::new(),
             idx_files: Vec::new(),
             pack_files: Vec::new(),
+            #[allow(clippy::disallowed_types)]
             known: std::collections::HashSet::new(),
             pending: None,
             root_synced: false,
@@ -937,7 +940,10 @@ impl NodeStore for FileNodeStore {
                             // Open the temporary pack while holding the state lock. A cloned
                             // handle may flush immediately after we release it, renaming this
                             // path; the open file descriptor remains valid across that rename.
-                            Some((Arc::new(File::open(&pending.path)?), pending.entries[idx].1.clone()))
+                            Some((
+                                Arc::new(File::open(&pending.path)?),
+                                pending.entries[idx].1.clone(),
+                            ))
                         } else {
                             None
                         }
@@ -995,11 +1001,11 @@ impl FileNodeStore {
             self.check()?;
             if check_existing
                 && (state.find(&digest)?.is_some()
-                || state
-                    .pending
-                    .as_ref()
-                    .is_some_and(|p| p.lookup.contains_key(&digest))
-                || self.legacy_contains(&digest)?)
+                    || state
+                        .pending
+                        .as_ref()
+                        .is_some_and(|p| p.lookup.contains_key(&digest))
+                    || self.legacy_contains(&digest)?)
             {
                 return Ok(());
             }
