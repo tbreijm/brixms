@@ -20,9 +20,9 @@ use super::error::WorldError;
 use super::network::{
     DerivationId, IntermediateTuple, JoinSide, OperatorState, Value, WorldNetwork,
 };
-use super::persistent::PMap;
+use super::persistent::{PMap, PSet};
 use super::state_codec::{JoinEntry, SubRoot, ValueList};
-use super::state_store::{SMap, StateStore, DEFAULT_NODE_CACHE_BYTES};
+use super::state_store::{SMap, SSet, StateStore, DEFAULT_NODE_CACHE_BYTES};
 
 /// Apply one delta to the legacy shadow and return the opposite side's matches
 /// (the pre-change `PMap` logic, unchanged).
@@ -49,6 +49,33 @@ pub(crate) fn shadow_step(
             }
         }
         other.legacy.get(join_key).cloned().unwrap_or_default()
+    }
+}
+
+/// Apply one delta to a legacy support-set shadow (Distinct, GroupedCount) with the
+/// pre-store `PMap<_, PSet<DerivationId>>` logic verbatim; returns the support count
+/// before and after.
+pub(crate) fn shadow_support_step<L: Ord + Clone>(
+    legacy: &mut PMap<L, PSet<DerivationId>>,
+    key: &L,
+    deriv: &DerivationId,
+    is_ins: bool,
+) -> (usize, usize) {
+    if is_ins {
+        let set = legacy.entry(key.clone()).or_default();
+        let old = set.len();
+        set.insert(deriv.clone());
+        (old, set.len())
+    } else if let Some(set) = legacy.get_mut(key) {
+        let old = set.len();
+        set.remove(deriv);
+        let new = set.len();
+        if new == 0 {
+            legacy.remove(key);
+        }
+        (old, new)
+    } else {
+        (0, 0)
     }
 }
 
@@ -106,7 +133,64 @@ fn legacy_side_root(side: &JoinSide, store: &StateStore) -> Result<SubRoot, Worl
     Ok(outer.sub_root())
 }
 
+fn legacy_support_root<L: Ord + Clone, K>(
+    legacy: &PMap<L, PSet<DerivationId>>,
+    to_key: impl Fn(&L) -> K,
+    store: &StateStore,
+) -> Result<SubRoot, WorldError>
+where
+    K: super::state_codec::StateCodec + Ord + Clone + 'static + Send + Sync,
+{
+    let mut outer: SMap<K, SubRoot> = SMap::new();
+    for (k, set) in legacy.iter() {
+        let mut inner: SSet<Digest> = SSet::new();
+        for d in set.iter() {
+            inner = inner.insert(deriv_ref(d), store)?;
+        }
+        outer = outer.upsert(to_key(k), inner.sub_root(), store)?;
+    }
+    Ok(outer.sub_root())
+}
+
 impl WorldNetwork {
+    /// Distinct support index roots rebuilt from the legacy shadow content.
+    pub fn legacy_distinct_roots(&self) -> Result<BTreeMap<OperatorId, SubRoot>, WorldError> {
+        let scratch = StateStore::memory(DEFAULT_NODE_CACHE_BYTES);
+        let mut out = BTreeMap::new();
+        for (idx, state) in self.operator_states.iter() {
+            if let OperatorState::Distinct { supports, .. } = state {
+                out.insert(
+                    OperatorId(*idx),
+                    legacy_support_root(
+                        &supports.legacy,
+                        |k: &IntermediateTuple| k.clone(),
+                        &scratch,
+                    )?,
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    /// Grouped-count index roots rebuilt from the legacy shadow content.
+    pub fn legacy_group_roots(&self) -> Result<BTreeMap<OperatorId, SubRoot>, WorldError> {
+        let scratch = StateStore::memory(DEFAULT_NODE_CACHE_BYTES);
+        let mut out = BTreeMap::new();
+        for (idx, state) in self.operator_states.iter() {
+            if let OperatorState::GroupedCount { groups, .. } = state {
+                out.insert(
+                    OperatorId(*idx),
+                    legacy_support_root(
+                        &groups.legacy,
+                        |k: &Vec<Value>| ValueList(k.clone()),
+                        &scratch,
+                    )?,
+                );
+            }
+        }
+        Ok(out)
+    }
+
     /// Join index roots rebuilt from the legacy shadow content.
     pub fn legacy_roots(&self) -> Result<BTreeMap<OperatorId, (SubRoot, SubRoot)>, WorldError> {
         let scratch = StateStore::memory(DEFAULT_NODE_CACHE_BYTES);
@@ -173,6 +257,31 @@ rel derived ok =
 
     fn check(net: &WorldNetwork) {
         assert_eq!(net.join_index_roots(), net.legacy_roots().unwrap());
+        assert_eq!(net.distinct_roots(), net.legacy_distinct_roots().unwrap());
+        assert_eq!(net.group_roots(), net.legacy_group_roots().unwrap());
+    }
+
+    #[test]
+    fn distinct_keys_are_typed_not_display_collapsed() {
+        let store = StateStore::memory(0);
+        let int_t = {
+            let mut t = IntermediateTuple::new();
+            t.insert("a", Value::Int(1));
+            t
+        };
+        let str_t = {
+            let mut t = IntermediateTuple::new();
+            t.insert("a", Value::Str("1".into()));
+            t
+        };
+        let m: SMap<IntermediateTuple, SubRoot> = SMap::new()
+            .upsert(int_t.clone(), SubRoot::empty(), &store)
+            .unwrap()
+            .upsert(str_t.clone(), SubRoot::empty(), &store)
+            .unwrap();
+        assert_eq!(m.len(), 2);
+        assert!(m.contains(&int_t, &store).unwrap());
+        assert!(m.contains(&str_t, &store).unwrap());
     }
 
     #[test]
