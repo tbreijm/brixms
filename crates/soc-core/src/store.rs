@@ -983,8 +983,8 @@ impl<K: Canonical + Ord + Clone, V: Canonical + Clone, H: KeyHasher + Default> F
 }
 
 impl<
-        K: Canonical + Ord + Clone + CanonDecode,
-        V: Canonical + Clone + CanonDecode,
+        K: Canonical + Ord + Clone + CanonDecode + 'static + Send + Sync,
+        V: Canonical + Clone + CanonDecode + 'static + Send + Sync,
         H: KeyHasher,
     > TrieMap<K, V, H>
 {
@@ -1172,6 +1172,115 @@ pub trait NodeStore {
     /// Whether `digest` exists in the store.
     fn contains(&self, digest: &Digest) -> bool {
         self.get_node(digest).is_some()
+    }
+    /// Optional cache of decoded, digest-verified trie nodes shared by store-aware
+    /// reads. Stores that return `None` decode on every access.
+    fn decoded_cache(&self) -> Option<&DecodedNodeCache> {
+        None
+    }
+}
+
+/// Byte-bounded LRU of decoded, digest-verified trie nodes keyed by
+/// `(TypeId of Node<K, V>, Digest)`. Cost of an entry is twice its encoded length.
+/// Only nodes that decoded and verified successfully are ever inserted.
+pub struct DecodedNodeCache {
+    inner: std::sync::Mutex<DecodedInner>,
+}
+
+struct DecodedInner {
+    cap: usize,
+    used: usize,
+    tick: u64,
+    decodes: u64,
+    map: BTreeMap<(std::any::TypeId, Digest), DecodedEntry>,
+    order: BTreeMap<u64, (std::any::TypeId, Digest)>,
+}
+
+struct DecodedEntry {
+    node: Arc<dyn std::any::Any + Send + Sync>,
+    cost: usize,
+    tick: u64,
+}
+
+impl DecodedNodeCache {
+    /// New cache bounded to `cap_bytes` of accounted cost.
+    pub fn new(cap_bytes: usize) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(DecodedInner {
+                cap: cap_bytes,
+                used: 0,
+                tick: 0,
+                decodes: 0,
+                map: BTreeMap::new(),
+                order: BTreeMap::new(),
+            }),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, DecodedInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Cached node of type `T` for `digest`, refreshing its recency.
+    pub fn get<T: std::any::Any + Send + Sync>(&self, digest: &Digest) -> Option<Arc<T>> {
+        let key = (std::any::TypeId::of::<T>(), *digest);
+        let mut g = self.lock();
+        g.tick += 1;
+        let tick = g.tick;
+        let e = g.map.get_mut(&key)?;
+        let old = std::mem::replace(&mut e.tick, tick);
+        let node = e.node.clone();
+        g.order.remove(&old);
+        g.order.insert(tick, key);
+        node.downcast::<T>().ok()
+    }
+
+    /// Insert a verified node whose encoding was `encoded_len` bytes (cost = 2x).
+    pub fn insert<T: std::any::Any + Send + Sync>(
+        &self,
+        digest: Digest,
+        node: Arc<T>,
+        encoded_len: usize,
+    ) {
+        let key = (std::any::TypeId::of::<T>(), digest);
+        let cost = encoded_len.saturating_mul(2);
+        let mut g = self.lock();
+        g.decodes += 1;
+        if cost > g.cap {
+            return;
+        }
+        if let Some(old) = g.map.remove(&key) {
+            g.used -= old.cost;
+            g.order.remove(&old.tick);
+        }
+        g.tick += 1;
+        let tick = g.tick;
+        g.used += cost;
+        g.order.insert(tick, key);
+        g.map.insert(key, DecodedEntry { node, cost, tick });
+        while g.used > g.cap {
+            let Some((_, victim)) = g.order.pop_first() else {
+                break;
+            };
+            if let Some(e) = g.map.remove(&victim) {
+                g.used -= e.cost;
+            }
+        }
+    }
+
+    /// Accounted bytes currently held.
+    pub fn used_bytes(&self) -> usize {
+        self.lock().used
+    }
+
+    /// Number of node decodes (cache misses that decoded and verified) observed.
+    pub fn decode_count(&self) -> u64 {
+        self.lock().decodes
+    }
+
+    /// Whether any node of any type is cached under `digest`.
+    pub fn contains_digest(&self, digest: &Digest) -> bool {
+        self.lock().map.keys().any(|(_, d)| d == digest)
     }
 }
 
@@ -1386,24 +1495,39 @@ pub fn decode_node_verified<K: CanonDecode + Canonical + Ord, V: CanonDecode + C
 mod file;
 pub use file::{FileNodeStore, StoreIoStats};
 
-fn resolve_node<K: CanonDecode + Canonical + Ord, V: CanonDecode + Canonical, S: NodeStore>(
+fn resolve_node<
+    K: CanonDecode + Canonical + Ord + 'static + Send + Sync,
+    V: CanonDecode + Canonical + 'static + Send + Sync,
+    S: NodeStore,
+>(
     node: &Arc<Node<K, V>>,
     store: &S,
 ) -> Result<Arc<Node<K, V>>, StorageError> {
     match &**node {
         Node::Lazy(d) => {
+            let cache = store.decoded_cache();
+            if let Some(c) = cache {
+                if let Some(hit) = c.get::<Node<K, V>>(d) {
+                    return Ok(hit);
+                }
+            }
             let bytes = store.get_node(d).ok_or(StorageError::MissingNode(*d))?;
+            // Digest verified exactly once, before the node can enter the cache.
             let decoded = decode_node_verified::<K, V>(&bytes, d)
                 .map_err(|_| StorageError::CorruptedNode(*d))?;
-            Ok(Arc::new(decoded))
+            let decoded = Arc::new(decoded);
+            if let Some(c) = cache {
+                c.insert::<Node<K, V>>(*d, decoded.clone(), bytes.len());
+            }
+            Ok(decoded)
         }
         _ => Ok(node.clone()),
     }
 }
 
 fn insert_recursive_store<
-    K: Canonical + Ord + Clone + CanonDecode,
-    V: Canonical + Clone + CanonDecode,
+    K: Canonical + Ord + Clone + CanonDecode + 'static + Send + Sync,
+    V: Canonical + Clone + CanonDecode + 'static + Send + Sync,
     S: NodeStore,
 >(
     node: &Arc<Node<K, V>>,
@@ -1600,8 +1724,8 @@ fn insert_recursive_store<
 }
 
 fn remove_recursive_store<
-    K: Canonical + Ord + Clone + CanonDecode,
-    V: Canonical + Clone + CanonDecode,
+    K: Canonical + Ord + Clone + CanonDecode + 'static + Send + Sync,
+    V: Canonical + Clone + CanonDecode + 'static + Send + Sync,
     S: NodeStore,
 >(
     node: &Arc<Node<K, V>>,
@@ -1755,8 +1879,8 @@ fn entries_len<T>(v: &[T]) -> usize {
 }
 
 fn iter_page_recursive<
-    K: Canonical + Ord + Clone + CanonDecode,
-    V: Canonical + Clone + CanonDecode,
+    K: Canonical + Ord + Clone + CanonDecode + 'static + Send + Sync,
+    V: Canonical + Clone + CanonDecode + 'static + Send + Sync,
     S: NodeStore,
 >(
     node: &Arc<Node<K, V>>,
@@ -2061,6 +2185,54 @@ mod tests {
             (1..=4).contains(&written3),
             "derived insert writes only changed path nodes: {written3}"
         );
+    }
+
+    struct CachedStore {
+        mem: MemoryNodeStore,
+        cache: DecodedNodeCache,
+    }
+
+    impl NodeStore for CachedStore {
+        fn get_node(&self, d: &Digest) -> Option<Vec<u8>> {
+            self.mem.get_node(d)
+        }
+        fn put_node(&mut self, d: Digest, b: Vec<u8>) {
+            self.mem.put_node(d, b)
+        }
+        fn decoded_cache(&self) -> Option<&DecodedNodeCache> {
+            Some(&self.cache)
+        }
+    }
+
+    fn cached_store(cap: usize, n: u64) -> (CachedStore, TrieMap<u64, u64>) {
+        let mut store = CachedStore {
+            mem: MemoryNodeStore::new(),
+            cache: DecodedNodeCache::new(cap),
+        };
+        let m: TrieMap<u64, u64> = (0..n).map(|i| (i, i * 10)).collect();
+        m.persist_to_store(&mut store);
+        let cold = TrieMap::from_root_digest(m.root_digest(), m.len());
+        (store, cold)
+    }
+
+    #[test]
+    fn decoded_cache_second_read_does_no_decodes() {
+        let (store, cold) = cached_store(1 << 20, 100);
+        assert_eq!(cold.get_with_store(&42, &store).unwrap(), Some(420));
+        let n = store.cache.decode_count();
+        assert!(n > 0);
+        assert_eq!(cold.get_with_store(&42, &store).unwrap(), Some(420));
+        assert_eq!(store.cache.decode_count(), n);
+    }
+
+    #[test]
+    fn decoded_cache_is_byte_bounded() {
+        let (store, cold) = cached_store(1024, 300);
+        for i in 0..300 {
+            assert_eq!(cold.get_with_store(&i, &store).unwrap(), Some(i * 10));
+            assert!(store.cache.used_bytes() <= 1024);
+        }
+        assert!(store.cache.used_bytes() > 0);
     }
 
     #[test]
