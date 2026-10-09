@@ -17,6 +17,18 @@ pub const REVISION_SCHEMA: &str = "brix.world.revision@1";
 /// the new field only enters the hash for `@2` records (see
 /// `WorldRevision::compute_digest`).
 pub const REVISION_SCHEMA_V2: &str = "brix.world.revision@2";
+/// `brix.world.revision@3` (R0 Phase 2 groundwork): additive over `@2` — binds
+/// an optional `network_state_root`, the digest of the persisted operator
+/// network state header. Every `@2` field keeps its `@2` position and encoding;
+/// the root is appended last, presence-tagged (`0` absent, `1` + 32 bytes).
+/// `@1`/`@2` digests are untouched byte-for-byte.
+///
+/// Old-reader semantics: a reader built before `@3` rejects `@3` records with
+/// `WorldError::InvalidSchema` in `from_json` (hard, typed failure; it never
+/// misreads them). `@3` is therefore only written when a root is supplied via
+/// [`WorldRevision::with_network_state_root`]; worlds that never supply one
+/// stay readable by old binaries.
+pub const REVISION_SCHEMA_V3: &str = "brix.world.revision@3";
 const REVISION_TAG: &str = "brix.world.revision@1";
 
 /// Settlement status of the world state following batch application.
@@ -119,6 +131,9 @@ pub struct WorldRevision {
     /// any revision with no attached decision network.
     pub decision_delta_digest: Option<Digest>,
     pub exec_profile_digest: Option<Digest>,
+    /// Digest of the persisted network state header (`brix.world.revision@3`
+    /// only); always `None` for `@1`/`@2` records.
+    pub network_state_root: Option<Digest>,
     pub revision_digest: Digest,
 }
 
@@ -168,6 +183,7 @@ impl WorldRevision {
             &status,
             &decision_delta_digest,
             &None,
+            &None,
         );
 
         Self {
@@ -187,8 +203,24 @@ impl WorldRevision {
             status,
             decision_delta_digest,
             exec_profile_digest: None,
+            network_state_root: None,
             revision_digest: digest,
         }
+    }
+
+    /// True for schemas that persist decision evidence (`@2` and later).
+    pub fn has_decision_evidence(&self) -> bool {
+        self.schema == REVISION_SCHEMA_V2 || self.schema == REVISION_SCHEMA_V3
+    }
+
+    /// Upgrade this record to `brix.world.revision@3`, binding
+    /// `network_state_root` into the revision digest. Builder for the R0
+    /// Phase 2 commit path; `new` alone keeps producing `@2`.
+    pub fn with_network_state_root(mut self, root: Digest) -> Self {
+        self.schema = REVISION_SCHEMA_V3.to_string();
+        self.network_state_root = Some(root);
+        self.revision_digest = self.compute_digest_for_record();
+        self
     }
 
     /// Version-dispatched digest formula. `schema == REVISION_SCHEMA`
@@ -214,6 +246,7 @@ impl WorldRevision {
         status: &SettlementStatus,
         decision_delta_digest: &Option<Digest>,
         exec_profile_digest: &Option<Digest>,
+        network_state_root: &Option<Digest>,
     ) -> Digest {
         let mut w = CanonWriter::new();
         w.write_tag(REVISION_TAG);
@@ -269,7 +302,8 @@ impl WorldRevision {
             }
         }
         status.canon_write(&mut w);
-        if schema == REVISION_SCHEMA_V2 {
+        let v2_plus = schema == REVISION_SCHEMA_V2 || schema == REVISION_SCHEMA_V3;
+        if v2_plus {
             match decision_delta_digest {
                 None => w.write_uint(0),
                 Some(d) => {
@@ -278,8 +312,17 @@ impl WorldRevision {
                 }
             }
         }
-        if schema == REVISION_SCHEMA_V2 {
+        if v2_plus {
             match exec_profile_digest {
+                None => w.write_uint(0),
+                Some(d) => {
+                    w.write_uint(1);
+                    w.write_bytes(d.as_bytes());
+                }
+            }
+        }
+        if schema == REVISION_SCHEMA_V3 {
+            match network_state_root {
                 None => w.write_uint(0),
                 Some(d) => {
                     w.write_uint(1);
@@ -310,6 +353,7 @@ impl WorldRevision {
             &self.status,
             &self.decision_delta_digest,
             &self.exec_profile_digest,
+            &self.network_state_root,
         );
         self
     }
@@ -333,6 +377,7 @@ impl WorldRevision {
             &self.status,
             &self.decision_delta_digest,
             &self.exec_profile_digest,
+            &self.network_state_root,
         )
     }
 
@@ -354,7 +399,7 @@ impl WorldRevision {
             .map(|(k, keys)| (k.clone(), keys.iter().map(|key| key.to_hex()).collect()))
             .collect();
 
-        json!({
+        let mut out = json!({
             "schema": self.schema,
             "seq": self.seq,
             "timestamp": self.timestamp,
@@ -372,7 +417,12 @@ impl WorldRevision {
             "decision_delta_digest": self.decision_delta_digest.map(|d| d.to_hex()),
             "exec_profile_digest": self.exec_profile_digest.map(|d| d.to_hex()),
             "revision_digest": self.revision_digest.to_hex(),
-        })
+        });
+        // Emitted only for `@3` so `@1`/`@2` JSON stays byte-identical.
+        if self.schema == REVISION_SCHEMA_V3 {
+            out["network_state_root"] = json!(self.network_state_root.map(|d| d.to_hex()));
+        }
+        out
     }
 
     pub fn from_json(v: &JsonValue) -> Result<Self, WorldError> {
@@ -380,9 +430,10 @@ impl WorldRevision {
             .get("schema")
             .and_then(|x| x.as_str())
             .ok_or_else(|| WorldError::Json("revision missing 'schema'".to_string()))?;
-        if schema != REVISION_SCHEMA && schema != REVISION_SCHEMA_V2 {
+        if schema != REVISION_SCHEMA && schema != REVISION_SCHEMA_V2 && schema != REVISION_SCHEMA_V3
+        {
             return Err(WorldError::InvalidSchema(format!(
-                "expected revision schema {REVISION_SCHEMA} or {REVISION_SCHEMA_V2}, got {schema}"
+                "expected revision schema {REVISION_SCHEMA}, {REVISION_SCHEMA_V2} or {REVISION_SCHEMA_V3}, got {schema}"
             )));
         }
 
@@ -614,6 +665,13 @@ impl WorldRevision {
             ));
         }
 
+        let network_state_root = read_optional_digest("network_state_root")?;
+        if schema != REVISION_SCHEMA_V3 && network_state_root.is_some() {
+            return Err(WorldError::InvalidSchema(
+                "only revision@3 can bind a network state root".into(),
+            ));
+        }
+
         let rev_hex = v
             .get("revision_digest")
             .and_then(|x| x.as_str())
@@ -653,6 +711,7 @@ impl WorldRevision {
             &status,
             &decision_delta_digest,
             &exec_profile_digest,
+            &network_state_root,
         );
 
         if computed_digest != revision_digest {
@@ -680,6 +739,7 @@ impl WorldRevision {
             status,
             decision_delta_digest,
             exec_profile_digest,
+            network_state_root,
             revision_digest,
         })
     }
@@ -773,6 +833,7 @@ mod tests {
             &status,
             &None,
             &None,
+            &None,
         );
         let v1_json = json!({
             "schema": REVISION_SCHEMA,
@@ -798,4 +859,108 @@ mod tests {
         assert_eq!(decoded.decision_delta_digest, None);
         assert_eq!(decoded.revision_digest, old_digest);
     }
+
+    fn golden_rev(v1: bool) -> WorldRevision {
+        let (rr, rc, sr, ck) = sample_fields();
+        let mut r = WorldRevision::new(
+            1,
+            "2026-10-04T00:00:00Z",
+            0,
+            "idem-1",
+            None,
+            None,
+            None,
+            rr,
+            rc,
+            sr,
+            Some(Digest::of(Domain::Value, b"decision-root")),
+            ck,
+            SettlementStatus::Committed,
+            Some(Digest::of(Domain::Value, b"some-decision-delta")),
+        )
+        .bind_exec_profile(Some(Digest::of(Domain::Value, b"profile")));
+        if v1 {
+            r.schema = REVISION_SCHEMA.to_string();
+            r.decision_delta_digest = None;
+            r.exec_profile_digest = None;
+            r.revision_digest = r.compute_digest_for_record();
+        }
+        r
+    }
+
+    /// Golden digests captured on the pre-@3 formula: @1/@2 must never move.
+    #[test]
+    fn v1_v2_golden_digests_unchanged() {
+        assert_eq!(golden_rev(true).revision_digest.to_hex(), GOLDEN_V1);
+        assert_eq!(golden_rev(false).revision_digest.to_hex(), GOLDEN_V2);
+    }
+
+    #[test]
+    fn v3_round_trips_and_binds_root() {
+        let root = Digest::of(Domain::Value, b"net-root");
+        let v2 = golden_rev(false);
+        let v3 = v2.clone().with_network_state_root(root);
+        assert_eq!(v3.schema, REVISION_SCHEMA_V3);
+        assert_ne!(v3.revision_digest, v2.revision_digest);
+        let decoded = WorldRevision::from_json(&v3.to_json()).unwrap();
+        assert_eq!(decoded, v3);
+        assert_eq!(decoded.network_state_root, Some(root));
+        assert!(decoded.has_decision_evidence());
+        // @2 JSON carries no network_state_root key at all.
+        assert!(v2.to_json().get("network_state_root").is_none());
+    }
+
+    #[test]
+    fn v3_root_tamper_is_detected() {
+        let v3 = golden_rev(false).with_network_state_root(Digest::of(Domain::Value, b"a"));
+        let other = golden_rev(false).with_network_state_root(Digest::of(Domain::Value, b"b"));
+        assert_ne!(v3.revision_digest, other.revision_digest);
+        let mut j = v3.to_json();
+        j["network_state_root"] = json!(Digest::of(Domain::Value, b"b").to_hex());
+        assert!(matches!(
+            WorldRevision::from_json(&j),
+            Err(WorldError::CorruptedRevision { .. })
+        ));
+    }
+
+    /// Presence tag is unambiguous: absent root differs from any present root,
+    /// and a @3 record without a root differs from the @2 record.
+    #[test]
+    fn v3_presence_tag_unambiguous() {
+        let mut none3 = golden_rev(false);
+        none3.schema = REVISION_SCHEMA_V3.to_string();
+        none3.revision_digest = none3.compute_digest_for_record();
+        assert_ne!(none3.revision_digest, golden_rev(false).revision_digest);
+        let zero = golden_rev(false).with_network_state_root(Digest::from_bytes([0; 32]));
+        assert_ne!(none3.revision_digest, zero.revision_digest);
+        let rt = WorldRevision::from_json(&none3.to_json()).unwrap();
+        assert_eq!(rt.network_state_root, None);
+    }
+
+    #[test]
+    fn v1_v2_reject_network_state_root() {
+        for v1 in [true, false] {
+            let mut j = golden_rev(v1).to_json();
+            j["network_state_root"] = json!(Digest::of(Domain::Value, b"x").to_hex());
+            assert!(matches!(
+                WorldRevision::from_json(&j),
+                Err(WorldError::InvalidSchema(_))
+            ));
+        }
+    }
+
+    /// Old-reader semantics: a pre-@3 reader accepted only @1/@2 and returned
+    /// `InvalidSchema` for anything else; an unknown future schema still does.
+    #[test]
+    fn unknown_schema_rejected() {
+        let mut j = golden_rev(false).to_json();
+        j["schema"] = json!("brix.world.revision@4");
+        assert!(matches!(
+            WorldRevision::from_json(&j),
+            Err(WorldError::InvalidSchema(_))
+        ));
+    }
+
+    const GOLDEN_V1: &str = "361d5946d2349dfd0227ef211f502bcccfe29a97bb6f3d4029408be3924beae4";
+    const GOLDEN_V2: &str = "55b862acc82ee0a8b1f22c2a91062e86fcfa8f2cbd0716d598b3128de30170f6";
 }

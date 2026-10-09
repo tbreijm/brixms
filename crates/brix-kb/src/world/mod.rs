@@ -35,7 +35,9 @@ pub use network::{
 };
 pub use oracle::{DiffEvent, WorldOracle};
 pub use paths::WorldPaths;
-pub use revision::{SettlementStatus, WorldRevision, REVISION_SCHEMA, REVISION_SCHEMA_V2};
+pub use revision::{
+    SettlementStatus, WorldRevision, REVISION_SCHEMA, REVISION_SCHEMA_V2, REVISION_SCHEMA_V3,
+};
 pub use session::{
     DiffPage, ExecModuleLoaderLimits, ExecProfileV1, QueryPage, RevisionReceipt,
     SecondaryIndexCursor, SecondaryIndexPage, WorldSession, WorldSnapshot, EXEC_PROFILE_SCHEMA,

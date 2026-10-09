@@ -1760,7 +1760,7 @@ impl WorldSession {
     ) -> Result<super::decision_codec::DecisionDelta, WorldError> {
         let snapshot = self.pin_revision(seq)?;
         let rev = snapshot.revision;
-        if rev.schema != super::revision::REVISION_SCHEMA_V2 {
+        if !rev.has_decision_evidence() {
             return Err(WorldError::NetworkError(
                 "legacy-history-unavailable".into(),
             ));
@@ -1804,7 +1804,7 @@ impl WorldSession {
         entity_id: &str,
     ) -> Result<Option<(String, SettledDecision)>, WorldError> {
         let rev = self.pin_revision(seq)?.revision;
-        if rev.schema != super::revision::REVISION_SCHEMA_V2 {
+        if !rev.has_decision_evidence() {
             return Err(WorldError::NetworkError(
                 "legacy-history-unavailable: revision@1 did not persist decision evidence".into(),
             ));
