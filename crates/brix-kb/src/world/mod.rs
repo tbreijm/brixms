@@ -8,6 +8,7 @@ pub mod audit;
 pub mod batch;
 pub mod codec;
 pub mod decision_codec;
+pub mod deriv_intern;
 pub mod error;
 pub mod import_kb;
 pub mod manifest;
