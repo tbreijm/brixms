@@ -255,9 +255,11 @@ Known limits in this release:
 - The first decisions read on a world that has no checkpoint yet walks the
   frontier once (several seconds at 1M) and writes the checkpoint;
   `open-check --refresh-state` moves that off the request path.
-- Before GC, a world uses about 1.26x the disk space of the same world in
-  alpha.4. The checkpoint is a second copy of the decisions and is not
-  GC-managed.
+- A world stores its operator state as well as its facts, so it is several
+  times larger on disk than in alpha.4 (the 100k benchmark world: about 86 MB
+  in alpha.4, about 490 MB after loading, about 300 MB after `brix world gc`).
+  Roughly half of what remains is per-node framing in the pack format. The
+  checkpoint is a second copy of the decisions and is not GC-managed.
 - The replay fallback is memory-hungry on large worlds.
 - Sessions open during a GC must be reopened; concurrent readers in other
   processes are not supported during GC.
