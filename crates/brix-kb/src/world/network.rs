@@ -15,6 +15,7 @@
 #![deny(unsafe_code)]
 
 use super::compact_deriv::{leaf_counts, CompactDeriv, DRoot, Derivation};
+use super::network_state::{NetworkStateHeader, OperatorRoots, ValidityKey};
 use super::persistent::{PMap, PSet};
 use super::state_codec::{
     CandKey, CandidateHead, CandidateRec, FrontierBucket, FrontierKey, JoinEntry, StateCodec,
@@ -1095,7 +1096,17 @@ pub struct WorldNetwork {
     state: StateStore,
     /// Leaves each operator's derivations carry (index = operator id).
     leaf_counts: Arc<Vec<usize>>,
+    /// Whether this network holds the base facts itself (`base_relations`, `Scan.records`).
+    /// A network restored from persisted state (R0 M4) does not: the old tuple of a changed
+    /// key is looked up through the [`BaseLookup`] the session passes to
+    /// [`Self::apply_ops_staged_view`]. The legacy oracle shadows are only meaningful for a
+    /// network that has seen every fact since empty, so they follow this flag too.
+    base_resident: bool,
 }
+
+/// Read access to the pre-batch base facts, supplied by whoever owns them (the session's
+/// relation tries) to a network that does not keep its own copy.
+pub type BaseLookup<'a> = dyn Fn(&str, &WorldKey) -> Result<Option<WorldTuple>, WorldError> + 'a;
 
 impl WorldNetwork {
     /// Construct a new network from a lowered relational DAG.
@@ -1253,6 +1264,7 @@ impl WorldNetwork {
             scheduling_quantum: DEFAULT_SCHEDULING_QUANTUM,
             state: StateStore::memory(DEFAULT_NODE_CACHE_BYTES),
             leaf_counts: Arc::new(counts),
+            base_resident: true,
         }
     }
 
@@ -1435,6 +1447,171 @@ impl WorldNetwork {
         self.decision_tree.sub_root()
     }
 
+    /// Whether this network keeps its own copy of the base facts (see [`BaseLookup`]).
+    pub fn base_resident(&self) -> bool {
+        self.base_resident
+    }
+
+    /// The header naming every persisted root of this network, under `validity`. Call on a
+    /// network whose state has been persisted ([`Self::persist_state`]); the roots do not
+    /// depend on whether it was.
+    pub fn state_header(&self, validity: ValidityKey) -> NetworkStateHeader {
+        let mut derived = BTreeMap::new();
+        // Distinct-backed derived relations are views over their Distinct operator's
+        // index, recorded once under `operators`; listing them here would count them twice.
+        for (name, rel) in self.derived_relations.iter() {
+            if let DerivedRel::Counted(s) = rel {
+                derived.insert(name.clone(), s.outer.sub_root());
+            }
+        }
+        let mut operators = BTreeMap::new();
+        for (idx, state) in self.operator_states.iter() {
+            let roots = match state {
+                OperatorState::EquiJoin {
+                    left_side,
+                    right_side,
+                    ..
+                } => OperatorRoots::Join {
+                    left: left_side.outer.sub_root(),
+                    right: right_side.outer.sub_root(),
+                },
+                OperatorState::Distinct { supports, .. } => {
+                    OperatorRoots::Distinct(supports.outer.sub_root())
+                }
+                OperatorState::GroupedCount { groups, .. } => {
+                    OperatorRoots::Group(groups.outer.sub_root())
+                }
+                _ => continue,
+            };
+            operators.insert(OperatorId(*idx), roots);
+        }
+        NetworkStateHeader {
+            validity,
+            decision: self.decision_sub_root(),
+            frontier: self.frontier_root(),
+            derived,
+            operators,
+        }
+    }
+
+    /// Install the persisted state `header` names into this (freshly built, empty) network,
+    /// lazily: nothing but the roots is read, apart from a probe of each non-empty root that
+    /// fails closed on a missing or corrupt root node. The header's operator set must match
+    /// this program exactly. The network then holds no base copy (see [`BaseLookup`]).
+    pub fn restore_state(&mut self, header: &NetworkStateHeader) -> Result<(), WorldError> {
+        let mismatch = |m: String| WorldError::ValidityMismatch(m);
+
+        let mut expect: BTreeMap<OperatorId, &'static str> = BTreeMap::new();
+        for (idx, state) in self.operator_states.iter() {
+            match state {
+                OperatorState::EquiJoin { .. } => {
+                    expect.insert(OperatorId(*idx), "join");
+                }
+                OperatorState::Distinct { .. } => {
+                    expect.insert(OperatorId(*idx), "distinct");
+                }
+                OperatorState::GroupedCount { .. } => {
+                    expect.insert(OperatorId(*idx), "group");
+                }
+                _ => {}
+            }
+        }
+        let got: BTreeMap<OperatorId, &'static str> = header
+            .operators
+            .iter()
+            .map(|(op, r)| (*op, r.kind_name()))
+            .collect();
+        if got != expect {
+            return Err(mismatch(format!(
+                "persisted operators {got:?} do not match the program's {expect:?}"
+            )));
+        }
+        let counted: BTreeSet<&String> = self
+            .derived_relations
+            .iter()
+            .filter(|(_, r)| matches!(r, DerivedRel::Counted(_)))
+            .map(|(n, _)| n)
+            .collect();
+        let listed: BTreeSet<&String> = header.derived.keys().collect();
+        if counted != listed {
+            return Err(mismatch(format!(
+                "persisted derived relations {listed:?} do not match the program's {counted:?}"
+            )));
+        }
+
+        for (name, root) in &header.derived {
+            if let Some(DerivedRel::Counted(supports)) = self.derived_relations.get_mut(name) {
+                supports.outer = SMap::from_sub_root(*root);
+                supports.hot = PMap::new();
+            }
+        }
+        for (op, roots) in &header.operators {
+            match (self.operator_states.get_mut(&op.0), roots) {
+                (
+                    Some(OperatorState::EquiJoin {
+                        left_side,
+                        right_side,
+                        ..
+                    }),
+                    OperatorRoots::Join { left, right },
+                ) => {
+                    left_side.outer = SMap::from_sub_root(*left);
+                    left_side.hot = PMap::new();
+                    right_side.outer = SMap::from_sub_root(*right);
+                    right_side.hot = PMap::new();
+                }
+                (Some(OperatorState::Distinct { supports, .. }), OperatorRoots::Distinct(r)) => {
+                    supports.outer = SMap::from_sub_root(*r);
+                    supports.hot = PMap::new();
+                }
+                (Some(OperatorState::GroupedCount { groups, .. }), OperatorRoots::Group(r)) => {
+                    groups.outer = SMap::from_sub_root(*r);
+                    groups.hot = PMap::new();
+                }
+                _ => return Err(mismatch(format!("operator {} has the wrong kind", op.0))),
+            }
+        }
+        self.candidate_frontier.buckets = SMap::from_sub_root(header.frontier);
+        self.candidate_frontier.hot = PMap::new();
+        self.decision_tree = SMap::from_sub_root(header.decision);
+        self.base_resident = false;
+
+        self.probe_roots()
+    }
+
+    /// Touch the first path of every non-empty persisted root, so a missing or corrupt
+    /// root node is reported when the network is restored rather than at first use.
+    fn probe_roots(&self) -> Result<(), WorldError> {
+        let store = &self.state;
+        for (_, state) in self.operator_states.iter() {
+            match state {
+                OperatorState::EquiJoin {
+                    left_side,
+                    right_side,
+                    ..
+                } => {
+                    left_side.outer.page(None, 1, store)?;
+                    right_side.outer.page(None, 1, store)?;
+                }
+                OperatorState::Distinct { supports, .. } => {
+                    supports.outer.page(None, 1, store)?;
+                }
+                OperatorState::GroupedCount { groups, .. } => {
+                    groups.outer.page(None, 1, store)?;
+                }
+                _ => {}
+            }
+        }
+        for (_, rel) in self.derived_relations.iter() {
+            if let DerivedRel::Counted(s) = rel {
+                s.outer.page(None, 1, store)?;
+            }
+        }
+        self.candidate_frontier.buckets.page(None, 1, store)?;
+        self.decision_tree.page(None, 1, store)?;
+        Ok(())
+    }
+
     /// Set scheduling quantum (work units per operator slice).
     pub fn with_scheduling_quantum(mut self, quantum: usize) -> Self {
         self.scheduling_quantum = quantum.max(1);
@@ -1497,6 +1674,7 @@ impl WorldNetwork {
             fresh.legacy_decisions = PMap::new();
         }
         fresh.current_revision = 0;
+        fresh.base_resident = true;
         let mut op_states = self.operator_states.clone();
         for (idx, state) in &self.operator_states {
             let cleared_state = match state {
@@ -1756,6 +1934,18 @@ impl WorldNetwork {
         ops: &[WorldBatchOp],
         limits: &NetworkLimits,
     ) -> Result<NetworkDeltaReport, WorldError> {
+        self.apply_ops_staged_view(ops, limits, None)
+    }
+
+    /// As [`Self::apply_ops_staged_bounded`], reading pre-batch base facts through `base`.
+    /// Required for a network restored from persisted state, which holds no base copy; a
+    /// resident network ignores it. `base` must reflect the facts *before* `ops`.
+    pub fn apply_ops_staged_view(
+        &mut self,
+        ops: &[WorldBatchOp],
+        limits: &NetworkLimits,
+        base: Option<&BaseLookup<'_>>,
+    ) -> Result<NetworkDeltaReport, WorldError> {
         let _scope = self.state.trace_scope("apply");
         let mut report = NetworkDeltaReport {
             revision: self.current_revision + 1,
@@ -1775,6 +1965,10 @@ impl WorldNetwork {
         let mut total_matches: u64 = 0;
         #[cfg(any(test, feature = "r0-oracle"))]
         let (mut legacy_candidates_inserted, mut legacy_candidates_retracted) = (0usize, 0usize);
+        // The oracle shadows only see a network that has applied every fact since empty;
+        // a network restored from persisted state has no shadow to compare with.
+        #[cfg(any(test, feature = "r0-oracle"))]
+        let shadow_on = self.base_resident;
 
         let enqueue =
             |op: OperatorId,
@@ -1789,6 +1983,12 @@ impl WorldNetwork {
             };
 
         // 1. Process base ops at Scan nodes
+        let resident = self.base_resident;
+        if !resident && base.is_none() {
+            return Err(WorldError::NetworkError(
+                "network was restored without its base facts; apply through a BaseLookup".into(),
+            ));
+        }
         for op in ops {
             let rel_name = op.relation();
             let base_rel = self
@@ -1801,6 +2001,9 @@ impl WorldNetwork {
                 .get(rel_name)
                 .cloned()
                 .unwrap_or_default();
+            // The pre-batch tuple of a changed key, once per op for a restored network
+            // (every Scan of the relation sees the same one).
+            let mut looked_up: Option<Option<WorldTuple>> = None;
             for scan_op_id in scan_ops {
                 let scan_state = self
                     .operator_states
@@ -1813,44 +2016,36 @@ impl WorldNetwork {
                     ..
                 } = scan_state
                 {
+                    let key = op.key();
+                    // The tuple this key currently holds in the Scan, as an intermediate.
+                    let old_inter: Option<IntermediateTuple> = if resident {
+                        records.get(key).map(|(_, i)| i.clone())
+                    } else {
+                        if looked_up.is_none() {
+                            let lookup = base.expect("checked above");
+                            looked_up = Some(lookup(rel_name, key)?);
+                        }
+                        match looked_up.as_ref().and_then(|t| t.as_ref()) {
+                            Some(t) => Some(scan_intermediate(relation, schema, t)?),
+                            None => None,
+                        }
+                    };
                     match op {
                         WorldBatchOp::Upsert { key, tuple, .. } => {
-                            base_rel.insert(key.clone(), tuple.clone());
+                            if resident {
+                                base_rel.insert(key.clone(), tuple.clone());
+                            }
                             let derivation = Derivation::base(relation, key);
-
-                            let rec = TupleRecord::from_tuple(tuple)?;
-                            let ast::Ty::Record(fields) = schema else {
-                                return Err(WorldError::NetworkError(format!(
-                                    "unresolved row schema for {relation}"
-                                )));
-                            };
-                            if rec.fields.len() != fields.len() {
-                                return Err(WorldError::NetworkError(format!(
-                                    "row fields do not match schema for {relation}"
-                                )));
-                            }
-                            let mut intermediate = IntermediateTuple::new();
-                            for field in fields {
-                                let bytes = rec.get(&field.name).ok_or_else(|| {
-                                    WorldError::NetworkError(format!(
-                                        "missing field {relation}.{}",
-                                        field.name
-                                    ))
-                                })?;
-                                intermediate.insert(
-                                    field.name.clone(),
-                                    Value::from_typed_bytes(bytes, &field.ty)?,
-                                );
-                            }
+                            let intermediate = scan_intermediate(relation, schema, tuple)?;
 
                             // If old record existed at key, retract it first
-                            if let Some((_, old_inter)) = records.get(key) {
-                                if old_inter == &intermediate {
+                            if let Some(old_inter) = old_inter {
+                                if old_inter == intermediate {
                                     // Idempotent value, no change
                                     continue;
                                 }
                                 let ret_delta = TupleDelta::Retract {
-                                    tuple: old_inter.clone(),
+                                    tuple: old_inter,
                                     derivation: derivation.clone(),
                                 };
                                 enqueue(
@@ -1866,7 +2061,9 @@ impl WorldNetwork {
                                 tuple: intermediate.clone(),
                                 derivation,
                             };
-                            records.insert(key.clone(), (tuple.clone(), intermediate));
+                            if resident {
+                                records.insert(key.clone(), (tuple.clone(), intermediate));
+                            }
                             enqueue(
                                 scan_op_id,
                                 OperatorWorkItem::Delta(ins_delta),
@@ -1876,8 +2073,11 @@ impl WorldNetwork {
                             );
                         }
                         WorldBatchOp::Remove { key, .. } => {
-                            base_rel.remove(key);
-                            if let Some((_, old_inter)) = records.remove(key) {
+                            if resident {
+                                base_rel.remove(key);
+                                records.remove(key);
+                            }
+                            if let Some(old_inter) = old_inter {
                                 let derivation = Derivation::base(relation, key);
                                 let ret_delta = TupleDelta::Retract {
                                     tuple: old_inter,
@@ -2146,14 +2346,18 @@ impl WorldNetwork {
                                 };
 
                                 #[cfg(any(test, feature = "r0-oracle"))]
-                                let legacy_matches = super::join_oracle::shadow_step(
-                                    own,
-                                    other,
-                                    &join_key,
-                                    deriv.legacy(),
-                                    tuple,
-                                    is_ins,
-                                );
+                                let legacy_matches = if shadow_on {
+                                    Some(super::join_oracle::shadow_step(
+                                        own,
+                                        other,
+                                        &join_key,
+                                        deriv.legacy(),
+                                        tuple,
+                                        is_ins,
+                                    ))
+                                } else {
+                                    None
+                                };
 
                                 if !deriv.c.leaf_count_ok(counts) {
                                     return Err(corrupt_derivation());
@@ -2178,12 +2382,14 @@ impl WorldNetwork {
                                 let matches = other.read(&vk, store)?.unwrap_or_default();
 
                                 #[cfg(any(test, feature = "r0-oracle"))]
-                                super::join_oracle::assert_same_matches(
-                                    &legacy_matches,
-                                    &matches,
-                                    store,
-                                    &self.dag,
-                                )?;
+                                if let Some(legacy_matches) = &legacy_matches {
+                                    super::join_oracle::assert_same_matches(
+                                        legacy_matches,
+                                        &matches,
+                                        store,
+                                        &self.dag,
+                                    )?;
+                                }
 
                                 let remaining = matches.len();
                                 (delta, is_left, join_key, matches, None, remaining)
@@ -2318,12 +2524,14 @@ impl WorldNetwork {
                             let out_deriv = Derivation::distinct(op_id, tuple_key);
 
                             #[cfg(any(test, feature = "r0-oracle"))]
-                            let legacy_counts = super::join_oracle::shadow_support_step(
-                                &mut supports.legacy,
-                                &tuple,
-                                deriv.legacy(),
-                                is_ins,
-                            );
+                            let legacy_counts = shadow_on.then(|| {
+                                super::join_oracle::shadow_support_step(
+                                    &mut supports.legacy,
+                                    &tuple,
+                                    deriv.legacy(),
+                                    is_ins,
+                                )
+                            });
 
                             let (old_count, new_count) = if is_ins {
                                 supports.add(tuple.clone(), deriv.c.clone(), store)?
@@ -2332,11 +2540,13 @@ impl WorldNetwork {
                             };
 
                             #[cfg(any(test, feature = "r0-oracle"))]
-                            assert_eq!(
-                                (old_count, new_count),
-                                legacy_counts,
-                                "store-backed distinct support counts diverged from the legacy oracle"
-                            );
+                            if let Some(legacy_counts) = legacy_counts {
+                                assert_eq!(
+                                    (old_count, new_count),
+                                    legacy_counts,
+                                    "store-backed distinct support counts diverged from the legacy oracle"
+                                );
+                            }
 
                             if is_ins {
                                 if old_count == 0 {
@@ -2402,12 +2612,14 @@ impl WorldNetwork {
 
                             let store = &self.state;
                             #[cfg(any(test, feature = "r0-oracle"))]
-                            let legacy_counts = super::join_oracle::shadow_support_step(
-                                &mut groups.legacy,
-                                &key_vals,
-                                deriv.legacy(),
-                                is_ins,
-                            );
+                            let legacy_counts = shadow_on.then(|| {
+                                super::join_oracle::shadow_support_step(
+                                    &mut groups.legacy,
+                                    &key_vals,
+                                    deriv.legacy(),
+                                    is_ins,
+                                )
+                            });
                             let gk = ValueList(key_vals.clone());
                             let (old_count, new_count) = if is_ins {
                                 groups.add(gk, deriv.c.digest(), store)?
@@ -2415,11 +2627,13 @@ impl WorldNetwork {
                                 groups.remove(&gk, &deriv.c.digest(), store)?
                             };
                             #[cfg(any(test, feature = "r0-oracle"))]
-                            assert_eq!(
-                                (old_count, new_count),
-                                legacy_counts,
-                                "store-backed group counts diverged from the legacy oracle"
-                            );
+                            if let Some(legacy_counts) = legacy_counts {
+                                assert_eq!(
+                                    (old_count, new_count),
+                                    legacy_counts,
+                                    "store-backed group counts diverged from the legacy oracle"
+                                );
+                            }
 
                             if new_count != old_count {
                                 let out_deriv = Derivation::group(op_id, key_vals.clone());
@@ -2490,15 +2704,17 @@ impl WorldNetwork {
                                 let is_ins = od.is_insert();
 
                                 #[cfg(any(test, feature = "r0-oracle"))]
-                                let legacy_changed = {
+                                let legacy_changed = if shadow_on {
                                     let set =
                                         self.legacy_derived.entry(rel_name.clone()).or_default();
                                     let rec = od.tuple().to_tuple_record();
-                                    if is_ins {
+                                    Some(if is_ins {
                                         set.insert(rec)
                                     } else {
                                         set.remove(&rec)
-                                    }
+                                    })
+                                } else {
+                                    None
                                 };
 
                                 let changed = match rel {
@@ -2521,10 +2737,12 @@ impl WorldNetwork {
                                 };
 
                                 #[cfg(any(test, feature = "r0-oracle"))]
-                                assert_eq!(
-                                    changed, legacy_changed,
-                                    "store-backed derived relation diverged from the legacy oracle"
-                                );
+                                if let Some(legacy_changed) = legacy_changed {
+                                    assert_eq!(
+                                        changed, legacy_changed,
+                                        "store-backed derived relation diverged from the legacy oracle"
+                                    );
+                                }
 
                                 if changed {
                                     if is_ins {
@@ -2610,7 +2828,9 @@ impl WorldNetwork {
                         let did = deriv
                             .expand(&self.dag)
                             .map_err(|e| WorldError::from(StateError::from(e)))?;
-                        assert_eq!(&did, deriv.legacy(), "frontier derivation diverged");
+                        if shadow_on {
+                            assert_eq!(&did, deriv.legacy(), "frontier derivation diverged");
+                        }
                         did
                     };
 
@@ -2703,7 +2923,7 @@ impl WorldNetwork {
                                 );
 
                                 #[cfg(any(test, feature = "r0-oracle"))]
-                                {
+                                if shadow_on {
                                     let entity_map = self
                                         .candidate_frontier
                                         .legacy
@@ -2775,8 +2995,11 @@ impl WorldNetwork {
                             }
                         } else {
                             #[cfg(any(test, feature = "r0-oracle"))]
-                            if let Some(decide_map) =
-                                self.candidate_frontier.legacy.get_mut(&decide.name)
+                            if let Some(decide_map) = self
+                                .candidate_frontier
+                                .legacy
+                                .get_mut(&decide.name)
+                                .filter(|_| shadow_on)
                             {
                                 if let Some(entity_map) = decide_map.get_mut(&entity_id) {
                                     if let Some(entry) = entity_map.get_mut(&propose.name) {
@@ -2832,7 +3055,7 @@ impl WorldNetwork {
             };
 
             #[cfg(any(test, feature = "r0-oracle"))]
-            {
+            if shadow_on {
                 if self
                     .candidate_frontier
                     .legacy
@@ -2887,7 +3110,7 @@ impl WorldNetwork {
         }
 
         #[cfg(any(test, feature = "r0-oracle"))]
-        {
+        if shadow_on {
             assert_eq!(
                 (report.candidates_inserted, report.candidates_retracted),
                 (legacy_candidates_inserted, legacy_candidates_retracted),
@@ -3305,6 +3528,36 @@ fn entity_id_for(
                 "decide entity field '{per_field}' missing from bound row (binder '{binder}')"
             ))
         })
+}
+
+/// Evaluate a base row into the typed intermediate tuple the Scan operator emits.
+fn scan_intermediate(
+    relation: &str,
+    schema: &ast::Ty,
+    tuple: &WorldTuple,
+) -> Result<IntermediateTuple, WorldError> {
+    let rec = TupleRecord::from_tuple(tuple)?;
+    let ast::Ty::Record(fields) = schema else {
+        return Err(WorldError::NetworkError(format!(
+            "unresolved row schema for {relation}"
+        )));
+    };
+    if rec.fields.len() != fields.len() {
+        return Err(WorldError::NetworkError(format!(
+            "row fields do not match schema for {relation}"
+        )));
+    }
+    let mut intermediate = IntermediateTuple::new();
+    for field in fields {
+        let bytes = rec.get(&field.name).ok_or_else(|| {
+            WorldError::NetworkError(format!("missing field {relation}.{}", field.name))
+        })?;
+        intermediate.insert(
+            field.name.clone(),
+            Value::from_typed_bytes(bytes, &field.ty)?,
+        );
+    }
+    Ok(intermediate)
 }
 
 /// Evaluate an AST expression over intermediate tuple fields and functions.

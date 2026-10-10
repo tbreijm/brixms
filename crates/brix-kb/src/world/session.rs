@@ -9,12 +9,14 @@ use super::state_store::{StateStore, DEFAULT_NODE_CACHE_BYTES};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use super::batch::{WorldBatch, WorldBatchOp};
 use super::codec::{encode_secondary_key, extract_indexed_field, TupleRecord};
 use super::error::{CrashPoint, WorldError};
 use super::manifest::{RelationDecl, WorldManifest, WORLD_PROFILE};
 use super::network::{DecisionExplanation, SettledDecision, WorldNetwork};
+use super::network_state::{NetworkStateHeader, ValidityKey};
 use super::oracle::DiffEvent;
 use super::paths::WorldPaths;
 use super::revision::{SettlementStatus, WorldRevision};
@@ -614,6 +616,30 @@ impl ExecProfileV1 {
     }
 }
 
+/// How a session obtained its operator network when it was opened (R0 M4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenMode {
+    /// The persisted network state the HEAD revision names was installed lazily; no base
+    /// fact was replayed.
+    Restored,
+    /// The network was rebuilt by replaying every resident base fact (a legacy revision,
+    /// a validity-key change, an explicit `open_replay`, or a freshly created world).
+    Replay,
+    /// The world has no executable program, so there is no network.
+    NoNetwork,
+}
+
+impl OpenMode {
+    /// The name surfaced in CLI and serve results.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Restored => "restored",
+            Self::Replay => "replay",
+            Self::NoNetwork => "none",
+        }
+    }
+}
+
 /// The active persistent world runtime session.
 pub struct WorldSession {
     pub root: PathBuf,
@@ -635,6 +661,17 @@ pub struct WorldSession {
     pub exec_profile: Option<ExecProfileV1>,
     /// Retention pins protecting revisions from compaction.
     pub pins: PinRegistry,
+    /// How the network was obtained at open (see [`OpenMode`]).
+    pub open_mode: OpenMode,
+    /// Why a replay happened when one did (`forced`, `legacy-revision`, `validity-key`).
+    pub replay_reason: Option<&'static str>,
+    /// Wall-clock milliseconds `open` took.
+    pub open_ms: u64,
+    /// Committed batches whose effects open had to re-derive: `0` when restored, the whole
+    /// history length when replayed.
+    pub tail_batches: u64,
+    /// The `network_state_root` of the HEAD revision, if it has one.
+    pub network_state_root: Option<Digest>,
 }
 
 impl WorldSession {
@@ -708,12 +745,33 @@ impl WorldSession {
             dehydrate_failures: 0,
             exec_profile: None,
             pins: PinRegistry::default(),
+            open_mode: OpenMode::NoNetwork,
+            replay_reason: None,
+            open_ms: 0,
+            tail_batches: 0,
+            network_state_root: None,
         })
     }
 
-    /// Open an existing world directory (lazy cold open).
+    /// Open an existing world directory (lazy cold open). When the HEAD revision names
+    /// persisted network state valid for this binary, it is restored without replaying any
+    /// base fact; otherwise (a legacy revision or a changed validity key) the network is
+    /// rebuilt by replay and the next commit records restorable state. Persisted state that
+    /// is corrupt, missing, or inconsistent with its revision is a hard error, never a
+    /// silent fallback: call [`Self::open_replay`] to rebuild deliberately.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, WorldError> {
-        let root = root.as_ref().to_path_buf();
+        Self::open_with(root.as_ref(), false)
+    }
+
+    /// Open, always rebuilding the network by replaying the resident base facts and never
+    /// reading persisted operator state (tests, verification, repair).
+    pub fn open_replay(root: impl AsRef<Path>) -> Result<Self, WorldError> {
+        Self::open_with(root.as_ref(), true)
+    }
+
+    fn open_with(root: &Path, force_replay: bool) -> Result<Self, WorldError> {
+        let started = Instant::now();
+        let root = root.to_path_buf();
         let paths = WorldPaths::new(&root);
 
         if !paths.world_json().exists() {
@@ -869,7 +927,13 @@ impl WorldSession {
             dehydrate_failures: 0,
             exec_profile: None,
             pins,
+            open_mode: OpenMode::NoNetwork,
+            replay_reason: None,
+            open_ms: 0,
+            tail_batches: 0,
+            network_state_root: current_rev.network_state_root,
         };
+        let mut pending_network: Option<WorldNetwork> = None;
 
         let program_file = session.paths.root.join("program.json");
         if session.manifest.program_required && !program_file.exists() {
@@ -921,7 +985,7 @@ impl WorldSession {
             }
             let network = WorldNetwork::from_program(&linked)?;
             validate_program_relations(&session.manifest, &network)?;
-            session.set_network(network)?;
+            pending_network = Some(network);
 
             // Additive field (ADR-0046 P6 §1.1, decided 2026-10-04): a
             // `program.json` written before `exec_profile` existed simply
@@ -946,6 +1010,9 @@ impl WorldSession {
                 ));
             }
         }
+        if let Some(network) = pending_network {
+            session.install_network(network, &current_rev, force_replay)?;
+        }
         if current_rev.decision_delta_digest.is_some() {
             session.decision_delta(current_revision)?;
         }
@@ -956,7 +1023,76 @@ impl WorldSession {
                 ));
             }
         }
+        session.open_ms = started.elapsed().as_millis() as u64;
         Ok(session)
+    }
+
+    fn node_cache_budget(&self) -> usize {
+        self.manifest
+            .node_cache_bytes
+            .map_or(DEFAULT_NODE_CACHE_BYTES, |n| {
+                usize::try_from(n).unwrap_or(usize::MAX)
+            })
+    }
+
+    /// The validity key under which this binary would persist (and accept) network state
+    /// for this world.
+    pub fn validity_key(&self) -> ValidityKey {
+        ValidityKey::current(
+            self.manifest.program_digest,
+            self.exec_profile.as_ref().map(ExecProfileV1::digest),
+        )
+    }
+
+    /// Give a freshly built network its state: restore it from the persisted header the
+    /// revision names, or replay the base facts.
+    fn install_network(
+        &mut self,
+        mut network: WorldNetwork,
+        rev: &WorldRevision,
+        force_replay: bool,
+    ) -> Result<(), WorldError> {
+        let reason: &'static str = if force_replay {
+            "forced"
+        } else if let Some(root) = rev.network_state_root {
+            let store = StateStore::from_file(self.node_store.clone(), self.node_cache_budget());
+            let header = NetworkStateHeader::read(&store, &root)?;
+            let key = self.validity_key();
+            if header.validity.program_digest != key.program_digest {
+                return Err(WorldError::ValidityMismatch(
+                    "persisted network state belongs to a different program".into(),
+                ));
+            }
+            if header.validity != key {
+                // Produced by another execution profile, lowering or codec version: the
+                // state is sound but not reusable by this binary. Rebuild.
+                "validity-key"
+            } else {
+                let decision_ok = match rev.decision_root {
+                    Some(expected) => header.decision.root == expected,
+                    None => header.decision.len == 0,
+                };
+                if !decision_ok {
+                    return Err(WorldError::ValidityMismatch(
+                        "persisted network state decision root does not match the revision".into(),
+                    ));
+                }
+                network.attach_state_store(store);
+                network.restore_state(&header)?;
+                network.current_revision = self.current_revision;
+                self.network = Some(network);
+                self.open_mode = OpenMode::Restored;
+                self.tail_batches = 0;
+                return Ok(());
+            }
+        } else {
+            "legacy-revision"
+        };
+        self.set_network(network)?;
+        self.open_mode = OpenMode::Replay;
+        self.replay_reason = Some(reason);
+        self.tail_batches = self.current_revision;
+        Ok(())
     }
 
     pub fn set_crash_point(&mut self, cp: Option<CrashPoint>) {
@@ -1107,9 +1243,20 @@ impl WorldSession {
         let (staged_network, decision_root, decision_delta_digest, decision_delta_body) =
             if let Some(ref net) = self.network {
                 let mut sn = net.clone();
-                let delta_report = sn.apply_ops_staged_bounded(
+                // Pre-batch facts for a network that keeps no copy of its own.
+                let base_relations = &self.relations;
+                let base_store = &self.node_store;
+                let lookup =
+                    |rel: &str, key: &WorldKey| -> Result<Option<WorldTuple>, WorldError> {
+                        let trie = base_relations
+                            .get(rel)
+                            .ok_or_else(|| WorldError::UnknownRelation(rel.to_string()))?;
+                        Ok(trie.get_with_store(key, base_store)?)
+                    };
+                let delta_report = sn.apply_ops_staged_view(
                     &normalized_ops,
                     limits.unwrap_or(&super::network::NetworkLimits::default()),
+                    Some(&lookup),
                 )?;
                 if sn.decides.is_empty() {
                     (Some(sn), None, None, None)
@@ -1315,6 +1462,13 @@ impl WorldSession {
             objects_written += trie.persist_to_store(&mut self.node_store);
             secondary_index_roots.insert(sec_name.clone(), trie.root_digest());
         }
+
+        // Crash injection seam: base objects written, no network object yet.
+        if self.crash_injector == Some(CrashPoint::AfterBaseObjectsBeforeNetworkObjects) {
+            return Err(WorldError::InjectedCrash(
+                CrashPoint::AfterBaseObjectsBeforeNetworkObjects,
+            ));
+        }
         // Persist the settled-decision trie's own nodes (ADR-0046 P6 G2,
         // decided 2026-10-04): previously only its root digest reached the
         // revision record, so historical settlements could not be read back
@@ -1324,6 +1478,19 @@ impl WorldSession {
             // Operator state, derived relations, the candidate frontier and the settled
             // decision trie, through the one state store (same pack, same flush).
             objects_written += sn.persist_state()?;
+        }
+        // The header that makes the persisted network state restorable, written in the
+        // same pack as everything it names and flushed with it, before HEAD can move.
+        let network_state_root = staged_network.as_ref().map(|sn| {
+            objects_written += 1;
+            sn.state_header(self.validity_key()).write(sn.state_store())
+        });
+
+        // Crash injection seam: every object written, none flushed.
+        if self.crash_injector == Some(CrashPoint::AfterNetworkObjectsBeforeFlush) {
+            return Err(WorldError::InjectedCrash(
+                CrashPoint::AfterNetworkObjectsBeforeFlush,
+            ));
         }
 
         // Crash injection seam 1
@@ -1392,6 +1559,10 @@ impl WorldSession {
             decision_delta_digest,
         )
         .bind_exec_profile(self.exec_profile.as_ref().map(ExecProfileV1::digest));
+        let new_revision = match network_state_root {
+            Some(root) => new_revision.with_network_state_root(root),
+            None => new_revision,
+        };
 
         let rev_json = serde_json::to_vec_pretty(&new_revision.to_json())
             .map_err(|e| WorldError::Json(e.to_string()))?;
@@ -1453,6 +1624,7 @@ impl WorldSession {
         let total_changed: usize = changed_keys.values().map(|v| v.len()).sum();
         self.current_revision = new_seq;
         self.current_revision_digest = Some(new_revision.revision_digest);
+        self.network_state_root = new_revision.network_state_root;
         self.relations = staged_relations;
         self.secondary_indexes = staged_secondary_indexes;
         if let Some(sn) = staged_network {
@@ -1888,12 +2060,7 @@ impl WorldSession {
                 }
             }
         }
-        let cache = self
-            .manifest
-            .node_cache_bytes
-            .map_or(DEFAULT_NODE_CACHE_BYTES, |n| {
-                usize::try_from(n).unwrap_or(usize::MAX)
-            });
+        let cache = self.node_cache_budget();
         network.attach_state_store(StateStore::from_file(self.node_store.clone(), cache));
         if !ops.is_empty() {
             network.apply_ops(&ops)?;
@@ -2050,9 +2217,62 @@ impl WorldSession {
     }
 
     /// Verify differential correctness between incremental network state and oracle full recompute.
+    ///
+    /// A restored network keeps no base facts of its own, so it is checked against a fresh
+    /// replay of the session's relations instead ([`Self::verify_state`]).
     pub fn verify_oracle(&self) -> Result<(), WorldError> {
         if let Some(ref net) = self.network {
-            net.verify_differential_correctness()?;
+            if net.base_resident() {
+                net.verify_differential_correctness()?;
+            } else {
+                self.verify_state()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A fresh in-memory network rebuilt by replaying every base fact the session holds.
+    /// Reads no persisted operator state.
+    pub fn replay_network(&self) -> Result<WorldNetwork, WorldError> {
+        let net = self
+            .network
+            .as_ref()
+            .ok_or_else(|| WorldError::NetworkError("world has no network".into()))?;
+        let mut fresh = net.clear_data();
+        fresh.attach_state_store(StateStore::memory(self.node_cache_budget()));
+        let mut ops = Vec::new();
+        for (rel_name, trie) in &self.relations {
+            if fresh.base_relations.contains_key(rel_name) {
+                let (entries, _) = trie.iter_page_with_store(None, usize::MAX, &self.node_store)?;
+                for (key, tuple) in entries {
+                    ops.push(WorldBatchOp::Upsert {
+                        relation: rel_name.clone(),
+                        key,
+                        tuple,
+                    });
+                }
+            }
+        }
+        if !ops.is_empty() {
+            fresh.apply_ops(&ops)?;
+        }
+        fresh.current_revision = self.current_revision;
+        Ok(fresh)
+    }
+
+    /// Recompute the network state from the base facts and require every persisted root
+    /// (operator indexes, derived, frontier, decisions) to equal what this session holds.
+    pub fn verify_state(&self) -> Result<(), WorldError> {
+        let Some(net) = self.network.as_ref() else {
+            return Ok(());
+        };
+        let fresh = self.replay_network()?;
+        let key = self.validity_key();
+        let (have, want) = (net.state_header(key.clone()), fresh.state_header(key));
+        if have != want {
+            return Err(WorldError::NetworkError(format!(
+                "persisted network state differs from replay: session={have:?} replay={want:?}"
+            )));
         }
         Ok(())
     }

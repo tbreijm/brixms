@@ -18,6 +18,12 @@ pub enum CrashPoint {
     AfterRevisionFsyncBeforeHeadRename,
     /// Crash after atomic HEAD rename, but before parent directory fsync.
     AfterHeadRenameBeforeDirectoryFsync,
+    /// Crash after the base relation and index objects are written, before any network
+    /// state object (operator indexes, frontier, decisions, header) is.
+    AfterBaseObjectsBeforeNetworkObjects,
+    /// Crash after every object, network state header included, is written but before
+    /// any is flushed.
+    AfterNetworkObjectsBeforeFlush,
 }
 
 impl fmt::Display for CrashPoint {
@@ -35,6 +41,12 @@ impl fmt::Display for CrashPoint {
             }
             Self::AfterHeadRenameBeforeDirectoryFsync => {
                 write!(f, "crash after HEAD rename before directory fsync")
+            }
+            Self::AfterBaseObjectsBeforeNetworkObjects => {
+                write!(f, "crash after base objects before network objects")
+            }
+            Self::AfterNetworkObjectsBeforeFlush => {
+                write!(f, "crash after network objects before flush")
             }
         }
     }

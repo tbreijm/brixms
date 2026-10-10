@@ -171,7 +171,9 @@ fn revision_binds_profile_and_delta_and_rejects_tampered_bodies() {
     let mut world = dir.session();
     world.apply_batch(batch(0, vec![upsert("a", 10)])).unwrap();
     let revision = world.pin_revision(1).unwrap().revision;
-    assert_eq!(revision.schema, "brix.world.revision@2");
+    // A world with an executable program records restorable network state (R0 M4).
+    assert_eq!(revision.schema, "brix.world.revision@3");
+    assert!(revision.network_state_root.is_some());
     assert_eq!(
         revision.exec_profile_digest,
         Some(world.exec_profile.as_ref().unwrap().digest())
