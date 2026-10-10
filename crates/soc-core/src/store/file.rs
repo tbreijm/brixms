@@ -254,6 +254,11 @@ struct Pending {
     entries: Vec<(Digest, Entry)>,
     lookup: BTreeMap<Digest, usize>,
     end: u64,
+    /// Read handle on the temporary pack, opened on the first read of a pending node and
+    /// kept (the descriptor stays valid across the publish rename).
+    reader: Option<Arc<File>>,
+    /// Bytes of the pack known to have reached the file (`BufWriter` flushed up to here).
+    flushed_end: u64,
 }
 #[derive(Debug)]
 struct State {
@@ -878,6 +883,8 @@ impl FileNodeStore {
             entries: Vec::new(),
             lookup: BTreeMap::new(),
             end: 8,
+            reader: None,
+            flushed_end: 0,
         })
     }
 
@@ -911,6 +918,15 @@ impl FileNodeStore {
             }
         }
         count
+    }
+
+    /// `(nodes, bytes)` appended to the not-yet-published pack. Zero when none is open.
+    pub fn pending_stats(&self) -> (usize, u64) {
+        let state = self.state.lock().expect("poisoned pack index");
+        state
+            .pending
+            .as_ref()
+            .map_or((0, 0), |p| (p.entries.len(), p.end))
     }
 
     /// Physical bytes on disk plus bytes still in the bounded pending buffer.
@@ -1091,12 +1107,20 @@ impl FileNodeStore {
                         Some((state.pack_file(&path)?, entry))
                     } else if let Some(pending) = state.pending.as_mut() {
                         if let Some(&idx) = pending.lookup.get(digest) {
-                            pending.writer.flush()?;
-                            // Open the temporary pack while holding the state lock. A cloned
-                            // handle may flush immediately after we release it, renaming this
-                            // path; the open file descriptor remains valid across that rename.
+                            // Flush the buffer only when the node is not yet in the file.
+                            if pending.flushed_end < pending.end {
+                                pending.writer.flush()?;
+                                pending.flushed_end = pending.end;
+                            }
+                            // Open the temporary pack while holding the state lock (once per
+                            // pending pack). A cloned handle may flush immediately after we
+                            // release it, renaming this path; the open file descriptor
+                            // remains valid across that rename.
+                            if pending.reader.is_none() {
+                                pending.reader = Some(Arc::new(File::open(&pending.path)?));
+                            }
                             Some((
-                                Arc::new(File::open(&pending.path)?),
+                                pending.reader.clone().expect("opened above"),
                                 pending.entries[idx].1.clone(),
                             ))
                         } else {

@@ -1050,6 +1050,31 @@ pub struct NetworkDeltaReport {
     pub diagnostics: NetworkDiagnostics,
 }
 
+/// First-seen (pre-batch) and latest decision of one entity within a batch.
+#[derive(Clone, Debug)]
+struct DecisionTrack {
+    prior: Option<WorldTuple>,
+    last: Option<SettledDecision>,
+}
+
+/// In-flight state of a batch applied as chunks ([`WorldNetwork::begin_batch`]).
+#[derive(Clone, Debug, Default)]
+pub struct BatchCtx {
+    report: NetworkDeltaReport,
+    diagnostics: NetworkDiagnostics,
+    total_work: u64,
+    total_matches: u64,
+    decisions: BTreeMap<(String, String), DecisionTrack>,
+    chunks: usize,
+}
+
+impl BatchCtx {
+    /// Chunks applied so far.
+    pub fn chunks(&self) -> usize {
+        self.chunks
+    }
+}
+
 /// The maintained operator network running bounded incremental evaluations (ADR-0046 §3.5, §3.7).
 #[derive(Clone, Debug)]
 pub struct WorldNetwork {
@@ -1282,6 +1307,18 @@ impl WorldNetwork {
                 _ => {}
             }
         }
+        Ok(n)
+    }
+
+    /// Write all not-yet-persisted state ([`Self::persist_state`]) and replace every
+    /// persisted trie by its `(root, len)` store reference, dropping the hydrated nodes
+    /// and the support caches. Roots are unchanged. Returns the objects written. Only
+    /// valid at a quiescent point (between chunks of a batch, never inside
+    /// [`Self::apply_chunk`]); the caller decides when to flush the store.
+    pub fn persist_and_dehydrate_in_place(&mut self) -> Result<usize, WorldError> {
+        let n = self.persist_state()?;
+        let d = self.dehydrated()?;
+        *self = d;
         Ok(n)
     }
 
@@ -1933,18 +1970,50 @@ impl WorldNetwork {
     /// As [`Self::apply_ops_staged_bounded`], reading pre-batch base facts through `base`.
     /// Required for a network restored from persisted state, which holds no base copy; a
     /// resident network ignores it. `base` must reflect the facts *before* `ops`.
+    ///
+    /// Exactly one chunk: [`Self::begin_batch`], [`Self::apply_chunk`], [`Self::finish_batch`].
     pub fn apply_ops_staged_view(
         &mut self,
         ops: &[WorldBatchOp],
         limits: &NetworkLimits,
         base: Option<&BaseLookup<'_>>,
     ) -> Result<NetworkDeltaReport, WorldError> {
-        let _scope = self.state.trace_scope("apply");
-        let mut report = NetworkDeltaReport {
-            revision: self.current_revision + 1,
-            ops_applied: ops.len(),
+        let mut ctx = self.begin_batch();
+        self.apply_chunk(&mut ctx, ops, limits, base)?;
+        Ok(self.finish_batch(ctx))
+    }
+
+    /// Start a batch that is applied as one or more contiguous chunks of its normalized
+    /// operations (CPD). The chunks together must be exactly the batch's operations, in
+    /// order; the result is independent of where the chunk boundaries fall.
+    pub fn begin_batch(&self) -> BatchCtx {
+        BatchCtx {
+            report: NetworkDeltaReport {
+                revision: self.current_revision + 1,
+                ..Default::default()
+            },
             ..Default::default()
-        };
+        }
+    }
+
+    /// Apply one contiguous slice of a batch (operator network, frontier and decision
+    /// tree); see [`Self::begin_batch`]. Does not advance the revision and does not
+    /// report settlements: [`Self::finish_batch`] does, from the net change over all chunks.
+    /// On `Err` the network is left in an unspecified state: discard it.
+    pub fn apply_chunk(
+        &mut self,
+        ctx: &mut BatchCtx,
+        ops: &[WorldBatchOp],
+        limits: &NetworkLimits,
+        base: Option<&BaseLookup<'_>>,
+    ) -> Result<(), WorldError> {
+        let _scope = self.state.trace_scope("apply");
+        ctx.chunks += 1;
+        let mut report = std::mem::take(&mut ctx.report);
+        report.ops_applied += ops.len();
+        let mut diagnostics = std::mem::take(&mut ctx.diagnostics);
+        let mut total_work: u64 = ctx.total_work;
+        let mut total_matches: u64 = ctx.total_matches;
 
         let mut ready_operators: std::collections::VecDeque<OperatorId> =
             std::collections::VecDeque::new();
@@ -1953,9 +2022,6 @@ impl WorldNetwork {
             OperatorId,
             std::collections::VecDeque<OperatorWorkItem>,
         > = BTreeMap::new();
-        let mut diagnostics = NetworkDiagnostics::default();
-        let mut total_work: u64 = 0;
-        let mut total_matches: u64 = 0;
 
         let enqueue =
             |op: OperatorId,
@@ -2707,6 +2773,12 @@ impl WorldNetwork {
         // Buckets are read once, edited in memory across all deltas of the batch, and
         // written back once per entity (`None`: the entity has no live candidate).
         let mut staged_buckets: BTreeMap<FrontierKey, Option<FrontierBucket>> = BTreeMap::new();
+        // Globally retract-first: every relation's netted retractions, then every
+        // insertion (stable within each class). A candidate's value can then never meet
+        // a stale support from another relation, so the outcome does not depend on the
+        // order relations are visited in or on where chunk boundaries fall (ADR-0046
+        // CPD, H4). Batches that succeed produce the same state as before.
+        let mut frontier_work: Vec<(&DecideBlock, &TupleDelta)> = Vec::new();
         for (relation, rel_deltas) in &relation_deltas {
             for decide_name in self
                 .decision_subscribers
@@ -2716,169 +2788,170 @@ impl WorldNetwork {
             {
                 let decide = &self.decides[decide_name];
                 for delta in net_effect(rel_deltas) {
-                    let is_ins = delta.is_insert();
-                    let (tuple, deriv) = match delta {
-                        TupleDelta::Insert { tuple, derivation }
-                        | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
+                    frontier_work.push((decide, delta));
+                }
+            }
+        }
+        frontier_work.sort_by_key(|(_, d)| d.is_insert());
+        for (decide, delta) in frontier_work {
+            let is_ins = delta.is_insert();
+            let (tuple, deriv) = match delta {
+                TupleDelta::Insert { tuple, derivation }
+                | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
+            };
+
+            let mut eval_tuple = tuple.clone();
+            for (k, v) in &tuple.fields {
+                eval_tuple.insert(format!("{}.{k}", decide.binder), v.clone());
+            }
+
+            for (p_idx, propose) in decide.proposals.iter().enumerate() {
+                let entity_id = entity_id_for(&eval_tuple, &decide.binder, &decide.per_field)?;
+                touched_entities.insert((decide.name.clone(), entity_id.clone()));
+
+                if is_ins {
+                    let compiled = decide.compiled_proposals.get(p_idx);
+                    let (guard_passed, val) = if let Some(compiled) = compiled {
+                        let bindings = scalar_bindings(&eval_tuple)?;
+                        diagnostics.expressions_evaluated += 1;
+                        if limits
+                            .max_expressions
+                            .is_some_and(|max| diagnostics.expressions_evaluated > max)
+                        {
+                            return Err(WorldError::BudgetExhausted);
+                        }
+                        let guard_l3 = compiled
+                            .guard
+                            .eval(&bindings)
+                            .map_err(WorldError::NetworkError)?;
+                        let guard_passed = match guard_l3 {
+                            brix_lower::l3_v2::L3ValueV2::Bool(b) => b,
+                            other => {
+                                return Err(WorldError::NetworkError(format!(
+                                    "expected boolean, got {other:?}"
+                                )))
+                            }
+                        };
+                        if guard_passed {
+                            diagnostics.expressions_evaluated += 1;
+                            if limits
+                                .max_expressions
+                                .is_some_and(|max| diagnostics.expressions_evaluated > max)
+                            {
+                                return Err(WorldError::BudgetExhausted);
+                            }
+                            let val_l3 = compiled
+                                .value
+                                .eval(&bindings)
+                                .map_err(WorldError::NetworkError)?;
+                            let val = Value::from_scalar(val_l3)?;
+                            (true, Some(val))
+                        } else {
+                            (false, None)
+                        }
+                    } else {
+                        diagnostics.expressions_evaluated += 1;
+                        if limits
+                            .max_expressions
+                            .is_some_and(|max| diagnostics.expressions_evaluated > max)
+                        {
+                            return Err(WorldError::BudgetExhausted);
+                        }
+                        let guard_passed =
+                            eval_expr(&propose.guard, &eval_tuple, &self.functions)?.as_bool()?;
+                        if guard_passed {
+                            diagnostics.expressions_evaluated += 1;
+                            if limits
+                                .max_expressions
+                                .is_some_and(|max| diagnostics.expressions_evaluated > max)
+                            {
+                                return Err(WorldError::BudgetExhausted);
+                            }
+                            let val = eval_expr(&propose.value, &eval_tuple, &self.functions)?;
+                            (true, Some(val))
+                        } else {
+                            (false, None)
+                        }
                     };
 
-                    let mut eval_tuple = tuple.clone();
-                    for (k, v) in &tuple.fields {
-                        eval_tuple.insert(format!("{}.{k}", decide.binder), v.clone());
-                    }
+                    if guard_passed {
+                        let val = val.unwrap();
+                        let cal_key = compute_candidate_calendar_key(
+                            0,
+                            propose.priority,
+                            &decide.name,
+                            &entity_id,
+                            &propose.name,
+                            &val,
+                        );
 
-                    for (p_idx, propose) in decide.proposals.iter().enumerate() {
-                        let entity_id =
-                            entity_id_for(&eval_tuple, &decide.binder, &decide.per_field)?;
-                        touched_entities.insert((decide.name.clone(), entity_id.clone()));
-
-                        if is_ins {
-                            let compiled = decide.compiled_proposals.get(p_idx);
-                            let (guard_passed, val) = if let Some(compiled) = compiled {
-                                let bindings = scalar_bindings(&eval_tuple)?;
-                                diagnostics.expressions_evaluated += 1;
-                                if limits
-                                    .max_expressions
-                                    .is_some_and(|max| diagnostics.expressions_evaluated > max)
-                                {
-                                    return Err(WorldError::BudgetExhausted);
-                                }
-                                let guard_l3 = compiled
-                                    .guard
-                                    .eval(&bindings)
-                                    .map_err(WorldError::NetworkError)?;
-                                let guard_passed = match guard_l3 {
-                                    brix_lower::l3_v2::L3ValueV2::Bool(b) => b,
-                                    other => {
-                                        return Err(WorldError::NetworkError(format!(
-                                            "expected boolean, got {other:?}"
-                                        )))
-                                    }
-                                };
-                                if guard_passed {
-                                    diagnostics.expressions_evaluated += 1;
-                                    if limits
-                                        .max_expressions
-                                        .is_some_and(|max| diagnostics.expressions_evaluated > max)
-                                    {
-                                        return Err(WorldError::BudgetExhausted);
-                                    }
-                                    let val_l3 = compiled
-                                        .value
-                                        .eval(&bindings)
-                                        .map_err(WorldError::NetworkError)?;
-                                    let val = Value::from_scalar(val_l3)?;
-                                    (true, Some(val))
-                                } else {
-                                    (false, None)
-                                }
-                            } else {
-                                diagnostics.expressions_evaluated += 1;
-                                if limits
-                                    .max_expressions
-                                    .is_some_and(|max| diagnostics.expressions_evaluated > max)
-                                {
-                                    return Err(WorldError::BudgetExhausted);
-                                }
-                                let guard_passed =
-                                    eval_expr(&propose.guard, &eval_tuple, &self.functions)?
-                                        .as_bool()?;
-                                if guard_passed {
-                                    diagnostics.expressions_evaluated += 1;
-                                    if limits
-                                        .max_expressions
-                                        .is_some_and(|max| diagnostics.expressions_evaluated > max)
-                                    {
-                                        return Err(WorldError::BudgetExhausted);
-                                    }
-                                    let val =
-                                        eval_expr(&propose.value, &eval_tuple, &self.functions)?;
-                                    (true, Some(val))
-                                } else {
-                                    (false, None)
-                                }
-                            };
-
-                            if guard_passed {
-                                let val = val.unwrap();
-                                let cal_key = compute_candidate_calendar_key(
-                                    0,
-                                    propose.priority,
-                                    &decide.name,
-                                    &entity_id,
-                                    &propose.name,
-                                    &val,
-                                );
-
-                                let store = &self.state;
-                                let fk = FrontierKey::new(&decide.name, &entity_id);
-                                if !staged_buckets.contains_key(&fk) {
-                                    let loaded = self.candidate_frontier.bucket(&fk, store)?;
-                                    staged_buckets.insert(fk.clone(), loaded);
-                                }
-                                let bucket = staged_buckets
-                                    .get_mut(&fk)
-                                    .expect("bucket staged above")
-                                    .get_or_insert_with(Default::default);
-                                let ck = CandKey::new(&decide.name, &entity_id, &propose.name);
-                                match bucket.0.get_mut(&propose.name) {
-                                    Some(rec) => {
-                                        if rec.head.value != val {
-                                            return Err(WorldError::NetworkError(format!(
-                                                "conflicting support values for decide '{}' \
+                        let store = &self.state;
+                        let fk = FrontierKey::new(&decide.name, &entity_id);
+                        if !staged_buckets.contains_key(&fk) {
+                            let loaded = self.candidate_frontier.bucket(&fk, store)?;
+                            staged_buckets.insert(fk.clone(), loaded);
+                        }
+                        let bucket = staged_buckets
+                            .get_mut(&fk)
+                            .expect("bucket staged above")
+                            .get_or_insert_with(Default::default);
+                        let ck = CandKey::new(&decide.name, &entity_id, &propose.name);
+                        match bucket.0.get_mut(&propose.name) {
+                            Some(rec) => {
+                                if rec.head.value != val {
+                                    return Err(WorldError::NetworkError(format!(
+                                        "conflicting support values for decide '{}' \
                                                  entity '{entity_id}' candidate '{}': {:?} vs \
                                                  {val:?}",
-                                                decide.name, propose.name, rec.head.value
-                                            )));
-                                        }
-                                        self.candidate_frontier.add_support(
-                                            &ck,
-                                            rec,
-                                            deriv.c.clone(),
-                                            store,
-                                        )?;
-                                    }
-                                    None => {
-                                        report.candidates_inserted += 1;
-                                        bucket.0.insert(
-                                            propose.name.clone(),
-                                            CandidateRec {
-                                                head: CandidateHead {
-                                                    priority: propose.priority,
-                                                    phase: 0,
-                                                    value: val,
-                                                    calendar_key: cal_key,
-                                                },
-                                                supports: SupportRef::Inline(deriv.c.clone()),
-                                            },
-                                        );
-                                    }
+                                        decide.name, propose.name, rec.head.value
+                                    )));
                                 }
+                                self.candidate_frontier.add_support(
+                                    &ck,
+                                    rec,
+                                    deriv.c.clone(),
+                                    store,
+                                )?;
                             }
-                        } else {
-                            let store = &self.state;
-                            let fk = FrontierKey::new(&decide.name, &entity_id);
-                            if !staged_buckets.contains_key(&fk) {
-                                let loaded = self.candidate_frontier.bucket(&fk, store)?;
-                                staged_buckets.insert(fk.clone(), loaded);
+                            None => {
+                                report.candidates_inserted += 1;
+                                bucket.0.insert(
+                                    propose.name.clone(),
+                                    CandidateRec {
+                                        head: CandidateHead {
+                                            priority: propose.priority,
+                                            phase: 0,
+                                            value: val,
+                                            calendar_key: cal_key,
+                                        },
+                                        supports: SupportRef::Inline(deriv.c.clone()),
+                                    },
+                                );
                             }
-                            let slot = staged_buckets.get_mut(&fk).expect("bucket staged above");
-                            if let Some(bucket) = slot.as_mut() {
-                                if let Some(rec) = bucket.0.get_mut(&propose.name) {
-                                    let ck = CandKey::new(&decide.name, &entity_id, &propose.name);
-                                    let remaining = self.candidate_frontier.remove_support(
-                                        &ck,
-                                        rec,
-                                        &deriv.c.digest(),
-                                        store,
-                                    )?;
-                                    if remaining == 0 {
-                                        bucket.0.remove(&propose.name);
-                                        report.candidates_retracted += 1;
-                                        if bucket.0.is_empty() {
-                                            *slot = None;
-                                        }
-                                    }
+                        }
+                    }
+                } else {
+                    let store = &self.state;
+                    let fk = FrontierKey::new(&decide.name, &entity_id);
+                    if !staged_buckets.contains_key(&fk) {
+                        let loaded = self.candidate_frontier.bucket(&fk, store)?;
+                        staged_buckets.insert(fk.clone(), loaded);
+                    }
+                    let slot = staged_buckets.get_mut(&fk).expect("bucket staged above");
+                    if let Some(bucket) = slot.as_mut() {
+                        if let Some(rec) = bucket.0.get_mut(&propose.name) {
+                            let ck = CandKey::new(&decide.name, &entity_id, &propose.name);
+                            let remaining = self.candidate_frontier.remove_support(
+                                &ck,
+                                rec,
+                                &deriv.c.digest(),
+                                store,
+                            )?;
+                            if remaining == 0 {
+                                bucket.0.remove(&propose.name);
+                                report.candidates_retracted += 1;
+                                if bucket.0.is_empty() {
+                                    *slot = None;
                                 }
                             }
                         }
@@ -2895,24 +2968,28 @@ impl WorldNetwork {
                 None => self.settlement_of(&decide, &entity)?,
             };
 
+            // The pre-batch value is the tree's value the first time any chunk touches
+            // the entity; the batch's settlement delta is last-vs-prior (H1), not a merge
+            // of per-chunk reports.
+            let current = self.decision_tree.get(&key, &self.state)?;
+            let track = ctx
+                .decisions
+                .entry((decide.clone(), entity.clone()))
+                .or_insert_with(|| DecisionTrack {
+                    prior: current.clone(),
+                    last: None,
+                });
             if let Some(decision) = settlement {
                 let tuple = decision_tuple(&decision);
-                if self.decision_tree.get(&key, &self.state)?.as_ref() == Some(&tuple) {
-                    continue;
+                if current.as_ref() != Some(&tuple) {
+                    self.decision_tree = self.decision_tree.upsert(key, tuple, &self.state)?;
                 }
-                self.decision_tree = self.decision_tree.upsert(key, tuple, &self.state)?;
-                report
-                    .settlements
-                    .entry(decide)
-                    .or_default()
-                    .insert(entity, decision);
-            } else if self.decision_tree.get(&key, &self.state)?.is_some() {
-                self.decision_tree = self.decision_tree.remove(&key, &self.state)?;
-                report
-                    .removed_settlements
-                    .entry(decide)
-                    .or_default()
-                    .insert(entity);
+                track.last = Some(decision);
+            } else {
+                if current.is_some() {
+                    self.decision_tree = self.decision_tree.remove(&key, &self.state)?;
+                }
+                track.last = None;
             }
         }
 
@@ -2921,9 +2998,47 @@ impl WorldNetwork {
                 .put_bucket(fk, bucket, &self.state)?;
         }
 
+        ctx.report = report;
+        ctx.diagnostics = diagnostics;
+        ctx.total_work = total_work;
+        ctx.total_matches = total_matches;
+        Ok(())
+    }
+
+    /// End a batch: report the net settlement change over all chunks and advance the
+    /// revision. For a single chunk this is exactly what the unchunked path reported.
+    pub fn finish_batch(&mut self, ctx: BatchCtx) -> NetworkDeltaReport {
+        let BatchCtx {
+            mut report,
+            diagnostics,
+            decisions,
+            ..
+        } = ctx;
+        for ((decide, entity), track) in decisions {
+            match track.last {
+                Some(decision) => {
+                    if track.prior.as_ref() != Some(&decision_tuple(&decision)) {
+                        report
+                            .settlements
+                            .entry(decide)
+                            .or_default()
+                            .insert(entity, decision);
+                    }
+                }
+                None => {
+                    if track.prior.is_some() {
+                        report
+                            .removed_settlements
+                            .entry(decide)
+                            .or_default()
+                            .insert(entity);
+                    }
+                }
+            }
+        }
         report.diagnostics = diagnostics;
         self.current_revision += 1;
-        Ok(report)
+        report
     }
 
     /// Number of settlements in the persisted decision trie.
