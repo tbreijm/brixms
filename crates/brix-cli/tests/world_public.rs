@@ -343,3 +343,91 @@ fn stdio_world_methods_dispatch_real_lifecycle_calls() {
         .unwrap()
         .is_empty());
 }
+
+#[test]
+fn world_results_report_how_the_world_was_opened() {
+    let scratch = Scratch::new("openinfo");
+    let world = scratch.path().join("world");
+    parse_stdout(
+        binary()
+            .args(["world", "init", "--json"])
+            .arg(&world)
+            .arg(linked_program())
+            .output()
+            .unwrap(),
+    );
+    let batch_file = scratch.path().join("batch.json");
+    fs::write(&batch_file, serde_json::to_vec(&batch()).unwrap()).unwrap();
+    parse_stdout(
+        binary()
+            .args(["world", "batch", "--json"])
+            .arg(&world)
+            .arg(&batch_file)
+            .output()
+            .unwrap(),
+    );
+
+    let decisions = parse_stdout(
+        binary()
+            .args(["world", "decide", "--json"])
+            .arg(&world)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(decisions["open_mode"], "restored");
+    assert_eq!(decisions["state_source"], "revision");
+    assert_eq!(decisions["tail_batches"], 0);
+    assert!(decisions["open_ms"].is_u64());
+
+    let forced = parse_stdout(
+        binary()
+            .args(["world", "decide", "--json", "--replay"])
+            .arg(&world)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(forced["open_mode"], "replay");
+    assert_eq!(forced["replay_reason"], "forced");
+    assert_eq!(forced["settlements"], decisions["settlements"]);
+
+    let check = parse_stdout(
+        binary()
+            .args(["world", "open-check", "--json", "--verify-state"])
+            .arg(&world)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(check["command"], "world open-check");
+    assert_eq!(check["open_mode"], "restored");
+    assert_eq!(check["verified_state"], true);
+    let refreshed = parse_stdout(
+        binary()
+            .args(["world", "open-check", "--json", "--refresh-state"])
+            .arg(&world)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(refreshed["refreshed_state"], true);
+    assert!(world.join("state-cache.json").exists());
+
+    // The same through the stdio server.
+    let mut child = binary()
+        .args(["serve", "--stdio"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    writeln!(
+        child.stdin.as_mut().unwrap(),
+        "{}",
+        json!({"id":1,"method":"world.open-check","params":{"dir":world,"verify_state":true}})
+    )
+    .unwrap();
+    drop(child.stdin.take());
+    let out = child.wait_with_output().unwrap();
+    let line: Value =
+        serde_json::from_slice(out.stdout.split(|b| *b == b'\n').next().unwrap()).unwrap();
+    assert_eq!(line["ok"], true, "{line}");
+    assert_eq!(line["result"]["open_mode"], "restored");
+    assert_eq!(line["result"]["verified_state"], true);
+}
