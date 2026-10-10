@@ -6,6 +6,7 @@
 
 pub mod audit;
 pub mod batch;
+pub mod chunk_policy;
 pub mod codec;
 pub mod compact_deriv;
 pub mod decision_codec;
@@ -32,15 +33,19 @@ pub mod types;
 pub mod verify;
 
 pub use batch::{WorldBatch, WorldBatchOp, BATCH_SCHEMA};
+pub use chunk_policy::{
+    ChunkDecision, ChunkInput, ChunkPolicy, FixedChunkPolicy, HeuristicChunkPolicy,
+    DEFAULT_APPLY_HYDRATED_BYTES, MIN_CHUNK_OPS,
+};
 pub use codec::{encode_secondary_key, extract_indexed_field, TupleRecord, TUPLE_MAGIC_V1};
 pub use error::{CrashPoint, WorldError};
 pub use manifest::{RelationDecl, WorldManifest, WORLD_PROFILE, WORLD_SCHEMA};
 pub use network::{
     compute_candidate_calendar_key, compute_decision_root, decision_key, decision_tuple,
-    decode_settled_decision, encode_decision_delta, eval_expr, BaseLookup, CandidateEntry,
-    CandidateExplanation, DecideBlock, DecisionExplanation, DerivationId, IntermediateTuple,
-    NetworkDeltaReport, OperatorState, SettledDecision, TupleDelta, Value, WorldNetwork,
-    WorldNetworkState,
+    decode_settled_decision, encode_decision_delta, eval_expr, BaseLookup, BatchCtx,
+    CandidateEntry, CandidateExplanation, DecideBlock, DecisionExplanation, DerivationId,
+    IntermediateTuple, NetworkDeltaReport, OperatorState, SettledDecision, TupleDelta, Value,
+    WorldNetwork, WorldNetworkState,
 };
 pub use network_state::{
     NetworkStateHeader, OperatorRoots, ValidityKey, NETWORK_LOWERING_VERSION, NETWORK_STATE_SCHEMA,

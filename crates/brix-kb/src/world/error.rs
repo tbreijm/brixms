@@ -32,6 +32,11 @@ pub enum CrashPoint {
     SidecarAfterRename,
     /// Settlement checkpoint refresh: written to its temp file only, not renamed into place.
     CheckpointAfterTmpBeforeRename,
+    /// Chunked apply: a chunk's state was persisted and dehydrated in place; the next
+    /// chunk has not started.
+    AfterChunkPersistedBeforeNextChunk,
+    /// Chunked apply: the intermediate pack was published (the batch is still uncommitted).
+    AfterIntermediatePackFlush,
 }
 
 impl fmt::Display for CrashPoint {
@@ -61,6 +66,12 @@ impl fmt::Display for CrashPoint {
                 write!(f, "crash after state-cache flush before rename")
             }
             Self::SidecarAfterRename => write!(f, "crash after state-cache rename"),
+            Self::AfterChunkPersistedBeforeNextChunk => {
+                write!(f, "crash after a chunk was persisted before the next chunk")
+            }
+            Self::AfterIntermediatePackFlush => {
+                write!(f, "crash after an intermediate pack flush mid-batch")
+            }
             Self::CheckpointAfterTmpBeforeRename => {
                 write!(
                     f,

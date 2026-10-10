@@ -116,6 +116,10 @@ pub struct WorldManifest {
     /// Decoded-node cache budget for persisted network state, in bytes. Operational
     /// tuning only: not part of the manifest digest. `None` uses the default.
     pub node_cache_bytes: Option<u64>,
+    /// Estimated hydrated bytes a single batch may hold before it is applied in persisted
+    /// and dehydrated chunks (CPD). Operational tuning only: not part of the manifest
+    /// digest and never changes a root. `None` uses the default; `Some(0)` disables.
+    pub apply_hydrated_bytes: Option<u64>,
 }
 
 impl WorldManifest {
@@ -138,6 +142,7 @@ impl WorldManifest {
             program_required: false,
             relations: rel_map,
             node_cache_bytes: None,
+            apply_hydrated_bytes: None,
         }
     }
 
@@ -184,6 +189,9 @@ impl WorldManifest {
         });
         if let (Some(n), Some(obj)) = (self.node_cache_bytes, v.as_object_mut()) {
             obj.insert("node_cache_bytes".to_string(), json!(n));
+        }
+        if let (Some(n), Some(obj)) = (self.apply_hydrated_bytes, v.as_object_mut()) {
+            obj.insert("apply_hydrated_bytes".to_string(), json!(n));
         }
         v
     }
@@ -263,6 +271,7 @@ impl WorldManifest {
                 .unwrap_or(false),
             relations,
             node_cache_bytes: v.get("node_cache_bytes").and_then(|x| x.as_u64()),
+            apply_hydrated_bytes: v.get("apply_hydrated_bytes").and_then(|x| x.as_u64()),
         };
         manifest.validate()?;
         Ok(manifest)
