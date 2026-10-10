@@ -16,10 +16,10 @@ use super::codec::{encode_secondary_key, extract_indexed_field, TupleRecord};
 use super::error::{CrashPoint, WorldError};
 use super::manifest::{RelationDecl, WorldManifest, WORLD_PROFILE};
 use super::network::{DecisionExplanation, SettledDecision, WorldNetwork};
-use super::network_state::{NetworkStateHeader, ValidityKey};
+use super::network_state::{Loaded, NetworkStateHeader, ValidityKey};
 use super::oracle::DiffEvent;
 use super::paths::WorldPaths;
-use super::revision::{SettlementStatus, WorldRevision};
+use super::revision::{SettlementStatus, WorldRevision, REVISION_SCHEMA_V3};
 use super::staging::StagingManager;
 use super::types::{WorldCursor, WorldKey, WorldTuple};
 
@@ -667,8 +667,10 @@ pub struct WorldSession {
     pub replay_reason: Option<&'static str>,
     /// Wall-clock milliseconds `open` took.
     pub open_ms: u64,
-    /// Committed batches whose effects open had to re-derive: `0` when restored, the whole
-    /// history length when replayed.
+    /// Committed batches applied on top of the persisted network state at open. Every
+    /// commit persists its own state, so this is `0` today; a replay rebuilds the network
+    /// from the resident base facts, not from batches, and also reports `0` (see
+    /// `open_mode` and `replay_reason`). Reserved for checkpointed state.
     pub tail_batches: u64,
     /// The `network_state_root` of the HEAD revision, if it has one.
     pub network_state_root: Option<Digest>,
@@ -1035,12 +1037,14 @@ impl WorldSession {
             })
     }
 
-    /// The validity key under which this binary would persist (and accept) network state
-    /// for this world.
-    pub fn validity_key(&self) -> ValidityKey {
+    /// The validity key under which this binary would persist (and accept) state of
+    /// `network` in this world. The network contributes its own structural fingerprint, so
+    /// state is never filed under a program other than the one that computed it.
+    pub fn validity_key_for(&self, network: &WorldNetwork) -> ValidityKey {
         ValidityKey::current(
             self.manifest.program_digest,
             self.exec_profile.as_ref().map(ExecProfileV1::digest),
+            network.fingerprint(),
         )
     }
 
@@ -1056,42 +1060,43 @@ impl WorldSession {
             "forced"
         } else if let Some(root) = rev.network_state_root {
             let store = StateStore::from_file(self.node_store.clone(), self.node_cache_budget());
-            let header = NetworkStateHeader::read(&store, &root)?;
-            let key = self.validity_key();
-            if header.validity.program_digest != key.program_digest {
-                return Err(WorldError::ValidityMismatch(
-                    "persisted network state belongs to a different program".into(),
-                ));
-            }
-            if header.validity != key {
-                // Produced by another execution profile, lowering or codec version: the
-                // state is sound but not reusable by this binary. Rebuild.
-                "validity-key"
-            } else {
-                let decision_ok = match rev.decision_root {
-                    Some(expected) => header.decision.root == expected,
-                    None => header.decision.len == 0,
-                };
-                if !decision_ok {
-                    return Err(WorldError::ValidityMismatch(
-                        "persisted network state decision root does not match the revision".into(),
-                    ));
+            let key = self.validity_key_for(&network);
+            match NetworkStateHeader::load(&store, &root, &key)? {
+                // Produced under another schema, execution profile, program structure or
+                // codec/lowering version: sound but not reusable by this binary. Rebuild.
+                Loaded::Stale(why) => why,
+                Loaded::Header(header) => {
+                    let decision_ok = match rev.decision_root {
+                        Some(expected) => header.decision.root == expected,
+                        None => header.decision.len == 0,
+                    };
+                    if !decision_ok {
+                        return Err(WorldError::ValidityMismatch(
+                            "persisted network state decision root does not match the revision"
+                                .into(),
+                        ));
+                    }
+                    network.attach_state_store(store);
+                    network.restore_state(&header)?;
+                    network.current_revision = self.current_revision;
+                    self.network = Some(network);
+                    self.open_mode = OpenMode::Restored;
+                    self.replay_reason = None;
+                    self.tail_batches = 0;
+                    return Ok(());
                 }
-                network.attach_state_store(store);
-                network.restore_state(&header)?;
-                network.current_revision = self.current_revision;
-                self.network = Some(network);
-                self.open_mode = OpenMode::Restored;
-                self.tail_batches = 0;
-                return Ok(());
             }
+        } else if rev.schema == REVISION_SCHEMA_V3 {
+            // A revision that claims restorable state must name it; treating the absence as
+            // a legacy world would hide a damaged or truncated record.
+            return Err(WorldError::InvalidSchema(
+                "revision@3 of an executable world has no network_state_root".into(),
+            ));
         } else {
             "legacy-revision"
         };
         self.set_network(network)?;
-        self.open_mode = OpenMode::Replay;
         self.replay_reason = Some(reason);
-        self.tail_batches = self.current_revision;
         Ok(())
     }
 
@@ -1483,7 +1488,8 @@ impl WorldSession {
         // same pack as everything it names and flushed with it, before HEAD can move.
         let network_state_root = staged_network.as_ref().map(|sn| {
             objects_written += 1;
-            sn.state_header(self.validity_key()).write(sn.state_store())
+            sn.state_header(self.validity_key_for(sn))
+                .write(sn.state_store())
         });
 
         // Crash injection seam: every object written, none flushed.
@@ -2066,6 +2072,9 @@ impl WorldSession {
             network.apply_ops(&ops)?;
         }
         network.current_revision = self.current_revision;
+        self.open_mode = OpenMode::Replay;
+        self.replay_reason = Some("set-network");
+        self.tail_batches = 0;
         // Replay built tries that were never persisted; write them once and drop the
         // in-memory copies so the first commit does not rewrite O(world).
         network.persist_state()?;
@@ -2157,7 +2166,19 @@ impl WorldSession {
             let mut session = Self::open(&root)?;
             let network = WorldNetwork::from_program(program)?;
             validate_program_relations(&session.manifest, &network)?;
-            session.set_network(network)?;
+            match &session.network {
+                // `open` already installed the world's own program (restored or replayed).
+                // The given program must be that program; installing a different one would
+                // file its state under the manifest's program digest.
+                Some(existing) => {
+                    if existing.fingerprint() != network.fingerprint() {
+                        return Err(WorldError::InvalidSchema(
+                            "program differs from the program this world is bound to".into(),
+                        ));
+                    }
+                }
+                None => session.set_network(network)?,
+            }
             return Ok(session);
         }
 
@@ -2267,11 +2288,11 @@ impl WorldSession {
             return Ok(());
         };
         let fresh = self.replay_network()?;
-        let key = self.validity_key();
+        let key = self.validity_key_for(net);
         let (have, want) = (net.state_header(key.clone()), fresh.state_header(key));
         if have != want {
-            return Err(WorldError::NetworkError(format!(
-                "persisted network state differs from replay: session={have:?} replay={want:?}"
+            return Err(WorldError::StateMismatch(format!(
+                "session={have:?} replay={want:?}"
             )));
         }
         Ok(())

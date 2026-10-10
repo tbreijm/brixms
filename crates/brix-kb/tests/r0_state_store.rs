@@ -221,7 +221,6 @@ impl Drop for TempDir {
     }
 }
 
-
 /// Every observable root and view of `net` equals the never-persisted `control`'s, and the
 /// decision root is the canonical one for the settlements.
 fn assert_same_state(net: &WorldNetwork, control: &WorldNetwork, label: &str) {

@@ -27,7 +27,7 @@ use brix_lower::relation_dag::OperatorId;
 use soc_core::store::{NodeStore, StorageError};
 
 use super::error::WorldError;
-use super::state_codec::{read_digest, read_op, read_string, StateCodec, StateCodecError, SubRoot};
+use super::state_codec::{read_op, read_string, StateCodec, StateCodecError, SubRoot};
 use super::state_store::{StateError, StateStore};
 
 /// Schema tag of the header object.
@@ -41,22 +41,97 @@ pub const NETWORK_LOWERING_VERSION: &str = "brix.world.net-lowering@1";
 /// Everything that must be identical for persisted network state to be reusable.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ValidityKey {
+    /// The world manifest's program closure digest.
     pub program_digest: Digest,
     pub exec_profile_digest: Option<Digest>,
+    /// Structural fingerprint of the network the state was computed by
+    /// ([`super::network::WorldNetwork::fingerprint`]): operator DAG, expressions,
+    /// projections, decide blocks and functions. Differs whenever the program differs, even
+    /// if the manifest does not say so.
+    pub network_fingerprint: Digest,
+    /// Hand-bumped for semantic changes the fingerprint cannot see.
     pub lowering_version: String,
     pub codec_version: String,
+    pub evaluator: String,
+    pub numeric_semantics: String,
 }
 
 impl ValidityKey {
-    /// The key this binary would write for a world bound to `program_digest`.
-    pub fn current(program_digest: Digest, exec_profile_digest: Option<Digest>) -> Self {
+    /// The key this binary would write for a network with `network_fingerprint` in a world
+    /// bound to `program_digest`.
+    pub fn current(
+        program_digest: Digest,
+        exec_profile_digest: Option<Digest>,
+        network_fingerprint: Digest,
+    ) -> Self {
+        let profile = super::session::ExecProfileV1::current_for_network();
         Self {
             program_digest,
             exec_profile_digest,
+            network_fingerprint,
             lowering_version: NETWORK_LOWERING_VERSION.to_string(),
             codec_version: super::state_codec::STATE_CODEC_VERSION.to_string(),
+            evaluator: profile.evaluator,
+            numeric_semantics: profile.numeric_semantics,
         }
     }
+
+    fn write(&self, w: &mut CanonWriter) {
+        w.write_bytes(self.program_digest.as_bytes());
+        put_opt_digest(w, &self.exec_profile_digest);
+        w.write_bytes(self.network_fingerprint.as_bytes());
+        put_str(w, &self.lowering_version);
+        put_str(w, &self.codec_version);
+        put_str(w, &self.evaluator);
+        put_str(w, &self.numeric_semantics);
+    }
+}
+
+/// Plain string read with canon primitives only (the stable header prefix must not depend
+/// on `state_codec`, whose version may be what changed).
+fn prefix_str(r: &mut CanonReader<'_>) -> Result<String, StateCodecError> {
+    let b = r.read_bytes()?;
+    std::str::from_utf8(b)
+        .map(str::to_owned)
+        .map_err(|_| StateCodecError::Canon(brix_canon::CanonError::BadLength))
+}
+
+fn prefix_digest(r: &mut CanonReader<'_>) -> Result<Digest, StateCodecError> {
+    let b = r.read_bytes()?;
+    let arr: [u8; 32] = b
+        .try_into()
+        .map_err(|_| StateCodecError::Canon(brix_canon::CanonError::BadLength))?;
+    Ok(Digest::from_bytes(arr))
+}
+
+fn prefix_opt_digest(r: &mut CanonReader<'_>) -> Result<Option<Digest>, StateCodecError> {
+    match r.read_uint()? {
+        0 => Ok(None),
+        1 => Ok(Some(prefix_digest(r)?)),
+        t => Err(StateCodecError::UnknownTag(t)),
+    }
+}
+
+fn read_validity(r: &mut CanonReader<'_>) -> Result<ValidityKey, StateCodecError> {
+    Ok(ValidityKey {
+        program_digest: prefix_digest(r)?,
+        exec_profile_digest: prefix_opt_digest(r)?,
+        network_fingerprint: prefix_digest(r)?,
+        lowering_version: prefix_str(r)?,
+        codec_version: prefix_str(r)?,
+        evaluator: prefix_str(r)?,
+        numeric_semantics: prefix_str(r)?,
+    })
+}
+
+/// Outcome of loading a header under an expected validity key.
+#[derive(Debug)]
+pub enum Loaded {
+    /// Written under exactly the expected key.
+    Header(NetworkStateHeader),
+    /// Intact but produced under another schema, execution profile, program structure or
+    /// codec/lowering version: not reusable here, the network must be rebuilt.
+    Stale(&'static str),
 }
 
 /// Persisted roots of one stateful operator.
@@ -109,14 +184,6 @@ fn put_opt_digest(w: &mut CanonWriter, d: &Option<Digest>) {
     }
 }
 
-fn get_opt_digest(r: &mut CanonReader<'_>) -> Result<Option<Digest>, StateCodecError> {
-    match r.read_uint()? {
-        0 => Ok(None),
-        1 => Ok(Some(read_digest(r)?)),
-        t => Err(StateCodecError::UnknownTag(t)),
-    }
-}
-
 fn noncanon<T>(msg: &str) -> Result<T, StateCodecError> {
     Err(StateCodecError::NonCanonical(msg.to_string()))
 }
@@ -126,10 +193,7 @@ impl NetworkStateHeader {
     pub fn encode(&self) -> Vec<u8> {
         let mut w = CanonWriter::new();
         put_str(&mut w, NETWORK_STATE_SCHEMA);
-        w.write_bytes(self.validity.program_digest.as_bytes());
-        put_opt_digest(&mut w, &self.validity.exec_profile_digest);
-        put_str(&mut w, &self.validity.lowering_version);
-        put_str(&mut w, &self.validity.codec_version);
+        self.validity.write(&mut w);
         self.decision.state_write(&mut w);
         self.frontier.state_write(&mut w);
         w.write_uint(self.derived.len() as u64);
@@ -161,19 +225,16 @@ impl NetworkStateHeader {
 
     /// The header's content address (the revision's `network_state_root`).
     pub fn digest(&self) -> Digest {
-        Digest::of(Domain::Value, &self.encode())
+        Digest::of(Domain::State, &self.encode())
     }
 
     /// Decode a complete header; trailing bytes and non-canonical orderings are errors.
     pub fn decode(bytes: &[u8]) -> Result<Self, StateCodecError> {
         let mut r = CanonReader::new(bytes);
-        if read_string(&mut r)? != NETWORK_STATE_SCHEMA {
+        if prefix_str(&mut r)? != NETWORK_STATE_SCHEMA {
             return noncanon("network-state schema tag");
         }
-        let program_digest = read_digest(&mut r)?;
-        let exec_profile_digest = get_opt_digest(&mut r)?;
-        let lowering_version = read_string(&mut r)?;
-        let codec_version = read_string(&mut r)?;
+        let validity = read_validity(&mut r)?;
         let decision = SubRoot::state_read(&mut r)?;
         let frontier = SubRoot::state_read(&mut r)?;
 
@@ -216,12 +277,7 @@ impl NetworkStateHeader {
             return Err(StateCodecError::TrailingBytes);
         }
         Ok(Self {
-            validity: ValidityKey {
-                program_digest,
-                exec_profile_digest,
-                lowering_version,
-                codec_version,
-            },
+            validity,
             decision,
             frontier,
             derived,
@@ -232,21 +288,64 @@ impl NetworkStateHeader {
     /// Write the header into the node store (not yet flushed) and return its digest.
     pub fn write(&self, store: &StateStore) -> Digest {
         let bytes = self.encode();
-        let digest = Digest::of(Domain::Value, &bytes);
+        let digest = Digest::of(Domain::State, &bytes);
         let mut s = store.clone();
         s.put_node(digest, bytes);
         digest
     }
 
-    /// Load and verify the header at `digest`. Absence is `MissingState`; bytes that do not
-    /// hash to their address, or do not decode canonically, are `CorruptState`.
-    pub fn read(store: &StateStore, digest: &Digest) -> Result<Self, WorldError> {
-        let bytes = store
-            .get_node(digest)
-            .ok_or(StateError::Storage(StorageError::MissingNode(*digest)))?;
-        if Digest::of(Domain::Value, &bytes) != *digest {
+    /// The verified bytes of the header object at `digest`. Absence is `MissingState`,
+    /// bytes that do not hash to their address are `CorruptState`. The file store reports a
+    /// node it cannot read as absent (deviation #2 in the design notes), so a digest the
+    /// store lists but cannot return is classified as corrupt.
+    fn verified_bytes(store: &StateStore, digest: &Digest) -> Result<Vec<u8>, WorldError> {
+        let Some(bytes) = store.get_node(digest) else {
+            let e = if store.has_node(digest) {
+                StorageError::CorruptedNode(*digest)
+            } else {
+                StorageError::MissingNode(*digest)
+            };
+            return Err(StateError::Storage(e).into());
+        };
+        if Digest::of(Domain::State, &bytes) != *digest {
             return Err(StateError::Storage(StorageError::CorruptedNode(*digest)).into());
         }
+        Ok(bytes)
+    }
+
+    /// Load the header at `digest` and check it against `expected`.
+    ///
+    /// Only a stable prefix (schema tag, validity key) is decoded before the key is
+    /// compared, using canon primitives alone: a header written under another schema or
+    /// codec version is [`Loaded::Stale`], never corruption. A header for a different
+    /// program is a hard `ValidityMismatch`. Everything after the prefix is decoded only
+    /// under an equal key, and any failure there is `CorruptState`.
+    pub fn load(
+        store: &StateStore,
+        digest: &Digest,
+        expected: &ValidityKey,
+    ) -> Result<Loaded, WorldError> {
+        let bytes = Self::verified_bytes(store, digest)?;
+        let corrupt = |e: StateCodecError| WorldError::from(StateError::from(e));
+        let mut r = CanonReader::new(&bytes);
+        if prefix_str(&mut r).map_err(corrupt)? != NETWORK_STATE_SCHEMA {
+            return Ok(Loaded::Stale("schema"));
+        }
+        let validity = read_validity(&mut r).map_err(corrupt)?;
+        if validity.program_digest != expected.program_digest {
+            return Err(WorldError::ValidityMismatch(
+                "persisted network state belongs to a different program".into(),
+            ));
+        }
+        if &validity != expected {
+            return Ok(Loaded::Stale("validity-key"));
+        }
+        Self::decode(&bytes).map(Loaded::Header).map_err(corrupt)
+    }
+
+    /// Load and fully decode the header at `digest`, whatever its validity key.
+    pub fn read(store: &StateStore, digest: &Digest) -> Result<Self, WorldError> {
+        let bytes = Self::verified_bytes(store, digest)?;
         Self::decode(&bytes)
             .map_err(StateError::from)
             .map_err(WorldError::from)
@@ -258,7 +357,7 @@ mod tests {
     use super::*;
 
     fn sample() -> NetworkStateHeader {
-        let d = |n: u8| Digest::of(Domain::Value, &[n]);
+        let d = |n: u8| Digest::of(Domain::State, &[n]);
         let sr = |n: u8, len: u64| SubRoot { root: d(n), len };
         let mut derived = BTreeMap::new();
         derived.insert("a::x".to_string(), sr(1, 3));
@@ -274,7 +373,7 @@ mod tests {
         operators.insert(OperatorId(5), OperatorRoots::Distinct(sr(5, 6)));
         operators.insert(OperatorId(6), OperatorRoots::Group(sr(6, 7)));
         NetworkStateHeader {
-            validity: ValidityKey::current(d(9), Some(d(10))),
+            validity: ValidityKey::current(d(9), Some(d(10)), d(11)),
             decision: sr(7, 8),
             frontier: sr(8, 9),
             derived,
@@ -287,7 +386,7 @@ mod tests {
         let h = sample();
         let bytes = h.encode();
         assert_eq!(NetworkStateHeader::decode(&bytes).unwrap(), h);
-        assert_eq!(h.digest(), Digest::of(Domain::Value, &bytes));
+        assert_eq!(h.digest(), Digest::of(Domain::State, &bytes));
     }
 
     #[test]
@@ -308,10 +407,61 @@ mod tests {
         let mut c = sample();
         c.validity.lowering_version = "other".into();
         assert_ne!(a.digest(), c.digest());
+        let mut e = sample();
+        e.validity.network_fingerprint = Digest::of(Domain::State, b"other");
+        assert_ne!(a.digest(), e.digest());
         let mut d = sample();
         d.operators
             .insert(OperatorId(7), OperatorRoots::Group(SubRoot::empty()));
         assert_ne!(a.digest(), d.digest());
+    }
+
+    #[test]
+    fn load_classifies_stale_foreign_and_corrupt() {
+        let store = StateStore::memory(1 << 20);
+        let h = sample();
+        let d = h.write(&store);
+        assert!(matches!(
+            NetworkStateHeader::load(&store, &d, &h.validity),
+            Ok(Loaded::Header(_))
+        ));
+        let mut other = h.validity.clone();
+        other.network_fingerprint = Digest::of(Domain::State, b"x");
+        assert!(matches!(
+            NetworkStateHeader::load(&store, &d, &other),
+            Ok(Loaded::Stale("validity-key"))
+        ));
+        other.codec_version = "newer".into();
+        assert!(matches!(
+            NetworkStateHeader::load(&store, &d, &other),
+            Ok(Loaded::Stale("validity-key"))
+        ));
+        let mut foreign = h.validity.clone();
+        foreign.program_digest = Digest::of(Domain::State, b"p");
+        assert!(matches!(
+            NetworkStateHeader::load(&store, &d, &foreign),
+            Err(WorldError::ValidityMismatch(_))
+        ));
+        // A future schema tag is stale, whatever follows it.
+        let mut w = CanonWriter::new();
+        put_str(&mut w, "brix.world.network-state@2");
+        w.write_uint(7);
+        let bytes = w.finish();
+        let fd = Digest::of(Domain::State, &bytes);
+        store.clone().put_node(fd, bytes);
+        assert!(matches!(
+            NetworkStateHeader::load(&store, &fd, &h.validity),
+            Ok(Loaded::Stale("schema"))
+        ));
+        // Same key, body damaged after the prefix: corrupt, not stale.
+        let mut bytes = h.encode();
+        bytes.truncate(bytes.len() - 3);
+        let cd = Digest::of(Domain::State, &bytes);
+        store.clone().put_node(cd, bytes);
+        assert!(matches!(
+            NetworkStateHeader::load(&store, &cd, &h.validity),
+            Err(WorldError::CorruptState(_))
+        ));
     }
 
     #[test]
@@ -320,7 +470,7 @@ mod tests {
         let h = sample();
         let d = h.write(&store);
         assert_eq!(NetworkStateHeader::read(&store, &d).unwrap(), h);
-        let missing = Digest::of(Domain::Value, b"nope");
+        let missing = Digest::of(Domain::State, b"nope");
         assert!(matches!(
             NetworkStateHeader::read(&store, &missing),
             Err(WorldError::MissingState(_))
@@ -334,7 +484,7 @@ mod tests {
         ));
         // Garbage that hashes correctly but is not a header is a codec failure.
         let junk = b"not a header".to_vec();
-        let jd = Digest::of(Domain::Value, &junk);
+        let jd = Digest::of(Domain::State, &junk);
         s.put_node(jd, junk);
         assert!(matches!(
             NetworkStateHeader::read(&store, &jd),

@@ -129,6 +129,9 @@ pub enum WorldError {
     /// Persisted network state was produced under a different validity key (program,
     /// execution profile, compiler or codec version) than the one opening it.
     ValidityMismatch(String),
+    /// Persisted network state is intact but differs from a replay of the base facts
+    /// (`WorldSession::verify_state`).
+    StateMismatch(String),
 }
 
 impl fmt::Display for WorldError {
@@ -202,6 +205,7 @@ impl fmt::Display for WorldError {
             Self::CorruptState(e) => write!(f, "corrupt persisted world state: {e}"),
             Self::MissingState(e) => write!(f, "missing persisted world state: {e}"),
             Self::ValidityMismatch(m) => write!(f, "persisted world state validity mismatch: {m}"),
+            Self::StateMismatch(m) => write!(f, "persisted world state differs from replay: {m}"),
         }
     }
 }

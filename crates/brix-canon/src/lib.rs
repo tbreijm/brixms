@@ -84,6 +84,8 @@ pub enum Domain {
     Snapshot,
     /// Generic value digest (canon-encoded values, revision-log entries).
     Value,
+    /// Persisted maintained-network state objects (world network-state header).
+    State,
 }
 
 impl Domain {
@@ -96,6 +98,7 @@ impl Domain {
             Domain::Claim => "claim",
             Domain::Snapshot => "snapshot",
             Domain::Value => "value",
+            Domain::State => "state",
         }
     }
 }

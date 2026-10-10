@@ -1409,6 +1409,27 @@ impl WorldNetwork {
         self.decision_tree.sub_root()
     }
 
+    /// Structural fingerprint of this network: the lowered operator DAG (node kinds, ids,
+    /// keys, expressions, projections), the relation outputs, the decide blocks and the
+    /// functions. Part of the validity key of persisted state, so state computed by a
+    /// different program can never be installed into this one.
+    pub fn fingerprint(&self) -> Digest {
+        use std::fmt::Write;
+        let mut s = String::from("brix.world.net-fingerprint@1\n");
+        let _ = writeln!(s, "{:?}", self.dag.nodes);
+        let _ = writeln!(s, "{:?}", self.dag.relation_outputs);
+        let decides: BTreeMap<_, _> = self.decides.iter().collect();
+        for (name, d) in decides {
+            let _ = writeln!(
+                s,
+                "{name}|{}|{}|{}|{:?}",
+                d.binder, d.source_relation, d.per_field, d.proposals
+            );
+        }
+        let _ = writeln!(s, "{:?}", self.functions);
+        Digest::of(Domain::State, s.as_bytes())
+    }
+
     /// Whether this network keeps its own copy of the base facts (see [`BaseLookup`]).
     pub fn base_resident(&self) -> bool {
         self.base_resident
@@ -2296,7 +2317,6 @@ impl WorldNetwork {
                                     (right_side, left_side)
                                 };
 
-
                                 if !deriv.c.leaf_count_ok(counts) {
                                     return Err(corrupt_derivation());
                                 }
@@ -2318,7 +2338,6 @@ impl WorldNetwork {
                                     own.write(vk.clone(), inner, store)?;
                                 }
                                 let matches = other.read(&vk, store)?.unwrap_or_default();
-
 
                                 let remaining = matches.len();
                                 (delta, is_left, join_key, matches, None, remaining)
@@ -2452,13 +2471,11 @@ impl WorldNetwork {
                             let tuple_key = distinct_key(&tuple);
                             let out_deriv = Derivation::distinct(op_id, tuple_key);
 
-
                             let (old_count, new_count) = if is_ins {
                                 supports.add(tuple.clone(), deriv.c.clone(), store)?
                             } else {
                                 supports.remove(&tuple, &deriv.c.digest(), store)?
                             };
-
 
                             if is_ins {
                                 if old_count == 0 {
@@ -2592,7 +2609,6 @@ impl WorldNetwork {
                             for od in &out_deltas {
                                 let is_ins = od.is_insert();
 
-
                                 let changed = match rel {
                                     // A Distinct output emits only on 0 -> 1 / 1 -> 0 support
                                     // transitions of its own index, which is the relation.
@@ -2611,7 +2627,6 @@ impl WorldNetwork {
                                         }
                                     }
                                 };
-
 
                                 if changed {
                                     if is_ins {
@@ -2691,7 +2706,6 @@ impl WorldNetwork {
                         TupleDelta::Insert { tuple, derivation }
                         | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
                     };
-
 
                     let mut eval_tuple = tuple.clone();
                     for (k, v) in &tuple.fields {
@@ -2781,7 +2795,6 @@ impl WorldNetwork {
                                     &val,
                                 );
 
-
                                 let store = &self.state;
                                 let fk = FrontierKey::new(&decide.name, &entity_id);
                                 if !staged_buckets.contains_key(&fk) {
@@ -2828,7 +2841,6 @@ impl WorldNetwork {
                                 }
                             }
                         } else {
-
                             let store = &self.state;
                             let fk = FrontierKey::new(&decide.name, &entity_id);
                             if !staged_buckets.contains_key(&fk) {
@@ -2867,7 +2879,6 @@ impl WorldNetwork {
                 Some(None) => None,
                 None => self.settlement_of(&decide, &entity)?,
             };
-
 
             if let Some(decision) = settlement {
                 let tuple = decision_tuple(&decision);
