@@ -106,6 +106,7 @@ const SUPPORTED_METHODS: &[&str] = &[
     "world.verify",
     "world.import-kb",
     "world.open-check",
+    "world.gc",
 ];
 
 /// Run the `brix serve --stdio` loop against `stdin`/`stdout`, returning the
@@ -729,6 +730,18 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
                 .get("refresh_state")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            verify_store: params
+                .get("verify_store")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
+        "gc" => WorldOp::Gc {
+            dir,
+            dry_run: params
+                .get("dry_run")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            keep_revisions: optional_u64_field(params, "keep_revisions"),
         },
         "init" => {
             let program_spec = params.get("program").cloned().unwrap_or(Value::Null);

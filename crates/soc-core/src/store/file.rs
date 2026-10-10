@@ -447,6 +447,9 @@ pub struct FileNodeStore {
     legacy_shards: Arc<Vec<AtomicBool>>,
 }
 
+mod gc;
+pub use gc::StoreVerifyReport;
+
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -780,6 +783,35 @@ impl FileNodeStore {
         }
     }
 
+    /// Like [`NodeStore::contains`] but an I/O failure is an error, never `false`.
+    pub fn try_contains(&self, digest: &Digest) -> io::Result<bool> {
+        self.latch((|| {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| invalid("poisoned pack index"))?;
+            self.check()?;
+            if state.known.contains(digest) {
+                return Ok(true);
+            }
+            if state.find(digest)?.is_some() {
+                if state.known.len() >= KNOWN_CAP {
+                    state.known.clear();
+                }
+                state.known.insert(*digest);
+                return Ok(true);
+            }
+            if state
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.lookup.contains_key(digest))
+            {
+                return Ok(true);
+            }
+            self.legacy_contains(digest)
+        })())
+    }
+
     fn pending(&self) -> io::Result<Pending> {
         let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
         let now = std::time::SystemTime::now()
@@ -954,32 +986,7 @@ impl FileNodeStore {
 
 impl NodeStore for FileNodeStore {
     fn contains(&self, digest: &Digest) -> bool {
-        self.latch((|| {
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|_| invalid("poisoned pack index"))?;
-            self.check()?;
-            if state.known.contains(digest) {
-                return Ok(true);
-            }
-            if state.find(digest)?.is_some() {
-                if state.known.len() >= KNOWN_CAP {
-                    state.known.clear();
-                }
-                state.known.insert(*digest);
-                return Ok(true);
-            }
-            if state
-                .pending
-                .as_ref()
-                .is_some_and(|p| p.lookup.contains_key(digest))
-            {
-                return Ok(true);
-            }
-            self.legacy_contains(digest)
-        })())
-        .unwrap_or(false)
+        self.try_contains(digest).unwrap_or(false)
     }
 
     fn get_node(&self, digest: &Digest) -> Result<Option<Vec<u8>>, StorageError> {

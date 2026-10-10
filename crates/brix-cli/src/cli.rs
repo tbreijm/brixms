@@ -126,6 +126,15 @@ pub enum WorldOp {
         dir: PathBuf,
         verify_state: bool,
         refresh_state: bool,
+        /// Also audit every pack body checksum and index (O(store size)).
+        verify_store: bool,
+    },
+    /// Garbage-collect and compact the node store (single writer; see `world::gc`).
+    Gc {
+        dir: PathBuf,
+        dry_run: bool,
+        /// Keep only the newest N revisions readable (default: all).
+        keep_revisions: Option<u64>,
     },
     Audit {
         dir: PathBuf,
@@ -1438,7 +1447,7 @@ fn parse_rev(raw: &str, cmd_name: &str, json: bool) -> Result<u64, CliUsageError
 pub fn parse_world_args(args: &[String], json: bool) -> Result<Command, CliUsageError> {
     if args.is_empty() {
         return Err(CliUsageError::usage(
-            "missing sub-command for 'brix world'\nUsage: brix world <init|batch|query|decide|show|explain|audit|verify|import-kb> ...".to_string(),
+            "missing sub-command for 'brix world'\nUsage: brix world <init|batch|query|decide|show|explain|audit|verify|import-kb|open-check|gc> ...".to_string(),
             json,
             Some("world".to_string()),
         ));
@@ -1456,6 +1465,7 @@ pub fn parse_world_args(args: &[String], json: bool) -> Result<Command, CliUsage
         "verify" => parse_world_verify_args(rest, json)?,
         "import-kb" => parse_world_import_kb_args(rest, json)?,
         "open-check" => parse_world_open_check_args(rest, json)?,
+        "gc" => parse_world_gc_args(rest, json)?,
         other => {
             return Err(CliUsageError::usage(
                 format!("unknown 'brix world' sub-command: '{other}'"),
@@ -2075,9 +2085,12 @@ fn parse_world_open_check_args(args: &[String], json: bool) -> Result<WorldOp, C
     let mut positionals = Vec::new();
     let mut verify_state = false;
     let mut refresh_state = false;
+    let mut verify_store = false;
     for arg in args {
         if arg == "--json" {
             // Handled
+        } else if arg == "--verify-store" {
+            verify_store = true;
         } else if arg == "--verify-state" {
             verify_state = true;
         } else if arg == "--refresh-state" {
@@ -2110,6 +2123,55 @@ fn parse_world_open_check_args(args: &[String], json: bool) -> Result<WorldOp, C
         dir: positionals.pop().unwrap(),
         verify_state,
         refresh_state,
+        verify_store,
+    })
+}
+
+fn parse_world_gc_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
+    let cmd_name = "world gc";
+    let mut positionals = Vec::new();
+    let mut dry_run = false;
+    let mut keep_revisions = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json" {
+            // Handled
+        } else if arg == "--dry-run" {
+            dry_run = true;
+        } else if arg == "--keep-revisions" {
+            i += 1;
+            keep_revisions = Some(args.get(i).and_then(|v| v.parse::<u64>().ok()).ok_or_else(
+                || {
+                    CliUsageError::usage(
+                        "--keep-revisions requires a number".to_string(),
+                        json,
+                        Some(cmd_name.to_string()),
+                    )
+                },
+            )?);
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+    if positionals.len() != 1 {
+        return Err(CliUsageError::usage(
+            format!("'{cmd_name}' requires exactly one DIR operand"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    Ok(WorldOp::Gc {
+        dir: positionals.pop().unwrap(),
+        dry_run,
+        keep_revisions,
     })
 }
 

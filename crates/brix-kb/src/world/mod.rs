@@ -10,6 +10,7 @@ pub mod codec;
 pub mod compact_deriv;
 pub mod decision_codec;
 pub mod error;
+pub mod gc;
 pub mod import_kb;
 pub mod manifest;
 pub mod network;

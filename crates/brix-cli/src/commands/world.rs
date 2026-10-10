@@ -58,7 +58,13 @@ pub fn execute_world(op: &WorldOp, json_out: bool) -> u8 {
             dir,
             verify_state,
             refresh_state,
-        } => execute_open_check(dir, *verify_state, *refresh_state, json_out),
+            verify_store,
+        } => execute_open_check(dir, *verify_state, *refresh_state, *verify_store, json_out),
+        WorldOp::Gc {
+            dir,
+            dry_run,
+            keep_revisions,
+        } => execute_gc(dir, *dry_run, *keep_revisions, json_out),
         WorldOp::Explain {
             dir,
             entity,
@@ -732,8 +738,24 @@ fn add_open_info(res: &mut serde_json::Value, session: &WorldSession) {
     }
 }
 
-fn execute_open_check(dir: &Path, verify_state: bool, refresh_state: bool, json_out: bool) -> u8 {
+fn execute_open_check(
+    dir: &Path,
+    verify_state: bool,
+    refresh_state: bool,
+    verify_store: bool,
+    json_out: bool,
+) -> u8 {
     const CMD: &str = "world open-check";
+    // The pack audit runs first: damage it names is a typed corrupt-state error, not whatever
+    // the open happens to trip over.
+    let store_report = if verify_store {
+        match brix_kb::world::gc::verify_store(dir) {
+            Ok(r) => Some(r),
+            Err(e) => return print_world_error(CMD, &e, json_out),
+        }
+    } else {
+        None
+    };
     // Refreshing is explicit here, not a side effect of the open.
     let policy = OpenPolicy {
         force_replay: false,
@@ -764,6 +786,12 @@ fn execute_open_check(dir: &Path, verify_state: bool, refresh_state: bool, json_
             "revision": session.current_revision,
             "network_state_root": session.network_state_root.map(|d| d.to_hex()),
             "verified_state": verify_state,
+            "verified_store": store_report.map(|r| json!({
+                "packs": r.packs,
+                "nodes": r.nodes,
+                "body_bytes": r.body_bytes,
+                "legacy_nodes": r.legacy_nodes,
+            })),
             "refreshed_state": refreshed.as_ref().map(|r| r.is_ok()),
             "refresh_error": refresh_error,
         });
@@ -787,6 +815,12 @@ fn execute_open_check(dir: &Path, verify_state: bool, refresh_state: bool, json_
         if verify_state {
             println!("state verified against a replay of the base facts");
         }
+        if let Some(r) = store_report {
+            println!(
+                "store verified: {} packs, {} nodes, {} body bytes, {} legacy objects",
+                r.packs, r.nodes, r.body_bytes, r.legacy_nodes
+            );
+        }
         match refreshed {
             Some(Ok(())) => println!("state cache refreshed"),
             Some(Err(e)) => println!("state cache not refreshed: {e}"),
@@ -798,6 +832,56 @@ fn execute_open_check(dir: &Path, verify_state: bool, refresh_state: bool, json_
     } else {
         EXIT_SUCCESS
     }
+}
+
+fn execute_gc(dir: &Path, dry_run: bool, keep_revisions: Option<u64>, json_out: bool) -> u8 {
+    const CMD: &str = "world gc";
+    let opts = brix_kb::world::gc::GcOptions {
+        dry_run,
+        keep_revisions,
+        ..Default::default()
+    };
+    let r = match brix_kb::world::gc::gc_world(dir, &opts) {
+        Ok(r) => r,
+        Err(e) => return print_world_error(CMD, &e, json_out),
+    };
+    if json_out {
+        crate::json::emit_result_json(&json!({
+            "schema": WORLD_JSON_SCHEMA,
+            "command": CMD,
+            "ok": true,
+            "dry_run": r.dry_run,
+            "head_revision": r.head_revision,
+            "revisions_total": r.revisions_total,
+            "revisions_retained": r.revisions_retained,
+            "roots": r.roots,
+            "live_nodes": r.live_nodes,
+            "live_bytes": r.live_bytes,
+            "nodes_before": r.nodes_before,
+            "dead_nodes": r.dead_nodes,
+            "bytes_before": r.bytes_before,
+            "bytes_after": r.bytes_after,
+            "packs_before": r.packs_before,
+            "packs_after": r.packs_after,
+            "files_swept": r.files_swept,
+            "elapsed_ms": r.elapsed_ms,
+        }));
+    } else {
+        println!(
+            "{}: {} of {} nodes live ({} dead), {} revisions retained of {}",
+            if r.dry_run { "dry run" } else { "gc" },
+            r.live_nodes,
+            r.nodes_before,
+            r.dead_nodes,
+            r.revisions_retained,
+            r.revisions_total
+        );
+        println!(
+            "store {} -> {} bytes, {} -> {} packs ({} ms)",
+            r.bytes_before, r.bytes_after, r.packs_before, r.packs_after, r.elapsed_ms
+        );
+    }
+    EXIT_SUCCESS
 }
 
 fn print_world_error(cmd: &str, err: &WorldError, json_out: bool) -> u8 {

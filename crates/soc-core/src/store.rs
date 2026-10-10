@@ -1628,7 +1628,7 @@ pub fn decode_node_verified<K: CanonDecode + Canonical + Ord, V: CanonDecode + C
 }
 
 mod file;
-pub use file::{FileNodeStore, StoreIoStats};
+pub use file::{FileNodeStore, StoreIoStats, StoreVerifyReport};
 
 fn resolve_node<
     K: CanonDecode + Canonical + Ord + 'static + Send + Sync,
