@@ -48,7 +48,21 @@ const OPEN_ONLY_ENV: &str = "R0_OPEN_BENCH_OPEN_ONLY";
 const KEEP_ENV: &str = "R0_OPEN_BENCH_KEEP";
 /// Set to stop the child after the decisions read (no one-row batch, so the world is not mutated).
 const NO_BATCH_ENV: &str = "R0_OPEN_BENCH_NO_BATCH";
-const BATCHES: usize = 10;
+const BATCHES_DEFAULT: usize = 10;
+/// Number of load batches (default 10); smaller batches approximate chunked persistence.
+const BATCHES_ENV: &str = "R0_OPEN_BENCH_BATCHES";
+/// Set to stop after the load (no cold-open child, no fallback probes).
+/// Set (with the child dir) to open by full replay and exit, for peak-RSS measurements.
+const REPLAY_ONLY_ENV: &str = "R0_OPEN_BENCH_REPLAY_ONLY";
+const LOAD_ONLY_ENV: &str = "R0_OPEN_BENCH_LOAD_ONLY";
+
+fn batches() -> usize {
+    std::env::var(BATCHES_ENV)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|b| *b > 0)
+        .unwrap_or(BATCHES_DEFAULT)
+}
 
 fn sources() -> BTreeMap<String, String> {
     BTreeMap::from([
@@ -128,6 +142,20 @@ fn row(i: usize, n: usize) -> WorldBatchOp {
     }
 }
 
+/// Cumulative CPU time of `pid` as `ps -o cputime=` prints it (`[h:]mm:ss.cc`), in seconds.
+fn cpu_time(pid: u32) -> Option<f64> {
+    let out = Command::new("ps")
+        .args(["-o", "cputime=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut secs = 0.0;
+    for part in text.trim().split(':') {
+        secs = secs * 60.0 + part.parse::<f64>().ok()?;
+    }
+    Some(secs)
+}
+
 fn rss_kb(pid: u32) -> Option<u64> {
     let out = Command::new("ps")
         .args(["-o", "rss=", "-p", &pid.to_string()])
@@ -180,12 +208,16 @@ fn run_child(dir: &Path) {
     drop(store);
 
     let t = Instant::now();
-    let mut session = WorldSession::open(dir).expect("cold open");
+    let mut session = if std::env::var_os(REPLAY_ONLY_ENV).is_some() {
+        WorldSession::open_replay(dir).expect("replay open")
+    } else {
+        WorldSession::open(dir).expect("cold open")
+    };
     let open_ms = ms(t.elapsed());
     let rss_after_open = rss_kb(pid);
     let mut open = open_report(&session, open_ms);
     open["file_store_new_ms"] = serde_json::json!(store_new_ms);
-    if std::env::var_os(OPEN_ONLY_ENV).is_some() {
+    if std::env::var_os(OPEN_ONLY_ENV).is_some() || std::env::var_os(REPLAY_ONLY_ENV).is_some() {
         println!(
             "CHILD_JSON {}",
             serde_json::json!({"open": open, "rss_after_open_kb": rss_after_open})
@@ -244,10 +276,11 @@ fn run_child(dir: &Path) {
 /// Parent mode: build the world, load it in batches, then run the child cold-open probe.
 fn run_parent(n: usize) {
     assert!(
-        n >= 10 && n.is_multiple_of(BATCHES * 10),
-        "N must be a multiple of 100"
+        n >= 10 && n.is_multiple_of(batches() * 10),
+        "N must be a multiple of 10 x the batch count"
     );
-    let batch_rows = n / BATCHES;
+    let nb = batches();
+    let batch_rows = n / nb;
     let dir: PathBuf =
         std::env::temp_dir().join(format!("r0_open_bench_{n}_{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -257,9 +290,9 @@ fn run_parent(n: usize) {
         .expect("initialize world with source closure");
     let init_ms = ms(t.elapsed());
 
-    let mut batch_stats = Vec::with_capacity(BATCHES);
+    let mut batch_stats = Vec::with_capacity(nb);
     let load_start = Instant::now();
-    for b in 0..BATCHES {
+    for b in 0..nb {
         let ops: Vec<WorldBatchOp> = (b * batch_rows..(b + 1) * batch_rows)
             .map(|i| row(i, n))
             .collect();
@@ -283,6 +316,8 @@ fn run_parent(n: usize) {
             "batch": b,
             "rows": batch_rows,
             "ms": ms(t.elapsed()),
+            "rss_kb": rss_kb(std::process::id()),
+            "cpu": cpu_time(std::process::id()),
             "profile": profile,
         }));
     }
@@ -291,6 +326,22 @@ fn run_parent(n: usize) {
     let facts: usize = session.relations.values().map(|r| r.len()).sum();
     session.close().expect("flush world before cold open");
     let disk_bytes = dir_bytes(&dir);
+    if std::env::var(LOAD_ONLY_ENV).is_ok() {
+        println!(
+            "{}",
+            serde_json::json!({
+                "bench": "r0_open_bench", "facts": n, "batches": nb, "load_total_ms": load_ms,
+                "rss_after_load_kb": rss_after_load, "disk_bytes": disk_bytes,
+                "load_batches": batch_stats,
+            })
+        );
+        if std::env::var_os(KEEP_ENV).is_none() {
+            let _ = fs::remove_dir_all(&dir);
+        } else {
+            eprintln!("KEPT {}", dir.display());
+        }
+        return;
+    }
 
     let exe = std::env::current_exe().expect("current exe");
     let child = Command::new(exe)
@@ -362,7 +413,7 @@ fn run_parent(n: usize) {
         "bench": "r0_open_bench",
         "facts": n,
         "facts_resident": facts,
-        "batches": BATCHES,
+        "batches": nb,
         "batch_rows": batch_rows,
         "init_ms": init_ms,
         "load_total_ms": load_ms,

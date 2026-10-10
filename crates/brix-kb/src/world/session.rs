@@ -64,12 +64,31 @@ fn link_closure(
     Ok((linked, digest, closure))
 }
 
+/// Share of the world's `node_cache_bytes` budget given to each cache tier: the raw
+/// encoded-node cache (cheap to hold, decoded on a hit) gets half, the operator-state decoded
+/// cache a quarter and the base-relation decoded cache an eighth, so the sum approximates the
+/// resident memory the knob is meant to bound.
+fn raw_cache_share(budget: usize) -> usize {
+    budget / 2
+}
+fn state_cache_share(budget: usize) -> usize {
+    budget / 4
+}
+fn base_cache_share(budget: usize) -> usize {
+    budget / 8
+}
+
 fn manifest_node_cache_budget(manifest: &WorldManifest) -> usize {
     manifest
         .node_cache_bytes
         .map_or(DEFAULT_NODE_CACHE_BYTES, |n| {
             usize::try_from(n).unwrap_or(usize::MAX)
         })
+}
+
+fn configure_node_store_caches(store: &FileNodeStore, budget: usize) {
+    store.set_cache_budget_bytes(raw_cache_share(budget));
+    store.set_decoded_cache_capacity(base_cache_share(budget));
 }
 
 /// A persisted base trie as `(root, len)` only. Callers guarantee the trie was persisted.
@@ -774,7 +793,7 @@ impl WorldSession {
         fs::write(paths.head(), "0\n")?;
 
         let node_store = FileNodeStore::new(&root)?;
-        node_store.set_decoded_cache_capacity(manifest_node_cache_budget(&manifest));
+        configure_node_store_caches(&node_store, manifest_node_cache_budget(&manifest));
         let mut relations = BTreeMap::new();
         let mut secondary_indexes = BTreeMap::new();
 
@@ -888,7 +907,7 @@ impl WorldSession {
             .map_err(|_| WorldError::CorruptedHead("invalid integer in HEAD".to_string()))?;
 
         let node_store = FileNodeStore::new(&root)?;
-        node_store.set_decoded_cache_capacity(manifest_node_cache_budget(&manifest));
+        configure_node_store_caches(&node_store, manifest_node_cache_budget(&manifest));
 
         // Read current revision record
         let rev_file = paths.revision_file(current_revision);
@@ -1171,7 +1190,10 @@ impl WorldSession {
         root: Digest,
         source: &'static str,
     ) -> Result<Option<&'static str>, WorldError> {
-        let store = StateStore::from_file(self.node_store.clone(), self.node_cache_budget());
+        let store = StateStore::from_file(
+            self.node_store.clone(),
+            state_cache_share(self.node_cache_budget()),
+        );
         let key = self.validity_key_for(network);
         match NetworkStateHeader::load(&store, &root, &key)? {
             // Produced under another schema, execution profile, program structure or
@@ -2326,7 +2348,10 @@ impl WorldSession {
             }
         }
         let cache = self.node_cache_budget();
-        network.attach_state_store(StateStore::from_file(self.node_store.clone(), cache));
+        network.attach_state_store(StateStore::from_file(
+            self.node_store.clone(),
+            state_cache_share(cache),
+        ));
         if !ops.is_empty() {
             network.apply_ops(&ops)?;
         }

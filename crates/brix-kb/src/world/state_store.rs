@@ -64,8 +64,9 @@ impl From<StateCodecError> for StateError {
     }
 }
 
-/// Default decoded-node cache budget for a [`StateStore`] (64 MiB).
-pub const DEFAULT_NODE_CACHE_BYTES: usize = 128 * 1024 * 1024;
+/// Default node-cache memory budget for a world (the `node_cache_bytes` knob): approximately
+/// the resident memory all node caches may hold together.
+pub const DEFAULT_NODE_CACHE_BYTES: usize = 512 * 1024 * 1024;
 
 enum Backend {
     Memory(MemoryNodeStore),
@@ -179,6 +180,14 @@ impl NodeStore for StateStore {
         match &*backend {
             Backend::Memory(m) => m.get_node(digest),
             Backend::File(f) => f.get_node(digest),
+        }
+    }
+
+    fn get_node_scan(&self, digest: &Digest) -> Option<Vec<u8>> {
+        let backend = self.inner.backend.read().expect("state store lock");
+        match &*backend {
+            Backend::Memory(m) => m.get_node(digest),
+            Backend::File(f) => f.get_node_scan(digest),
         }
     }
 

@@ -1229,6 +1229,11 @@ pub trait NodeStore {
     fn put_new_node(&mut self, digest: Digest, bytes: Vec<u8>) {
         self.put_node(digest, bytes);
     }
+    /// Like [`Self::get_node`] for bulk iteration: stores must not admit the node to their
+    /// own read caches, so a scan cannot evict the hot working set.
+    fn get_node_scan(&self, digest: &Digest) -> Option<Vec<u8>> {
+        self.get_node(digest)
+    }
     /// Whether `digest` exists in the store.
     fn contains(&self, digest: &Digest) -> bool {
         self.get_node(digest).is_some()
@@ -1246,8 +1251,14 @@ pub trait NodeStore {
     fn note_touch(&self, _digest: &Digest, _hit: bool, _bytes: usize) {}
 }
 
+/// Accounted cost of a decoded node per encoded byte, calibrated against measured RSS (a
+/// decoded node with its `Arc`s and key/value buffers is several times its encoding), so
+/// the cache budget approximates resident memory rather than encoded size.
+pub const DECODED_COST_FACTOR: usize = 8;
+
 /// Byte-bounded cache of decoded, digest-verified trie nodes keyed by
-/// `(TypeId of Node<K, V>, Digest)`. Cost of an entry is twice its encoded length.
+/// `(TypeId of Node<K, V>, Digest)`. Cost of an entry is [`DECODED_COST_FACTOR`] times its
+/// encoded length.
 /// Only nodes that decoded and verified successfully are ever inserted.
 ///
 /// Eviction is second-chance (CLOCK): a hit only sets a flag, so lookups and inserts are one
@@ -1381,7 +1392,7 @@ impl DecodedNodeCache {
         self.lock().map.contains_key(&key)
     }
 
-    /// Insert a verified node whose encoding was `encoded_len` bytes (cost = 2x).
+    /// Insert a verified node whose encoding was `encoded_len` bytes.
     pub fn insert<T: std::any::Any + Send + Sync>(
         &self,
         digest: Digest,
@@ -1389,7 +1400,7 @@ impl DecodedNodeCache {
         encoded_len: usize,
     ) {
         let key = (std::any::TypeId::of::<T>(), digest);
-        let cost = encoded_len.saturating_mul(2);
+        let cost = encoded_len.saturating_mul(DECODED_COST_FACTOR);
         let mut g = self.lock();
         g.decodes += 1;
         if cost > g.cap {
@@ -1648,6 +1659,23 @@ fn resolve_node<
     node: &Arc<Node<K, V>>,
     store: &S,
 ) -> Result<Arc<Node<K, V>>, StorageError> {
+    resolve_node_mode(node, store, None)
+}
+
+/// Scan-resistant resolve for bulk iteration: reads hit the caches as usual, but a miss is
+/// admitted to the decoded cache only for branches near the root (which later pages of the
+/// same scan descend through again), never for leaves or deep branches.
+const SCAN_ADMIT_DEPTH: usize = 3;
+
+fn resolve_node_mode<
+    K: CanonDecode + Canonical + Ord + 'static + Send + Sync,
+    V: CanonDecode + Canonical + 'static + Send + Sync,
+    S: NodeStore,
+>(
+    node: &Arc<Node<K, V>>,
+    store: &S,
+    scan_depth: Option<usize>,
+) -> Result<Arc<Node<K, V>>, StorageError> {
     match &**node {
         Node::Lazy(d) => {
             let cache = store.decoded_cache();
@@ -1657,14 +1685,24 @@ fn resolve_node<
                     return Ok(hit);
                 }
             }
-            let bytes = store.get_node(d).ok_or(StorageError::MissingNode(*d))?;
+            let bytes = match scan_depth {
+                None => store.get_node(d),
+                Some(_) => store.get_node_scan(d),
+            }
+            .ok_or(StorageError::MissingNode(*d))?;
             store.note_touch(d, false, bytes.len());
             // Digest verified exactly once, before the node can enter the cache.
             let decoded = decode_node_verified::<K, V>(&bytes, d)
                 .map_err(|_| StorageError::CorruptedNode(*d))?;
             let decoded = Arc::new(decoded);
             if let Some(c) = cache {
-                c.insert::<Node<K, V>>(*d, decoded.clone(), bytes.len());
+                let admit = match scan_depth {
+                    None => true,
+                    Some(depth) => depth < SCAN_ADMIT_DEPTH && matches!(&*decoded, Node::Branch(_)),
+                };
+                if admit {
+                    c.insert::<Node<K, V>>(*d, decoded.clone(), bytes.len());
+                }
             }
             Ok(decoded)
         }
@@ -2041,7 +2079,7 @@ fn iter_page_recursive<
     if *done {
         return Ok(());
     }
-    let resolved = resolve_node(node, store)?;
+    let resolved = resolve_node_mode(node, store, Some(depth))?;
     match &*resolved {
         Node::Leaf(leaf) => {
             if let Some((cur_hash, cur_key)) = cursor {
