@@ -2282,6 +2282,15 @@ impl WorldSession {
 
     /// Attach an operator network to this session and hydrate it with existing committed base records.
     pub fn set_network(&mut self, mut network: WorldNetwork) -> Result<(), WorldError> {
+        // A world's decisions and state are filed under the network that computed them;
+        // swapping in a different program would let later commits attest foreign decisions.
+        if let Some(existing) = &self.network {
+            if existing.fingerprint() != network.fingerprint() {
+                return Err(WorldError::InvalidSchema(
+                    "program differs from the program this world is bound to".into(),
+                ));
+            }
+        }
         let mut ops = Vec::new();
         for (rel_name, trie) in &self.relations {
             if network.base_relations.contains_key(rel_name) {

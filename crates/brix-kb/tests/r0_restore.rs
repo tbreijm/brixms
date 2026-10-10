@@ -692,6 +692,23 @@ fn from_program_on_an_existing_world_does_not_poison_the_cache() {
 }
 
 #[test]
+fn set_network_refuses_a_different_program_on_a_bound_world() {
+    let (dir, live) = seeded_world("setnet");
+    drop(live);
+    let mut s = WorldSession::open(dir.path()).unwrap();
+    let changed =
+        WorldNetwork::from_program(&link(&MODEL.replace("priority 20", "priority 70"))).unwrap();
+    assert!(s.set_network(changed).is_err());
+    // The refusal leaves the session and the world untouched.
+    assert_eq!(s.open_mode, OpenMode::Restored);
+    s.verify_state().unwrap();
+    // The bound program itself is accepted.
+    s.set_network(WorldNetwork::from_program(&link(MODEL)).unwrap())
+        .unwrap();
+    s.verify_state().unwrap();
+}
+
+#[test]
 fn the_validity_fingerprint_follows_the_program() {
     let base = WorldNetwork::from_program(&link(MODEL)).unwrap();
     let same = WorldNetwork::from_program(&link(MODEL)).unwrap();
