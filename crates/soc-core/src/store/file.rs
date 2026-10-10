@@ -29,7 +29,7 @@
 //! body allocated per read. Clones share the index and pending writer.
 //! Identical digests in several packs are tolerated (content-addressed).
 
-use super::NodeStore;
+use super::{DecodedNodeCache, NodeStore};
 use brix_canon::{Digest, Domain};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -443,6 +443,10 @@ pub struct FileNodeStore {
     /// Legacy `objects/xx/` shard directories that existed at open (legacy files are
     /// read-only history; shards created after open are not consulted until reopen).
     legacy_shards: Arc<Vec<AtomicBool>>,
+    /// Decoded-node cache for store-aware trie reads made directly through this handle
+    /// (the base relations). Shared by clones; capacity 0 (disabled) until
+    /// [`FileNodeStore::set_decoded_cache_capacity`].
+    decoded: Arc<DecodedNodeCache>,
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -486,6 +490,7 @@ impl FileNodeStore {
             failed: Arc::new(AtomicBool::new(false)),
             io: Arc::new(Counters::default()),
             legacy_shards: Arc::new((0..256).map(|_| AtomicBool::new(false)).collect()),
+            decoded: Arc::new(DecodedNodeCache::new(0)),
         };
         let mut state = store
             .state
@@ -745,6 +750,12 @@ impl FileNodeStore {
         }
     }
 
+    /// Bound the decoded-node cache used by store-aware reads through this handle (0
+    /// disables it). Shared by all clones; evicts immediately when shrinking.
+    pub fn set_decoded_cache_capacity(&self, cap_bytes: usize) {
+        self.decoded.set_capacity(cap_bytes);
+    }
+
     /// Number of nodes currently resident in the in-memory cache.
     pub fn cached_nodes_count(&self) -> usize {
         self.state.lock().map_or(0, |s| s.node_cache.len())
@@ -950,6 +961,10 @@ impl FileNodeStore {
 }
 
 impl NodeStore for FileNodeStore {
+    fn decoded_cache(&self) -> Option<&DecodedNodeCache> {
+        Some(&self.decoded)
+    }
+
     fn contains(&self, digest: &Digest) -> bool {
         self.latch((|| {
             let mut state = self

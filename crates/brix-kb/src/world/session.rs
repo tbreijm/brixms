@@ -64,6 +64,27 @@ fn link_closure(
     Ok((linked, digest, closure))
 }
 
+fn manifest_node_cache_budget(manifest: &WorldManifest) -> usize {
+    manifest
+        .node_cache_bytes
+        .map_or(DEFAULT_NODE_CACHE_BYTES, |n| {
+            usize::try_from(n).unwrap_or(usize::MAX)
+        })
+}
+
+/// A persisted base trie as `(root, len)` only. Callers guarantee the trie was persisted.
+fn dehydrate_base(
+    tries: BTreeMap<String, TrieMap<WorldKey, WorldTuple>>,
+) -> BTreeMap<String, TrieMap<WorldKey, WorldTuple>> {
+    tries
+        .into_iter()
+        .map(|(name, t)| {
+            let d = TrieMap::from_root_digest(t.root_digest(), t.len());
+            (name, d)
+        })
+        .collect()
+}
+
 fn validate_program_relations(
     manifest: &WorldManifest,
     network: &WorldNetwork,
@@ -753,6 +774,7 @@ impl WorldSession {
         fs::write(paths.head(), "0\n")?;
 
         let node_store = FileNodeStore::new(&root)?;
+        node_store.set_decoded_cache_capacity(manifest_node_cache_budget(&manifest));
         let mut relations = BTreeMap::new();
         let mut secondary_indexes = BTreeMap::new();
 
@@ -866,6 +888,7 @@ impl WorldSession {
             .map_err(|_| WorldError::CorruptedHead("invalid integer in HEAD".to_string()))?;
 
         let node_store = FileNodeStore::new(&root)?;
+        node_store.set_decoded_cache_capacity(manifest_node_cache_budget(&manifest));
 
         // Read current revision record
         let rev_file = paths.revision_file(current_revision);
@@ -1123,11 +1146,7 @@ impl WorldSession {
     }
 
     fn node_cache_budget(&self) -> usize {
-        self.manifest
-            .node_cache_bytes
-            .map_or(DEFAULT_NODE_CACHE_BYTES, |n| {
-                usize::try_from(n).unwrap_or(usize::MAX)
-            })
+        manifest_node_cache_budget(&self.manifest)
     }
 
     /// The validity key under which this binary would persist (and accept) state of
@@ -1840,8 +1859,10 @@ impl WorldSession {
         self.current_revision = new_seq;
         self.current_revision_digest = Some(new_revision.revision_digest);
         self.network_state_root = new_revision.network_state_root;
-        self.relations = staged_relations;
-        self.secondary_indexes = staged_secondary_indexes;
+        // Both were persisted above; keep only (root, len) so the next commit does not
+        // re-probe unchanged hydrated siblings and the session does not pin the base copy.
+        self.relations = dehydrate_base(staged_relations);
+        self.secondary_indexes = dehydrate_base(staged_secondary_indexes);
         if let Some(sn) = staged_network {
             // The commit is already durable: dehydrating must never fail it. On the
             // (unexpected) error keep the hydrated network, which is merely larger.

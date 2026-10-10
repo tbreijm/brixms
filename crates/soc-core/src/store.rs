@@ -1257,6 +1257,12 @@ pub struct DecodedNodeCache {
     inner: std::sync::Mutex<DecodedInner>,
 }
 
+impl std::fmt::Debug for DecodedNodeCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DecodedNodeCache")
+    }
+}
+
 type CacheKey = (std::any::TypeId, Digest);
 
 /// Hasher that reads the leading 8 bytes of a digest (already a cryptographic hash).
@@ -1349,6 +1355,13 @@ impl DecodedNodeCache {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, DecodedInner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Change the accounted-byte bound, evicting immediately when it shrinks.
+    pub fn set_capacity(&self, cap_bytes: usize) {
+        let mut g = self.lock();
+        g.cap = cap_bytes;
+        g.evict_to_cap();
     }
 
     /// Cached node of type `T` for `digest`, marking it recently used.
