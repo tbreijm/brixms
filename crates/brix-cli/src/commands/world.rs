@@ -748,12 +748,31 @@ fn execute_open_check(dir: &Path, verify_state: bool, refresh_state: bool, json_
             return print_world_error(CMD, &e, json_out);
         }
     }
+    let mut checkpoint_entries = None;
+    if verify_state {
+        match session.verify_settlement_checkpoint() {
+            Ok(n) => checkpoint_entries = n,
+            Err(e) => return print_world_error(CMD, &e, json_out),
+        }
+    }
     let mut refreshed = None;
     if refresh_state {
         refreshed = Some(match session.refresh_state_cache() {
             Ok(()) => Ok(()),
             Err(e) => Err(e.to_string()),
         });
+        // The settlement checkpoint (decisions read cache) is refreshed with the state cache;
+        // a world with no decide blocks has none to write.
+        if session
+            .network
+            .as_ref()
+            .is_some_and(|n| !n.decides.is_empty())
+        {
+            match session.refresh_settlement_checkpoint() {
+                Ok(n) => checkpoint_entries = Some(n),
+                Err(e) => refreshed = Some(Err(e.to_string())),
+            }
+        }
     }
     let refresh_error = refreshed.as_ref().and_then(|r| r.as_ref().err().cloned());
     if json_out {
@@ -766,6 +785,7 @@ fn execute_open_check(dir: &Path, verify_state: bool, refresh_state: bool, json_
             "verified_state": verify_state,
             "refreshed_state": refreshed.as_ref().map(|r| r.is_ok()),
             "refresh_error": refresh_error,
+            "settlement_checkpoint_entries": checkpoint_entries,
         });
         add_open_info(&mut res, &session);
         crate::json::emit_result_json(&res);

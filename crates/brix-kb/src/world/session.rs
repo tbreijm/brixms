@@ -13,13 +13,16 @@ use std::time::Instant;
 
 use super::batch::{WorldBatch, WorldBatchOp};
 use super::codec::{encode_secondary_key, extract_indexed_field, TupleRecord};
+use super::decision_codec::compute_decision_root;
 use super::error::{CrashPoint, WorldError};
+use super::idempotency::{IdempotencyIndex, IdempotencySource};
 use super::manifest::{RelationDecl, WorldManifest, WORLD_PROFILE};
 use super::network::{DecisionExplanation, SettledDecision, WorldNetwork};
 use super::network_state::{Loaded, NetworkStateHeader, ValidityKey};
 use super::oracle::DiffEvent;
 use super::paths::WorldPaths;
 use super::revision::{SettlementStatus, WorldRevision, REVISION_SCHEMA_V3};
+use super::settlement_checkpoint::{apply_delta, SettlementCheckpoint};
 use super::staging::StagingManager;
 use super::state_cache::StateCache;
 use super::types::{WorldCursor, WorldKey, WorldTuple};
@@ -665,6 +668,13 @@ impl OpenMode {
     }
 }
 
+/// A checkpoint further behind HEAD than this many revisions is not used (the frontier is).
+const CHECKPOINT_MAX_TAIL: u64 = 256;
+/// A checkpoint read that applied more tail revisions than this refreshes the checkpoint.
+const CHECKPOINT_REFRESH_TAIL: u64 = 32;
+/// Entries of a checkpoint read spot-checked against the persisted decision trie.
+const CHECKPOINT_PROBES: usize = 64;
+
 /// Operational choices for [`WorldSession::open_with_policy`]. They never change what a
 /// session computes, only how much work open does and leaves behind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -696,7 +706,10 @@ pub struct WorldSession {
     pub node_store: FileNodeStore,
     pub relations: BTreeMap<String, TrieMap<WorldKey, WorldTuple>>,
     pub secondary_indexes: BTreeMap<String, TrieMap<WorldKey, WorldTuple>>,
-    pub committed_idempotency_keys: BTreeMap<String, CommittedBatchInfo>,
+    pub idempotency: IdempotencyIndex,
+    /// Whether `all_settlements` may leave a settlement checkpoint behind (best effort);
+    /// off for `open_replay`.
+    pub checkpoint_autowrite: bool,
     pub crash_injector: Option<CrashPoint>,
     pub network: Option<WorldNetwork>,
     /// Diagnostic: post-commit dehydrations that failed (network kept hydrated).
@@ -797,7 +810,8 @@ impl WorldSession {
             node_store,
             relations,
             secondary_indexes,
-            committed_idempotency_keys: BTreeMap::new(),
+            idempotency: IdempotencyIndex::empty(),
+            checkpoint_autowrite: true,
             crash_injector: None,
             network: None,
             dehydrate_failures: 0,
@@ -926,70 +940,13 @@ impl WorldSession {
             }
         }
 
-        // Scan receipts and revision headers for idempotency keys
-        let mut committed_idempotency_keys = BTreeMap::new();
-        let parse_receipt_or_rev =
-            |path: &std::path::Path, committed_keys: &mut BTreeMap<String, CommittedBatchInfo>| {
-                if let Ok(content) = fs::read_to_string(path) {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-                        if let (Some(seq), Some(ikey), Some(d_hex)) = (
-                            v.get("seq").and_then(|x| x.as_u64()),
-                            v.get("idempotency_key").and_then(|x| x.as_str()),
-                            v.get("revision_digest").and_then(|x| x.as_str()),
-                        ) {
-                            if seq > 0 && seq <= current_revision && d_hex.len() == 64 {
-                                if let Ok(d) = hex_to_digest(d_hex) {
-                                    let b_digest = v
-                                        .get("batch_digest")
-                                        .and_then(|x| x.as_str())
-                                        .and_then(|s| hex_to_digest(s).ok());
-                                    committed_keys.insert(
-                                        ikey.to_string(),
-                                        CommittedBatchInfo {
-                                            seq,
-                                            revision_digest: d,
-                                            batch_digest: b_digest,
-                                        },
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            };
-
-        // Receipts carry exactly the fields needed here and are tiny; a revision record
-        // carries its whole changed-key list, so records are parsed only for revisions that
-        // have no receipt (worlds written before receipts existed).
-        let mut receipted: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
-        if let Ok(entries) = fs::read_dir(paths.receipts_dir()) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(seq) = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .and_then(|s| s.parse::<u64>().ok())
-                {
-                    receipted.insert(seq);
-                }
-                parse_receipt_or_rev(&path, &mut committed_idempotency_keys);
-            }
-        }
-        if let Ok(entries) = fs::read_dir(paths.revisions_dir()) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let seq = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .and_then(|s| s.parse::<u64>().ok());
-                if path.extension().and_then(|e| e.to_str()) == Some("json")
-                    && seq.is_some_and(|s| receipted.contains(&s))
-                {
-                    continue;
-                }
-                parse_receipt_or_rev(&path, &mut committed_idempotency_keys);
-            }
-        }
+        // The idempotency index: the persisted trie (plus the receipts after it), else a scan.
+        let idempotency = IdempotencyIndex::load(
+            &paths,
+            &node_store,
+            current_revision,
+            current_rev.revision_digest,
+        );
 
         // Restore persisted checkpoint pins
         let mut pins = PinRegistry::default();
@@ -1012,7 +969,8 @@ impl WorldSession {
             node_store,
             relations,
             secondary_indexes,
-            committed_idempotency_keys,
+            idempotency,
+            checkpoint_autowrite: policy.refresh_after_replay,
             crash_injector: None,
             network: None,
             dehydrate_failures: 0,
@@ -1118,8 +1076,45 @@ impl WorldSession {
                 ));
             }
         }
+        if policy.refresh_after_replay
+            && session.idempotency.source == IdempotencySource::Scan
+            && !session.idempotency.is_empty()
+        {
+            // A world without the index (written before it existed, or whose sidecar was
+            // lost): persist the scan's result so the next open does not scan. Best effort.
+            let _ = session.persist_idempotency_index();
+        }
         session.open_ms = started.elapsed().as_millis() as u64;
         Ok(session)
+    }
+
+    /// Persist the idempotency index and its sidecar for the current HEAD (non-blocking on
+    /// the writer lock; HEAD re-checked under it). A cache refresh, never authoritative.
+    pub fn persist_idempotency_index(&mut self) -> Result<bool, WorldError> {
+        let _lock = WorldLockGuard::acquire(&self.root)?;
+        let Some(digest) = self.current_revision_digest else {
+            return Ok(false);
+        };
+        if self.read_disk_head()? != self.current_revision {
+            return Err(WorldError::StaleBaseRevision {
+                expected: self.current_revision,
+                current: self.read_disk_head()?,
+            });
+        }
+        self.idempotency.persist(
+            &mut self.node_store,
+            &self.paths,
+            self.current_revision,
+            digest,
+        )
+    }
+
+    /// The batch committed under `idempotency_key`, if any.
+    pub fn idempotency_lookup(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<CommittedBatchInfo>, WorldError> {
+        self.idempotency.get(idempotency_key, &self.node_store)
     }
 
     fn node_cache_budget(&self) -> usize {
@@ -1415,7 +1410,10 @@ impl WorldSession {
 
         // 1. Check idempotency key
         let batch_digest = batch.digest();
-        if let Some(info) = self.committed_idempotency_keys.get(&batch.idempotency_key) {
+        if let Some(info) = self
+            .idempotency
+            .get(&batch.idempotency_key, &self.node_store)?
+        {
             if info.batch_digest == Some(batch_digest) {
                 return Ok(RevisionReceipt {
                     revision_seq: info.seq,
@@ -1698,54 +1696,7 @@ impl WorldSession {
                 .write(sn.state_store())
         });
 
-        phase!("state_header");
-        // Crash injection seam: every object written, none flushed.
-        if self.crash_injector == Some(CrashPoint::AfterNetworkObjectsBeforeFlush) {
-            return Err(WorldError::InjectedCrash(
-                CrashPoint::AfterNetworkObjectsBeforeFlush,
-            ));
-        }
-
-        // Crash injection seam 1
-        if self.crash_injector == Some(CrashPoint::BeforeObjectsFsync) {
-            return Err(WorldError::InjectedCrash(CrashPoint::BeforeObjectsFsync));
-        }
-
-        // Fsync newly written objects
-        self.node_store.flush()?;
-        phase!("flush");
-
-        // Crash injection seam 2
-        if self.crash_injector == Some(CrashPoint::AfterObjectsFsyncBeforeRevisionFsync) {
-            return Err(WorldError::InjectedCrash(
-                CrashPoint::AfterObjectsFsyncBeforeRevisionFsync,
-            ));
-        }
-
         let new_seq = self.current_revision + 1;
-
-        // Write the decision-delta body durably BEFORE the revision record
-        // (ADR-0046 P6 G2/G3, decided 2026-10-04): tmp-write, fsync, rename —
-        // the same atomic-write discipline as the revision record itself, one
-        // step earlier in the publication order. An uncommitted attempt may
-        // leave an orphaned `{seq}.decisions` file; harmless, since nothing
-        // ever reads one without the matching revision record's digest.
-        if let Some(ref body) = decision_delta_body {
-            let tmp_delta_file = self.paths.decision_delta_tmp_file(new_seq);
-            fs::write(&tmp_delta_file, body)?;
-            {
-                let f = fs::File::open(&tmp_delta_file)?;
-                f.sync_all()?;
-            }
-            fs::rename(&tmp_delta_file, self.paths.decision_delta_file(new_seq))?;
-            fs::File::open(self.paths.revisions_dir())?.sync_all()?;
-        }
-
-        if self.crash_injector == Some(CrashPoint::AfterDecisionDeltaFsyncBeforeRevisionFsync) {
-            return Err(WorldError::InjectedCrash(
-                CrashPoint::AfterDecisionDeltaFsyncBeforeRevisionFsync,
-            ));
-        }
         // 6. Assemble revision record
         let mut relation_roots = BTreeMap::new();
         let mut relation_cardinalities = BTreeMap::new();
@@ -1778,6 +1729,67 @@ impl WorldSession {
             None => new_revision,
         };
 
+        // The idempotency index with this commit's key, its nodes written into the same pack
+        // and flushed with everything else. Staged on a copy: it replaces the session's only
+        // once the commit is published. (The revision digest does not depend on the flush.)
+        let mut next_idempotency = self.idempotency.clone();
+        next_idempotency.record(
+            &batch.idempotency_key,
+            CommittedBatchInfo {
+                seq: new_seq,
+                revision_digest: new_revision.revision_digest,
+                batch_digest: Some(batch_digest),
+            },
+            &self.node_store,
+        );
+        objects_written += next_idempotency.stage(&mut self.node_store);
+
+        phase!("state_header");
+        // Crash injection seam: every object written, none flushed.
+        if self.crash_injector == Some(CrashPoint::AfterNetworkObjectsBeforeFlush) {
+            return Err(WorldError::InjectedCrash(
+                CrashPoint::AfterNetworkObjectsBeforeFlush,
+            ));
+        }
+
+        // Crash injection seam 1
+        if self.crash_injector == Some(CrashPoint::BeforeObjectsFsync) {
+            return Err(WorldError::InjectedCrash(CrashPoint::BeforeObjectsFsync));
+        }
+
+        // Fsync newly written objects
+        self.node_store.flush()?;
+        phase!("flush");
+
+        // Crash injection seam 2
+        if self.crash_injector == Some(CrashPoint::AfterObjectsFsyncBeforeRevisionFsync) {
+            return Err(WorldError::InjectedCrash(
+                CrashPoint::AfterObjectsFsyncBeforeRevisionFsync,
+            ));
+        }
+
+        // Write the decision-delta body durably BEFORE the revision record
+        // (ADR-0046 P6 G2/G3, decided 2026-10-04): tmp-write, fsync, rename —
+        // the same atomic-write discipline as the revision record itself, one
+        // step earlier in the publication order. An uncommitted attempt may
+        // leave an orphaned `{seq}.decisions` file; harmless, since nothing
+        // ever reads one without the matching revision record's digest.
+        if let Some(ref body) = decision_delta_body {
+            let tmp_delta_file = self.paths.decision_delta_tmp_file(new_seq);
+            fs::write(&tmp_delta_file, body)?;
+            {
+                let f = fs::File::open(&tmp_delta_file)?;
+                f.sync_all()?;
+            }
+            fs::rename(&tmp_delta_file, self.paths.decision_delta_file(new_seq))?;
+            fs::File::open(self.paths.revisions_dir())?.sync_all()?;
+        }
+
+        if self.crash_injector == Some(CrashPoint::AfterDecisionDeltaFsyncBeforeRevisionFsync) {
+            return Err(WorldError::InjectedCrash(
+                CrashPoint::AfterDecisionDeltaFsyncBeforeRevisionFsync,
+            ));
+        }
         let rev_json = serde_json::to_vec_pretty(&new_revision.to_json())
             .map_err(|e| WorldError::Json(e.to_string()))?;
 
@@ -1854,14 +1866,12 @@ impl WorldSession {
                 }
             });
         }
-        self.committed_idempotency_keys.insert(
-            batch.idempotency_key.clone(),
-            CommittedBatchInfo {
-                seq: new_seq,
-                revision_digest: new_revision.revision_digest,
-                batch_digest: Some(batch_digest),
-            },
-        );
+        self.idempotency = next_idempotency;
+        // Best effort, after the commit is durable (its nodes were flushed above): a failure
+        // only leaves the sidecar behind HEAD, which the next open catches up from receipts.
+        let _ = self
+            .idempotency
+            .publish(&self.paths, new_seq, new_revision.revision_digest);
 
         phases.push(("dehydrate", ms_since(phase_started)));
         let io_after = self
@@ -2163,13 +2173,226 @@ impl WorldSession {
     }
 
     /// Retrieve all settled decisions across all decide blocks.
+    ///
+    /// Served from the settlement checkpoint (one sequential read, plus the decision deltas of
+    /// any revisions after it) when a valid one exists, else from the candidate frontier; the
+    /// result is identical either way (the checkpoint is a cache, see
+    /// [`super::settlement_checkpoint`]). A frontier read, or a read that had to apply a long
+    /// tail, leaves a fresh checkpoint behind (best effort) unless `checkpoint_autowrite` is
+    /// off, so the next read is fast; commits never write one.
     pub fn all_settlements(
         &self,
     ) -> Result<BTreeMap<String, BTreeMap<String, SettledDecision>>, WorldError> {
-        match self.network.as_ref() {
-            Some(n) => n.all_settlements(),
-            None => Ok(BTreeMap::new()),
+        Ok(self.all_settlements_with_source()?.0)
+    }
+
+    /// [`Self::all_settlements`] and where it came from: `"none"` (no network or no decide
+    /// blocks), `"checkpoint"`, `"checkpoint+tail"` or `"frontier"`.
+    #[allow(clippy::type_complexity)]
+    pub fn all_settlements_with_source(
+        &self,
+    ) -> Result<
+        (
+            BTreeMap<String, BTreeMap<String, SettledDecision>>,
+            &'static str,
+        ),
+        WorldError,
+    > {
+        let Some(net) = self.network.as_ref() else {
+            return Ok((BTreeMap::new(), "none"));
+        };
+        if net.decides.is_empty() {
+            return Ok((net.all_settlements()?, "none"));
         }
+        if let Some((map, tail)) = self.settlements_from_checkpoint(net) {
+            if tail > CHECKPOINT_REFRESH_TAIL && self.checkpoint_autowrite {
+                let _ = self.write_settlement_checkpoint(net, &map);
+            }
+            return Ok((
+                map,
+                if tail == 0 {
+                    "checkpoint"
+                } else {
+                    "checkpoint+tail"
+                },
+            ));
+        }
+        let map = net.all_settlements()?;
+        if self.checkpoint_autowrite {
+            let _ = self.write_settlement_checkpoint(net, &map);
+        }
+        Ok((map, "frontier"))
+    }
+
+    /// One page of settlements straight from the candidate frontier (never the checkpoint),
+    /// at most `limit` buckets after `cursor`, in trie (not name) order. For consumers that
+    /// do not need every decision.
+    #[allow(clippy::type_complexity)]
+    pub fn settlements_page(
+        &self,
+        cursor: Option<&super::state_store::PageCursor<super::state_codec::FrontierKey>>,
+        limit: usize,
+    ) -> Result<
+        (
+            Vec<(String, String, SettledDecision)>,
+            Option<super::state_store::PageCursor<super::state_codec::FrontierKey>>,
+        ),
+        WorldError,
+    > {
+        match self.network.as_ref() {
+            Some(n) => n.settlements_page(cursor, limit),
+            None => Ok((Vec::new(), None)),
+        }
+    }
+
+    /// The checkpoint's settlements brought to HEAD, and how many revisions that took; `None`
+    /// on any miss (absent, corrupt, foreign, stale, or a delta that cannot be authenticated).
+    fn settlements_from_checkpoint(
+        &self,
+        net: &WorldNetwork,
+    ) -> Option<(super::settlement_checkpoint::Settlements, u64)> {
+        let ck = SettlementCheckpoint::read(&self.paths)?;
+        if ck.validity_key_digest != self.validity_key_for(net).digest()
+            || ck.revision_seq > self.current_revision
+        {
+            return None;
+        }
+        let tail = self.current_revision - ck.revision_seq;
+        if tail > CHECKPOINT_MAX_TAIL {
+            return None;
+        }
+        if tail == 0 {
+            if Some(ck.revision_digest) != self.current_revision_digest
+                || ck.decision_root != Some(net.decision_root())
+            {
+                return None;
+            }
+            self.probe_settlements(net, &ck.settlements, &[])?;
+            return Some((ck.settlements, 0));
+        }
+        if ck.revision_seq > 0 {
+            let (_, info) =
+                super::idempotency::record_of(&self.paths, ck.revision_seq, ck.revision_seq)?;
+            if info.revision_digest != ck.revision_digest {
+                return None;
+            }
+        }
+        let mut map = ck.settlements;
+        let mut touched: Vec<(String, String)> = Vec::new();
+        for seq in ck.revision_seq + 1..=self.current_revision {
+            let delta = self.decision_delta(seq).ok()?;
+            touched.extend(delta.keys().cloned());
+            apply_delta(&mut map, delta);
+        }
+        touched.sort();
+        touched.dedup();
+        let touched = touched
+            .into_iter()
+            .take(CHECKPOINT_PROBES)
+            .collect::<Vec<_>>();
+        self.probe_settlements(net, &map, &touched)?;
+        Some((map, tail))
+    }
+
+    /// Spot-check `map` against HEAD's persisted decision trie: the same number of
+    /// settlements, a spread sample of `CHECKPOINT_PROBES` entries present with exactly the
+    /// trie's value, and every `extra` key (those a tail changed) agreeing. A checkpoint with
+    /// a flipped, dropped or forged entry is overwhelmingly likely to fail one of these; a
+    /// full recompute of the decision root is `verify_settlement_checkpoint`.
+    fn probe_settlements(
+        &self,
+        net: &WorldNetwork,
+        map: &super::settlement_checkpoint::Settlements,
+        extra: &[(String, String)],
+    ) -> Option<()> {
+        let count: usize = map.values().map(|m| m.len()).sum();
+        if count != net.decision_count() {
+            return None;
+        }
+        let stride = (count / CHECKPOINT_PROBES).max(1);
+        let mut i = 0usize;
+        for (decide, entities) in map {
+            for (entity, d) in entities {
+                if i.is_multiple_of(stride) && !net.decision_matches(decide, entity, d).ok()? {
+                    return None;
+                }
+                i += 1;
+            }
+        }
+        for (decide, entity) in extra {
+            let ok = match map.get(decide).and_then(|m| m.get(entity)) {
+                Some(d) => net.decision_matches(decide, entity, d),
+                None => net.decision_absent(decide, entity),
+            };
+            if !ok.ok()? {
+                return None;
+            }
+        }
+        Some(())
+    }
+
+    fn write_settlement_checkpoint(
+        &self,
+        net: &WorldNetwork,
+        map: &super::settlement_checkpoint::Settlements,
+    ) -> Result<(), WorldError> {
+        let Some(digest) = self.current_revision_digest else {
+            return Ok(());
+        };
+        let bytes = SettlementCheckpoint::encode_parts(
+            self.current_revision,
+            digest,
+            self.validity_key_for(net).digest(),
+            Some(net.decision_root()),
+            map,
+        );
+        let crash = self.crash_injector == Some(CrashPoint::CheckpointAfterTmpBeforeRename);
+        SettlementCheckpoint::write_bytes(&self.paths, &bytes, crash).map_err(|e| {
+            if crash {
+                WorldError::InjectedCrash(CrashPoint::CheckpointAfterTmpBeforeRename)
+            } else {
+                e.into()
+            }
+        })
+    }
+
+    /// Rebuild the settlement checkpoint at HEAD from the candidate frontier, after checking
+    /// that the settlements hash to the revision's decision root (a mismatch is corrupt
+    /// state and nothing is written). Returns the number of settlements.
+    pub fn refresh_settlement_checkpoint(&mut self) -> Result<usize, WorldError> {
+        let Some(net) = self.network.as_ref() else {
+            return Err(WorldError::NetworkError("world has no network".into()));
+        };
+        let map = net.all_settlements()?;
+        if !map.is_empty() && compute_decision_root(&map) != net.decision_root() {
+            return Err(WorldError::StateMismatch(
+                "settlements do not hash to the decision root".into(),
+            ));
+        }
+        self.write_settlement_checkpoint(net, &map)?;
+        Ok(map.values().map(|m| m.len()).sum())
+    }
+
+    /// Check the settlement checkpoint on disk: `Ok(None)` if there is none, else its entry
+    /// count after strict decoding, a recompute of its decision root from its settlements,
+    /// and (when it is at HEAD) equality with the frontier's settlements.
+    pub fn verify_settlement_checkpoint(&self) -> Result<Option<usize>, WorldError> {
+        let path = self.paths.settlement_checkpoint_file();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let ck = SettlementCheckpoint::decode(&fs::read(path)?)?;
+        ck.verify_root()?;
+        if ck.revision_seq == self.current_revision {
+            if let Some(net) = self.network.as_ref() {
+                if ck.settlements != net.all_settlements()? {
+                    return Err(WorldError::StateMismatch(
+                        "settlement checkpoint differs from the candidate frontier".into(),
+                    ));
+                }
+            }
+        }
+        Ok(Some(ck.count()))
     }
 
     /// Explain the decision deliberation for an entity key.
@@ -2716,24 +2939,4 @@ impl WorldSession {
 
 fn iso_now() -> String {
     "2026-10-04T00:00:00Z".to_string()
-}
-
-fn hex_to_digest(hex: &str) -> Result<Digest, WorldError> {
-    if hex.len() != 64 {
-        return Err(WorldError::Json(
-            "digest hex must be 64 characters".to_string(),
-        ));
-    }
-    let mut b = [0u8; 32];
-    let chars: Vec<char> = hex.chars().collect();
-    for i in (0..64).step_by(2) {
-        let high = chars[i]
-            .to_digit(16)
-            .ok_or_else(|| WorldError::Json("invalid hex".to_string()))?;
-        let low = chars[i + 1]
-            .to_digit(16)
-            .ok_or_else(|| WorldError::Json("invalid hex".to_string()))?;
-        b[i / 2] = ((high << 4) | low) as u8;
-    }
-    Ok(Digest::from_bytes(b))
 }
