@@ -14,10 +14,6 @@ brix-semantic = { workspace = true }
 soc-core = { path = "../soc-core" }
 serde_json = { workspace = true }
 
-[features]
-# Keeps the legacy PMap join implementation as a shadow oracle (until R0 M4).
-r0-oracle = []
-
 [dev-dependencies]
 brix-canon = { workspace = true }
 proptest = { workspace = true }

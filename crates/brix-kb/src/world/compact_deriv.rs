@@ -323,13 +323,10 @@ fn unfold(dag: &RelationDag, op: OperatorId, leaves: &[Leaf], i: &mut usize) -> 
     }
 }
 
-/// A derivation as carried by a delta: the compact form, plus (tests / `r0-oracle`) the
-/// legacy [`DerivationId`] built in parallel by the pre-compact logic.
+/// A derivation as carried by a delta: the compact form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Derivation {
     pub c: CompactDeriv,
-    #[cfg(any(test, feature = "r0-oracle"))]
-    legacy: DerivationId,
 }
 
 impl Derivation {
@@ -340,11 +337,6 @@ impl Derivation {
                 root: DRoot::Base(Arc::from(relation)),
                 leaves: Arc::from([Leaf::Base(key.clone())]),
             },
-            #[cfg(any(test, feature = "r0-oracle"))]
-            legacy: DerivationId::Base {
-                relation: relation.to_string(),
-                key: key.clone(),
-            },
         }
     }
 
@@ -354,11 +346,6 @@ impl Derivation {
             c: CompactDeriv {
                 root: DRoot::Op(op),
                 leaves: self.c.leaves.clone(),
-            },
-            #[cfg(any(test, feature = "r0-oracle"))]
-            legacy: DerivationId::Unary {
-                op,
-                parent: Box::new(self.legacy.clone()),
             },
         }
     }
@@ -373,23 +360,12 @@ impl Derivation {
                 root: DRoot::Op(op),
                 leaves: leaves.into(),
             },
-            #[cfg(any(test, feature = "r0-oracle"))]
-            legacy: DerivationId::Join {
-                op,
-                left: Box::new(left.legacy.clone()),
-                right: Box::new(right.legacy.clone()),
-            },
         }
     }
 
     /// Output of a distinct operator for `tuple_key`.
     pub fn distinct(op: OperatorId, tuple_key: Vec<u8>) -> Self {
         Self {
-            #[cfg(any(test, feature = "r0-oracle"))]
-            legacy: DerivationId::Distinct {
-                op,
-                tuple_key: tuple_key.clone(),
-            },
             c: CompactDeriv {
                 root: DRoot::Op(op),
                 leaves: Arc::from([Leaf::Distinct(tuple_key)]),
@@ -400,11 +376,6 @@ impl Derivation {
     /// Output of a grouped-count operator for `group_key`.
     pub fn group(op: OperatorId, group_key: Vec<Value>) -> Self {
         Self {
-            #[cfg(any(test, feature = "r0-oracle"))]
-            legacy: DerivationId::Group {
-                op,
-                group_key: group_key.clone(),
-            },
             c: CompactDeriv {
                 root: DRoot::Op(op),
                 leaves: Arc::from([Leaf::Group(group_key)]),
@@ -412,17 +383,10 @@ impl Derivation {
         }
     }
 
-    /// Wrap a derivation read back from the store (the legacy shadow is its expansion).
+    /// Wrap a derivation read back from the store, checking it expands against `dag`.
     pub fn from_stored(c: CompactDeriv, dag: &RelationDag) -> Res<Self> {
-        #[cfg(any(test, feature = "r0-oracle"))]
-        let legacy = c.expand(dag)?;
-        #[cfg(not(any(test, feature = "r0-oracle")))]
-        let _ = dag;
-        Ok(Self {
-            c,
-            #[cfg(any(test, feature = "r0-oracle"))]
-            legacy,
-        })
+        c.expand(dag)?;
+        Ok(Self { c })
     }
 
     pub fn digest(&self) -> Digest {
@@ -433,25 +397,14 @@ impl Derivation {
         self.c.expand(dag)
     }
 
-    /// The legacy derivation built by the pre-compact logic.
-    #[cfg(any(test, feature = "r0-oracle"))]
-    pub fn legacy(&self) -> &DerivationId {
-        &self.legacy
-    }
-
-    /// Oracle invariant I1: the compact form expands to exactly the legacy derivation and
-    /// converts back to itself.
-    #[cfg(any(test, feature = "r0-oracle"))]
+    /// Invariant I1: the compact form expands against `dag` and converts back to itself.
+    #[cfg(test)]
     pub fn check(&self, dag: &RelationDag) -> Res<()> {
         let expanded = self.c.expand(dag)?;
         assert_eq!(
-            expanded, self.legacy,
-            "compact derivation does not expand to the legacy derivation"
-        );
-        assert_eq!(
-            CompactDeriv::from_derivation(&self.legacy),
+            CompactDeriv::from_derivation(&expanded),
             self.c,
-            "compact(legacy) != compact"
+            "compact(expand(c)) != c"
         );
         Ok(())
     }
@@ -495,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn expand_matches_legacy_and_roundtrips() {
+    fn expand_roundtrips() {
         let (dag, [_, _, bind, join, dist, grp]) = dag();
         let ka = WorldKey(vec![1]);
         let kb = WorldKey(vec![2]);
@@ -509,10 +462,6 @@ mod tests {
             x.check(&dag).unwrap();
             let bytes = x.c.state_bytes();
             assert_eq!(CompactDeriv::state_from_bytes(&bytes).unwrap(), x.c);
-            assert_eq!(
-                x.c.digest(),
-                CompactDeriv::from_derivation(x.legacy()).digest()
-            );
         }
         assert_eq!(
             j.expand(&dag).unwrap(),

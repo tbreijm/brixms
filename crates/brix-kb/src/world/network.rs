@@ -423,9 +423,6 @@ pub fn compute_candidate_calendar_key(
 pub struct JoinSide {
     pub outer: SMap<ValueList, SubRoot>,
     pub hot: PMap<ValueList, SMap<Digest, JoinEntry>>,
-    /// Shadow of the pre-store implementation, kept until M4 (see `join_oracle`).
-    #[cfg(any(test, feature = "r0-oracle"))]
-    pub(crate) legacy: PMap<Vec<Value>, PMap<DerivationId, IntermediateTuple>>,
 }
 
 impl JoinSide {
@@ -470,8 +467,6 @@ impl JoinSide {
         Ok(Self {
             outer: self.outer.dehydrate(store)?,
             hot: PMap::new(),
-            #[cfg(any(test, feature = "r0-oracle"))]
-            legacy: self.legacy.clone(),
         })
     }
 }
@@ -518,47 +513,34 @@ impl<I: SupportItem> Supports<I> {
 /// `outer` maps each key to its [`SupportRef`]: a single support inline, two or more as the
 /// [`SubRoot`] of an inner `SMap<id, Val>` (canonical: one representation per support
 /// set). `hot` holds the inner sets of `Sub` keys modified (and so not yet reachable from
-/// the store) since the last dehydration. `L` is the key type of the legacy oracle shadow;
-/// `I` the stored support item (the compact derivation for Distinct, its digest for
+/// the store) since the last dehydration. `I` the stored support item (the compact derivation for Distinct, its digest for
 /// GroupedCount, which never needs to expand its supports).
 #[derive(Clone, Debug)]
-pub struct SupportIndex<K, L, I>
+pub struct SupportIndex<K, I>
 where
     K: StateCodec + Ord + Clone + 'static + Send + Sync,
-    L: Ord + Clone,
     I: SupportItem,
 {
     pub outer: SMap<K, SupportRef<I>>,
     pub hot: PMap<K, SMap<Digest, I::Val>>,
-    /// Shadow of the pre-store implementation, kept until M4 (see `join_oracle`).
-    #[cfg(any(test, feature = "r0-oracle"))]
-    pub(crate) legacy: PMap<L, PSet<DerivationId>>,
-    #[cfg(not(any(test, feature = "r0-oracle")))]
-    _legacy: std::marker::PhantomData<L>,
 }
 
-impl<K, L, I> Default for SupportIndex<K, L, I>
+impl<K, I> Default for SupportIndex<K, I>
 where
     K: StateCodec + Ord + Clone + 'static + Send + Sync,
-    L: Ord + Clone,
     I: SupportItem,
 {
     fn default() -> Self {
         Self {
             outer: SMap::new(),
             hot: PMap::new(),
-            #[cfg(any(test, feature = "r0-oracle"))]
-            legacy: PMap::new(),
-            #[cfg(not(any(test, feature = "r0-oracle")))]
-            _legacy: std::marker::PhantomData,
         }
     }
 }
 
-impl<K, L, I> SupportIndex<K, L, I>
+impl<K, I> SupportIndex<K, I>
 where
     K: StateCodec + Ord + Clone + 'static + Send + Sync,
-    L: Ord + Clone,
     I: SupportItem,
 {
     /// The supports for `key`, from `hot` if modified, else from the persisted index.
@@ -726,24 +708,20 @@ where
         Ok(Self {
             outer: self.outer.dehydrate(store)?,
             hot: PMap::new(),
-            #[cfg(any(test, feature = "r0-oracle"))]
-            legacy: self.legacy.clone(),
-            #[cfg(not(any(test, feature = "r0-oracle")))]
-            _legacy: std::marker::PhantomData,
         })
     }
 }
 
 /// Distinct support index, keyed by the typed tuple (`Int(1)` and `Str("1")` stay distinct).
-pub type DistinctSupports = SupportIndex<IntermediateTuple, IntermediateTuple, CompactDeriv>;
+pub type DistinctSupports = SupportIndex<IntermediateTuple, CompactDeriv>;
 /// Grouped-count index, keyed by the group key values.
-pub type GroupSupports = SupportIndex<ValueList, Vec<Value>, Digest>;
+pub type GroupSupports = SupportIndex<ValueList, Digest>;
 /// Contents of a derived relation that is not a `Distinct` output: each distinct typed tuple
 /// with the digests of the derivations currently supporting it. A tuple is in the relation
 /// iff it has at least one support, so collapsing derivations (several rows projecting to
 /// one tuple) is order-independent, and `Int(1)` / `Str("1")` stay distinct (the pre-M3 set
 /// was keyed by the Display bytes of a `TupleRecord`, which collapsed them).
-pub type DerivedSupports = SupportIndex<IntermediateTuple, (), Digest>;
+pub type DerivedSupports = SupportIndex<IntermediateTuple, Digest>;
 
 /// How the contents of one derived relation are stored.
 #[derive(Clone, Debug)]
@@ -767,9 +745,6 @@ pub enum DerivedRel {
 pub struct CandidateFrontier {
     pub buckets: SMap<FrontierKey, FrontierBucket>,
     pub hot: PMap<CandKey, SMap<Digest, CompactDeriv>>,
-    /// Shadow of the pre-store implementation, kept until M4 (see `join_oracle`).
-    #[cfg(any(test, feature = "r0-oracle"))]
-    pub(crate) legacy: PMap<String, PMap<String, PMap<String, CandidateEntry>>>,
 }
 
 impl CandidateFrontier {
@@ -924,8 +899,6 @@ impl CandidateFrontier {
         Ok(Self {
             buckets: self.buckets.dehydrate(store)?,
             hot: PMap::new(),
-            #[cfg(any(test, feature = "r0-oracle"))]
-            legacy: self.legacy.clone(),
         })
     }
 }
@@ -1081,13 +1054,6 @@ pub struct WorldNetwork {
     /// roots recorded in revisions are unchanged.
     pub(crate) decision_tree: SMap<WorldKey, WorldTuple>,
     pub candidate_frontier: CandidateFrontier,
-    /// Shadow of the pre-M3 derived relations (a set of `TupleRecord` without support
-    /// counts), kept until M4 (see `join_oracle`).
-    #[cfg(any(test, feature = "r0-oracle"))]
-    pub(crate) legacy_derived: PMap<String, PSet<TupleRecord>>,
-    /// Shadow of the settled decisions (plain map; the root is rebuilt on demand).
-    #[cfg(any(test, feature = "r0-oracle"))]
-    pub(crate) legacy_decisions: PMap<WorldKey, WorldTuple>,
     pub functions: Arc<BTreeMap<String, ast::Callable>>,
     pub program_env: Option<Arc<CompiledProgramEnv>>,
     pub current_revision: u64,
@@ -1254,10 +1220,6 @@ impl WorldNetwork {
             decision_subscribers: PMap::new(),
             decision_tree: SMap::new(),
             candidate_frontier: CandidateFrontier::default(),
-            #[cfg(any(test, feature = "r0-oracle"))]
-            legacy_derived: PMap::new(),
-            #[cfg(any(test, feature = "r0-oracle"))]
-            legacy_decisions: PMap::new(),
             functions: Arc::new(BTreeMap::new()),
             program_env: None,
             current_revision: 0,
@@ -1668,11 +1630,6 @@ impl WorldNetwork {
             .collect();
         fresh.decision_tree = SMap::new();
         fresh.candidate_frontier = CandidateFrontier::default();
-        #[cfg(any(test, feature = "r0-oracle"))]
-        {
-            fresh.legacy_derived = PMap::new();
-            fresh.legacy_decisions = PMap::new();
-        }
         fresh.current_revision = 0;
         fresh.base_resident = true;
         let mut op_states = self.operator_states.clone();
@@ -1963,12 +1920,6 @@ impl WorldNetwork {
         let mut diagnostics = NetworkDiagnostics::default();
         let mut total_work: u64 = 0;
         let mut total_matches: u64 = 0;
-        #[cfg(any(test, feature = "r0-oracle"))]
-        let (mut legacy_candidates_inserted, mut legacy_candidates_retracted) = (0usize, 0usize);
-        // The oracle shadows only see a network that has applied every fact since empty;
-        // a network restored from persisted state has no shadow to compare with.
-        #[cfg(any(test, feature = "r0-oracle"))]
-        let shadow_on = self.base_resident;
 
         let enqueue =
             |op: OperatorId,
@@ -2345,19 +2296,6 @@ impl WorldNetwork {
                                     (right_side, left_side)
                                 };
 
-                                #[cfg(any(test, feature = "r0-oracle"))]
-                                let legacy_matches = if shadow_on {
-                                    Some(super::join_oracle::shadow_step(
-                                        own,
-                                        other,
-                                        &join_key,
-                                        deriv.legacy(),
-                                        tuple,
-                                        is_ins,
-                                    ))
-                                } else {
-                                    None
-                                };
 
                                 if !deriv.c.leaf_count_ok(counts) {
                                     return Err(corrupt_derivation());
@@ -2381,15 +2319,6 @@ impl WorldNetwork {
                                 }
                                 let matches = other.read(&vk, store)?.unwrap_or_default();
 
-                                #[cfg(any(test, feature = "r0-oracle"))]
-                                if let Some(legacy_matches) = &legacy_matches {
-                                    super::join_oracle::assert_same_matches(
-                                        legacy_matches,
-                                        &matches,
-                                        store,
-                                        &self.dag,
-                                    )?;
-                                }
 
                                 let remaining = matches.len();
                                 (delta, is_left, join_key, matches, None, remaining)
@@ -2523,15 +2452,6 @@ impl WorldNetwork {
                             let tuple_key = distinct_key(&tuple);
                             let out_deriv = Derivation::distinct(op_id, tuple_key);
 
-                            #[cfg(any(test, feature = "r0-oracle"))]
-                            let legacy_counts = shadow_on.then(|| {
-                                super::join_oracle::shadow_support_step(
-                                    &mut supports.legacy,
-                                    &tuple,
-                                    deriv.legacy(),
-                                    is_ins,
-                                )
-                            });
 
                             let (old_count, new_count) = if is_ins {
                                 supports.add(tuple.clone(), deriv.c.clone(), store)?
@@ -2539,14 +2459,6 @@ impl WorldNetwork {
                                 supports.remove(&tuple, &deriv.c.digest(), store)?
                             };
 
-                            #[cfg(any(test, feature = "r0-oracle"))]
-                            if let Some(legacy_counts) = legacy_counts {
-                                assert_eq!(
-                                    (old_count, new_count),
-                                    legacy_counts,
-                                    "store-backed distinct support counts diverged from the legacy oracle"
-                                );
-                            }
 
                             if is_ins {
                                 if old_count == 0 {
@@ -2611,29 +2523,12 @@ impl WorldNetwork {
                             };
 
                             let store = &self.state;
-                            #[cfg(any(test, feature = "r0-oracle"))]
-                            let legacy_counts = shadow_on.then(|| {
-                                super::join_oracle::shadow_support_step(
-                                    &mut groups.legacy,
-                                    &key_vals,
-                                    deriv.legacy(),
-                                    is_ins,
-                                )
-                            });
                             let gk = ValueList(key_vals.clone());
                             let (old_count, new_count) = if is_ins {
                                 groups.add(gk, deriv.c.digest(), store)?
                             } else {
                                 groups.remove(&gk, &deriv.c.digest(), store)?
                             };
-                            #[cfg(any(test, feature = "r0-oracle"))]
-                            if let Some(legacy_counts) = legacy_counts {
-                                assert_eq!(
-                                    (old_count, new_count),
-                                    legacy_counts,
-                                    "store-backed group counts diverged from the legacy oracle"
-                                );
-                            }
 
                             if new_count != old_count {
                                 let out_deriv = Derivation::group(op_id, key_vals.clone());
@@ -2673,12 +2568,6 @@ impl WorldNetwork {
             // Propagate out_deltas. Each consumer of the batch gets a copy except the last,
             // which takes ownership (avoids one full clone of every batch).
             if !out_deltas.is_empty() {
-                #[cfg(any(test, feature = "r0-oracle"))]
-                for od in &out_deltas {
-                    od.derivation()
-                        .check(&self.dag)
-                        .map_err(|e| WorldError::from(StateError::from(e)))?;
-                }
                 let n_out = out_deltas.len();
                 report.intermediate_deltas_count += n_out;
                 let outputs = self.output_relations.get(&op_id);
@@ -2703,19 +2592,6 @@ impl WorldNetwork {
                             for od in &out_deltas {
                                 let is_ins = od.is_insert();
 
-                                #[cfg(any(test, feature = "r0-oracle"))]
-                                let legacy_changed = if shadow_on {
-                                    let set =
-                                        self.legacy_derived.entry(rel_name.clone()).or_default();
-                                    let rec = od.tuple().to_tuple_record();
-                                    Some(if is_ins {
-                                        set.insert(rec)
-                                    } else {
-                                        set.remove(&rec)
-                                    })
-                                } else {
-                                    None
-                                };
 
                                 let changed = match rel {
                                     // A Distinct output emits only on 0 -> 1 / 1 -> 0 support
@@ -2736,13 +2612,6 @@ impl WorldNetwork {
                                     }
                                 };
 
-                                #[cfg(any(test, feature = "r0-oracle"))]
-                                if let Some(legacy_changed) = legacy_changed {
-                                    assert_eq!(
-                                        changed, legacy_changed,
-                                        "store-backed derived relation diverged from the legacy oracle"
-                                    );
-                                }
 
                                 if changed {
                                     if is_ins {
@@ -2823,16 +2692,6 @@ impl WorldNetwork {
                         | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
                     };
 
-                    #[cfg(any(test, feature = "r0-oracle"))]
-                    let did = {
-                        let did = deriv
-                            .expand(&self.dag)
-                            .map_err(|e| WorldError::from(StateError::from(e)))?;
-                        if shadow_on {
-                            assert_eq!(&did, deriv.legacy(), "frontier derivation diverged");
-                        }
-                        did
-                    };
 
                     let mut eval_tuple = tuple.clone();
                     for (k, v) in &tuple.fields {
@@ -2922,31 +2781,6 @@ impl WorldNetwork {
                                     &val,
                                 );
 
-                                #[cfg(any(test, feature = "r0-oracle"))]
-                                if shadow_on {
-                                    let entity_map = self
-                                        .candidate_frontier
-                                        .legacy
-                                        .entry(decide.name.clone())
-                                        .or_default()
-                                        .entry(entity_id.clone())
-                                        .or_default();
-                                    let entry = entity_map
-                                        .entry(propose.name.clone())
-                                        .or_insert_with(|| {
-                                            legacy_candidates_inserted += 1;
-                                            CandidateEntry {
-                                                candidate_name: propose.name.clone(),
-                                                entity_id: entity_id.clone(),
-                                                priority: propose.priority,
-                                                phase: 0,
-                                                value: val.clone(),
-                                                calendar_key: cal_key,
-                                                supports: PSet::new(),
-                                            }
-                                        });
-                                    entry.supports.insert(did.clone());
-                                }
 
                                 let store = &self.state;
                                 let fk = FrontierKey::new(&decide.name, &entity_id);
@@ -2994,26 +2828,6 @@ impl WorldNetwork {
                                 }
                             }
                         } else {
-                            #[cfg(any(test, feature = "r0-oracle"))]
-                            if let Some(decide_map) = self
-                                .candidate_frontier
-                                .legacy
-                                .get_mut(&decide.name)
-                                .filter(|_| shadow_on)
-                            {
-                                if let Some(entity_map) = decide_map.get_mut(&entity_id) {
-                                    if let Some(entry) = entity_map.get_mut(&propose.name) {
-                                        entry.supports.remove(&did);
-                                        if entry.supports.is_empty() {
-                                            entity_map.remove(&propose.name);
-                                            legacy_candidates_retracted += 1;
-                                        }
-                                    }
-                                    if entity_map.is_empty() {
-                                        decide_map.remove(&entity_id);
-                                    }
-                                }
-                            }
 
                             let store = &self.state;
                             let fk = FrontierKey::new(&decide.name, &entity_id);
@@ -3054,34 +2868,6 @@ impl WorldNetwork {
                 None => self.settlement_of(&decide, &entity)?,
             };
 
-            #[cfg(any(test, feature = "r0-oracle"))]
-            if shadow_on {
-                if self
-                    .candidate_frontier
-                    .legacy
-                    .get(&decide)
-                    .is_some_and(|entities| entities.is_empty())
-                {
-                    self.candidate_frontier.legacy.remove(&decide);
-                }
-                let legacy = super::join_oracle::legacy_settlement(
-                    &self.candidate_frontier.legacy,
-                    &decide,
-                    &entity,
-                );
-                assert_eq!(
-                    settlement, legacy,
-                    "store-backed settlement diverged from the legacy oracle"
-                );
-                match &settlement {
-                    Some(d) => {
-                        self.legacy_decisions.insert(key.clone(), decision_tuple(d));
-                    }
-                    None => {
-                        self.legacy_decisions.remove(&key);
-                    }
-                }
-            }
 
             if let Some(decision) = settlement {
                 let tuple = decision_tuple(&decision);
@@ -3109,14 +2895,6 @@ impl WorldNetwork {
                 .put_bucket(fk, bucket, &self.state)?;
         }
 
-        #[cfg(any(test, feature = "r0-oracle"))]
-        if shadow_on {
-            assert_eq!(
-                (report.candidates_inserted, report.candidates_retracted),
-                (legacy_candidates_inserted, legacy_candidates_retracted),
-                "store-backed candidate counts diverged from the legacy oracle"
-            );
-        }
         report.diagnostics = diagnostics;
         self.current_revision += 1;
         Ok(report)

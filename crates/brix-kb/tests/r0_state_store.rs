@@ -1,10 +1,8 @@
 //! R0 Phase 2 M2/M3: store-backed join, Distinct, GroupedCount, derived-relation, candidate
 //! frontier and decision state.
 //!
-//! Run with `--features brix-kb/r0-oracle` to also compare every root and view against the
-//! legacy shadows (`legacy_roots`, `legacy_derived_state`, `legacy_frontier_state`, ...);
-//! without the feature the tests still check behaviour against a never-persisted control
-//! network and the independent reference evaluator.
+//! Behaviour is checked against a never-persisted control network and the independent
+//! reference evaluator.
 //!
 //! The model and fuzz generator mirror `world_reference_differential.rs`. At every fuzz step
 //! the persisted network is persisted, flushed and dehydrated (so the next batch reads
@@ -223,52 +221,6 @@ impl Drop for TempDir {
     }
 }
 
-#[cfg(feature = "r0-oracle")]
-fn assert_legacy_roots(net: &WorldNetwork, label: &str) {
-    assert_eq!(
-        net.distinct_roots(),
-        net.legacy_distinct_roots().unwrap(),
-        "[{label}] distinct roots != legacy"
-    );
-    assert_eq!(
-        net.group_roots(),
-        net.legacy_group_roots().unwrap(),
-        "[{label}] group roots != legacy"
-    );
-    assert_eq!(
-        net.join_index_roots(),
-        net.legacy_roots().unwrap(),
-        "[{label}] join roots != legacy"
-    );
-    let state = net.current_state().unwrap();
-    assert_eq!(
-        state.derived_relations,
-        net.legacy_derived_state(),
-        "[{label}] derived relations != legacy"
-    );
-    assert_eq!(
-        state.candidate_frontier,
-        net.legacy_frontier_state(),
-        "[{label}] candidate frontier != legacy"
-    );
-    assert_eq!(
-        net.all_settlements().unwrap(),
-        net.legacy_settlements(),
-        "[{label}] settlements != legacy"
-    );
-    assert_eq!(
-        net.frontier_root(),
-        net.legacy_frontier_root().unwrap(),
-        "[{label}] frontier root != legacy"
-    );
-    assert_eq!(
-        net.decision_sub_root(),
-        net.legacy_decision_sub_root(),
-        "[{label}] decision trie != legacy"
-    );
-}
-#[cfg(not(feature = "r0-oracle"))]
-fn assert_legacy_roots(_net: &WorldNetwork, _label: &str) {}
 
 /// Every observable root and view of `net` equals the never-persisted `control`'s, and the
 /// decision root is the canonical one for the settlements.
@@ -337,7 +289,6 @@ fn run_fuzz(seed: u64, steps: usize, quantum: usize, backend: Backend) {
         }
         apply(&mut control, &label, ops.clone());
         apply(&mut net, &label, ops);
-        assert_legacy_roots(&net, &label);
 
         net = persist_and_dehydrate(&net);
         if backend == Backend::File {
@@ -346,7 +297,6 @@ fn run_fuzz(seed: u64, steps: usize, quantum: usize, backend: Backend) {
                 StateStore::open_file(&dir.0, DEFAULT_NODE_CACHE_BYTES).unwrap(),
             );
         }
-        assert_legacy_roots(&net, &label);
 
         let got = net.current_state().unwrap();
         let want = control.current_state().unwrap();
@@ -719,7 +669,6 @@ proptest! {
         prop_assert_eq!(a.decision_root(), b.decision_root());
         prop_assert_eq!(a.all_settlements().unwrap(), b.all_settlements().unwrap());
         prop_assert_eq!(a.current_state().unwrap().derived_relations, b.current_state().unwrap().derived_relations);
-        assert_legacy_roots(&b, "proptest");
     }
 }
 
