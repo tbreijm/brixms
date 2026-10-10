@@ -448,7 +448,7 @@ fn test_node_store_lru_cache_eviction_and_counters() {
 
     // Read back all 20 nodes to exercise cache hits, misses, and evictions
     for d in &digests {
-        let node = store.get_node(d);
+        let node = store.get_node(d).unwrap();
         assert!(node.is_some());
     }
 

@@ -63,11 +63,14 @@ fn sparse_windows_find_every_node_in_large_packs() {
         store.set_cache_capacity(0);
         for (n, d) in stored.iter().enumerate() {
             assert!(store.contains(d), "stored node {n} not found");
-            assert!(store.get_node(d).is_some(), "stored node {n} unreadable");
+            assert!(
+                store.get_node(d).unwrap().is_some(),
+                "stored node {n} unreadable"
+            );
         }
         for d in &absent {
             assert!(!store.contains(d), "absent neighbour reported present");
-            assert_eq!(store.get_node(d), None);
+            assert_eq!(store.get_node(d).unwrap(), None);
         }
     };
     check(&store);

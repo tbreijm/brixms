@@ -31,13 +31,15 @@ impl CountingMemoryStore {
 }
 
 impl NodeStore for CountingMemoryStore {
-    fn get_node(&self, digest: &Digest) -> Option<Vec<u8>> {
+    fn get_node(&self, digest: &Digest) -> Result<Option<Vec<u8>>, soc_core::store::StorageError> {
         self.counts.reads.set(self.counts.reads.get() + 1);
-        let bytes = self.inner.get_node(digest)?;
+        let Some(bytes) = self.inner.get_node(digest)? else {
+            return Ok(None);
+        };
         self.counts
             .bytes_read
             .set(self.counts.bytes_read.get() + bytes.len() as u64);
-        Some(bytes)
+        Ok(Some(bytes))
     }
 
     fn put_node(&mut self, digest: Digest, bytes: Vec<u8>) {

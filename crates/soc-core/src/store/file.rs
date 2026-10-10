@@ -29,7 +29,7 @@
 //! body allocated per read. Clones share the index and pending writer.
 //! Identical digests in several packs are tolerated (content-addressed).
 
-use super::NodeStore;
+use super::{NodeStore, StorageError};
 use brix_canon::{Digest, Domain};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -439,6 +439,8 @@ pub struct FileNodeStore {
     objects_dir: PathBuf,
     state: Arc<Mutex<State>>,
     failed: Arc<AtomicBool>,
+    /// Set when the latched failure was damage (checksum/format), not an OS I/O error.
+    corrupt: Arc<AtomicBool>,
     io: Arc<Counters>,
     /// Legacy `objects/xx/` shard directories that existed at open (legacy files are
     /// read-only history; shards created after open are not consulted until reopen).
@@ -484,6 +486,7 @@ impl FileNodeStore {
             objects_dir,
             state: Arc::new(Mutex::new(State::default())),
             failed: Arc::new(AtomicBool::new(false)),
+            corrupt: Arc::new(AtomicBool::new(false)),
             io: Arc::new(Counters::default()),
             legacy_shards: Arc::new((0..256).map(|_| AtomicBool::new(false)).collect()),
         };
@@ -979,16 +982,29 @@ impl NodeStore for FileNodeStore {
         .unwrap_or(false)
     }
 
-    fn get_node(&self, digest: &Digest) -> Option<Vec<u8>> {
+    fn get_node(&self, digest: &Digest) -> Result<Option<Vec<u8>>, StorageError> {
         self.io.reads.fetch_add(1, Ordering::Relaxed);
+        let storage_err = |e: io::Error| {
+            if e.kind() == io::ErrorKind::InvalidData {
+                self.corrupt.store(true, Ordering::SeqCst);
+                StorageError::CorruptedNode(*digest)
+            } else {
+                StorageError::Io(e.to_string())
+            }
+        };
         if self.check().is_err() {
-            return None;
+            // A latched failure stays an error for every later read (also cached nodes).
+            return Err(if self.corrupt.load(Ordering::SeqCst) {
+                StorageError::CorruptedNode(*digest)
+            } else {
+                StorageError::Io("node I/O failed in FileNodeStore".into())
+            });
         }
         // 1. Check in-memory LRU cache
         if let Ok(state) = self.state.lock() {
             if let Some(bytes) = state.node_cache.get(digest) {
                 self.io.cache_hits.fetch_add(1, Ordering::Relaxed);
-                return Some(bytes.clone());
+                return Ok(Some(bytes.clone()));
             }
         }
         self.io.cache_misses.fetch_add(1, Ordering::Relaxed);
@@ -1037,8 +1053,7 @@ impl NodeStore for FileNodeStore {
                     Err(err) => Err(err),
                 }
             })())
-            .ok()
-            .flatten();
+            .map_err(storage_err)?;
 
         if let Some(ref bytes) = result {
             if let Ok(mut state) = self.state.lock() {
@@ -1046,7 +1061,7 @@ impl NodeStore for FileNodeStore {
             }
         }
 
-        result
+        Ok(result)
     }
 
     fn put_node(&mut self, digest: Digest, bytes: Vec<u8>) {

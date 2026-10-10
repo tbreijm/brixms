@@ -302,17 +302,14 @@ impl NetworkStateHeader {
     }
 
     /// The verified bytes of the header object at `digest`. Absence is `MissingState`,
-    /// bytes that do not hash to their address are `CorruptState`. The file store reports a
-    /// node it cannot read as absent (deviation #2 in the design notes), so a digest the
-    /// store lists but cannot return is classified as corrupt.
+    /// bytes that do not hash to their address (or a damaged pack) are `CorruptState`, and
+    /// an OS I/O failure stays a plain state error.
     fn verified_bytes(store: &StateStore, digest: &Digest) -> Result<Vec<u8>, WorldError> {
-        let Some(bytes) = store.get_node(digest) else {
-            let e = if store.has_node(digest) {
-                StorageError::CorruptedNode(*digest)
-            } else {
-                StorageError::MissingNode(*digest)
-            };
-            return Err(StateError::Storage(e).into());
+        let Some(bytes) = store
+            .get_node(digest)
+            .map_err(|e| WorldError::from(StateError::Storage(e)))?
+        else {
+            return Err(StateError::Storage(StorageError::MissingNode(*digest)).into());
         };
         if Digest::of(Domain::State, &bytes) != *digest {
             return Err(StateError::Storage(StorageError::CorruptedNode(*digest)).into());

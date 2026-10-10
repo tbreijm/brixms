@@ -1221,7 +1221,10 @@ impl<
 /// Content-addressed storage for persistent trie nodes.
 pub trait NodeStore {
     /// Retrieve raw serialized bytes of a node by its Merkle [`Digest`].
-    fn get_node(&self, digest: &Digest) -> Option<Vec<u8>>;
+    ///
+    /// `Ok(None)` means the node is absent; an unreadable or damaged store is an `Err`
+    /// (`CorruptedNode` for pack damage, `Io` for OS errors), never reported as absent.
+    fn get_node(&self, digest: &Digest) -> Result<Option<Vec<u8>>, StorageError>;
     /// Store raw serialized bytes for a node under its Merkle [`Digest`].
     fn put_node(&mut self, digest: Digest, bytes: Vec<u8>);
     /// Like [`Self::put_node`] for a node the caller has just checked is absent
@@ -1231,7 +1234,7 @@ pub trait NodeStore {
     }
     /// Whether `digest` exists in the store.
     fn contains(&self, digest: &Digest) -> bool {
-        self.get_node(digest).is_some()
+        matches!(self.get_node(digest), Ok(Some(_)))
     }
     /// Optional cache of decoded, digest-verified trie nodes shared by store-aware
     /// reads. Stores that return `None` decode on every access.
@@ -1437,8 +1440,8 @@ impl MemoryNodeStore {
 }
 
 impl NodeStore for MemoryNodeStore {
-    fn get_node(&self, digest: &Digest) -> Option<Vec<u8>> {
-        self.nodes.get(digest).cloned()
+    fn get_node(&self, digest: &Digest) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self.nodes.get(digest).cloned())
     }
 
     fn put_node(&mut self, digest: Digest, bytes: Vec<u8>) {
@@ -1644,7 +1647,7 @@ fn resolve_node<
                     return Ok(hit);
                 }
             }
-            let bytes = store.get_node(d).ok_or(StorageError::MissingNode(*d))?;
+            let bytes = store.get_node(d)?.ok_or(StorageError::MissingNode(*d))?;
             store.note_touch(d, false, bytes.len());
             // Digest verified exactly once, before the node can enter the cache.
             let decoded = decode_node_verified::<K, V>(&bytes, d)
@@ -2360,7 +2363,7 @@ mod tests {
     }
 
     impl NodeStore for CachedStore {
-        fn get_node(&self, d: &Digest) -> Option<Vec<u8>> {
+        fn get_node(&self, d: &Digest) -> Result<Option<Vec<u8>>, StorageError> {
             self.mem.get_node(d)
         }
         fn put_node(&mut self, d: Digest, b: Vec<u8>) {
