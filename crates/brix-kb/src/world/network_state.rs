@@ -76,6 +76,13 @@ impl ValidityKey {
         }
     }
 
+    /// Content address of the key (for the state-cache sidecar).
+    pub fn digest(&self) -> Digest {
+        let mut w = CanonWriter::new();
+        self.write(&mut w);
+        Digest::of(Domain::State, &w.finish())
+    }
+
     fn write(&self, w: &mut CanonWriter) {
         w.write_bytes(self.program_digest.as_bytes());
         put_opt_digest(w, &self.exec_profile_digest);

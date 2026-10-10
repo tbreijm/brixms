@@ -928,3 +928,212 @@ fn loaded_enum_is_reachable_from_the_public_api() {
     // Compile-time check that the staged loader is part of the public surface.
     let _ = |l: Loaded| matches!(l, Loaded::Stale(_));
 }
+
+// ---------------------------------------------------------------------------------------
+// State-cache sidecar
+// ---------------------------------------------------------------------------------------
+
+use brix_kb::world::OpenPolicy;
+
+/// A world whose HEAD is a pre-M4 `@2` record, with the observation of its true state.
+fn legacy_world(name: &str) -> (TempDir, Obs) {
+    let (dir, live) = seeded_world(name);
+    let want = observe_fresh(&live);
+    drop(live);
+    forge_legacy_head(dir.path());
+    (dir, want)
+}
+
+fn forge_legacy_head(dir: &Path) {
+    forge_head(dir, |mut r| {
+        r.schema = REVISION_SCHEMA_V2.to_string();
+        r.network_state_root = None;
+        r.revision_digest = r.compute_digest_for_record();
+        r
+    });
+}
+
+fn sidecar(dir: &Path) -> PathBuf {
+    WorldPaths::new(dir).state_cache_file()
+}
+
+fn no_refresh() -> OpenPolicy {
+    OpenPolicy {
+        force_replay: false,
+        refresh_after_replay: false,
+    }
+}
+
+#[test]
+fn replay_refreshes_the_sidecar_and_the_next_open_restores_from_it() {
+    let (dir, want) = legacy_world("sc_basic");
+    let first = WorldSession::open(dir.path()).unwrap();
+    assert_eq!(first.open_mode, OpenMode::Replay);
+    assert_eq!(first.replay_reason, Some("legacy-revision"));
+    assert!(first.state_refreshed, "{:?}", first.state_refresh_error);
+    assert!(sidecar(dir.path()).exists());
+    assert_eq!(observe(&first), want);
+    drop(first);
+
+    let mut second = WorldSession::open(dir.path()).unwrap();
+    assert_eq!(second.open_mode, OpenMode::Restored);
+    assert_eq!(second.state_source, Some("sidecar"));
+    assert_eq!(second.replay_reason, None);
+    assert_eq!(observe(&second), want, "sidecar restore != replay");
+    second.verify_state().unwrap();
+    // The first commit after a refresh writes the delta only, and is a restorable @3.
+    let receipt = second
+        .apply_batch(WorldBatch::new(
+            second.current_revision,
+            "b3",
+            vec![order(5, 0, 1, true)],
+        ))
+        .unwrap();
+    assert!(receipt.objects_written < 100, "{}", receipt.objects_written);
+    let third = WorldSession::open(dir.path()).unwrap();
+    assert_eq!(third.open_mode, OpenMode::Restored);
+    assert_eq!(third.state_source, Some("revision"));
+    assert_all_agree(dir.path(), &third, "after sidecar restore + commit");
+}
+
+#[test]
+fn a_validity_key_change_also_refreshes() {
+    let (dir, live) = seeded_world("sc_key");
+    let want = observe_fresh(&live);
+    drop(live);
+    forge_header(dir.path(), |h| {
+        h.validity.lowering_version = "brix.world.net-lowering@0".into()
+    });
+    let first = WorldSession::open(dir.path()).unwrap();
+    assert_eq!(first.replay_reason, Some("validity-key"));
+    assert!(first.state_refreshed);
+    drop(first);
+    let second = WorldSession::open(dir.path()).unwrap();
+    assert_eq!(second.state_source, Some("sidecar"));
+    assert_eq!(observe(&second), want);
+}
+
+#[test]
+fn a_stale_sidecar_is_ignored() {
+    // HEAD advanced after the sidecar was written.
+    let (dir, _) = legacy_world("sc_stale_head");
+    drop(WorldSession::open(dir.path()).unwrap());
+    let old = fs::read(sidecar(dir.path())).unwrap();
+    let mut s = WorldSession::open(dir.path()).unwrap();
+    commit(&mut s, "advance", vec![order(6, 1, 1, true)]);
+    let want = observe_fresh(&s);
+    drop(s);
+    forge_legacy_head(dir.path());
+    fs::write(sidecar(dir.path()), old).unwrap();
+    let r = WorldSession::open(dir.path()).unwrap();
+    assert_eq!(r.open_mode, OpenMode::Replay);
+    assert_eq!(observe(&r), want);
+
+    // Written under another validity key.
+    let (dir, want) = legacy_world("sc_stale_key");
+    drop(WorldSession::open(dir.path()).unwrap());
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&fs::read(sidecar(dir.path())).unwrap()).unwrap();
+    v["validity_key_digest"] = Digest::from_bytes([4; 32]).to_hex().into();
+    fs::write(sidecar(dir.path()), serde_json::to_vec(&v).unwrap()).unwrap();
+    // Replays; the refresh then rewrites a correct sidecar.
+    let r = WorldSession::open(dir.path()).unwrap();
+    assert_eq!(r.open_mode, OpenMode::Replay);
+    assert_eq!(observe(&r), want);
+    assert_eq!(
+        WorldSession::open(dir.path()).unwrap().state_source,
+        Some("sidecar")
+    );
+}
+
+#[test]
+fn an_unreadable_sidecar_is_a_cache_miss() {
+    for garbage in [
+        &b""[..],
+        b"{",
+        b"{\"schema\":\"brix.world.state-cache@1\"",
+        b"[1,2]",
+    ] {
+        let (dir, want) = legacy_world("sc_garbage");
+        drop(WorldSession::open(dir.path()).unwrap());
+        fs::write(sidecar(dir.path()), garbage).unwrap();
+        let r = WorldSession::open(dir.path()).unwrap();
+        assert_eq!(r.open_mode, OpenMode::Replay);
+        assert_eq!(observe(&r), want);
+    }
+}
+
+#[test]
+fn damage_behind_a_valid_sidecar_is_a_hard_error() {
+    let (dir, _) = legacy_world("sc_damage");
+    drop(WorldSession::open(dir.path()).unwrap());
+    let cache = brix_kb::world::state_cache::StateCache::read(&sidecar(dir.path())).unwrap();
+    let store = StateStore::open_file(dir.path(), 1 << 20).unwrap();
+    let h = NetworkStateHeader::read(&store, &cache.network_state_root).unwrap();
+    let node = soc_core::store::NodeStore::get_node(&store, &h.frontier.root).unwrap();
+    drop(store);
+    flip_byte_in_store(dir.path(), &node);
+    let err = WorldSession::open(dir.path()).err().expect("must fail");
+    assert!(
+        matches!(
+            err,
+            WorldError::CorruptState(_) | WorldError::MissingState(_)
+        ),
+        "{err:?}"
+    );
+    assert!(WorldSession::open_replay(dir.path()).is_ok());
+}
+
+#[test]
+fn a_held_lock_skips_the_refresh_and_open_still_succeeds() {
+    let (dir, want) = legacy_world("sc_locked");
+    let guard = brix_kb::world::session::WorldLockGuard::acquire(dir.path()).unwrap();
+    let s = WorldSession::open(dir.path()).unwrap();
+    assert_eq!(s.open_mode, OpenMode::Replay);
+    assert!(!s.state_refreshed);
+    assert!(s.state_refresh_error.is_some());
+    assert!(!sidecar(dir.path()).exists());
+    assert_eq!(observe(&s), want);
+    drop(guard);
+}
+
+#[test]
+fn forced_replay_never_writes_a_sidecar() {
+    let (dir, _) = legacy_world("sc_forced");
+    let s = WorldSession::open_replay(dir.path()).unwrap();
+    assert!(!s.state_refreshed);
+    assert!(!sidecar(dir.path()).exists());
+    // Nor does a policy that opts out.
+    let s = WorldSession::open_with_policy(dir.path(), no_refresh()).unwrap();
+    assert_eq!(s.open_mode, OpenMode::Replay);
+    assert!(!sidecar(dir.path()).exists());
+}
+
+#[test]
+fn sidecar_crash_points_leave_a_consistent_cache() {
+    for (i, point) in [
+        CrashPoint::SidecarBeforeFlush,
+        CrashPoint::SidecarAfterFlushBeforeRename,
+        CrashPoint::SidecarAfterRename,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (dir, want) = legacy_world(&format!("sc_crash_{i}"));
+        let mut s = WorldSession::open_with_policy(dir.path(), no_refresh()).unwrap();
+        s.set_crash_point(Some(point));
+        assert!(matches!(
+            s.refresh_state_cache(),
+            Err(WorldError::InjectedCrash(p)) if p == point
+        ));
+        drop(s);
+        let present = sidecar(dir.path()).exists();
+        assert_eq!(present, point == CrashPoint::SidecarAfterRename, "{point}");
+        // Whatever survived, the world opens to the true state.
+        let r = WorldSession::open(dir.path()).unwrap();
+        assert_eq!(observe(&r), want, "{point}");
+        if present {
+            assert_eq!(r.state_source, Some("sidecar"));
+        }
+    }
+}

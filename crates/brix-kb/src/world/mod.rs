@@ -22,6 +22,7 @@ pub mod reference;
 pub mod revision;
 pub mod session;
 pub mod staging;
+pub mod state_cache;
 pub mod state_codec;
 pub mod state_store;
 pub mod types;
@@ -47,7 +48,8 @@ pub use revision::{
     SettlementStatus, WorldRevision, REVISION_SCHEMA, REVISION_SCHEMA_V2, REVISION_SCHEMA_V3,
 };
 pub use session::{
-    DiffPage, ExecModuleLoaderLimits, ExecProfileV1, OpenMode, QueryPage, RevisionReceipt,
-    SecondaryIndexCursor, SecondaryIndexPage, WorldSession, WorldSnapshot, EXEC_PROFILE_SCHEMA,
+    DiffPage, ExecModuleLoaderLimits, ExecProfileV1, OpenMode, OpenPolicy, QueryPage,
+    RevisionReceipt, SecondaryIndexCursor, SecondaryIndexPage, WorldSession, WorldSnapshot,
+    EXEC_PROFILE_SCHEMA,
 };
 pub use types::{WorldCursor, WorldKey, WorldTuple};

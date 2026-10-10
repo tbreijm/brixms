@@ -24,6 +24,12 @@ pub enum CrashPoint {
     /// Crash after every object, network state header included, is written but before
     /// any is flushed.
     AfterNetworkObjectsBeforeFlush,
+    /// State-cache refresh: header written, not yet flushed.
+    SidecarBeforeFlush,
+    /// State-cache refresh: objects flushed, sidecar written to its temp file only.
+    SidecarAfterFlushBeforeRename,
+    /// State-cache refresh: sidecar renamed into place.
+    SidecarAfterRename,
 }
 
 impl fmt::Display for CrashPoint {
@@ -48,6 +54,11 @@ impl fmt::Display for CrashPoint {
             Self::AfterNetworkObjectsBeforeFlush => {
                 write!(f, "crash after network objects before flush")
             }
+            Self::SidecarBeforeFlush => write!(f, "crash before state-cache flush"),
+            Self::SidecarAfterFlushBeforeRename => {
+                write!(f, "crash after state-cache flush before rename")
+            }
+            Self::SidecarAfterRename => write!(f, "crash after state-cache rename"),
         }
     }
 }

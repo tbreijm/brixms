@@ -21,6 +21,7 @@ use super::oracle::DiffEvent;
 use super::paths::WorldPaths;
 use super::revision::{SettlementStatus, WorldRevision, REVISION_SCHEMA_V3};
 use super::staging::StagingManager;
+use super::state_cache::StateCache;
 use super::types::{WorldCursor, WorldKey, WorldTuple};
 
 fn parse_digest(hex: &str, field: &str) -> Result<Digest, WorldError> {
@@ -640,6 +641,27 @@ impl OpenMode {
     }
 }
 
+/// Operational choices for [`WorldSession::open_with_policy`]. They never change what a
+/// session computes, only how much work open does and leaves behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenPolicy {
+    /// Rebuild the network by replay and never read persisted operator state.
+    pub force_replay: bool,
+    /// After a non-forced replay (legacy revision, changed validity key), try to persist the
+    /// rebuilt state and a state-cache sidecar so the next open restores. Best effort:
+    /// failures (read-only filesystem, held lock) never fail the open.
+    pub refresh_after_replay: bool,
+}
+
+impl Default for OpenPolicy {
+    fn default() -> Self {
+        Self {
+            force_replay: false,
+            refresh_after_replay: true,
+        }
+    }
+}
+
 /// The active persistent world runtime session.
 pub struct WorldSession {
     pub root: PathBuf,
@@ -674,6 +696,13 @@ pub struct WorldSession {
     pub tail_batches: u64,
     /// The `network_state_root` of the HEAD revision, if it has one.
     pub network_state_root: Option<Digest>,
+    /// Where restored state came from: `"revision"` (named by the HEAD record) or
+    /// `"sidecar"` (the state-cache file); `None` unless `open_mode` is `Restored`.
+    pub state_source: Option<&'static str>,
+    /// Whether this open persisted a state-cache sidecar after replaying.
+    pub state_refreshed: bool,
+    /// Why a post-replay refresh did not happen, when it was attempted and failed.
+    pub state_refresh_error: Option<String>,
 }
 
 impl WorldSession {
@@ -752,6 +781,9 @@ impl WorldSession {
             open_ms: 0,
             tail_batches: 0,
             network_state_root: None,
+            state_source: None,
+            state_refreshed: false,
+            state_refresh_error: None,
         })
     }
 
@@ -762,16 +794,23 @@ impl WorldSession {
     /// is corrupt, missing, or inconsistent with its revision is a hard error, never a
     /// silent fallback: call [`Self::open_replay`] to rebuild deliberately.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, WorldError> {
-        Self::open_with(root.as_ref(), false)
+        Self::open_with_policy(root.as_ref(), OpenPolicy::default())
     }
 
     /// Open, always rebuilding the network by replaying the resident base facts and never
     /// reading persisted operator state (tests, verification, repair).
     pub fn open_replay(root: impl AsRef<Path>) -> Result<Self, WorldError> {
-        Self::open_with(root.as_ref(), true)
+        Self::open_with_policy(
+            root.as_ref(),
+            OpenPolicy {
+                force_replay: true,
+                refresh_after_replay: false,
+            },
+        )
     }
 
-    fn open_with(root: &Path, force_replay: bool) -> Result<Self, WorldError> {
+    /// Open under an explicit [`OpenPolicy`].
+    pub fn open_with_policy(root: &Path, policy: OpenPolicy) -> Result<Self, WorldError> {
         let started = Instant::now();
         let root = root.to_path_buf();
         let paths = WorldPaths::new(&root);
@@ -934,6 +973,9 @@ impl WorldSession {
             open_ms: 0,
             tail_batches: 0,
             network_state_root: current_rev.network_state_root,
+            state_source: None,
+            state_refreshed: false,
+            state_refresh_error: None,
         };
         let mut pending_network: Option<WorldNetwork> = None;
 
@@ -1013,7 +1055,7 @@ impl WorldSession {
             }
         }
         if let Some(network) = pending_network {
-            session.install_network(network, &current_rev, force_replay)?;
+            session.install_network(network, &current_rev, policy)?;
         }
         if current_rev.decision_delta_digest.is_some() {
             session.decision_delta(current_revision)?;
@@ -1048,55 +1090,149 @@ impl WorldSession {
         )
     }
 
+    /// Install the state `root` names into `network`, the single restore path for both a
+    /// revision's own `network_state_root` and the state-cache sidecar. `Ok(None)`: restored
+    /// and installed. `Ok(Some(why))`: intact but written under another validity key, so
+    /// the caller rebuilds. Corrupt, missing or inconsistent state is a hard error.
+    fn restore_from_header(
+        &mut self,
+        network: &mut WorldNetwork,
+        rev: &WorldRevision,
+        root: Digest,
+        source: &'static str,
+    ) -> Result<Option<&'static str>, WorldError> {
+        let store = StateStore::from_file(self.node_store.clone(), self.node_cache_budget());
+        let key = self.validity_key_for(network);
+        match NetworkStateHeader::load(&store, &root, &key)? {
+            // Produced under another schema, execution profile, program structure or
+            // codec/lowering version: sound but not reusable by this binary.
+            Loaded::Stale(why) => Ok(Some(why)),
+            Loaded::Header(header) => {
+                let decision_ok = match rev.decision_root {
+                    Some(expected) => header.decision.root == expected,
+                    None => header.decision.len == 0,
+                };
+                if !decision_ok {
+                    return Err(WorldError::ValidityMismatch(
+                        "persisted network state decision root does not match the revision".into(),
+                    ));
+                }
+                network.attach_state_store(store);
+                network.restore_state(&header)?;
+                network.current_revision = self.current_revision;
+                self.open_mode = OpenMode::Restored;
+                self.replay_reason = None;
+                self.state_source = Some(source);
+                self.tail_batches = 0;
+                Ok(None)
+            }
+        }
+    }
+
     /// Give a freshly built network its state: restore it from the persisted header the
-    /// revision names, or replay the base facts.
+    /// revision names (or, failing that, the state-cache sidecar), or replay the base facts.
     fn install_network(
         &mut self,
         mut network: WorldNetwork,
         rev: &WorldRevision,
-        force_replay: bool,
+        policy: OpenPolicy,
     ) -> Result<(), WorldError> {
-        let reason: &'static str = if force_replay {
+        let reason: &'static str = if policy.force_replay {
             "forced"
-        } else if let Some(root) = rev.network_state_root {
-            let store = StateStore::from_file(self.node_store.clone(), self.node_cache_budget());
-            let key = self.validity_key_for(&network);
-            match NetworkStateHeader::load(&store, &root, &key)? {
-                // Produced under another schema, execution profile, program structure or
-                // codec/lowering version: sound but not reusable by this binary. Rebuild.
-                Loaded::Stale(why) => why,
-                Loaded::Header(header) => {
-                    let decision_ok = match rev.decision_root {
-                        Some(expected) => header.decision.root == expected,
-                        None => header.decision.len == 0,
-                    };
-                    if !decision_ok {
-                        return Err(WorldError::ValidityMismatch(
-                            "persisted network state decision root does not match the revision"
-                                .into(),
-                        ));
+        } else {
+            let reason = match rev.network_state_root {
+                Some(root) => {
+                    match self.restore_from_header(&mut network, rev, root, "revision")? {
+                        None => {
+                            self.network = Some(network);
+                            return Ok(());
+                        }
+                        Some(why) => why,
                     }
-                    network.attach_state_store(store);
-                    network.restore_state(&header)?;
-                    network.current_revision = self.current_revision;
-                    self.network = Some(network);
-                    self.open_mode = OpenMode::Restored;
-                    self.replay_reason = None;
-                    self.tail_batches = 0;
-                    return Ok(());
+                }
+                None if rev.schema == REVISION_SCHEMA_V3 => {
+                    // A revision that claims restorable state must name it; treating the
+                    // absence as a legacy world would hide a damaged or truncated record.
+                    return Err(WorldError::InvalidSchema(
+                        "revision@3 of an executable world has no network_state_root".into(),
+                    ));
+                }
+                None => "legacy-revision",
+            };
+            // The sidecar: a cache hit only for exactly this revision under exactly this key.
+            let key_digest = self.validity_key_for(&network).digest();
+            if let Some(c) = StateCache::read(&self.paths.state_cache_file()) {
+                if c.revision_digest == rev.revision_digest && c.validity_key_digest == key_digest {
+                    let root = c.network_state_root;
+                    if self
+                        .restore_from_header(&mut network, rev, root, "sidecar")?
+                        .is_none()
+                    {
+                        self.network = Some(network);
+                        return Ok(());
+                    }
                 }
             }
-        } else if rev.schema == REVISION_SCHEMA_V3 {
-            // A revision that claims restorable state must name it; treating the absence as
-            // a legacy world would hide a damaged or truncated record.
-            return Err(WorldError::InvalidSchema(
-                "revision@3 of an executable world has no network_state_root".into(),
-            ));
-        } else {
-            "legacy-revision"
+            reason
         };
         self.set_network(network)?;
         self.replay_reason = Some(reason);
+        self.state_source = None;
+        if !policy.force_replay && policy.refresh_after_replay {
+            match self.refresh_state_cache() {
+                Ok(()) => self.state_refreshed = true,
+                Err(e) => self.state_refresh_error = Some(e.to_string()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Persist the current network state and point `state-cache.json` at it, so the next
+    /// open of this revision restores instead of replaying. Non-blocking: a world another
+    /// writer holds is `WorldLocked`. The sidecar is renamed into place only after the
+    /// state is flushed and with HEAD re-checked under the lock; it is a cache, never
+    /// authoritative.
+    pub fn refresh_state_cache(&mut self) -> Result<(), WorldError> {
+        let _lock = WorldLockGuard::acquire(&self.root)?;
+        let Some(net) = self.network.as_ref() else {
+            return Err(WorldError::NetworkError("world has no network".into()));
+        };
+        net.persist_state()?;
+        let key = self.validity_key_for(net);
+        let root = net.state_header(key.clone()).write(net.state_store());
+        if self.crash_injector == Some(CrashPoint::SidecarBeforeFlush) {
+            return Err(WorldError::InjectedCrash(CrashPoint::SidecarBeforeFlush));
+        }
+        self.node_store.flush()?;
+        let disk_head = self.read_disk_head()?;
+        let Some(revision_digest) = self.current_revision_digest else {
+            return Err(WorldError::CorruptedHead(
+                "no current revision digest".into(),
+            ));
+        };
+        if disk_head != self.current_revision {
+            return Err(WorldError::StaleBaseRevision {
+                expected: self.current_revision,
+                current: disk_head,
+            });
+        }
+        let cache = StateCache {
+            revision_seq: self.current_revision,
+            revision_digest,
+            validity_key_digest: key.digest(),
+            network_state_root: root,
+        };
+        cache.write_tmp(&self.paths.state_cache_tmp())?;
+        if self.crash_injector == Some(CrashPoint::SidecarAfterFlushBeforeRename) {
+            return Err(WorldError::InjectedCrash(
+                CrashPoint::SidecarAfterFlushBeforeRename,
+            ));
+        }
+        fs::rename(self.paths.state_cache_tmp(), self.paths.state_cache_file())?;
+        fs::File::open(&self.root)?.sync_all()?;
+        if self.crash_injector == Some(CrashPoint::SidecarAfterRename) {
+            return Err(WorldError::InjectedCrash(CrashPoint::SidecarAfterRename));
+        }
         Ok(())
     }
 

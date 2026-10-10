@@ -67,6 +67,16 @@ impl WorldPaths {
         self.staging_dir().join(upload_id)
     }
 
+    /// Best-effort pointer to restorable network state for the HEAD revision
+    /// (`brix.world.state-cache@1`, see `state_cache`).
+    pub fn state_cache_file(&self) -> PathBuf {
+        self.root.join("state-cache.json")
+    }
+
+    pub fn state_cache_tmp(&self) -> PathBuf {
+        self.root.join(".state-cache.tmp")
+    }
+
     pub fn pins_file(&self) -> PathBuf {
         self.root.join("pins.json")
     }
