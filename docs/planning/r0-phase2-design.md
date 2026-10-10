@@ -214,3 +214,44 @@ GC time 10.7 s (100k), 167 s (1M; dry-run mark alone 96 s). After GC `open-check
 - Sessions open before a GC must be reopened. Concurrent readers in other processes are not supported during GC.
 - Legacy loose objects: primitive covered in `soc-core/tests/pack_gc.rs`; no world-level legacy GC test (cannot construct a legacy world).
 - The 1M figures were taken while another lane's 1M bench was running on the same machine.
+## Lane B (alpha.5): fast decisions read and O(1) idempotency
+
+Both are caches (ADR-0046 s5). No revision schema, network-state header, root or digest changes, so no M4 version handling is needed: every cache carries its own schema string, and any mismatch is a miss that falls back to the authoritative path with identical output.
+
+### Settlement checkpoint (`settlements.ckpt`, `brix.world.settlement-checkpoint@1`)
+- Flat file: magic, revision seq/digest, validity-key digest, decision root, count, sorted body (per decide: entities with canonical decision tuples), trailing digest of everything before it. Written tmp + rename (process-unique tmp; not fsynced, a torn file fails the trailer).
+- Read (`WorldSession::all_settlements[_with_source]`, so CLI and serve get it): strict decode, validity key match, then at HEAD revision digest and decision root must match; otherwise the checkpoint is older and the `{seq}.decisions` deltas (digest-authenticated by `decision_delta`) are applied (max tail 256; missing/compacted delta = miss). The result is spot-checked against the persisted decision trie: same count, 64 evenly spread entries equal to the trie value, plus every key a tail touched. A full recompute of the decision root from the content is `verify_settlement_checkpoint` (also run by `open-check --verify-state`).
+- Where it is written: lazily by the first frontier-path read (and by a read that applied more than 32 tail revisions), eagerly by `open-check --refresh-state` (`refresh_settlement_checkpoint`, which also checks that the settlements hash to the decision root). Never at commit: rewriting ~80 MB per commit would break O(delta); the tail mechanism keeps the cache current without touching commits. `open_replay`/`refresh_after_replay=false` never write (`checkpoint_autowrite`). Cost of the first read is the old frontier walk plus one encode and write.
+- Paged variant: `settlements_page(cursor, limit)` over `CandidateFrontier` buckets (trie order, frontier path only).
+- Crash point `CheckpointAfterTmpBeforeRename`.
+
+### Idempotency index (`idempotency.json`, `brix.world.idempotency-index@1`)
+- Content-addressed trie (`TrieMap<WorldKey, WorldTuple>`: key = canon(idempotency key), value = seq + revision digest + optional batch digest) in the node store, root named by a sibling sidecar (chosen over a header field because that would change `network_state_root`). Receipts remain the source of truth.
+- Commit: the key is inserted on a copy before the flush, its nodes ride the same pack and fsync, the revision is assembled before the flush (it never depended on it), the sidecar is written after HEAD (not fsynced), the copy replaces the session's index only after publication. A lookup is O(log n) node reads.
+- Open: sidecar at HEAD (digest must match) = no file scan; sidecar behind HEAD by at most 4096 = caught up from exactly those receipts (crash between HEAD rename and sidecar write); anything else (absent, garbage, other schema/world/revision, root missing in the store, too far behind, a receipt that does not agree) = the previous receipt scan, followed by a best-effort upgrade (default policy only). Old worlds therefore work unchanged and upgrade on first open.
+- Policy: a damaged cache is never a hard error at open (it is a miss); a trie node that fails mid-lookup at commit is an error for that commit (refusal, never a different answer).
+- GC (M6): the idempotency root must be a GC root alongside HEAD and the state-cache root.
+
+### Measurements (release, M-series Mac, serial; other lanes were running benchmarks, so absolute numbers are noisy)
+"Before" = the same binary with the cache file removed (frontier path / receipt scan are the unchanged previous code).
+
+| Metric | 100k before | 100k after | 1M before | 1M after |
+|---|---|---|---|---|
+| Cold open (ms) | 13-15 | 13-14 | 149 | 133 |
+| First all_settlements, fresh process | 590-770 ms | 51-60 ms | 12.05 s (7.15 s unloaded, see above) | 560-590 ms |
+| of which first read after upgrade | | frontier, writes checkpoint | | frontier 12.05 s once |
+| all_settlements with 1 revision of tail | | 52 ms | | 557 ms |
+| One-row batch (ms, 5 samples) | 52-65 | 46-65 (A/B with the index disabled: same within noise) | 79-440 (noisy) | 79-440 |
+| Objects written by one-row batch | 51 | 53 | | 59 |
+| RSS after decisions read | 331 MB | 47 MB | 1.36 GB | 442 MB |
+
+Open with many one-row batches (each batch is one pack): 1000 batches open 33 ms with the index vs 199 ms scan; 2000 batches 65 ms vs 1477 ms. The index removes the receipt scan; what remains at thousands of batches is `FileNodeStore::new` over one pack (+idx) per commit (110-720 ms at 1000-2000 batches on this contended machine), which is the M6 pack-index/compaction item, not this lane.
+
+### Tests (`crates/brix-kb/tests/r0_fast_read.rs`, 17)
+Checkpoint: equals frontier and `open_replay` over four fuzz seeds; tail application over 12 rounds equals replay; long tail refreshes; 15 corruption cases (empty, garbage, truncations, extension, byte flips in header/body/trailer) fall back identically and repair; forged/foreign (wrong digest, key, root, seq, a changed decision, a dropped decision) rejected on read and forged content caught by verify; compacted tail; stale older checkpoint; crash point; explicit refresh and `open_replay` never writes; paging covers everything once. Idempotency: index equals scan (and revision-only worlds), upgrade of old worlds, replay/conflict semantics for both sources, stale sidecar tail catch-up and persistence, seven unusable-sidecar cases, foreign sidecar, crashes before/after the HEAD rename, no file scan when current.
+
+### Open issues
+- Checkpoint read trusts self-digest plus probes; a forged-but-consistent file that agrees at all 64 probes and the count survives until `verify`. Full recompute on every read costs seconds.
+- The first read of a 1M world is still the frontier walk (writes the checkpoint); `open-check --refresh-state` moves it off the request path.
+- Checkpoint is a second copy of the decisions on disk (~80 MB per 800k) and is not GC-managed.
+- Commit profile folds the index work into the existing `dehydrate`/`state_header` phases (phase names are asserted by a test).

@@ -2926,6 +2926,33 @@ impl WorldNetwork {
         Ok(report)
     }
 
+    /// Number of settlements in the persisted decision trie.
+    pub fn decision_count(&self) -> usize {
+        self.decision_tree.len()
+    }
+
+    /// Whether the decision trie holds exactly `decision` for `(decide, entity)`.
+    pub fn decision_matches(
+        &self,
+        decide: &str,
+        entity: &str,
+        decision: &SettledDecision,
+    ) -> Result<bool, WorldError> {
+        Ok(self
+            .decision_tree
+            .get(&decision_key(decide, entity), &self.state)?
+            .as_ref()
+            == Some(&decision_tuple(decision)))
+    }
+
+    /// Whether the decision trie holds nothing for `(decide, entity)`.
+    pub fn decision_absent(&self, decide: &str, entity: &str) -> Result<bool, WorldError> {
+        Ok(self
+            .decision_tree
+            .get(&decision_key(decide, entity), &self.state)?
+            .is_none())
+    }
+
     /// Canonical decision root, maintained only for affected entities.
     pub fn decision_root(&self) -> Digest {
         self.decision_tree.root()
@@ -3054,6 +3081,36 @@ impl WorldNetwork {
                 Ok(())
             })?;
         Ok(out)
+    }
+
+    /// One page of settlements from the candidate frontier, at most `limit` buckets (so at
+    /// most `limit` settlements) after `cursor`, in deterministic trie order (not sorted by
+    /// name), without materialising the rest. Every bucket is verified.
+    #[allow(clippy::type_complexity)]
+    pub fn settlements_page(
+        &self,
+        cursor: Option<&PageCursor<FrontierKey>>,
+        limit: usize,
+    ) -> Result<
+        (
+            Vec<(String, String, SettledDecision)>,
+            Option<PageCursor<FrontierKey>>,
+        ),
+        WorldError,
+    > {
+        let _scope = self.state.trace_scope("query");
+        let (rows, next) = self
+            .candidate_frontier
+            .buckets
+            .page(cursor, limit, &self.state)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (key, bucket) in rows {
+            verify_bucket(&key, &bucket)?;
+            if let Some(decision) = settle(&key.entity, &bucket) {
+                out.push((key.decide, key.entity, decision));
+            }
+        }
+        Ok((out, next))
     }
 
     /// Capture current observable network state.

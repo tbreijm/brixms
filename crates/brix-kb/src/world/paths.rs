@@ -77,6 +77,22 @@ impl WorldPaths {
         self.root.join(".state-cache.tmp")
     }
 
+    /// Best-effort pointer to the idempotency index root (`brix.world.idempotency-index@1`,
+    /// see `idempotency`).
+    pub fn idempotency_file(&self) -> PathBuf {
+        self.root.join("idempotency.json")
+    }
+
+    pub fn idempotency_tmp(&self) -> PathBuf {
+        self.root.join(".idempotency.tmp")
+    }
+
+    /// Derived, self-verifying flat copy of every settlement at some revision
+    /// (`brix.world.settlement-checkpoint@1`, see `settlement_checkpoint`).
+    pub fn settlement_checkpoint_file(&self) -> PathBuf {
+        self.root.join("settlements.ckpt")
+    }
+
     pub fn pins_file(&self) -> PathBuf {
         self.root.join("pins.json")
     }

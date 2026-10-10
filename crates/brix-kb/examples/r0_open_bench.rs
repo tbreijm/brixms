@@ -165,6 +165,7 @@ fn open_report(session: &WorldSession, wall_ms: f64) -> serde_json::Value {
         "replay_reason": session.replay_reason,
         "state_source": session.state_source,
         "state_refreshed": session.state_refreshed,
+        "idempotency_source": session.idempotency.source.label(),
     })
 }
 
@@ -194,7 +195,7 @@ fn run_child(dir: &Path) {
     }
 
     let t = Instant::now();
-    let settlements = session.all_settlements().unwrap();
+    let (settlements, decisions_source) = session.all_settlements_with_source().unwrap();
     let decisions_ms = ms(t.elapsed());
     let decision_count: usize = settlements.values().map(|m| m.len()).sum();
 
@@ -204,6 +205,7 @@ fn run_child(dir: &Path) {
             serde_json::json!({
                 "open": open,
                 "decisions_ms": decisions_ms,
+                "decisions_source": decisions_source,
                 "decision_count": decision_count,
                 "rss_after_decisions_kb": rss_kb(pid),
             })
@@ -224,6 +226,22 @@ fn run_child(dir: &Path) {
         .apply_batch(batch)
         .expect("one-row batch after cold open");
     let one_row_ms = ms(t.elapsed());
+    // Four more one-row batches: the first after a cold open also pays cache warm-up.
+    let mut more_ms = Vec::new();
+    for i in 1..=4 {
+        let batch = WorldBatch::new(
+            session.current_revision(),
+            format!("r0-one-row-{i}"),
+            vec![upsert(
+                "orders::rows",
+                &format!("O-{i}"),
+                &[("sku", &format!("SKU-{i}")), ("qty", "30")],
+            )],
+        );
+        let t = Instant::now();
+        session.apply_batch(batch).expect("one-row batch");
+        more_ms.push(ms(t.elapsed()));
+    }
     let rss_after_one_row = rss_kb(pid);
 
     let out = serde_json::json!({
@@ -232,8 +250,10 @@ fn run_child(dir: &Path) {
         "open": open,
         "rss_after_open_kb": rss_after_open,
         "decisions_ms": decisions_ms,
+        "decisions_source": decisions_source,
         "decision_count": decision_count,
         "one_row_batch_ms": one_row_ms,
+        "one_row_next_batches_ms": more_ms,
         "one_row_changed_keys": receipt.changed_keys_count,
         "one_row_objects_written": receipt.objects_written,
         "rss_after_one_row_kb": rss_after_one_row,
@@ -292,22 +312,38 @@ fn run_parent(n: usize) {
     session.close().expect("flush world before cold open");
     let disk_bytes = dir_bytes(&dir);
 
-    let exe = std::env::current_exe().expect("current exe");
-    let child = Command::new(exe)
-        .env(CHILD_ENV, &dir)
-        .output()
-        .expect("spawn cold-open child");
-    assert!(
-        child.status.success(),
-        "cold-open child failed:\n{}",
-        String::from_utf8_lossy(&child.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&child.stdout);
-    let child_json: serde_json::Value = stdout
-        .lines()
-        .find_map(|l| l.strip_prefix("CHILD_JSON "))
-        .map(|j| serde_json::from_str(j).expect("child json"))
-        .expect("child emitted CHILD_JSON");
+    let run_child_proc = |envs: &[(&str, &str)]| {
+        let exe = std::env::current_exe().expect("current exe");
+        let mut cmd = Command::new(exe);
+        cmd.env(CHILD_ENV, &dir);
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let child = cmd.output().expect("spawn child");
+        assert!(
+            child.status.success(),
+            "child failed:\n{}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&child.stdout);
+        let j: serde_json::Value = stdout
+            .lines()
+            .find_map(|l| l.strip_prefix("CHILD_JSON "))
+            .map(|j| serde_json::from_str(j).expect("child json"))
+            .expect("child emitted CHILD_JSON");
+        j
+    };
+    // Decisions reads in fresh processes: with no checkpoint (frontier, which then leaves a
+    // checkpoint), then from the checkpoint at HEAD.
+    let _ = fs::remove_file(WorldPaths::new(&dir).settlement_checkpoint_file());
+    let decisions_frontier = run_child_proc(&[(NO_BATCH_ENV, "1")]);
+    let decisions_checkpoint = run_child_proc(&[(NO_BATCH_ENV, "1")]);
+    // Idempotency: open with the sidecar vs forced scan.
+    let open_sidecar = run_child_proc(&[(OPEN_ONLY_ENV, "1")]);
+    let _ = fs::remove_file(WorldPaths::new(&dir).idempotency_file());
+    let open_scan = run_child_proc(&[(OPEN_ONLY_ENV, "1")]);
+    let child_json = run_child_proc(&[]);
+    let decisions_checkpoint_tail = run_child_proc(&[(NO_BATCH_ENV, "1")]);
 
     // Fallback: a pre-M4 world. First open replays and refreshes the sidecar, second restores.
     let fallback = {
@@ -370,6 +406,11 @@ fn run_parent(n: usize) {
         "rss_after_load_kb": rss_after_load,
         "disk_bytes": disk_bytes,
         "cold_open": child_json,
+        "decisions_frontier": decisions_frontier,
+        "decisions_checkpoint": decisions_checkpoint,
+        "decisions_checkpoint_tail": decisions_checkpoint_tail,
+        "open_sidecar": open_sidecar,
+        "open_scan": open_scan,
         "fallback": fallback,
     });
     println!("{report}");
@@ -380,9 +421,71 @@ fn run_parent(n: usize) {
     }
 }
 
+/// Many tiny batches: open cost must not grow with the batch count.
+fn run_small_batches(k: usize) {
+    let dir: PathBuf =
+        std::env::temp_dir().join(format!("r0_open_bench_small_{k}_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let mut session = WorldSession::from_program_with_sources(&dir, "root", &sources())
+        .expect("initialize world");
+    let t = Instant::now();
+    for b in 0..k {
+        session
+            .apply_batch(WorldBatch::new(
+                session.current_revision(),
+                format!("small-{b}"),
+                vec![upsert(
+                    "stock::rows",
+                    &format!("S-{b}"),
+                    &[("sku", &format!("SKU-{b}")), ("available", "25")],
+                )],
+            ))
+            .expect("small batch");
+    }
+    let load_ms = ms(t.elapsed());
+    session.close().expect("close");
+    let open = |scan: bool| {
+        if scan {
+            let _ = fs::remove_file(WorldPaths::new(&dir).idempotency_file());
+        }
+        let t = Instant::now();
+        let s = WorldSession::open_with_policy(
+            &dir,
+            brix_kb::world::OpenPolicy {
+                force_replay: false,
+                refresh_after_replay: false,
+            },
+        )
+        .expect("open");
+        open_report(&s, ms(t.elapsed()))
+    };
+    let t = Instant::now();
+    let store = soc_core::store::FileNodeStore::new(&dir).expect("node store");
+    let store_new_ms = ms(t.elapsed());
+    drop(store);
+    let packs = fs::read_dir(dir.join("objects"))
+        .map(|d| d.count())
+        .unwrap_or(0);
+    let sidecar = open(false);
+    let scan = open(true);
+    println!(
+        "{}",
+        serde_json::json!({"bench": "r0_open_bench_small_batches", "batches": k, "load_ms": load_ms, "file_store_new_ms": store_new_ms, "objects_dir_entries": packs, "open_sidecar": sidecar, "open_scan": scan})
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 fn main() {
     if let Some(dir) = std::env::var_os(CHILD_ENV) {
         run_child(Path::new(&dir));
+        return;
+    }
+    if std::env::args().nth(1).as_deref() == Some("small") {
+        let k: usize = std::env::args()
+            .nth(2)
+            .map(|s| s.parse().expect("K must be an integer"))
+            .unwrap_or(1000);
+        run_small_batches(k);
         return;
     }
     let n: usize = std::env::args()

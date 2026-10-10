@@ -30,6 +30,8 @@ pub enum CrashPoint {
     SidecarAfterFlushBeforeRename,
     /// State-cache refresh: sidecar renamed into place.
     SidecarAfterRename,
+    /// Settlement checkpoint refresh: written to its temp file only, not renamed into place.
+    CheckpointAfterTmpBeforeRename,
 }
 
 impl fmt::Display for CrashPoint {
@@ -59,6 +61,12 @@ impl fmt::Display for CrashPoint {
                 write!(f, "crash after state-cache flush before rename")
             }
             Self::SidecarAfterRename => write!(f, "crash after state-cache rename"),
+            Self::CheckpointAfterTmpBeforeRename => {
+                write!(
+                    f,
+                    "crash after settlement checkpoint temp write before rename"
+                )
+            }
         }
     }
 }
