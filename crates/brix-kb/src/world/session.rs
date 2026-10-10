@@ -930,14 +930,36 @@ impl WorldSession {
                 }
             };
 
+        // Receipts carry exactly the fields needed here and are tiny; a revision record
+        // carries its whole changed-key list, so records are parsed only for revisions that
+        // have no receipt (worlds written before receipts existed).
+        let mut receipted: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
         if let Ok(entries) = fs::read_dir(paths.receipts_dir()) {
             for entry in entries.flatten() {
-                parse_receipt_or_rev(&entry.path(), &mut committed_idempotency_keys);
+                let path = entry.path();
+                if let Some(seq) = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    receipted.insert(seq);
+                }
+                parse_receipt_or_rev(&path, &mut committed_idempotency_keys);
             }
         }
         if let Ok(entries) = fs::read_dir(paths.revisions_dir()) {
             for entry in entries.flatten() {
-                parse_receipt_or_rev(&entry.path(), &mut committed_idempotency_keys);
+                let path = entry.path();
+                let seq = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.parse::<u64>().ok());
+                if path.extension().and_then(|e| e.to_str()) == Some("json")
+                    && seq.is_some_and(|s| receipted.contains(&s))
+                {
+                    continue;
+                }
+                parse_receipt_or_rev(&path, &mut committed_idempotency_keys);
             }
         }
 

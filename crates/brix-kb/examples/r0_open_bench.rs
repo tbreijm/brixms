@@ -9,7 +9,12 @@
 //!   the loader's high-water mark;
 //! * `all_settlements().unwrap()` (world decisions) right after the cold open;
 //! * one single-row correction batch right after the cold open;
-//! * RSS (via `ps -o rss=`) after open and after the one-row batch, and on-disk bytes.
+//! * RSS (via `ps -o rss=`) after open and after the one-row batch, and on-disk bytes;
+//! * the fallback path: the HEAD record is rewritten as a pre-M4 `@2` record, then two fresh
+//!   processes open it (the first replays and refreshes the state-cache sidecar, the second
+//!   restores from it).
+//!
+//! Every open reports `open_ms`, `open_mode`, `replay_reason` and `state_source`.
 //!
 //! The result is printed as one JSON object on stdout.
 //!
@@ -29,10 +34,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use brix_kb::world::{TupleRecord, WorldBatch, WorldBatchOp, WorldKey, WorldSession};
+use brix_kb::world::{
+    TupleRecord, WorldBatch, WorldBatchOp, WorldKey, WorldPaths, WorldRevision, WorldSession,
+    REVISION_SCHEMA_V2,
+};
 
 /// Set by the parent when re-invoking this binary as the cold-open child.
 const CHILD_ENV: &str = "R0_OPEN_BENCH_CHILD_DIR";
+/// Set to make the child only open the world and report how.
+const OPEN_ONLY_ENV: &str = "R0_OPEN_BENCH_OPEN_ONLY";
 const BATCHES: usize = 10;
 
 fn sources() -> BTreeMap<String, String> {
@@ -142,15 +152,41 @@ fn ms(d: std::time::Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 
+fn open_report(session: &WorldSession, wall_ms: f64) -> serde_json::Value {
+    serde_json::json!({
+        "open_ms_wall": wall_ms,
+        "open_ms": session.open_ms,
+        "open_mode": session.open_mode.as_str(),
+        "replay_reason": session.replay_reason,
+        "state_source": session.state_source,
+        "state_refreshed": session.state_refreshed,
+    })
+}
+
 /// Child mode: cold open in a fresh process, then decisions and one-row batch.
 fn run_child(dir: &Path) {
     let pid = std::process::id();
     let rss_before = rss_kb(pid);
 
+    // Opening the node store alone (pack index load) is the floor of any open.
+    let t = Instant::now();
+    let store = soc_core::store::FileNodeStore::new(dir).expect("node store");
+    let store_new_ms = ms(t.elapsed());
+    drop(store);
+
     let t = Instant::now();
     let mut session = WorldSession::open(dir).expect("cold open");
     let open_ms = ms(t.elapsed());
     let rss_after_open = rss_kb(pid);
+    let mut open = open_report(&session, open_ms);
+    open["file_store_new_ms"] = serde_json::json!(store_new_ms);
+    if std::env::var_os(OPEN_ONLY_ENV).is_some() {
+        println!(
+            "CHILD_JSON {}",
+            serde_json::json!({"open": open, "rss_after_open_kb": rss_after_open})
+        );
+        return;
+    }
 
     let t = Instant::now();
     let settlements = session.all_settlements().unwrap();
@@ -176,6 +212,7 @@ fn run_child(dir: &Path) {
     let out = serde_json::json!({
         "rss_before_open_kb": rss_before,
         "cold_open_ms": open_ms,
+        "open": open,
         "rss_after_open_kb": rss_after_open,
         "decisions_ms": decisions_ms,
         "decision_count": decision_count,
@@ -246,6 +283,55 @@ fn run_parent(n: usize) {
         .map(|j| serde_json::from_str(j).expect("child json"))
         .expect("child emitted CHILD_JSON");
 
+    // Fallback: a pre-M4 world. First open replays and refreshes the sidecar, second restores.
+    let fallback = {
+        let paths = WorldPaths::new(&dir);
+        let seq: u64 = fs::read_to_string(paths.head())
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let v = serde_json::from_slice(&fs::read(paths.revision_file(seq)).unwrap()).unwrap();
+        let mut rev = WorldRevision::from_json(&v).unwrap();
+        rev.schema = REVISION_SCHEMA_V2.to_string();
+        rev.network_state_root = None;
+        rev.revision_digest = rev.compute_digest_for_record();
+        fs::write(
+            paths.revision_file(seq),
+            serde_json::to_vec_pretty(&rev.to_json()).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            paths.head(),
+            format!("{} {}\n", seq, rev.revision_digest.to_hex()),
+        )
+        .unwrap();
+        let open_only = || {
+            let out = Command::new(std::env::current_exe().unwrap())
+                .env(CHILD_ENV, &dir)
+                .env(OPEN_ONLY_ENV, "1")
+                .output()
+                .expect("spawn open-only child");
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let j = stdout
+                .lines()
+                .find_map(|l| l.strip_prefix("CHILD_JSON "))
+                .expect("child json")
+                .to_string();
+            serde_json::from_str::<serde_json::Value>(&j).unwrap()
+        };
+        let first = open_only();
+        let second = open_only();
+        serde_json::json!({"first_open": first, "second_open": second})
+    };
+
     let report = serde_json::json!({
         "bench": "r0_open_bench",
         "facts": n,
@@ -258,6 +344,7 @@ fn run_parent(n: usize) {
         "rss_after_load_kb": rss_after_load,
         "disk_bytes": disk_bytes,
         "cold_open": child_json,
+        "fallback": fallback,
     });
     println!("{report}");
     let _ = fs::remove_dir_all(&dir);
