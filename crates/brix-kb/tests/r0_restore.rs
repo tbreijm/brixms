@@ -1137,3 +1137,46 @@ fn sidecar_crash_points_leave_a_consistent_cache() {
         }
     }
 }
+
+/// Every committed batch records where its time went; an idempotent replay commits nothing
+/// and leaves the previous profile alone.
+#[test]
+fn commit_profile_records_ordered_phases_and_io() {
+    let dir = TempDir::new("commit_profile");
+    let mut s = create(&dir);
+    assert!(s.last_commit_profile.is_none());
+    let batch = WorldBatch::new(
+        s.current_revision(),
+        "profile-1",
+        vec![stock(1, 1, 10), order(1, 1, 2, false)],
+    );
+    s.apply_batch(batch.clone()).unwrap();
+    let profile = s.last_commit_profile.clone().expect("profile after commit");
+    let names: Vec<&str> = profile.phases.iter().map(|(n, _)| *n).collect();
+    assert_eq!(
+        names,
+        [
+            "clone_network",
+            "apply_ops",
+            "decision_encode",
+            "stage_base",
+            "persist_base",
+            "persist_state",
+            "state_header",
+            "flush",
+            "publish",
+            "dehydrate",
+        ]
+    );
+    let sum: f64 = profile.phases.iter().map(|(_, ms)| ms).sum();
+    assert!(profile.phases.iter().all(|(_, ms)| *ms >= 0.0));
+    assert!(
+        sum <= profile.total_ms + 1e-6,
+        "{sum} > {}",
+        profile.total_ms
+    );
+
+    let replay = s.apply_batch(batch).unwrap();
+    assert!(replay.is_idempotent_replay);
+    assert_eq!(s.last_commit_profile, Some(profile));
+}

@@ -138,7 +138,49 @@ struct PackRef {
     /// Built for free at flush; for packs found at open it is built lazily once
     /// the pack has been probed `FILTER_AFTER_PROBES` times.
     filter: Option<Bloom>,
+    /// In-memory sparse sample of the sorted idx (same lifetime as `filter`): lets a lookup
+    /// read one small window of records instead of bisecting the idx with several reads.
+    sparse: Option<Sparse>,
     probes: u32,
+}
+
+/// Records between two samples of a [`Sparse`] table.
+const SPARSE_STRIDE: u64 = 32;
+
+/// The first 8 digest bytes (big-endian) of every `SPARSE_STRIDE`-th record of a pack's sorted
+/// idx. Derived data only: it bounds where a digest can be, never whether it is present, so a
+/// stale or damaged table can at worst miss a node (and the idx itself stays authoritative).
+#[derive(Debug, Default)]
+struct Sparse {
+    prefixes: Vec<u64>,
+}
+
+fn digest_prefix(digest: &Digest) -> u64 {
+    u64::from_be_bytes(digest.as_bytes()[..8].try_into().expect("32-byte digest"))
+}
+
+impl Sparse {
+    /// Record indexes `[lo, hi)` (within `[lo0, hi0)`) that can hold `digest` in a pack of
+    /// `count` sorted records.
+    fn window(&self, digest: &Digest, count: u64, lo0: u64, hi0: u64) -> (u64, u64) {
+        let target = digest_prefix(digest);
+        // Samples strictly below the target prefix: the last of them is a record below the
+        // digest, so the digest lies after it. The first sample above the target prefix is a
+        // record above the digest, so the digest lies before it.
+        let below = self.prefixes.partition_point(|&p| p < target) as u64;
+        let at_or_below = self.prefixes.partition_point(|&p| p <= target) as u64;
+        let lo = if below == 0 {
+            0
+        } else {
+            (below - 1) * SPARSE_STRIDE + 1
+        };
+        let hi = if at_or_below as usize >= self.prefixes.len() {
+            count
+        } else {
+            at_or_below * SPARSE_STRIDE
+        };
+        (lo.max(lo0), hi.min(hi0))
+    }
 }
 
 /// Probes of an opened pack (via binary search) before its filter is built.
@@ -187,18 +229,23 @@ impl Bloom {
     }
 }
 
-/// Read every digest of an idx file (sequential) into a filter.
-fn build_filter(idx_path: &Path, count: u64) -> io::Result<Bloom> {
+/// Read every digest of an idx file (sequential) into a filter and a sparse sample table.
+fn build_filter(idx_path: &Path, count: u64) -> io::Result<(Bloom, Sparse)> {
     let mut file = File::open(idx_path)?;
     file.seek(SeekFrom::Start(IDX_HEADER))?;
     let mut reader = BufReader::with_capacity(256 * 1024, file);
     let mut bloom = Bloom::with_capacity(count);
+    let mut sparse = Sparse::default();
     let mut record = [0; RECORD as usize];
-    for _ in 0..count {
+    for i in 0..count {
         reader.read_exact(&mut record)?;
-        bloom.insert(&digest_at(&record, 0));
+        let digest = digest_at(&record, 0);
+        bloom.insert(&digest);
+        if i % SPARSE_STRIDE == 0 {
+            sparse.prefixes.push(digest_prefix(&digest));
+        }
     }
-    Ok(bloom)
+    Ok((bloom, sparse))
 }
 #[derive(Debug)]
 struct Pending {
@@ -245,7 +292,11 @@ impl State {
 
     /// Shared open handle for a published pack (bounded cache, most recent last).
     fn pack_file(&mut self, path: &Arc<PathBuf>) -> io::Result<Arc<File>> {
-        if let Some(i) = self.pack_files.iter().position(|(p, _)| p == path) {
+        if let Some(i) = self
+            .pack_files
+            .iter()
+            .position(|(p, _)| Arc::ptr_eq(p, path))
+        {
             let item = self.pack_files.remove(i);
             let file = item.1.clone();
             self.pack_files.push(item);
@@ -279,7 +330,9 @@ impl State {
                 let pack = &mut self.packs[n];
                 pack.probes = pack.probes.saturating_add(1);
                 if pack.probes > FILTER_AFTER_PROBES {
-                    pack.filter = Some(build_filter(&pack.idx_path, pack.count)?);
+                    let (filter, sparse) = build_filter(&pack.idx_path, pack.count)?;
+                    pack.filter = Some(filter);
+                    pack.sparse = Some(sparse);
                 }
             }
             if let Some(filter) = &self.packs[n].filter {
@@ -301,6 +354,12 @@ impl State {
             self.idx_files.swap(slot, last);
             let file = &self.idx_files[last].1;
             let (mut lo, mut hi) = (lo, hi);
+            if let Some(sparse) = &self.packs[n].sparse {
+                (lo, hi) = sparse.window(digest, self.packs[n].count, lo, hi);
+                if lo >= hi {
+                    continue;
+                }
+            }
             // Narrow large buckets with single-record positional reads, then read
             // the remaining (at most BUCKET_READ) records in one syscall.
             while hi - lo > BUCKET_READ {
@@ -546,6 +605,7 @@ impl FileNodeStore {
             count,
             fanout,
             filter: None,
+            sparse: None,
             probes: 0,
         })
     }
@@ -849,6 +909,14 @@ impl FileNodeStore {
                 fanout[digest.as_bytes()[0] as usize] += 1;
                 filter.insert(digest);
             }
+            // `sorted` is the idx order (sorted in place by `write_idx_tmp`).
+            let sparse = Sparse {
+                prefixes: sorted
+                    .iter()
+                    .step_by(SPARSE_STRIDE as usize)
+                    .map(|(d, _)| digest_prefix(d))
+                    .collect(),
+            };
             let mut total = 0u32;
             for slot in fanout.iter_mut() {
                 total += *slot;
@@ -861,6 +929,7 @@ impl FileNodeStore {
                 count: pending.entries.len() as u64,
                 fanout,
                 filter: Some(filter),
+                sparse: Some(sparse),
                 probes: 0,
             });
             Ok(())

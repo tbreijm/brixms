@@ -141,3 +141,55 @@ Restored state equals replayed state (sidecar restore == replay tests), a key-ch
 ### Remaining
 
 M5 (base copy / M5-lite) and M6 (GC with both roots, `Result`-returning node reads, persisted idempotency trie, O(1) open scan).
+
+## Profiling: load growth and the decisions read (2026-10-10, on 883dd8d)
+
+Bench: `r0_open_bench`, release, serial, M-series Mac with 16 GB. The bench now keeps per-batch commit profiles (`load_batches[].profile`, from `WorldSession::last_commit_profile`: phase timings plus state-store node reads and bytes), and takes `R0_OPEN_BENCH_KEEP=1` (keep the world dir) and `R0_OPEN_BENCH_NO_BATCH=1` (child stops after the decisions read, so a kept world can be re-probed).
+
+### Problem 1: load growth (1M: 2.4 s, 2.4 s, 16 s, 36 s ... 53 s per 100k rows)
+
+Reproduces at 300k (batches of 30k: 0.6, 0.6, 3.3, 5.0, 6.8, 7.2, 7.5, 8.1, 8.8, 9.0 s). Nothing in a commit scans resident facts: `clone_network` (20-70 ms), `decision_encode` (O(batch), 50-260 ms), `publish` (40-60 ms), `stage_base` (flat, 50-230 ms), idempotency check and header are flat or zero. The growth is in four phases (300k, batch 2 -> batch 9, ms):
+
+| Phase | 300k b2 | 300k b9 | 1M b2 | 1M b9 (before) | Cause |
+|---|---|---|---|---|---|
+| apply_ops | 1790 | 5200 | 8266 | 33841 | decoded-node-cache misses: state node reads 0 -> 342k (300k), 99k -> 1.70M (1M), each 7-20 us |
+| persist_state | 1030 | 2590 | 4344 | 10502 | nodes written per commit 0.38M -> 0.63M (300k), 1.3M -> 2.1M (1M); about 4-5 us per node |
+| persist_base | 70 | 510 | 298 | 3680 | hydrated, unchanged siblings of path-copied base nodes are probed with `contains` (see below) |
+| flush | 218 | 352 | 723 | 1249 | bytes written per commit 115 -> 200 MB (300k), 394 -> 678 MB (1M) |
+
+1. **apply_ops is cache thrash, not O(resident) work.** Every row touches about 9 hash-keyed tries (two join sides, Distinct x2, GroupedCount, frontier, decision tree, plus the base relation), each path-copy reads about log32(N) nodes, and the bench touches every sku group in every batch, so a batch's working set is close to the whole state. The decoded-node cache (128 MB accounted, which is about 4-5x that in RSS: `cost = 2 x encoded` against a real decoded size of roughly 8-10x) is full from batch 2 on. At 300k the first order batch has 0 reads; from batch 3 on, reads/row rise 0.3 -> 11 (300k) and 1 -> 17 (1M). The 1M cliff at batch 3 (99k -> 1.29M reads, apply_ops 8 s -> 20 s) is the working set outgrowing the cache. Evidence: with a 6 GB cap apply_ops is flat at 2.3 s across all batches at 300k and total batch 9 drops 9.0 -> 6.0 s; cap sweep (batch 9): 128 MB 9.0 s (RSS after load 3.0 GB), 512 MB 6.7 s (4.2 GB), 1 GB 6.3 s (5.9 GB). Disabling the persist write-through made it worse (reads 342k -> 502k, batch 9 9.6 s). 17 reads per row is near the layout's floor (each of about 9 tries contributes 1-2 distinct nodes per row below the depth where paths diverge); only cheaper misses or a larger or denser cache can move it.
+2. **persist_state grows with nodes written**, which grows B x log(N/B): nodes/key 1.3 -> 2.1 as the tries deepen. Per-component (300k, batch 9): frontier 63k nodes/322 ms, decisions 64k/234 ms, join sides 111k each/about 500 ms, Distinct 64k/361 ms, GroupedCount 111k/461 ms. Inherent to the current node layout, mild.
+3. **persist_base is O(visited hydrated nodes)**, a genuine resident-size term. Base relation tries are never dehydrated, so after a path-copy the unchanged siblings of every new branch are in-memory nodes, and `persist_node_recursive` must call `store.contains()` on each (it cannot tell they were already written). Counted at 300k: visits per commit 40k -> 174k, of which 0 -> 110k are such probes; each probe is a `known`-set hit or an idx lookup (`KNOWN_CAP` is 262k, cleared when full). State tries do not show it (their children are `Lazy`). The same hydrated base copy is why RSS after load is 5.1 GB at 1M (M5-lite).
+4. Disk is 5.0 GB at 1M (5 KB per fact; no GC until M6), so at 1M the page cache holds only part of the packs and per-read cost rises 7 -> 20 us.
+
+**Fix landed** (does not change any output, root or digest): the `find()` idx lookup now narrows with an in-memory sparse sample (first 8 digest bytes of every 32nd idx record, built at flush for free and lazily with the Bloom filter for packs found at open) and reads one window of at most about 64 records instead of 4-6 bisection reads plus a 20 KB bucket; `pack_file()` compares `Arc` identity instead of walking path components on every read. Result (same machine, same bench):
+
+| | before | after |
+|---|---|---|
+| 1M load, per batch (s) | 2.2 2.3 14.7 31.3 33.1 35.5 40.5 42.5 45.4 50.9 | 2.2 2.4 14.3 25.6 26.3 27.9 31.4 33.8 36.0 38.1 |
+| 1M load total (s) | 298.5 | 238.0 (-20%) |
+| 1M batch 9 apply_ops (s) | 33.8 | 23.9 |
+| 300k batch 9 (s) | 9.0 | 7.8 |
+
+The shape is unchanged (the cliff at batch 3, then slow growth), so this is a constant-factor win, not the fix for the growth.
+
+**Recommended next** (not done; each is larger or changes policy):
+- Make a cache miss cheaper than a syscall pair and make the cache denser. Cache the raw encoded node (cost = its length) and decode on hit (1-2 us), so the same RSS holds 4-5x more nodes; or calibrate `cost` to the real decoded size and raise the default with `node_cache_bytes` (a deployment choice: RSS grows about 5x the accounted bytes today). Expected: apply_ops flat once the previous batch's written nodes (about 400 MB encoded at 1M) fit.
+- Prefetch with parallel reads: a batch's touched paths are known after sorting ops by trie hash; issue the node reads on a small thread pool before the serial apply. Expected 3-5x on the miss-bound part (apply_ops 24 s -> under 8 s at 1M) with no format change.
+- Remove the persist_base term: dehydrate base tries after persist (needs a decoded cache on the base store; M5-lite) or mark nodes persisted per store. Expected -3.7 s of 38 s at 1M and about -3 GB RSS.
+- Fewer nodes per row: fatter leaves (several entries per leaf node) would cut both reads and writes by about 1.4x but change node encodings and roots (needs its own ADR and a state-format version).
+
+### Problem 2: the decisions read (1M: 12.7 s for 800k decisions, about 15.9 us each)
+
+`all_settlements` reads the candidate frontier (not the decision trie): `CandidateFrontier::all_buckets` pages the whole `SMap`, verifies each bucket, and `settle`s it. Breakdown at 100k (80k decisions, 838 ms; same shape at 200k: 160k, 1.91 s): node reads inside `page` 762 ms (91%), `verify_bucket` 31 ms, `settle` 25 ms, result map 37 ms. There are 109k node reads for 80k buckets (1.36 per bucket: the trie holds a leaf per key plus branches), 190 bytes each, so the cost is 7 us per node read: with the old lookup about 5 pread syscalls to bisect the idx and one for the 20 KB bucket, one pread for the body, two blake3 passes (pack checksum, then trie digest), the allocation and decode, and two cache inserts. Decode, verify and settle are under 10%. Page size is irrelevant (256 vs 4096: same time). The decoded cache has zero reuse in a scan.
+
+Fix landed: the sparse idx window above (1M: 12.7 -> 7.15 s; 200k: 1.91 -> 1.19 s). It is a constant factor: 800k decisions need at least 1.1M serial node reads, so the spec's under 1 s at 1.09M facts is out of reach by tuning the read path. Atlas's 363k orders mean about 363k decisions, about 3.2 s now.
+
+Recommended: (a) a settlement ledger: the `{seq}.decisions` delta bodies already exist per revision; compact them into a sorted flat checkpoint (derived cache, verified against `decision_root` by recompute in `world verify`), so the read is one sequential pass (800k x about 100 B = 80 MB, around 0.1 s); (b) otherwise parallel subtree reads (N threads over the 32 top-level branches), roughly linear speedup; (c) a paged API (`settlements_page(cursor, limit)`) for consumers that do not need everything, which `for_each_bucket` now supports without materialising.
+
+**RSS 2.9 GB after the one-row batch.** It is the high-water mark of the decisions read, kept by the allocator (the bench also holds the result map alive). Measured at 200k (160k decisions, `ps`/`time -l` peak): 930 MB with the old `all_settlements`; with a 1 MB decoded cache 447 MB; so the decoded-node cache contributes about 480 MB (128 MB accounted, 3.7x real) and the materialised `Vec<(FrontierKey, FrontierBucket)>` of every bucket (about 2 KB each, held until the settlement map is built) and the result map the rest. The one-row batch itself adds little (its staged network is dehydrated). Landed: `all_settlements` now streams (`for_each_bucket`), so only the settlements are retained: 200k peak 930 -> 617 MB; at 1M RSS after the one-row batch 2.95 GB -> 1.46 GB. Remaining about 450 MB is the decoded cache filled by a scan; a scan-resistant admission rule (do not insert pages read by bulk iteration) removes it.
+
+### Gaps found
+- `KNOWN_CAP` (262k) and the 65,536-node raw cache in `FileNodeStore` are shared by the base store and the state store (clones share `State`) and are far below a 1M world's node counts.
+- GC (M6) must drop the per-pack sparse and Bloom tables and the `known` set along with any removed pack.
+- Receipts do not carry the commit profile (observation only, by design); `WorldSession::last_commit_profile` is in-process.

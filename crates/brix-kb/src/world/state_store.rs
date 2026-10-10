@@ -139,6 +139,14 @@ impl StateStore {
         NodeStore::contains(self, digest)
     }
 
+    /// Physical file-store IO counters (`None` for memory stores).
+    pub fn io_stats(&self) -> Option<soc_core::store::StoreIoStats> {
+        match &*self.inner.backend.read().expect("state store lock") {
+            Backend::File(f) => Some(f.io_stats()),
+            Backend::Memory(_) => None,
+        }
+    }
+
     /// Bytes currently held by the read cache.
     pub fn cache_used_bytes(&self) -> usize {
         self.inner.cache.used_bytes()

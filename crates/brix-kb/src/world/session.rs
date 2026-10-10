@@ -96,6 +96,30 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WorldError> {
     Ok(())
 }
 
+fn ms_since(t: Instant) -> f64 {
+    t.elapsed().as_secs_f64() * 1000.0
+}
+
+/// Where the time of one commit went: wall milliseconds per phase of `apply_batch`, in order,
+/// plus the state store's physical IO over the whole commit. Observation only (never part of
+/// a receipt, a revision or a digest); recorded for every commit in
+/// [`WorldSession::last_commit_profile`].
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct CommitProfile {
+    /// `(phase, milliseconds)`: `clone_network`, `apply_ops` (operator network deltas and
+    /// settlement), `decision_encode`, `stage_base` (base tries and secondary indexes),
+    /// `persist_base`, `persist_state`, `state_header`, `flush`, `publish` (revision, receipt
+    /// and HEAD, each fsynced), `dehydrate`.
+    pub phases: Vec<(&'static str, f64)>,
+    pub total_ms: f64,
+    /// Node reads that reached the store (decoded-node-cache misses) during the commit.
+    pub state_node_reads: u64,
+    /// Body bytes read from packs during the commit.
+    pub state_bytes_read: u64,
+    /// Bytes appended to the pack (framing and index included) during the commit.
+    pub state_bytes_written: u64,
+}
+
 /// Outcome receipt returned upon applying a batch.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct RevisionReceipt {
@@ -677,6 +701,9 @@ pub struct WorldSession {
     pub network: Option<WorldNetwork>,
     /// Diagnostic: post-commit dehydrations that failed (network kept hydrated).
     pub dehydrate_failures: u64,
+    /// Phase timings and IO of the most recent committed batch (`None` before the first
+    /// commit of this session; an idempotent replay commits nothing and leaves it unchanged).
+    pub last_commit_profile: Option<CommitProfile>,
     /// Recorded (non-authoritative) execution profile (ADR-0046 P6 §1.1,
     /// decided 2026-10-04); `None` for a storage-only world or a
     /// `program.json` written before this field existed.
@@ -774,6 +801,7 @@ impl WorldSession {
             crash_injector: None,
             network: None,
             dehydrate_failures: 0,
+            last_commit_profile: None,
             exec_profile: None,
             pins: PinRegistry::default(),
             open_mode: OpenMode::NoNetwork,
@@ -988,6 +1016,7 @@ impl WorldSession {
             crash_injector: None,
             network: None,
             dehydrate_failures: 0,
+            last_commit_profile: None,
             exec_profile: None,
             pins,
             open_mode: OpenMode::NoNetwork,
@@ -1361,6 +1390,19 @@ impl WorldSession {
         limits: Option<&super::network::NetworkLimits>,
     ) -> Result<RevisionReceipt, WorldError> {
         let _lock = WorldLockGuard::acquire(&self.root)?;
+        let commit_started = Instant::now();
+        let io_before = self
+            .network
+            .as_ref()
+            .and_then(|n| n.state_store().io_stats());
+        let mut phases: Vec<(&'static str, f64)> = Vec::with_capacity(10);
+        let mut phase_started = Instant::now();
+        macro_rules! phase {
+            ($name:expr) => {{
+                phases.push(($name, ms_since(phase_started)));
+                phase_started = Instant::now();
+            }};
+        }
 
         // Verify disk HEAD matches in-memory current_revision
         let disk_head = self.read_disk_head()?;
@@ -1406,6 +1448,7 @@ impl WorldSession {
         let (staged_network, decision_root, decision_delta_digest, decision_delta_body) =
             if let Some(ref net) = self.network {
                 let mut sn = net.clone();
+                phase!("clone_network");
                 // Pre-batch facts for a network that keeps no copy of its own.
                 let base_relations = &self.relations;
                 let base_store = &self.node_store;
@@ -1421,6 +1464,7 @@ impl WorldSession {
                     limits.unwrap_or(&super::network::NetworkLimits::default()),
                     Some(&lookup),
                 )?;
+                phase!("apply_ops");
                 if sn.decides.is_empty() {
                     (Some(sn), None, None, None)
                 } else {
@@ -1436,6 +1480,7 @@ impl WorldSession {
                 (None, None, None, None)
             };
 
+        phase!("decision_encode");
         // 4. Stage updates across relations and maintain changed keys
         let mut staged_relations = self.relations.clone();
         let mut staged_secondary_indexes = self.secondary_indexes.clone();
@@ -1615,6 +1660,7 @@ impl WorldSession {
             }
         }
 
+        phase!("stage_base");
         // 5. Persist modified trie nodes to node store
         let mut objects_written = inner_objects_written;
         for trie in staged_relations.values() {
@@ -1626,6 +1672,7 @@ impl WorldSession {
             secondary_index_roots.insert(sec_name.clone(), trie.root_digest());
         }
 
+        phase!("persist_base");
         // Crash injection seam: base objects written, no network object yet.
         if self.crash_injector == Some(CrashPoint::AfterBaseObjectsBeforeNetworkObjects) {
             return Err(WorldError::InjectedCrash(
@@ -1642,6 +1689,7 @@ impl WorldSession {
             // decision trie, through the one state store (same pack, same flush).
             objects_written += sn.persist_state()?;
         }
+        phase!("persist_state");
         // The header that makes the persisted network state restorable, written in the
         // same pack as everything it names and flushed with it, before HEAD can move.
         let network_state_root = staged_network.as_ref().map(|sn| {
@@ -1650,6 +1698,7 @@ impl WorldSession {
                 .write(sn.state_store())
         });
 
+        phase!("state_header");
         // Crash injection seam: every object written, none flushed.
         if self.crash_injector == Some(CrashPoint::AfterNetworkObjectsBeforeFlush) {
             return Err(WorldError::InjectedCrash(
@@ -1664,6 +1713,7 @@ impl WorldSession {
 
         // Fsync newly written objects
         self.node_store.flush()?;
+        phase!("flush");
 
         // Crash injection seam 2
         if self.crash_injector == Some(CrashPoint::AfterObjectsFsyncBeforeRevisionFsync) {
@@ -1784,6 +1834,7 @@ impl WorldSession {
         // Fsync parent directory
         fs::File::open(&self.root)?.sync_all()?;
 
+        phase!("publish");
         // 8. Update in-memory session state
         let total_changed: usize = changed_keys.values().map(|v| v.len()).sum();
         self.current_revision = new_seq;
@@ -1812,6 +1863,26 @@ impl WorldSession {
             },
         );
 
+        phases.push(("dehydrate", ms_since(phase_started)));
+        let io_after = self
+            .network
+            .as_ref()
+            .and_then(|n| n.state_store().io_stats());
+        let (reads, read_bytes, written_bytes) = match (io_before, io_after) {
+            (Some(b), Some(a)) => (
+                a.reads.saturating_sub(b.reads),
+                a.bytes_read.saturating_sub(b.bytes_read),
+                a.bytes_written.saturating_sub(b.bytes_written),
+            ),
+            _ => (0, 0, 0),
+        };
+        self.last_commit_profile = Some(CommitProfile {
+            phases,
+            total_ms: ms_since(commit_started),
+            state_node_reads: reads,
+            state_bytes_read: read_bytes,
+            state_bytes_written: written_bytes,
+        });
         Ok(RevisionReceipt {
             revision_seq: new_seq,
             revision_digest: new_revision.revision_digest,

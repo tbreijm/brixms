@@ -43,6 +43,11 @@ use brix_kb::world::{
 const CHILD_ENV: &str = "R0_OPEN_BENCH_CHILD_DIR";
 /// Set to make the child only open the world and report how.
 const OPEN_ONLY_ENV: &str = "R0_OPEN_BENCH_OPEN_ONLY";
+/// Set to keep the generated world directory (the cold-open child can then be re-run on it
+/// with `R0_OPEN_BENCH_CHILD_DIR=<dir>` for profiling).
+const KEEP_ENV: &str = "R0_OPEN_BENCH_KEEP";
+/// Set to stop the child after the decisions read (no one-row batch, so the world is not mutated).
+const NO_BATCH_ENV: &str = "R0_OPEN_BENCH_NO_BATCH";
 const BATCHES: usize = 10;
 
 fn sources() -> BTreeMap<String, String> {
@@ -193,6 +198,18 @@ fn run_child(dir: &Path) {
     let decisions_ms = ms(t.elapsed());
     let decision_count: usize = settlements.values().map(|m| m.len()).sum();
 
+    if std::env::var_os(NO_BATCH_ENV).is_some() {
+        println!(
+            "CHILD_JSON {}",
+            serde_json::json!({
+                "open": open,
+                "decisions_ms": decisions_ms,
+                "decision_count": decision_count,
+                "rss_after_decisions_kb": rss_kb(pid),
+            })
+        );
+        return;
+    }
     let batch = WorldBatch::new(
         session.current_revision(),
         "r0-one-row",
@@ -254,10 +271,19 @@ fn run_parent(n: usize) {
                 ops,
             ))
             .expect("load batch");
+        let profile = session.last_commit_profile.as_ref().map(|p| {
+            serde_json::json!({
+                "phases_ms": p.phases.iter().map(|(n, v)| (n.to_string(), serde_json::json!(v))).collect::<serde_json::Map<_, _>>(),
+                "state_node_reads": p.state_node_reads,
+                "state_bytes_read": p.state_bytes_read,
+                "state_bytes_written": p.state_bytes_written,
+            })
+        });
         batch_stats.push(serde_json::json!({
             "batch": b,
             "rows": batch_rows,
             "ms": ms(t.elapsed()),
+            "profile": profile,
         }));
     }
     let load_ms = ms(load_start.elapsed());
@@ -347,7 +373,11 @@ fn run_parent(n: usize) {
         "fallback": fallback,
     });
     println!("{report}");
-    let _ = fs::remove_dir_all(&dir);
+    if std::env::var_os(KEEP_ENV).is_some() {
+        eprintln!("kept bench world at {}", dir.display());
+    } else {
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
 
 fn main() {

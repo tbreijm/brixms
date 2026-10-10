@@ -776,24 +776,39 @@ impl CandidateFrontier {
         Ok(())
     }
 
-    /// Every entity bucket, in outer trie order.
-    pub(crate) fn all_buckets(
+    /// Visit every entity bucket in outer trie order, one page at a time, so a caller that
+    /// reduces each bucket (settlement, counting) never holds more than a page of decoded
+    /// buckets. Every bucket is verified before it is visited.
+    pub(crate) fn for_each_bucket(
         &self,
         store: &StateStore,
-    ) -> Result<Vec<(FrontierKey, FrontierBucket)>, WorldError> {
-        let mut out = Vec::with_capacity(self.buckets.len());
+        mut visit: impl FnMut(FrontierKey, FrontierBucket) -> Result<(), WorldError>,
+    ) -> Result<(), WorldError> {
         let mut cursor = None;
         loop {
             let (rows, next) = self.buckets.page(cursor.as_ref(), 256, store)?;
             for (k, b) in rows {
                 verify_bucket(&k, &b)?;
-                out.push((k, b));
+                visit(k, b)?;
             }
             match next {
                 Some(c) => cursor = Some(c),
                 None => break,
             }
         }
+        Ok(())
+    }
+
+    /// Every entity bucket, in outer trie order.
+    pub(crate) fn all_buckets(
+        &self,
+        store: &StateStore,
+    ) -> Result<Vec<(FrontierKey, FrontierBucket)>, WorldError> {
+        let mut out = Vec::with_capacity(self.buckets.len());
+        self.for_each_bucket(store, |k, b| {
+            out.push((k, b));
+            Ok(())
+        })?;
         Ok(out)
     }
 
@@ -3027,13 +3042,17 @@ impl WorldNetwork {
     ) -> Result<BTreeMap<String, BTreeMap<String, SettledDecision>>, WorldError> {
         let _scope = self.state.trace_scope("query");
         let mut out: BTreeMap<String, BTreeMap<String, SettledDecision>> = BTreeMap::new();
-        for (key, bucket) in self.candidate_frontier.all_buckets(&self.state)? {
-            if let Some(decision) = settle(&key.entity, &bucket) {
-                out.entry(key.decide)
-                    .or_default()
-                    .insert(key.entity, decision);
-            }
-        }
+        // Streamed: each bucket is reduced to its settlement and dropped, so peak memory is
+        // the settlements themselves rather than every decoded bucket besides.
+        self.candidate_frontier
+            .for_each_bucket(&self.state, |key, bucket| {
+                if let Some(decision) = settle(&key.entity, &bucket) {
+                    out.entry(key.decide)
+                        .or_default()
+                        .insert(key.entity, decision);
+                }
+                Ok(())
+            })?;
         Ok(out)
     }
 

@@ -48,8 +48,8 @@ pub use revision::{
     SettlementStatus, WorldRevision, REVISION_SCHEMA, REVISION_SCHEMA_V2, REVISION_SCHEMA_V3,
 };
 pub use session::{
-    DiffPage, ExecModuleLoaderLimits, ExecProfileV1, OpenMode, OpenPolicy, QueryPage,
-    RevisionReceipt, SecondaryIndexCursor, SecondaryIndexPage, WorldSession, WorldSnapshot,
-    EXEC_PROFILE_SCHEMA,
+    CommitProfile, DiffPage, ExecModuleLoaderLimits, ExecProfileV1, OpenMode, OpenPolicy,
+    QueryPage, RevisionReceipt, SecondaryIndexCursor, SecondaryIndexPage, WorldSession,
+    WorldSnapshot, EXEC_PROFILE_SCHEMA,
 };
 pub use types::{WorldCursor, WorldKey, WorldTuple};
