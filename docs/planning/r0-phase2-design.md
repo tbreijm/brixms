@@ -103,3 +103,41 @@ The frontier applied all retractions before all insertions per relation. A (tupl
 4. `legacy_*` oracle shadows must be removed at M4; the per-delta `legacy_derived` assert would diverge if a `Counted` relation ever has multiple supports.
 5. Retracting a never-inserted support is a silent no-op; netting assumes a well-formed delta stream.
 6. Load remains ~+10% over post-M2 (extra frontier trie persisted and scanned); further wins would need cheaper candidate support encoding (Inline supports carry the full Distinct tuple key).
+
+## M4 results (restore from persisted state; sidecar; open surfacing)
+
+Open now restores from the HEAD revision's persisted roots instead of replaying history. A world whose HEAD cannot be restored (legacy revision, validity-key or schema change) replays once, then writes a `state-cache.json` sidecar (`brix.world.state-cache@1`) so the next open restores. `open_replay` / `--replay` never writes. Open info (`open_ms`, `open_mode`, `replay_reason`, `state_source`, `state_refreshed`, `tail_batches`) is surfaced in `world.*` results; `brix world open-check [--verify-state] [--refresh-state]` checks a world.
+
+### Bench (release, `r0_open_bench`, serial runs)
+
+| Metric | M3 final (100k) | 10k run 1 | 10k run 2 | 100k run 1 | 100k run 2 |
+|---|---|---|---|---|---|
+| Load (s) | 14.5-14.8 | 1.51 | 1.51 | 14.13 | 14.25 |
+| Cold open, restored (ms) | 8800-9000 | 2.9 | 2.8 | 14.3 | 14.3 |
+| of which FileNodeStore::new (ms) | n/a | 0.54 | 0.51 | 0.54 | 0.58 |
+| RSS after open | 724-747 MB | 4.0 MB | 4.2 MB | 12.6 MB | 12.3 MB |
+| First all_settlements after restore (ms) | ~900 | 53 | 58 | 879 | 866 |
+| One-row batch (ms) | 50-74 | 51 | 48 | 49 | 48 |
+| One-row objects written | 50 | 47 | 47 | 51 | 51 |
+| Disk | 498 MB | 49 MB | 49 MB | 498 MB | 498 MB |
+
+Fallback (legacy `@2` HEAD, fresh process each): 10k first open 621-639 ms (replay + sidecar refresh), second 1-2 ms; 100k first 8.7-8.9 s, second 3-11 ms from the sidecar.
+
+Cold open is not exactly flat: ~3 ms at 10k, ~14 ms at 100k (was ~9 s). The store floor is 0.55 ms. The remainder is attributed to parsing the HEAD revision record, whose changed-key list scales with the last batch size; this is inferred from the batch sizes and the receipt-first scan fix, not instrumented. The idempotency scan now parses a revision only when its receipt is missing (14 ms vs 18.6 ms). No 1M run (disk).
+
+### A/B summary
+
+Restored state equals replayed state (sidecar restore == replay tests), a key-change refresh works, and the first commit after a refresh is `@3` writing only the delta (<100 objects). Negative controls: stale HEAD/key, truncated or garbage sidecar, damage behind a valid sidecar, held lock, forced replay writes nothing, and three sidecar crash points.
+
+### Gaps
+
+- The latched `FileNodeStore` read masks corruption as missing; fix is `NodeStore::get_node` returning a `Result` (M6).
+- Public `set_network` can attest foreign decisions.
+- No GC: the sidecar root and the HEAD root must both be GC roots in M6.
+- The `r0-oracle` feature and legacy shadows are removed; CI no longer needs it.
+- The open scan is still O(files); the persisted idempotency trie is M6.
+- Restored networks have no base copy (`base_relations` empty); use `verify_state`. Base copy is M5-lite.
+
+### Remaining
+
+M5 (base copy / M5-lite) and M6 (GC with both roots, `Result`-returning node reads, persisted idempotency trie, O(1) open scan).
