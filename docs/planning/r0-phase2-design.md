@@ -193,3 +193,24 @@ Recommended: (a) a settlement ledger: the `{seq}.decisions` delta bodies already
 - `KNOWN_CAP` (262k) and the 65,536-node raw cache in `FileNodeStore` are shared by the base store and the state store (clones share `State`) and are far below a 1M world's node counts.
 - GC (M6) must drop the per-pack sparse and Bloom tables and the `known` set along with any removed pack.
 - Receipts do not carry the commit profile (observation only, by design); `WorldSession::last_commit_profile` is in-process.
+
+## M6 / Lane C results (storage correctness, GC, disk)
+
+**Result-returning reads.** `NodeStore::get_node -> Result<Option<Vec<u8>>, StorageError>`. `FileNodeStore` maps a checksum/format failure to `CorruptedNode` and OS errors to `Io`; the store-wide latch is kept (later reads, cached ones included, stay errors, `CorruptedNode` if the first failure was damage). Pack damage is `WorldError::CorruptState` end to end; the three r0_restore negative controls now require it.
+
+**GC (`brix world gc <dir> [--dry-run] [--keep-revisions N]`, `world::gc::gc_world`).** Roots: for each retained revision its `relation_roots`, `secondary_index_roots`, `decision_root`; for HEAD also `network_state_root`; plus the state-cache sidecar root. Default retains every revision on disk (so `pin_revision`, `explain --rev`, `decision_delta`, audit builders and `world verify` behave as before); `--keep-revisions K` keeps the newest K plus genesis, HEAD and checkpoint pins, older revisions then error with a missing node (journal files are never touched). Older revisions' network-state tries are not roots: they are the bulk of the garbage. Reachability is a conservative byte scan for the canonical digest embedding (`01 20` + 32 bytes) that checks presence in the store, uniform over all trie types, the header and derivation objects; a false match only keeps a node. Live nodes are copied to new packs while marking, packs are published, then old packs are unlinked one by one (invariant: every live node is always in a published pack, so a crash leaves old, new or a superset, never a loss). Single-writer lock; stale `.tmp`/orphan `.idx` swept; removed packs drop Bloom/sparse/idx handles/`known`/node cache. Crash points `GcCrashPoint` x5 tested. `verify_after` reopens, audits all packs and checks each live node resolves.
+
+**`open-check --verify-store`** (`world::gc::verify_store`): framing, idx, every body checksum; damage is `corrupt-state`.
+
+### Disk (release, `r0_open_bench`; GC with default options)
+| | before | live nodes / bytes | dead nodes | after | packs |
+|---|---|---|---|---|---|
+| 100k | 487 MB (498 MB at load) | 948,969 / 150 MB bodies | 643,005 (40% of 1.59M) | 302 MB | 11 -> 1 |
+| 1M | 4.90 GB | 9,464,294 / 1.52 GB bodies | 6,482,875 (41% of 15.9M) | 3.04 GB | 10 -> 6 |
+
+GC time 10.7 s (100k), 167 s (1M; dry-run mark alone 96 s). After GC `open-check --verify-state --verify-store` passes (restored, 8 ms / 358 ms open). So about 40% of nodes (38% of bytes) are garbage; the remaining 1.26-1.5x over alpha.4's 86 MB is live data, not garbage. Live overhead: bodies are ~50% of the compacted store; the rest is per-node framing, an 80-byte record in the pack footer plus an 80-byte record in the derived `.idx` (about 160 B per node vs 158 B average body). Not changed (pack format/idx layout out of scope for a no-risk pass); candidate next steps: drop the pack-embedded record table in favour of the idx, or store only a 16-byte checksum. Node encodings and roots are untouched.
+
+### Gaps / notes
+- Sessions open before a GC must be reopened. Concurrent readers in other processes are not supported during GC.
+- Legacy loose objects: primitive covered in `soc-core/tests/pack_gc.rs`; no world-level legacy GC test (cannot construct a legacy world).
+- The 1M figures were taken while another lane's 1M bench was running on the same machine.

@@ -434,7 +434,7 @@ fn missing_state_nodes_are_errors_not_empty() {
     for root in victims {
         let mut flipped = net.clone();
         let mut store = flipped.state_store().clone();
-        let mut bytes = store.get_node(&root).expect("root persisted");
+        let mut bytes = store.get_node(&root).unwrap().expect("root persisted");
         let last = bytes.len() - 1;
         bytes[last] ^= 0xff;
         // Fresh store sharing nothing: copy not possible, so overwrite in place on a clone of
@@ -480,7 +480,7 @@ fn frontier_and_decision_nodes_are_typed_errors_not_empty() {
 
     let flip = |net: &WorldNetwork, root| {
         let mut store = net.state_store().clone();
-        let mut bytes = store.get_node(&root).expect("root persisted");
+        let mut bytes = store.get_node(&root).unwrap().expect("root persisted");
         let last = bytes.len() - 1;
         bytes[last] ^= 0xff;
         store.put_node(root, bytes);

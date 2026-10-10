@@ -36,6 +36,12 @@ A legacy (`@2`) world replays once on its first open, then restores from `state-
   `open_ms`, `open_mode`, `replay_reason`, `state_source`, `state_refreshed`, `tail_batches`; new
   error statuses `corrupt-state`, `missing-state`, `state-mismatch`.
 - The `r0-oracle` feature is removed; CI no longer needs it.
+- Storage: `NodeStore::get_node` returns `Result<Option<_>, StorageError>` (breaking for custom
+  stores). Pack damage is `CorruptedNode` / `WorldError::CorruptState`; OS errors are `Io`.
+- GC: `brix world gc <dir> [--dry-run] [--keep-revisions N]` (serve `world.gc`), library
+  `world::gc::gc_world(dir, &GcOptions)`. Single writer; reopen sessions afterwards. Default keeps
+  every revision readable. `brix world open-check --verify-store` (serve `verify_store`,
+  `world::gc::verify_store`) audits every pack body checksum.
 
 ## Fixed
 

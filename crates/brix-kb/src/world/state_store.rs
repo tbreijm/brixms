@@ -174,7 +174,7 @@ impl StateStore {
 }
 
 impl NodeStore for StateStore {
-    fn get_node(&self, digest: &Digest) -> Option<Vec<u8>> {
+    fn get_node(&self, digest: &Digest) -> Result<Option<Vec<u8>>, StorageError> {
         let backend = self.inner.backend.read().expect("state store lock");
         match &*backend {
             Backend::Memory(m) => m.get_node(digest),
@@ -650,7 +650,7 @@ mod tests {
             m
         };
         let root = m.root();
-        let mut bytes = raw.get_node(&root).unwrap();
+        let mut bytes = raw.get_node(&root).unwrap().unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 0x01;
         raw.put_node(root, bytes);
@@ -731,7 +731,7 @@ mod tests {
             raw = mem.clone();
         }
         let root = m.root();
-        let mut bytes = raw.get_node(&root).unwrap();
+        let mut bytes = raw.get_node(&root).unwrap().unwrap();
         let last = bytes.len() - 1;
         bytes[last] ^= 0x01;
         raw.put_node(root, bytes);

@@ -510,18 +510,9 @@ fn flipped_byte_in_the_header_is_a_hard_state_error_and_replay_recovers() {
     let bytes = header_of(dir.path()).encode();
     let _ = rev;
     flip_byte_in_store(dir.path(), &bytes);
-    // The file store latches a failed read and reports everything afterwards as absent, so
-    // pack-level damage is `MissingState` until `NodeStore::get_node` returns a `Result`
-    // (deviation #2, M6). Hash mismatches the store does not mask are `CorruptState`
-    // (unit-tested in `network_state`).
+    // Pack-level damage surfaces from `NodeStore::get_node` as an error, never as absence.
     let err = WorldSession::open(dir.path()).err().expect("must fail");
-    assert!(
-        matches!(
-            err,
-            WorldError::CorruptState(_) | WorldError::MissingState(_)
-        ),
-        "{err:?}"
-    );
+    assert!(matches!(err, WorldError::CorruptState(_)), "{err:?}");
     let s = WorldSession::open_replay(dir.path()).unwrap();
     s.verify_state().unwrap();
 }
@@ -533,17 +524,13 @@ fn flipped_byte_in_a_trie_node_is_a_hard_state_error() {
     let h = header_of(dir.path());
     // The frontier root is probed at open; read its bytes back and damage them in place.
     let store = soc_core::store::FileNodeStore::new(dir.path()).unwrap();
-    let node = soc_core::store::NodeStore::get_node(&store, &h.frontier.root).unwrap();
+    let node = soc_core::store::NodeStore::get_node(&store, &h.frontier.root)
+        .unwrap()
+        .unwrap();
     drop(store);
     flip_byte_in_store(dir.path(), &node);
     let err = WorldSession::open(dir.path()).err().expect("must fail");
-    assert!(
-        matches!(
-            err,
-            WorldError::CorruptState(_) | WorldError::MissingState(_)
-        ),
-        "{err:?}"
-    );
+    assert!(matches!(err, WorldError::CorruptState(_)), "{err:?}");
     // Base facts are intact, so the deliberate rebuild opens and reads them.
     let s = WorldSession::open_replay(dir.path()).unwrap();
     assert!(s
@@ -1087,17 +1074,13 @@ fn damage_behind_a_valid_sidecar_is_a_hard_error() {
     let cache = brix_kb::world::state_cache::StateCache::read(&sidecar(dir.path())).unwrap();
     let store = StateStore::open_file(dir.path(), 1 << 20).unwrap();
     let h = NetworkStateHeader::read(&store, &cache.network_state_root).unwrap();
-    let node = soc_core::store::NodeStore::get_node(&store, &h.frontier.root).unwrap();
+    let node = soc_core::store::NodeStore::get_node(&store, &h.frontier.root)
+        .unwrap()
+        .unwrap();
     drop(store);
     flip_byte_in_store(dir.path(), &node);
     let err = WorldSession::open(dir.path()).err().expect("must fail");
-    assert!(
-        matches!(
-            err,
-            WorldError::CorruptState(_) | WorldError::MissingState(_)
-        ),
-        "{err:?}"
-    );
+    assert!(matches!(err, WorldError::CorruptState(_)), "{err:?}");
     assert!(WorldSession::open_replay(dir.path()).is_ok());
 }
 

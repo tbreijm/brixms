@@ -126,7 +126,7 @@ fn randomized_lookup_matches_model_across_packs_and_reopen() {
     store.set_cache_capacity(0);
     for (digest, body) in &model {
         assert!(store.contains(digest));
-        assert_eq!(store.get_node(digest).as_ref(), Some(body));
+        assert_eq!(store.get_node(digest).unwrap().as_ref(), Some(body));
     }
     for miss in 0..2000u64 {
         let d = Digest::of(
@@ -134,7 +134,7 @@ fn randomized_lookup_matches_model_across_packs_and_reopen() {
             &[b"miss".as_slice(), &miss.to_be_bytes()].concat(),
         );
         assert!(!store.contains(&d));
-        assert_eq!(store.get_node(&d), None);
+        assert_eq!(store.get_node(&d).unwrap(), None);
     }
     assert_eq!(store.node_count(), model.len());
 }
@@ -163,9 +163,9 @@ fn legacy_pack_without_idx_and_loose_objects_remain_readable() {
     let store = FileNodeStore::new(dir.path()).expect("open legacy");
     assert_eq!(dir.with_ext("idx").len(), 1, "idx built once");
     for (d, b) in &items {
-        assert_eq!(store.get_node(d).as_ref(), Some(b));
+        assert_eq!(store.get_node(d).unwrap().as_ref(), Some(b));
     }
-    assert_eq!(store.get_node(&loose), Some(b"loose".to_vec()));
+    assert_eq!(store.get_node(&loose).unwrap(), Some(b"loose".to_vec()));
     store.verify_indexes().expect("built idx matches pack");
 
     // Second open reuses the idx: no pack-index scan.
@@ -178,8 +178,14 @@ fn legacy_pack_without_idx_and_loose_objects_remain_readable() {
     writer.put_node(dig(99_999), b"new".to_vec());
     writer.put_node(dig(3), b"dup-ignored".to_vec());
     writer.flush().expect("flush");
-    assert_eq!(writer.get_node(&dig(99_999)), Some(b"new".to_vec()));
-    assert_eq!(writer.get_node(&dig(3)), Some(b"legacy-3".to_vec()));
+    assert_eq!(
+        writer.get_node(&dig(99_999)).unwrap(),
+        Some(b"new".to_vec())
+    );
+    assert_eq!(
+        writer.get_node(&dig(3)).unwrap(),
+        Some(b"legacy-3".to_vec())
+    );
     assert_eq!(dir.with_ext("pack").len(), 2);
     assert_eq!(dir.with_ext("idx").len(), 2);
 }
@@ -200,7 +206,7 @@ fn crash_leftovers_and_damaged_idx_are_rebuilt_from_pack() {
         let s = FileNodeStore::new(dir.path()).unwrap_or_else(|e| panic!("{label}: {e}"));
         for i in 0..300u64 {
             assert_eq!(
-                s.get_node(&dig(i)),
+                s.get_node(&dig(i)).unwrap(),
                 Some(format!("v{i}").into_bytes()),
                 "{label}"
             );
@@ -264,7 +270,7 @@ fn corrupted_idx_records_fail_closed() {
     let s = FileNodeStore::new(dir.path()).expect("header still valid");
     assert!(s.verify_indexes().is_err());
     let victim = Digest::from_bytes(good[first..first + 32].try_into().unwrap());
-    assert_eq!(s.get_node(&victim), None);
+    assert_eq!(s.get_node(&victim).unwrap(), None);
 
     // Offset pointing outside the pack: lookup errors, never reads elsewhere.
     let mut bad = good.clone();
@@ -272,7 +278,7 @@ fn corrupted_idx_records_fail_closed() {
     fs::write(&idx, &bad).unwrap();
     let s = FileNodeStore::new(dir.path()).expect("header still valid");
     assert!(s.verify_indexes().is_err());
-    assert_eq!(s.get_node(&victim), None);
+    assert_eq!(s.get_node(&victim).unwrap(), None);
     assert!(!s.contains(&victim), "latched after idx fault");
 }
 
@@ -289,7 +295,7 @@ fn flat_open(nodes: u64) -> (u64, std::time::Duration) {
     let elapsed = start.elapsed();
     let bytes = store.io_stats().bytes_read;
     // Lookups still work at scale.
-    assert_eq!(store.get_node(&dig(nodes / 2)), Some(vec![7u8]));
+    assert_eq!(store.get_node(&dig(nodes / 2)).unwrap(), Some(vec![7u8]));
     assert!(!store.contains(&dig(nodes + 1)));
     (bytes, elapsed)
 }
