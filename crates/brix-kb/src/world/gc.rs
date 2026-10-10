@@ -56,6 +56,7 @@ use brix_canon::Digest;
 use soc_core::store::{FileNodeStore, NodeStore};
 
 use super::error::WorldError;
+use super::idempotency::IdempotencySidecar;
 use super::paths::WorldPaths;
 use super::revision::WorldRevision;
 use super::session::WorldLockGuard;
@@ -217,6 +218,11 @@ fn collect_roots(root: &Path, paths: &WorldPaths, keep: Option<u64>) -> Result<R
     let _ = root;
     if let Some(c) = StateCache::read(&paths.state_cache_file()) {
         digests.push(c.network_state_root);
+    }
+    // The idempotency index is a best-effort cache named by a sibling sidecar; its trie
+    // nodes must survive GC or every open falls back to the receipt scan.
+    if let Some(sc) = IdempotencySidecar::read(&paths.idempotency_file()) {
+        digests.push(sc.root);
     }
     Ok(Roots {
         digests,

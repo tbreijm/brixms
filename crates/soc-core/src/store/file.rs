@@ -29,7 +29,7 @@
 //! body allocated per read. Clones share the index and pending writer.
 //! Identical digests in several packs are tolerated (content-addressed).
 
-use super::{NodeStore, StorageError};
+use super::{DecodedNodeCache, NodeStore, StorageError};
 use brix_canon::{Digest, Domain};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -270,21 +270,43 @@ struct State {
     known: std::collections::HashSet<Digest>,
     pending: Option<Pending>,
     root_synced: bool,
-    node_cache: BTreeMap<Digest, Vec<u8>>,
+    // Point lookups and FIFO eviction only (never iterated).
+    #[allow(clippy::disallowed_types)]
+    node_cache: std::collections::HashMap<Digest, Vec<u8>>,
     cache_lru: std::collections::VecDeque<Digest>,
     max_cached_nodes: usize,
+    /// Accounted bytes of `node_cache` (payload plus [`RAW_ENTRY_OVERHEAD`] per entry).
+    cached_bytes: usize,
+    max_cached_bytes: usize,
 }
+
+/// Accounted per-entry overhead of the raw node cache (map slot, queue slot, `Vec` header
+/// and allocator rounding).
+const RAW_ENTRY_OVERHEAD: usize = 128;
 
 impl State {
     fn cache_insert(&mut self, digest: Digest, bytes: Vec<u8>, io: &Counters) {
-        if self.node_cache.insert(digest, bytes).is_none() {
-            self.cache_lru.push_back(digest);
+        let cost = bytes.len() + RAW_ENTRY_OVERHEAD;
+        if cost > self.max_cached_bytes {
+            return;
         }
-        while self.node_cache.len() > self.max_cached_nodes {
+        match self.node_cache.insert(digest, bytes) {
+            None => self.cache_lru.push_back(digest),
+            Some(old) => self.cached_bytes -= old.len() + RAW_ENTRY_OVERHEAD,
+        }
+        self.cached_bytes += cost;
+        self.cache_evict(io);
+    }
+
+    fn cache_evict(&mut self, io: &Counters) {
+        while self.node_cache.len() > self.max_cached_nodes
+            || self.cached_bytes > self.max_cached_bytes
+        {
             let Some(old) = self.cache_lru.pop_front() else {
                 break;
             };
-            if self.node_cache.remove(&old).is_some() {
+            if let Some(b) = self.node_cache.remove(&old) {
+                self.cached_bytes -= b.len() + RAW_ENTRY_OVERHEAD;
                 io.evictions.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -421,9 +443,12 @@ impl Default for State {
             known: std::collections::HashSet::new(),
             pending: None,
             root_synced: false,
-            node_cache: BTreeMap::new(),
+            #[allow(clippy::disallowed_types)]
+            node_cache: std::collections::HashMap::new(),
             cache_lru: std::collections::VecDeque::new(),
             max_cached_nodes: 65_536,
+            cached_bytes: 0,
+            max_cached_bytes: usize::MAX,
         }
     }
 }
@@ -445,6 +470,10 @@ pub struct FileNodeStore {
     /// Legacy `objects/xx/` shard directories that existed at open (legacy files are
     /// read-only history; shards created after open are not consulted until reopen).
     legacy_shards: Arc<Vec<AtomicBool>>,
+    /// Decoded-node cache for store-aware trie reads made directly through this handle
+    /// (the base relations). Shared by clones; capacity 0 (disabled) until
+    /// [`FileNodeStore::set_decoded_cache_capacity`].
+    decoded: Arc<DecodedNodeCache>,
 }
 
 mod gc;
@@ -492,6 +521,7 @@ impl FileNodeStore {
             corrupt: Arc::new(AtomicBool::new(false)),
             io: Arc::new(Counters::default()),
             legacy_shards: Arc::new((0..256).map(|_| AtomicBool::new(false)).collect()),
+            decoded: Arc::new(DecodedNodeCache::new(0)),
         };
         let mut state = store
             .state
@@ -740,15 +770,24 @@ impl FileNodeStore {
     pub fn set_cache_capacity(&self, max_nodes: usize) {
         if let Ok(mut state) = self.state.lock() {
             state.max_cached_nodes = max_nodes;
-            while state.node_cache.len() > state.max_cached_nodes {
-                if let Some(old) = state.cache_lru.pop_front() {
-                    state.node_cache.remove(&old);
-                    self.io.evictions.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    break;
-                }
-            }
+            state.cache_evict(&self.io);
         }
+    }
+
+    /// Bound the raw node cache by accounted bytes instead of node count (payload plus a
+    /// fixed per-entry overhead). Evicts immediately when shrinking.
+    pub fn set_cache_budget_bytes(&self, max_bytes: usize) {
+        if let Ok(mut state) = self.state.lock() {
+            state.max_cached_nodes = usize::MAX;
+            state.max_cached_bytes = max_bytes;
+            state.cache_evict(&self.io);
+        }
+    }
+
+    /// Bound the decoded-node cache used by store-aware reads through this handle (0
+    /// disables it). Shared by all clones; evicts immediately when shrinking.
+    pub fn set_decoded_cache_capacity(&self, cap_bytes: usize) {
+        self.decoded.set_capacity(cap_bytes);
     }
 
     /// Number of nodes currently resident in the in-memory cache.
@@ -985,11 +1024,35 @@ impl FileNodeStore {
 }
 
 impl NodeStore for FileNodeStore {
+    fn decoded_cache(&self) -> Option<&DecodedNodeCache> {
+        Some(&self.decoded)
+    }
+
     fn contains(&self, digest: &Digest) -> bool {
         self.try_contains(digest).unwrap_or(false)
     }
 
     fn get_node(&self, digest: &Digest) -> Result<Option<Vec<u8>>, StorageError> {
+        self.read_node(digest, true)
+    }
+
+    fn get_node_scan(&self, digest: &Digest) -> Result<Option<Vec<u8>>, StorageError> {
+        self.read_node(digest, false)
+    }
+
+    fn put_node(&mut self, digest: Digest, bytes: Vec<u8>) {
+        self.put_node_impl(digest, bytes, true);
+    }
+
+    fn put_new_node(&mut self, digest: Digest, bytes: Vec<u8>) {
+        self.put_node_impl(digest, bytes, false);
+    }
+}
+
+impl FileNodeStore {
+    /// Read a node; `admit` controls whether a miss enters the raw node cache (bulk scans
+    /// pass `false` so they cannot evict hot nodes).
+    fn read_node(&self, digest: &Digest, admit: bool) -> Result<Option<Vec<u8>>, StorageError> {
         self.io.reads.fetch_add(1, Ordering::Relaxed);
         let storage_err = |e: io::Error| {
             if e.kind() == io::ErrorKind::InvalidData {
@@ -1062,25 +1125,17 @@ impl NodeStore for FileNodeStore {
             })())
             .map_err(storage_err)?;
 
-        if let Some(ref bytes) = result {
-            if let Ok(mut state) = self.state.lock() {
-                state.cache_insert(*digest, bytes.clone(), &self.io);
+        if admit {
+            if let Some(ref bytes) = result {
+                if let Ok(mut state) = self.state.lock() {
+                    state.cache_insert(*digest, bytes.clone(), &self.io);
+                }
             }
         }
 
         Ok(result)
     }
 
-    fn put_node(&mut self, digest: Digest, bytes: Vec<u8>) {
-        self.put_node_impl(digest, bytes, true);
-    }
-
-    fn put_new_node(&mut self, digest: Digest, bytes: Vec<u8>) {
-        self.put_node_impl(digest, bytes, false);
-    }
-}
-
-impl FileNodeStore {
     /// Append a node. With `check_existing` the node is skipped when already stored; callers
     /// that have just established absence (via `contains`) pass `false` to avoid a second probe.
     fn put_node_impl(&mut self, digest: Digest, bytes: Vec<u8>, check_existing: bool) {

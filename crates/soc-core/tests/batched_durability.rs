@@ -217,7 +217,10 @@ fn body_corruption_is_latched_and_semantic_digest_is_still_verified() {
 
     let reopened = FileNodeStore::new(dir.path()).expect("index framing stays valid");
     assert!(reopened.contains(&digest));
-    assert_eq!(reopened.get_node(&digest).unwrap(), None);
+    assert!(matches!(
+        reopened.get_node(&digest),
+        Err(soc_core::store::StorageError::CorruptedNode(d)) if d == digest
+    ));
     assert!(
         !reopened.contains(&digest),
         "checksum failure latches the handle"

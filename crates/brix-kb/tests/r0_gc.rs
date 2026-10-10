@@ -425,3 +425,24 @@ fn verify_store_reports_pack_damage_as_corrupt_state() {
     // GC refuses to launder damage into a fresh pack.
     assert!(gc_world(dir.path(), &GcOptions::default()).is_err());
 }
+
+#[test]
+fn gc_keeps_the_idempotency_index_root_alive() {
+    let dir = TempDir::new("idem_root");
+    let mut s = history(&dir, 12);
+    // Make sure the sidecar for HEAD exists (it is written best-effort after a commit).
+    let _ = s.persist_idempotency_index();
+    drop(s);
+    gc_world(dir.path(), &GcOptions::default()).unwrap();
+    // With the receipts gone only the persisted index can still answer; a GC that dropped
+    // its trie nodes would degrade the open to a (here empty) scan.
+    let paths = brix_kb::world::WorldPaths::new(dir.path());
+    for e in fs::read_dir(paths.receipts_dir()).unwrap() {
+        fs::remove_file(e.unwrap().path()).unwrap();
+    }
+    let s = WorldSession::open(dir.path()).unwrap();
+    assert_eq!(s.idempotency.source.label(), "sidecar");
+    for k in ["b0", "g0", "g11"] {
+        assert!(s.idempotency_lookup(k).unwrap().is_some(), "{k}");
+    }
+}

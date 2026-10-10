@@ -270,7 +270,10 @@ fn corrupted_idx_records_fail_closed() {
     let s = FileNodeStore::new(dir.path()).expect("header still valid");
     assert!(s.verify_indexes().is_err());
     let victim = Digest::from_bytes(good[first..first + 32].try_into().unwrap());
-    assert_eq!(s.get_node(&victim).unwrap(), None);
+    assert!(
+        s.get_node(&victim).is_err(),
+        "damage is an error, not absence"
+    );
 
     // Offset pointing outside the pack: lookup errors, never reads elsewhere.
     let mut bad = good.clone();
@@ -278,7 +281,10 @@ fn corrupted_idx_records_fail_closed() {
     fs::write(&idx, &bad).unwrap();
     let s = FileNodeStore::new(dir.path()).expect("header still valid");
     assert!(s.verify_indexes().is_err());
-    assert_eq!(s.get_node(&victim).unwrap(), None);
+    assert!(
+        s.get_node(&victim).is_err(),
+        "damage is an error, not absence"
+    );
     assert!(!s.contains(&victim), "latched after idx fault");
 }
 

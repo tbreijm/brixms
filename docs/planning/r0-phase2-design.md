@@ -255,3 +255,82 @@ Checkpoint: equals frontier and `open_replay` over four fuzz seeds; tail applica
 - The first read of a 1M world is still the frontier walk (writes the checkpoint); `open-check --refresh-state` moves it off the request path.
 - Checkpoint is a second copy of the decisions on disk (~80 MB per 800k) and is not GC-managed.
 - Commit profile folds the index work into the existing `dehydrate`/`state_header` phases (phase names are asserted by a test).
+## Lane A results: load growth and memory (alpha.5, 2026-10-10)
+
+Roots, digests and node encodings are unchanged. Bench: `r0_open_bench` (now also records per-batch `rss_kb` and process `cpu` seconds). The machine was shared with other lanes' builds and benchmarks (load average 3-7), so wall time is unreliable (flush and persist_state swing 2-5x between runs); compare CPU seconds and byte counters.
+
+What landed:
+1. Base relation and secondary-index tries are reduced to `(root, len)` after each commit (`dehydrate_base`), the state a reopened session already has. `persist_base` no longer probes unchanged hydrated siblings (1M batch 9: 1.70 s -> 1.26 s; 300k batch 9: 455 -> 365 ms). `FileNodeStore` gained a decoded-node cache (disabled until a session sizes it) so base reads stay cheap; its write-through also lets `persist_node_recursive` skip `contains` for cached nodes.
+2. Node cache rework. The raw encoded-node cache in `FileNodeStore` is now a byte-bounded hash map (payload + 128 B/entry overhead) instead of a 65,536-node count; `node_cache_bytes` is now the total budget (default 512 MiB), split raw 1/2, operator-state decoded 1/4, base decoded 1/8. Decoded-node cost is 8x the encoding (was 2x; measured RSS grows about 1.7 GB for a 2 GB budget). Bulk iteration (`iter_page_with_store`, so `all_settlements`) is scan resistant: `NodeStore::get_node_scan` never admits to the raw cache, and decoded admission is limited to branches within 3 levels of the root.
+3. Not done: deterministic prefetch. The remaining apply_ops time is decode and hit cost, not syscalls, so a read-ahead pool would not help; it needs a larger decoded working set or cheaper decode.
+4. Not done: M3 frontier persist/scan overhead (+10%).
+
+Tried and reverted: releasing the network's own base copy after the first commit (`release_base`). It made no RSS difference in a measurement (1.52 -> 1.48 GB at 300k) and broke `world_skew_isolation`, which applies ops to a clone of `session.network`.
+
+### Results (CPU seconds are cumulative over the load; per-batch ms are noisy)
+
+300k, batch = 30k rows:
+
+| | batch 2 ms | batch 9 ms | apply b9 | persist_base b9 | CPU total s | RSS after load |
+|---|---|---|---|---|---|---|
+| baseline 4c25a80 | 4107 | 11798 | 7228 | 455 | 62.8 | 1.99 GB |
+| lane A | 3942 | 11640 | 7037 | 365 | 58.3 | 1.52 GB |
+
+1M, batch = 100k rows (contended machine; baseline 289 s wall / 262 s CPU, lane A 370 s wall / 270 s CPU, i.e. no measurable load-time change):
+
+| | b9 ms | b9 apply | b9 persist_base | RSS after load |
+|---|---|---|---|---|
+| baseline | 36317 | 21922 | 1703 | 5.34 GB |
+| lane A | 58435 | 39005 | 1258 | 4.42 GB |
+
+Per-batch growth is NOT fixed: late batches are still about 5-6x early per-row cost at 300k. A run with a 2 GB budget gave apply_ops 3.5 s at batch 9 (vs 7.0 s) and RSS 4.5 GB, so the lever is holding the working set decoded, which costs memory. RSS above the cache is dominated by the per-batch staged network (all path-copied nodes of a batch hydrated until persist and dehydrate: about 1.3 GB at 300k, growing with nodes written per commit); incremental persist-and-dehydrate inside a batch is the next lever (needs a design for intermediate state writes).
+
+### Tests
+`crates/soc-core/tests/node_cache_budget.rs` (byte-bounded raw cache, scan not admitted, decoded scan admission, dehydrated trie reads and writes reach the same root). Existing `r0_restore` differential and the full workspace suite pass.
+
+### Gaps
+- `NodeStore::get_node_scan` must be carried through lane C's `Result`-returning `get_node` on merge.
+- `DECODED_COST_FACTOR` is empirical; revisit if node types change.
+- A deeper `SCAN_ADMIT_DEPTH` or paging-aware admission may help repeated paged scans.
+
+### Chunked-persist gate experiments (lane A, 2026-10-10/11)
+
+New bench knobs: `R0_OPEN_BENCH_BATCHES` (batch count, default 10), `R0_OPEN_BENCH_LOAD_ONLY` (stop after the load), `R0_OPEN_BENCH_REPLAY_ONLY` (child opens by full replay and exits). Peak RSS is `/usr/bin/time -l` maximum resident set size. A smaller batch is a naive chunked persist plus per-batch publish overhead. macOS RSS can read low under memory pressure (other lanes were running), so treat RSS as +-10%. CPU seconds are cumulative process CPU. Default budget (512 MiB) unless noted.
+
+**E0: batch count sweep (load only)**
+
+| N | batches | wall s | CPU s | peak RSS GB | apply us/row | persist_state us/row | state bytes written/row | flush+publish+decision_encode s | last-batch apply us/row |
+|---|---|---|---|---|---|---|---|---|---|
+| 300k | 10 | 56 | 49.0 | 3.15 | 103 | 54 | 4839 | 3.7 | 183 |
+| 300k | 40 | 64 | 62.0 | 2.02 | 96 | 78 | 6177 | 5.8 | 150 |
+| 300k | 100 | 92 | 86.2 | 1.66 | 125 | 120 | 7337 | 9.3 | 235 |
+| 1M | 10 | 259 | 223.6 | 5.98 | 156 | 66 | 4898 | 12.4 | 263 |
+| 1M | 40 | 302 | 268.4 | 5.10 | 164 | 91 | 6098 | 15.0 | 348 |
+
+(1M with 100 batches was not run: 300k already shows it costs +76% CPU.)
+
+Go criterion (peak RSS falls >= 2 GB at 1M with <= 15% CPU): **FAILED**. 10 -> 40 batches frees 0.9 GB at 1M for +20% CPU (+26% at 300k, which frees 1.1 GB). Chunking rewrites shared upper-trie nodes once per chunk (state bytes written per row +25..50%) and does not touch the per-row apply cost, which keeps growing with trie size (last-batch apply 150-350 us/row vs 7 us in batch 1) even with 3000-row batches. Load growth is cache-miss and decode bound, not batch-size bound.
+
+**E1: 300k, 40 batches, budget +1.1 GB (1536 MiB) with the raw cache at 3/4 (state 1/8, base 1/8)**
+
+| | CPU s | peak RSS GB | apply us/row | last-batch apply us/row |
+|---|---|---|---|---|
+| 40 batches, default | 62.0 | 2.02 | 96 | 150 |
+| 40 batches, 1536 MiB, raw 3/4 | 57.7 | 3.91 | 86 | 130 |
+| 10 batches, default | 49.0 | 3.15 | 103 | 183 |
+| 10 batches, 1536 MiB, raw 3/4 | 47.0 | 4.46 | 81 | 109 |
+
+Apply_ops at the late batch falls 13-40%, not 2x; and the extra budget eats all the RSS that chunking freed (3.9 GB vs 3.15 GB un-chunked). Not a win.
+
+**E2: heap per hydrated node** (`crates/brix-kb/tests/lane_a_node_heap.rs`, `--ignored`, counting allocator; 20k scattered upserts into a dehydrated 200k-entry `WorldKey -> WorldTuple` trie). `size_of::<Node<WorldKey, WorldTuple>>()` = 104 B, so a lazy child is `Arc<Node::Lazy>` of about 120 B (Opus's estimate holds). Measured 612 B of heap per path-copied node. Boxing the Leaf/Collision/Branch payloads (Node = 40 B, lazy child about 56 B; compiled with no logic change and the full test suite passed) lowered it to 519 B/node (-15%), implying about 1.45 lazy children per path-copied node, i.e. lazy children are about 30% of the hydrated heap, not >= 50%. The rest is leaf key/value allocations, `Arc<V>`, the children `Vec`s and per-allocation overhead. Per the gate, the compact `enum Child` refactor was NOT implemented and the Box experiment was reverted (it changed 42 construction sites in `store.rs` for -15% heap, with no change in RSS or CPU in an end-to-end run: 300k/10 batches peak 3.08 GB vs 3.15 GB, 300k/40 batches 1.94 vs 2.02 GB, CPU +-5% noise). Measured heap is about 4x the encoding, so `DECODED_COST_FACTOR = 8` includes cache-index overhead and is conservative, not unexplained. The compact-child refactor alone does not change the load-growth picture.
+
+**E3: peak RSS of `open_replay`**: 300k: 3.98 GB peak (2.03 GB after open), 36.5 s, versus 34 MB and 41 ms for a normal restore open. About 13 KB per fact: the fallback applies the whole world as one `apply_ops` in `set_network`. 1M was not run (extrapolates to about 13 GB on a 16 GB machine shared with other lanes); the fallback needs chunked replay (apply the base facts in slices of a few 10k rows through the same path, persisting nothing) to be safe at scale. That is the one place where chunking is purely a memory win, since replay output is not persisted per slice.
+
+**Go / no-go**
+
+| Change | Verdict | Evidence |
+|---|---|---|
+| Naive chunked persist for load (40 batches) | NO-GO | 1M: -0.9 GB peak RSS for +20% CPU; fails the 2 GB / 15% criterion; more bytes written and more publish overhead |
+| Chunked persist + larger raw cache (E1) | NO-GO | late apply -13..-40%, RSS ends higher than un-chunked |
+| Compact children / boxed Node variants | NO-GO as a load fix | lazy children about 30% of the hydrated heap; -15% heap, no end-to-end change |
+| Chunked replay inside `set_network` / `open_replay` (no per-chunk persist) | GO (separate task) | 300k replay peaks at 4 GB (13 KB/fact); output unaffected since nothing is persisted per slice |
