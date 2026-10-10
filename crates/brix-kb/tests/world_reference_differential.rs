@@ -806,7 +806,43 @@ fn run_fuzz_battery(seed: u64, total_steps: usize) {
         }
         apply(&mut network, &label, ops);
         assert_agrees_with_reference(&network, &refprog, &label);
+        if step % 25 == 24 {
+            assert_restored_matches(&network, &label);
+        }
     }
+}
+
+/// R0 M4: a network restored lazily from the persisted roots of `network` answers exactly as
+/// `network` does (the reference battery above has just shown `network` to be correct).
+fn assert_restored_matches(network: &WorldNetwork, label: &str) {
+    network.persist_state().expect("persist");
+    let key = brix_kb::world::ValidityKey::current(
+        brix_canon::Digest::from_bytes([1; 32]),
+        None,
+        network.fingerprint(),
+    );
+    let header = network.state_header(key);
+    let mut restored = WorldNetwork::from_program(&link(LINKED_MODEL_SRC)).expect("network");
+    restored.attach_state_store(network.state_store().clone());
+    restored.restore_state(&header).expect("restore");
+    assert_eq!(
+        restored.all_settlements().unwrap(),
+        network.all_settlements().unwrap(),
+        "{label}: restored settlements"
+    );
+    assert_eq!(restored.decision_root(), network.decision_root(), "{label}");
+    for (name, _) in network.derived_relations.iter() {
+        assert_eq!(
+            restored.get_derived_tuples(name).unwrap(),
+            network.get_derived_tuples(name).unwrap(),
+            "{label}: restored derived {name}"
+        );
+    }
+    assert_eq!(
+        restored.state_header(header.validity.clone()),
+        header,
+        "{label}: restored header"
+    );
 }
 
 #[test]

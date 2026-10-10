@@ -128,7 +128,7 @@ fn read_validity(r: &mut CanonReader<'_>) -> Result<ValidityKey, StateCodecError
 #[derive(Debug)]
 pub enum Loaded {
     /// Written under exactly the expected key.
-    Header(NetworkStateHeader),
+    Header(Box<NetworkStateHeader>),
     /// Intact but produced under another schema, execution profile, program structure or
     /// codec/lowering version: not reusable here, the network must be rebuilt.
     Stale(&'static str),
@@ -340,7 +340,9 @@ impl NetworkStateHeader {
         if &validity != expected {
             return Ok(Loaded::Stale("validity-key"));
         }
-        Self::decode(&bytes).map(Loaded::Header).map_err(corrupt)
+        Self::decode(&bytes)
+            .map(|h| Loaded::Header(Box::new(h)))
+            .map_err(corrupt)
     }
 
     /// Load and fully decode the header at `digest`, whatever its validity key.
