@@ -62,7 +62,7 @@ fn assert_decision(session: &WorldSession, id: &str, expected: Option<&str>) {
         .network
         .as_ref()
         .expect("executable session must have network");
-    let decision = network.get_settlement("root::dispatch", id);
+    let decision = network.get_settlement("root::dispatch", id).unwrap();
     assert_eq!(
         decision.map(|d| d.value),
         expected.map(|s| Value::Str(s.into()))

@@ -84,6 +84,8 @@ pub enum Domain {
     Snapshot,
     /// Generic value digest (canon-encoded values, revision-log entries).
     Value,
+    /// Persisted maintained-network state objects (world network-state header).
+    State,
 }
 
 impl Domain {
@@ -96,6 +98,7 @@ impl Domain {
             Domain::Claim => "claim",
             Domain::Snapshot => "snapshot",
             Domain::Value => "value",
+            Domain::State => "state",
         }
     }
 }
@@ -192,6 +195,13 @@ impl CanonWriter {
     /// A fresh, empty writer.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A fresh writer with room for `cap` bytes (avoids regrowth when the size is known).
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(cap),
+        }
     }
 
     /// Consume the writer, returning the canonical byte string.

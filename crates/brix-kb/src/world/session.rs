@@ -4,19 +4,32 @@ use brix_canon::{CanonReader, CanonWriter, Digest, Domain};
 use brix_lower::module_graph::{LinkedProgram, ModuleGraph, ModuleLoaderLimits};
 use brix_lower::relation_dag::{lower_relations, OperatorNode};
 use soc_core::store::{FileNodeStore, TrieMap};
+
+use super::state_store::{StateStore, DEFAULT_NODE_CACHE_BYTES};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
 use super::batch::{WorldBatch, WorldBatchOp};
+use super::chunk_policy::{
+    ChunkInput, ChunkPolicy, HeuristicChunkPolicy, DEFAULT_APPLY_HYDRATED_BYTES,
+    PENDING_INDEX_BYTES_PER_NODE,
+};
 use super::codec::{encode_secondary_key, extract_indexed_field, TupleRecord};
+use super::decision_codec::compute_decision_root;
 use super::error::{CrashPoint, WorldError};
+use super::idempotency::{IdempotencyIndex, IdempotencySource};
 use super::manifest::{RelationDecl, WorldManifest, WORLD_PROFILE};
 use super::network::{DecisionExplanation, SettledDecision, WorldNetwork};
+use super::network_state::{Loaded, NetworkStateHeader, ValidityKey};
 use super::oracle::DiffEvent;
 use super::paths::WorldPaths;
-use super::revision::{SettlementStatus, WorldRevision};
+use super::revision::{SettlementStatus, WorldRevision, REVISION_SCHEMA_V3};
+use super::settlement_checkpoint::{apply_delta, SettlementCheckpoint};
 use super::staging::StagingManager;
+use super::state_cache::StateCache;
 use super::types::{WorldCursor, WorldKey, WorldTuple};
 
 fn parse_digest(hex: &str, field: &str) -> Result<Digest, WorldError> {
@@ -59,6 +72,190 @@ fn link_closure(
     Ok((linked, digest, closure))
 }
 
+/// Share of the world's `node_cache_bytes` budget given to each cache tier: the raw
+/// encoded-node cache (cheap to hold, decoded on a hit) gets half, the operator-state decoded
+/// cache a quarter and the base-relation decoded cache an eighth, so the sum approximates the
+/// resident memory the knob is meant to bound.
+fn raw_cache_share(budget: usize) -> usize {
+    budget / 2
+}
+fn state_cache_share(budget: usize) -> usize {
+    budget / 4
+}
+fn base_cache_share(budget: usize) -> usize {
+    budget / 8
+}
+
+fn manifest_node_cache_budget(manifest: &WorldManifest) -> usize {
+    manifest
+        .node_cache_bytes
+        .map_or(DEFAULT_NODE_CACHE_BYTES, |n| {
+            usize::try_from(n).unwrap_or(usize::MAX)
+        })
+}
+
+fn configure_node_store_caches(store: &FileNodeStore, budget: usize) {
+    store.set_cache_budget_bytes(raw_cache_share(budget));
+    store.set_decoded_cache_capacity(base_cache_share(budget));
+}
+
+/// A persisted base trie as `(root, len)` only. Callers guarantee the trie was persisted.
+fn dehydrate_base(
+    tries: BTreeMap<String, TrieMap<WorldKey, WorldTuple>>,
+) -> BTreeMap<String, TrieMap<WorldKey, WorldTuple>> {
+    tries
+        .into_iter()
+        .map(|(name, t)| {
+            let d = TrieMap::from_root_digest(t.root_digest(), t.len());
+            (name, d)
+        })
+        .collect()
+}
+
+/// What chunking did for one batch (operational; never reaches a digest).
+struct ChunkRun {
+    chunks: usize,
+    persist_ms: f64,
+    /// Objects written by the between-chunk persists.
+    objects: usize,
+    fallback: bool,
+}
+
+impl ChunkRun {
+    fn single() -> Self {
+        Self {
+            chunks: 1,
+            persist_ms: 0.0,
+            objects: 0,
+            fallback: false,
+        }
+    }
+}
+
+/// Errors that are about the environment (disk, store, lock), not about the batch's logic.
+/// A chunked run that hits one fails the batch; any other error may be an artifact of the
+/// chunk boundaries, so the batch is re-run unchunked and that result is authoritative.
+fn is_environmental(e: &WorldError) -> bool {
+    matches!(
+        e,
+        WorldError::Io(_)
+            | WorldError::InjectedCrash(_)
+            | WorldError::State(_)
+            | WorldError::CorruptState(_)
+            | WorldError::MissingState(_)
+            | WorldError::MissingObject(_)
+            | WorldError::CorruptedObject(_)
+            | WorldError::WorldLocked(_)
+            | WorldError::StateMismatch(_)
+            | WorldError::ValidityMismatch(_)
+    )
+}
+
+/// Apply `ops` to `sn` (a private clone of `net`) in the chunks `policy` plans, persisting and
+/// dehydrating the staged network between chunks so the hydrated working set stays near the
+/// budget. Output (roots, decision delta, revision) is identical for any chunking; with no
+/// limit set, a batch the policy keeps whole runs exactly the unchunked path.
+#[allow(clippy::too_many_arguments)]
+fn apply_ops_chunked(
+    mut sn: WorldNetwork,
+    net: &WorldNetwork,
+    ops: &[WorldBatchOp],
+    limits: Option<&super::network::NetworkLimits>,
+    lookup: &super::network::BaseLookup<'_>,
+    policy: &dyn ChunkPolicy,
+    budget: u64,
+    crash: Option<CrashPoint>,
+) -> Result<(WorldNetwork, super::network::NetworkDeltaReport, ChunkRun), WorldError> {
+    let default_limits = super::network::NetworkLimits::default();
+    let lim = limits.unwrap_or(&default_limits);
+    let mut input = ChunkInput {
+        ops_total: ops.len(),
+        ops_done: 0,
+        prev_chunk_ops: 0,
+        prev_nodes_written: 0,
+        pending_index_bytes: 0,
+        budget_bytes: budget,
+    };
+    // Any execution bound is accounted per batch, so a bounded batch is never split (H3).
+    let first = if *lim == default_limits {
+        policy.chunk_plan(&input)
+    } else {
+        super::chunk_policy::ChunkDecision {
+            ops: ops.len(),
+            flush_pack: false,
+        }
+    };
+    if first.ops >= ops.len() {
+        let report = sn.apply_ops_staged_view(ops, lim, Some(lookup))?;
+        return Ok((sn, report, ChunkRun::single()));
+    }
+
+    let mut run = ChunkRun::single();
+    let chunked: Result<super::network::NetworkDeltaReport, WorldError> = (|| {
+        let mut ctx = sn.begin_batch();
+        let mut decision = first;
+        loop {
+            let remaining = ops.len() - input.ops_done;
+            let n = decision.ops.clamp(1, remaining);
+            sn.apply_chunk(
+                &mut ctx,
+                &ops[input.ops_done..input.ops_done + n],
+                lim,
+                Some(lookup),
+            )?;
+            input.ops_done += n;
+            input.prev_chunk_ops = n;
+            if input.ops_done >= ops.len() {
+                break;
+            }
+            let started = Instant::now();
+            let written = sn.persist_and_dehydrate_in_place()?;
+            run.objects += written;
+            run.persist_ms += ms_since(started);
+            input.prev_nodes_written = written;
+            if crash == Some(CrashPoint::AfterChunkPersistedBeforeNextChunk) {
+                return Err(WorldError::InjectedCrash(
+                    CrashPoint::AfterChunkPersistedBeforeNextChunk,
+                ));
+            }
+            input.pending_index_bytes =
+                sn.state_store().pending_stats().0 as u64 * PENDING_INDEX_BYTES_PER_NODE;
+            decision = policy.chunk_plan(&input);
+            if decision.flush_pack {
+                let started = Instant::now();
+                sn.state_store().flush()?;
+                run.persist_ms += ms_since(started);
+                if crash == Some(CrashPoint::AfterIntermediatePackFlush) {
+                    return Err(WorldError::InjectedCrash(
+                        CrashPoint::AfterIntermediatePackFlush,
+                    ));
+                }
+            }
+        }
+        run.chunks = ctx.chunks();
+        Ok(sn.finish_batch(ctx))
+    })();
+    match chunked {
+        Ok(report) => Ok((sn, report, run)),
+        Err(e) if is_environmental(&e) => Err(e),
+        Err(_) => {
+            // The error may be an artifact of where the chunks fell (a transient state the
+            // whole batch never reaches). The unchunked run is authoritative: it accepts
+            // exactly what it accepted before chunking existed.
+            let mut sn = net.clone();
+            let report = sn.apply_ops_staged_view(ops, lim, Some(lookup))?;
+            Ok((
+                sn,
+                report,
+                ChunkRun {
+                    fallback: true,
+                    ..run
+                },
+            ))
+        }
+    }
+}
+
 fn validate_program_relations(
     manifest: &WorldManifest,
     network: &WorldNetwork,
@@ -89,6 +286,37 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WorldError> {
         fs::File::open(parent)?.sync_all()?;
     }
     Ok(())
+}
+
+fn ms_since(t: Instant) -> f64 {
+    t.elapsed().as_secs_f64() * 1000.0
+}
+
+/// Where the time of one commit went: wall milliseconds per phase of `apply_batch`, in order,
+/// plus the state store's physical IO over the whole commit. Observation only (never part of
+/// a receipt, a revision or a digest); recorded for every commit in
+/// [`WorldSession::last_commit_profile`].
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct CommitProfile {
+    /// `(phase, milliseconds)`: `clone_network`, `apply_ops` (operator network deltas and
+    /// settlement), `decision_encode`, `stage_base` (base tries and secondary indexes),
+    /// `persist_base`, `persist_state`, `state_header`, `flush`, `publish` (revision, receipt
+    /// and HEAD, each fsynced), `dehydrate`.
+    pub phases: Vec<(&'static str, f64)>,
+    pub total_ms: f64,
+    /// Node reads that reached the store (decoded-node-cache misses) during the commit.
+    pub state_node_reads: u64,
+    /// Body bytes read from packs during the commit.
+    pub state_bytes_read: u64,
+    /// Bytes appended to the pack (framing and index included) during the commit.
+    pub state_bytes_written: u64,
+    /// Chunks the batch's operator network was applied in (1: not chunked, CPD off or the
+    /// batch under the budget).
+    pub chunks: usize,
+    /// Milliseconds spent persisting and dehydrating between chunks (inside `apply_ops`).
+    pub chunk_persist_ms: f64,
+    /// Chunking hit a non-environmental error and the batch was re-run unchunked.
+    pub chunk_fallback: bool,
 }
 
 /// Outcome receipt returned upon applying a batch.
@@ -258,6 +486,10 @@ pub struct CommittedBatchInfo {
     pub batch_digest: Option<Digest>,
 }
 
+/// How long a commit waits for the writer lock before reporting `WorldLocked` (readers hold
+/// it only for sub-millisecond publish steps; see [`WorldLockGuard::acquire_wait`]).
+const COMMIT_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// RAII guard representing exclusive writer ownership over a world directory.
 pub struct WorldLockGuard {
     _file: fs::File,
@@ -282,6 +514,27 @@ impl WorldLockGuard {
                 Err(fs::TryLockError::Error(e)) => Err(WorldError::Io(e)),
             },
             Err(e) => Err(WorldError::Io(e)),
+        }
+    }
+}
+
+impl WorldLockGuard {
+    /// [`Self::acquire`], retrying for up to `wait` while another handle holds the lock. For
+    /// commits: a reader's opportunistic cache write holds the lock only for a few
+    /// milliseconds (it does its heavy work outside it), so a short wait turns a spurious
+    /// `WorldLocked` into success, while a genuine second writer still fails after `wait`.
+    pub fn acquire_wait(root: &Path, wait: std::time::Duration) -> Result<Self, WorldError> {
+        let deadline = Instant::now() + wait;
+        loop {
+            match Self::acquire(root) {
+                Err(WorldError::WorldLocked(m)) => {
+                    if Instant::now() >= deadline {
+                        return Err(WorldError::WorldLocked(m));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                other => return other,
+            }
         }
     }
 }
@@ -612,6 +865,58 @@ impl ExecProfileV1 {
     }
 }
 
+/// How a session obtained its operator network when it was opened (R0 M4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenMode {
+    /// The persisted network state the HEAD revision names was installed lazily; no base
+    /// fact was replayed.
+    Restored,
+    /// The network was rebuilt by replaying every resident base fact (a legacy revision,
+    /// a validity-key change, an explicit `open_replay`, or a freshly created world).
+    Replay,
+    /// The world has no executable program, so there is no network.
+    NoNetwork,
+}
+
+impl OpenMode {
+    /// The name surfaced in CLI and serve results.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Restored => "restored",
+            Self::Replay => "replay",
+            Self::NoNetwork => "none",
+        }
+    }
+}
+
+/// A checkpoint further behind HEAD than this many revisions is not used (the frontier is).
+const CHECKPOINT_MAX_TAIL: u64 = 256;
+/// A checkpoint read that applied more tail revisions than this refreshes the checkpoint.
+const CHECKPOINT_REFRESH_TAIL: u64 = 32;
+/// Entries of a checkpoint read spot-checked against the persisted decision trie.
+const CHECKPOINT_PROBES: usize = 64;
+
+/// Operational choices for [`WorldSession::open_with_policy`]. They never change what a
+/// session computes, only how much work open does and leaves behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenPolicy {
+    /// Rebuild the network by replay and never read persisted operator state.
+    pub force_replay: bool,
+    /// After a non-forced replay (legacy revision, changed validity key), try to persist the
+    /// rebuilt state and a state-cache sidecar so the next open restores. Best effort:
+    /// failures (read-only filesystem, held lock) never fail the open.
+    pub refresh_after_replay: bool,
+}
+
+impl Default for OpenPolicy {
+    fn default() -> Self {
+        Self {
+            force_replay: false,
+            refresh_after_replay: true,
+        }
+    }
+}
+
 /// The active persistent world runtime session.
 pub struct WorldSession {
     pub root: PathBuf,
@@ -622,15 +927,50 @@ pub struct WorldSession {
     pub node_store: FileNodeStore,
     pub relations: BTreeMap<String, TrieMap<WorldKey, WorldTuple>>,
     pub secondary_indexes: BTreeMap<String, TrieMap<WorldKey, WorldTuple>>,
-    pub committed_idempotency_keys: BTreeMap<String, CommittedBatchInfo>,
+    pub idempotency: IdempotencyIndex,
+    /// The GC generation marker (`objects/GC_EPOCH`) this session's store handle and caches
+    /// were built under; compared under the writer lock before anything is written (see
+    /// [`Self::sync_gc_epoch`]).
+    gc_epoch: String,
+    /// Whether `all_settlements` may leave a settlement checkpoint behind (best effort);
+    /// off for `open_replay`.
+    pub checkpoint_autowrite: bool,
     pub crash_injector: Option<CrashPoint>,
     pub network: Option<WorldNetwork>,
+    /// Diagnostic: post-commit dehydrations that failed (network kept hydrated).
+    pub dehydrate_failures: u64,
+    /// Phase timings and IO of the most recent committed batch (`None` before the first
+    /// commit of this session; an idempotent replay commits nothing and leaves it unchanged).
+    pub last_commit_profile: Option<CommitProfile>,
+    /// Decides where a large batch is split into chunks (CPD). Operational only: no root,
+    /// digest or decision delta depends on it.
+    pub chunk_policy: Arc<dyn ChunkPolicy>,
     /// Recorded (non-authoritative) execution profile (ADR-0046 P6 §1.1,
     /// decided 2026-10-04); `None` for a storage-only world or a
     /// `program.json` written before this field existed.
     pub exec_profile: Option<ExecProfileV1>,
     /// Retention pins protecting revisions from compaction.
     pub pins: PinRegistry,
+    /// How the network was obtained at open (see [`OpenMode`]).
+    pub open_mode: OpenMode,
+    /// Why a replay happened when one did (`forced`, `legacy-revision`, `validity-key`).
+    pub replay_reason: Option<&'static str>,
+    /// Wall-clock milliseconds `open` took.
+    pub open_ms: u64,
+    /// Committed batches applied on top of the persisted network state at open. Every
+    /// commit persists its own state, so this is `0` today; a replay rebuilds the network
+    /// from the resident base facts, not from batches, and also reports `0` (see
+    /// `open_mode` and `replay_reason`). Reserved for checkpointed state.
+    pub tail_batches: u64,
+    /// The `network_state_root` of the HEAD revision, if it has one.
+    pub network_state_root: Option<Digest>,
+    /// Where restored state came from: `"revision"` (named by the HEAD record) or
+    /// `"sidecar"` (the state-cache file); `None` unless `open_mode` is `Restored`.
+    pub state_source: Option<&'static str>,
+    /// Whether this open persisted a state-cache sidecar after replaying.
+    pub state_refreshed: bool,
+    /// Why a post-replay refresh did not happen, when it was attempted and failed.
+    pub state_refresh_error: Option<String>,
 }
 
 impl WorldSession {
@@ -653,7 +993,9 @@ impl WorldSession {
         // Write initial HEAD pointing to genesis (revision 0)
         fs::write(paths.head(), "0\n")?;
 
+        let gc_epoch = super::gc::read_gc_epoch(&paths);
         let node_store = FileNodeStore::new(&root)?;
+        configure_node_store_caches(&node_store, manifest_node_cache_budget(&manifest));
         let mut relations = BTreeMap::new();
         let mut secondary_indexes = BTreeMap::new();
 
@@ -698,17 +1040,53 @@ impl WorldSession {
             node_store,
             relations,
             secondary_indexes,
-            committed_idempotency_keys: BTreeMap::new(),
+            idempotency: IdempotencyIndex::empty(),
+            gc_epoch,
+            checkpoint_autowrite: true,
             crash_injector: None,
             network: None,
+            dehydrate_failures: 0,
+            last_commit_profile: None,
+            chunk_policy: Arc::new(HeuristicChunkPolicy),
             exec_profile: None,
             pins: PinRegistry::default(),
+            open_mode: OpenMode::NoNetwork,
+            replay_reason: None,
+            open_ms: 0,
+            tail_batches: 0,
+            network_state_root: None,
+            state_source: None,
+            state_refreshed: false,
+            state_refresh_error: None,
         })
     }
 
-    /// Open an existing world directory (lazy cold open).
+    /// Open an existing world directory (lazy cold open). When the HEAD revision names
+    /// persisted network state valid for this binary, it is restored without replaying any
+    /// base fact; otherwise (a legacy revision or a changed validity key) the network is
+    /// rebuilt by replay and the next commit records restorable state. Persisted state that
+    /// is corrupt, missing, or inconsistent with its revision is a hard error, never a
+    /// silent fallback: call [`Self::open_replay`] to rebuild deliberately.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, WorldError> {
-        let root = root.as_ref().to_path_buf();
+        Self::open_with_policy(root.as_ref(), OpenPolicy::default())
+    }
+
+    /// Open, always rebuilding the network by replaying the resident base facts and never
+    /// reading persisted operator state (tests, verification, repair).
+    pub fn open_replay(root: impl AsRef<Path>) -> Result<Self, WorldError> {
+        Self::open_with_policy(
+            root.as_ref(),
+            OpenPolicy {
+                force_replay: true,
+                refresh_after_replay: false,
+            },
+        )
+    }
+
+    /// Open under an explicit [`OpenPolicy`].
+    pub fn open_with_policy(root: &Path, policy: OpenPolicy) -> Result<Self, WorldError> {
+        let started = Instant::now();
+        let root = root.to_path_buf();
         let paths = WorldPaths::new(&root);
 
         if !paths.world_json().exists() {
@@ -733,7 +1111,11 @@ impl WorldSession {
             .parse()
             .map_err(|_| WorldError::CorruptedHead("invalid integer in HEAD".to_string()))?;
 
+        // Read the GC marker before the store is built: a collection in between is then seen
+        // (the marker differs) rather than silently baked into this session's caches.
+        let gc_epoch = super::gc::read_gc_epoch(&paths);
         let node_store = FileNodeStore::new(&root)?;
+        configure_node_store_caches(&node_store, manifest_node_cache_budget(&manifest));
 
         // Read current revision record
         let rev_file = paths.revision_file(current_revision);
@@ -794,48 +1176,13 @@ impl WorldSession {
             }
         }
 
-        // Scan receipts and revision headers for idempotency keys
-        let mut committed_idempotency_keys = BTreeMap::new();
-        let parse_receipt_or_rev =
-            |path: &std::path::Path, committed_keys: &mut BTreeMap<String, CommittedBatchInfo>| {
-                if let Ok(content) = fs::read_to_string(path) {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
-                        if let (Some(seq), Some(ikey), Some(d_hex)) = (
-                            v.get("seq").and_then(|x| x.as_u64()),
-                            v.get("idempotency_key").and_then(|x| x.as_str()),
-                            v.get("revision_digest").and_then(|x| x.as_str()),
-                        ) {
-                            if seq > 0 && seq <= current_revision && d_hex.len() == 64 {
-                                if let Ok(d) = hex_to_digest(d_hex) {
-                                    let b_digest = v
-                                        .get("batch_digest")
-                                        .and_then(|x| x.as_str())
-                                        .and_then(|s| hex_to_digest(s).ok());
-                                    committed_keys.insert(
-                                        ikey.to_string(),
-                                        CommittedBatchInfo {
-                                            seq,
-                                            revision_digest: d,
-                                            batch_digest: b_digest,
-                                        },
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            };
-
-        if let Ok(entries) = fs::read_dir(paths.receipts_dir()) {
-            for entry in entries.flatten() {
-                parse_receipt_or_rev(&entry.path(), &mut committed_idempotency_keys);
-            }
-        }
-        if let Ok(entries) = fs::read_dir(paths.revisions_dir()) {
-            for entry in entries.flatten() {
-                parse_receipt_or_rev(&entry.path(), &mut committed_idempotency_keys);
-            }
-        }
+        // The idempotency index: the persisted trie (plus the receipts after it), else a scan.
+        let idempotency = IdempotencyIndex::load(
+            &paths,
+            &node_store,
+            current_revision,
+            current_rev.revision_digest,
+        );
 
         // Restore persisted checkpoint pins
         let mut pins = PinRegistry::default();
@@ -858,12 +1205,26 @@ impl WorldSession {
             node_store,
             relations,
             secondary_indexes,
-            committed_idempotency_keys,
+            idempotency,
+            gc_epoch,
+            checkpoint_autowrite: policy.refresh_after_replay,
             crash_injector: None,
             network: None,
+            dehydrate_failures: 0,
+            last_commit_profile: None,
+            chunk_policy: Arc::new(HeuristicChunkPolicy),
             exec_profile: None,
             pins,
+            open_mode: OpenMode::NoNetwork,
+            replay_reason: None,
+            open_ms: 0,
+            tail_batches: 0,
+            network_state_root: current_rev.network_state_root,
+            state_source: None,
+            state_refreshed: false,
+            state_refresh_error: None,
         };
+        let mut pending_network: Option<WorldNetwork> = None;
 
         let program_file = session.paths.root.join("program.json");
         if session.manifest.program_required && !program_file.exists() {
@@ -915,7 +1276,7 @@ impl WorldSession {
             }
             let network = WorldNetwork::from_program(&linked)?;
             validate_program_relations(&session.manifest, &network)?;
-            session.set_network(network)?;
+            pending_network = Some(network);
 
             // Additive field (ADR-0046 P6 §1.1, decided 2026-10-04): a
             // `program.json` written before `exec_profile` existed simply
@@ -940,6 +1301,9 @@ impl WorldSession {
                 ));
             }
         }
+        if let Some(network) = pending_network {
+            session.install_network(network, &current_rev, policy)?;
+        }
         if current_rev.decision_delta_digest.is_some() {
             session.decision_delta(current_revision)?;
         }
@@ -950,7 +1314,407 @@ impl WorldSession {
                 ));
             }
         }
+        if policy.refresh_after_replay
+            && session.idempotency.source == IdempotencySource::Scan
+            && !session.idempotency.is_empty()
+        {
+            // A world without the index (written before it existed, or whose sidecar was
+            // lost): persist the scan's result so the next open does not scan. Best effort.
+            let _ = session.persist_idempotency_index();
+        }
+        session.open_ms = started.elapsed().as_millis() as u64;
         Ok(session)
+    }
+
+    /// Re-read the GC generation marker and, when a garbage collection ran since this session
+    /// built its store handle, rebuild the handle's view of the packs and drop every cache that
+    /// could vouch for a node GC removed: the file store's known set, Bloom filters, idx
+    /// handles, raw and decoded caches, and the network's state-store cache. Called under the
+    /// writer lock before any write that persists trie nodes (a decoded-cache hit is taken as
+    /// proof a node is stored), so a session that was open across a GC re-writes what GC
+    /// deleted instead of committing a HEAD whose nodes are gone. Transparent to the caller.
+    fn sync_gc_epoch(&mut self) -> Result<(), WorldError> {
+        let now = super::gc::read_gc_epoch(&self.paths);
+        if now != self.gc_epoch {
+            self.node_store.reload_from_disk()?;
+            if let Some(n) = &self.network {
+                n.state_store().clear_cache();
+            }
+            self.gc_epoch = now;
+        }
+        Ok(())
+    }
+
+    /// Persist the idempotency index and its sidecar for the current HEAD. A cache refresh,
+    /// never authoritative, and built not to get in a writer's way: it fails fast with
+    /// `WorldLocked` when a writer holds the lock, writes the trie's nodes (content-addressed
+    /// and additive, so safe beside a writer) *without* the lock, and takes the lock only to
+    /// publish the sidecar, re-checking under it that HEAD and the GC generation are what the
+    /// nodes were written for.
+    pub fn persist_idempotency_index(&mut self) -> Result<bool, WorldError> {
+        drop(WorldLockGuard::acquire(&self.root)?);
+        let Some(digest) = self.current_revision_digest else {
+            return Ok(false);
+        };
+        self.sync_gc_epoch()?;
+        let epoch = self.gc_epoch.clone();
+        if !self.idempotency.persist_nodes(&mut self.node_store)? {
+            return Ok(false);
+        }
+        let _lock = WorldLockGuard::acquire(&self.root)?;
+        if super::gc::read_gc_epoch(&self.paths) != epoch {
+            return Err(WorldError::StaleSession(
+                "garbage collection ran while the idempotency index was written".into(),
+            ));
+        }
+        if self.read_disk_head()? != self.current_revision {
+            return Err(WorldError::StaleBaseRevision {
+                expected: self.current_revision,
+                current: self.read_disk_head()?,
+            });
+        }
+        self.idempotency
+            .publish(&self.paths, self.current_revision, digest)
+    }
+
+    /// The batch committed under `idempotency_key`, if any.
+    pub fn idempotency_lookup(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<CommittedBatchInfo>, WorldError> {
+        match self.idempotency.get(idempotency_key, &self.node_store) {
+            Ok(found) => Ok(found),
+            // A cache: damage is answered from the receipts, never an error.
+            Err(_) => {
+                IdempotencyIndex::from_scan(&self.paths, &self.node_store, self.current_revision)
+                    .get(idempotency_key, &self.node_store)
+            }
+        }
+    }
+
+    /// [`Self::idempotency_lookup`] for a commit: when the persisted index cannot answer (a
+    /// missing or damaged trie node, an undecodable entry), rebuild it from the receipts and
+    /// ask again. The index is a cache and never authority, so damage to it must not block a
+    /// commit or an open. The rebuilt index is private to this session (its nodes may share
+    /// digests with the damaged ones, which are never re-written, so it is not published) and
+    /// the sidecar is removed so the next open rescans the receipts.
+    fn committed_info(&mut self, key: &str) -> Result<Option<CommittedBatchInfo>, WorldError> {
+        match self.idempotency.get(key, &self.node_store) {
+            Ok(found) => Ok(found),
+            Err(_) => {
+                // A damaged cache node latches the file store's corruption flag; it is
+                // cleared (damage is re-detected on any read of the damaged node).
+                self.node_store.clear_corruption_latch();
+                let mut rebuilt = IdempotencyIndex::from_scan(
+                    &self.paths,
+                    &self.node_store,
+                    self.current_revision,
+                );
+                rebuilt.set_ephemeral();
+                let _ = fs::remove_file(self.paths.idempotency_file());
+                self.idempotency = rebuilt;
+                self.idempotency.get(key, &self.node_store)
+            }
+        }
+    }
+
+    fn node_cache_budget(&self) -> usize {
+        manifest_node_cache_budget(&self.manifest)
+    }
+
+    /// The next up-to-`n` base facts (as upserts) of the relations `network` declares, in
+    /// relation then key order, continuing from `cursor` (`(relation index, key cursor)`).
+    fn next_base_facts(
+        &self,
+        network: &WorldNetwork,
+        cursor: &mut (usize, Option<([u8; 32], WorldKey)>),
+        n: usize,
+    ) -> Result<Vec<WorldBatchOp>, WorldError> {
+        let rels: Vec<(&String, &TrieMap<WorldKey, WorldTuple>)> = self
+            .relations
+            .iter()
+            .filter(|(name, _)| network.base_relations.contains_key(*name))
+            .collect();
+        let mut out = Vec::with_capacity(n.min(1 << 16));
+        while out.len() < n && cursor.0 < rels.len() {
+            let (name, trie) = rels[cursor.0];
+            let want = n - out.len();
+            let (entries, next) = trie.iter_page_with_store(
+                cursor.1.as_ref().map(|(h, k)| (h, k)),
+                want,
+                &self.node_store,
+            )?;
+            for (key, tuple) in entries {
+                out.push(WorldBatchOp::Upsert {
+                    relation: name.clone(),
+                    key,
+                    tuple,
+                });
+            }
+            match next {
+                Some(c) => cursor.1 = Some(c),
+                None => *cursor = (cursor.0 + 1, None),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Replay every base fact the session holds into `network` as one batch. A world big
+    /// enough to exceed the hydrated-bytes budget is applied in chunks, persisting and
+    /// dehydrating the network between them and streaming the facts from the base tries
+    /// instead of materialising all of them (same output as one `apply_ops`).
+    fn apply_base_facts(&self, network: &mut WorldNetwork) -> Result<(), WorldError> {
+        let total: usize = self
+            .relations
+            .iter()
+            .filter(|(name, _)| network.base_relations.contains_key(*name))
+            .map(|(_, t)| t.len())
+            .sum();
+        if total == 0 {
+            return Ok(());
+        }
+        let budget = self
+            .manifest
+            .apply_hydrated_bytes
+            .unwrap_or(DEFAULT_APPLY_HYDRATED_BYTES);
+        let mut input = ChunkInput {
+            ops_total: total,
+            ops_done: 0,
+            prev_chunk_ops: 0,
+            prev_nodes_written: 0,
+            pending_index_bytes: 0,
+            budget_bytes: budget,
+        };
+        let mut decision = self.chunk_policy.chunk_plan(&input);
+        let mut cursor = (0usize, None);
+        if decision.ops >= total {
+            let ops = self.next_base_facts(network, &mut cursor, total)?;
+            network.apply_ops(&ops)?;
+            return Ok(());
+        }
+        let pristine = network.clone();
+        let chunked: Result<(), WorldError> = (|| {
+            let limits = super::network::NetworkLimits::default();
+            let mut ctx = network.begin_batch();
+            loop {
+                let remaining = total - input.ops_done;
+                let n = decision.ops.clamp(1, remaining);
+                let ops = self.next_base_facts(network, &mut cursor, n)?;
+                network.apply_chunk(&mut ctx, &ops, &limits, None)?;
+                input.ops_done += n;
+                input.prev_chunk_ops = n;
+                if input.ops_done >= total {
+                    break;
+                }
+                input.prev_nodes_written = network.persist_and_dehydrate_in_place()?;
+                input.pending_index_bytes =
+                    network.state_store().pending_stats().0 as u64 * PENDING_INDEX_BYTES_PER_NODE;
+                decision = self.chunk_policy.chunk_plan(&input);
+                if decision.flush_pack {
+                    network.state_store().flush()?;
+                }
+            }
+            network.finish_batch(ctx);
+            Ok(())
+        })();
+        match chunked {
+            Ok(()) => Ok(()),
+            Err(e) if is_environmental(&e) => Err(e),
+            Err(_) => {
+                // As in a commit: the whole-world application is authoritative.
+                *network = pristine;
+                let mut cursor = (0usize, None);
+                let ops = self.next_base_facts(network, &mut cursor, total)?;
+                network.apply_ops(&ops)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// The validity key under which this binary would persist (and accept) state of
+    /// `network` in this world. The network contributes its own structural fingerprint, so
+    /// state is never filed under a program other than the one that computed it.
+    pub fn validity_key_for(&self, network: &WorldNetwork) -> ValidityKey {
+        ValidityKey::current(
+            self.manifest.program_digest,
+            self.exec_profile.as_ref().map(ExecProfileV1::digest),
+            network.fingerprint(),
+        )
+    }
+
+    /// Install the state `root` names into `network`, the single restore path for both a
+    /// revision's own `network_state_root` and the state-cache sidecar. `Ok(None)`: restored
+    /// and installed. `Ok(Some(why))`: intact but written under another validity key, so
+    /// the caller rebuilds. Corrupt, missing or inconsistent state is a hard error.
+    fn restore_from_header(
+        &mut self,
+        network: &mut WorldNetwork,
+        rev: &WorldRevision,
+        root: Digest,
+        source: &'static str,
+    ) -> Result<Option<&'static str>, WorldError> {
+        let store = StateStore::from_file(
+            self.node_store.clone(),
+            state_cache_share(self.node_cache_budget()),
+        );
+        let key = self.validity_key_for(network);
+        match NetworkStateHeader::load(&store, &root, &key)? {
+            // Produced under another schema, execution profile, program structure or
+            // codec/lowering version: sound but not reusable by this binary.
+            Loaded::Stale(why) => Ok(Some(why)),
+            Loaded::Header(header) => {
+                let decision_ok = match rev.decision_root {
+                    Some(expected) => header.decision.root == expected,
+                    None => header.decision.len == 0,
+                };
+                if !decision_ok {
+                    return Err(WorldError::ValidityMismatch(
+                        "persisted network state decision root does not match the revision".into(),
+                    ));
+                }
+                network.attach_state_store(store);
+                network.restore_state(&header)?;
+                network.current_revision = self.current_revision;
+                self.open_mode = OpenMode::Restored;
+                self.replay_reason = None;
+                self.state_source = Some(source);
+                self.tail_batches = 0;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Give a freshly built network its state: restore it from the persisted header the
+    /// revision names (or, failing that, the state-cache sidecar), or replay the base facts.
+    fn install_network(
+        &mut self,
+        mut network: WorldNetwork,
+        rev: &WorldRevision,
+        policy: OpenPolicy,
+    ) -> Result<(), WorldError> {
+        let reason: &'static str = if policy.force_replay {
+            "forced"
+        } else {
+            let reason = match rev.network_state_root {
+                Some(root) => {
+                    match self.restore_from_header(&mut network, rev, root, "revision")? {
+                        None => {
+                            self.network = Some(network);
+                            return Ok(());
+                        }
+                        Some(why) => why,
+                    }
+                }
+                None if rev.schema == REVISION_SCHEMA_V3 => {
+                    // A revision that claims restorable state must name it; treating the
+                    // absence as a legacy world would hide a damaged or truncated record.
+                    return Err(WorldError::InvalidSchema(
+                        "revision@3 of an executable world has no network_state_root".into(),
+                    ));
+                }
+                None => "legacy-revision",
+            };
+            // The sidecar: a cache hit only for exactly this revision under exactly this key.
+            let key_digest = self.validity_key_for(&network).digest();
+            if let Some(c) = StateCache::read(&self.paths.state_cache_file()) {
+                if c.revision_digest == rev.revision_digest && c.validity_key_digest == key_digest {
+                    let root = c.network_state_root;
+                    if self
+                        .restore_from_header(&mut network, rev, root, "sidecar")?
+                        .is_none()
+                    {
+                        self.network = Some(network);
+                        return Ok(());
+                    }
+                }
+            }
+            reason
+        };
+        self.set_network(network)?;
+        self.replay_reason = Some(reason);
+        self.state_source = None;
+        if !policy.force_replay && policy.refresh_after_replay {
+            match self.refresh_state_cache_inner(false) {
+                Ok(()) => self.state_refreshed = true,
+                Err(e) => self.state_refresh_error = Some(e.to_string()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Persist the current network state and point `state-cache.json` at it, so the next
+    /// open of this revision restores instead of replaying. Non-blocking: a world another
+    /// writer holds is `WorldLocked`. The sidecar is renamed into place only after the
+    /// state is flushed and with HEAD re-checked under the lock; it is a cache, never
+    /// authoritative.
+    pub fn refresh_state_cache(&mut self) -> Result<(), WorldError> {
+        self.refresh_state_cache_inner(true)
+    }
+
+    /// `hold_lock`: the explicit operator refresh keeps the writer lock for the whole
+    /// operation. Without it (the opportunistic refresh an `open` performs after a replay,
+    /// which may persist gigabytes at scale) the lock is only probed up front (a writer
+    /// holding it means skip, as `WorldLocked`) and taken again for the final HEAD re-check
+    /// and the sidecar rename; the state nodes themselves are content-addressed additions that
+    /// need no exclusion, and a GC generation change in between abandons the refresh.
+    fn refresh_state_cache_inner(&mut self, hold_lock: bool) -> Result<(), WorldError> {
+        let held = if hold_lock {
+            Some(WorldLockGuard::acquire(&self.root)?)
+        } else {
+            drop(WorldLockGuard::acquire(&self.root)?);
+            None
+        };
+        self.sync_gc_epoch()?;
+        let epoch = self.gc_epoch.clone();
+        let Some(net) = self.network.as_ref() else {
+            return Err(WorldError::NetworkError("world has no network".into()));
+        };
+        net.persist_state()?;
+        let key = self.validity_key_for(net);
+        let root = net.state_header(key.clone()).write(net.state_store());
+        if self.crash_injector == Some(CrashPoint::SidecarBeforeFlush) {
+            return Err(WorldError::InjectedCrash(CrashPoint::SidecarBeforeFlush));
+        }
+        self.node_store.flush()?;
+        let _relock = match held {
+            Some(_) => None,
+            None => Some(WorldLockGuard::acquire(&self.root)?),
+        };
+        if super::gc::read_gc_epoch(&self.paths) != epoch {
+            return Err(WorldError::StaleSession(
+                "garbage collection ran while the state cache was written".into(),
+            ));
+        }
+        let disk_head = self.read_disk_head()?;
+        let Some(revision_digest) = self.current_revision_digest else {
+            return Err(WorldError::CorruptedHead(
+                "no current revision digest".into(),
+            ));
+        };
+        if disk_head != self.current_revision {
+            return Err(WorldError::StaleBaseRevision {
+                expected: self.current_revision,
+                current: disk_head,
+            });
+        }
+        let cache = StateCache {
+            revision_seq: self.current_revision,
+            revision_digest,
+            validity_key_digest: key.digest(),
+            network_state_root: root,
+        };
+        cache.write_tmp(&self.paths.state_cache_tmp())?;
+        if self.crash_injector == Some(CrashPoint::SidecarAfterFlushBeforeRename) {
+            return Err(WorldError::InjectedCrash(
+                CrashPoint::SidecarAfterFlushBeforeRename,
+            ));
+        }
+        fs::rename(self.paths.state_cache_tmp(), self.paths.state_cache_file())?;
+        fs::File::open(&self.root)?.sync_all()?;
+        if self.crash_injector == Some(CrashPoint::SidecarAfterRename) {
+            return Err(WorldError::InjectedCrash(CrashPoint::SidecarAfterRename));
+        }
+        Ok(())
     }
 
     pub fn set_crash_point(&mut self, cp: Option<CrashPoint>) {
@@ -1055,7 +1819,21 @@ impl WorldSession {
         batch: WorldBatch,
         limits: Option<&super::network::NetworkLimits>,
     ) -> Result<RevisionReceipt, WorldError> {
-        let _lock = WorldLockGuard::acquire(&self.root)?;
+        let _lock = WorldLockGuard::acquire_wait(&self.root, COMMIT_LOCK_WAIT)?;
+        self.sync_gc_epoch()?;
+        let commit_started = Instant::now();
+        let io_before = self
+            .network
+            .as_ref()
+            .and_then(|n| n.state_store().io_stats());
+        let mut phases: Vec<(&'static str, f64)> = Vec::with_capacity(10);
+        let mut phase_started = Instant::now();
+        macro_rules! phase {
+            ($name:expr) => {{
+                phases.push(($name, ms_since(phase_started)));
+                phase_started = Instant::now();
+            }};
+        }
 
         // Verify disk HEAD matches in-memory current_revision
         let disk_head = self.read_disk_head()?;
@@ -1068,7 +1846,7 @@ impl WorldSession {
 
         // 1. Check idempotency key
         let batch_digest = batch.digest();
-        if let Some(info) = self.committed_idempotency_keys.get(&batch.idempotency_key) {
+        if let Some(info) = self.committed_info(&batch.idempotency_key)? {
             if info.batch_digest == Some(batch_digest) {
                 return Ok(RevisionReceipt {
                     revision_seq: info.seq,
@@ -1097,14 +1875,39 @@ impl WorldSession {
         // 3. Normalize operations and reject conflicting duplicate operations
         let normalized_ops = batch.validate_and_normalize()?;
 
+        let mut chunk_run = ChunkRun::single();
         // Stage operator network updates and deliberation if network is present
         let (staged_network, decision_root, decision_delta_digest, decision_delta_body) =
             if let Some(ref net) = self.network {
                 let mut sn = net.clone();
-                let delta_report = sn.apply_ops_staged_bounded(
+                phase!("clone_network");
+                // Pre-batch facts for a network that keeps no copy of its own.
+                let base_relations = &self.relations;
+                let base_store = &self.node_store;
+                let lookup =
+                    |rel: &str, key: &WorldKey| -> Result<Option<WorldTuple>, WorldError> {
+                        let trie = base_relations
+                            .get(rel)
+                            .ok_or_else(|| WorldError::UnknownRelation(rel.to_string()))?;
+                        Ok(trie.get_with_store(key, base_store)?)
+                    };
+                let hydrated_budget = self
+                    .manifest
+                    .apply_hydrated_bytes
+                    .unwrap_or(DEFAULT_APPLY_HYDRATED_BYTES);
+                let (sn_applied, delta_report, run) = apply_ops_chunked(
+                    sn,
+                    net,
                     &normalized_ops,
-                    limits.unwrap_or(&super::network::NetworkLimits::default()),
+                    limits,
+                    &lookup,
+                    self.chunk_policy.as_ref(),
+                    hydrated_budget,
+                    self.crash_injector,
                 )?;
+                sn = sn_applied;
+                chunk_run = run;
+                phase!("apply_ops");
                 if sn.decides.is_empty() {
                     (Some(sn), None, None, None)
                 } else {
@@ -1120,6 +1923,7 @@ impl WorldSession {
                 (None, None, None, None)
             };
 
+        phase!("decision_encode");
         // 4. Stage updates across relations and maintain changed keys
         let mut staged_relations = self.relations.clone();
         let mut staged_secondary_indexes = self.secondary_indexes.clone();
@@ -1299,8 +2103,9 @@ impl WorldSession {
             }
         }
 
+        phase!("stage_base");
         // 5. Persist modified trie nodes to node store
-        let mut objects_written = inner_objects_written;
+        let mut objects_written = inner_objects_written + chunk_run.objects;
         for trie in staged_relations.values() {
             objects_written += trie.persist_to_store(&mut self.node_store);
         }
@@ -1309,54 +2114,34 @@ impl WorldSession {
             objects_written += trie.persist_to_store(&mut self.node_store);
             secondary_index_roots.insert(sec_name.clone(), trie.root_digest());
         }
+
+        phase!("persist_base");
+        // Crash injection seam: base objects written, no network object yet.
+        if self.crash_injector == Some(CrashPoint::AfterBaseObjectsBeforeNetworkObjects) {
+            return Err(WorldError::InjectedCrash(
+                CrashPoint::AfterBaseObjectsBeforeNetworkObjects,
+            ));
+        }
         // Persist the settled-decision trie's own nodes (ADR-0046 P6 G2,
         // decided 2026-10-04): previously only its root digest reached the
         // revision record, so historical settlements could not be read back
         // without replaying every base record. Same persistence seam as the
         // relation/secondary-index tries above — same crash-recovery story.
         if let Some(ref sn) = staged_network {
-            objects_written += sn.decision_tree.persist_to_store(&mut self.node_store);
+            // Operator state, derived relations, the candidate frontier and the settled
+            // decision trie, through the one state store (same pack, same flush).
+            objects_written += sn.persist_state()?;
         }
-
-        // Crash injection seam 1
-        if self.crash_injector == Some(CrashPoint::BeforeObjectsFsync) {
-            return Err(WorldError::InjectedCrash(CrashPoint::BeforeObjectsFsync));
-        }
-
-        // Fsync newly written objects
-        self.node_store.flush()?;
-
-        // Crash injection seam 2
-        if self.crash_injector == Some(CrashPoint::AfterObjectsFsyncBeforeRevisionFsync) {
-            return Err(WorldError::InjectedCrash(
-                CrashPoint::AfterObjectsFsyncBeforeRevisionFsync,
-            ));
-        }
+        phase!("persist_state");
+        // The header that makes the persisted network state restorable, written in the
+        // same pack as everything it names and flushed with it, before HEAD can move.
+        let network_state_root = staged_network.as_ref().map(|sn| {
+            objects_written += 1;
+            sn.state_header(self.validity_key_for(sn))
+                .write(sn.state_store())
+        });
 
         let new_seq = self.current_revision + 1;
-
-        // Write the decision-delta body durably BEFORE the revision record
-        // (ADR-0046 P6 G2/G3, decided 2026-10-04): tmp-write, fsync, rename —
-        // the same atomic-write discipline as the revision record itself, one
-        // step earlier in the publication order. An uncommitted attempt may
-        // leave an orphaned `{seq}.decisions` file; harmless, since nothing
-        // ever reads one without the matching revision record's digest.
-        if let Some(ref body) = decision_delta_body {
-            let tmp_delta_file = self.paths.decision_delta_tmp_file(new_seq);
-            fs::write(&tmp_delta_file, body)?;
-            {
-                let f = fs::File::open(&tmp_delta_file)?;
-                f.sync_all()?;
-            }
-            fs::rename(&tmp_delta_file, self.paths.decision_delta_file(new_seq))?;
-            fs::File::open(self.paths.revisions_dir())?.sync_all()?;
-        }
-
-        if self.crash_injector == Some(CrashPoint::AfterDecisionDeltaFsyncBeforeRevisionFsync) {
-            return Err(WorldError::InjectedCrash(
-                CrashPoint::AfterDecisionDeltaFsyncBeforeRevisionFsync,
-            ));
-        }
         // 6. Assemble revision record
         let mut relation_roots = BTreeMap::new();
         let mut relation_cardinalities = BTreeMap::new();
@@ -1384,7 +2169,72 @@ impl WorldSession {
             decision_delta_digest,
         )
         .bind_exec_profile(self.exec_profile.as_ref().map(ExecProfileV1::digest));
+        let new_revision = match network_state_root {
+            Some(root) => new_revision.with_network_state_root(root),
+            None => new_revision,
+        };
 
+        // The idempotency index with this commit's key, its nodes written into the same pack
+        // and flushed with everything else. Staged on a copy: it replaces the session's only
+        // once the commit is published. (The revision digest does not depend on the flush.)
+        let mut next_idempotency = self.idempotency.clone();
+        next_idempotency.record(
+            &batch.idempotency_key,
+            CommittedBatchInfo {
+                seq: new_seq,
+                revision_digest: new_revision.revision_digest,
+                batch_digest: Some(batch_digest),
+            },
+            &self.node_store,
+        );
+        objects_written += next_idempotency.stage(&mut self.node_store);
+
+        phase!("state_header");
+        // Crash injection seam: every object written, none flushed.
+        if self.crash_injector == Some(CrashPoint::AfterNetworkObjectsBeforeFlush) {
+            return Err(WorldError::InjectedCrash(
+                CrashPoint::AfterNetworkObjectsBeforeFlush,
+            ));
+        }
+
+        // Crash injection seam 1
+        if self.crash_injector == Some(CrashPoint::BeforeObjectsFsync) {
+            return Err(WorldError::InjectedCrash(CrashPoint::BeforeObjectsFsync));
+        }
+
+        // Fsync newly written objects
+        self.node_store.flush()?;
+        phase!("flush");
+
+        // Crash injection seam 2
+        if self.crash_injector == Some(CrashPoint::AfterObjectsFsyncBeforeRevisionFsync) {
+            return Err(WorldError::InjectedCrash(
+                CrashPoint::AfterObjectsFsyncBeforeRevisionFsync,
+            ));
+        }
+
+        // Write the decision-delta body durably BEFORE the revision record
+        // (ADR-0046 P6 G2/G3, decided 2026-10-04): tmp-write, fsync, rename —
+        // the same atomic-write discipline as the revision record itself, one
+        // step earlier in the publication order. An uncommitted attempt may
+        // leave an orphaned `{seq}.decisions` file; harmless, since nothing
+        // ever reads one without the matching revision record's digest.
+        if let Some(ref body) = decision_delta_body {
+            let tmp_delta_file = self.paths.decision_delta_tmp_file(new_seq);
+            fs::write(&tmp_delta_file, body)?;
+            {
+                let f = fs::File::open(&tmp_delta_file)?;
+                f.sync_all()?;
+            }
+            fs::rename(&tmp_delta_file, self.paths.decision_delta_file(new_seq))?;
+            fs::File::open(self.paths.revisions_dir())?.sync_all()?;
+        }
+
+        if self.crash_injector == Some(CrashPoint::AfterDecisionDeltaFsyncBeforeRevisionFsync) {
+            return Err(WorldError::InjectedCrash(
+                CrashPoint::AfterDecisionDeltaFsyncBeforeRevisionFsync,
+            ));
+        }
         let rev_json = serde_json::to_vec_pretty(&new_revision.to_json())
             .map_err(|e| WorldError::Json(e.to_string()))?;
 
@@ -1441,24 +2291,58 @@ impl WorldSession {
         // Fsync parent directory
         fs::File::open(&self.root)?.sync_all()?;
 
+        phase!("publish");
         // 8. Update in-memory session state
         let total_changed: usize = changed_keys.values().map(|v| v.len()).sum();
         self.current_revision = new_seq;
         self.current_revision_digest = Some(new_revision.revision_digest);
-        self.relations = staged_relations;
-        self.secondary_indexes = staged_secondary_indexes;
+        self.network_state_root = new_revision.network_state_root;
+        // Both were persisted above; keep only (root, len) so the next commit does not
+        // re-probe unchanged hydrated siblings and the session does not pin the base copy.
+        self.relations = dehydrate_base(staged_relations);
+        self.secondary_indexes = dehydrate_base(staged_secondary_indexes);
         if let Some(sn) = staged_network {
-            self.network = Some(sn);
+            // The commit is already durable: dehydrating must never fail it. On the
+            // (unexpected) error keep the hydrated network, which is merely larger.
+            self.network = Some(match sn.dehydrated() {
+                Ok(d) => d,
+                Err(_) => {
+                    self.dehydrate_failures += 1;
+                    debug_assert!(false, "dehydrate after durable commit failed");
+                    sn
+                }
+            });
         }
-        self.committed_idempotency_keys.insert(
-            batch.idempotency_key.clone(),
-            CommittedBatchInfo {
-                seq: new_seq,
-                revision_digest: new_revision.revision_digest,
-                batch_digest: Some(batch_digest),
-            },
-        );
+        self.idempotency = next_idempotency;
+        // Best effort, after the commit is durable (its nodes were flushed above): a failure
+        // only leaves the sidecar behind HEAD, which the next open catches up from receipts.
+        let _ = self
+            .idempotency
+            .publish(&self.paths, new_seq, new_revision.revision_digest);
 
+        phases.push(("dehydrate", ms_since(phase_started)));
+        let io_after = self
+            .network
+            .as_ref()
+            .and_then(|n| n.state_store().io_stats());
+        let (reads, read_bytes, written_bytes) = match (io_before, io_after) {
+            (Some(b), Some(a)) => (
+                a.reads.saturating_sub(b.reads),
+                a.bytes_read.saturating_sub(b.bytes_read),
+                a.bytes_written.saturating_sub(b.bytes_written),
+            ),
+            _ => (0, 0, 0),
+        };
+        self.last_commit_profile = Some(CommitProfile {
+            phases,
+            total_ms: ms_since(commit_started),
+            state_node_reads: reads,
+            state_bytes_read: read_bytes,
+            state_bytes_written: written_bytes,
+            chunks: chunk_run.chunks,
+            chunk_persist_ms: chunk_run.persist_ms,
+            chunk_fallback: chunk_run.fallback,
+        });
         Ok(RevisionReceipt {
             revision_seq: new_seq,
             revision_digest: new_revision.revision_digest,
@@ -1477,6 +2361,13 @@ impl WorldSession {
         let rev_file = self.paths.revision_file(seq);
         if !rev_file.exists() {
             return Err(WorldError::RevisionNotFound(seq));
+        }
+        // History a `--keep-revisions` GC dropped is not damage: say so.
+        if seq != 0
+            && seq < super::gc::read_gc_floor(&self.paths)
+            && !self.pins.checkpoint_pins().contains(&seq)
+        {
+            return Err(WorldError::RevisionCompacted(seq));
         }
         let rev_bytes = fs::read(rev_file)?;
         let rev_val: serde_json::Value =
@@ -1665,14 +2556,24 @@ impl WorldSession {
     }
 
     /// Retrieve derived tuples for a relation from the active operator network.
-    pub fn get_derived(&self, relation: &str) -> Option<Vec<TupleRecord>> {
-        let net = self.network.as_ref()?;
-        net.get_derived_tuples(relation).or_else(|| {
-            net.derived_relations
-                .keys()
-                .find(|k| k.ends_with(&format!("::{relation}")))
-                .and_then(|k| net.get_derived_tuples(k))
-        })
+    ///
+    /// `Ok(None)` if there is no network or `relation` is not derived; `Err` if persisted
+    /// network state cannot be read (missing or corrupt node).
+    pub fn get_derived(&self, relation: &str) -> Result<Option<Vec<TupleRecord>>, WorldError> {
+        let Some(net) = self.network.as_ref() else {
+            return Ok(None);
+        };
+        if let Some(rows) = net.get_derived_tuples(relation)? {
+            return Ok(Some(rows));
+        }
+        match net
+            .derived_relations
+            .keys()
+            .find(|k| k.ends_with(&format!("::{relation}")))
+        {
+            Some(k) => net.get_derived_tuples(k),
+            None => Ok(None),
+        }
     }
 
     /// Query a paged slice of derived tuples from the active operator network.
@@ -1688,7 +2589,7 @@ impl WorldSession {
             ));
         }
         let records = self
-            .get_derived(relation)
+            .get_derived(relation)?
             .ok_or_else(|| WorldError::UnknownRelation(relation.to_string()))?;
 
         let offset = match cursor {
@@ -1729,16 +2630,248 @@ impl WorldSession {
     }
 
     /// Retrieve all settled decisions across all decide blocks.
-    pub fn all_settlements(&self) -> BTreeMap<String, BTreeMap<String, SettledDecision>> {
-        self.network
-            .as_ref()
-            .map(|n| n.all_settlements())
-            .unwrap_or_default()
+    ///
+    /// Served from the settlement checkpoint (one sequential read, plus the decision deltas of
+    /// any revisions after it) when a valid one exists, else from the candidate frontier; the
+    /// result is identical either way (the checkpoint is a cache, see
+    /// [`super::settlement_checkpoint`]). A frontier read, or a read that had to apply a long
+    /// tail, leaves a fresh checkpoint behind (best effort) unless `checkpoint_autowrite` is
+    /// off, so the next read is fast; commits never write one.
+    pub fn all_settlements(
+        &self,
+    ) -> Result<BTreeMap<String, BTreeMap<String, SettledDecision>>, WorldError> {
+        Ok(self.all_settlements_with_source()?.0)
+    }
+
+    /// [`Self::all_settlements`] and where it came from: `"none"` (no network or no decide
+    /// blocks), `"checkpoint"`, `"checkpoint+tail"` or `"frontier"`.
+    #[allow(clippy::type_complexity)]
+    pub fn all_settlements_with_source(
+        &self,
+    ) -> Result<
+        (
+            BTreeMap<String, BTreeMap<String, SettledDecision>>,
+            &'static str,
+        ),
+        WorldError,
+    > {
+        let Some(net) = self.network.as_ref() else {
+            return Ok((BTreeMap::new(), "none"));
+        };
+        if net.decides.is_empty() {
+            return Ok((net.all_settlements()?, "none"));
+        }
+        if let Some((map, tail)) = self.settlements_from_checkpoint(net) {
+            if tail > CHECKPOINT_REFRESH_TAIL && self.checkpoint_autowrite {
+                let _ = self.write_settlement_checkpoint(net, &map, false);
+            }
+            return Ok((
+                map,
+                if tail == 0 {
+                    "checkpoint"
+                } else {
+                    "checkpoint+tail"
+                },
+            ));
+        }
+        let map = net.all_settlements()?;
+        if self.checkpoint_autowrite {
+            let _ = self.write_settlement_checkpoint(net, &map, false);
+        }
+        Ok((map, "frontier"))
+    }
+
+    /// One page of settlements straight from the candidate frontier (never the checkpoint),
+    /// at most `limit` buckets after `cursor`, in trie (not name) order. For consumers that
+    /// do not need every decision.
+    #[allow(clippy::type_complexity)]
+    pub fn settlements_page(
+        &self,
+        cursor: Option<&super::state_store::PageCursor<super::state_codec::FrontierKey>>,
+        limit: usize,
+    ) -> Result<
+        (
+            Vec<(String, String, SettledDecision)>,
+            Option<super::state_store::PageCursor<super::state_codec::FrontierKey>>,
+        ),
+        WorldError,
+    > {
+        match self.network.as_ref() {
+            Some(n) => n.settlements_page(cursor, limit),
+            None => Ok((Vec::new(), None)),
+        }
+    }
+
+    /// The checkpoint's settlements brought to HEAD, and how many revisions that took; `None`
+    /// on any miss (absent, corrupt, foreign, stale, or a delta that cannot be authenticated).
+    fn settlements_from_checkpoint(
+        &self,
+        net: &WorldNetwork,
+    ) -> Option<(super::settlement_checkpoint::Settlements, u64)> {
+        let ck = SettlementCheckpoint::read_authentic(&self.paths)?;
+        if ck.validity_key_digest != self.validity_key_for(net).digest()
+            || ck.revision_seq > self.current_revision
+        {
+            return None;
+        }
+        let tail = self.current_revision - ck.revision_seq;
+        if tail > CHECKPOINT_MAX_TAIL {
+            return None;
+        }
+        if tail == 0 {
+            if Some(ck.revision_digest) != self.current_revision_digest
+                || ck.decision_root != Some(net.decision_root())
+            {
+                return None;
+            }
+            self.probe_settlements(net, &ck.settlements, &[])?;
+            return Some((ck.settlements, 0));
+        }
+        if ck.revision_seq > 0 {
+            let (_, info) =
+                super::idempotency::record_of(&self.paths, ck.revision_seq, ck.revision_seq)?;
+            if info.revision_digest != ck.revision_digest {
+                return None;
+            }
+        }
+        let mut map = ck.settlements;
+        let mut touched: Vec<(String, String)> = Vec::new();
+        for seq in ck.revision_seq + 1..=self.current_revision {
+            let delta = self.decision_delta(seq).ok()?;
+            touched.extend(delta.keys().cloned());
+            apply_delta(&mut map, delta);
+        }
+        touched.sort();
+        touched.dedup();
+        // Every key the tail touched, not a sample.
+        self.probe_settlements(net, &map, &touched)?;
+        Some((map, tail))
+    }
+
+    /// Spot-check `map` against HEAD's persisted decision trie: the same number of
+    /// settlements, a spread sample of `CHECKPOINT_PROBES` entries present with exactly the
+    /// trie's value, and every `extra` key (those a tail changed) agreeing. A checkpoint with
+    /// a flipped, dropped or forged entry is overwhelmingly likely to fail one of these; a
+    /// full recompute of the decision root is `verify_settlement_checkpoint`.
+    fn probe_settlements(
+        &self,
+        net: &WorldNetwork,
+        map: &super::settlement_checkpoint::Settlements,
+        extra: &[(String, String)],
+    ) -> Option<()> {
+        let count: usize = map.values().map(|m| m.len()).sum();
+        if count != net.decision_count() {
+            return None;
+        }
+        let stride = (count / CHECKPOINT_PROBES).max(1);
+        let mut i = 0usize;
+        for (decide, entities) in map {
+            for (entity, d) in entities {
+                if i.is_multiple_of(stride) && !net.decision_matches(decide, entity, d).ok()? {
+                    return None;
+                }
+                i += 1;
+            }
+        }
+        for (decide, entity) in extra {
+            let ok = match map.get(decide).and_then(|m| m.get(entity)) {
+                Some(d) => net.decision_matches(decide, entity, d),
+                None => net.decision_absent(decide, entity),
+            };
+            if !ok.ok()? {
+                return None;
+            }
+        }
+        Some(())
+    }
+
+    /// Write `map` as the HEAD checkpoint, authenticated under the world's secret. Unless the
+    /// caller already proved it (`verified`), the settlements must first hash to the decision
+    /// root the checkpoint is stamped with: the frontier walk and a tail-applied map are both
+    /// derived data, and a checkpoint is only ever as good as what it was written from.
+    fn write_settlement_checkpoint(
+        &self,
+        net: &WorldNetwork,
+        map: &super::settlement_checkpoint::Settlements,
+        verified: bool,
+    ) -> Result<(), WorldError> {
+        let Some(digest) = self.current_revision_digest else {
+            return Ok(());
+        };
+        if !verified && !map.is_empty() && compute_decision_root(map) != net.decision_root() {
+            return Err(WorldError::StateMismatch(
+                "settlements do not hash to the decision root; checkpoint not written".into(),
+            ));
+        }
+        let Some(key) = super::settlement_checkpoint::load_or_create_key(&self.paths) else {
+            return Ok(());
+        };
+        let bytes = SettlementCheckpoint::encode_parts(
+            self.current_revision,
+            digest,
+            self.validity_key_for(net).digest(),
+            Some(net.decision_root()),
+            map,
+            Some(&key),
+        );
+        let crash = self.crash_injector == Some(CrashPoint::CheckpointAfterTmpBeforeRename);
+        SettlementCheckpoint::write_bytes(&self.paths, &bytes, crash).map_err(|e| {
+            if crash {
+                WorldError::InjectedCrash(CrashPoint::CheckpointAfterTmpBeforeRename)
+            } else {
+                e.into()
+            }
+        })
+    }
+
+    /// Rebuild the settlement checkpoint at HEAD from the candidate frontier, after checking
+    /// that the settlements hash to the revision's decision root (a mismatch is corrupt
+    /// state and nothing is written). Returns the number of settlements.
+    pub fn refresh_settlement_checkpoint(&mut self) -> Result<usize, WorldError> {
+        let Some(net) = self.network.as_ref() else {
+            return Err(WorldError::NetworkError("world has no network".into()));
+        };
+        let map = net.all_settlements()?;
+        if !map.is_empty() && compute_decision_root(&map) != net.decision_root() {
+            return Err(WorldError::StateMismatch(
+                "settlements do not hash to the decision root".into(),
+            ));
+        }
+        self.write_settlement_checkpoint(net, &map, true)?;
+        Ok(map.values().map(|m| m.len()).sum())
+    }
+
+    /// Check the settlement checkpoint on disk: `Ok(None)` if there is none, else its entry
+    /// count after strict decoding, a recompute of its decision root from its settlements,
+    /// and (when it is at HEAD) equality with the frontier's settlements.
+    pub fn verify_settlement_checkpoint(&self) -> Result<Option<usize>, WorldError> {
+        let path = self.paths.settlement_checkpoint_file();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let ck = SettlementCheckpoint::decode(&fs::read(path)?)?;
+        ck.verify_root()?;
+        if ck.revision_seq == self.current_revision {
+            if let Some(net) = self.network.as_ref() {
+                if ck.settlements != net.all_settlements()? {
+                    return Err(WorldError::StateMismatch(
+                        "settlement checkpoint differs from the candidate frontier".into(),
+                    ));
+                }
+            }
+        }
+        Ok(Some(ck.count()))
     }
 
     /// Explain the decision deliberation for an entity key.
-    pub fn explain_decision(&self, entity_key: &str) -> Option<DecisionExplanation> {
-        self.network.as_ref()?.explain_decision(entity_key)
+    pub fn explain_decision(
+        &self,
+        entity_key: &str,
+    ) -> Result<Option<DecisionExplanation>, WorldError> {
+        match self.network.as_ref() {
+            Some(n) => n.explain_decision(entity_key),
+            None => Ok(None),
+        }
     }
 
     /// Explain the decision deliberation for an entity key within a specific decide block.
@@ -1746,10 +2879,11 @@ impl WorldSession {
         &self,
         decide_name: &str,
         entity_key: &str,
-    ) -> Option<DecisionExplanation> {
-        self.network
-            .as_ref()?
-            .explain_decision_for(decide_name, entity_key)
+    ) -> Result<Option<DecisionExplanation>, WorldError> {
+        match self.network.as_ref() {
+            Some(n) => n.explain_decision_for(decide_name, entity_key),
+            None => Ok(None),
+        }
     }
 
     /// Read and authenticate a committed revision's canonical decision changes.
@@ -1760,7 +2894,7 @@ impl WorldSession {
     ) -> Result<super::decision_codec::DecisionDelta, WorldError> {
         let snapshot = self.pin_revision(seq)?;
         let rev = snapshot.revision;
-        if rev.schema != super::revision::REVISION_SCHEMA_V2 {
+        if !rev.has_decision_evidence() {
             return Err(WorldError::NetworkError(
                 "legacy-history-unavailable".into(),
             ));
@@ -1804,7 +2938,7 @@ impl WorldSession {
         entity_id: &str,
     ) -> Result<Option<(String, SettledDecision)>, WorldError> {
         let rev = self.pin_revision(seq)?.revision;
-        if rev.schema != super::revision::REVISION_SCHEMA_V2 {
+        if !rev.has_decision_evidence() {
             return Err(WorldError::NetworkError(
                 "legacy-history-unavailable: revision@1 did not persist decision evidence".into(),
             ));
@@ -1839,24 +2973,30 @@ impl WorldSession {
 
     /// Attach an operator network to this session and hydrate it with existing committed base records.
     pub fn set_network(&mut self, mut network: WorldNetwork) -> Result<(), WorldError> {
-        let mut ops = Vec::new();
-        for (rel_name, trie) in &self.relations {
-            if network.base_relations.contains_key(rel_name) {
-                let (entries, _) = trie.iter_page_with_store(None, usize::MAX, &self.node_store)?;
-                for (key, tuple) in entries {
-                    ops.push(WorldBatchOp::Upsert {
-                        relation: rel_name.clone(),
-                        key,
-                        tuple,
-                    });
-                }
+        // A world's decisions and state are filed under the network that computed them;
+        // swapping in a different program would let later commits attest foreign decisions.
+        if let Some(existing) = &self.network {
+            if existing.fingerprint() != network.fingerprint() {
+                return Err(WorldError::InvalidSchema(
+                    "program differs from the program this world is bound to".into(),
+                ));
             }
         }
-        if !ops.is_empty() {
-            network.apply_ops(&ops)?;
-        }
+        let cache = self.node_cache_budget();
+        network.attach_state_store(StateStore::from_file(
+            self.node_store.clone(),
+            state_cache_share(cache),
+        ));
+        self.apply_base_facts(&mut network)?;
         network.current_revision = self.current_revision;
-        self.network = Some(network);
+        self.open_mode = OpenMode::Replay;
+        self.replay_reason = Some("set-network");
+        self.tail_batches = 0;
+        // Replay built tries that were never persisted; write them once and drop the
+        // in-memory copies so the first commit does not rewrite O(world).
+        network.persist_state()?;
+        self.node_store.flush()?;
+        self.network = Some(network.dehydrated()?);
         Ok(())
     }
 
@@ -1943,7 +3083,19 @@ impl WorldSession {
             let mut session = Self::open(&root)?;
             let network = WorldNetwork::from_program(program)?;
             validate_program_relations(&session.manifest, &network)?;
-            session.set_network(network)?;
+            match &session.network {
+                // `open` already installed the world's own program (restored or replayed).
+                // The given program must be that program; installing a different one would
+                // file its state under the manifest's program digest.
+                Some(existing) => {
+                    if existing.fingerprint() != network.fingerprint() {
+                        return Err(WorldError::InvalidSchema(
+                            "program differs from the program this world is bound to".into(),
+                        ));
+                    }
+                }
+                None => session.set_network(network)?,
+            }
             return Ok(session);
         }
 
@@ -2003,9 +3155,47 @@ impl WorldSession {
     }
 
     /// Verify differential correctness between incremental network state and oracle full recompute.
+    ///
+    /// A restored network keeps no base facts of its own, so it is checked against a fresh
+    /// replay of the session's relations instead ([`Self::verify_state`]).
     pub fn verify_oracle(&self) -> Result<(), WorldError> {
         if let Some(ref net) = self.network {
-            net.verify_differential_correctness()?;
+            if net.base_resident() {
+                net.verify_differential_correctness()?;
+            } else {
+                self.verify_state()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A fresh in-memory network rebuilt by replaying every base fact the session holds.
+    /// Reads no persisted operator state.
+    pub fn replay_network(&self) -> Result<WorldNetwork, WorldError> {
+        let net = self
+            .network
+            .as_ref()
+            .ok_or_else(|| WorldError::NetworkError("world has no network".into()))?;
+        let mut fresh = net.clear_data();
+        fresh.attach_state_store(StateStore::memory(self.node_cache_budget()));
+        self.apply_base_facts(&mut fresh)?;
+        fresh.current_revision = self.current_revision;
+        Ok(fresh)
+    }
+
+    /// Recompute the network state from the base facts and require every persisted root
+    /// (operator indexes, derived, frontier, decisions) to equal what this session holds.
+    pub fn verify_state(&self) -> Result<(), WorldError> {
+        let Some(net) = self.network.as_ref() else {
+            return Ok(());
+        };
+        let fresh = self.replay_network()?;
+        let key = self.validity_key_for(net);
+        let (have, want) = (net.state_header(key.clone()), fresh.state_header(key));
+        if have != want {
+            return Err(WorldError::StateMismatch(format!(
+                "session={have:?} replay={want:?}"
+            )));
         }
         Ok(())
     }
@@ -2190,24 +3380,4 @@ impl WorldSession {
 
 fn iso_now() -> String {
     "2026-10-04T00:00:00Z".to_string()
-}
-
-fn hex_to_digest(hex: &str) -> Result<Digest, WorldError> {
-    if hex.len() != 64 {
-        return Err(WorldError::Json(
-            "digest hex must be 64 characters".to_string(),
-        ));
-    }
-    let mut b = [0u8; 32];
-    let chars: Vec<char> = hex.chars().collect();
-    for i in (0..64).step_by(2) {
-        let high = chars[i]
-            .to_digit(16)
-            .ok_or_else(|| WorldError::Json("invalid hex".to_string()))?;
-        let low = chars[i + 1]
-            .to_digit(16)
-            .ok_or_else(|| WorldError::Json("invalid hex".to_string()))?;
-        b[i / 2] = ((high << 4) | low) as u8;
-    }
-    Ok(Digest::from_bytes(b))
 }

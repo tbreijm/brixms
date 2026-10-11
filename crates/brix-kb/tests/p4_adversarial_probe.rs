@@ -74,6 +74,7 @@ rel derived matched =
     // 1. Initial empty state: both relations empty, join output empty
     let initial = network
         .get_derived_tuples("root::matched")
+        .unwrap()
         .unwrap_or_default();
     assert_eq!(
         initial.len(),
@@ -94,6 +95,7 @@ rel derived matched =
     );
     let after_order = network
         .get_derived_tuples("root::matched")
+        .unwrap()
         .unwrap_or_default();
     assert_eq!(
         after_order.len(),
@@ -114,6 +116,7 @@ rel derived matched =
     );
     let after_bo = network
         .get_derived_tuples("root::matched")
+        .unwrap()
         .unwrap_or_default();
     assert_eq!(
         after_bo.len(),
@@ -137,6 +140,7 @@ rel derived matched =
     );
     let after_order2 = network
         .get_derived_tuples("root::matched")
+        .unwrap()
         .unwrap_or_default();
     assert_eq!(
         after_order2.len(),
@@ -157,6 +161,7 @@ rel derived matched =
     );
     let after_bo2 = network
         .get_derived_tuples("root::matched")
+        .unwrap()
         .unwrap_or_default();
     assert_eq!(
         after_bo2.len(),
@@ -173,6 +178,7 @@ rel derived matched =
     );
     let after_retract_order2 = network
         .get_derived_tuples("root::matched")
+        .unwrap()
         .unwrap_or_default();
     assert_eq!(
         after_retract_order2.len(),
@@ -200,6 +206,7 @@ rel derived matched =
     );
     let final_tuples = network
         .get_derived_tuples("root::matched")
+        .unwrap()
         .unwrap_or_default();
     assert_eq!(
         final_tuples.len(),
@@ -263,10 +270,12 @@ decide priority_dispatch for p in priority_customer per customer {
 
     let derived_1 = network
         .get_derived_tuples("root::priority_customer")
+        .unwrap()
         .unwrap();
     assert_eq!(derived_1.len(), 1, "first derivation path asserts C1");
     let cands_1 = network
         .get_candidates("root::priority_dispatch", "C1")
+        .unwrap()
         .unwrap();
     assert!(
         cands_1.contains_key("expedite"),
@@ -292,13 +301,14 @@ decide priority_dispatch for p in priority_customer per customer {
 
     let derived_2 = network
         .get_derived_tuples("root::priority_customer")
+        .unwrap()
         .unwrap();
     assert_eq!(
         derived_2.len(),
         1,
         "distinct view deduplicates identical tuple C1"
     );
-    let state = network.current_state();
+    let state = network.current_state().unwrap();
     let distinct_op_supports = state
         .distinct_supports
         .values()
@@ -311,6 +321,7 @@ decide priority_dispatch for p in priority_customer per customer {
     );
     let cands_2 = network
         .get_candidates("root::priority_dispatch", "C1")
+        .unwrap()
         .unwrap();
     assert!(
         cands_2.contains_key("expedite"),
@@ -328,13 +339,14 @@ decide priority_dispatch for p in priority_customer per customer {
     // Tuple MUST survive in distinct view and candidate frontier!
     let derived_after_first_retract = network
         .get_derived_tuples("root::priority_customer")
+        .unwrap()
         .unwrap();
     assert_eq!(
         derived_after_first_retract.len(),
         1,
         "tuple C1 MUST survive in distinct view when 1 of 2 supports is retracted"
     );
-    let state_after_retract_1 = network.current_state();
+    let state_after_retract_1 = network.current_state().unwrap();
     let distinct_supports_after_1 = state_after_retract_1
         .distinct_supports
         .values()
@@ -347,6 +359,7 @@ decide priority_dispatch for p in priority_customer per customer {
     );
     let cands_after_first_retract = network
         .get_candidates("root::priority_dispatch", "C1")
+        .unwrap()
         .unwrap();
     assert!(
         cands_after_first_retract.contains_key("expedite"),
@@ -364,19 +377,24 @@ decide priority_dispatch for p in priority_customer per customer {
     // Tuple MUST be cleanly retracted from distinct view and candidate frontier!
     let derived_final = network
         .get_derived_tuples("root::priority_customer")
+        .unwrap()
         .unwrap();
     assert_eq!(
         derived_final.len(),
         0,
         "tuple C1 MUST be cleanly retracted from distinct view when all supports are removed"
     );
-    let cands_final = network.get_candidates("root::priority_dispatch", "C1");
+    let cands_final = network
+        .get_candidates("root::priority_dispatch", "C1")
+        .unwrap();
     assert!(
         cands_final.is_none(),
         "candidate expedite MUST be cleanly retracted from frontier when all supports are removed"
     );
 
-    let settlement_final = network.get_settlement("root::priority_dispatch", "C1");
+    let settlement_final = network
+        .get_settlement("root::priority_dispatch", "C1")
+        .unwrap();
     assert!(
         settlement_final.is_none(),
         "settlement MUST be None after all supports are retracted"
@@ -429,7 +447,10 @@ decide dispatch for r in ready_queue per id {
     );
 
     // Verify propagation through Hop 1 (B)
-    let b_tuples = network.get_derived_tuples("root::valid_orders").unwrap();
+    let b_tuples = network
+        .get_derived_tuples("root::valid_orders")
+        .unwrap()
+        .unwrap();
     assert_eq!(
         b_tuples.len(),
         1,
@@ -437,7 +458,10 @@ decide dispatch for r in ready_queue per id {
     );
 
     // Verify propagation through Hop 2 (C)
-    let c_tuples = network.get_derived_tuples("root::ready_queue").unwrap();
+    let c_tuples = network
+        .get_derived_tuples("root::ready_queue")
+        .unwrap()
+        .unwrap();
     assert_eq!(
         c_tuples.len(),
         1,
@@ -445,12 +469,12 @@ decide dispatch for r in ready_queue per id {
     );
 
     // Verify propagation through Hop 3 (Decide Proposal)
-    let candidate = network.get_candidates("root::dispatch", "ORD-999");
+    let candidate = network.get_candidates("root::dispatch", "ORD-999").unwrap();
     assert!(
         candidate.is_some(),
         "Hop 3 (Decide) must hold candidate for ORD-999"
     );
-    let winner = network.get_settlement("root::dispatch", "ORD-999");
+    let winner = network.get_settlement("root::dispatch", "ORD-999").unwrap();
     assert_eq!(
         winner.as_ref().map(|w| w.candidate_name.as_str()),
         Some("ship"),
@@ -465,19 +489,25 @@ decide dispatch for r in ready_queue per id {
         vec![remove_op("root::order", 999)],
     );
 
-    let b_after = network.get_derived_tuples("root::valid_orders").unwrap();
+    let b_after = network
+        .get_derived_tuples("root::valid_orders")
+        .unwrap()
+        .unwrap();
     assert_eq!(b_after.len(), 0, "cascade: B (valid_orders) must be empty");
 
-    let c_after = network.get_derived_tuples("root::ready_queue").unwrap();
+    let c_after = network
+        .get_derived_tuples("root::ready_queue")
+        .unwrap()
+        .unwrap();
     assert_eq!(c_after.len(), 0, "cascade: C (ready_queue) must be empty");
 
-    let cands_after = network.get_candidates("root::dispatch", "ORD-999");
+    let cands_after = network.get_candidates("root::dispatch", "ORD-999").unwrap();
     assert!(
         cands_after.is_none(),
         "cascade: candidate frontier must be empty for ORD-999"
     );
 
-    let winner_after = network.get_settlement("root::dispatch", "ORD-999");
+    let winner_after = network.get_settlement("root::dispatch", "ORD-999").unwrap();
     assert!(
         winner_after.is_none(),
         "cascade: settlement must be None (quiescence)"
@@ -525,6 +555,7 @@ decide fulfillment for o in active_orders per id {
 
     let winner_1 = network
         .get_settlement("root::fulfillment", "ORD-1")
+        .unwrap()
         .expect("winner 1");
     assert_eq!(winner_1.candidate_name, "expedite");
     assert_eq!(winner_1.priority, 10);
@@ -545,6 +576,7 @@ decide fulfillment for o in active_orders per id {
     // The winner MUST re-deliberate to standard!
     let winner_2 = network
         .get_settlement("root::fulfillment", "ORD-1")
+        .unwrap()
         .expect("winner 2");
     assert_eq!(
         winner_2.candidate_name, "standard",
@@ -555,6 +587,7 @@ decide fulfillment for o in active_orders per id {
     // Check that expedite is no longer in candidate frontier
     let cands_2 = network
         .get_candidates("root::fulfillment", "ORD-1")
+        .unwrap()
         .unwrap();
     assert!(
         !cands_2.contains_key("expedite"),
@@ -576,7 +609,9 @@ decide fulfillment for o in active_orders per id {
     );
 
     // Frontier must re-deliberate to None (no winner / quiescence)
-    let winner_3 = network.get_settlement("root::fulfillment", "ORD-1");
+    let winner_3 = network
+        .get_settlement("root::fulfillment", "ORD-1")
+        .unwrap();
     assert!(
         winner_3.is_none(),
         "when all guards are false, settlement must be None (quiescence)"
@@ -601,10 +636,12 @@ decide tie_choice for i in items per id {
 
     let tie_winner = tie_net
         .get_settlement("root::tie_choice", "ITEM-1")
+        .unwrap()
         .expect("tie winner");
     // Verify canonical settlement discipline: winner has least Key (tiebreak digest)
     let cands = tie_net
         .get_candidates("root::tie_choice", "ITEM-1")
+        .unwrap()
         .unwrap();
     let key_alpha = cands["cand_alpha"].calendar_key;
     let key_beta = cands["cand_beta"].calendar_key;
@@ -667,9 +704,10 @@ decide dispatch for f in fulfillment per order_id {
         ],
     );
 
-    let state_before = network.current_state();
+    let state_before = network.current_state().unwrap();
     let winner_before = network
         .get_settlement("root::dispatch", "ORD-101")
+        .unwrap()
         .expect("winner before");
     assert_eq!(winner_before.candidate_name, "ship");
 
@@ -707,13 +745,17 @@ decide dispatch for f in fulfillment per order_id {
     // Target decisions, supports, and relations must be 100% UNMUTATED
     let winner_after = network
         .get_settlement("root::dispatch", "ORD-101")
+        .unwrap()
         .expect("winner after");
     assert_eq!(
         winner_after, winner_before,
         "target decision must be completely unaffected"
     );
 
-    let fulfillment_tuples = network.get_derived_tuples("root::fulfillment").unwrap();
+    let fulfillment_tuples = network
+        .get_derived_tuples("root::fulfillment")
+        .unwrap()
+        .unwrap();
     assert_eq!(
         fulfillment_tuples.len(),
         1,
@@ -721,7 +763,7 @@ decide dispatch for f in fulfillment per order_id {
     );
     assert_eq!(fulfillment_tuples[0].get_str("order_id"), Some("ORD-101"));
 
-    let state_after = network.current_state();
+    let state_after = network.current_state().unwrap();
     assert_eq!(
         state_after.distinct_supports, state_before.distinct_supports,
         "supports for existing relations must remain byte-identical"
@@ -752,6 +794,7 @@ rel derived customer_order_count =
     // Initial state: 0 rows
     let initial = network
         .get_derived_tuples("root::customer_order_count")
+        .unwrap()
         .unwrap_or_default();
     assert_eq!(
         initial.len(),
@@ -773,6 +816,7 @@ rel derived customer_order_count =
 
     let step1 = network
         .get_derived_tuples("root::customer_order_count")
+        .unwrap()
         .unwrap();
     assert_eq!(step1.len(), 1, "0 -> 1: group row must be created");
     assert_eq!(step1[0].get_str("customer"), Some("CUST-DELTA"));
@@ -792,6 +836,7 @@ rel derived customer_order_count =
 
     let step2 = network
         .get_derived_tuples("root::customer_order_count")
+        .unwrap()
         .unwrap();
     assert_eq!(
         step2.len(),
@@ -815,6 +860,7 @@ rel derived customer_order_count =
 
     let step3 = network
         .get_derived_tuples("root::customer_order_count")
+        .unwrap()
         .unwrap();
     assert_eq!(
         step3.len(),
@@ -838,6 +884,7 @@ rel derived customer_order_count =
 
     let step4 = network
         .get_derived_tuples("root::customer_order_count")
+        .unwrap()
         .unwrap();
     assert_eq!(
         step4.len(),
@@ -1108,6 +1155,7 @@ decide shipping for f in fulfillment per order_id {
     let fulfillment_before = network
         .get_derived_tuples("root::fulfillment")
         .unwrap()
+        .unwrap()
         .len();
     let absent_report = network
         .apply_batch(&WorldBatch::new(
@@ -1128,6 +1176,7 @@ decide shipping for f in fulfillment per order_id {
 
     let fulfillment_after = network
         .get_derived_tuples("root::fulfillment")
+        .unwrap()
         .unwrap()
         .len();
     assert_eq!(

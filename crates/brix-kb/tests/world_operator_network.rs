@@ -70,6 +70,7 @@ decide fulfill for f in fulfillment per order_id {
 
     let derived = network
         .get_derived_tuples("root::fulfillment")
+        .unwrap()
         .expect("fulfillment tuples");
     assert_eq!(derived.len(), 1);
     assert_eq!(derived[0].get_str("order_id"), Some("ord-1"));
@@ -79,6 +80,7 @@ decide fulfill for f in fulfillment per order_id {
 
     let decision = network
         .get_settlement("root::fulfill", "ord-1")
+        .unwrap()
         .expect("settled decision");
     assert_eq!(decision.candidate_name, "fulfill_order");
     assert_eq!(decision.value, Value::Str("ord-1".to_string()));
@@ -134,6 +136,7 @@ decide fulfill for f in fulfillment per order_id {
         network
             .get_derived_tuples("root::fulfillment")
             .unwrap()
+            .unwrap()
             .len(),
         1
     );
@@ -162,10 +165,14 @@ decide fulfill for f in fulfillment per order_id {
         network
             .get_derived_tuples("root::fulfillment")
             .unwrap()
+            .unwrap()
             .len(),
         0
     );
-    assert!(network.get_settlement("root::fulfill", "ord-1").is_none());
+    assert!(network
+        .get_settlement("root::fulfill", "ord-1")
+        .unwrap()
+        .is_none());
     network.verify_differential_correctness().unwrap();
 
     // Switch back to "pending"
@@ -190,10 +197,14 @@ decide fulfill for f in fulfillment per order_id {
         network
             .get_derived_tuples("root::fulfillment")
             .unwrap()
+            .unwrap()
             .len(),
         1
     );
-    assert!(network.get_settlement("root::fulfill", "ord-1").is_some());
+    assert!(network
+        .get_settlement("root::fulfill", "ord-1")
+        .unwrap()
+        .is_some());
     network.verify_differential_correctness().unwrap();
 }
 
@@ -226,6 +237,7 @@ rel derived matching_stock =
         network
             .get_derived_tuples("root::matching_stock")
             .unwrap()
+            .unwrap()
             .len(),
         0
     );
@@ -246,6 +258,7 @@ rel derived matching_stock =
         network
             .get_derived_tuples("root::matching_stock")
             .unwrap()
+            .unwrap()
             .len(),
         1
     );
@@ -264,6 +277,7 @@ rel derived matching_stock =
     assert_eq!(
         network
             .get_derived_tuples("root::matching_stock")
+            .unwrap()
             .unwrap()
             .len(),
         0
@@ -299,6 +313,7 @@ rel derived unique_categories =
         network
             .get_derived_tuples("root::unique_categories")
             .unwrap()
+            .unwrap()
             .len(),
         1
     );
@@ -321,6 +336,7 @@ rel derived unique_categories =
         network
             .get_derived_tuples("root::unique_categories")
             .unwrap()
+            .unwrap()
             .len(),
         1
     );
@@ -341,6 +357,7 @@ rel derived unique_categories =
         network
             .get_derived_tuples("root::unique_categories")
             .unwrap()
+            .unwrap()
             .len(),
         1
     );
@@ -360,6 +377,7 @@ rel derived unique_categories =
     assert_eq!(
         network
             .get_derived_tuples("root::unique_categories")
+            .unwrap()
             .unwrap()
             .len(),
         0
@@ -409,12 +427,14 @@ decide incident for a in alert per entity_id {
     // Candidate should have 2 derivation supports
     let candidates = network
         .get_candidates("root::incident", "srv-1")
+        .unwrap()
         .expect("candidates for srv-1");
     let entry = &candidates["raise_ticket"];
     assert_eq!(entry.supports.len(), 2);
     assert_eq!(
         network
             .get_settlement("root::incident", "srv-1")
+            .unwrap()
             .unwrap()
             .candidate_name,
         "raise_ticket"
@@ -433,9 +453,13 @@ decide incident for a in alert per entity_id {
     network.apply_batch(&batch2).unwrap();
     let candidates_after_one = network
         .get_candidates("root::incident", "srv-1")
+        .unwrap()
         .expect("candidates still exist");
     assert_eq!(candidates_after_one["raise_ticket"].supports.len(), 1);
-    assert!(network.get_settlement("root::incident", "srv-1").is_some());
+    assert!(network
+        .get_settlement("root::incident", "srv-1")
+        .unwrap()
+        .is_some());
     network.verify_differential_correctness().unwrap();
 
     // Retract second alert: last support removed, candidate retracted!
@@ -448,8 +472,14 @@ decide incident for a in alert per entity_id {
         }],
     );
     network.apply_batch(&batch3).unwrap();
-    assert!(network.get_candidates("root::incident", "srv-1").is_none());
-    assert!(network.get_settlement("root::incident", "srv-1").is_none());
+    assert!(network
+        .get_candidates("root::incident", "srv-1")
+        .unwrap()
+        .is_none());
+    assert!(network
+        .get_settlement("root::incident", "srv-1")
+        .unwrap()
+        .is_none());
     network.verify_differential_correctness().unwrap();
 }
 
@@ -502,6 +532,7 @@ decide group_decision for l in linked_parent_child per child_id {
         network
             .get_derived_tuples("root::active_children")
             .unwrap()
+            .unwrap()
             .len(),
         1
     );
@@ -509,11 +540,13 @@ decide group_decision for l in linked_parent_child per child_id {
         network
             .get_derived_tuples("root::linked_parent_child")
             .unwrap()
+            .unwrap()
             .len(),
         1
     );
     assert!(network
         .get_settlement("root::group_decision", "c-1")
+        .unwrap()
         .is_some());
     network.verify_differential_correctness().unwrap();
 
@@ -533,6 +566,7 @@ decide group_decision for l in linked_parent_child per child_id {
         network
             .get_derived_tuples("root::active_children")
             .unwrap()
+            .unwrap()
             .len(),
         1
     );
@@ -540,11 +574,13 @@ decide group_decision for l in linked_parent_child per child_id {
         network
             .get_derived_tuples("root::linked_parent_child")
             .unwrap()
+            .unwrap()
             .len(),
         0
     );
     assert!(network
         .get_settlement("root::group_decision", "c-1")
+        .unwrap()
         .is_none());
     network.verify_differential_correctness().unwrap();
 }
@@ -573,7 +609,10 @@ rel derived category_count =
         }],
     );
     network.apply_batch(&batch1).unwrap();
-    let tuples1 = network.get_derived_tuples("root::category_count").unwrap();
+    let tuples1 = network
+        .get_derived_tuples("root::category_count")
+        .unwrap()
+        .unwrap();
     assert_eq!(tuples1.len(), 1);
     assert_eq!(tuples1[0].get_str("category"), Some("hardware"));
     assert_eq!(tuples1[0].get_str("cnt"), Some("1"));
@@ -590,7 +629,10 @@ rel derived category_count =
         }],
     );
     network.apply_batch(&batch2).unwrap();
-    let tuples2 = network.get_derived_tuples("root::category_count").unwrap();
+    let tuples2 = network
+        .get_derived_tuples("root::category_count")
+        .unwrap()
+        .unwrap();
     assert_eq!(tuples2.len(), 1);
     assert_eq!(tuples2[0].get_str("category"), Some("hardware"));
     assert_eq!(tuples2[0].get_str("cnt"), Some("2"));
@@ -607,7 +649,10 @@ rel derived category_count =
         }],
     );
     network.apply_batch(&batch3).unwrap();
-    let tuples3 = network.get_derived_tuples("root::category_count").unwrap();
+    let tuples3 = network
+        .get_derived_tuples("root::category_count")
+        .unwrap()
+        .unwrap();
     assert_eq!(tuples3.len(), 1);
     assert_eq!(tuples3[0].get_str("cnt"), Some("3"));
     network.verify_differential_correctness().unwrap();
@@ -622,7 +667,10 @@ rel derived category_count =
         }],
     );
     network.apply_batch(&batch4).unwrap();
-    let tuples4 = network.get_derived_tuples("root::category_count").unwrap();
+    let tuples4 = network
+        .get_derived_tuples("root::category_count")
+        .unwrap()
+        .unwrap();
     assert_eq!(tuples4.len(), 1);
     assert_eq!(tuples4[0].get_str("cnt"), Some("2"));
     network.verify_differential_correctness().unwrap();
@@ -643,7 +691,10 @@ rel derived category_count =
         ],
     );
     network.apply_batch(&batch5).unwrap();
-    let tuples5 = network.get_derived_tuples("root::category_count").unwrap();
+    let tuples5 = network
+        .get_derived_tuples("root::category_count")
+        .unwrap()
+        .unwrap();
     assert_eq!(tuples5.len(), 0);
     network.verify_differential_correctness().unwrap();
 }
@@ -674,7 +725,10 @@ decide schedule for t in task per id {
     network.apply_batch(&batch1).unwrap();
 
     // Smaller priority = more urgent -> urgent (priority 1) must be settled
-    let decision1 = network.get_settlement("root::schedule", "task-42").unwrap();
+    let decision1 = network
+        .get_settlement("root::schedule", "task-42")
+        .unwrap()
+        .unwrap();
     assert_eq!(decision1.candidate_name, "urgent");
     assert_eq!(decision1.priority, 1);
     assert_eq!(decision1.value, Value::Str("urgent_handling".into()));
@@ -692,7 +746,10 @@ decide schedule for t in task per id {
     );
     network.apply_batch(&batch2).unwrap();
 
-    let decision2 = network.get_settlement("root::schedule", "task-42").unwrap();
+    let decision2 = network
+        .get_settlement("root::schedule", "task-42")
+        .unwrap()
+        .unwrap();
     assert_eq!(decision2.candidate_name, "standard");
     assert_eq!(decision2.priority, 5);
     assert_eq!(decision2.value, Value::Str("standard_handling".into()));
@@ -724,7 +781,10 @@ rel derived formatted =
     );
     network.apply_batch(&batch).unwrap();
 
-    let tuples = network.get_derived_tuples("root::formatted").unwrap();
+    let tuples = network
+        .get_derived_tuples("root::formatted")
+        .unwrap()
+        .unwrap();
     assert_eq!(tuples.len(), 1);
     assert_eq!(tuples[0].get_str("id"), Some("R-99"));
     network.verify_differential_correctness().unwrap();

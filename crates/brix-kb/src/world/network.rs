@@ -14,7 +14,14 @@
 
 #![deny(unsafe_code)]
 
+use super::compact_deriv::{leaf_counts, CompactDeriv, DRoot, Derivation};
+use super::network_state::{NetworkStateHeader, OperatorRoots, ValidityKey};
 use super::persistent::{PMap, PSet};
+use super::state_codec::{
+    CandKey, CandidateHead, CandidateRec, FrontierBucket, FrontierKey, JoinEntry, StateCodec,
+    StateCodecError, SubRoot, SupportItem, SupportRef, ValueList,
+};
+use super::state_store::{PageCursor, SMap, StateError, StateStore, DEFAULT_NODE_CACHE_BYTES};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -28,7 +35,6 @@ use brix_lower::relation_dag::{
 use brix_lower::world_expr::{CompiledProgramEnv, CompiledWorldExpr};
 use brix_syntax::ast;
 use soc_core::calendar::{Frontier, Key};
-use soc_core::store::TrieMap;
 
 use super::decision_codec::canon_write_value;
 pub use super::decision_codec::{
@@ -94,6 +100,13 @@ impl IntermediateTuple {
     }
 }
 
+/// The typed, injective key identifying a distinct tuple inside
+/// [`DerivationId::Distinct`]; decodable back to the tuple with
+/// [`StateCodec::state_from_bytes`].
+pub fn distinct_key(tuple: &IntermediateTuple) -> Vec<u8> {
+    tuple.state_bytes()
+}
+
 /// A derivation identifier uniquely tracking justifications for TMS truth maintenance.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum DerivationId {
@@ -116,6 +129,12 @@ pub enum DerivationId {
         group_key: Vec<Value>,
     },
     /// Canonical derivation for a distinct tuple produced by set semantics.
+    ///
+    /// `tuple_key` is [`distinct_key`] of the tuple: the *typed* injective state encoding.
+    /// (Before R0 M2 part 2 it was the Display-based `Value::to_bytes` encoding, under which
+    /// `Int(1)` and `Str("1")` -- likewise `Bool(true)`/`Str("true")`, `Null`/`Str("null")` --
+    /// produced the same key. The two now stay distinct; that is an intentional semantic
+    /// change, only observable when a column holds mixed dynamic types.)
     Distinct { op: OperatorId, tuple_key: Vec<u8> },
 }
 
@@ -184,11 +203,11 @@ impl DerivationId {
 pub enum TupleDelta {
     Insert {
         tuple: IntermediateTuple,
-        derivation: DerivationId,
+        derivation: Derivation,
     },
     Retract {
         tuple: IntermediateTuple,
-        derivation: DerivationId,
+        derivation: Derivation,
     },
 }
 
@@ -199,7 +218,7 @@ impl TupleDelta {
         }
     }
 
-    pub fn derivation(&self) -> &DerivationId {
+    pub fn derivation(&self) -> &Derivation {
         match self {
             Self::Insert { derivation, .. } | Self::Retract { derivation, .. } => derivation,
         }
@@ -221,8 +240,10 @@ pub enum OperatorWorkItem {
         delta: TupleDelta,
         is_left: bool,
         join_key: Vec<Value>,
-        matches: PMap<DerivationId, IntermediateTuple>,
-        next_idx: usize,
+        /// Snapshot of the opposite side's inner map for `join_key`.
+        matches: SMap<Digest, JoinEntry>,
+        cursor: Option<PageCursor<Digest>>,
+        remaining: usize,
     },
 }
 
@@ -230,9 +251,7 @@ pub enum OperatorWorkItem {
 fn work_item_queued_count(item: &OperatorWorkItem) -> usize {
     match item {
         OperatorWorkItem::Delta(_) => 1,
-        OperatorWorkItem::JoinContinuation {
-            matches, next_idx, ..
-        } => matches.len().saturating_sub(*next_idx).max(1),
+        OperatorWorkItem::JoinContinuation { remaining, .. } => (*remaining).max(1),
     }
 }
 
@@ -395,6 +414,570 @@ pub fn compute_candidate_calendar_key(
     Key::new(phase, priority, tiebreak)
 }
 
+/// One side of a join index: join key -> inner map of the tuples (with compact
+/// derivations) currently supporting that key.
+///
+/// `outer` is the persisted index (key -> inner [`SubRoot`]); `hot` holds the inner maps
+/// modified (and so not yet reachable from the store) since the last dehydration.
+#[derive(Clone, Debug, Default)]
+pub struct JoinSide {
+    pub outer: SMap<ValueList, SubRoot>,
+    pub hot: PMap<ValueList, SMap<Digest, JoinEntry>>,
+}
+
+impl JoinSide {
+    /// The inner map for `key`, from `hot` if modified, else from the persisted index.
+    fn read(
+        &self,
+        key: &ValueList,
+        store: &StateStore,
+    ) -> Result<Option<SMap<Digest, JoinEntry>>, WorldError> {
+        if let Some(m) = self.hot.get(key) {
+            return Ok(Some(m.clone()));
+        }
+        Ok(self.outer.get(key, store)?.map(SMap::from_sub_root))
+    }
+
+    /// Record the new inner map for `key`; an empty map removes the key everywhere.
+    fn write(
+        &mut self,
+        key: ValueList,
+        inner: SMap<Digest, JoinEntry>,
+        store: &StateStore,
+    ) -> Result<(), WorldError> {
+        if inner.is_empty() {
+            self.hot.remove(&key);
+            self.outer = self.outer.remove(&key, store)?;
+        } else {
+            self.outer = self.outer.upsert(key.clone(), inner.sub_root(), store)?;
+            self.hot.insert(key, inner);
+        }
+        Ok(())
+    }
+
+    fn persist(&self, store: &StateStore) -> usize {
+        let mut n = 0;
+        for inner in self.hot.values() {
+            n += inner.persist(store);
+        }
+        n + self.outer.persist(store)
+    }
+
+    fn dehydrated(&self, store: &StateStore) -> Result<Self, WorldError> {
+        Ok(Self {
+            outer: self.outer.dehydrate(store)?,
+            hot: PMap::new(),
+        })
+    }
+}
+
+/// The supports of one key, as read from a [`SupportIndex`].
+pub(crate) enum Supports<I: SupportItem> {
+    None,
+    One(I),
+    Many(SMap<Digest, I::Val>),
+}
+
+impl<I: SupportItem> Supports<I> {
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Supports::None => 0,
+            Supports::One(_) => 1,
+            Supports::Many(set) => set.len(),
+        }
+    }
+
+    pub(crate) fn members(&self, store: &StateStore) -> Result<Vec<I>, WorldError> {
+        match self {
+            Supports::None => Ok(Vec::new()),
+            Supports::One(d) => Ok(vec![d.clone()]),
+            Supports::Many(set) => {
+                let mut out = Vec::with_capacity(set.len());
+                let mut cursor = None;
+                loop {
+                    let (rows, next) = set.page(cursor.as_ref(), 256, store)?;
+                    out.extend(rows.into_iter().map(|(k, v)| I::from_parts(k, v)));
+                    match next {
+                        Some(c) => cursor = Some(c),
+                        None => break,
+                    }
+                }
+                Ok(out)
+            }
+        }
+    }
+}
+
+/// A persisted "key -> set of supporting derivations" index (Distinct, GroupedCount).
+///
+/// `outer` maps each key to its [`SupportRef`]: a single support inline, two or more as the
+/// [`SubRoot`] of an inner `SMap<id, Val>` (canonical: one representation per support
+/// set). `hot` holds the inner sets of `Sub` keys modified (and so not yet reachable from
+/// the store) since the last dehydration. `I` the stored support item (the compact derivation for Distinct, its digest for
+/// GroupedCount, which never needs to expand its supports).
+#[derive(Clone, Debug)]
+pub struct SupportIndex<K, I>
+where
+    K: StateCodec + Ord + Clone + 'static + Send + Sync,
+    I: SupportItem,
+{
+    pub outer: SMap<K, SupportRef<I>>,
+    pub hot: PMap<K, SMap<Digest, I::Val>>,
+}
+
+impl<K, I> Default for SupportIndex<K, I>
+where
+    K: StateCodec + Ord + Clone + 'static + Send + Sync,
+    I: SupportItem,
+{
+    fn default() -> Self {
+        Self {
+            outer: SMap::new(),
+            hot: PMap::new(),
+        }
+    }
+}
+
+impl<K, I> SupportIndex<K, I>
+where
+    K: StateCodec + Ord + Clone + 'static + Send + Sync,
+    I: SupportItem,
+{
+    /// The supports for `key`, from `hot` if modified, else from the persisted index.
+    pub(crate) fn read(&self, key: &K, store: &StateStore) -> Result<Supports<I>, WorldError> {
+        if let Some(m) = self.hot.get(key) {
+            return Ok(Supports::Many(m.clone()));
+        }
+        Ok(match self.outer.get(key, store)? {
+            None => Supports::None,
+            Some(SupportRef::Inline(d)) => Supports::One(d),
+            Some(SupportRef::Sub(s)) => Supports::Many(SMap::from_sub_root(s)),
+        })
+    }
+
+    /// Store a set of two or more supports.
+    fn write_many(
+        &mut self,
+        key: K,
+        inner: SMap<Digest, I::Val>,
+        store: &StateStore,
+    ) -> Result<(), WorldError> {
+        debug_assert!(inner.len() >= 2);
+        self.outer = self
+            .outer
+            .upsert(key.clone(), SupportRef::Sub(inner.sub_root()), store)?;
+        self.hot.insert(key, inner);
+        Ok(())
+    }
+
+    /// Add support `item` for `key`; returns the support count before and after.
+    pub(crate) fn add(
+        &mut self,
+        key: K,
+        item: I,
+        store: &StateStore,
+    ) -> Result<(usize, usize), WorldError> {
+        match self.read(&key, store)? {
+            Supports::None => {
+                self.outer = self.outer.upsert(key, SupportRef::Inline(item), store)?;
+                Ok((0, 1))
+            }
+            Supports::One(d) => {
+                if d.id() == item.id() {
+                    return Ok((1, 1));
+                }
+                let set = SMap::new().upsert(d.id(), d.val(), store)?.upsert(
+                    item.id(),
+                    item.val(),
+                    store,
+                )?;
+                self.write_many(key, set, store)?;
+                Ok((1, 2))
+            }
+            Supports::Many(set) => {
+                let old = set.len();
+                let set = set.upsert(item.id(), item.val(), store)?;
+                let new = set.len();
+                if new != old {
+                    self.write_many(key, set, store)?;
+                }
+                Ok((old, new))
+            }
+        }
+    }
+
+    /// Remove support `id` for `key`; returns the support count before and after
+    /// (`(0, 0)` if the key is absent).
+    pub(crate) fn remove(
+        &mut self,
+        key: &K,
+        id: &Digest,
+        store: &StateStore,
+    ) -> Result<(usize, usize), WorldError> {
+        match self.read(key, store)? {
+            Supports::None => Ok((0, 0)),
+            Supports::One(d) => {
+                if d.id() != *id {
+                    return Ok((1, 1));
+                }
+                self.hot.remove(key);
+                self.outer = self.outer.remove(key, store)?;
+                Ok((1, 0))
+            }
+            Supports::Many(set) => {
+                let old = set.len();
+                let set = set.remove(id, store)?;
+                let new = set.len();
+                if new == old {
+                    return Ok((old, new));
+                }
+                if new == 1 {
+                    let (rows, _) = set.page(None, 1, store)?;
+                    let (k, v) = rows.into_iter().next().ok_or_else(|| {
+                        WorldError::NetworkError("support set lost its last member".to_string())
+                    })?;
+                    self.hot.remove(key);
+                    self.outer = self.outer.upsert(
+                        key.clone(),
+                        SupportRef::Inline(I::from_parts(k, v)),
+                        store,
+                    )?;
+                } else {
+                    self.write_many(key.clone(), set, store)?;
+                }
+                Ok((old, new))
+            }
+        }
+    }
+
+    /// Number of keys with at least one support.
+    pub fn len(&self) -> usize {
+        self.outer.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.outer.is_empty()
+    }
+
+    /// Every key (outer trie order); reads only the outer index.
+    pub(crate) fn keys(&self, store: &StateStore) -> Result<Vec<K>, WorldError> {
+        let mut out = Vec::with_capacity(self.outer.len());
+        let mut cursor = None;
+        loop {
+            let (rows, next) = self.outer.page(cursor.as_ref(), 1024, store)?;
+            out.extend(rows.into_iter().map(|(k, _)| k));
+            match next {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every key with its supports (hot-aware), in outer trie order.
+    pub(crate) fn entries(&self, store: &StateStore) -> Result<Vec<(K, Vec<I>)>, WorldError> {
+        let mut out = Vec::with_capacity(self.outer.len());
+        let mut cursor = None;
+        loop {
+            let (rows, next) = self.outer.page(cursor.as_ref(), 256, store)?;
+            for (k, sref) in rows {
+                let sup = match (self.hot.get(&k), sref) {
+                    (Some(m), _) => Supports::Many(m.clone()),
+                    (None, SupportRef::Inline(d)) => Supports::One(d),
+                    (None, SupportRef::Sub(s)) => Supports::Many(SMap::from_sub_root(s)),
+                };
+                out.push((k, sup.members(store)?));
+            }
+            match next {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn persist(&self, store: &StateStore) -> usize {
+        let mut n = 0;
+        for inner in self.hot.values() {
+            n += inner.persist(store);
+        }
+        n + self.outer.persist(store)
+    }
+
+    pub(crate) fn dehydrated(&self, store: &StateStore) -> Result<Self, WorldError> {
+        Ok(Self {
+            outer: self.outer.dehydrate(store)?,
+            hot: PMap::new(),
+        })
+    }
+}
+
+/// Distinct support index, keyed by the typed tuple (`Int(1)` and `Str("1")` stay distinct).
+pub type DistinctSupports = SupportIndex<IntermediateTuple, CompactDeriv>;
+/// Grouped-count index, keyed by the group key values.
+pub type GroupSupports = SupportIndex<ValueList, Digest>;
+/// Contents of a derived relation that is not a `Distinct` output: each distinct typed tuple
+/// with the digests of the derivations currently supporting it. A tuple is in the relation
+/// iff it has at least one support, so collapsing derivations (several rows projecting to
+/// one tuple) is order-independent, and `Int(1)` / `Str("1")` stay distinct (the pre-M3 set
+/// was keyed by the Display bytes of a `TupleRecord`, which collapsed them).
+pub type DerivedSupports = SupportIndex<IntermediateTuple, Digest>;
+
+/// How the contents of one derived relation are stored.
+#[derive(Clone, Debug)]
+pub enum DerivedRel {
+    /// The relation is the output of `Distinct` operator `op` (lowering ends every `select`
+    /// with one). Its tuples are exactly that operator's support-index keys, typed and with
+    /// one canonical derivation each, so they are not stored a second time.
+    DistinctOutput(OperatorId),
+    /// Any other output operator: a support-counted typed tuple index.
+    Counted(DerivedSupports),
+}
+
+/// The candidate frontier, store-backed: per `(decide, entity)` a [`FrontierBucket`] holding
+/// the live candidates, each with its head and its supports (a single support inline, two or
+/// more as the [`SubRoot`] of a nested set, canonical like every support index). A candidate
+/// is live iff it has a support; an entity without candidates has no bucket.
+///
+/// `hot` holds the nested support sets modified (and so not yet reachable from the store)
+/// since the last dehydration, keyed by candidate.
+#[derive(Clone, Debug, Default)]
+pub struct CandidateFrontier {
+    pub buckets: SMap<FrontierKey, FrontierBucket>,
+    pub hot: PMap<CandKey, SMap<Digest, CompactDeriv>>,
+}
+
+impl CandidateFrontier {
+    /// The live candidates of one entity, with every head's calendar key re-checked against
+    /// its recomputation (a mismatch is corrupt state).
+    pub fn bucket(
+        &self,
+        key: &FrontierKey,
+        store: &StateStore,
+    ) -> Result<Option<FrontierBucket>, WorldError> {
+        let Some(bucket) = self.buckets.get(key, store)? else {
+            return Ok(None);
+        };
+        verify_bucket(key, &bucket)?;
+        Ok(Some(bucket))
+    }
+
+    /// Write an entity's bucket (an empty or absent bucket removes the entity).
+    fn put_bucket(
+        &mut self,
+        key: FrontierKey,
+        bucket: Option<FrontierBucket>,
+        store: &StateStore,
+    ) -> Result<(), WorldError> {
+        self.buckets = match bucket {
+            Some(b) if !b.0.is_empty() => self.buckets.upsert(key, b, store)?,
+            _ => self.buckets.remove(&key, store)?,
+        };
+        Ok(())
+    }
+
+    /// Visit every entity bucket in outer trie order, one page at a time, so a caller that
+    /// reduces each bucket (settlement, counting) never holds more than a page of decoded
+    /// buckets. Every bucket is verified before it is visited.
+    pub(crate) fn for_each_bucket(
+        &self,
+        store: &StateStore,
+        mut visit: impl FnMut(FrontierKey, FrontierBucket) -> Result<(), WorldError>,
+    ) -> Result<(), WorldError> {
+        let mut cursor = None;
+        loop {
+            let (rows, next) = self.buckets.page(cursor.as_ref(), 256, store)?;
+            for (k, b) in rows {
+                verify_bucket(&k, &b)?;
+                visit(k, b)?;
+            }
+            match next {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        Ok(())
+    }
+
+    /// Every entity bucket, in outer trie order.
+    pub(crate) fn all_buckets(
+        &self,
+        store: &StateStore,
+    ) -> Result<Vec<(FrontierKey, FrontierBucket)>, WorldError> {
+        let mut out = Vec::with_capacity(self.buckets.len());
+        self.for_each_bucket(store, |k, b| {
+            out.push((k, b));
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// The supports of candidate `ck`, whose stored record is `rec`.
+    pub(crate) fn supports_of(&self, ck: &CandKey, rec: &CandidateRec) -> Supports<CompactDeriv> {
+        match &rec.supports {
+            SupportRef::Inline(d) => Supports::One(d.clone()),
+            SupportRef::Sub(s) => Supports::Many(
+                self.hot
+                    .get(ck)
+                    .cloned()
+                    .unwrap_or_else(|| SMap::from_sub_root(*s)),
+            ),
+        }
+    }
+
+    /// Add support `item` to candidate `ck` (record `rec`, to be written back by the
+    /// caller). Idempotent for a support already present.
+    pub(crate) fn add_support(
+        &mut self,
+        ck: &CandKey,
+        rec: &mut CandidateRec,
+        item: CompactDeriv,
+        store: &StateStore,
+    ) -> Result<(), WorldError> {
+        let set = match &rec.supports {
+            SupportRef::Inline(d) => {
+                if d.id() == item.id() {
+                    return Ok(());
+                }
+                SMap::new().upsert(d.id(), d.clone(), store)?
+            }
+            SupportRef::Sub(s) => self
+                .hot
+                .get(ck)
+                .cloned()
+                .unwrap_or_else(|| SMap::from_sub_root(*s)),
+        };
+        let old = set.len();
+        let set = set.upsert(item.id(), item, store)?;
+        if set.len() != old {
+            rec.supports = SupportRef::Sub(set.sub_root());
+            self.hot.insert(ck.clone(), set);
+        }
+        Ok(())
+    }
+
+    /// Remove the support with id `id` from candidate `ck`; returns how many remain (the
+    /// caller drops the candidate at 0).
+    pub(crate) fn remove_support(
+        &mut self,
+        ck: &CandKey,
+        rec: &mut CandidateRec,
+        id: &Digest,
+        store: &StateStore,
+    ) -> Result<usize, WorldError> {
+        match &rec.supports {
+            SupportRef::Inline(d) => {
+                if d.id() == *id {
+                    self.hot.remove(ck);
+                    Ok(0)
+                } else {
+                    Ok(1)
+                }
+            }
+            SupportRef::Sub(s) => {
+                let set = self
+                    .hot
+                    .get(ck)
+                    .cloned()
+                    .unwrap_or_else(|| SMap::from_sub_root(*s));
+                let old = set.len();
+                let set = set.remove(id, store)?;
+                let new = set.len();
+                if new == old {
+                    return Ok(old);
+                }
+                if new == 1 {
+                    let (rows, _) = set.page(None, 1, store)?;
+                    let (_, only) = rows.into_iter().next().ok_or_else(|| {
+                        WorldError::NetworkError("support set lost its last member".to_string())
+                    })?;
+                    rec.supports = SupportRef::Inline(only);
+                    self.hot.remove(ck);
+                } else {
+                    rec.supports = SupportRef::Sub(set.sub_root());
+                    self.hot.insert(ck.clone(), set);
+                }
+                Ok(new)
+            }
+        }
+    }
+
+    fn persist(&self, store: &StateStore) -> usize {
+        let mut n = 0;
+        for inner in self.hot.values() {
+            n += inner.persist(store);
+        }
+        n + self.buckets.persist(store)
+    }
+
+    fn dehydrated(&self, store: &StateStore) -> Result<Self, WorldError> {
+        Ok(Self {
+            buckets: self.buckets.dehydrate(store)?,
+            hot: PMap::new(),
+        })
+    }
+}
+
+/// The net effect of one batch's deltas on a relation, retractions first.
+///
+/// A `(tuple, derivation)` pair inserted and retracted within the batch (a join result that
+/// exists only transiently) cancels out. Applying all retractions before all insertions
+/// without cancelling first would retract the not-yet-present pair and then insert it,
+/// leaving a candidate (and a settlement) for a tuple that is no longer derived.
+fn net_effect(deltas: &[TupleDelta]) -> Vec<&TupleDelta> {
+    if deltas.iter().all(TupleDelta::is_insert) || deltas.iter().all(|d| !d.is_insert()) {
+        return deltas.iter().collect();
+    }
+    let key = |d: &TupleDelta| (d.derivation().c.clone(), d.tuple().clone());
+    let mut balance: BTreeMap<(CompactDeriv, IntermediateTuple), i64> = BTreeMap::new();
+    for d in deltas {
+        *balance.entry(key(d)).or_default() += if d.is_insert() { 1 } else { -1 };
+    }
+    let mut emitted = BTreeSet::new();
+    let mut retractions = Vec::new();
+    let mut insertions = Vec::new();
+    for d in deltas {
+        let k = key(d);
+        let b = balance[&k];
+        if (b > 0 && d.is_insert() || b < 0 && !d.is_insert()) && emitted.insert((k, d.is_insert()))
+        {
+            if d.is_insert() {
+                insertions.push(d);
+            } else {
+                retractions.push(d);
+            }
+        }
+    }
+    retractions.extend(insertions);
+    retractions
+}
+
+fn verify_bucket(key: &FrontierKey, bucket: &FrontierBucket) -> Result<(), WorldError> {
+    for (name, rec) in &bucket.0 {
+        rec.head
+            .verify(&key.decide, &key.entity, name)
+            .map_err(|e| WorldError::from(StateError::from(e)))?;
+    }
+    Ok(())
+}
+
+/// The settled decision of one entity: the live candidate with the least calendar key.
+fn settle(entity: &str, bucket: &FrontierBucket) -> Option<SettledDecision> {
+    let mut frontier: Frontier<(&String, &CandidateHead)> = Frontier::new();
+    for (name, rec) in &bucket.0 {
+        let _ = frontier.insert(rec.head.calendar_key, (name, &rec.head));
+    }
+    let (key, (name, head)) = frontier.select_least()?;
+    Some(SettledDecision {
+        entity_id: entity.to_string(),
+        candidate_name: name.clone(),
+        priority: head.priority,
+        phase: head.phase,
+        value: head.value.clone(),
+        calendar_key: key,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub enum OperatorState {
     Scan {
@@ -422,19 +1005,19 @@ pub enum OperatorState {
         right: OperatorId,
         left_keys: Vec<FieldRef>,
         right_keys: Vec<FieldRef>,
-        left_index: PMap<Vec<Value>, PMap<DerivationId, IntermediateTuple>>,
-        right_index: PMap<Vec<Value>, PMap<DerivationId, IntermediateTuple>>,
+        left_side: JoinSide,
+        right_side: JoinSide,
     },
     Distinct {
         input: OperatorId,
-        supports: PMap<IntermediateTuple, PSet<DerivationId>>,
+        supports: DistinctSupports,
     },
     GroupedCount {
         input: OperatorId,
         group_keys: Vec<ast::Expr>,
         compiled_group_keys: Vec<CompiledWorldExpr>,
         projections: Vec<(String, GroupProjection)>,
-        groups: PMap<Vec<Value>, PSet<DerivationId>>,
+        groups: GroupSupports,
     },
 }
 
@@ -467,6 +1050,31 @@ pub struct NetworkDeltaReport {
     pub diagnostics: NetworkDiagnostics,
 }
 
+/// First-seen (pre-batch) and latest decision of one entity within a batch.
+#[derive(Clone, Debug)]
+struct DecisionTrack {
+    prior: Option<WorldTuple>,
+    last: Option<SettledDecision>,
+}
+
+/// In-flight state of a batch applied as chunks ([`WorldNetwork::begin_batch`]).
+#[derive(Clone, Debug, Default)]
+pub struct BatchCtx {
+    report: NetworkDeltaReport,
+    diagnostics: NetworkDiagnostics,
+    total_work: u64,
+    total_matches: u64,
+    decisions: BTreeMap<(String, String), DecisionTrack>,
+    chunks: usize,
+}
+
+impl BatchCtx {
+    /// Chunks applied so far.
+    pub fn chunks(&self) -> usize {
+        self.chunks
+    }
+}
+
 /// The maintained operator network running bounded incremental evaluations (ADR-0046 §3.5, §3.7).
 #[derive(Clone, Debug)]
 pub struct WorldNetwork {
@@ -476,20 +1084,35 @@ pub struct WorldNetwork {
     pub downstream: PMap<OperatorId, Vec<OperatorId>>,
     output_relations: PMap<OperatorId, Vec<String>>,
     pub base_relations: PMap<String, PMap<WorldKey, WorldTuple>>,
-    pub derived_relations: PMap<String, PSet<TupleRecord>>,
+    pub derived_relations: PMap<String, DerivedRel>,
     pub decides: PMap<String, DecideBlock>,
     decision_subscribers: PMap<String, Vec<String>>,
-    /// Content-addressed trie of settled decisions, keyed by [`decision_key`].
-    /// `pub(crate)` so `session.rs` can persist its nodes to the durable node
-    /// store (ADR-0046 P6 G2, decided 2026-10-04) without this module owning
-    /// any filesystem concern.
-    pub(crate) decision_tree: TrieMap<WorldKey, WorldTuple>,
-    pub candidate_frontier: PMap<String, PMap<String, PMap<String, CandidateEntry>>>,
+    /// Content-addressed trie of settled decisions, keyed by [`decision_key`]
+    /// (ADR-0046 P6 G2). Store-backed: only fallible, store-aware operations are
+    /// reachable, so an unhydrated node can never read as an empty subtree. Its node
+    /// encoding is identical to the pre-M3 `TrieMap<WorldKey, WorldTuple>`, so decision
+    /// roots recorded in revisions are unchanged.
+    pub(crate) decision_tree: SMap<WorldKey, WorldTuple>,
+    pub candidate_frontier: CandidateFrontier,
     pub functions: Arc<BTreeMap<String, ast::Callable>>,
     pub program_env: Option<Arc<CompiledProgramEnv>>,
     pub current_revision: u64,
     pub scheduling_quantum: usize,
+    /// Node store backing persisted operator state (join and support indexes).
+    state: StateStore,
+    /// Leaves each operator's derivations carry (index = operator id).
+    leaf_counts: Arc<Vec<usize>>,
+    /// Whether this network holds the base facts itself (`base_relations`, `Scan.records`).
+    /// A network restored from persisted state (R0 M4) does not: the old tuple of a changed
+    /// key is looked up through the [`BaseLookup`] the session passes to
+    /// [`Self::apply_ops_staged_view`]. The legacy oracle shadows are only meaningful for a
+    /// network that has seen every fact since empty, so they follow this flag too.
+    base_resident: bool,
 }
+
+/// Read access to the pre-batch base facts, supplied by whoever owns them (the session's
+/// relation tries) to a network that does not keep its own copy.
+pub type BaseLookup<'a> = dyn Fn(&str, &WorldKey) -> Result<Option<WorldTuple>, WorldError> + 'a;
 
 impl WorldNetwork {
     /// Construct a new network from a lowered relational DAG.
@@ -569,8 +1192,8 @@ impl WorldNetwork {
                             right: *right,
                             left_keys: left_keys.clone(),
                             right_keys: right_keys.clone(),
-                            left_index: PMap::new(),
-                            right_index: PMap::new(),
+                            left_side: JoinSide::default(),
+                            right_side: JoinSide::default(),
                         },
                     );
                 }
@@ -580,7 +1203,7 @@ impl WorldNetwork {
                         idx,
                         OperatorState::Distinct {
                             input: *input,
-                            supports: PMap::new(),
+                            supports: DistinctSupports::default(),
                         },
                     );
                 }
@@ -597,7 +1220,7 @@ impl WorldNetwork {
                             group_keys: group_keys.clone(),
                             compiled_group_keys: Vec::new(),
                             projections: projections.clone(),
-                            groups: PMap::new(),
+                            groups: GroupSupports::default(),
                         },
                     );
                 }
@@ -606,8 +1229,17 @@ impl WorldNetwork {
 
         let mut derived_relations = PMap::new();
         for (name, &op_id) in &dag.relation_outputs {
-            if !matches!(dag.nodes[op_id.0], OperatorNode::Scan { .. }) {
-                derived_relations.insert(name.clone(), PSet::new());
+            match dag.nodes[op_id.0] {
+                OperatorNode::Scan { .. } => {}
+                OperatorNode::Distinct { .. } => {
+                    derived_relations.insert(name.clone(), DerivedRel::DistinctOutput(op_id));
+                }
+                _ => {
+                    derived_relations.insert(
+                        name.clone(),
+                        DerivedRel::Counted(DerivedSupports::default()),
+                    );
+                }
             }
         }
 
@@ -615,6 +1247,7 @@ impl WorldNetwork {
         for (name, op) in &dag.relation_outputs {
             output_relations.entry(*op).or_default().push(name.clone());
         }
+        let counts = leaf_counts(&dag);
         Self {
             dag: Arc::new(dag),
             output_relations,
@@ -625,13 +1258,393 @@ impl WorldNetwork {
             derived_relations,
             decides: PMap::new(),
             decision_subscribers: PMap::new(),
-            decision_tree: TrieMap::new(),
-            candidate_frontier: PMap::new(),
+            decision_tree: SMap::new(),
+            candidate_frontier: CandidateFrontier::default(),
             functions: Arc::new(BTreeMap::new()),
             program_env: None,
             current_revision: 0,
             scheduling_quantum: DEFAULT_SCHEDULING_QUANTUM,
+            state: StateStore::memory(DEFAULT_NODE_CACHE_BYTES),
+            leaf_counts: Arc::new(counts),
+            base_resident: true,
         }
+    }
+
+    /// Back operator state with `store` (call before any data is applied).
+    pub fn attach_state_store(&mut self, store: StateStore) {
+        self.state = store;
+    }
+
+    /// The store backing persisted operator state.
+    pub fn state_store(&self) -> &StateStore {
+        &self.state
+    }
+
+    /// Write all not-yet-persisted join state (inner maps, then outer indexes, then
+    /// support indexes). Returns the number of objects written. The caller
+    /// flushes the store.
+    pub fn persist_state(&self) -> Result<usize, WorldError> {
+        let mut n = 0;
+        for rel in self.derived_relations.values() {
+            if let DerivedRel::Counted(supports) = rel {
+                n += supports.persist(&self.state);
+            }
+        }
+        n += self.candidate_frontier.persist(&self.state);
+        n += self.decision_tree.persist(&self.state);
+        for (_, state) in self.operator_states.iter() {
+            match state {
+                OperatorState::EquiJoin {
+                    left_side,
+                    right_side,
+                    ..
+                } => {
+                    n += left_side.persist(&self.state);
+                    n += right_side.persist(&self.state);
+                }
+                OperatorState::Distinct { supports, .. } => n += supports.persist(&self.state),
+                OperatorState::GroupedCount { groups, .. } => n += groups.persist(&self.state),
+                _ => {}
+            }
+        }
+        Ok(n)
+    }
+
+    /// Write all not-yet-persisted state ([`Self::persist_state`]) and replace every
+    /// persisted trie by its `(root, len)` store reference, dropping the hydrated nodes
+    /// and the support caches. Roots are unchanged. Returns the objects written. Only
+    /// valid at a quiescent point (between chunks of a batch, never inside
+    /// [`Self::apply_chunk`]); the caller decides when to flush the store.
+    pub fn persist_and_dehydrate_in_place(&mut self) -> Result<usize, WorldError> {
+        let n = self.persist_state()?;
+        let d = self.dehydrated()?;
+        *self = d;
+        Ok(n)
+    }
+
+    /// A copy holding only store references for persisted state. Requires
+    /// [`Self::persist_state`] (and a flush) first; fails if a root is not persisted.
+    pub fn dehydrated(&self) -> Result<Self, WorldError> {
+        let mut out = self.clone();
+        for (name, rel) in self.derived_relations.iter() {
+            if let DerivedRel::Counted(supports) = rel {
+                out.derived_relations.insert(
+                    name.clone(),
+                    DerivedRel::Counted(supports.dehydrated(&self.state)?),
+                );
+            }
+        }
+        out.candidate_frontier = self.candidate_frontier.dehydrated(&self.state)?;
+        out.decision_tree = self.decision_tree.dehydrate(&self.state)?;
+        for (idx, state) in self.operator_states.iter() {
+            match state {
+                OperatorState::EquiJoin {
+                    left,
+                    right,
+                    left_keys,
+                    right_keys,
+                    left_side,
+                    right_side,
+                } => {
+                    out.operator_states.insert(
+                        *idx,
+                        OperatorState::EquiJoin {
+                            left: *left,
+                            right: *right,
+                            left_keys: left_keys.clone(),
+                            right_keys: right_keys.clone(),
+                            left_side: left_side.dehydrated(&self.state)?,
+                            right_side: right_side.dehydrated(&self.state)?,
+                        },
+                    );
+                }
+                OperatorState::Distinct { input, supports } => {
+                    out.operator_states.insert(
+                        *idx,
+                        OperatorState::Distinct {
+                            input: *input,
+                            supports: supports.dehydrated(&self.state)?,
+                        },
+                    );
+                }
+                OperatorState::GroupedCount {
+                    input,
+                    group_keys,
+                    compiled_group_keys,
+                    projections,
+                    groups,
+                } => {
+                    out.operator_states.insert(
+                        *idx,
+                        OperatorState::GroupedCount {
+                            input: *input,
+                            group_keys: group_keys.clone(),
+                            compiled_group_keys: compiled_group_keys.clone(),
+                            projections: projections.clone(),
+                            groups: groups.dehydrated(&self.state)?,
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
+    /// Per join operator, the `(left, right)` outer index roots.
+    pub fn join_index_roots(&self) -> BTreeMap<OperatorId, (SubRoot, SubRoot)> {
+        let mut out = BTreeMap::new();
+        for (idx, state) in self.operator_states.iter() {
+            if let OperatorState::EquiJoin {
+                left_side,
+                right_side,
+                ..
+            } = state
+            {
+                out.insert(
+                    OperatorId(*idx),
+                    (left_side.outer.sub_root(), right_side.outer.sub_root()),
+                );
+            }
+        }
+        out
+    }
+
+    /// Per Distinct operator, the outer support index root.
+    pub fn distinct_roots(&self) -> BTreeMap<OperatorId, SubRoot> {
+        let mut out = BTreeMap::new();
+        for (idx, state) in self.operator_states.iter() {
+            if let OperatorState::Distinct { supports, .. } = state {
+                out.insert(OperatorId(*idx), supports.outer.sub_root());
+            }
+        }
+        out
+    }
+
+    /// Per GroupedCount operator, the outer group index root.
+    pub fn group_roots(&self) -> BTreeMap<OperatorId, SubRoot> {
+        let mut out = BTreeMap::new();
+        for (idx, state) in self.operator_states.iter() {
+            if let OperatorState::GroupedCount { groups, .. } = state {
+                out.insert(OperatorId(*idx), groups.outer.sub_root());
+            }
+        }
+        out
+    }
+
+    /// Per derived relation, the root of the index holding its tuples: the Distinct
+    /// operator's support index for a `Distinct` output (see [`DerivedRel`]), the relation's
+    /// own index otherwise.
+    pub fn derived_roots(&self) -> BTreeMap<String, SubRoot> {
+        let distinct = self.distinct_roots();
+        self.derived_relations
+            .iter()
+            .map(|(name, rel)| {
+                let root = match rel {
+                    DerivedRel::DistinctOutput(op) => {
+                        distinct.get(op).copied().unwrap_or_else(SubRoot::empty)
+                    }
+                    DerivedRel::Counted(s) => s.outer.sub_root(),
+                };
+                (name.clone(), root)
+            })
+            .collect()
+    }
+
+    /// The candidate frontier root (buckets, with the supports nested in them).
+    pub fn frontier_root(&self) -> SubRoot {
+        self.candidate_frontier.buckets.sub_root()
+    }
+
+    /// Root and size of the settled-decision trie.
+    pub fn decision_sub_root(&self) -> SubRoot {
+        self.decision_tree.sub_root()
+    }
+
+    /// Structural fingerprint of this network: the lowered operator DAG (node kinds, ids,
+    /// keys, expressions, projections), the relation outputs, the decide blocks and the
+    /// functions. Part of the validity key of persisted state, so state computed by a
+    /// different program can never be installed into this one.
+    pub fn fingerprint(&self) -> Digest {
+        use std::fmt::Write;
+        let mut s = String::from("brix.world.net-fingerprint@1\n");
+        let _ = writeln!(s, "{:?}", self.dag.nodes);
+        let _ = writeln!(s, "{:?}", self.dag.relation_outputs);
+        let decides: BTreeMap<_, _> = self.decides.iter().collect();
+        for (name, d) in decides {
+            let _ = writeln!(
+                s,
+                "{name}|{}|{}|{}|{:?}",
+                d.binder, d.source_relation, d.per_field, d.proposals
+            );
+        }
+        let _ = writeln!(s, "{:?}", self.functions);
+        Digest::of(Domain::State, s.as_bytes())
+    }
+
+    /// Whether this network keeps its own copy of the base facts (see [`BaseLookup`]).
+    pub fn base_resident(&self) -> bool {
+        self.base_resident
+    }
+
+    /// The header naming every persisted root of this network, under `validity`. Call on a
+    /// network whose state has been persisted ([`Self::persist_state`]); the roots do not
+    /// depend on whether it was.
+    pub fn state_header(&self, validity: ValidityKey) -> NetworkStateHeader {
+        let mut derived = BTreeMap::new();
+        // Distinct-backed derived relations are views over their Distinct operator's
+        // index, recorded once under `operators`; listing them here would count them twice.
+        for (name, rel) in self.derived_relations.iter() {
+            if let DerivedRel::Counted(s) = rel {
+                derived.insert(name.clone(), s.outer.sub_root());
+            }
+        }
+        let mut operators = BTreeMap::new();
+        for (idx, state) in self.operator_states.iter() {
+            let roots = match state {
+                OperatorState::EquiJoin {
+                    left_side,
+                    right_side,
+                    ..
+                } => OperatorRoots::Join {
+                    left: left_side.outer.sub_root(),
+                    right: right_side.outer.sub_root(),
+                },
+                OperatorState::Distinct { supports, .. } => {
+                    OperatorRoots::Distinct(supports.outer.sub_root())
+                }
+                OperatorState::GroupedCount { groups, .. } => {
+                    OperatorRoots::Group(groups.outer.sub_root())
+                }
+                _ => continue,
+            };
+            operators.insert(OperatorId(*idx), roots);
+        }
+        NetworkStateHeader {
+            validity,
+            decision: self.decision_sub_root(),
+            frontier: self.frontier_root(),
+            derived,
+            operators,
+        }
+    }
+
+    /// Install the persisted state `header` names into this (freshly built, empty) network,
+    /// lazily: nothing but the roots is read, apart from a probe of each non-empty root that
+    /// fails closed on a missing or corrupt root node. The header's operator set must match
+    /// this program exactly. The network then holds no base copy (see [`BaseLookup`]).
+    pub fn restore_state(&mut self, header: &NetworkStateHeader) -> Result<(), WorldError> {
+        let mismatch = |m: String| WorldError::ValidityMismatch(m);
+
+        let mut expect: BTreeMap<OperatorId, &'static str> = BTreeMap::new();
+        for (idx, state) in self.operator_states.iter() {
+            match state {
+                OperatorState::EquiJoin { .. } => {
+                    expect.insert(OperatorId(*idx), "join");
+                }
+                OperatorState::Distinct { .. } => {
+                    expect.insert(OperatorId(*idx), "distinct");
+                }
+                OperatorState::GroupedCount { .. } => {
+                    expect.insert(OperatorId(*idx), "group");
+                }
+                _ => {}
+            }
+        }
+        let got: BTreeMap<OperatorId, &'static str> = header
+            .operators
+            .iter()
+            .map(|(op, r)| (*op, r.kind_name()))
+            .collect();
+        if got != expect {
+            return Err(mismatch(format!(
+                "persisted operators {got:?} do not match the program's {expect:?}"
+            )));
+        }
+        let counted: BTreeSet<&String> = self
+            .derived_relations
+            .iter()
+            .filter(|(_, r)| matches!(r, DerivedRel::Counted(_)))
+            .map(|(n, _)| n)
+            .collect();
+        let listed: BTreeSet<&String> = header.derived.keys().collect();
+        if counted != listed {
+            return Err(mismatch(format!(
+                "persisted derived relations {listed:?} do not match the program's {counted:?}"
+            )));
+        }
+
+        for (name, root) in &header.derived {
+            if let Some(DerivedRel::Counted(supports)) = self.derived_relations.get_mut(name) {
+                supports.outer = SMap::from_sub_root(*root);
+                supports.hot = PMap::new();
+            }
+        }
+        for (op, roots) in &header.operators {
+            match (self.operator_states.get_mut(&op.0), roots) {
+                (
+                    Some(OperatorState::EquiJoin {
+                        left_side,
+                        right_side,
+                        ..
+                    }),
+                    OperatorRoots::Join { left, right },
+                ) => {
+                    left_side.outer = SMap::from_sub_root(*left);
+                    left_side.hot = PMap::new();
+                    right_side.outer = SMap::from_sub_root(*right);
+                    right_side.hot = PMap::new();
+                }
+                (Some(OperatorState::Distinct { supports, .. }), OperatorRoots::Distinct(r)) => {
+                    supports.outer = SMap::from_sub_root(*r);
+                    supports.hot = PMap::new();
+                }
+                (Some(OperatorState::GroupedCount { groups, .. }), OperatorRoots::Group(r)) => {
+                    groups.outer = SMap::from_sub_root(*r);
+                    groups.hot = PMap::new();
+                }
+                _ => return Err(mismatch(format!("operator {} has the wrong kind", op.0))),
+            }
+        }
+        self.candidate_frontier.buckets = SMap::from_sub_root(header.frontier);
+        self.candidate_frontier.hot = PMap::new();
+        self.decision_tree = SMap::from_sub_root(header.decision);
+        self.base_resident = false;
+
+        self.probe_roots()
+    }
+
+    /// Touch the first path of every non-empty persisted root, so a missing or corrupt
+    /// root node is reported when the network is restored rather than at first use.
+    fn probe_roots(&self) -> Result<(), WorldError> {
+        let store = &self.state;
+        for (_, state) in self.operator_states.iter() {
+            match state {
+                OperatorState::EquiJoin {
+                    left_side,
+                    right_side,
+                    ..
+                } => {
+                    left_side.outer.page(None, 1, store)?;
+                    right_side.outer.page(None, 1, store)?;
+                }
+                OperatorState::Distinct { supports, .. } => {
+                    supports.outer.page(None, 1, store)?;
+                }
+                OperatorState::GroupedCount { groups, .. } => {
+                    groups.outer.page(None, 1, store)?;
+                }
+                _ => {}
+            }
+        }
+        for (_, rel) in self.derived_relations.iter() {
+            if let DerivedRel::Counted(s) = rel {
+                s.outer.page(None, 1, store)?;
+            }
+        }
+        self.candidate_frontier.buckets.page(None, 1, store)?;
+        self.decision_tree.page(None, 1, store)?;
+        Ok(())
     }
 
     /// Set scheduling quantum (work units per operator slice).
@@ -680,11 +1693,18 @@ impl WorldNetwork {
         fresh.derived_relations = self
             .derived_relations
             .iter()
-            .map(|(k, _)| (k.clone(), PSet::new()))
+            .map(|(k, rel)| {
+                let cleared = match rel {
+                    DerivedRel::DistinctOutput(op) => DerivedRel::DistinctOutput(*op),
+                    DerivedRel::Counted(_) => DerivedRel::Counted(DerivedSupports::default()),
+                };
+                (k.clone(), cleared)
+            })
             .collect();
-        fresh.decision_tree = TrieMap::new();
-        fresh.candidate_frontier = PMap::new();
+        fresh.decision_tree = SMap::new();
+        fresh.candidate_frontier = CandidateFrontier::default();
         fresh.current_revision = 0;
+        fresh.base_resident = true;
         let mut op_states = self.operator_states.clone();
         for (idx, state) in &self.operator_states {
             let cleared_state = match state {
@@ -713,12 +1733,12 @@ impl WorldNetwork {
                     right: *right,
                     left_keys: left_keys.clone(),
                     right_keys: right_keys.clone(),
-                    left_index: PMap::new(),
-                    right_index: PMap::new(),
+                    left_side: JoinSide::default(),
+                    right_side: JoinSide::default(),
                 },
                 OperatorState::Distinct { input, .. } => OperatorState::Distinct {
                     input: *input,
-                    supports: PMap::new(),
+                    supports: DistinctSupports::default(),
                 },
                 OperatorState::GroupedCount {
                     input,
@@ -731,7 +1751,7 @@ impl WorldNetwork {
                     group_keys: group_keys.clone(),
                     compiled_group_keys: compiled_group_keys.clone(),
                     projections: projections.clone(),
-                    groups: PMap::new(),
+                    groups: GroupSupports::default(),
                 },
             };
             op_states.insert(*idx, cleared_state);
@@ -944,11 +1964,56 @@ impl WorldNetwork {
         ops: &[WorldBatchOp],
         limits: &NetworkLimits,
     ) -> Result<NetworkDeltaReport, WorldError> {
-        let mut report = NetworkDeltaReport {
-            revision: self.current_revision + 1,
-            ops_applied: ops.len(),
+        self.apply_ops_staged_view(ops, limits, None)
+    }
+
+    /// As [`Self::apply_ops_staged_bounded`], reading pre-batch base facts through `base`.
+    /// Required for a network restored from persisted state, which holds no base copy; a
+    /// resident network ignores it. `base` must reflect the facts *before* `ops`.
+    ///
+    /// Exactly one chunk: [`Self::begin_batch`], [`Self::apply_chunk`], [`Self::finish_batch`].
+    pub fn apply_ops_staged_view(
+        &mut self,
+        ops: &[WorldBatchOp],
+        limits: &NetworkLimits,
+        base: Option<&BaseLookup<'_>>,
+    ) -> Result<NetworkDeltaReport, WorldError> {
+        let mut ctx = self.begin_batch();
+        self.apply_chunk(&mut ctx, ops, limits, base)?;
+        Ok(self.finish_batch(ctx))
+    }
+
+    /// Start a batch that is applied as one or more contiguous chunks of its normalized
+    /// operations (CPD). The chunks together must be exactly the batch's operations, in
+    /// order; the result is independent of where the chunk boundaries fall.
+    pub fn begin_batch(&self) -> BatchCtx {
+        BatchCtx {
+            report: NetworkDeltaReport {
+                revision: self.current_revision + 1,
+                ..Default::default()
+            },
             ..Default::default()
-        };
+        }
+    }
+
+    /// Apply one contiguous slice of a batch (operator network, frontier and decision
+    /// tree); see [`Self::begin_batch`]. Does not advance the revision and does not
+    /// report settlements: [`Self::finish_batch`] does, from the net change over all chunks.
+    /// On `Err` the network is left in an unspecified state: discard it.
+    pub fn apply_chunk(
+        &mut self,
+        ctx: &mut BatchCtx,
+        ops: &[WorldBatchOp],
+        limits: &NetworkLimits,
+        base: Option<&BaseLookup<'_>>,
+    ) -> Result<(), WorldError> {
+        let _scope = self.state.trace_scope("apply");
+        ctx.chunks += 1;
+        let mut report = std::mem::take(&mut ctx.report);
+        report.ops_applied += ops.len();
+        let mut diagnostics = std::mem::take(&mut ctx.diagnostics);
+        let mut total_work: u64 = ctx.total_work;
+        let mut total_matches: u64 = ctx.total_matches;
 
         let mut ready_operators: std::collections::VecDeque<OperatorId> =
             std::collections::VecDeque::new();
@@ -957,9 +2022,6 @@ impl WorldNetwork {
             OperatorId,
             std::collections::VecDeque<OperatorWorkItem>,
         > = BTreeMap::new();
-        let mut diagnostics = NetworkDiagnostics::default();
-        let mut total_work: u64 = 0;
-        let mut total_matches: u64 = 0;
 
         let enqueue =
             |op: OperatorId,
@@ -974,6 +2036,12 @@ impl WorldNetwork {
             };
 
         // 1. Process base ops at Scan nodes
+        let resident = self.base_resident;
+        if !resident && base.is_none() {
+            return Err(WorldError::NetworkError(
+                "network was restored without its base facts; apply through a BaseLookup".into(),
+            ));
+        }
         for op in ops {
             let rel_name = op.relation();
             let base_rel = self
@@ -986,6 +2054,9 @@ impl WorldNetwork {
                 .get(rel_name)
                 .cloned()
                 .unwrap_or_default();
+            // The pre-batch tuple of a changed key, once per op for a restored network
+            // (every Scan of the relation sees the same one).
+            let mut looked_up: Option<Option<WorldTuple>> = None;
             for scan_op_id in scan_ops {
                 let scan_state = self
                     .operator_states
@@ -998,47 +2069,36 @@ impl WorldNetwork {
                     ..
                 } = scan_state
                 {
+                    let key = op.key();
+                    // The tuple this key currently holds in the Scan, as an intermediate.
+                    let old_inter: Option<IntermediateTuple> = if resident {
+                        records.get(key).map(|(_, i)| i.clone())
+                    } else {
+                        if looked_up.is_none() {
+                            let lookup = base.expect("checked above");
+                            looked_up = Some(lookup(rel_name, key)?);
+                        }
+                        match looked_up.as_ref().and_then(|t| t.as_ref()) {
+                            Some(t) => Some(scan_intermediate(relation, schema, t)?),
+                            None => None,
+                        }
+                    };
                     match op {
                         WorldBatchOp::Upsert { key, tuple, .. } => {
-                            base_rel.insert(key.clone(), tuple.clone());
-                            let derivation = DerivationId::Base {
-                                relation: relation.clone(),
-                                key: key.clone(),
-                            };
-
-                            let rec = TupleRecord::from_tuple(tuple)?;
-                            let ast::Ty::Record(fields) = schema else {
-                                return Err(WorldError::NetworkError(format!(
-                                    "unresolved row schema for {relation}"
-                                )));
-                            };
-                            if rec.fields.len() != fields.len() {
-                                return Err(WorldError::NetworkError(format!(
-                                    "row fields do not match schema for {relation}"
-                                )));
+                            if resident {
+                                base_rel.insert(key.clone(), tuple.clone());
                             }
-                            let mut intermediate = IntermediateTuple::new();
-                            for field in fields {
-                                let bytes = rec.get(&field.name).ok_or_else(|| {
-                                    WorldError::NetworkError(format!(
-                                        "missing field {relation}.{}",
-                                        field.name
-                                    ))
-                                })?;
-                                intermediate.insert(
-                                    field.name.clone(),
-                                    Value::from_typed_bytes(bytes, &field.ty)?,
-                                );
-                            }
+                            let derivation = Derivation::base(relation, key);
+                            let intermediate = scan_intermediate(relation, schema, tuple)?;
 
                             // If old record existed at key, retract it first
-                            if let Some((_, old_inter)) = records.get(key) {
-                                if old_inter == &intermediate {
+                            if let Some(old_inter) = old_inter {
+                                if old_inter == intermediate {
                                     // Idempotent value, no change
                                     continue;
                                 }
                                 let ret_delta = TupleDelta::Retract {
-                                    tuple: old_inter.clone(),
+                                    tuple: old_inter,
                                     derivation: derivation.clone(),
                                 };
                                 enqueue(
@@ -1054,7 +2114,9 @@ impl WorldNetwork {
                                 tuple: intermediate.clone(),
                                 derivation,
                             };
-                            records.insert(key.clone(), (tuple.clone(), intermediate));
+                            if resident {
+                                records.insert(key.clone(), (tuple.clone(), intermediate));
+                            }
                             enqueue(
                                 scan_op_id,
                                 OperatorWorkItem::Delta(ins_delta),
@@ -1064,12 +2126,12 @@ impl WorldNetwork {
                             );
                         }
                         WorldBatchOp::Remove { key, .. } => {
-                            base_rel.remove(key);
-                            if let Some((_, old_inter)) = records.remove(key) {
-                                let derivation = DerivationId::Base {
-                                    relation: relation.clone(),
-                                    key: key.clone(),
-                                };
+                            if resident {
+                                base_rel.remove(key);
+                                records.remove(key);
+                            }
+                            if let Some(old_inter) = old_inter {
+                                let derivation = Derivation::base(relation, key);
                                 let ret_delta = TupleDelta::Retract {
                                     tuple: old_inter,
                                     derivation,
@@ -1144,10 +2206,7 @@ impl WorldNetwork {
                                 bound_tuple.insert(k.clone(), v.clone());
                             }
 
-                            let out_deriv = DerivationId::Unary {
-                                op: op_id,
-                                parent: Box::new(deriv),
-                            };
+                            let out_deriv = deriv.unary(op_id);
 
                             if is_ins {
                                 out_deltas.push(TupleDelta::Insert {
@@ -1199,10 +2258,7 @@ impl WorldNetwork {
                                 eval_expr(predicate, &tuple, &self.functions)?.as_bool()?
                             };
                             if passed {
-                                let out_deriv = DerivationId::Unary {
-                                    op: op_id,
-                                    parent: Box::new(deriv),
-                                };
+                                let out_deriv = deriv.unary(op_id);
                                 if is_ins {
                                     out_deltas.push(TupleDelta::Insert {
                                         tuple,
@@ -1261,10 +2317,7 @@ impl WorldNetwork {
                                 }
                             }
 
-                            let out_deriv = DerivationId::Unary {
-                                op: op_id,
-                                parent: Box::new(deriv),
-                            };
+                            let out_deriv = deriv.unary(op_id);
 
                             if is_ins {
                                 out_deltas.push(TupleDelta::Insert {
@@ -1285,19 +2338,22 @@ impl WorldNetwork {
                         right: _,
                         left_keys,
                         right_keys,
-                        left_index,
-                        right_index,
+                        left_side,
+                        right_side,
                     } => {
                         let left_op = *left;
+                        let store = &self.state;
+                        let counts = &self.leaf_counts;
 
-                        let (delta, is_left, join_key, matches, next_idx) = match item {
+                        let (delta, is_left, join_key, matches, cursor, remaining) = match item {
                             OperatorWorkItem::JoinContinuation {
                                 delta,
                                 is_left,
                                 join_key,
                                 matches,
-                                next_idx,
-                            } => (delta, is_left, join_key, matches, next_idx),
+                                cursor,
+                                remaining,
+                            } => (delta, is_left, join_key, matches, cursor, remaining),
                             OperatorWorkItem::Delta(delta) => {
                                 let (tuple, deriv) = match &delta {
                                     TupleDelta::Insert { tuple, derivation }
@@ -1306,17 +2362,17 @@ impl WorldNetwork {
                                     }
                                 };
 
-                                let is_left = match deriv {
-                                    DerivationId::Unary { op, .. }
-                                    | DerivationId::Join { op, .. }
-                                    | DerivationId::Group { op, .. }
-                                    | DerivationId::Distinct { op, .. } => *op == left_op,
-                                    DerivationId::Base { relation, .. } => {
-                                        match &self.dag.nodes[left_op.0] {
-                                            OperatorNode::Scan { relation: r, .. } => r == relation,
-                                            _ => false,
+                                // Same rule as before: a derivation rooted at an operator is
+                                // left iff that is the left input; a scan output is left iff the
+                                // left input is a scan of the same relation (self-join quirk).
+                                let is_left = match &deriv.c.root {
+                                    DRoot::Op(op) => *op == left_op,
+                                    DRoot::Base(relation) => match &self.dag.nodes[left_op.0] {
+                                        OperatorNode::Scan { relation: r, .. } => {
+                                            r.as_str() == &**relation
                                         }
-                                    }
+                                        _ => false,
+                                    },
                                 };
 
                                 let keys = if is_left { left_keys } else { right_keys };
@@ -1336,47 +2392,36 @@ impl WorldNetwork {
                                     .collect::<Result<_, _>>()?;
 
                                 let is_ins = delta.is_insert();
-                                let matches: PMap<DerivationId, IntermediateTuple> = if is_left {
-                                    if is_ins {
-                                        let m =
-                                            right_index.get(&join_key).cloned().unwrap_or_default();
-                                        left_index
-                                            .entry(join_key.clone())
-                                            .or_default()
-                                            .insert(deriv.clone(), tuple.clone());
-                                        m
-                                    } else {
-                                        if let Some(matching_lefts) = left_index.get_mut(&join_key)
-                                        {
-                                            matching_lefts.remove(deriv);
-                                            if matching_lefts.is_empty() {
-                                                left_index.remove(&join_key);
-                                            }
-                                        }
-                                        right_index.get(&join_key).cloned().unwrap_or_default()
-                                    }
+                                let (own, other) = if is_left {
+                                    (left_side, right_side)
                                 } else {
-                                    if is_ins {
-                                        let m =
-                                            left_index.get(&join_key).cloned().unwrap_or_default();
-                                        right_index
-                                            .entry(join_key.clone())
-                                            .or_default()
-                                            .insert(deriv.clone(), tuple.clone());
-                                        m
-                                    } else {
-                                        if let Some(matching_rights) =
-                                            right_index.get_mut(&join_key)
-                                        {
-                                            matching_rights.remove(deriv);
-                                            if matching_rights.is_empty() {
-                                                right_index.remove(&join_key);
-                                            }
-                                        }
-                                        left_index.get(&join_key).cloned().unwrap_or_default()
-                                    }
+                                    (right_side, left_side)
                                 };
-                                (delta, is_left, join_key, matches, 0)
+
+                                if !deriv.c.leaf_count_ok(counts) {
+                                    return Err(corrupt_derivation());
+                                }
+                                let vk = ValueList(join_key.clone());
+                                let own_id = deriv.c.digest();
+                                let existing = own.read(&vk, store)?;
+                                if is_ins {
+                                    let inner = existing.unwrap_or_default().upsert(
+                                        own_id,
+                                        JoinEntry {
+                                            tuple: tuple.clone(),
+                                            deriv: deriv.c.clone(),
+                                        },
+                                        store,
+                                    )?;
+                                    own.write(vk.clone(), inner, store)?;
+                                } else if let Some(inner) = existing {
+                                    let inner = inner.remove(&own_id, store)?;
+                                    own.write(vk.clone(), inner, store)?;
+                                }
+                                let matches = other.read(&vk, store)?.unwrap_or_default();
+
+                                let remaining = matches.len();
+                                (delta, is_left, join_key, matches, None, remaining)
                             }
                         };
 
@@ -1387,7 +2432,7 @@ impl WorldNetwork {
                         };
 
                         let remaining_quantum = quantum.saturating_sub(work_in_slice);
-                        let remaining_matches = matches.len().saturating_sub(next_idx);
+                        let remaining_matches = remaining;
                         if remaining_matches > 0 {
                             if limits.max_matches.is_some_and(|max| total_matches >= max) {
                                 return Err(WorldError::BudgetExhausted);
@@ -1402,50 +2447,68 @@ impl WorldNetwork {
                             remaining_quantum.max(1).min(remaining_matches)
                         };
 
-                        let key_str = format!(
-                            "{op_id:?}:{}",
-                            join_key
-                                .iter()
-                                .map(|v| v.to_string())
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        );
+                        let (page, next_cursor) = if take_count == 0 {
+                            (Vec::new(), None)
+                        } else {
+                            matches.page(cursor.as_ref(), take_count, store)?
+                        };
+                        let own_deriv = deriv;
+                        // Diagnostics are accumulated per page and flushed once (also on the
+                        // budget-exhausted exits), instead of one string clone and three map
+                        // updates per match.
+                        let mut page_matches = 0u64;
+                        let flush_diag = |diagnostics: &mut NetworkDiagnostics, n: u64| {
+                            if n == 0 {
+                                return;
+                            }
+                            *diagnostics.operator_work.entry(op_id).or_default() += n;
+                            *diagnostics.join_fanout.entry(op_id).or_default() += n;
+                            let key_str = format!(
+                                "{op_id:?}:{}",
+                                join_key
+                                    .iter()
+                                    .map(|v| v.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            );
+                            *diagnostics.hot_join_keys.entry(key_str).or_default() += n;
+                        };
 
-                        for (other_deriv, other_tuple) in
-                            matches.iter().skip(next_idx).take(take_count)
-                        {
+                        for (_, entry) in page.iter() {
+                            let other_tuple = &entry.tuple;
+                            if !entry.deriv.leaf_count_ok(counts) {
+                                return Err(corrupt_derivation());
+                            }
+                            // Full leaf-kind check of a stored derivation; a mismatch is
+                            // corrupt state (also in release builds).
+                            entry
+                                .deriv
+                                .check_shape(&self.dag)
+                                .map_err(|e| WorldError::from(StateError::from(e)))?;
+                            let other_deriv =
+                                Derivation::from_stored(entry.deriv.clone(), &self.dag)
+                                    .map_err(|e| WorldError::from(StateError::from(e)))?;
                             let (comp_tuple, comp_deriv) = if is_left {
-                                let composite = tuple.merge(other_tuple);
-                                let comp_deriv = DerivationId::Join {
-                                    op: op_id,
-                                    left: Box::new(deriv.clone()),
-                                    right: Box::new(other_deriv.clone()),
-                                };
-                                (composite, comp_deriv)
+                                (
+                                    tuple.merge(other_tuple),
+                                    Derivation::join(op_id, own_deriv, &other_deriv),
+                                )
                             } else {
-                                let composite = other_tuple.merge(tuple);
-                                let comp_deriv = DerivationId::Join {
-                                    op: op_id,
-                                    left: Box::new(other_deriv.clone()),
-                                    right: Box::new(deriv.clone()),
-                                };
-                                (composite, comp_deriv)
+                                (
+                                    other_tuple.merge(tuple),
+                                    Derivation::join(op_id, &other_deriv, own_deriv),
+                                )
                             };
 
                             work_in_slice += 1;
                             total_work += 1;
                             total_matches += 1;
-                            *diagnostics.operator_work.entry(op_id).or_default() += 1;
-                            *diagnostics.join_fanout.entry(op_id).or_default() += 1;
-                            *diagnostics
-                                .hot_join_keys
-                                .entry(key_str.clone())
-                                .or_default() += 1;
+                            page_matches += 1;
 
-                            if limits.max_work.is_some_and(|max| total_work > max) {
-                                return Err(WorldError::BudgetExhausted);
-                            }
-                            if limits.max_matches.is_some_and(|max| total_matches > max) {
+                            if limits.max_work.is_some_and(|max| total_work > max)
+                                || limits.max_matches.is_some_and(|max| total_matches > max)
+                            {
+                                flush_diag(&mut diagnostics, page_matches);
                                 return Err(WorldError::BudgetExhausted);
                             }
 
@@ -1462,15 +2525,17 @@ impl WorldNetwork {
                             }
                         }
 
-                        let new_next_idx = next_idx + take_count;
-                        if new_next_idx < matches.len() {
+                        flush_diag(&mut diagnostics, page_matches);
+                        let new_remaining = remaining.saturating_sub(page.len());
+                        if new_remaining > 0 && next_cursor.is_some() {
                             operator_queues.entry(op_id).or_default().push_front(
                                 OperatorWorkItem::JoinContinuation {
                                     delta,
                                     is_left,
                                     join_key,
                                     matches,
-                                    next_idx: new_next_idx,
+                                    cursor: next_cursor,
+                                    remaining: new_remaining,
                                 },
                             );
                         }
@@ -1482,32 +2547,29 @@ impl WorldNetwork {
                                 TupleDelta::Insert { tuple, derivation }
                                 | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
                             };
+                            let store = &self.state;
 
-                            let tuple_key = tuple.to_tuple_record().to_tuple().0;
-                            let out_deriv = DerivationId::Distinct {
-                                op: op_id,
-                                tuple_key,
+                            let tuple_key = distinct_key(&tuple);
+                            let out_deriv = Derivation::distinct(op_id, tuple_key);
+
+                            let (old_count, new_count) = if is_ins {
+                                supports.add(tuple.clone(), deriv.c.clone(), store)?
+                            } else {
+                                supports.remove(&tuple, &deriv.c.digest(), store)?
                             };
 
                             if is_ins {
-                                let entry = supports.entry(tuple.clone()).or_default();
-                                let was_empty = entry.is_empty();
-                                entry.insert(deriv);
-                                if was_empty {
+                                if old_count == 0 {
                                     out_deltas.push(TupleDelta::Insert {
                                         tuple,
                                         derivation: out_deriv,
                                     });
                                 }
-                            } else if let Some(entry) = supports.get_mut(&tuple) {
-                                entry.remove(&deriv);
-                                if entry.is_empty() {
-                                    supports.remove(&tuple);
-                                    out_deltas.push(TupleDelta::Retract {
-                                        tuple,
-                                        derivation: out_deriv,
-                                    });
-                                }
+                            } else if old_count > 0 && new_count == 0 {
+                                out_deltas.push(TupleDelta::Retract {
+                                    tuple,
+                                    derivation: out_deriv,
+                                });
                             }
                         }
                         _ => unreachable!(),
@@ -1558,71 +2620,41 @@ impl WorldNetwork {
                                     .collect::<Result<_, _>>()?
                             };
 
-                            if is_ins {
-                                let set = groups.entry(key_vals.clone()).or_default();
-                                let old_count = set.len();
-                                set.insert(deriv);
-                                let new_count = set.len();
+                            let store = &self.state;
+                            let gk = ValueList(key_vals.clone());
+                            let (old_count, new_count) = if is_ins {
+                                groups.add(gk, deriv.c.digest(), store)?
+                            } else {
+                                groups.remove(&gk, &deriv.c.digest(), store)?
+                            };
 
-                                if new_count != old_count {
-                                    let out_deriv = DerivationId::Group {
-                                        op: op_id,
-                                        group_key: key_vals.clone(),
-                                    };
-                                    if old_count == 0 {
-                                        let out_tuple =
-                                            build_grouped_tuple(projections, &key_vals, 1);
-                                        out_deltas.push(TupleDelta::Insert {
-                                            tuple: out_tuple,
-                                            derivation: out_deriv,
-                                        });
-                                    } else {
-                                        let old_tuple =
-                                            build_grouped_tuple(projections, &key_vals, old_count);
-                                        let new_tuple =
-                                            build_grouped_tuple(projections, &key_vals, new_count);
-                                        out_deltas.push(TupleDelta::Retract {
-                                            tuple: old_tuple,
-                                            derivation: out_deriv.clone(),
-                                        });
-                                        out_deltas.push(TupleDelta::Insert {
-                                            tuple: new_tuple,
-                                            derivation: out_deriv,
-                                        });
-                                    }
-                                }
-                            } else if let Some(set) = groups.get_mut(&key_vals) {
-                                let old_count = set.len();
-                                set.remove(&deriv);
-                                let new_count = set.len();
-
-                                if new_count != old_count {
-                                    let out_deriv = DerivationId::Group {
-                                        op: op_id,
-                                        group_key: key_vals.clone(),
-                                    };
-                                    if new_count == 0 {
-                                        let old_tuple =
-                                            build_grouped_tuple(projections, &key_vals, 1);
-                                        groups.remove(&key_vals);
-                                        out_deltas.push(TupleDelta::Retract {
-                                            tuple: old_tuple,
-                                            derivation: out_deriv,
-                                        });
-                                    } else {
-                                        let old_tuple =
-                                            build_grouped_tuple(projections, &key_vals, old_count);
-                                        let new_tuple =
-                                            build_grouped_tuple(projections, &key_vals, new_count);
-                                        out_deltas.push(TupleDelta::Retract {
-                                            tuple: old_tuple,
-                                            derivation: out_deriv.clone(),
-                                        });
-                                        out_deltas.push(TupleDelta::Insert {
-                                            tuple: new_tuple,
-                                            derivation: out_deriv,
-                                        });
-                                    }
+                            if new_count != old_count {
+                                let out_deriv = Derivation::group(op_id, key_vals.clone());
+                                if is_ins && old_count == 0 {
+                                    let out_tuple = build_grouped_tuple(projections, &key_vals, 1);
+                                    out_deltas.push(TupleDelta::Insert {
+                                        tuple: out_tuple,
+                                        derivation: out_deriv,
+                                    });
+                                } else if !is_ins && new_count == 0 {
+                                    let old_tuple = build_grouped_tuple(projections, &key_vals, 1);
+                                    out_deltas.push(TupleDelta::Retract {
+                                        tuple: old_tuple,
+                                        derivation: out_deriv,
+                                    });
+                                } else {
+                                    let old_tuple =
+                                        build_grouped_tuple(projections, &key_vals, old_count);
+                                    let new_tuple =
+                                        build_grouped_tuple(projections, &key_vals, new_count);
+                                    out_deltas.push(TupleDelta::Retract {
+                                        tuple: old_tuple,
+                                        derivation: out_deriv.clone(),
+                                    });
+                                    out_deltas.push(TupleDelta::Insert {
+                                        tuple: new_tuple,
+                                        derivation: out_deriv,
+                                    });
                                 }
                             }
                         }
@@ -1631,54 +2663,87 @@ impl WorldNetwork {
                 }
             }
 
-            // Propagate out_deltas
+            // Propagate out_deltas. Each consumer of the batch gets a copy except the last,
+            // which takes ownership (avoids one full clone of every batch).
             if !out_deltas.is_empty() {
-                report.intermediate_deltas_count += out_deltas.len();
+                let n_out = out_deltas.len();
+                report.intermediate_deltas_count += n_out;
+                let outputs = self.output_relations.get(&op_id);
+                let down = self.downstream.get(&op_id);
+                let mut uses_left = outputs.map_or(0, |o| o.len()) + down.map_or(0, |d| d.len());
 
-                if let Some(outputs) = self.output_relations.get(&op_id) {
+                if let Some(outputs) = outputs {
                     for rel_name in outputs {
                         *diagnostics
                             .relation_deltas
                             .entry(rel_name.clone())
-                            .or_default() += out_deltas.len() as u64;
-                        relation_deltas
-                            .entry(rel_name.clone())
-                            .or_default()
-                            .extend(out_deltas.clone());
+                            .or_default() += n_out as u64;
 
                         if !self.base_relations.contains_key(rel_name) {
+                            let store = &self.state;
+                            let rel =
+                                self.derived_relations.get_mut(rel_name).ok_or_else(|| {
+                                    WorldError::NetworkError(format!(
+                                        "output relation {rel_name} has no derived index"
+                                    ))
+                                })?;
                             for od in &out_deltas {
-                                let rec = od.tuple().to_tuple_record();
-                                if od.is_insert() {
-                                    if self
-                                        .derived_relations
-                                        .entry(rel_name.clone())
-                                        .or_default()
-                                        .insert(rec)
-                                    {
-                                        report.derived_tuples_inserted += 1;
+                                let is_ins = od.is_insert();
+
+                                let changed = match rel {
+                                    // A Distinct output emits only on 0 -> 1 / 1 -> 0 support
+                                    // transitions of its own index, which is the relation.
+                                    DerivedRel::DistinctOutput(_) => true,
+                                    DerivedRel::Counted(supports) => {
+                                        let id = od.derivation().digest();
+                                        let (old, new) = if is_ins {
+                                            supports.add(od.tuple().clone(), id, store)?
+                                        } else {
+                                            supports.remove(od.tuple(), &id, store)?
+                                        };
+                                        if is_ins {
+                                            old == 0 && new > 0
+                                        } else {
+                                            old > 0 && new == 0
+                                        }
                                     }
-                                } else {
-                                    if self
-                                        .derived_relations
-                                        .entry(rel_name.clone())
-                                        .or_default()
-                                        .remove(&rec)
-                                    {
+                                };
+
+                                if changed {
+                                    if is_ins {
+                                        report.derived_tuples_inserted += 1;
+                                    } else {
                                         report.derived_tuples_retracted += 1;
                                     }
                                 }
                             }
                         }
+
+                        uses_left -= 1;
+                        let batch = if uses_left == 0 {
+                            std::mem::take(&mut out_deltas)
+                        } else {
+                            out_deltas.clone()
+                        };
+                        relation_deltas
+                            .entry(rel_name.clone())
+                            .or_default()
+                            .extend(batch);
                     }
                 }
 
-                if let Some(down) = self.downstream.get(&op_id) {
+                if let Some(down) = down {
                     for consumer in down {
-                        for od in &out_deltas {
+                        uses_left -= 1;
+                        let batch = if uses_left == 0 {
+                            std::mem::take(&mut out_deltas)
+                        } else {
+                            out_deltas.clone()
+                        };
+                        for od in batch {
                             enqueue(
                                 *consumer,
-                                OperatorWorkItem::Delta(od.clone()),
+                                OperatorWorkItem::Delta(od),
                                 &mut operator_queues,
                                 &mut ready_operators,
                                 &mut in_ready,
@@ -1705,6 +2770,15 @@ impl WorldNetwork {
 
         // 3. Update candidate frontiers for decide blocks from relation deltas
         let mut touched_entities = BTreeSet::new();
+        // Buckets are read once, edited in memory across all deltas of the batch, and
+        // written back once per entity (`None`: the entity has no live candidate).
+        let mut staged_buckets: BTreeMap<FrontierKey, Option<FrontierBucket>> = BTreeMap::new();
+        // Globally retract-first: every relation's netted retractions, then every
+        // insertion (stable within each class). A candidate's value can then never meet
+        // a stale support from another relation, so the outcome does not depend on the
+        // order relations are visited in or on where chunk boundaries fall (ADR-0046
+        // CPD, H4). Batches that succeed produce the same state as before.
+        let mut frontier_work: Vec<(&DecideBlock, &TupleDelta)> = Vec::new();
         for (relation, rel_deltas) in &relation_deltas {
             for decide_name in self
                 .decision_subscribers
@@ -1713,151 +2787,171 @@ impl WorldNetwork {
                 .flatten()
             {
                 let decide = &self.decides[decide_name];
-                for delta in rel_deltas
-                    .iter()
-                    .filter(|d| !d.is_insert())
-                    .chain(rel_deltas.iter().filter(|d| d.is_insert()))
-                {
-                    let is_ins = delta.is_insert();
-                    let (tuple, deriv) = match delta {
-                        TupleDelta::Insert { tuple, derivation }
-                        | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
+                for delta in net_effect(rel_deltas) {
+                    frontier_work.push((decide, delta));
+                }
+            }
+        }
+        frontier_work.sort_by_key(|(_, d)| d.is_insert());
+        for (decide, delta) in frontier_work {
+            let is_ins = delta.is_insert();
+            let (tuple, deriv) = match delta {
+                TupleDelta::Insert { tuple, derivation }
+                | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
+            };
+
+            let mut eval_tuple = tuple.clone();
+            for (k, v) in &tuple.fields {
+                eval_tuple.insert(format!("{}.{k}", decide.binder), v.clone());
+            }
+
+            for (p_idx, propose) in decide.proposals.iter().enumerate() {
+                let entity_id = entity_id_for(&eval_tuple, &decide.binder, &decide.per_field)?;
+                touched_entities.insert((decide.name.clone(), entity_id.clone()));
+
+                if is_ins {
+                    let compiled = decide.compiled_proposals.get(p_idx);
+                    let (guard_passed, val) = if let Some(compiled) = compiled {
+                        let bindings = scalar_bindings(&eval_tuple)?;
+                        diagnostics.expressions_evaluated += 1;
+                        if limits
+                            .max_expressions
+                            .is_some_and(|max| diagnostics.expressions_evaluated > max)
+                        {
+                            return Err(WorldError::BudgetExhausted);
+                        }
+                        let guard_l3 = compiled
+                            .guard
+                            .eval(&bindings)
+                            .map_err(WorldError::NetworkError)?;
+                        let guard_passed = match guard_l3 {
+                            brix_lower::l3_v2::L3ValueV2::Bool(b) => b,
+                            other => {
+                                return Err(WorldError::NetworkError(format!(
+                                    "expected boolean, got {other:?}"
+                                )))
+                            }
+                        };
+                        if guard_passed {
+                            diagnostics.expressions_evaluated += 1;
+                            if limits
+                                .max_expressions
+                                .is_some_and(|max| diagnostics.expressions_evaluated > max)
+                            {
+                                return Err(WorldError::BudgetExhausted);
+                            }
+                            let val_l3 = compiled
+                                .value
+                                .eval(&bindings)
+                                .map_err(WorldError::NetworkError)?;
+                            let val = Value::from_scalar(val_l3)?;
+                            (true, Some(val))
+                        } else {
+                            (false, None)
+                        }
+                    } else {
+                        diagnostics.expressions_evaluated += 1;
+                        if limits
+                            .max_expressions
+                            .is_some_and(|max| diagnostics.expressions_evaluated > max)
+                        {
+                            return Err(WorldError::BudgetExhausted);
+                        }
+                        let guard_passed =
+                            eval_expr(&propose.guard, &eval_tuple, &self.functions)?.as_bool()?;
+                        if guard_passed {
+                            diagnostics.expressions_evaluated += 1;
+                            if limits
+                                .max_expressions
+                                .is_some_and(|max| diagnostics.expressions_evaluated > max)
+                            {
+                                return Err(WorldError::BudgetExhausted);
+                            }
+                            let val = eval_expr(&propose.value, &eval_tuple, &self.functions)?;
+                            (true, Some(val))
+                        } else {
+                            (false, None)
+                        }
                     };
 
-                    let mut eval_tuple = tuple.clone();
-                    for (k, v) in &tuple.fields {
-                        eval_tuple.insert(format!("{}.{k}", decide.binder), v.clone());
-                    }
+                    if guard_passed {
+                        let val = val.unwrap();
+                        let cal_key = compute_candidate_calendar_key(
+                            0,
+                            propose.priority,
+                            &decide.name,
+                            &entity_id,
+                            &propose.name,
+                            &val,
+                        );
 
-                    for (p_idx, propose) in decide.proposals.iter().enumerate() {
-                        let entity_id =
-                            entity_id_for(&eval_tuple, &decide.binder, &decide.per_field)?;
-                        touched_entities.insert((decide.name.clone(), entity_id.clone()));
-
-                        if is_ins {
-                            let compiled = decide.compiled_proposals.get(p_idx);
-                            let (guard_passed, val) = if let Some(compiled) = compiled {
-                                let bindings = scalar_bindings(&eval_tuple)?;
-                                diagnostics.expressions_evaluated += 1;
-                                if limits
-                                    .max_expressions
-                                    .is_some_and(|max| diagnostics.expressions_evaluated > max)
-                                {
-                                    return Err(WorldError::BudgetExhausted);
+                        let store = &self.state;
+                        let fk = FrontierKey::new(&decide.name, &entity_id);
+                        if !staged_buckets.contains_key(&fk) {
+                            let loaded = self.candidate_frontier.bucket(&fk, store)?;
+                            staged_buckets.insert(fk.clone(), loaded);
+                        }
+                        let bucket = staged_buckets
+                            .get_mut(&fk)
+                            .expect("bucket staged above")
+                            .get_or_insert_with(Default::default);
+                        let ck = CandKey::new(&decide.name, &entity_id, &propose.name);
+                        match bucket.0.get_mut(&propose.name) {
+                            Some(rec) => {
+                                if rec.head.value != val {
+                                    return Err(WorldError::NetworkError(format!(
+                                        "conflicting support values for decide '{}' \
+                                                 entity '{entity_id}' candidate '{}': {:?} vs \
+                                                 {val:?}",
+                                        decide.name, propose.name, rec.head.value
+                                    )));
                                 }
-                                let guard_l3 = compiled
-                                    .guard
-                                    .eval(&bindings)
-                                    .map_err(WorldError::NetworkError)?;
-                                let guard_passed = match guard_l3 {
-                                    brix_lower::l3_v2::L3ValueV2::Bool(b) => b,
-                                    other => {
-                                        return Err(WorldError::NetworkError(format!(
-                                            "expected boolean, got {other:?}"
-                                        )))
-                                    }
-                                };
-                                if guard_passed {
-                                    diagnostics.expressions_evaluated += 1;
-                                    if limits
-                                        .max_expressions
-                                        .is_some_and(|max| diagnostics.expressions_evaluated > max)
-                                    {
-                                        return Err(WorldError::BudgetExhausted);
-                                    }
-                                    let val_l3 = compiled
-                                        .value
-                                        .eval(&bindings)
-                                        .map_err(WorldError::NetworkError)?;
-                                    let val = Value::from_scalar(val_l3)?;
-                                    (true, Some(val))
-                                } else {
-                                    (false, None)
-                                }
-                            } else {
-                                diagnostics.expressions_evaluated += 1;
-                                if limits
-                                    .max_expressions
-                                    .is_some_and(|max| diagnostics.expressions_evaluated > max)
-                                {
-                                    return Err(WorldError::BudgetExhausted);
-                                }
-                                let guard_passed =
-                                    eval_expr(&propose.guard, &eval_tuple, &self.functions)?
-                                        .as_bool()?;
-                                if guard_passed {
-                                    diagnostics.expressions_evaluated += 1;
-                                    if limits
-                                        .max_expressions
-                                        .is_some_and(|max| diagnostics.expressions_evaluated > max)
-                                    {
-                                        return Err(WorldError::BudgetExhausted);
-                                    }
-                                    let val =
-                                        eval_expr(&propose.value, &eval_tuple, &self.functions)?;
-                                    (true, Some(val))
-                                } else {
-                                    (false, None)
-                                }
-                            };
-
-                            if guard_passed {
-                                let val = val.unwrap();
-                                let cal_key = compute_candidate_calendar_key(
-                                    0,
-                                    propose.priority,
-                                    &decide.name,
-                                    &entity_id,
-                                    &propose.name,
-                                    &val,
-                                );
-
-                                let entity_map = self
-                                    .candidate_frontier
-                                    .entry(decide.name.clone())
-                                    .or_default()
-                                    .entry(entity_id.clone())
-                                    .or_default();
-
-                                if let Some(existing) = entity_map.get(&propose.name) {
-                                    if existing.value != val {
-                                        return Err(WorldError::NetworkError(format!(
-                                            "conflicting support values for decide '{}' entity \
-                                             '{entity_id}' candidate '{}': {:?} vs {val:?}",
-                                            decide.name, propose.name, existing.value
-                                        )));
-                                    }
-                                }
-
-                                let entry =
-                                    entity_map.entry(propose.name.clone()).or_insert_with(|| {
-                                        report.candidates_inserted += 1;
-                                        CandidateEntry {
-                                            candidate_name: propose.name.clone(),
-                                            entity_id: entity_id.clone(),
+                                self.candidate_frontier.add_support(
+                                    &ck,
+                                    rec,
+                                    deriv.c.clone(),
+                                    store,
+                                )?;
+                            }
+                            None => {
+                                report.candidates_inserted += 1;
+                                bucket.0.insert(
+                                    propose.name.clone(),
+                                    CandidateRec {
+                                        head: CandidateHead {
                                             priority: propose.priority,
                                             phase: 0,
-                                            value: val.clone(),
+                                            value: val,
                                             calendar_key: cal_key,
-                                            supports: PSet::new(),
-                                        }
-                                    });
-
-                                entry.supports.insert(deriv.clone());
+                                        },
+                                        supports: SupportRef::Inline(deriv.c.clone()),
+                                    },
+                                );
                             }
-                        } else if let Some(decide_map) =
-                            self.candidate_frontier.get_mut(&decide.name)
-                        {
-                            if let Some(entity_map) = decide_map.get_mut(&entity_id) {
-                                if let Some(entry) = entity_map.get_mut(&propose.name) {
-                                    entry.supports.remove(deriv);
-                                    if entry.supports.is_empty() {
-                                        entity_map.remove(&propose.name);
-                                        report.candidates_retracted += 1;
-                                    }
-                                }
-                                if entity_map.is_empty() {
-                                    decide_map.remove(&entity_id);
+                        }
+                    }
+                } else {
+                    let store = &self.state;
+                    let fk = FrontierKey::new(&decide.name, &entity_id);
+                    if !staged_buckets.contains_key(&fk) {
+                        let loaded = self.candidate_frontier.bucket(&fk, store)?;
+                        staged_buckets.insert(fk.clone(), loaded);
+                    }
+                    let slot = staged_buckets.get_mut(&fk).expect("bucket staged above");
+                    if let Some(bucket) = slot.as_mut() {
+                        if let Some(rec) = bucket.0.get_mut(&propose.name) {
+                            let ck = CandKey::new(&decide.name, &entity_id, &propose.name);
+                            let remaining = self.candidate_frontier.remove_support(
+                                &ck,
+                                rec,
+                                &deriv.c.digest(),
+                                store,
+                            )?;
+                            if remaining == 0 {
+                                bucket.0.remove(&propose.name);
+                                report.candidates_retracted += 1;
+                                if bucket.0.is_empty() {
+                                    *slot = None;
                                 }
                             }
                         }
@@ -1867,114 +2961,318 @@ impl WorldNetwork {
         }
 
         for (decide, entity) in touched_entities {
-            if self
-                .candidate_frontier
-                .get(&decide)
-                .is_some_and(|entities| entities.is_empty())
-            {
-                self.candidate_frontier.remove(&decide);
-            }
             let key = decision_key(&decide, &entity);
-            if let Some(decision) = self.get_settlement(&decide, &entity) {
+            let settlement = match staged_buckets.get(&FrontierKey::new(&decide, &entity)) {
+                Some(Some(bucket)) => settle(&entity, bucket),
+                Some(None) => None,
+                None => self.settlement_of(&decide, &entity)?,
+            };
+
+            // The pre-batch value is the tree's value the first time any chunk touches
+            // the entity; the batch's settlement delta is last-vs-prior (H1), not a merge
+            // of per-chunk reports.
+            let current = self.decision_tree.get(&key, &self.state)?;
+            let track = ctx
+                .decisions
+                .entry((decide.clone(), entity.clone()))
+                .or_insert_with(|| DecisionTrack {
+                    prior: current.clone(),
+                    last: None,
+                });
+            if let Some(decision) = settlement {
                 let tuple = decision_tuple(&decision);
-                if self.decision_tree.get(&key) == Some(&tuple) {
-                    continue;
+                if current.as_ref() != Some(&tuple) {
+                    self.decision_tree = self.decision_tree.upsert(key, tuple, &self.state)?;
                 }
-                self.decision_tree = self.decision_tree.insert(key, tuple);
-                report
-                    .settlements
-                    .entry(decide)
-                    .or_default()
-                    .insert(entity, decision);
-            } else if self.decision_tree.get(&key).is_some() {
-                self.decision_tree = self.decision_tree.remove(&key);
-                report
-                    .removed_settlements
-                    .entry(decide)
-                    .or_default()
-                    .insert(entity);
+                track.last = Some(decision);
+            } else {
+                if current.is_some() {
+                    self.decision_tree = self.decision_tree.remove(&key, &self.state)?;
+                }
+                track.last = None;
+            }
+        }
+
+        for (fk, bucket) in staged_buckets {
+            self.candidate_frontier
+                .put_bucket(fk, bucket, &self.state)?;
+        }
+
+        ctx.report = report;
+        ctx.diagnostics = diagnostics;
+        ctx.total_work = total_work;
+        ctx.total_matches = total_matches;
+        Ok(())
+    }
+
+    /// End a batch: report the net settlement change over all chunks and advance the
+    /// revision. For a single chunk this is exactly what the unchunked path reported.
+    pub fn finish_batch(&mut self, ctx: BatchCtx) -> NetworkDeltaReport {
+        let BatchCtx {
+            mut report,
+            diagnostics,
+            decisions,
+            ..
+        } = ctx;
+        for ((decide, entity), track) in decisions {
+            match track.last {
+                Some(decision) => {
+                    if track.prior.as_ref() != Some(&decision_tuple(&decision)) {
+                        report
+                            .settlements
+                            .entry(decide)
+                            .or_default()
+                            .insert(entity, decision);
+                    }
+                }
+                None => {
+                    if track.prior.is_some() {
+                        report
+                            .removed_settlements
+                            .entry(decide)
+                            .or_default()
+                            .insert(entity);
+                    }
+                }
             }
         }
         report.diagnostics = diagnostics;
         self.current_revision += 1;
-        Ok(report)
+        report
+    }
+
+    /// Number of settlements in the persisted decision trie.
+    pub fn decision_count(&self) -> usize {
+        self.decision_tree.len()
+    }
+
+    /// Whether the decision trie holds exactly `decision` for `(decide, entity)`.
+    pub fn decision_matches(
+        &self,
+        decide: &str,
+        entity: &str,
+        decision: &SettledDecision,
+    ) -> Result<bool, WorldError> {
+        Ok(self
+            .decision_tree
+            .get(&decision_key(decide, entity), &self.state)?
+            .as_ref()
+            == Some(&decision_tuple(decision)))
+    }
+
+    /// Whether the decision trie holds nothing for `(decide, entity)`.
+    pub fn decision_absent(&self, decide: &str, entity: &str) -> Result<bool, WorldError> {
+        Ok(self
+            .decision_tree
+            .get(&decision_key(decide, entity), &self.state)?
+            .is_none())
     }
 
     /// Canonical decision root, maintained only for affected entities.
     pub fn decision_root(&self) -> Digest {
-        self.decision_tree.root_digest()
+        self.decision_tree.root()
     }
 
-    /// Retrieve all derived tuples produced for a relation.
-    pub fn get_derived_tuples(&self, relation: &str) -> Option<Vec<TupleRecord>> {
-        self.derived_relations
-            .get(relation)
-            .map(|set| set.iter().cloned().collect())
+    /// Retrieve all derived tuples produced for a relation, in `TupleRecord` order.
+    ///
+    /// `None` if `relation` is not a derived relation. Tuples are stored typed, so two
+    /// distinct typed tuples whose display bytes coincide (`Int(1)` vs `Str("1")`) are two
+    /// entries internally and collapse to one record only here, in the observable view.
+    pub fn get_derived_tuples(
+        &self,
+        relation: &str,
+    ) -> Result<Option<Vec<TupleRecord>>, WorldError> {
+        let _scope = self.state.trace_scope("query");
+        let Some(rel) = self.derived_relations.get(relation) else {
+            return Ok(None);
+        };
+        let records: BTreeSet<TupleRecord> = self
+            .derived_tuples(rel)?
+            .iter()
+            .map(IntermediateTuple::to_tuple_record)
+            .collect();
+        Ok(Some(records.into_iter().collect()))
     }
 
-    /// Retrieve candidates for a specific decide block and entity.
+    /// The typed tuples of one derived relation.
+    fn derived_tuples(&self, rel: &DerivedRel) -> Result<Vec<IntermediateTuple>, WorldError> {
+        match rel {
+            DerivedRel::Counted(supports) => supports.keys(&self.state),
+            DerivedRel::DistinctOutput(op) => match self.operator_states.get(&op.0) {
+                Some(OperatorState::Distinct { supports, .. }) => supports.keys(&self.state),
+                _ => Err(WorldError::NetworkError(format!(
+                    "derived relation refers to operator {} which is not a Distinct",
+                    op.0
+                ))),
+            },
+        }
+    }
+
+    /// Candidates (with their expanded supports) for a specific decide block and entity.
     pub fn get_candidates(
         &self,
         decide: &str,
         entity_id: &str,
-    ) -> Option<&PMap<String, CandidateEntry>> {
-        self.candidate_frontier.get(decide)?.get(entity_id)
+    ) -> Result<Option<BTreeMap<String, CandidateEntry>>, WorldError> {
+        let _scope = self.state.trace_scope("query");
+        let Some(bucket) = self
+            .candidate_frontier
+            .bucket(&FrontierKey::new(decide, entity_id), &self.state)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(self.candidate_entries(decide, entity_id, &bucket)?))
+    }
+
+    fn candidate_entries(
+        &self,
+        decide: &str,
+        entity_id: &str,
+        bucket: &FrontierBucket,
+    ) -> Result<BTreeMap<String, CandidateEntry>, WorldError> {
+        let mut out = BTreeMap::new();
+        for (name, rec) in &bucket.0 {
+            let items = self
+                .candidate_frontier
+                .supports_of(&CandKey::new(decide, entity_id, name), rec)
+                .members(&self.state)?;
+            let mut supports = PSet::new();
+            for id in self.expand_supports(&items)? {
+                supports.insert(id);
+            }
+            out.insert(
+                name.clone(),
+                CandidateEntry {
+                    candidate_name: name.clone(),
+                    entity_id: entity_id.to_string(),
+                    priority: rec.head.priority,
+                    phase: rec.head.phase,
+                    value: rec.head.value.clone(),
+                    calendar_key: rec.head.calendar_key,
+                    supports,
+                },
+            );
+        }
+        Ok(out)
     }
 
     /// Deliberate and select the winning candidate for an entity using canonical settlement discipline.
-    pub fn get_settlement(&self, decide: &str, entity_id: &str) -> Option<SettledDecision> {
-        let decide_frontier = self.candidate_frontier.get(decide)?;
-        let entity_candidates = decide_frontier.get(entity_id)?;
+    pub fn get_settlement(
+        &self,
+        decide: &str,
+        entity_id: &str,
+    ) -> Result<Option<SettledDecision>, WorldError> {
+        let _scope = self.state.trace_scope("query");
+        self.settlement_of(decide, entity_id)
+    }
 
-        let mut frontier: Frontier<&CandidateEntry> = Frontier::new();
-        for candidate in entity_candidates.values() {
-            if !candidate.supports.is_empty() {
-                let _ = frontier.insert(candidate.calendar_key, candidate);
-            }
-        }
-
-        let (key, candidate) = frontier.select_least()?;
-        Some(SettledDecision {
-            entity_id: candidate.entity_id.clone(),
-            candidate_name: candidate.candidate_name.clone(),
-            priority: candidate.priority,
-            phase: candidate.phase,
-            value: candidate.value.clone(),
-            calendar_key: key,
-        })
+    /// [`Self::get_settlement`] without opening a trace scope (used inside an apply).
+    fn settlement_of(
+        &self,
+        decide: &str,
+        entity_id: &str,
+    ) -> Result<Option<SettledDecision>, WorldError> {
+        Ok(self
+            .candidate_frontier
+            .bucket(&FrontierKey::new(decide, entity_id), &self.state)?
+            .and_then(|bucket| settle(entity_id, &bucket)))
     }
 
     /// Settle decisions across all entities in all decide blocks.
-    pub fn all_settlements(&self) -> BTreeMap<String, BTreeMap<String, SettledDecision>> {
-        let mut out = BTreeMap::new();
-        for (decide_name, entity_map) in &self.candidate_frontier {
-            let mut entities = BTreeMap::new();
-            for entity_id in entity_map.keys() {
-                if let Some(decision) = self.get_settlement(decide_name, entity_id) {
-                    entities.insert(entity_id.clone(), decision);
+    pub fn all_settlements(
+        &self,
+    ) -> Result<BTreeMap<String, BTreeMap<String, SettledDecision>>, WorldError> {
+        let _scope = self.state.trace_scope("query");
+        let mut out: BTreeMap<String, BTreeMap<String, SettledDecision>> = BTreeMap::new();
+        // Streamed: each bucket is reduced to its settlement and dropped, so peak memory is
+        // the settlements themselves rather than every decoded bucket besides.
+        self.candidate_frontier
+            .for_each_bucket(&self.state, |key, bucket| {
+                if let Some(decision) = settle(&key.entity, &bucket) {
+                    out.entry(key.decide)
+                        .or_default()
+                        .insert(key.entity, decision);
                 }
-            }
-            if !entities.is_empty() {
-                out.insert(decide_name.clone(), entities);
+                Ok(())
+            })?;
+        Ok(out)
+    }
+
+    /// One page of settlements from the candidate frontier, at most `limit` buckets (so at
+    /// most `limit` settlements) after `cursor`, in deterministic trie order (not sorted by
+    /// name), without materialising the rest. Every bucket is verified.
+    #[allow(clippy::type_complexity)]
+    pub fn settlements_page(
+        &self,
+        cursor: Option<&PageCursor<FrontierKey>>,
+        limit: usize,
+    ) -> Result<
+        (
+            Vec<(String, String, SettledDecision)>,
+            Option<PageCursor<FrontierKey>>,
+        ),
+        WorldError,
+    > {
+        let _scope = self.state.trace_scope("query");
+        let (rows, next) = self
+            .candidate_frontier
+            .buckets
+            .page(cursor, limit, &self.state)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (key, bucket) in rows {
+            verify_bucket(&key, &bucket)?;
+            if let Some(decision) = settle(&key.entity, &bucket) {
+                out.push((key.decide, key.entity, decision));
             }
         }
-        out
+        Ok((out, next))
     }
 
     /// Capture current observable network state.
-    pub fn current_state(&self) -> WorldNetworkState {
+    pub fn current_state(&self) -> Result<WorldNetworkState, WorldError> {
+        let _scope = self.state.trace_scope("query");
         let mut distinct_supports = BTreeMap::new();
         for (idx, state) in self.operator_states.iter() {
             if let OperatorState::Distinct { supports, .. } = state {
                 let mut map = BTreeMap::new();
-                for (it, sups) in supports {
-                    map.insert(it.to_tuple_record(), sups.iter().cloned().collect());
+                for (it, items) in supports.entries(&self.state)? {
+                    map.insert(it.to_tuple_record(), self.expand_supports(&items)?);
                 }
                 distinct_supports.insert(OperatorId(*idx), map);
             }
         }
 
-        WorldNetworkState {
+        let mut derived_relations = BTreeMap::new();
+        for (name, rel) in self.derived_relations.iter() {
+            derived_relations.insert(
+                name.clone(),
+                self.derived_tuples(rel)?
+                    .iter()
+                    .map(IntermediateTuple::to_tuple_record)
+                    .collect::<BTreeSet<_>>(),
+            );
+        }
+
+        let mut candidate_frontier: BTreeMap<
+            String,
+            BTreeMap<String, BTreeMap<String, CandidateEntry>>,
+        > = BTreeMap::new();
+        let mut settlements: BTreeMap<String, BTreeMap<String, SettledDecision>> = BTreeMap::new();
+        for (key, bucket) in self.candidate_frontier.all_buckets(&self.state)? {
+            if let Some(decision) = settle(&key.entity, &bucket) {
+                settlements
+                    .entry(key.decide.clone())
+                    .or_default()
+                    .insert(key.entity.clone(), decision);
+            }
+            let entries = self.candidate_entries(&key.decide, &key.entity, &bucket)?;
+            candidate_frontier
+                .entry(key.decide)
+                .or_default()
+                .insert(key.entity, entries);
+        }
+
+        Ok(WorldNetworkState {
             base_relations: self
                 .base_relations
                 .iter()
@@ -1985,31 +3283,26 @@ impl WorldNetwork {
                     )
                 })
                 .collect(),
-            derived_relations: self
-                .derived_relations
-                .iter()
-                .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
-                .collect(),
-            candidate_frontier: self
-                .candidate_frontier
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        v.iter()
-                            .map(|(k, v)| {
-                                (
-                                    k.clone(),
-                                    v.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-                                )
-                            })
-                            .collect(),
-                    )
-                })
-                .collect(),
-            settlements: self.all_settlements(),
+            derived_relations,
+            candidate_frontier,
+            settlements,
             distinct_supports,
+        })
+    }
+
+    /// Expand stored compact supports to derivation ids.
+    fn expand_supports(
+        &self,
+        items: &[CompactDeriv],
+    ) -> Result<BTreeSet<DerivationId>, WorldError> {
+        let mut out = BTreeSet::new();
+        for c in items {
+            out.insert(
+                c.expand(&self.dag)
+                    .map_err(|e| WorldError::from(StateError::from(e)))?,
+            );
         }
+        Ok(out)
     }
 
     /// Rebuild from base facts using this engine. This checks update history, not independent semantics.
@@ -2028,13 +3321,13 @@ impl WorldNetwork {
         }
 
         fresh.apply_ops(&ops)?;
-        Ok(fresh.current_state())
+        fresh.current_state()
     }
 
     /// Verify differential correctness: compare incrementally maintained state with oracle full recompute.
     pub fn verify_differential_correctness(&self) -> Result<(), WorldError> {
         let scratch_state = self.recompute_from_scratch()?;
-        let incremental_state = self.current_state();
+        let incremental_state = self.current_state()?;
 
         if incremental_state.derived_relations != scratch_state.derived_relations {
             return Err(WorldError::NetworkError(format!(
@@ -2072,43 +3365,47 @@ impl WorldNetwork {
         &self,
         deriv: &DerivationId,
         out: &mut BTreeSet<(String, WorldKey)>,
-    ) {
+    ) -> Result<(), WorldError> {
         match deriv {
             DerivationId::Base { relation, key } => {
                 out.insert((relation.clone(), key.clone()));
             }
             DerivationId::Unary { parent, .. } => {
-                self.collect_base_facts_for_derivation(parent, out);
+                self.collect_base_facts_for_derivation(parent, out)?;
             }
             DerivationId::Join { left, right, .. } => {
-                self.collect_base_facts_for_derivation(left, out);
-                self.collect_base_facts_for_derivation(right, out);
+                self.collect_base_facts_for_derivation(left, out)?;
+                self.collect_base_facts_for_derivation(right, out)?;
             }
             DerivationId::Distinct { op, tuple_key } => {
                 if let Some(OperatorState::Distinct { supports, .. }) =
                     self.operator_states.get(&op.0)
                 {
-                    for (tuple, parent_derivs) in supports {
-                        if tuple.to_tuple_record().to_tuple().0 == *tuple_key {
-                            for p in parent_derivs {
-                                self.collect_base_facts_for_derivation(p, out);
-                            }
-                        }
+                    // Keyed lookup: the typed key decodes back to the Distinct tuple.
+                    let tuple = IntermediateTuple::state_from_bytes(tuple_key)
+                        .map_err(|e| WorldError::from(StateError::from(e)))?;
+                    let items = supports.read(&tuple, &self.state)?.members(&self.state)?;
+                    for p in self.expand_supports(&items)? {
+                        self.collect_base_facts_for_derivation(&p, out)?;
                     }
                 }
             }
             DerivationId::Group { .. } => {}
         }
+        Ok(())
     }
 
     /// Deliberate and explain the decision for an entity key across any matching decide block.
-    pub fn explain_decision(&self, entity_id: &str) -> Option<DecisionExplanation> {
-        for decide_name in self.candidate_frontier.keys() {
-            if let Some(exp) = self.explain_decision_for(decide_name, entity_id) {
-                return Some(exp);
+    pub fn explain_decision(
+        &self,
+        entity_id: &str,
+    ) -> Result<Option<DecisionExplanation>, WorldError> {
+        for decide_name in self.decides.keys() {
+            if let Some(exp) = self.explain_decision_for(decide_name, entity_id)? {
+                return Ok(Some(exp));
             }
         }
-        None
+        Ok(None)
     }
 
     /// Deliberate and explain the decision for an entity key in a specific decide block.
@@ -2116,32 +3413,41 @@ impl WorldNetwork {
         &self,
         decide_name: &str,
         entity_id: &str,
-    ) -> Option<DecisionExplanation> {
-        let decide_frontier = self.candidate_frontier.get(decide_name)?;
-        let entity_candidates = decide_frontier.get(entity_id)?;
+    ) -> Result<Option<DecisionExplanation>, WorldError> {
+        let _scope = self.state.trace_scope("query");
+        let Some(bucket) = self
+            .candidate_frontier
+            .bucket(&FrontierKey::new(decide_name, entity_id), &self.state)?
+        else {
+            return Ok(None);
+        };
 
-        let settlement = self.get_settlement(decide_name, entity_id);
+        let settlement = settle(entity_id, &bucket);
         let winning_name = settlement.as_ref().map(|s| &s.candidate_name);
 
         let mut candidates = Vec::new();
         let mut contributing_base = BTreeSet::new();
 
-        for (cand_name, entry) in entity_candidates {
+        for (cand_name, rec) in &bucket.0 {
             let winning = winning_name == Some(cand_name);
-            for deriv in &entry.supports {
-                self.collect_base_facts_for_derivation(deriv, &mut contributing_base);
+            let supports = self
+                .candidate_frontier
+                .supports_of(&CandKey::new(decide_name, entity_id, cand_name), rec);
+            let items = supports.members(&self.state)?;
+            for deriv in self.expand_supports(&items)? {
+                self.collect_base_facts_for_derivation(&deriv, &mut contributing_base)?;
             }
             candidates.push(CandidateExplanation {
                 name: cand_name.clone(),
-                priority: entry.priority,
-                phase: entry.phase,
-                value: entry.value.clone(),
-                supports_count: entry.supports.len(),
+                priority: rec.head.priority,
+                phase: rec.head.phase,
+                value: rec.head.value.clone(),
+                supports_count: supports.len(),
                 winning,
             });
         }
 
-        Some(DecisionExplanation {
+        Ok(Some(DecisionExplanation {
             entity_id: entity_id.to_string(),
             decide_name: decide_name.to_string(),
             winning_candidate: settlement.as_ref().map(|s| s.candidate_name.clone()),
@@ -2151,8 +3457,15 @@ impl WorldNetwork {
             calendar_key: settlement.as_ref().map(|s| s.calendar_key),
             candidates,
             contributing_facts: contributing_base.into_iter().collect(),
-        })
+        }))
     }
+}
+
+fn corrupt_derivation() -> WorldError {
+    StateError::Codec(StateCodecError::NonCanonical(
+        "stored derivation does not match its operator".to_string(),
+    ))
+    .into()
 }
 
 fn build_grouped_tuple(
@@ -2195,6 +3508,36 @@ fn entity_id_for(
                 "decide entity field '{per_field}' missing from bound row (binder '{binder}')"
             ))
         })
+}
+
+/// Evaluate a base row into the typed intermediate tuple the Scan operator emits.
+fn scan_intermediate(
+    relation: &str,
+    schema: &ast::Ty,
+    tuple: &WorldTuple,
+) -> Result<IntermediateTuple, WorldError> {
+    let rec = TupleRecord::from_tuple(tuple)?;
+    let ast::Ty::Record(fields) = schema else {
+        return Err(WorldError::NetworkError(format!(
+            "unresolved row schema for {relation}"
+        )));
+    };
+    if rec.fields.len() != fields.len() {
+        return Err(WorldError::NetworkError(format!(
+            "row fields do not match schema for {relation}"
+        )));
+    }
+    let mut intermediate = IntermediateTuple::new();
+    for field in fields {
+        let bytes = rec.get(&field.name).ok_or_else(|| {
+            WorldError::NetworkError(format!("missing field {relation}.{}", field.name))
+        })?;
+        intermediate.insert(
+            field.name.clone(),
+            Value::from_typed_bytes(bytes, &field.ty)?,
+        );
+    }
+    Ok(intermediate)
 }
 
 /// Evaluate an AST expression over intermediate tuple fields and functions.

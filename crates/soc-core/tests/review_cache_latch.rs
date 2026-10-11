@@ -16,21 +16,26 @@ fn cached_node_is_rejected_after_store_latches_a_read_error() {
     store.put_node(da, a.clone());
     store.put_node(db, b.clone());
     store.flush().unwrap();
+    // Writes are cached write-through; reopen so only the explicitly warmed node is cached.
+    drop(store);
+    let store = FileNodeStore::new(&dir).unwrap();
 
-    assert_eq!(store.get_node(&da), Some(a)); // warm cache
+    assert_eq!(store.get_node(&da).unwrap(), Some(a)); // warm cache
     let pack = fs::read_dir(store.objects_dir())
         .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().and_then(|s| s.to_str()) == Some("pack"))
+        .unwrap();
     let mut bytes = fs::read(&pack).unwrap();
     bytes[8 + 6] ^= 0xff; // corrupt B's body after A
     fs::write(&pack, bytes).unwrap();
-    assert_eq!(store.get_node(&db), None); // checksum error latches the store
-    assert_eq!(
-        store.get_node(&da),
-        None,
+    // A checksum error surfaces as an error (not as absence) and latches the store.
+    assert!(matches!(
+        store.get_node(&db),
+        Err(soc_core::store::StorageError::CorruptedNode(_))
+    ));
+    assert!(
+        store.get_node(&da).is_err(),
         "cache must not bypass latched store error"
     );
 }

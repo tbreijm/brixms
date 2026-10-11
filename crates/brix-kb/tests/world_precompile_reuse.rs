@@ -221,7 +221,7 @@ fn test_precompile_program_construction_and_row_count_independence() {
         exprs_after_init,
         "zero expression compilations during recompute_from_scratch"
     );
-    assert_eq!(scratch_state, network.current_state());
+    assert_eq!(scratch_state, network.current_state().unwrap());
 }
 
 #[test]
@@ -344,18 +344,19 @@ fn test_reference_evaluator_precompile_and_equivalence() {
         .expect("batch application failed");
 
     // Evaluate reference program
-    let ref_state = reference::evaluate(&ref_prog, &network.current_state().base_relations)
-        .expect("reference evaluate failed");
+    let ref_state =
+        reference::evaluate(&ref_prog, &network.current_state().unwrap().base_relations)
+            .expect("reference evaluate failed");
 
     // Verify differential equivalence
     assert_eq!(
-        network.current_state().derived_relations,
+        network.current_state().unwrap().derived_relations,
         ref_state.derived_relations,
         "derived relations must match between runtime and reference"
     );
 
     // Settlements match
-    let network_settlements = network.all_settlements();
+    let network_settlements = network.all_settlements().unwrap();
     assert_eq!(network_settlements.len(), ref_state.settlements.len());
     for (decide_name, dec_map) in &network_settlements {
         let ref_dec = &ref_state.settlements[decide_name];
@@ -405,15 +406,16 @@ fn test_nominal_record_helpers_and_updates() {
     let batch = WorldBatch::new(0, "b1", ops);
     network.apply_batch(&batch).expect("batch failed");
 
-    let ref_state = reference::evaluate(&ref_prog, &network.current_state().base_relations)
-        .expect("reference evaluate failed");
+    let ref_state =
+        reference::evaluate(&ref_prog, &network.current_state().unwrap().base_relations)
+            .expect("reference evaluate failed");
 
     assert_eq!(
-        network.current_state().derived_relations,
+        network.current_state().unwrap().derived_relations,
         ref_state.derived_relations
     );
     // Line 1 has subtotal 150 > 100 -> matches. Line 2 has subtotal 20 <= 100 -> does not match.
-    let derived = &network.current_state().derived_relations["root::high_lines"];
+    let derived = &network.current_state().unwrap().derived_relations["root::high_lines"];
     assert_eq!(derived.len(), 1);
 }
 
@@ -456,12 +458,12 @@ fn test_changed_helper_implementation_recompiles_fresh_environment() {
 
     // In v1: bonus(0) = 10 <= 25 -> 0 derived
     assert_eq!(
-        net_v1.current_state().derived_relations["root::rated"].len(),
+        net_v1.current_state().unwrap().derived_relations["root::rated"].len(),
         0
     );
     // In v2: bonus(0) = 50 > 25 -> 1 derived
     assert_eq!(
-        net_v2.current_state().derived_relations["root::rated"].len(),
+        net_v2.current_state().unwrap().derived_relations["root::rated"].len(),
         1
     );
 }

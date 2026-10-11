@@ -10,7 +10,7 @@ use brix_kb::world::audit::{
     decode_world_audit_bundle_v1, ExecProfileV1, ProgramClosureV1, ScopeV1, WorldAuditDecodeLimits,
 };
 use brix_kb::world::verify::{verify_world_audit_bundle, VerifyOptions};
-use brix_kb::world::{TupleRecord, WorldBatch, WorldError, WorldKey, WorldSession};
+use brix_kb::world::{OpenPolicy, TupleRecord, WorldBatch, WorldError, WorldKey, WorldSession};
 use brix_lower::module_graph::{ModuleGraph, ModuleLoaderLimits};
 use serde_json::json;
 
@@ -28,31 +28,50 @@ pub fn execute_world(op: &WorldOp, json_out: bool) -> u8 {
             program,
             package_paths,
         } => execute_init(dir, program, package_paths, json_out),
-        WorldOp::Batch { dir, batch_file } => execute_batch(dir, batch_file, json_out),
+        WorldOp::Batch {
+            dir,
+            batch_file,
+            replay,
+        } => execute_batch(dir, batch_file, *replay, json_out),
         WorldOp::Query {
             dir,
             relation,
             cursor,
             limit,
+            replay,
         } => execute_query(
             dir,
             relation,
             cursor.as_deref(),
             limit.unwrap_or(50),
+            *replay,
             json_out,
         ),
         WorldOp::Decide {
             dir,
             decide,
             entity,
-        } => execute_decide(dir, decide.as_deref(), entity.as_deref(), json_out),
-        WorldOp::Show { dir, rev } => execute_show(dir, *rev, json_out),
+            replay,
+        } => execute_decide(dir, decide.as_deref(), entity.as_deref(), *replay, json_out),
+        WorldOp::Show { dir, rev, replay } => execute_show(dir, *rev, *replay, json_out),
+        WorldOp::OpenCheck {
+            dir,
+            verify_state,
+            refresh_state,
+            verify_store,
+        } => execute_open_check(dir, *verify_state, *refresh_state, *verify_store, json_out),
+        WorldOp::Gc {
+            dir,
+            dry_run,
+            keep_revisions,
+        } => execute_gc(dir, *dry_run, *keep_revisions, json_out),
         WorldOp::Explain {
             dir,
             entity,
             decide,
             rev,
-        } => execute_explain(dir, entity, decide.as_deref(), *rev, json_out),
+            replay,
+        } => execute_explain(dir, entity, decide.as_deref(), *rev, *replay, json_out),
         WorldOp::Audit {
             dir,
             out,
@@ -200,8 +219,8 @@ fn execute_init(dir: &Path, program: &Path, package_paths: &[PathBuf], json_out:
     EXIT_SUCCESS
 }
 
-fn execute_batch(dir: &Path, batch_file: &Path, json_out: bool) -> u8 {
-    let mut session = match WorldSession::open(dir) {
+fn execute_batch(dir: &Path, batch_file: &Path, replay: bool, json_out: bool) -> u8 {
+    let mut session = match open_session(dir, replay) {
         Ok(s) => s,
         Err(e) => return print_world_error("world batch", &e, json_out),
     };
@@ -241,7 +260,7 @@ fn execute_batch(dir: &Path, batch_file: &Path, json_out: bool) -> u8 {
         .and_then(|snap| snap.revision.decision_root.map(|d| d.to_hex()));
 
     if json_out {
-        let res = json!({
+        let mut res = json!({
             "schema": WORLD_JSON_SCHEMA,
             "command": "world batch",
             "ok": true,
@@ -253,6 +272,7 @@ fn execute_batch(dir: &Path, batch_file: &Path, json_out: bool) -> u8 {
             "objects_written": receipt.objects_written,
             "decision_root": decision_root,
         });
+        add_open_info(&mut res, &session);
         crate::json::emit_result_json(&res);
     } else if receipt.is_idempotent_replay {
         println!(
@@ -277,16 +297,21 @@ fn execute_query(
     relation: &str,
     cursor: Option<&str>,
     limit: usize,
+    replay: bool,
     json_out: bool,
 ) -> u8 {
-    let session = match WorldSession::open(dir) {
+    let session = match open_session(dir, replay) {
         Ok(s) => s,
         Err(e) => return print_world_error("world query", &e, json_out),
     };
 
+    let derived_known = match session.get_derived(relation) {
+        Ok(rows) => rows.is_some(),
+        Err(e) => return print_world_error("world query", &e, json_out),
+    };
     let page = if session.relations.contains_key(relation) {
         session.query_page(relation, cursor, limit)
-    } else if session.get_derived(relation).is_some() {
+    } else if derived_known {
         session.query_derived_page(relation, cursor, limit)
     } else if let Some(qualified) = session
         .relations
@@ -338,7 +363,7 @@ fn execute_query(
         .collect();
 
     if json_out {
-        let res = json!({
+        let mut res = json!({
             "schema": WORLD_JSON_SCHEMA,
             "command": "world query",
             "ok": true,
@@ -348,6 +373,7 @@ fn execute_query(
             "next_cursor": page.next_cursor,
             "entries": entries_json,
         });
+        add_open_info(&mut res, &session);
         crate::json::emit_result_json(&res);
     } else {
         println!(
@@ -387,14 +413,18 @@ fn execute_decide(
     dir: &Path,
     decide_filter: Option<&str>,
     entity_filter: Option<&str>,
+    replay: bool,
     json_out: bool,
 ) -> u8 {
-    let session = match WorldSession::open(dir) {
+    let session = match open_session(dir, replay) {
         Ok(s) => s,
         Err(e) => return print_world_error("world decide", &e, json_out),
     };
 
-    let mut settlements = session.all_settlements();
+    let mut settlements = match session.all_settlements() {
+        Ok(s) => s,
+        Err(e) => return print_world_error("world decide", &e, json_out),
+    };
     if let Some(dec) = decide_filter {
         settlements.retain(|k, _| k == dec || k.ends_with(&format!("::{dec}")));
     }
@@ -414,12 +444,13 @@ fn execute_decide(
             }
             settlements_json.insert(dec_name, serde_json::Value::Object(emap));
         }
-        let res = json!({
+        let mut res = json!({
             "schema": WORLD_JSON_SCHEMA,
             "command": "world decide",
             "ok": true,
             "settlements": settlements_json,
         });
+        add_open_info(&mut res, &session);
         crate::json::emit_result_json(&res);
     } else {
         println!("Settled decisions:");
@@ -440,8 +471,8 @@ fn execute_decide(
     EXIT_SUCCESS
 }
 
-fn execute_show(dir: &Path, rev_opt: Option<u64>, json_out: bool) -> u8 {
-    let session = match WorldSession::open(dir) {
+fn execute_show(dir: &Path, rev_opt: Option<u64>, replay: bool, json_out: bool) -> u8 {
+    let session = match open_session(dir, replay) {
         Ok(s) => s,
         Err(e) => return print_world_error("world show", &e, json_out),
     };
@@ -453,12 +484,13 @@ fn execute_show(dir: &Path, rev_opt: Option<u64>, json_out: bool) -> u8 {
     };
 
     if json_out {
-        let res = json!({
+        let mut res = json!({
             "schema": WORLD_JSON_SCHEMA,
             "command": "world show",
             "ok": true,
             "revision": snap.revision.to_json(),
         });
+        add_open_info(&mut res, &session);
         crate::json::emit_result_json(&res);
     } else {
         let rev = &snap.revision;
@@ -485,9 +517,10 @@ fn execute_explain(
     entity: &str,
     decide_filter: Option<&str>,
     rev: Option<u64>,
+    replay: bool,
     json_out: bool,
 ) -> u8 {
-    let session = match WorldSession::open(dir) {
+    let session = match open_session(dir, replay) {
         Ok(s) => s,
         Err(e) => return print_world_error("world explain", &e, json_out),
     };
@@ -510,7 +543,7 @@ fn execute_explain(
                 return print_world_error("world explain", &err, json_out);
             };
             if json_out {
-                let res = json!({
+                let mut res = json!({
                     "schema": WORLD_JSON_SCHEMA,
                     "command": "world explain",
                     "ok": true,
@@ -525,6 +558,7 @@ fn execute_explain(
                         "phase": settlement.phase,
                     },
                 });
+                add_open_info(&mut res, &session);
                 crate::json::emit_result_json(&res);
             } else {
                 println!("Historical decision at revision {seq} for entity '{entity}':");
@@ -544,18 +578,39 @@ fn execute_explain(
     }
 
     let explanation = match decide_filter {
-        Some(d) => session.explain_decision_for(d, entity).or_else(|| {
-            session
-                .network
-                .as_ref()
-                .and_then(|n| {
-                    n.candidate_frontier
-                        .keys()
-                        .find(|k| k.ends_with(&format!("::{d}")))
-                })
-                .and_then(|qualified| session.explain_decision_for(qualified, entity))
-        }),
+        Some(d) => match session.explain_decision_for(d, entity) {
+            Ok(Some(exp)) => Ok(Some(exp)),
+            Ok(None) => {
+                let qualified: Vec<String> = session
+                    .network
+                    .as_ref()
+                    .map(|n| {
+                        n.decides
+                            .keys()
+                            .filter(|k| k.ends_with(&format!("::{d}")))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut found = Ok(None);
+                for q in &qualified {
+                    match session.explain_decision_for(q, entity) {
+                        Ok(None) => continue,
+                        other => {
+                            found = other;
+                            break;
+                        }
+                    }
+                }
+                found
+            }
+            Err(e) => Err(e),
+        },
         None => session.explain_decision(entity),
+    };
+    let explanation = match explanation {
+        Ok(e) => e,
+        Err(e) => return print_world_error("world explain", &e, json_out),
     };
 
     let explanation = match explanation {
@@ -569,12 +624,13 @@ fn execute_explain(
     };
 
     if json_out {
-        let res = json!({
+        let mut res = json!({
             "schema": WORLD_JSON_SCHEMA,
             "command": "world explain",
             "ok": true,
             "explanation": explanation.to_json(),
         });
+        add_open_info(&mut res, &session);
         crate::json::emit_result_json(&res);
     } else {
         println!(
@@ -654,6 +710,200 @@ fn classify_network_error(msg: &str) -> (&'static str, u8) {
     }
 }
 
+/// Open a world, restoring by default or forcing a replay of the base facts (`--replay`).
+fn open_session(dir: &Path, replay: bool) -> Result<WorldSession, WorldError> {
+    if replay {
+        WorldSession::open_replay(dir)
+    } else {
+        WorldSession::open(dir)
+    }
+}
+
+/// The fields describing how a session was opened (R0 M4).
+fn open_info(session: &WorldSession) -> serde_json::Value {
+    json!({
+        "open_ms": session.open_ms,
+        "open_mode": session.open_mode.as_str(),
+        "replay_reason": session.replay_reason,
+        "state_source": session.state_source,
+        "state_refreshed": session.state_refreshed,
+        "tail_batches": session.tail_batches,
+    })
+}
+
+fn add_open_info(res: &mut serde_json::Value, session: &WorldSession) {
+    if let (Some(obj), serde_json::Value::Object(info)) = (res.as_object_mut(), open_info(session))
+    {
+        obj.extend(info);
+    }
+}
+
+fn execute_open_check(
+    dir: &Path,
+    verify_state: bool,
+    refresh_state: bool,
+    verify_store: bool,
+    json_out: bool,
+) -> u8 {
+    const CMD: &str = "world open-check";
+    // The pack audit runs first: damage it names is a typed corrupt-state error, not whatever
+    // the open happens to trip over.
+    let store_report = if verify_store {
+        match brix_kb::world::gc::verify_store(dir) {
+            Ok(r) => Some(r),
+            Err(e) => return print_world_error(CMD, &e, json_out),
+        }
+    } else {
+        None
+    };
+    // Refreshing is explicit here, not a side effect of the open.
+    let policy = OpenPolicy {
+        force_replay: false,
+        refresh_after_replay: false,
+    };
+    let mut session = match WorldSession::open_with_policy(dir, policy) {
+        Ok(s) => s,
+        Err(e) => return print_world_error(CMD, &e, json_out),
+    };
+    if verify_state {
+        if let Err(e) = session.verify_state() {
+            return print_world_error(CMD, &e, json_out);
+        }
+    }
+    let mut checkpoint_entries = None;
+    if verify_state {
+        match session.verify_settlement_checkpoint() {
+            Ok(n) => checkpoint_entries = n,
+            Err(e) => return print_world_error(CMD, &e, json_out),
+        }
+    }
+    let mut refreshed = None;
+    if refresh_state {
+        refreshed = Some(match session.refresh_state_cache() {
+            Ok(()) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        });
+        // The settlement checkpoint (decisions read cache) is refreshed with the state cache;
+        // a world with no decide blocks has none to write.
+        if session
+            .network
+            .as_ref()
+            .is_some_and(|n| !n.decides.is_empty())
+        {
+            match session.refresh_settlement_checkpoint() {
+                Ok(n) => checkpoint_entries = Some(n),
+                Err(e) => refreshed = Some(Err(e.to_string())),
+            }
+        }
+    }
+    let refresh_error = refreshed.as_ref().and_then(|r| r.as_ref().err().cloned());
+    if json_out {
+        let mut res = json!({
+            "schema": WORLD_JSON_SCHEMA,
+            "command": CMD,
+            "ok": true,
+            "revision": session.current_revision,
+            "network_state_root": session.network_state_root.map(|d| d.to_hex()),
+            "verified_state": verify_state,
+            "verified_store": store_report.map(|r| json!({
+                "packs": r.packs,
+                "nodes": r.nodes,
+                "body_bytes": r.body_bytes,
+                "legacy_nodes": r.legacy_nodes,
+            })),
+            "refreshed_state": refreshed.as_ref().map(|r| r.is_ok()),
+            "refresh_error": refresh_error,
+            "settlement_checkpoint_entries": checkpoint_entries,
+        });
+        add_open_info(&mut res, &session);
+        crate::json::emit_result_json(&res);
+    } else {
+        println!(
+            "revision {}: opened {} in {} ms{}{}",
+            session.current_revision,
+            session.open_mode.as_str(),
+            session.open_ms,
+            session
+                .replay_reason
+                .map(|r| format!(" (replay: {r})"))
+                .unwrap_or_default(),
+            session
+                .state_source
+                .map(|s| format!(" (state: {s})"))
+                .unwrap_or_default(),
+        );
+        if verify_state {
+            println!("state verified against a replay of the base facts");
+        }
+        if let Some(r) = store_report {
+            println!(
+                "store verified: {} packs, {} nodes, {} body bytes, {} legacy objects",
+                r.packs, r.nodes, r.body_bytes, r.legacy_nodes
+            );
+        }
+        match refreshed {
+            Some(Ok(())) => println!("state cache refreshed"),
+            Some(Err(e)) => println!("state cache not refreshed: {e}"),
+            None => {}
+        }
+    }
+    if refresh_error.is_some() {
+        EXIT_REJECTED_OR_UNKNOWN
+    } else {
+        EXIT_SUCCESS
+    }
+}
+
+fn execute_gc(dir: &Path, dry_run: bool, keep_revisions: Option<u64>, json_out: bool) -> u8 {
+    const CMD: &str = "world gc";
+    let opts = brix_kb::world::gc::GcOptions {
+        dry_run,
+        keep_revisions,
+        ..Default::default()
+    };
+    let r = match brix_kb::world::gc::gc_world(dir, &opts) {
+        Ok(r) => r,
+        Err(e) => return print_world_error(CMD, &e, json_out),
+    };
+    if json_out {
+        crate::json::emit_result_json(&json!({
+            "schema": WORLD_JSON_SCHEMA,
+            "command": CMD,
+            "ok": true,
+            "dry_run": r.dry_run,
+            "head_revision": r.head_revision,
+            "revisions_total": r.revisions_total,
+            "revisions_retained": r.revisions_retained,
+            "roots": r.roots,
+            "live_nodes": r.live_nodes,
+            "live_bytes": r.live_bytes,
+            "nodes_before": r.nodes_before,
+            "dead_nodes": r.dead_nodes,
+            "bytes_before": r.bytes_before,
+            "bytes_after": r.bytes_after,
+            "packs_before": r.packs_before,
+            "packs_after": r.packs_after,
+            "files_swept": r.files_swept,
+            "elapsed_ms": r.elapsed_ms,
+        }));
+    } else {
+        println!(
+            "{}: {} of {} nodes live ({} dead), {} revisions retained of {}",
+            if r.dry_run { "dry run" } else { "gc" },
+            r.live_nodes,
+            r.nodes_before,
+            r.dead_nodes,
+            r.revisions_retained,
+            r.revisions_total
+        );
+        println!(
+            "store {} -> {} bytes, {} -> {} packs ({} ms)",
+            r.bytes_before, r.bytes_after, r.packs_before, r.packs_after, r.elapsed_ms
+        );
+    }
+    EXIT_SUCCESS
+}
+
 fn print_world_error(cmd: &str, err: &WorldError, json_out: bool) -> u8 {
     let (status, exit_code) = match err {
         WorldError::UnknownRelation(_)
@@ -666,12 +916,22 @@ fn print_world_error(cmd: &str, err: &WorldError, json_out: bool) -> u8 {
             ("batch-conflict", EXIT_REJECTED_OR_UNKNOWN)
         }
         WorldError::StaleBaseRevision { .. } => ("stale-base-revision", EXIT_REJECTED_OR_UNKNOWN),
+        // Another writer (or an operator command that writes) holds the world: retry.
+        WorldError::WorldLocked(_) => ("world-locked", EXIT_REJECTED_OR_UNKNOWN),
+        WorldError::StaleSession(_) => ("stale-session", EXIT_REJECTED_OR_UNKNOWN),
+        // History dropped on purpose by `gc --keep-revisions`, not damage.
+        WorldError::RevisionCompacted(_) => ("revision-compacted", EXIT_REJECTED_OR_UNKNOWN),
         WorldError::Io(_)
         | WorldError::Json(_)
         | WorldError::CorruptedHead(_)
         | WorldError::CorruptedRevision { .. }
         | WorldError::CorruptedObject(_) => ("io-or-corruption", EXIT_USAGE_OR_IO),
         WorldError::NetworkError(msg) => classify_network_error(msg),
+        WorldError::CorruptState(_) | WorldError::State(_) => ("corrupt-state", EXIT_USAGE_OR_IO),
+        WorldError::MissingState(_) => ("missing-state", EXIT_USAGE_OR_IO),
+        WorldError::ValidityMismatch(_) | WorldError::StateMismatch(_) => {
+            ("state-mismatch", EXIT_REJECTED_OR_UNKNOWN)
+        }
         _ => ("unknown-error", EXIT_REJECTED_OR_UNKNOWN),
     };
 
