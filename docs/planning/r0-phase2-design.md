@@ -337,7 +337,7 @@ Apply_ops at the late batch falls 13-40%, not 2x; and the extra budget eats all 
 
 ## Chunked persist (CPD) results (alpha.5)
 
-A memory-bounding mechanism, not a speedup. A batch whose estimated hydrated bytes exceed `apply_hydrated_bytes` (manifest knob, default 1 GiB, `0` disables) and which has at least 32,768 operations is applied as contiguous chunks; between chunks the staged network is persisted and dehydrated in place (`WorldNetwork::persist_and_dehydrate_in_place`). Smaller batches, and any batch run with an execution limit set, take the unchanged single-chunk path (`CommitProfile.chunks == 1`, zero overhead). Roots, digests, decision deltas and revision digests are identical for any chunking (same head revision digest in every bench run below).
+A memory-bounding mechanism, not a speedup. A batch whose estimated hydrated bytes exceed `apply_hydrated_bytes` (manifest knob; off by default since alpha.5 release, `0` disables, 1 GiB recommended when enabled) and which has at least 32,768 operations is applied as contiguous chunks; between chunks the staged network is persisted and dehydrated in place (`WorldNetwork::persist_and_dehydrate_in_place`). Smaller batches, and any batch run with an execution limit set, take the unchanged single-chunk path (`CommitProfile.chunks == 1`, zero overhead). Roots, digests, decision deltas and revision digests are identical for any chunking (same head revision digest in every bench run below).
 
 ### Design as built
 - `network.rs`: `apply_ops_staged_view` is `begin_batch` + one `apply_chunk` + `finish_batch`. The decision delta is computed in `finish_batch` as last-vs-first-seen value per (decide, entity) (H1), so A->B->A and settled->removed->settled report nothing, as unchunked. Golden tests pin revision digests and delta bytes to the pre-CPD engine (67d2910).
@@ -438,3 +438,8 @@ The read path keeps its speed (~0.6 s vs ~0.53 s); a full recompute per read wou
 - `refresh_state_cache` called by an operator still holds the lock for its whole duration.
 - The idempotency fallback after damage costs one receipt scan per affected open until a GC removes the damaged node.
 - `From<StorageError>` mapping to `CorruptedObject` elsewhere (secondary-index paging) left as is.
+
+
+### Decision: off by default (alpha.5)
+
+Clean 1M comparison (10 x 100k rows, idle machine, `/usr/bin/time -l`): chunking off 6.10 GB peak RSS / 4.11 GB footprint / 226 s / 5.0 GB disk; 1 GiB budget 5.33 GB / 2.68 GB / 262 s / 6.0 GB. A modest memory bound for a real time and disk cost, so it ships opt-in via `apply_hydrated_bytes`.

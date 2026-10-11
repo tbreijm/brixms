@@ -20,8 +20,8 @@ pub const MIN_CHUNK_OPS: usize = 16_384;
 pub const HYDRATED_NODE_BYTES: u64 = 2048;
 /// Nodes written per operation assumed before the first chunk has been measured.
 pub const FIRST_CHUNK_NODES_PER_OP: u64 = 24;
-/// Default `apply_hydrated_bytes` budget.
-pub const DEFAULT_APPLY_HYDRATED_BYTES: u64 = 1024 * 1024 * 1024;
+/// Default `apply_hydrated_bytes` budget: `0` = chunked persist is off (opt-in via the manifest).
+pub const DEFAULT_APPLY_HYDRATED_BYTES: u64 = 0;
 /// The pending pack's in-memory index costs about this many bytes per node.
 pub const PENDING_INDEX_BYTES_PER_NODE: u64 = 130;
 /// Publish an intermediate pack once the pending index exceeds this.

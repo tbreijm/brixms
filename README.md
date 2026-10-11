@@ -261,7 +261,8 @@ Known limits in this release:
   Roughly half of what remains is per-node framing in the pack format. The
   checkpoint is a second copy of the decisions and is not GC-managed.
 - The replay fallback is still memory-hungry on large worlds (about 4 GB at
-  300k facts); chunking it only helps with a small `apply_hydrated_bytes`.
+  300k facts); opt-in chunking (`apply_hydrated_bytes` in the manifest) bounds
+  memory at the cost of some time and disk; see the release notes.
 - A session open across a GC keeps committing safely (it reloads its pack set
   on the next write), but may serve pre-GC cached nodes for reads until
   reopened. Concurrent readers in other processes are not supported while a GC

@@ -65,7 +65,7 @@ served from `settlements.ckpt` in ~0.6 s.
   damaged checkpoint or idempotency entry); OS errors are `Io`.
 - `pin_revision` of a revision removed by `--keep-revisions` returns `RevisionCompacted(seq)`
   instead of handing back a snapshot whose reads fail with `missing-state`.
-- Chunked persist/dehydrate: a batch estimated to exceed `apply_hydrated_bytes` (manifest, default 1 GiB, `0` disables; at least 32,768 ops) is applied in chunks that are persisted and dehydrated in place, bounding memory. Memory mechanism, not a speedup (about +25% CPU for -25% peak RSS at 1M); outputs are identical for any chunking; intermediate nodes are garbage until `brix world gc`. Replay (`set_network`, `replay_network`, `open_replay`) is chunked the same way.
+- Chunked persist/dehydrate (opt-in, off by default): set `apply_hydrated_bytes` in the world manifest (for example `1073741824`; `0` or absent disables) and a batch estimated to exceed it (at least 32,768 ops) is applied in chunks that are persisted and dehydrated in place, bounding memory. Memory mechanism, not a speedup. Measured on a 1M world loaded as ten 100k-row batches with a 1 GiB budget: peak RSS 6.10 -> 5.33 GB (-13%), peak memory footprint 4.11 -> 2.68 GB (-35%), wall 226 -> 262 s (+16%), disk before GC 5.0 -> 6.0 GB (intermediate nodes, reclaimed by `brix world gc`). Outputs are identical for any chunking. Replay (`set_network`, `replay_network`, `open_replay`) is chunked the same way when enabled.
 
 ## New files in a world directory
 
