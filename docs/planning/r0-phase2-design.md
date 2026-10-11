@@ -335,7 +335,6 @@ Apply_ops at the late batch falls 13-40%, not 2x; and the extra budget eats all 
 | Compact children / boxed Node variants | NO-GO as a load fix | lazy children about 30% of the hydrated heap; -15% heap, no end-to-end change |
 | Chunked replay inside `set_network` / `open_replay` (no per-chunk persist) | GO (separate task) | 300k replay peaks at 4 GB (13 KB/fact); output unaffected since nothing is persisted per slice |
 
-<<<<<<< HEAD
 ## Chunked persist (CPD) results (alpha.5)
 
 A memory-bounding mechanism, not a speedup. A batch whose estimated hydrated bytes exceed `apply_hydrated_bytes` (manifest knob, default 1 GiB, `0` disables) and which has at least 32,768 operations is applied as contiguous chunks; between chunks the staged network is persisted and dehydrated in place (`WorldNetwork::persist_and_dehydrate_in_place`). Smaller batches, and any batch run with an execution limit set, take the unchanged single-chunk path (`CommitProfile.chunks == 1`, zero overhead). Roots, digests, decision deltas and revision digests are identical for any chunking (same head revision digest in every bench run below).
@@ -377,7 +376,7 @@ Replay (`open_replay`, 300k, 10 batches world): before 4.00 GB peak / 2.04 GB af
 
 ### Tests (`crates/brix-kb/tests/r0_chunked_persist.rs`, 21, plus a chunked run in `r0_restore`)
 Golden pre-CPD digests (3 seeds), chunk-size, quantum and policy differentials (incl. random/adversarial policy with pack flush), network-level proptest over random chunk vectors (memory store), A->B->A, settled->removed->settled, cross-boundary derivation, limits => one chunk, heuristic engagement rules, manifest knob, crash points with 1-op chunks, real conflict in chunk 3 (session unchanged, next batch equals clean world), boundary-only conflict (fallback succeeds, same revision digest as unchunked), injected failure mid-chunk and retry, GC after failed chunked batches then retry, chunked replay equals whole replay.
-=======
+
 ## Review fixes (alpha.5)
 
 Fixes for the adversarial review of 67d2910. Regression tests: `crates/brix-kb/tests/r0_review_fixes.rs` (18; each fails on 67d2910 and passes now) and `crates/brix-cli/tests/world_locked.rs`. Roots, digests and node encodings are unchanged; everything below is cache, marker or error-class behaviour.
@@ -439,4 +438,3 @@ The read path keeps its speed (~0.6 s vs ~0.53 s); a full recompute per read wou
 - `refresh_state_cache` called by an operator still holds the lock for its whole duration.
 - The idempotency fallback after damage costs one receipt scan per affected open until a GC removes the damaged node.
 - `From<StorageError>` mapping to `CorruptedObject` elsewhere (secondary-index paging) left as is.
->>>>>>> worktree-agent-a456ba610d3ba066e
