@@ -68,7 +68,11 @@ fn encode_info(info: &CommittedBatchInfo) -> WorldTuple {
 
 fn decode_info(t: &WorldTuple) -> Result<CommittedBatchInfo, WorldError> {
     let b = t.as_bytes();
-    let bad = || WorldError::NetworkError("corrupt idempotency index entry".into());
+    let bad = || {
+        WorldError::CorruptState(super::state_store::StateError::Io(
+            "corrupt idempotency index entry".into(),
+        ))
+    };
     if b.len() < 41 {
         return Err(bad());
     }
@@ -231,10 +235,32 @@ impl IdempotencyIndex {
         }
         match self
             .trie
-            .get_with_store(&idempotency_trie_key(key), store)?
+            .get_with_store(&idempotency_trie_key(key), store)
+            .map_err(|e| WorldError::from(super::state_store::StateError::from(e)))?
         {
             Some(t) => Ok(Some(decode_info(&t)?)),
             None => Ok(None),
+        }
+    }
+
+    /// Read every node and entry of the trie (and nothing else): proves the whole index is
+    /// reachable and decodes. O(entries); for audits, never on a hot path.
+    pub fn walk(&self, store: &FileNodeStore) -> Result<usize, WorldError> {
+        let mut seen = 0usize;
+        let mut cursor: Option<([u8; 32], WorldKey)> = None;
+        loop {
+            let (page, next) = self
+                .trie
+                .iter_page_with_store(cursor.as_ref().map(|(h, k)| (h, k)), 4096, store)
+                .map_err(|e| WorldError::from(super::state_store::StateError::from(e)))?;
+            for (_, v) in &page {
+                decode_info(v)?;
+            }
+            seen += page.len();
+            match next {
+                Some(n) => cursor = Some(n),
+                None => return Ok(seen),
+            }
         }
     }
 
@@ -250,6 +276,12 @@ impl IdempotencyIndex {
                 self.overlay.insert(key.to_string(), info);
             }
         }
+    }
+
+    /// Mark the index session-private: it is never staged or published (used when it was
+    /// rebuilt because the persisted trie was unreadable, whose nodes may still be damaged).
+    pub fn set_ephemeral(&mut self) {
+        self.complete = false;
     }
 
     pub fn is_complete(&self) -> bool {
@@ -289,7 +321,24 @@ impl IdempotencyIndex {
         Ok(true)
     }
 
-    /// [`Self::stage`], flush, [`Self::publish`]: refresh the sidecar outside a commit.
+    /// [`Self::stage`] and flush, then prove the whole trie reads back: `Ok(true)` when the
+    /// trie is complete, durable and readable, i.e. [`Self::publish`] may name it. Nodes
+    /// already stored are not re-written, so a damaged one (same digest) would otherwise be
+    /// re-published as healthy.
+    pub fn persist_nodes(&mut self, store: &mut FileNodeStore) -> Result<bool, WorldError> {
+        if !self.complete {
+            return Ok(false);
+        }
+        self.stage(store);
+        store.flush()?;
+        if self.walk(store).is_err() {
+            store.clear_corruption_latch();
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    /// [`Self::persist_nodes`] then [`Self::publish`]: refresh the sidecar outside a commit.
     pub fn persist(
         &mut self,
         store: &mut FileNodeStore,
@@ -297,11 +346,10 @@ impl IdempotencyIndex {
         revision_seq: u64,
         revision_digest: Digest,
     ) -> Result<bool, WorldError> {
-        if !self.complete {
+        if !self.persist_nodes(store)? {
+            let _ = fs::remove_file(paths.idempotency_file());
             return Ok(false);
         }
-        self.stage(store);
-        store.flush()?;
         self.publish(paths, revision_seq, revision_digest)
     }
 
@@ -316,6 +364,8 @@ impl IdempotencyIndex {
         if let Some(idx) = Self::from_sidecar(paths, store, head_seq, head_digest) {
             return idx;
         }
+        // A sidecar whose root was unreadable (damage) latched the store; it is only a cache.
+        store.clear_corruption_latch();
         Self::from_scan(paths, store, head_seq)
     }
 
@@ -333,7 +383,16 @@ impl IdempotencyIndex {
             if sc.revision_digest != head_digest {
                 return None;
             }
-        } else if sc.revision_seq > 0 {
+        } else if sc.revision_seq == 0 {
+            // Genesis has no receipt: its own record must agree (a sidecar naming revision 0
+            // of some other world, or of a forged history, is not this world's).
+            let v: serde_json::Value =
+                serde_json::from_slice(&fs::read(paths.revision_file(0)).ok()?).ok()?;
+            let genesis = super::revision::WorldRevision::from_json(&v).ok()?;
+            if genesis.seq != 0 || genesis.revision_digest != sc.revision_digest {
+                return None;
+            }
+        } else {
             // The sidecar's own revision must be this world's: its receipt agrees.
             let (_, info) = record_of(paths, sc.revision_seq, head_seq)?;
             if info.revision_digest != sc.revision_digest {
@@ -363,47 +422,65 @@ impl IdempotencyIndex {
         })
     }
 
-    /// Every receipt, then every revision record without a receipt (a revision record carries
-    /// its whole changed-key list, so it is parsed only when the receipt is missing).
-    fn from_scan(paths: &WorldPaths, store: &FileNodeStore, head_seq: u64) -> Self {
+    /// Every receipt, then every revision record without a (parseable) receipt (a revision
+    /// record carries its whole changed-key list, so it is parsed only when the receipt is
+    /// missing or unusable). A record that exists but parses to nothing in neither place
+    /// loses its key: the index then is `complete = false`, which keeps it out of the
+    /// sidecar (a persisted trie must never be missing a committed key).
+    pub(crate) fn from_scan(paths: &WorldPaths, store: &FileNodeStore, head_seq: u64) -> Self {
+        use std::collections::BTreeSet;
+        let stem = |path: &Path| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.parse::<u64>().ok())
+        };
         let mut found: BTreeMap<String, CommittedBatchInfo> = BTreeMap::new();
-        let mut receipted = std::collections::BTreeSet::new();
+        let mut receipted = BTreeSet::new();
+        let mut unparsed = BTreeSet::new();
         if let Ok(entries) = fs::read_dir(paths.receipts_dir()) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if let Some(seq) = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .and_then(|s| s.parse::<u64>().ok())
-                {
-                    receipted.insert(seq);
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
                 }
-                if let Some((k, i)) = parse_record(&path, head_seq) {
-                    found.insert(k, i);
+                let seq = stem(&path);
+                match parse_record(&path, head_seq) {
+                    Some((k, i)) => {
+                        receipted.extend(seq);
+                        found.insert(k, i);
+                    }
+                    // Unparseable: fall back to the revision record below.
+                    None => unparsed.extend(seq.filter(|s| (1..=head_seq).contains(s))),
                 }
             }
         }
         if let Ok(entries) = fs::read_dir(paths.revisions_dir()) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                let seq = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .and_then(|s| s.parse::<u64>().ok());
-                if path.extension().and_then(|e| e.to_str()) == Some("json")
-                    && seq.is_some_and(|s| receipted.contains(&s))
-                {
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
                     continue;
                 }
-                if let Some((k, i)) = parse_record(&path, head_seq) {
-                    found.insert(k, i);
+                let seq = stem(&path);
+                if seq.is_some_and(|s| receipted.contains(&s)) {
+                    continue;
+                }
+                match parse_record(&path, head_seq) {
+                    Some((k, i)) => {
+                        receipted.extend(seq);
+                        found.insert(k, i);
+                    }
+                    None => unparsed.extend(seq.filter(|s| (1..=head_seq).contains(s))),
                 }
             }
         }
+        let lost = unparsed.iter().any(|s| !receipted.contains(s));
         let mut idx = Self::empty();
         idx.source = IdempotencySource::Scan;
         for (k, i) in found {
             idx.record(&k, i, store);
+        }
+        if lost {
+            idx.complete = false;
         }
         idx
     }

@@ -110,6 +110,12 @@ pub enum WorldError {
     Json(String),
     /// World directory is locked by another writer.
     WorldLocked(String),
+    /// A garbage collection ran underneath a cache write that was in progress; it was
+    /// abandoned (a cache write only) and nothing was published.
+    StaleSession(String),
+    /// The revision's state was dropped on purpose by `gc --keep-revisions`: history, not
+    /// damage (the journal records remain).
+    RevisionCompacted(u64),
     /// Object file missing from disk.
     MissingObject(Digest),
     /// Revision record digest does not match its contents.
@@ -187,6 +193,11 @@ impl fmt::Display for WorldError {
             Self::StagingError(s) => write!(f, "staging error: {s}"),
             Self::Json(s) => write!(f, "JSON error: {s}"),
             Self::WorldLocked(s) => write!(f, "world locked: {s}"),
+            Self::StaleSession(s) => write!(f, "stale session: {s}"),
+            Self::RevisionCompacted(seq) => write!(
+                f,
+                "revision {seq} was compacted away by garbage collection (--keep-revisions)"
+            ),
             Self::MissingObject(d) => write!(f, "missing object digest {}", d.to_hex()),
             Self::CorruptedRevision {
                 seq,

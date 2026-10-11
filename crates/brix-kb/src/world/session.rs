@@ -330,6 +330,10 @@ pub struct CommittedBatchInfo {
     pub batch_digest: Option<Digest>,
 }
 
+/// How long a commit waits for the writer lock before reporting `WorldLocked` (readers hold
+/// it only for sub-millisecond publish steps; see [`WorldLockGuard::acquire_wait`]).
+const COMMIT_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// RAII guard representing exclusive writer ownership over a world directory.
 pub struct WorldLockGuard {
     _file: fs::File,
@@ -354,6 +358,27 @@ impl WorldLockGuard {
                 Err(fs::TryLockError::Error(e)) => Err(WorldError::Io(e)),
             },
             Err(e) => Err(WorldError::Io(e)),
+        }
+    }
+}
+
+impl WorldLockGuard {
+    /// [`Self::acquire`], retrying for up to `wait` while another handle holds the lock. For
+    /// commits: a reader's opportunistic cache write holds the lock only for a few
+    /// milliseconds (it does its heavy work outside it), so a short wait turns a spurious
+    /// `WorldLocked` into success, while a genuine second writer still fails after `wait`.
+    pub fn acquire_wait(root: &Path, wait: std::time::Duration) -> Result<Self, WorldError> {
+        let deadline = Instant::now() + wait;
+        loop {
+            match Self::acquire(root) {
+                Err(WorldError::WorldLocked(m)) => {
+                    if Instant::now() >= deadline {
+                        return Err(WorldError::WorldLocked(m));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                other => return other,
+            }
         }
     }
 }
@@ -747,6 +772,10 @@ pub struct WorldSession {
     pub relations: BTreeMap<String, TrieMap<WorldKey, WorldTuple>>,
     pub secondary_indexes: BTreeMap<String, TrieMap<WorldKey, WorldTuple>>,
     pub idempotency: IdempotencyIndex,
+    /// The GC generation marker (`objects/GC_EPOCH`) this session's store handle and caches
+    /// were built under; compared under the writer lock before anything is written (see
+    /// [`Self::sync_gc_epoch`]).
+    gc_epoch: String,
     /// Whether `all_settlements` may leave a settlement checkpoint behind (best effort);
     /// off for `open_replay`.
     pub checkpoint_autowrite: bool,
@@ -805,6 +834,7 @@ impl WorldSession {
         // Write initial HEAD pointing to genesis (revision 0)
         fs::write(paths.head(), "0\n")?;
 
+        let gc_epoch = super::gc::read_gc_epoch(&paths);
         let node_store = FileNodeStore::new(&root)?;
         configure_node_store_caches(&node_store, manifest_node_cache_budget(&manifest));
         let mut relations = BTreeMap::new();
@@ -852,6 +882,7 @@ impl WorldSession {
             relations,
             secondary_indexes,
             idempotency: IdempotencyIndex::empty(),
+            gc_epoch,
             checkpoint_autowrite: true,
             crash_injector: None,
             network: None,
@@ -920,6 +951,9 @@ impl WorldSession {
             .parse()
             .map_err(|_| WorldError::CorruptedHead("invalid integer in HEAD".to_string()))?;
 
+        // Read the GC marker before the store is built: a collection in between is then seen
+        // (the marker differs) rather than silently baked into this session's caches.
+        let gc_epoch = super::gc::read_gc_epoch(&paths);
         let node_store = FileNodeStore::new(&root)?;
         configure_node_store_caches(&node_store, manifest_node_cache_budget(&manifest));
 
@@ -1012,6 +1046,7 @@ impl WorldSession {
             relations,
             secondary_indexes,
             idempotency,
+            gc_epoch,
             checkpoint_autowrite: policy.refresh_after_replay,
             crash_injector: None,
             network: None,
@@ -1130,25 +1165,55 @@ impl WorldSession {
         Ok(session)
     }
 
-    /// Persist the idempotency index and its sidecar for the current HEAD (non-blocking on
-    /// the writer lock; HEAD re-checked under it). A cache refresh, never authoritative.
+    /// Re-read the GC generation marker and, when a garbage collection ran since this session
+    /// built its store handle, rebuild the handle's view of the packs and drop every cache that
+    /// could vouch for a node GC removed: the file store's known set, Bloom filters, idx
+    /// handles, raw and decoded caches, and the network's state-store cache. Called under the
+    /// writer lock before any write that persists trie nodes (a decoded-cache hit is taken as
+    /// proof a node is stored), so a session that was open across a GC re-writes what GC
+    /// deleted instead of committing a HEAD whose nodes are gone. Transparent to the caller.
+    fn sync_gc_epoch(&mut self) -> Result<(), WorldError> {
+        let now = super::gc::read_gc_epoch(&self.paths);
+        if now != self.gc_epoch {
+            self.node_store.reload_from_disk()?;
+            if let Some(n) = &self.network {
+                n.state_store().clear_cache();
+            }
+            self.gc_epoch = now;
+        }
+        Ok(())
+    }
+
+    /// Persist the idempotency index and its sidecar for the current HEAD. A cache refresh,
+    /// never authoritative, and built not to get in a writer's way: it fails fast with
+    /// `WorldLocked` when a writer holds the lock, writes the trie's nodes (content-addressed
+    /// and additive, so safe beside a writer) *without* the lock, and takes the lock only to
+    /// publish the sidecar, re-checking under it that HEAD and the GC generation are what the
+    /// nodes were written for.
     pub fn persist_idempotency_index(&mut self) -> Result<bool, WorldError> {
-        let _lock = WorldLockGuard::acquire(&self.root)?;
+        drop(WorldLockGuard::acquire(&self.root)?);
         let Some(digest) = self.current_revision_digest else {
             return Ok(false);
         };
+        self.sync_gc_epoch()?;
+        let epoch = self.gc_epoch.clone();
+        if !self.idempotency.persist_nodes(&mut self.node_store)? {
+            return Ok(false);
+        }
+        let _lock = WorldLockGuard::acquire(&self.root)?;
+        if super::gc::read_gc_epoch(&self.paths) != epoch {
+            return Err(WorldError::StaleSession(
+                "garbage collection ran while the idempotency index was written".into(),
+            ));
+        }
         if self.read_disk_head()? != self.current_revision {
             return Err(WorldError::StaleBaseRevision {
                 expected: self.current_revision,
                 current: self.read_disk_head()?,
             });
         }
-        self.idempotency.persist(
-            &mut self.node_store,
-            &self.paths,
-            self.current_revision,
-            digest,
-        )
+        self.idempotency
+            .publish(&self.paths, self.current_revision, digest)
     }
 
     /// The batch committed under `idempotency_key`, if any.
@@ -1156,7 +1221,40 @@ impl WorldSession {
         &self,
         idempotency_key: &str,
     ) -> Result<Option<CommittedBatchInfo>, WorldError> {
-        self.idempotency.get(idempotency_key, &self.node_store)
+        match self.idempotency.get(idempotency_key, &self.node_store) {
+            Ok(found) => Ok(found),
+            // A cache: damage is answered from the receipts, never an error.
+            Err(_) => {
+                IdempotencyIndex::from_scan(&self.paths, &self.node_store, self.current_revision)
+                    .get(idempotency_key, &self.node_store)
+            }
+        }
+    }
+
+    /// [`Self::idempotency_lookup`] for a commit: when the persisted index cannot answer (a
+    /// missing or damaged trie node, an undecodable entry), rebuild it from the receipts and
+    /// ask again. The index is a cache and never authority, so damage to it must not block a
+    /// commit or an open. The rebuilt index is private to this session (its nodes may share
+    /// digests with the damaged ones, which are never re-written, so it is not published) and
+    /// the sidecar is removed so the next open rescans the receipts.
+    fn committed_info(&mut self, key: &str) -> Result<Option<CommittedBatchInfo>, WorldError> {
+        match self.idempotency.get(key, &self.node_store) {
+            Ok(found) => Ok(found),
+            Err(_) => {
+                // A damaged cache node latches the file store's corruption flag; it is
+                // cleared (damage is re-detected on any read of the damaged node).
+                self.node_store.clear_corruption_latch();
+                let mut rebuilt = IdempotencyIndex::from_scan(
+                    &self.paths,
+                    &self.node_store,
+                    self.current_revision,
+                );
+                rebuilt.set_ephemeral();
+                let _ = fs::remove_file(self.paths.idempotency_file());
+                self.idempotency = rebuilt;
+                self.idempotency.get(key, &self.node_store)
+            }
+        }
     }
 
     fn node_cache_budget(&self) -> usize {
@@ -1266,7 +1364,7 @@ impl WorldSession {
         self.replay_reason = Some(reason);
         self.state_source = None;
         if !policy.force_replay && policy.refresh_after_replay {
-            match self.refresh_state_cache() {
+            match self.refresh_state_cache_inner(false) {
                 Ok(()) => self.state_refreshed = true,
                 Err(e) => self.state_refresh_error = Some(e.to_string()),
             }
@@ -1280,7 +1378,24 @@ impl WorldSession {
     /// state is flushed and with HEAD re-checked under the lock; it is a cache, never
     /// authoritative.
     pub fn refresh_state_cache(&mut self) -> Result<(), WorldError> {
-        let _lock = WorldLockGuard::acquire(&self.root)?;
+        self.refresh_state_cache_inner(true)
+    }
+
+    /// `hold_lock`: the explicit operator refresh keeps the writer lock for the whole
+    /// operation. Without it (the opportunistic refresh an `open` performs after a replay,
+    /// which may persist gigabytes at scale) the lock is only probed up front (a writer
+    /// holding it means skip, as `WorldLocked`) and taken again for the final HEAD re-check
+    /// and the sidecar rename; the state nodes themselves are content-addressed additions that
+    /// need no exclusion, and a GC generation change in between abandons the refresh.
+    fn refresh_state_cache_inner(&mut self, hold_lock: bool) -> Result<(), WorldError> {
+        let held = if hold_lock {
+            Some(WorldLockGuard::acquire(&self.root)?)
+        } else {
+            drop(WorldLockGuard::acquire(&self.root)?);
+            None
+        };
+        self.sync_gc_epoch()?;
+        let epoch = self.gc_epoch.clone();
         let Some(net) = self.network.as_ref() else {
             return Err(WorldError::NetworkError("world has no network".into()));
         };
@@ -1291,6 +1406,15 @@ impl WorldSession {
             return Err(WorldError::InjectedCrash(CrashPoint::SidecarBeforeFlush));
         }
         self.node_store.flush()?;
+        let _relock = match held {
+            Some(_) => None,
+            None => Some(WorldLockGuard::acquire(&self.root)?),
+        };
+        if super::gc::read_gc_epoch(&self.paths) != epoch {
+            return Err(WorldError::StaleSession(
+                "garbage collection ran while the state cache was written".into(),
+            ));
+        }
         let disk_head = self.read_disk_head()?;
         let Some(revision_digest) = self.current_revision_digest else {
             return Err(WorldError::CorruptedHead(
@@ -1425,7 +1549,8 @@ impl WorldSession {
         batch: WorldBatch,
         limits: Option<&super::network::NetworkLimits>,
     ) -> Result<RevisionReceipt, WorldError> {
-        let _lock = WorldLockGuard::acquire(&self.root)?;
+        let _lock = WorldLockGuard::acquire_wait(&self.root, COMMIT_LOCK_WAIT)?;
+        self.sync_gc_epoch()?;
         let commit_started = Instant::now();
         let io_before = self
             .network
@@ -1451,10 +1576,7 @@ impl WorldSession {
 
         // 1. Check idempotency key
         let batch_digest = batch.digest();
-        if let Some(info) = self
-            .idempotency
-            .get(&batch.idempotency_key, &self.node_store)?
-        {
+        if let Some(info) = self.committed_info(&batch.idempotency_key)? {
             if info.batch_digest == Some(batch_digest) {
                 return Ok(RevisionReceipt {
                     revision_seq: info.seq,
@@ -1955,6 +2077,13 @@ impl WorldSession {
         if !rev_file.exists() {
             return Err(WorldError::RevisionNotFound(seq));
         }
+        // History a `--keep-revisions` GC dropped is not damage: say so.
+        if seq != 0
+            && seq < super::gc::read_gc_floor(&self.paths)
+            && !self.pins.checkpoint_pins().contains(&seq)
+        {
+            return Err(WorldError::RevisionCompacted(seq));
+        }
         let rev_bytes = fs::read(rev_file)?;
         let rev_val: serde_json::Value =
             serde_json::from_slice(&rev_bytes).map_err(|e| WorldError::Json(e.to_string()))?;
@@ -2249,7 +2378,7 @@ impl WorldSession {
         }
         if let Some((map, tail)) = self.settlements_from_checkpoint(net) {
             if tail > CHECKPOINT_REFRESH_TAIL && self.checkpoint_autowrite {
-                let _ = self.write_settlement_checkpoint(net, &map);
+                let _ = self.write_settlement_checkpoint(net, &map, false);
             }
             return Ok((
                 map,
@@ -2262,7 +2391,7 @@ impl WorldSession {
         }
         let map = net.all_settlements()?;
         if self.checkpoint_autowrite {
-            let _ = self.write_settlement_checkpoint(net, &map);
+            let _ = self.write_settlement_checkpoint(net, &map, false);
         }
         Ok((map, "frontier"))
     }
@@ -2294,7 +2423,7 @@ impl WorldSession {
         &self,
         net: &WorldNetwork,
     ) -> Option<(super::settlement_checkpoint::Settlements, u64)> {
-        let ck = SettlementCheckpoint::read(&self.paths)?;
+        let ck = SettlementCheckpoint::read_authentic(&self.paths)?;
         if ck.validity_key_digest != self.validity_key_for(net).digest()
             || ck.revision_seq > self.current_revision
         {
@@ -2329,10 +2458,7 @@ impl WorldSession {
         }
         touched.sort();
         touched.dedup();
-        let touched = touched
-            .into_iter()
-            .take(CHECKPOINT_PROBES)
-            .collect::<Vec<_>>();
+        // Every key the tail touched, not a sample.
         self.probe_settlements(net, &map, &touched)?;
         Some((map, tail))
     }
@@ -2374,12 +2500,25 @@ impl WorldSession {
         Some(())
     }
 
+    /// Write `map` as the HEAD checkpoint, authenticated under the world's secret. Unless the
+    /// caller already proved it (`verified`), the settlements must first hash to the decision
+    /// root the checkpoint is stamped with: the frontier walk and a tail-applied map are both
+    /// derived data, and a checkpoint is only ever as good as what it was written from.
     fn write_settlement_checkpoint(
         &self,
         net: &WorldNetwork,
         map: &super::settlement_checkpoint::Settlements,
+        verified: bool,
     ) -> Result<(), WorldError> {
         let Some(digest) = self.current_revision_digest else {
+            return Ok(());
+        };
+        if !verified && !map.is_empty() && compute_decision_root(map) != net.decision_root() {
+            return Err(WorldError::StateMismatch(
+                "settlements do not hash to the decision root; checkpoint not written".into(),
+            ));
+        }
+        let Some(key) = super::settlement_checkpoint::load_or_create_key(&self.paths) else {
             return Ok(());
         };
         let bytes = SettlementCheckpoint::encode_parts(
@@ -2388,6 +2527,7 @@ impl WorldSession {
             self.validity_key_for(net).digest(),
             Some(net.decision_root()),
             map,
+            Some(&key),
         );
         let crash = self.crash_injector == Some(CrashPoint::CheckpointAfterTmpBeforeRename);
         SettlementCheckpoint::write_bytes(&self.paths, &bytes, crash).map_err(|e| {
@@ -2412,7 +2552,7 @@ impl WorldSession {
                 "settlements do not hash to the decision root".into(),
             ));
         }
-        self.write_settlement_checkpoint(net, &map)?;
+        self.write_settlement_checkpoint(net, &map, true)?;
         Ok(map.values().map(|m| m.len()).sum())
     }
 

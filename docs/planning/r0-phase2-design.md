@@ -211,7 +211,7 @@ Recommended: (a) a settlement ledger: the `{seq}.decisions` delta bodies already
 GC time 10.7 s (100k), 167 s (1M; dry-run mark alone 96 s). After GC `open-check --verify-state --verify-store` passes (restored, 8 ms / 358 ms open). So about 40% of nodes (38% of bytes) are garbage; the remaining 1.26-1.5x over alpha.4's 86 MB is live data, not garbage. Live overhead: bodies are ~50% of the compacted store; the rest is per-node framing, an 80-byte record in the pack footer plus an 80-byte record in the derived `.idx` (about 160 B per node vs 158 B average body). Not changed (pack format/idx layout out of scope for a no-risk pass); candidate next steps: drop the pack-embedded record table in favour of the idx, or store only a 16-byte checksum. Node encodings and roots are untouched.
 
 ### Gaps / notes
-- Sessions open before a GC must be reopened. Concurrent readers in other processes are not supported during GC.
+- Sessions open before a GC no longer need a reopen to commit safely (superseded by "Review fixes (alpha.5)": the `objects/GC_EPOCH` marker makes them reload their pack view and caches). Concurrent readers in other processes are still not supported during GC.
 - Legacy loose objects: primitive covered in `soc-core/tests/pack_gc.rs`; no world-level legacy GC test (cannot construct a legacy world).
 - The 1M figures were taken while another lane's 1M bench was running on the same machine.
 ## Lane B (alpha.5): fast decisions read and O(1) idempotency
@@ -251,7 +251,7 @@ Open with many one-row batches (each batch is one pack): 1000 batches open 33 ms
 Checkpoint: equals frontier and `open_replay` over four fuzz seeds; tail application over 12 rounds equals replay; long tail refreshes; 15 corruption cases (empty, garbage, truncations, extension, byte flips in header/body/trailer) fall back identically and repair; forged/foreign (wrong digest, key, root, seq, a changed decision, a dropped decision) rejected on read and forged content caught by verify; compacted tail; stale older checkpoint; crash point; explicit refresh and `open_replay` never writes; paging covers everything once. Idempotency: index equals scan (and revision-only worlds), upgrade of old worlds, replay/conflict semantics for both sources, stale sidecar tail catch-up and persistence, seven unusable-sidecar cases, foreign sidecar, crashes before/after the HEAD rename, no file scan when current.
 
 ### Open issues
-- Checkpoint read trusts self-digest plus probes; a forged-but-consistent file that agrees at all 64 probes and the count survives until `verify`. Full recompute on every read costs seconds.
+- (Closed by "Review fixes (alpha.5)", M1: the checkpoint is now authenticated with a per-world key.) Checkpoint read trusted self-digest plus probes; a forged-but-consistent file that agreed at all 64 probes and the count survived until `verify`.
 - The first read of a 1M world is still the frontier walk (writes the checkpoint); `open-check --refresh-state` moves it off the request path.
 - Checkpoint is a second copy of the decisions on disk (~80 MB per 800k) and is not GC-managed.
 - Commit profile folds the index work into the existing `dehydrate`/`state_header` phases (phase names are asserted by a test).
@@ -334,3 +334,65 @@ Apply_ops at the late batch falls 13-40%, not 2x; and the extra budget eats all 
 | Chunked persist + larger raw cache (E1) | NO-GO | late apply -13..-40%, RSS ends higher than un-chunked |
 | Compact children / boxed Node variants | NO-GO as a load fix | lazy children about 30% of the hydrated heap; -15% heap, no end-to-end change |
 | Chunked replay inside `set_network` / `open_replay` (no per-chunk persist) | GO (separate task) | 300k replay peaks at 4 GB (13 KB/fact); output unaffected since nothing is persisted per slice |
+
+## Review fixes (alpha.5)
+
+Fixes for the adversarial review of 67d2910. Regression tests: `crates/brix-kb/tests/r0_review_fixes.rs` (18; each fails on 67d2910 and passes now) and `crates/brix-cli/tests/world_locked.rs`. Roots, digests and node encodings are unchanged; everything below is cache, marker or error-class behaviour.
+
+### H1: a session open across a GC (HIGH)
+Cause: `persist_node_recursive` treats a decoded-cache hit as proof that a node is stored, and the file store keeps `known`, Bloom, idx handles and a raw cache. After GC deleted nodes, a stale session re-created identical nodes (re-adding a fact it had removed) and skipped writing them, committing a HEAD whose state nodes no longer existed (`MissingState` at the next open).
+
+Design: a generation marker, then a transparent rebuild (the preferred option; no typed `StaleSession` on the commit path).
+- GC writes `objects/GC_EPOCH` (atomic, fsynced; a fresh `epoch <pid>-<nanos>-<n>` plus `floor <seq>`) **before** it retires any pack, and again after the last retirement. A crash mid-retire therefore still changes the marker. Dry runs do not touch it.
+- `WorldSession` records the marker before it builds its `FileNodeStore` (so a GC in between is seen). `apply_batch`, `refresh_state_cache` and `persist_idempotency_index` re-read it under the writer lock; on mismatch `sync_gc_epoch` calls `FileNodeStore::reload_from_disk` (re-lists the packs, drops Bloom/sparse/idx handles/`known`, the raw cache with its byte accounting, and the decoded cache; legacy shard flags re-scanned) and clears the network's `StateStore` cache. Clones of the store share that state, so the network's handle is covered too.
+- `retire_packs` itself now clears `cached_bytes` (it left it stale) and the decoded cache (L2).
+- Why transparent instead of `StaleSession`: the stale session's in-memory state is still correct (HEAD is current and retained by GC); only "this node is stored" beliefs are stale, which a reload restores. Failing would make `serve` need a reopen for no benefit. A cache write that races a GC (the opportunistic refresh/persist, which do their node writes outside the lock) is abandoned with `WorldError::StaleSession` instead, since its nodes may be in packs that GC retired.
+- Read-only use of a stale session is unchanged: it can serve pre-GC cached nodes (valid when cached). Documented: reopen for a fresh view.
+- Tests: in-process (`stale_session_commit_after_gc_leaves_dangling_nodes`, the reviewer's probe) and a child-process GC against a session with warmed caches (`gc_in_another_process_does_not_poison_an_open_session`), both followed by `verify_state`, `verify_store` and equality with a replay.
+
+### M1: settlement checkpoint served a forged-but-consistent body
+Cause: the read accepted on trailer digest + count + 64 spread probes + the *claimed* decision root; all of that can be recomputed by whoever edits the file. The auto-write path stamped `net.decision_root()` onto a map it had not checked, and the tail path probed only the first 64 sorted touched keys.
+
+Options considered:
+1. Recompute the decision root on every read. Closes the forgery but costs a full trie build: measured at 100k, +340 ms per read (verify of the frontier map) which extrapolates to ~3.4 s at 1M, undoing the ~0.6 s decisions-read win. Rejected for the read path.
+2. Memoize the verification per file identity in process. Useless for the CLI (one process per command).
+3. **Chosen: authenticate the file.** `checkpoint.key` holds 32 random bytes per world (created on first checkpoint write, mode 0600, separate from `world.json` so no manifest/digest changes). The checkpoint header carries `auth = H(key || tag || seq || revision digest || validity key || root || count || digest of the body)`. A reader accepts a file only if `auth` verifies (one extra hash over bytes it has already read, ~+10 ms at 100k), so a file not written by this world's writer is a miss and falls back to the frontier with identical output.
+4. The writer proves what it signs: the frontier-path write and the tail-rewrite (>32 revisions) path recompute the decision root from the map and write nothing on mismatch (the read still returns the map; only the cache is refused). The recompute is a one-off cost beside a 12 s frontier walk (+340 ms at 100k, +~3.5 s at 1M); `refresh_settlement_checkpoint` already did this and skips the duplicate.
+5. The tail path now probes **every** key a tail touched (the `take(64)` is gone); the 64 spread probes against the decision trie remain as defence in depth.
+
+Threat model, stated plainly: the key defeats damage and any edit that does not know the secret, including the reviewer's decode-edit-re-encode probe and a forgery that copies the genuine `auth` bytes (both tested). Someone who can write the world directory can also rewrite revision records (unsigned) and `checkpoint.key`, so this is integrity of a cache against accidents and naive tampering, not an access-control boundary. A missing or malformed key is a miss, replaced on the next write. `verify_settlement_checkpoint` (full recompute) is unchanged and still run by `open-check --verify-state`.
+
+Measured decisions read (release, fresh process, 800k decisions at 1M; the same world, old binary = 67d2910):
+
+| 1M, 800k decisions (shared machine, noisy) | before (67d2910) | after |
+|---|---|---|
+| first read, frontier path (also writes the checkpoint) | 6.3 s | 9.9 s (+3.5 s once: decision-root recompute before signing) |
+| checkpoint read, fresh process | 529 ms | 583-615 ms (+~70 ms: one hash of the file for `auth`) |
+| 100k: frontier / checkpoint | 533 ms / 54 ms | 872 ms / 64 ms |
+
+The read path keeps its speed (~0.6 s vs ~0.53 s); a full recompute per read would have cost ~3.5 s (the same recompute as the one-off write-side check).
+
+### M2: torn receipt lost its idempotency key
+`from_scan` added a seq to `receipted` whenever the receipt *file* existed, so the revision record (which carries the key) was skipped even when the receipt did not parse. Now a seq is receipted only when its record parses; an unparseable receipt falls back to the revision record. If neither parses, the scan result is marked incomplete (`complete = false`) and is never staged, published or persisted (`persist_nodes` refuses it), so no sidecar can be built from a scan that lost a key. Tests: torn receipt with an intact revision (key recovered), and both torn (lookup of the other key works, no sidecar written).
+
+### M3: damage to the idempotency cache blocked commits
+`apply_batch` now asks `committed_info`: on any error from the index lookup (missing or corrupt deep node, undecodable value) it clears the store's corruption latch, rebuilds the index from the receipts and retries once. The rebuilt index is session-private (`set_ephemeral`: not staged, not published) because its nodes can share digests with the damaged ones, which are never re-written; the sidecar is removed so the next open rescans. `IdempotencyIndex::load` clears the latch when the sidecar's root was unreadable (before, one damaged node poisoned every later read of the handle and `open` failed with `CorruptState`), and `persist_nodes` only publishes a trie that reads end to end (`walk`), so a damaged node is not re-published as healthy. `idempotency_lookup` falls back to a receipt scan on error. The damaged node disappears at the next GC (the sidecar is gone, so it is unreachable). Test corrupts every child of the sidecar root in the packs, then opens, commits, replays an old key, reopens and commits again.
+
+### M4: read-only commands vs the writer lock
+- `WorldLocked` is its own status `world-locked` (same exit code as the old `unknown-error`); new `stale-session`, `revision-compacted`. The serve layer reports the same strings (it uses the CLI mapping).
+- Opportunistic cache writes are best effort and non-blocking. State-cache refresh after a replay: probe the lock (writer holds it: skip, `state_refresh_error = WorldLocked`), write the state nodes and flush with **no** lock (packs have unique names and nodes are content-addressed, so a concurrent writer is unaffected), then take the lock only to re-check HEAD and the GC epoch and rename the sidecar. The idempotency sidecar upgrade is split the same way (`persist_nodes`, then `publish`). The explicit `refresh_state_cache()` (operator `open-check --refresh-state`) still holds the lock throughout. The settlement checkpoint write never took the lock (temporary file + rename).
+- A commit waits up to 500 ms for the lock (`WorldLockGuard::acquire_wait`, 5 ms steps), so a reader's sub-millisecond publish step cannot fail it, while a real second writer still gets `world-locked`. `acquire` itself is still immediate (GC, tests).
+- Tests: a legacy world whose reader is mid-refresh (detected by the lock being held) while a writer commits (fails with `WorldLocked` before); the bounded wait; the CLI status.
+- Not done: the refresh's CPU work (a 1M replay) is still done by the reader, only no longer under the lock.
+
+### L1 to L6
+- L1: `head - seq < k` (no overflow); `keep_revisions_huge_does_not_drop_history`.
+- L3: `verify_after` now reopens the store (`verify_store`, every live node present), resolves every retained revision's relation, secondary-index and decision root through the trie (root node decoded and digest-checked), reopens the world without writing, runs `verify_state` (restored network equals a replay) and walks the whole idempotency trie. A sidecar naming a root whose children are missing used to pass; it now fails the GC run (the store is not harmed: the check is after the fact and read-only). Note `verify_state` is a replay: at 1M `verify_after` adds that cost to the GC run; pass `verify_after: false` to skip.
+- L4: GC `storage()` maps `CorruptedNode`/`DecodeError` to `CorruptState` and `MissingNode` to `MissingState`; idempotency entries that fail to decode are `CorruptState`; checkpoint damage stays a miss. Not changed: the global `From<StorageError> for WorldError` still yields `CorruptedObject` (status `io-or-corruption`, asserted by `secondary_query_pagination`), to keep existing statuses stable. History dropped by `--keep-revisions` is `RevisionCompacted(seq)`: GC records `floor` in the marker (newest K kept means everything below `head - K + 1` except genesis, HEAD and checkpoint pins is gone); `pin_revision` returns the typed error for it. The existing GC test that called `pin_revision(3).unwrap()` and expected the *read* to fail now expects the typed error at the pin.
+- L5: documented, not enforceable: `--keep-revisions` cannot see `pin_reader` pins (in memory, per process). GC sweeps `settlements.tmp.<pid>` files older than 60 s (younger may belong to a live reader; leftover count is in `files_swept`); not swept by open-check. `dead_nodes` counts distinct digests (`FileNodeStore::unique_node_count`, a k-way merge of the sorted idx files, constant memory); before, a node in several packs was counted once per pack.
+- L6: a sidecar naming revision 0 below HEAD must match revision 0's recorded digest (else a scan).
+
+### Gaps
+- `refresh_state_cache` called by an operator still holds the lock for its whole duration.
+- The idempotency fallback after damage costs one receipt scan per affected open until a GC removes the damaged node.
+- `From<StorageError>` mapping to `CorruptedObject` elsewhere (secondary-index paging) left as is.

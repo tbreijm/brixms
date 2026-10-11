@@ -1371,6 +1371,15 @@ impl DecodedNodeCache {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Drop every cached node (the bound is kept). Used when the store underneath changed
+    /// without this handle's knowledge, so a hit can no longer vouch for presence.
+    pub fn clear(&self) {
+        let mut g = self.lock();
+        g.map.clear();
+        g.queue.clear();
+        g.used = 0;
+    }
+
     /// Change the accounted-byte bound, evicting immediately when it shrinks.
     pub fn set_capacity(&self, cap_bytes: usize) {
         let mut g = self.lock();

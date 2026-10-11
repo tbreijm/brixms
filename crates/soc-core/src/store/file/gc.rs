@@ -94,6 +94,10 @@ impl FileNodeStore {
             state.known.clear();
             state.node_cache.clear();
             state.cache_lru.clear();
+            state.cached_bytes = 0;
+            // A decoded-cache hit is taken as proof a node is stored (trie persistence), which
+            // no longer holds for nodes that lived only in the retired packs.
+            self.decoded.clear();
         }
         let mut freed = 0;
         for (i, pack) in packs.iter().enumerate() {
@@ -112,6 +116,127 @@ impl FileNodeStore {
         }
         File::open(&self.objects_dir)?.sync_all()?;
         Ok(freed)
+    }
+
+    /// Re-read the set of published packs from disk and drop every table and cache derived
+    /// from the old view (Bloom filters, sparse tables, idx handles, the `known` set, the raw
+    /// and decoded node caches). For a handle that outlived a compaction done by another
+    /// handle or process: afterwards no cache can vouch for a node the compaction removed.
+    /// A pending (unflushed) pack is kept. A latched failure that was *damage* (checksum or
+    /// format, not an OS error) is cleared: damage is re-detected by the next read of the
+    /// damaged node, so nothing is hidden, but one unreadable cache node need not poison the
+    /// handle for good. An I/O latch (possibly a torn write) is kept.
+    pub fn reload_from_disk(&self) -> io::Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| invalid("poisoned pack index"))?;
+        let mut packs = Vec::new();
+        for item in fs::read_dir(&self.objects_dir)? {
+            let path = item?.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("pack") {
+                packs.push(path);
+            }
+        }
+        packs.sort();
+        let mut fresh = Vec::with_capacity(packs.len());
+        for path in packs {
+            fresh.push(self.open_pack(&path)?);
+        }
+        for (i, flag) in self.legacy_shards.iter().enumerate() {
+            let present = self.objects_dir.join(format!("{i:02x}")).is_dir();
+            flag.store(present, Ordering::Relaxed);
+        }
+        state.packs = fresh;
+        state.idx_files.clear();
+        state.pack_files.clear();
+        state.known.clear();
+        state.node_cache.clear();
+        state.cache_lru.clear();
+        state.cached_bytes = 0;
+        self.decoded.clear();
+        self.clear_corruption_latch();
+        Ok(())
+    }
+
+    /// Forget a latched failure that was *damage* (checksum or format), keeping an I/O latch.
+    /// For callers that treat the unreadable node as a cache miss: damage is re-detected by
+    /// the next read of the damaged node, so nothing is hidden, but one unreadable cache node
+    /// no longer poisons every other read of the handle.
+    pub fn clear_corruption_latch(&self) {
+        if self.corrupt.load(Ordering::SeqCst) {
+            self.corrupt.store(false, Ordering::SeqCst);
+            self.failed.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Number of distinct digests across the published packs (a k-way merge of the sorted idx
+    /// files, constant memory) plus legacy loose objects. [`Self::node_count`] counts entries,
+    /// so a node re-written by several commits counts once per pack there.
+    pub fn unique_node_count(&self) -> io::Result<u64> {
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+        let idx_paths: Vec<(PathBuf, u64)> = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| invalid("poisoned pack index"))?;
+            state
+                .packs
+                .iter()
+                .map(|p| (p.idx_path.clone(), p.count))
+                .collect()
+        };
+        struct Cursor {
+            reader: BufReader<File>,
+            left: u64,
+        }
+        fn next(c: &mut Cursor) -> io::Result<Option<Digest>> {
+            if c.left == 0 {
+                return Ok(None);
+            }
+            let mut rec = [0u8; RECORD as usize];
+            c.reader.read_exact(&mut rec)?;
+            c.left -= 1;
+            Ok(Some(digest_at(&rec, 0)))
+        }
+        let mut cursors = Vec::with_capacity(idx_paths.len());
+        let mut heap = BinaryHeap::new();
+        for (i, (path, count)) in idx_paths.iter().enumerate() {
+            let mut file = File::open(path)?;
+            file.seek(SeekFrom::Start(IDX_HEADER))?;
+            let mut c = Cursor {
+                reader: BufReader::with_capacity(64 * 1024, file),
+                left: *count,
+            };
+            if let Some(d) = next(&mut c)? {
+                heap.push(Reverse((d, i)));
+            }
+            cursors.push(c);
+        }
+        let mut unique = 0u64;
+        let mut last: Option<Digest> = None;
+        while let Some(Reverse((d, i))) = heap.pop() {
+            if last != Some(d) {
+                unique += 1;
+                last = Some(d);
+            }
+            if let Some(n) = next(&mut cursors[i])? {
+                heap.push(Reverse((n, i)));
+            }
+        }
+        // Loose legacy objects: counted as stored (rare, and they may repeat packed nodes).
+        let mut loose = 0u64;
+        for item in fs::read_dir(&self.objects_dir)? {
+            let path = item?.path();
+            if path.is_dir() {
+                loose += fs::read_dir(&path)?
+                    .flatten()
+                    .filter(|f| f.path().extension().and_then(|s| s.to_str()) == Some("bin"))
+                    .count() as u64;
+            }
+        }
+        Ok(unique + loose)
     }
 
     /// Delete every legacy loose object (`objects/xx/*.bin`). Only for GC, after the live ones

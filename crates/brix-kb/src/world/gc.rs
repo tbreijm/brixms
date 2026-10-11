@@ -41,7 +41,30 @@
 //! live node is in some published pack, so a crash leaves a store that holds the live set
 //! (old packs, new packs, or both: a superset of the same content) and that opens and reads
 //! identically. The next GC removes the leftovers (and any `.tmp` files). GC holds the world's
-//! single-writer lock; sessions that were open before GC must be reopened afterwards.
+//! single-writer lock.
+//!
+//! # Sessions open across a GC (generation marker)
+//!
+//! A [`super::session::WorldSession`] open before a GC keeps caches that can vouch for nodes the
+//! GC deletes (the decoded-node cache is taken as proof a node is stored, so an identical
+//! node re-created by a later commit would never be written again). GC therefore rewrites the
+//! marker `objects/GC_EPOCH` (atomically, a fresh nonce plus the history floor) **before** it
+//! retires anything and again after; every session write path (`apply_batch`,
+//! `refresh_state_cache`, `persist_idempotency_index`) re-reads it under the writer lock and,
+//! when it changed, reloads the pack set and clears every cache first. A stale session thus
+//! keeps working transparently instead of committing a HEAD whose nodes are gone. Read-only
+//! use of a stale session can still see pre-GC cached nodes (harmless: they were valid) and
+//! should reopen for a fresh view.
+//!
+//! # Compacted history
+//!
+//! `keep_revisions` leaves a `floor` in the marker: revisions below it other than genesis and
+//! checkpoint pins no longer have their tries, and `pin_revision` reports them as
+//! [`WorldError::RevisionCompacted`] (status `revision-compacted`), distinct from damage
+//! (`corrupt-state`) and from absent state (`missing-state`). In-memory reader pins
+//! (`pin_reader`) live in one process and are invisible to a GC run from another: GC cannot
+//! honour them (only the persisted checkpoint pins), so `--keep-revisions` must not run while
+//! readers hold older revisions.
 
 // Membership tests and an order-insensitive final check only; GC output never depends on
 // iteration order (nodes are content-addressed).
@@ -53,14 +76,15 @@ use std::path::Path;
 use std::time::Instant;
 
 use brix_canon::Digest;
-use soc_core::store::{FileNodeStore, NodeStore};
+use soc_core::store::{FileNodeStore, NodeStore, TrieMap};
 
 use super::error::WorldError;
 use super::idempotency::IdempotencySidecar;
 use super::paths::WorldPaths;
 use super::revision::WorldRevision;
-use super::session::WorldLockGuard;
+use super::session::{OpenPolicy, WorldLockGuard, WorldSession};
 use super::state_cache::StateCache;
+use super::types::{WorldKey, WorldTuple};
 
 /// Bytes of node data after which GC publishes a pack and starts the next one.
 const PACK_TARGET_BYTES: u64 = 256 * 1024 * 1024;
@@ -135,8 +159,49 @@ fn inject(opts: &GcOptions, at: GcCrashPoint) -> Result<(), WorldError> {
     Ok(())
 }
 
+/// Damage found while collecting is `CorruptState` (as everywhere else); only OS errors stay `Io`.
 fn storage(e: soc_core::store::StorageError) -> WorldError {
-    WorldError::Io(io::Error::other(format!("gc: {e}")))
+    use soc_core::store::StorageError as S;
+    match e {
+        S::Io(m) => WorldError::Io(io::Error::other(format!("gc: {m}"))),
+        S::MissingNode(_) => WorldError::MissingState(super::state_store::StateError::Storage(e)),
+        e => WorldError::CorruptState(super::state_store::StateError::Storage(e)),
+    }
+}
+
+/// The GC generation marker: the whole content of `objects/GC_EPOCH` (empty when no GC ever
+/// ran). Compared for equality by sessions; see the module docs.
+pub(crate) fn read_gc_epoch(paths: &WorldPaths) -> String {
+    std::fs::read_to_string(paths.gc_epoch_file()).unwrap_or_default()
+}
+
+/// The history floor recorded by the last `keep_revisions` GC (0 = nothing was compacted).
+pub(crate) fn read_gc_floor(paths: &WorldPaths) -> u64 {
+    read_gc_epoch(paths)
+        .lines()
+        .find_map(|l| l.strip_prefix("floor "))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Atomically replace the marker with a fresh nonce and `floor`, durable before returning.
+fn write_gc_epoch(paths: &WorldPaths, floor: u64) -> Result<(), WorldError> {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let body = format!("epoch {}-{nanos}-{n}\nfloor {floor}\n", std::process::id());
+    let tmp = paths.gc_epoch_tmp();
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(body.as_bytes())?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, paths.gc_epoch_file())?;
+    std::fs::File::open(paths.objects_dir())?.sync_all()?;
+    Ok(())
 }
 
 /// Every digest-shaped reference in `bytes` that names a node present in `store`.
@@ -163,6 +228,9 @@ fn references(
 
 struct Roots {
     digests: Vec<Digest>,
+    /// Relation, secondary-index and decision roots of the retained revisions (trie roots
+    /// that must decode), for `verify_after`.
+    trie_roots: Vec<Digest>,
     total: u64,
     retained: u64,
     head: u64,
@@ -181,6 +249,7 @@ fn collect_roots(root: &Path, paths: &WorldPaths, keep: Option<u64>) -> Result<R
         .map(|v| v.into_iter().collect())
         .unwrap_or_default();
     let mut digests = Vec::new();
+    let mut trie_roots = Vec::new();
     let (mut total, mut retained) = (0, 0);
     for seq in 0..=head {
         let file = paths.revision_file(seq);
@@ -193,7 +262,7 @@ fn collect_roots(root: &Path, paths: &WorldPaths, keep: Option<u64>) -> Result<R
         total += 1;
         let keep_it = match keep {
             None => true,
-            Some(k) => seq == 0 || seq == head || pinned.contains(&seq) || seq + k > head,
+            Some(k) => seq == 0 || seq == head || pinned.contains(&seq) || head - seq < k,
         };
         if !keep_it {
             continue;
@@ -211,6 +280,9 @@ fn collect_roots(root: &Path, paths: &WorldPaths, keep: Option<u64>) -> Result<R
         digests.extend(rev.relation_roots.values().copied());
         digests.extend(rev.secondary_index_roots.values().copied());
         digests.extend(rev.decision_root);
+        trie_roots.extend(rev.relation_roots.values().copied());
+        trie_roots.extend(rev.secondary_index_roots.values().copied());
+        trie_roots.extend(rev.decision_root);
         if seq == head {
             digests.extend(rev.network_state_root);
         }
@@ -226,6 +298,7 @@ fn collect_roots(root: &Path, paths: &WorldPaths, keep: Option<u64>) -> Result<R
     }
     Ok(Roots {
         digests,
+        trie_roots,
         total,
         retained,
         head,
@@ -252,12 +325,13 @@ pub fn gc_world(dir: impl AsRef<Path>, opts: &GcOptions) -> Result<GcReport, Wor
         ..Default::default()
     };
     if !opts.dry_run {
-        report.files_swept = store.sweep_unpublished()? as u64;
+        report.files_swept = store.sweep_unpublished()? as u64 + sweep_checkpoint_tmp(root);
     }
     let old_packs = store.published_packs()?;
     report.packs_before = old_packs.len() as u64;
     report.bytes_before = store.total_bytes();
-    report.nodes_before = store.node_count() as u64;
+    // Distinct digests: a node re-written by several commits sits in several packs.
+    report.nodes_before = store.unique_node_count()?;
 
     // Mark, copying each live node into the new pack as soon as it is read.
     let target = opts.pack_target_bytes.unwrap_or(PACK_TARGET_BYTES);
@@ -306,6 +380,17 @@ pub fn gc_world(dir: impl AsRef<Path>, opts: &GcOptions) -> Result<GcReport, Wor
     inject(opts, GcCrashPoint::BeforeFinalFlush)?;
     store.flush()?;
     inject(opts, GcCrashPoint::AfterCopyBeforeRetire)?;
+    // Generation marker, durable BEFORE anything is retired: a session open across this GC
+    // must notice even if we crash half way through the retirement.
+    let floor = match opts.keep_revisions {
+        None => read_gc_floor(&paths),
+        Some(k) => read_gc_floor(&paths).max(if k == 0 {
+            roots.head
+        } else {
+            roots.head.saturating_sub(k - 1)
+        }),
+    };
+    write_gc_epoch(&paths, floor)?;
     let mut crash_mid = |i: usize| -> io::Result<()> {
         if i == 0 && opts.crash == Some(GcCrashPoint::MidRetire) {
             return Err(io::Error::other("injected gc crash: MidRetire"));
@@ -317,23 +402,78 @@ pub fn gc_world(dir: impl AsRef<Path>, opts: &GcOptions) -> Result<GcReport, Wor
     if store.has_legacy_objects() {
         store.retire_legacy_objects()?;
     }
+    write_gc_epoch(&paths, floor)?;
     report.packs_after = store.published_packs()?.len() as u64;
     report.bytes_after = store.total_bytes();
     drop(store);
 
     if opts.verify_after {
-        let reopened = FileNodeStore::new(root)?;
-        reopened.verify_store()?;
-        for d in &live {
-            if !reopened.try_contains(d)? {
-                return Err(WorldError::State(super::state_store::StateError::Storage(
-                    soc_core::store::StorageError::MissingNode(*d),
-                )));
-            }
-        }
+        verify_reachability(root, &roots, &live)?;
     }
     report.elapsed_ms = started.elapsed().as_millis() as u64;
     Ok(report)
+}
+
+/// Leftover `settlements.tmp.<pid>` files of readers that died while writing a checkpoint.
+/// Only files untouched for a minute are removed (a live reader may be mid-write).
+fn sweep_checkpoint_tmp(root: &Path) -> u64 {
+    let mut removed = 0;
+    let Ok(items) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    for item in items.flatten() {
+        let name = item.file_name();
+        if !name.to_string_lossy().starts_with("settlements.tmp.") {
+            continue;
+        }
+        let old = item
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age.as_secs() >= 60);
+        if old && std::fs::remove_file(item.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// After a real run: reopen the store (every pack, every live node present), then reopen the
+/// world and prove what a reader needs is reachable: the restored network equals a replay
+/// (`verify_state`), the idempotency trie reads end to end, and every retained revision's
+/// relation, secondary-index and decision roots resolve through the store.
+fn verify_reachability(
+    root: &Path,
+    roots: &Roots,
+    live: &HashSet<Digest>,
+) -> Result<(), WorldError> {
+    let reopened = FileNodeStore::new(root)?;
+    reopened.verify_store().map_err(map_pack_error)?;
+    for d in live {
+        if !reopened.try_contains(d)? {
+            return Err(WorldError::State(super::state_store::StateError::Storage(
+                soc_core::store::StorageError::MissingNode(*d),
+            )));
+        }
+    }
+    for d in &roots.trie_roots {
+        TrieMap::<WorldKey, WorldTuple>::from_root_digest(*d, 0)
+            .get_with_store(&WorldKey::new(Vec::new()), &reopened)
+            .map_err(storage)?;
+    }
+    drop(reopened);
+    // Never writes: the lock is already ours and caches are not refreshed by a check.
+    let session = WorldSession::open_with_policy(
+        root,
+        OpenPolicy {
+            force_replay: false,
+            refresh_after_replay: false,
+        },
+    )?;
+    session.verify_state()?;
+    session.idempotency.walk(&session.node_store)?;
+    Ok(())
 }
 
 /// Result of [`verify_store`].
