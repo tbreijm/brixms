@@ -6,8 +6,14 @@ use std::process::Command;
 
 use serde_json::{json, Value};
 
+/// The `brix` binary, resolved at run time first: CI runs tests from a
+/// nextest archive extracted elsewhere, where the compile-time path is gone.
 fn brix() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_brix"))
+    let bin = std::env::var_os("CARGO_BIN_EXE_brix")
+        .or_else(|| std::env::var_os("NEXTEST_BIN_EXE_brix"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_brix")));
+    Command::new(bin)
 }
 
 fn repo_root() -> PathBuf {
