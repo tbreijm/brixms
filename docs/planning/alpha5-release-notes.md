@@ -23,8 +23,8 @@ served from `settlements.ckpt` in ~0.6 s.
 
 - 1M load is ~259 s wall after the load-growth work (lane A); per-batch time still grows with N.
   `open-check --refresh-state` moves the first decisions read off the request path.
-- Disk is ~1.26x alpha.4 before GC; `brix world gc` removes about 40% of it (dead nodes of
-  superseded revisions). Sessions open across a GC keep working (see "Garbage collection").
+- A world stores operator state as well as facts: the 100k benchmark world is ~86 MB in alpha.4,
+  ~490 MB after loading and ~300 MB after `brix world gc` (dead nodes of superseded revisions). Sessions open across a GC keep working (see "Garbage collection").
 - `--keep-revisions N` cannot see in-memory reader pins (`pin_reader`) of other processes: do not
   run it while readers hold older revisions. Persisted checkpoint pins are honoured.
 - An idempotency-index trie node that is damaged stays in its pack until the next GC; until then

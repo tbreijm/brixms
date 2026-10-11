@@ -1468,7 +1468,9 @@ pub fn parse_world_args(args: &[String], json: bool) -> Result<Command, CliUsage
         "gc" => parse_world_gc_args(rest, json)?,
         other => {
             return Err(CliUsageError::usage(
-                format!("unknown 'brix world' sub-command: '{other}'"),
+                format!(
+                    "unknown 'brix world' sub-command: '{other}'\nUsage: brix world <init|batch|query|decide|show|explain|audit|verify|import-kb|open-check|gc> ..."
+                ),
                 json,
                 Some("world".to_string()),
             ))
@@ -2275,6 +2277,14 @@ Commands:
   kb verify <dir> [--package-path <dir>...] [--json]
       Verify the whole knowledge base: every revision's digest, parent chain,
       recomputed program/snapshot identities, and a fresh replay of its result.
+
+  world <init|batch|query|decide|show|explain|audit|verify|import-kb|open-check|gc> <dir> ... [--json]
+      The persistent world runtime (ADR-0046): facts, operator state and decisions in a
+      content-addressed store; opening restores state without replaying facts and a
+      commit costs time proportional to the change. 'open-check' reports how a world
+      opens (--refresh-state, --verify-store); 'gc [--dry-run] [--keep-revisions N]'
+      reclaims storage no retained revision references; 'import-kb' converts a 'brix kb'.
+      See the README for a walkthrough.
 
   serve --stdio
       Run a long-running JSON-lines protocol (schema 'brix.serve@1') over

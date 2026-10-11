@@ -260,9 +260,12 @@ Known limits in this release:
   in alpha.4, about 490 MB after loading, about 300 MB after `brix world gc`).
   Roughly half of what remains is per-node framing in the pack format. The
   checkpoint is a second copy of the decisions and is not GC-managed.
-- The replay fallback is memory-hungry on large worlds.
-- Sessions open during a GC must be reopened; concurrent readers in other
-  processes are not supported during GC.
+- The replay fallback is still memory-hungry on large worlds (about 4 GB at
+  300k facts); chunking it only helps with a small `apply_hydrated_bytes`.
+- A session open across a GC keeps committing safely (it reloads its pack set
+  on the next write), but may serve pre-GC cached nodes for reads until
+  reopened. Concurrent readers in other processes are not supported while a GC
+  runs, and `--keep-revisions` cannot see reader pins held by other processes.
 
 Embedders should read the
 [alpha.5 release notes](./docs/planning/alpha5-release-notes.md) for API and
