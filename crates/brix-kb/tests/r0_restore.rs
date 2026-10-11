@@ -291,8 +291,21 @@ fn fuzz_ops(rng: &mut Lcg, next: &mut [u64; 3]) -> Vec<WorldBatchOp> {
 }
 
 fn run_fuzz(seed: u64, steps: usize) {
-    let dir = TempDir::new(&format!("fuzz{seed}"));
+    run_fuzz_chunked(seed, steps, 0);
+}
+
+/// `chunk` 0: the default policy; otherwise every batch is applied in chunks of that many
+/// operations (CPD), which must not change anything this test observes.
+fn run_fuzz_chunked(seed: u64, steps: usize, chunk: usize) {
+    use brix_kb::world::FixedChunkPolicy;
+    let policy = || -> std::sync::Arc<dyn brix_kb::world::ChunkPolicy> {
+        std::sync::Arc::new(FixedChunkPolicy(chunk))
+    };
+    let dir = TempDir::new(&format!("fuzz{seed}_{chunk}"));
     let mut live = create(&dir);
+    if chunk > 0 {
+        live.chunk_policy = policy();
+    }
     let mut rng = Lcg(seed);
     let mut next = [0u64; 3];
     for step in 0..steps {
@@ -304,8 +317,16 @@ fn run_fuzz(seed: u64, steps: usize) {
         if step % 4 == 3 {
             live = WorldSession::open(dir.path()).unwrap();
             assert_eq!(live.open_mode, OpenMode::Restored);
+            if chunk > 0 {
+                live.chunk_policy = policy();
+            }
         }
     }
+}
+
+#[test]
+fn restore_equals_replay_at_every_fuzz_step_with_one_op_chunks() {
+    run_fuzz_chunked(0x00DD_BA11, 40, 1);
 }
 
 #[test]

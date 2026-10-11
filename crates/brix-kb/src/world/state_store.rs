@@ -135,6 +135,14 @@ impl StateStore {
         Ok(())
     }
 
+    /// `(nodes, bytes)` written since the last flush (`(0, 0)` for memory stores).
+    pub fn pending_stats(&self) -> (usize, u64) {
+        match &*self.inner.backend.read().expect("state store lock") {
+            Backend::File(f) => f.pending_stats(),
+            Backend::Memory(_) => (0, 0),
+        }
+    }
+
     /// Whether the store holds a node with this digest.
     pub fn has_node(&self, digest: &Digest) -> bool {
         NodeStore::contains(self, digest)

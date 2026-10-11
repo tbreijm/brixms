@@ -42,6 +42,7 @@ A legacy (`@2`) world replays once on its first open, then restores from `state-
   `world::gc::gc_world(dir, &GcOptions)`. Single writer; reopen sessions afterwards. Default keeps
   every revision readable. `brix world open-check --verify-store` (serve `verify_store`,
   `world::gc::verify_store`) audits every pack body checksum.
+- Chunked persist/dehydrate: a batch estimated to exceed `apply_hydrated_bytes` (manifest, default 1 GiB, `0` disables; at least 32,768 ops) is applied in chunks that are persisted and dehydrated in place, bounding memory. Memory mechanism, not a speedup (about +25% CPU for -25% peak RSS at 1M); outputs are identical for any chunking; intermediate nodes are garbage until `brix world gc`. Replay (`set_network`, `replay_network`, `open_replay`) is chunked the same way.
 
 ## Fixed
 

@@ -9,9 +9,14 @@ use super::state_store::{StateStore, DEFAULT_NODE_CACHE_BYTES};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::batch::{WorldBatch, WorldBatchOp};
+use super::chunk_policy::{
+    ChunkInput, ChunkPolicy, HeuristicChunkPolicy, DEFAULT_APPLY_HYDRATED_BYTES,
+    PENDING_INDEX_BYTES_PER_NODE,
+};
 use super::codec::{encode_secondary_key, extract_indexed_field, TupleRecord};
 use super::decision_codec::compute_decision_root;
 use super::error::{CrashPoint, WorldError};
@@ -107,6 +112,150 @@ fn dehydrate_base(
         .collect()
 }
 
+/// What chunking did for one batch (operational; never reaches a digest).
+struct ChunkRun {
+    chunks: usize,
+    persist_ms: f64,
+    /// Objects written by the between-chunk persists.
+    objects: usize,
+    fallback: bool,
+}
+
+impl ChunkRun {
+    fn single() -> Self {
+        Self {
+            chunks: 1,
+            persist_ms: 0.0,
+            objects: 0,
+            fallback: false,
+        }
+    }
+}
+
+/// Errors that are about the environment (disk, store, lock), not about the batch's logic.
+/// A chunked run that hits one fails the batch; any other error may be an artifact of the
+/// chunk boundaries, so the batch is re-run unchunked and that result is authoritative.
+fn is_environmental(e: &WorldError) -> bool {
+    matches!(
+        e,
+        WorldError::Io(_)
+            | WorldError::InjectedCrash(_)
+            | WorldError::State(_)
+            | WorldError::CorruptState(_)
+            | WorldError::MissingState(_)
+            | WorldError::MissingObject(_)
+            | WorldError::CorruptedObject(_)
+            | WorldError::WorldLocked(_)
+            | WorldError::StateMismatch(_)
+            | WorldError::ValidityMismatch(_)
+    )
+}
+
+/// Apply `ops` to `sn` (a private clone of `net`) in the chunks `policy` plans, persisting and
+/// dehydrating the staged network between chunks so the hydrated working set stays near the
+/// budget. Output (roots, decision delta, revision) is identical for any chunking; with no
+/// limit set, a batch the policy keeps whole runs exactly the unchunked path.
+#[allow(clippy::too_many_arguments)]
+fn apply_ops_chunked(
+    mut sn: WorldNetwork,
+    net: &WorldNetwork,
+    ops: &[WorldBatchOp],
+    limits: Option<&super::network::NetworkLimits>,
+    lookup: &super::network::BaseLookup<'_>,
+    policy: &dyn ChunkPolicy,
+    budget: u64,
+    crash: Option<CrashPoint>,
+) -> Result<(WorldNetwork, super::network::NetworkDeltaReport, ChunkRun), WorldError> {
+    let default_limits = super::network::NetworkLimits::default();
+    let lim = limits.unwrap_or(&default_limits);
+    let mut input = ChunkInput {
+        ops_total: ops.len(),
+        ops_done: 0,
+        prev_chunk_ops: 0,
+        prev_nodes_written: 0,
+        pending_index_bytes: 0,
+        budget_bytes: budget,
+    };
+    // Any execution bound is accounted per batch, so a bounded batch is never split (H3).
+    let first = if *lim == default_limits {
+        policy.chunk_plan(&input)
+    } else {
+        super::chunk_policy::ChunkDecision {
+            ops: ops.len(),
+            flush_pack: false,
+        }
+    };
+    if first.ops >= ops.len() {
+        let report = sn.apply_ops_staged_view(ops, lim, Some(lookup))?;
+        return Ok((sn, report, ChunkRun::single()));
+    }
+
+    let mut run = ChunkRun::single();
+    let chunked: Result<super::network::NetworkDeltaReport, WorldError> = (|| {
+        let mut ctx = sn.begin_batch();
+        let mut decision = first;
+        loop {
+            let remaining = ops.len() - input.ops_done;
+            let n = decision.ops.clamp(1, remaining);
+            sn.apply_chunk(
+                &mut ctx,
+                &ops[input.ops_done..input.ops_done + n],
+                lim,
+                Some(lookup),
+            )?;
+            input.ops_done += n;
+            input.prev_chunk_ops = n;
+            if input.ops_done >= ops.len() {
+                break;
+            }
+            let started = Instant::now();
+            let written = sn.persist_and_dehydrate_in_place()?;
+            run.objects += written;
+            run.persist_ms += ms_since(started);
+            input.prev_nodes_written = written;
+            if crash == Some(CrashPoint::AfterChunkPersistedBeforeNextChunk) {
+                return Err(WorldError::InjectedCrash(
+                    CrashPoint::AfterChunkPersistedBeforeNextChunk,
+                ));
+            }
+            input.pending_index_bytes =
+                sn.state_store().pending_stats().0 as u64 * PENDING_INDEX_BYTES_PER_NODE;
+            decision = policy.chunk_plan(&input);
+            if decision.flush_pack {
+                let started = Instant::now();
+                sn.state_store().flush()?;
+                run.persist_ms += ms_since(started);
+                if crash == Some(CrashPoint::AfterIntermediatePackFlush) {
+                    return Err(WorldError::InjectedCrash(
+                        CrashPoint::AfterIntermediatePackFlush,
+                    ));
+                }
+            }
+        }
+        run.chunks = ctx.chunks();
+        Ok(sn.finish_batch(ctx))
+    })();
+    match chunked {
+        Ok(report) => Ok((sn, report, run)),
+        Err(e) if is_environmental(&e) => Err(e),
+        Err(_) => {
+            // The error may be an artifact of where the chunks fell (a transient state the
+            // whole batch never reaches). The unchunked run is authoritative: it accepts
+            // exactly what it accepted before chunking existed.
+            let mut sn = net.clone();
+            let report = sn.apply_ops_staged_view(ops, lim, Some(lookup))?;
+            Ok((
+                sn,
+                report,
+                ChunkRun {
+                    fallback: true,
+                    ..run
+                },
+            ))
+        }
+    }
+}
+
 fn validate_program_relations(
     manifest: &WorldManifest,
     network: &WorldNetwork,
@@ -161,6 +310,13 @@ pub struct CommitProfile {
     pub state_bytes_read: u64,
     /// Bytes appended to the pack (framing and index included) during the commit.
     pub state_bytes_written: u64,
+    /// Chunks the batch's operator network was applied in (1: not chunked, CPD off or the
+    /// batch under the budget).
+    pub chunks: usize,
+    /// Milliseconds spent persisting and dehydrating between chunks (inside `apply_ops`).
+    pub chunk_persist_ms: f64,
+    /// Chunking hit a non-environmental error and the batch was re-run unchunked.
+    pub chunk_fallback: bool,
 }
 
 /// Outcome receipt returned upon applying a batch.
@@ -757,6 +913,9 @@ pub struct WorldSession {
     /// Phase timings and IO of the most recent committed batch (`None` before the first
     /// commit of this session; an idempotent replay commits nothing and leaves it unchanged).
     pub last_commit_profile: Option<CommitProfile>,
+    /// Decides where a large batch is split into chunks (CPD). Operational only: no root,
+    /// digest or decision delta depends on it.
+    pub chunk_policy: Arc<dyn ChunkPolicy>,
     /// Recorded (non-authoritative) execution profile (ADR-0046 P6 §1.1,
     /// decided 2026-10-04); `None` for a storage-only world or a
     /// `program.json` written before this field existed.
@@ -857,6 +1016,7 @@ impl WorldSession {
             network: None,
             dehydrate_failures: 0,
             last_commit_profile: None,
+            chunk_policy: Arc::new(HeuristicChunkPolicy),
             exec_profile: None,
             pins: PinRegistry::default(),
             open_mode: OpenMode::NoNetwork,
@@ -1017,6 +1177,7 @@ impl WorldSession {
             network: None,
             dehydrate_failures: 0,
             last_commit_profile: None,
+            chunk_policy: Arc::new(HeuristicChunkPolicy),
             exec_profile: None,
             pins,
             open_mode: OpenMode::NoNetwork,
@@ -1161,6 +1322,115 @@ impl WorldSession {
 
     fn node_cache_budget(&self) -> usize {
         manifest_node_cache_budget(&self.manifest)
+    }
+
+    /// The next up-to-`n` base facts (as upserts) of the relations `network` declares, in
+    /// relation then key order, continuing from `cursor` (`(relation index, key cursor)`).
+    fn next_base_facts(
+        &self,
+        network: &WorldNetwork,
+        cursor: &mut (usize, Option<([u8; 32], WorldKey)>),
+        n: usize,
+    ) -> Result<Vec<WorldBatchOp>, WorldError> {
+        let rels: Vec<(&String, &TrieMap<WorldKey, WorldTuple>)> = self
+            .relations
+            .iter()
+            .filter(|(name, _)| network.base_relations.contains_key(*name))
+            .collect();
+        let mut out = Vec::with_capacity(n.min(1 << 16));
+        while out.len() < n && cursor.0 < rels.len() {
+            let (name, trie) = rels[cursor.0];
+            let want = n - out.len();
+            let (entries, next) = trie.iter_page_with_store(
+                cursor.1.as_ref().map(|(h, k)| (h, k)),
+                want,
+                &self.node_store,
+            )?;
+            for (key, tuple) in entries {
+                out.push(WorldBatchOp::Upsert {
+                    relation: name.clone(),
+                    key,
+                    tuple,
+                });
+            }
+            match next {
+                Some(c) => cursor.1 = Some(c),
+                None => *cursor = (cursor.0 + 1, None),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Replay every base fact the session holds into `network` as one batch. A world big
+    /// enough to exceed the hydrated-bytes budget is applied in chunks, persisting and
+    /// dehydrating the network between them and streaming the facts from the base tries
+    /// instead of materialising all of them (same output as one `apply_ops`).
+    fn apply_base_facts(&self, network: &mut WorldNetwork) -> Result<(), WorldError> {
+        let total: usize = self
+            .relations
+            .iter()
+            .filter(|(name, _)| network.base_relations.contains_key(*name))
+            .map(|(_, t)| t.len())
+            .sum();
+        if total == 0 {
+            return Ok(());
+        }
+        let budget = self
+            .manifest
+            .apply_hydrated_bytes
+            .unwrap_or(DEFAULT_APPLY_HYDRATED_BYTES);
+        let mut input = ChunkInput {
+            ops_total: total,
+            ops_done: 0,
+            prev_chunk_ops: 0,
+            prev_nodes_written: 0,
+            pending_index_bytes: 0,
+            budget_bytes: budget,
+        };
+        let mut decision = self.chunk_policy.chunk_plan(&input);
+        let mut cursor = (0usize, None);
+        if decision.ops >= total {
+            let ops = self.next_base_facts(network, &mut cursor, total)?;
+            network.apply_ops(&ops)?;
+            return Ok(());
+        }
+        let pristine = network.clone();
+        let chunked: Result<(), WorldError> = (|| {
+            let limits = super::network::NetworkLimits::default();
+            let mut ctx = network.begin_batch();
+            loop {
+                let remaining = total - input.ops_done;
+                let n = decision.ops.clamp(1, remaining);
+                let ops = self.next_base_facts(network, &mut cursor, n)?;
+                network.apply_chunk(&mut ctx, &ops, &limits, None)?;
+                input.ops_done += n;
+                input.prev_chunk_ops = n;
+                if input.ops_done >= total {
+                    break;
+                }
+                input.prev_nodes_written = network.persist_and_dehydrate_in_place()?;
+                input.pending_index_bytes =
+                    network.state_store().pending_stats().0 as u64 * PENDING_INDEX_BYTES_PER_NODE;
+                decision = self.chunk_policy.chunk_plan(&input);
+                if decision.flush_pack {
+                    network.state_store().flush()?;
+                }
+            }
+            network.finish_batch(ctx);
+            Ok(())
+        })();
+        match chunked {
+            Ok(()) => Ok(()),
+            Err(e) if is_environmental(&e) => Err(e),
+            Err(_) => {
+                // As in a commit: the whole-world application is authoritative.
+                *network = pristine;
+                let mut cursor = (0usize, None);
+                let ops = self.next_base_facts(network, &mut cursor, total)?;
+                network.apply_ops(&ops)?;
+                Ok(())
+            }
+        }
     }
 
     /// The validity key under which this binary would persist (and accept) state of
@@ -1483,6 +1753,7 @@ impl WorldSession {
         // 3. Normalize operations and reject conflicting duplicate operations
         let normalized_ops = batch.validate_and_normalize()?;
 
+        let mut chunk_run = ChunkRun::single();
         // Stage operator network updates and deliberation if network is present
         let (staged_network, decision_root, decision_delta_digest, decision_delta_body) =
             if let Some(ref net) = self.network {
@@ -1498,11 +1769,22 @@ impl WorldSession {
                             .ok_or_else(|| WorldError::UnknownRelation(rel.to_string()))?;
                         Ok(trie.get_with_store(key, base_store)?)
                     };
-                let delta_report = sn.apply_ops_staged_view(
+                let hydrated_budget = self
+                    .manifest
+                    .apply_hydrated_bytes
+                    .unwrap_or(DEFAULT_APPLY_HYDRATED_BYTES);
+                let (sn_applied, delta_report, run) = apply_ops_chunked(
+                    sn,
+                    net,
                     &normalized_ops,
-                    limits.unwrap_or(&super::network::NetworkLimits::default()),
-                    Some(&lookup),
+                    limits,
+                    &lookup,
+                    self.chunk_policy.as_ref(),
+                    hydrated_budget,
+                    self.crash_injector,
                 )?;
+                sn = sn_applied;
+                chunk_run = run;
                 phase!("apply_ops");
                 if sn.decides.is_empty() {
                     (Some(sn), None, None, None)
@@ -1701,7 +1983,7 @@ impl WorldSession {
 
         phase!("stage_base");
         // 5. Persist modified trie nodes to node store
-        let mut objects_written = inner_objects_written;
+        let mut objects_written = inner_objects_written + chunk_run.objects;
         for trie in staged_relations.values() {
             objects_written += trie.persist_to_store(&mut self.node_store);
         }
@@ -1935,6 +2217,9 @@ impl WorldSession {
             state_node_reads: reads,
             state_bytes_read: read_bytes,
             state_bytes_written: written_bytes,
+            chunks: chunk_run.chunks,
+            chunk_persist_ms: chunk_run.persist_ms,
+            chunk_fallback: chunk_run.fallback,
         });
         Ok(RevisionReceipt {
             revision_seq: new_seq,
@@ -2557,27 +2842,12 @@ impl WorldSession {
                 ));
             }
         }
-        let mut ops = Vec::new();
-        for (rel_name, trie) in &self.relations {
-            if network.base_relations.contains_key(rel_name) {
-                let (entries, _) = trie.iter_page_with_store(None, usize::MAX, &self.node_store)?;
-                for (key, tuple) in entries {
-                    ops.push(WorldBatchOp::Upsert {
-                        relation: rel_name.clone(),
-                        key,
-                        tuple,
-                    });
-                }
-            }
-        }
         let cache = self.node_cache_budget();
         network.attach_state_store(StateStore::from_file(
             self.node_store.clone(),
             state_cache_share(cache),
         ));
-        if !ops.is_empty() {
-            network.apply_ops(&ops)?;
-        }
+        self.apply_base_facts(&mut network)?;
         network.current_revision = self.current_revision;
         self.open_mode = OpenMode::Replay;
         self.replay_reason = Some("set-network");
@@ -2768,22 +3038,7 @@ impl WorldSession {
             .ok_or_else(|| WorldError::NetworkError("world has no network".into()))?;
         let mut fresh = net.clear_data();
         fresh.attach_state_store(StateStore::memory(self.node_cache_budget()));
-        let mut ops = Vec::new();
-        for (rel_name, trie) in &self.relations {
-            if fresh.base_relations.contains_key(rel_name) {
-                let (entries, _) = trie.iter_page_with_store(None, usize::MAX, &self.node_store)?;
-                for (key, tuple) in entries {
-                    ops.push(WorldBatchOp::Upsert {
-                        relation: rel_name.clone(),
-                        key,
-                        tuple,
-                    });
-                }
-            }
-        }
-        if !ops.is_empty() {
-            fresh.apply_ops(&ops)?;
-        }
+        self.apply_base_facts(&mut fresh)?;
         fresh.current_revision = self.current_revision;
         Ok(fresh)
     }

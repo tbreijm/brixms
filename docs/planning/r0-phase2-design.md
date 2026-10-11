@@ -334,3 +334,45 @@ Apply_ops at the late batch falls 13-40%, not 2x; and the extra budget eats all 
 | Chunked persist + larger raw cache (E1) | NO-GO | late apply -13..-40%, RSS ends higher than un-chunked |
 | Compact children / boxed Node variants | NO-GO as a load fix | lazy children about 30% of the hydrated heap; -15% heap, no end-to-end change |
 | Chunked replay inside `set_network` / `open_replay` (no per-chunk persist) | GO (separate task) | 300k replay peaks at 4 GB (13 KB/fact); output unaffected since nothing is persisted per slice |
+
+## Chunked persist (CPD) results (alpha.5)
+
+A memory-bounding mechanism, not a speedup. A batch whose estimated hydrated bytes exceed `apply_hydrated_bytes` (manifest knob, default 1 GiB, `0` disables) and which has at least 32,768 operations is applied as contiguous chunks; between chunks the staged network is persisted and dehydrated in place (`WorldNetwork::persist_and_dehydrate_in_place`). Smaller batches, and any batch run with an execution limit set, take the unchanged single-chunk path (`CommitProfile.chunks == 1`, zero overhead). Roots, digests, decision deltas and revision digests are identical for any chunking (same head revision digest in every bench run below).
+
+### Design as built
+- `network.rs`: `apply_ops_staged_view` is `begin_batch` + one `apply_chunk` + `finish_batch`. The decision delta is computed in `finish_batch` as last-vs-first-seen value per (decide, entity) (H1), so A->B->A and settled->removed->settled report nothing, as unchunked. Golden tests pin revision digests and delta bytes to the pre-CPD engine (67d2910).
+- Frontier phase is globally retract-first (H4a). Note: a decide has one source relation, so this changes no reachable behaviour today; it is defensive.
+- Any non-environmental error in a multi-chunk run (a transient conflict created by the chunk order) drops the staged clone and re-runs the batch unchunked; its result is authoritative (H4b). I/O, corruption and injected crashes fail the batch directly.
+- `chunk_policy.rs`: `ChunkPolicy::chunk_plan(ChunkInput) -> ChunkDecision` (M7 seam), `HeuristicChunkPolicy` (v1), `FixedChunkPolicy`. The engine clamps to `[1, remaining]`; the MIN_CHUNK_OPS = 16,384 floor lives in the heuristic so adversarial policies are testable.
+- Intermediate pack flush only when the pending index exceeds 256 MiB. New crash points `AfterChunkPersistedBeforeNextChunk`, `AfterIntermediatePackFlush`. Intermediate nodes are garbage until `brix world gc`; reopen sessions after GC (existing contract).
+- `FileNodeStore`: pending-pack reads keep one read handle and a flushed watermark (was flush + open per read); `pending_stats()`.
+- `set_network` / `replay_network` stream base facts from the tries in chunks through the same policy (fallback to whole-world apply on a non-environmental error).
+- Operational counters (`CommitProfile.chunks`, report diagnostics, receipt `objects_written`) vary with chunking; no digest depends on them.
+
+### Measurements (release, `r0_open_bench`, serial, shared 16 GB machine; CPU = process CPU s; wall noisy)
+Single 300k-row batch (`R0_OPEN_BENCH_BATCHES=1`, `BRIX_APPLY_CHUNK_OPS` overrides):
+
+| chunk ops | chunks | peak RSS GB | CPU s | state bytes written |
+|---|---|---|---|---|
+| unchunked | 1 | 4.89 | 37.5 | 824 MB |
+| 50,000 | 6 | 3.35 | 40.1 | 1174 MB |
+| 30,000 | 10 | 3.35 | 45.2 | 1411 MB |
+| 10,000 | 30 | 2.46 | 49.0 | 1665 MB |
+| heuristic, 1 GiB budget (default) | 3 | 4.21 | 37.4 | 934 MB |
+| heuristic, 512 MiB | 11 | 3.14 | 44.7 | 1402 MB |
+| heuristic, 256 MiB | 15 | 3.15 | 46.3 | 1521 MB |
+
+1M world, 10 batches of 100k rows (load only):
+
+| | peak RSS GB | CPU s | wall s |
+|---|---|---|---|
+| unchunked | 5.16 | 224.7 | 260 |
+| default (1 GiB): 5 chunks on the late batches | 3.85 | 283 | 401 |
+| 256 MiB budget | 5.23 | 285 | 364 |
+
+The 1 GiB default costs +26% CPU at 1M for -1.3 GB (-25%); the 256 MiB run did not lower peak RSS (the peak moved elsewhere: base staging and the batch's own ops, which CPD does not shrink; a single 1M-row batch was not run, it would not fit comfortably). Write amplification is real (1.1-2x state bytes). Per-chunk base staging (S9) and skeleton retention (S11) were not done; the RSS floor at about 3.3 GB (300k) is the staged base tries, op list and caches.
+
+Replay (`open_replay`, 300k, 10 batches world): before 4.00 GB peak / 2.04 GB after open / 35.4 s; after, default budget 3.94 GB / 3.12 GB / 38.5 s (no gain: the resident network keeps the whole base copy, and the heap stays fragmented); with `apply_hydrated_bytes` = 128 MiB 3.33 GB / 2.68 GB / 31.7 s (-17% peak). Chunked replay is therefore a modest win only with a small budget.
+
+### Tests (`crates/brix-kb/tests/r0_chunked_persist.rs`, 21, plus a chunked run in `r0_restore`)
+Golden pre-CPD digests (3 seeds), chunk-size, quantum and policy differentials (incl. random/adversarial policy with pack flush), network-level proptest over random chunk vectors (memory store), A->B->A, settled->removed->settled, cross-boundary derivation, limits => one chunk, heuristic engagement rules, manifest knob, crash points with 1-op chunks, real conflict in chunk 3 (session unchanged, next batch equals clean world), boundary-only conflict (fallback succeeds, same revision digest as unchunked), injected failure mid-chunk and retry, GC after failed chunked batches then retry, chunked replay equals whole replay.

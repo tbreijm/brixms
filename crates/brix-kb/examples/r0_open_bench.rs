@@ -309,6 +309,20 @@ fn run_parent(n: usize) {
     let mut session = WorldSession::from_program_with_sources(&dir, "root", &sources())
         .expect("initialize world with source closure");
     let init_ms = ms(t.elapsed());
+    // BRIX_APPLY_CHUNK_OPS: unset = shipped heuristic, 0 = never chunk, k = chunks of k ops.
+    if let Some(k) = std::env::var("BRIX_APPLY_CHUNK_OPS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        session.chunk_policy = std::sync::Arc::new(brix_kb::world::FixedChunkPolicy(k));
+    }
+
+    if let Some(b) = std::env::var("BRIX_APPLY_HYDRATED_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        session.manifest.apply_hydrated_bytes = Some(b);
+    }
 
     let mut batch_stats = Vec::with_capacity(nb);
     let load_start = Instant::now();
@@ -330,6 +344,9 @@ fn run_parent(n: usize) {
                 "state_node_reads": p.state_node_reads,
                 "state_bytes_read": p.state_bytes_read,
                 "state_bytes_written": p.state_bytes_written,
+                "chunks": p.chunks,
+                "chunk_persist_ms": p.chunk_persist_ms,
+                "chunk_fallback": p.chunk_fallback,
             })
         });
         batch_stats.push(serde_json::json!({
@@ -344,6 +361,7 @@ fn run_parent(n: usize) {
     let load_ms = ms(load_start.elapsed());
     let rss_after_load = rss_kb(std::process::id());
     let facts: usize = session.relations.values().map(|r| r.len()).sum();
+    let session_head = session.current_revision_digest().map(|d| d.to_hex());
     session.close().expect("flush world before cold open");
     let disk_bytes = dir_bytes(&dir);
     if std::env::var(LOAD_ONLY_ENV).is_ok() {
@@ -351,7 +369,7 @@ fn run_parent(n: usize) {
             "{}",
             serde_json::json!({
                 "bench": "r0_open_bench", "facts": n, "batches": nb, "load_total_ms": load_ms,
-                "rss_after_load_kb": rss_after_load, "disk_bytes": disk_bytes,
+                "rss_after_load_kb": rss_after_load, "disk_bytes": disk_bytes, "head_revision_digest": session_head,
                 "load_batches": batch_stats,
             })
         );
