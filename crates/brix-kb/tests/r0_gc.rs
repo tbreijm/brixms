@@ -359,9 +359,12 @@ fn keep_revisions_drops_old_history_but_not_head_or_genesis() {
         let snap = s.pin_revision(seq).unwrap();
         snap.query_page("root::orders", None, 10).unwrap();
     }
-    // A dropped revision reads as an error, never as silently empty data.
-    let old = s.pin_revision(3).unwrap();
-    assert!(old.query_page("root::orders", None, 10).is_err());
+    // A dropped revision reads as a typed error (history removed on purpose, not damage),
+    // never as silently empty data.
+    assert!(matches!(
+        s.pin_revision(3),
+        Err(WorldError::RevisionCompacted(3))
+    ));
 }
 
 #[test]

@@ -156,6 +156,11 @@ impl StateStore {
         }
     }
 
+    /// Drop every decoded node this handle caches (after the store changed underneath it).
+    pub fn clear_cache(&self) {
+        self.inner.cache.clear();
+    }
+
     /// Bytes currently held by the read cache.
     pub fn cache_used_bytes(&self) -> usize {
         self.inner.cache.used_bytes()

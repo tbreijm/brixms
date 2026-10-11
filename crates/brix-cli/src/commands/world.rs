@@ -916,6 +916,11 @@ fn print_world_error(cmd: &str, err: &WorldError, json_out: bool) -> u8 {
             ("batch-conflict", EXIT_REJECTED_OR_UNKNOWN)
         }
         WorldError::StaleBaseRevision { .. } => ("stale-base-revision", EXIT_REJECTED_OR_UNKNOWN),
+        // Another writer (or an operator command that writes) holds the world: retry.
+        WorldError::WorldLocked(_) => ("world-locked", EXIT_REJECTED_OR_UNKNOWN),
+        WorldError::StaleSession(_) => ("stale-session", EXIT_REJECTED_OR_UNKNOWN),
+        // History dropped on purpose by `gc --keep-revisions`, not damage.
+        WorldError::RevisionCompacted(_) => ("revision-compacted", EXIT_REJECTED_OR_UNKNOWN),
         WorldError::Io(_)
         | WorldError::Json(_)
         | WorldError::CorruptedHead(_)
