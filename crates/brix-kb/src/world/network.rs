@@ -236,6 +236,10 @@ pub const DEFAULT_SCHEDULING_QUANTUM: usize = 256;
 #[derive(Clone, Debug)]
 pub enum OperatorWorkItem {
     Delta(TupleDelta),
+    SideDelta {
+        delta: TupleDelta,
+        is_left: bool,
+    },
     JoinContinuation {
         delta: TupleDelta,
         is_left: bool,
@@ -248,7 +252,7 @@ pub enum OperatorWorkItem {
 #[inline]
 fn work_item_queued_count(item: &OperatorWorkItem) -> usize {
     match item {
-        OperatorWorkItem::Delta(_) => 1,
+        OperatorWorkItem::Delta(_) | OperatorWorkItem::SideDelta { .. } => 1,
         OperatorWorkItem::JoinContinuation {
             matches, next_idx, ..
         } => matches.len().saturating_sub(*next_idx).max(1),
@@ -460,6 +464,24 @@ pub enum OperatorState {
         right_keys: Vec<FieldRef>,
         left_index: PMap<Vec<Value>, PMap<DerivationId, IntermediateTuple>>,
         right_index: PMap<Vec<Value>, PMap<DerivationId, IntermediateTuple>>,
+    },
+    AntiJoin {
+        left: OperatorId,
+        right: OperatorId,
+        left_keys: Vec<FieldRef>,
+        right_keys: Vec<FieldRef>,
+        left_rows: PMap<Vec<Value>, PMap<DerivationId, IntermediateTuple>>,
+        right_counts: PMap<Vec<Value>, usize>,
+    },
+    ParentCount {
+        left: OperatorId,
+        right: OperatorId,
+        left_key: FieldRef,
+        right_key: FieldRef,
+        output_key: String,
+        output_count: String,
+        left_rows: PMap<Vec<Value>, IntermediateTuple>,
+        right_counts: PMap<Vec<Value>, usize>,
     },
     Distinct {
         input: OperatorId,
@@ -766,6 +788,50 @@ impl WorldNetwork {
                         },
                     );
                 }
+                OperatorNode::AntiJoin {
+                    left,
+                    right,
+                    left_keys,
+                    right_keys,
+                } => {
+                    downstream.entry(*left).or_default().push(op_id);
+                    downstream.entry(*right).or_default().push(op_id);
+                    operator_states.insert(
+                        idx,
+                        OperatorState::AntiJoin {
+                            left: *left,
+                            right: *right,
+                            left_keys: left_keys.clone(),
+                            right_keys: right_keys.clone(),
+                            left_rows: PMap::new(),
+                            right_counts: PMap::new(),
+                        },
+                    );
+                }
+                OperatorNode::ParentCount {
+                    left,
+                    right,
+                    left_key,
+                    right_key,
+                    output_key,
+                    output_count,
+                } => {
+                    downstream.entry(*left).or_default().push(op_id);
+                    downstream.entry(*right).or_default().push(op_id);
+                    operator_states.insert(
+                        idx,
+                        OperatorState::ParentCount {
+                            left: *left,
+                            right: *right,
+                            left_key: left_key.clone(),
+                            right_key: right_key.clone(),
+                            output_key: output_key.clone(),
+                            output_count: output_count.clone(),
+                            left_rows: PMap::new(),
+                            right_counts: PMap::new(),
+                        },
+                    );
+                }
                 OperatorNode::Distinct { input } => {
                     downstream.entry(*input).or_default().push(op_id);
                     operator_states.insert(
@@ -911,6 +977,38 @@ impl WorldNetwork {
                     right_keys: right_keys.clone(),
                     left_index: PMap::new(),
                     right_index: PMap::new(),
+                },
+                OperatorState::AntiJoin {
+                    left,
+                    right,
+                    left_keys,
+                    right_keys,
+                    ..
+                } => OperatorState::AntiJoin {
+                    left: *left,
+                    right: *right,
+                    left_keys: left_keys.clone(),
+                    right_keys: right_keys.clone(),
+                    left_rows: PMap::new(),
+                    right_counts: PMap::new(),
+                },
+                OperatorState::ParentCount {
+                    left,
+                    right,
+                    left_key,
+                    right_key,
+                    output_key,
+                    output_count,
+                    ..
+                } => OperatorState::ParentCount {
+                    left: *left,
+                    right: *right,
+                    left_key: left_key.clone(),
+                    right_key: right_key.clone(),
+                    output_key: output_key.clone(),
+                    output_count: output_count.clone(),
+                    left_rows: PMap::new(),
+                    right_counts: PMap::new(),
                 },
                 OperatorState::Distinct { input, .. } => OperatorState::Distinct {
                     input: *input,
@@ -1247,7 +1345,7 @@ impl WorldNetwork {
                             let derivation = if is_winner_relation {
                                 let entity_id = Value::from_typed_bytes(
                                     key.as_bytes(),
-                                    &schema_key_type(schema, &key_fields),
+                                    &schema_key_type(schema, key_fields),
                                 )?
                                 .to_string();
                                 let candidate = TupleRecord::from_tuple(tuple)?
@@ -1316,7 +1414,7 @@ impl WorldNetwork {
                                         winner_derivation_from_row(
                                             relation,
                                             old_inter,
-                                            &key_fields,
+                                            key_fields,
                                             self.winner_versions
                                                 .get(&(relation.clone(), key.clone()))
                                                 .copied()
@@ -1719,6 +1817,9 @@ impl WorldNetwork {
                                 };
                                 (delta, is_left, join_key, matches, 0)
                             }
+                            OperatorWorkItem::SideDelta { .. } => {
+                                unreachable!("equi-join receives ordinary deltas")
+                            }
                         };
 
                         let is_ins = delta.is_insert();
@@ -1814,6 +1915,210 @@ impl WorldNetwork {
                                     next_idx: new_next_idx,
                                 },
                             );
+                        }
+                    }
+                    OperatorState::AntiJoin {
+                        left,
+                        right,
+                        left_keys,
+                        right_keys,
+                        left_rows,
+                        right_counts,
+                    } => {
+                        let OperatorWorkItem::SideDelta { delta, is_left } = item else {
+                            unreachable!("anti-join receives side-tagged deltas")
+                        };
+                        let insertion = delta.is_insert();
+                        let (tuple, deriv) = match delta {
+                            TupleDelta::Insert { tuple, derivation }
+                            | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
+                        };
+                        let keys = if is_left { left_keys } else { right_keys };
+                        let key: Vec<Value> = keys
+                            .iter()
+                            .map(|k| {
+                                tuple
+                                    .get_qualified(&k.binding, &k.field)
+                                    .cloned()
+                                    .ok_or_else(|| {
+                                        WorldError::NetworkError(format!(
+                                            "missing anti-join field {}.{}",
+                                            k.binding, k.field
+                                        ))
+                                    })
+                            })
+                            .collect::<Result<_, _>>()?;
+                        if is_left {
+                            let right_count = right_counts.get(&key).copied().unwrap_or(0);
+                            if insertion {
+                                left_rows
+                                    .entry(key.clone())
+                                    .or_default()
+                                    .insert(deriv.clone(), tuple.clone());
+                            } else if let Some(rows) = left_rows.get_mut(&key) {
+                                rows.remove(&deriv);
+                                if rows.is_empty() {
+                                    left_rows.remove(&key);
+                                }
+                            }
+                            if right_count == 0 {
+                                let out_deriv = DerivationId::Unary {
+                                    op: op_id,
+                                    parent: Box::new(deriv),
+                                };
+                                out_deltas.push(if insertion {
+                                    TupleDelta::Insert {
+                                        tuple,
+                                        derivation: out_deriv,
+                                    }
+                                } else {
+                                    TupleDelta::Retract {
+                                        tuple,
+                                        derivation: out_deriv,
+                                    }
+                                });
+                            }
+                        } else {
+                            let old_count = right_counts.get(&key).copied().unwrap_or(0);
+                            let new_count = if insertion {
+                                old_count + 1
+                            } else {
+                                old_count.saturating_sub(1)
+                            };
+                            if new_count == 0 {
+                                right_counts.remove(&key);
+                            } else {
+                                right_counts.insert(key.clone(), new_count);
+                            }
+                            if (old_count == 0) != (new_count == 0) {
+                                if let Some(rows) = left_rows.get(&key) {
+                                    for (left_deriv, left_tuple) in rows {
+                                        work_in_slice += 1;
+                                        total_work += 1;
+                                        total_matches += 1;
+                                        *diagnostics.operator_work.entry(op_id).or_default() += 1;
+                                        *diagnostics.join_fanout.entry(op_id).or_default() += 1;
+                                        if limits.max_work.is_some_and(|max| total_work > max)
+                                            || limits
+                                                .max_matches
+                                                .is_some_and(|max| total_matches > max)
+                                        {
+                                            return Err(WorldError::BudgetExhausted);
+                                        }
+                                        let out_deriv = DerivationId::Unary {
+                                            op: op_id,
+                                            parent: Box::new(left_deriv.clone()),
+                                        };
+                                        out_deltas.push(if new_count == 0 {
+                                            TupleDelta::Insert {
+                                                tuple: left_tuple.clone(),
+                                                derivation: out_deriv,
+                                            }
+                                        } else {
+                                            TupleDelta::Retract {
+                                                tuple: left_tuple.clone(),
+                                                derivation: out_deriv,
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        let _ = (left, right);
+                    }
+                    OperatorState::ParentCount {
+                        left,
+                        right,
+                        left_key,
+                        right_key,
+                        output_key,
+                        output_count,
+                        left_rows,
+                        right_counts,
+                    } => {
+                        let OperatorWorkItem::SideDelta { delta, is_left } = item else {
+                            unreachable!("parent count receives side-tagged deltas")
+                        };
+                        let insertion = delta.is_insert();
+                        let (tuple, deriv) = match delta {
+                            TupleDelta::Insert { tuple, derivation }
+                            | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
+                        };
+                        let field = if is_left { left_key } else { right_key };
+                        let key = vec![tuple
+                            .get_qualified(&field.binding, &field.field)
+                            .cloned()
+                            .ok_or_else(|| {
+                                WorldError::NetworkError(format!(
+                                    "missing count correlation field {}.{}",
+                                    field.binding, field.field
+                                ))
+                            })?];
+                        let make_row =
+                            |key: &[Value],
+                             count: usize|
+                             -> Result<IntermediateTuple, WorldError> {
+                                let count = i64::try_from(count).map_err(|_| {
+                                    WorldError::NetworkError("count_or_zero overflow".into())
+                                })?;
+                                let mut row = IntermediateTuple::new();
+                                row.insert(output_key.clone(), key[0].clone());
+                                row.insert(output_count.clone(), Value::Int(count));
+                                Ok(row)
+                            };
+                        let make_deriv = || DerivationId::Group {
+                            op: op_id,
+                            group_key: key.clone(),
+                        };
+                        if is_left {
+                            let count = right_counts.get(&key).copied().unwrap_or(0);
+                            let output = make_row(&key, count)?;
+                            if insertion {
+                                left_rows.insert(key.clone(), tuple);
+                                out_deltas.push(TupleDelta::Insert {
+                                    tuple: output,
+                                    derivation: make_deriv(),
+                                });
+                            } else if left_rows.remove(&key).is_some() {
+                                out_deltas.push(TupleDelta::Retract {
+                                    tuple: output,
+                                    derivation: make_deriv(),
+                                });
+                            }
+                            let _ = deriv;
+                        } else {
+                            let old_count = right_counts.get(&key).copied().unwrap_or(0);
+                            let new_count = if insertion {
+                                old_count + 1
+                            } else {
+                                old_count.saturating_sub(1)
+                            };
+                            if new_count == 0 {
+                                right_counts.remove(&key);
+                            } else {
+                                right_counts.insert(key.clone(), new_count);
+                            }
+                            if old_count != new_count && left_rows.contains_key(&key) {
+                                work_in_slice += 1;
+                                total_work += 1;
+                                total_matches += 1;
+                                *diagnostics.operator_work.entry(op_id).or_default() += 1;
+                                *diagnostics.join_fanout.entry(op_id).or_default() += 1;
+                                if limits.max_work.is_some_and(|max| total_work > max)
+                                    || limits.max_matches.is_some_and(|max| total_matches > max)
+                                {
+                                    return Err(WorldError::BudgetExhausted);
+                                }
+                                out_deltas.push(TupleDelta::Retract {
+                                    tuple: make_row(&key, old_count)?,
+                                    derivation: make_deriv(),
+                                });
+                                out_deltas.push(TupleDelta::Insert {
+                                    tuple: make_row(&key, new_count)?,
+                                    derivation: make_deriv(),
+                                });
+                            }
+                            let _ = (left, right, deriv);
                         }
                     }
                     OperatorState::Distinct { supports, .. } => match item {
@@ -2086,9 +2391,19 @@ impl WorldNetwork {
                 if let Some(down) = self.downstream.get(&op_id) {
                     for consumer in down {
                         for od in &out_deltas {
+                            let item = match self.operator_states.get(&consumer.0) {
+                                Some(OperatorState::AntiJoin { left, right, .. })
+                                | Some(OperatorState::ParentCount { left, right, .. }) => {
+                                    OperatorWorkItem::SideDelta {
+                                        delta: od.clone(),
+                                        is_left: *left == op_id && *right != op_id,
+                                    }
+                                }
+                                _ => OperatorWorkItem::Delta(od.clone()),
+                            };
                             enqueue(
                                 *consumer,
-                                OperatorWorkItem::Delta(od.clone()),
+                                item,
                                 &mut operator_queues,
                                 &mut ready_operators,
                                 &mut in_ready,
@@ -2889,7 +3204,9 @@ fn has_pending_ancestor(
         | OperatorNode::Project { input, .. }
         | OperatorNode::Distinct { input }
         | OperatorNode::GroupedCount { input, .. } => pending.push(*input),
-        OperatorNode::EquiJoin { left, right, .. } => {
+        OperatorNode::EquiJoin { left, right, .. }
+        | OperatorNode::AntiJoin { left, right, .. }
+        | OperatorNode::ParentCount { left, right, .. } => {
             pending.push(*left);
             pending.push(*right);
         }
@@ -2909,7 +3226,9 @@ fn has_pending_ancestor(
             | OperatorNode::Project { input, .. }
             | OperatorNode::Distinct { input }
             | OperatorNode::GroupedCount { input, .. } => pending.push(*input),
-            OperatorNode::EquiJoin { left, right, .. } => {
+            OperatorNode::EquiJoin { left, right, .. }
+            | OperatorNode::AntiJoin { left, right, .. }
+            | OperatorNode::ParentCount { left, right, .. } => {
                 pending.push(*left);
                 pending.push(*right);
             }

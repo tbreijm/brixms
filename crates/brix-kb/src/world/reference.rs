@@ -701,7 +701,7 @@ impl ReferenceWideDecimal {
     fn mul_pow10(&mut self, power: u8) {
         if !self.digits.is_empty() {
             self.digits
-                .splice(0..0, std::iter::repeat(0).take(power as usize));
+                .splice(0..0, std::iter::repeat_n(0, power as usize));
         }
     }
 
@@ -913,6 +913,8 @@ pub enum CompiledOperator {
         compiled_projections: Vec<(String, CompiledWorldExpr)>,
     },
     EquiJoin,
+    AntiJoin,
+    ParentCount,
     Distinct,
     GroupedCount {
         compiled_group_keys: Vec<CompiledWorldExpr>,
@@ -999,6 +1001,10 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                 });
             }
             OperatorNode::EquiJoin { .. } => compiled_operators.push(CompiledOperator::EquiJoin),
+            OperatorNode::AntiJoin { .. } => compiled_operators.push(CompiledOperator::AntiJoin),
+            OperatorNode::ParentCount { .. } => {
+                compiled_operators.push(CompiledOperator::ParentCount)
+            }
             OperatorNode::Distinct { .. } => compiled_operators.push(CompiledOperator::Distinct),
             OperatorNode::GroupedCount {
                 input,
@@ -1408,6 +1414,91 @@ fn evaluate_once_with_budget(
                             out.push(merge_rows(l, r));
                         }
                     }
+                }
+                out
+            }
+            OperatorNode::AntiJoin {
+                left,
+                right,
+                left_keys,
+                right_keys,
+            } => {
+                let mut right_index: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
+                for row in &operator_outputs[right.0] {
+                    let key = right_keys
+                        .iter()
+                        .map(|k| {
+                            get_qualified(row, &k.binding, &k.field)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    WorldError::NetworkError(format!(
+                                        "missing anti-join field {}.{}",
+                                        k.binding, k.field
+                                    ))
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    *right_index.entry(key).or_default() += 1;
+                }
+                operator_outputs[left.0]
+                    .iter()
+                    .filter_map(|row| {
+                        let key = left_keys
+                            .iter()
+                            .map(|k| {
+                                get_qualified(row, &k.binding, &k.field)
+                                    .cloned()
+                                    .ok_or_else(|| {
+                                        WorldError::NetworkError(format!(
+                                            "missing anti-join field {}.{}",
+                                            k.binding, k.field
+                                        ))
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, _>>();
+                        match key {
+                            Ok(key) if !right_index.contains_key(&key) => Some(Ok(row.clone())),
+                            Ok(_) => None,
+                            Err(e) => Some(Err(e)),
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+            OperatorNode::ParentCount {
+                left,
+                right,
+                left_key,
+                right_key,
+                output_key,
+                output_count,
+            } => {
+                let left_rows = &operator_outputs[left.0];
+                let right_rows = &operator_outputs[right.0];
+                let mut out = Vec::with_capacity(left_rows.len());
+                for parent in left_rows {
+                    let key = get_qualified(parent, &left_key.binding, &left_key.field)
+                        .cloned()
+                        .ok_or_else(|| {
+                            WorldError::NetworkError(format!(
+                                "missing count correlation field {}.{}",
+                                left_key.binding, left_key.field
+                            ))
+                        })?;
+                    let mut count = 0i64;
+                    for child in right_rows {
+                        meter.rows_evaluated += 1;
+                        charge_work(meter, work_offset, max_work)?;
+                        if get_qualified(child, &right_key.binding, &right_key.field) == Some(&key)
+                        {
+                            count = count.checked_add(1).ok_or_else(|| {
+                                WorldError::NetworkError("count_or_zero overflow".into())
+                            })?;
+                        }
+                    }
+                    let mut row = Row::new();
+                    row.insert(output_key.clone(), key);
+                    row.insert(output_count.clone(), Value::Int(count));
+                    out.push(row);
                 }
                 out
             }

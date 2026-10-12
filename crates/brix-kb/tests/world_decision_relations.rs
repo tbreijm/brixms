@@ -1,5 +1,7 @@
 use brix_canon::{Digest, Domain};
-use brix_kb::world::audit::{build_checkpoint_bundle_from_session, ExecProfileV1, ProgramClosureV1};
+use brix_kb::world::audit::{
+    build_checkpoint_bundle_from_session, ExecProfileV1, ProgramClosureV1,
+};
 use brix_kb::world::verify::{verify_world_audit_bundle, VerifyOptions};
 use brix_kb::world::{
     RelationDecl, TupleRecord, WorldBatch, WorldBatchOp, WorldKey, WorldManifest, WorldNetwork,
@@ -8,7 +10,6 @@ use brix_kb::world::{
 use brix_lower::module_graph::{ModuleGraph, ModuleLoaderLimits};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
 
 const SOURCE: &str = r#"
 rel input orders: { id: Str, quote: Int } key id
@@ -193,24 +194,38 @@ fn decision_chain_survives_persistence_restart_and_verification() {
         "decision_chain",
         "2026-10-08T00:00:00Z",
         Digest::of(Domain::Value, b"decision-chain-genesis"),
-        vec![RelationDecl::new(
-            "root::orders",
-            vec!["id".into()],
-            vec!["quote".into()],
-            vec![],
-        ), RelationDecl::new("root::gates", vec!["id".into()], vec!["active".into()], vec![])],
+        vec![
+            RelationDecl::new(
+                "root::orders",
+                vec!["id".into()],
+                vec!["quote".into()],
+                vec![],
+            ),
+            RelationDecl::new(
+                "root::gates",
+                vec!["id".into()],
+                vec!["active".into()],
+                vec![],
+            ),
+        ],
     );
     let mut world = WorldSession::create(&root, manifest).unwrap();
     world.set_network(network()).unwrap();
     let sources = BTreeMap::from([("root".into(), SOURCE.into())]);
+    world.save_program_closure("root", &sources).unwrap();
     world
-        .save_program_closure("root", &sources)
+        .apply_batch(WorldBatch::new(
+            0,
+            "chain-r1",
+            vec![order(17), gate_for("o-1", 1)],
+        ))
         .unwrap();
     world
-        .apply_batch(WorldBatch::new(0, "chain-r1", vec![order(17), gate_for("o-1", 1)]))
-        .unwrap();
-    world
-        .apply_batch(WorldBatch::new(1, "chain-r2", vec![order(23), gate_for("o-1", 2)]))
+        .apply_batch(WorldBatch::new(
+            1,
+            "chain-r2",
+            vec![order(23), gate_for("o-1", 2)],
+        ))
         .unwrap();
     let current_explanation = world.explain_decision_for("root::dispatch", "o-1").unwrap();
     assert!(current_explanation
@@ -225,24 +240,22 @@ fn decision_chain_survives_persistence_restart_and_verification() {
             .1
             .value
             .to_json(),
-        serde_json::json!(18)
+        serde_json::json!("18")
     );
     let program = ProgramClosureV1 {
         root_module: "root".into(),
         sources: sources.into_iter().collect(),
         program_manifest_digest: world.manifest().program_digest,
     };
-    let bundle = build_checkpoint_bundle_from_session(
-        &world,
-        1,
-        program,
-        ExecProfileV1::default(),
-    ).unwrap();
+    let bundle =
+        build_checkpoint_bundle_from_session(&world, 1, program, ExecProfileV1::default()).unwrap();
     let verify = VerifyOptions {
         expect_head: world.current_revision_digest().unwrap(),
         expect_program: world.manifest().program_digest,
         trust_checkpoint: match &bundle.scope {
-            brix_kb::world::audit::ScopeV1::Checkpoint { revision_digest, .. } => Some(*revision_digest),
+            brix_kb::world::audit::ScopeV1::Checkpoint {
+                revision_digest, ..
+            } => Some(*revision_digest),
             _ => None,
         },
         limits: Default::default(),
@@ -260,20 +273,25 @@ fn decision_chain_survives_persistence_restart_and_verification() {
             .1
             .value
             .to_json(),
-        serde_json::json!(25)
+        serde_json::json!("25")
     );
     let historical = reopened
         .historical_explain_decision_for(1, "root::dispatch", "o-1")
         .unwrap()
         .unwrap();
     assert_eq!(historical.upstream_settlements.len(), 2);
-    assert!(historical.upstream_settlements.iter().all(|link| link.revision == 1));
-    assert!(historical.upstream_settlements.iter().any(|link| {
-        link.decide == "root::approve" && link.entity_id == "o-1"
-    }));
-    assert!(historical.upstream_settlements.iter().any(|link| {
-        link.decide == "root::review" && link.entity_id == "o-1"
-    }));
+    assert!(historical
+        .upstream_settlements
+        .iter()
+        .all(|link| link.revision == 1));
+    assert!(historical
+        .upstream_settlements
+        .iter()
+        .any(|link| { link.decide == "root::approve" && link.entity_id == "o-1" }));
+    assert!(historical
+        .upstream_settlements
+        .iter()
+        .any(|link| { link.decide == "root::review" && link.entity_id == "o-1" }));
     let explanation = reopened
         .explain_decision_for("root::dispatch", "o-1")
         .unwrap();
@@ -282,5 +300,5 @@ fn decision_chain_survives_persistence_restart_and_verification() {
         .upstream_settlements
         .iter()
         .all(|link| link.revision == 2));
-    let _ = fs::remove_dir_all(PathBuf::from(root));
+    let _ = fs::remove_dir_all(root);
 }

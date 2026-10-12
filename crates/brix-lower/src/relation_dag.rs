@@ -81,6 +81,24 @@ pub enum OperatorNode {
         left_keys: Vec<FieldRef>,
         right_keys: Vec<FieldRef>,
     },
+    /// Indexed anti-join: preserve a left row exactly while its correlated
+    /// right-side equality key has zero supports.
+    AntiJoin {
+        left: OperatorId,
+        right: OperatorId,
+        left_keys: Vec<FieldRef>,
+        right_keys: Vec<FieldRef>,
+    },
+    /// Parent-anchored count with zero rows for unmatched parents. Deliberately
+    /// limited to a single equality correlation and one parent grouping key.
+    ParentCount {
+        left: OperatorId,
+        right: OperatorId,
+        left_key: FieldRef,
+        right_key: FieldRef,
+        output_key: String,
+        output_count: String,
+    },
     /// Distinct / set semantics.
     Distinct { input: OperatorId },
     /// Grouped count aggregation.
@@ -260,6 +278,13 @@ pub fn lower_relations(program: &LinkedProgram) -> Result<RelationDag, Relationa
                     )?;
                     deps.push(dep);
                 }
+                if let Some(anti) = &derived.query.not_exists {
+                    deps.push(resolve_binding_relation(
+                        &anti.binding.relation,
+                        owner_module(name),
+                        &all_relations,
+                    )?);
+                }
                 dependencies.insert(name.clone(), deps);
             }
             RelationSource::Decision(decide) => {
@@ -283,6 +308,19 @@ pub fn lower_relations(program: &LinkedProgram) -> Result<RelationDag, Relationa
         if let RelationSource::Derived(derived) = source {
             if let Some(w) = &derived.query.where_clause {
                 check_negation(name, w, &dependencies)?;
+            }
+            if let Some(anti) = &derived.query.not_exists {
+                let target = resolve_binding_relation(
+                    &anti.binding.relation,
+                    owner_module(name),
+                    &all_relations,
+                )?;
+                if path_exists(&dependencies, &target, name) {
+                    return Err(RelationalLowerError::UnstratifiedNegation {
+                        relation: name.clone(),
+                        negated_target: target,
+                    });
+                }
             }
         }
     }
@@ -515,6 +553,24 @@ pub fn decision_field_schemas(
                 f.extend(schemas[right.0].clone());
                 f
             }
+            OperatorNode::AntiJoin { left, .. } => schemas[left.0].clone(),
+            OperatorNode::ParentCount {
+                left,
+                left_key,
+                output_key,
+                output_count,
+                ..
+            } => {
+                let mut fields = BTreeMap::new();
+                if let Some(ty) = schemas[left.0]
+                    .get(&format!("{}.{}", left_key.binding, left_key.field))
+                    .or_else(|| schemas[left.0].get(&left_key.field))
+                {
+                    fields.insert(output_key.clone(), ty.clone());
+                }
+                fields.insert(output_count.clone(), ast::Ty::Named("Int".into()));
+                fields
+            }
             OperatorNode::Project { input, projections } => projections
                 .iter()
                 .map(|(k, e)| {
@@ -605,20 +661,10 @@ fn infer_decision_value_type(
             Expr::Num(n) => Some(ast::Ty::Named(
                 if n.contains('.') { "F64" } else { "Int" }.into(),
             )),
-            Expr::Var(v) => fields.get(v).cloned().or_else(|| {
-                let q = if v.contains("::") {
-                    v.clone()
-                } else {
-                    format!("{module}::{v}")
-                };
-                program
-                    .configs
-                    .iter()
-                    .find(|(name, c)| {
-                        name.to_string() == q && matches!(c.body, ast::ConfigBody::Sum(_))
-                    })
-                    .map(|(name, _)| ast::Ty::Named(name.to_string()))
-            }),
+            Expr::Var(v) => fields
+                .get(v)
+                .cloned()
+                .or_else(|| constructor_sum_type(v, module, program)),
             Expr::Field(base, field) => match base.as_ref() {
                 Expr::Var(alias) => fields.get(&format!("{alias}.{field}")).cloned(),
                 _ => None,
@@ -650,18 +696,7 @@ fn infer_decision_value_type(
                 {
                     f.ret.clone()
                 } else {
-                    let q = if func.contains("::") {
-                        func.clone()
-                    } else {
-                        format!("{module}::{func}")
-                    };
-                    program
-                        .configs
-                        .iter()
-                        .find(|(name, c)| {
-                            name.to_string() == q && matches!(c.body, ast::ConfigBody::Sum(_))
-                        })
-                        .map(|(name, _)| ast::Ty::Named(name.to_string()))
+                    constructor_sum_type(func, module, program)
                 }
             }
             Expr::Bin { op, .. } if op.is_comparison() || op.is_logical() => {
@@ -674,7 +709,7 @@ fn infer_decision_value_type(
     let mut fields = source_fields.clone();
     for (name, ty) in source_fields {
         if let Some((alias, field)) = name.split_once('.') {
-            if alias == &decide.binder {
+            if alias == decide.binder {
                 fields.insert(field.to_string(), ty.clone());
             }
         } else {
@@ -708,6 +743,33 @@ fn infer_decision_value_type(
             "decide '{decide_name}' has no proposals, so its winner-row value type is unknown"
         ))
     })
+}
+
+/// The nominal Sum type a (bare or qualified) variant constructor builds.
+/// A bare name prefers a Sum declared in `module`; otherwise it must be unique
+/// in the program (the linker rejects ambiguous constructors before this runs).
+fn constructor_sum_type(name: &str, module: &str, program: &LinkedProgram) -> Option<ast::Ty> {
+    let mut matches = program.configs.iter().filter_map(|(qname, config)| {
+        let ast::ConfigBody::Sum(variants) = &config.body else {
+            return None;
+        };
+        let full = qname.to_string();
+        variants
+            .iter()
+            .any(|variant| {
+                let qualified = format!("{full}::{}", variant.name);
+                name == variant.name
+                    || name == qualified
+                    || qualified.ends_with(&format!("::{name}")) && name.contains("::")
+            })
+            .then_some(full)
+    });
+    let all: Vec<String> = matches.by_ref().collect();
+    let chosen = all
+        .iter()
+        .find(|full| owner_module(full) == module)
+        .or_else(|| (all.len() == 1).then(|| &all[0]))?;
+    Some(ast::Ty::Named(chosen.clone()))
 }
 
 fn owner_module(qualified_name: &str) -> &str {
@@ -888,6 +950,9 @@ fn lower_derived_query(
     if let Some(predicate) = &mut query.where_clause {
         qualify_query_expr(predicate, owner, program)?;
     }
+    if let Some(anti) = &mut query.not_exists {
+        qualify_query_expr(&mut anti.predicate, owner, program)?;
+    }
     for key in &mut query.group_by {
         qualify_query_expr(key, owner, program)?;
     }
@@ -896,6 +961,116 @@ fn lower_derived_query(
         .chain(query.group_by.iter())
     {
         validate_binding_fields(expression, &query.from, owner, all_relations, program)?;
+    }
+    if let Some(anti) = &query.not_exists {
+        let mut bindings = query.from.clone();
+        bindings.push(anti.binding.clone());
+        validate_binding_fields(&anti.predicate, &bindings, owner, all_relations, program)?;
+    }
+    if expr_contains_count_or_zero(&query.select) {
+        if query.from.len() != 2 || query.group_by.len() != 1 || query.not_exists.is_some() {
+            return Err(RelationalLowerError::UnsupportedExpression(
+                "count_or_zero() requires one parent source, one child source, and one parent key"
+                    .into(),
+            ));
+        }
+        let left_binding = &query.from[0];
+        let right_binding = &query.from[1];
+        let left_rel = resolve_binding_relation(&left_binding.relation, owner, all_relations)?;
+        let right_rel = resolve_binding_relation(&right_binding.relation, owner, all_relations)?;
+        let left_input = *dag
+            .relation_outputs
+            .get(&left_rel)
+            .ok_or_else(|| RelationalLowerError::UnknownRelation(left_rel.clone()))?;
+        let right_input = *dag
+            .relation_outputs
+            .get(&right_rel)
+            .ok_or_else(|| RelationalLowerError::UnknownRelation(right_rel.clone()))?;
+        let left = dag.add_node(OperatorNode::Bind {
+            input: left_input,
+            alias: left_binding.var.clone(),
+        });
+        let right = dag.add_node(OperatorNode::Bind {
+            input: right_input,
+            alias: right_binding.var.clone(),
+        });
+        let bindings = BTreeMap::from([
+            (left_binding.var.clone(), left_rel.clone()),
+            (right_binding.var.clone(), right_rel.clone()),
+        ]);
+        let predicates = query
+            .where_clause
+            .as_ref()
+            .map(split_and_predicates)
+            .unwrap_or_default();
+        if predicates.len() != 1 {
+            return Err(RelationalLowerError::UnsupportedExpression(
+                "count_or_zero() requires exactly one correlated equality predicate".into(),
+            ));
+        }
+        let (left_key, right_key) =
+            match_equijoin_predicate(&predicates[0], &bindings, &right_binding.var).ok_or_else(
+                || {
+                    RelationalLowerError::UnsupportedExpression(
+                        "count_or_zero() requires an equality from the parent key to the child"
+                            .into(),
+                    )
+                },
+            )?;
+        match &all_relations[&left_rel] {
+            RelationSource::Input(decl) if decl.key_fields.contains(&left_key.field) => {}
+            _ => {
+                return Err(RelationalLowerError::UnsupportedExpression(
+                    "count_or_zero() parent correlation must use a key field of an input relation"
+                        .into(),
+                ))
+            }
+        }
+        if query.group_by[0]
+            != Expr::Field(
+                Box::new(Expr::Var(left_key.binding.clone())),
+                left_key.field.clone(),
+            )
+        {
+            return Err(RelationalLowerError::UnsupportedExpression(
+                "count_or_zero() must group by its parent correlation key".into(),
+            ));
+        }
+        let projections = match &query.select {
+            Expr::AnonRecord(fields) => fields,
+            _ => {
+                return Err(RelationalLowerError::UnsupportedExpression(
+                    "count_or_zero() requires a record projection".into(),
+                ))
+            }
+        };
+        let mut output_key = None;
+        let mut output_count = None;
+        for (name, expression) in projections {
+            if expression == &query.group_by[0] {
+                output_key = Some(name.clone());
+            } else if matches!(expression, Expr::Call { func, args } if func == "count_or_zero" && args.is_empty())
+            {
+                output_count = Some(name.clone());
+            } else {
+                return Err(RelationalLowerError::UnsupportedExpression(
+                    "count_or_zero() projection may contain only its parent key and zero-filled count".into(),
+                ));
+            }
+        }
+        let (Some(output_key), Some(output_count)) = (output_key, output_count) else {
+            return Err(RelationalLowerError::UnsupportedExpression(
+                "count_or_zero() requires parent-key and count_or_zero() projections".into(),
+            ));
+        };
+        return Ok(dag.add_node(OperatorNode::ParentCount {
+            left,
+            right,
+            left_key,
+            right_key,
+            output_key,
+            output_count,
+        }));
     }
     // 1. Resolve and bind input relations
     let mut current_op: OperatorId;
@@ -963,6 +1138,34 @@ fn lower_derived_query(
 
         var_to_relation.insert(binding.var.clone(), next_rel);
         split_predicates = remaining_predicates;
+    }
+
+    if let Some(anti) = &query.not_exists {
+        let next_rel = resolve_binding_relation(&anti.binding.relation, owner, all_relations)?;
+        let next_op = *dag
+            .relation_outputs
+            .get(&next_rel)
+            .ok_or_else(|| RelationalLowerError::UnknownRelation(next_rel.clone()))?;
+        let right_op = dag.add_node(OperatorNode::Bind {
+            input: next_op,
+            alias: anti.binding.var.clone(),
+        });
+        let mut bindings = var_to_relation.clone();
+        bindings.insert(anti.binding.var.clone(), next_rel.clone());
+        let (left_key, right_key) =
+            match_equijoin_predicate(&anti.predicate, &bindings, &anti.binding.var).ok_or_else(
+                || {
+                    RelationalLowerError::UnsupportedExpression(
+                        "not exists currently requires one correlated equality predicate".into(),
+                    )
+                },
+            )?;
+        current_op = dag.add_node(OperatorNode::AntiJoin {
+            left: current_op,
+            right: right_op,
+            left_keys: vec![left_key],
+            right_keys: vec![right_key],
+        });
     }
 
     // 3. Selection Filter for remaining predicates
@@ -1348,5 +1551,15 @@ fn expr_ty_for_aggregate(
             .find(|(q, _)| q.to_string() == *func)
             .and_then(|(_, f)| f.ret.clone()),
         _ => None,
+    }
+}
+
+fn expr_contains_count_or_zero(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call { func, args } if func == "count_or_zero" && args.is_empty() => true,
+        Expr::AnonRecord(fields) => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_count_or_zero(expr)),
+        _ => false,
     }
 }

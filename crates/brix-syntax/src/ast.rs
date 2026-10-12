@@ -86,7 +86,17 @@ pub struct RelQuery {
     pub select: Expr,
     pub from: Vec<RelBinding>,
     pub where_clause: Option<Expr>,
+    /// Optional correlated anti-join introduced by `where not exists ...`.
+    pub not_exists: Option<RelNotExists>,
     pub group_by: Vec<Expr>,
+}
+
+/// A single correlated `not exists` source. This first version admits one
+/// equality correlation predicate and relies on stratification validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelNotExists {
+    pub binding: RelBinding,
+    pub predicate: Expr,
 }
 
 /// One binding in a relational `from` clause: `var in relation` or `relation`.

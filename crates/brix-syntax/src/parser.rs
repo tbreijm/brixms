@@ -479,9 +479,25 @@ impl Parser {
                 break;
             }
         }
+        let mut not_exists = None;
         let where_clause = if self.check(&TokenKind::Where) {
             self.advance();
-            Some(self.parse_expr()?)
+            if self.check(&TokenKind::Not) {
+                self.advance();
+                self.consume(TokenKind::Exists, "not exists")?;
+                let var = self.expect_ident("not-exists binding variable")?.0;
+                self.consume(TokenKind::In, "not-exists 'in'")?;
+                let relation = self.parse_qualified_name("not-exists relation name")?;
+                self.consume(TokenKind::Where, "not-exists 'where'")?;
+                let predicate = self.parse_expr()?;
+                not_exists = Some(RelNotExists {
+                    binding: RelBinding { var, relation },
+                    predicate,
+                });
+                None
+            } else {
+                Some(self.parse_expr()?)
+            }
         } else {
             None
         };
@@ -507,6 +523,7 @@ impl Parser {
                 select,
                 from,
                 where_clause,
+                not_exists,
                 group_by,
             },
         })

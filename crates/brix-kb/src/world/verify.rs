@@ -661,7 +661,9 @@ pub fn verify_world_audit_bundle(
                     .or_default()
                     .insert(entity.clone(), dec);
             }
-            let computed_root = if ref_prog.is_some() || !prev_settlements.is_empty() {
+            let computed_root = if ref_prog.as_ref().is_some_and(|p| !p.decides.is_empty())
+                || !prev_settlements.is_empty()
+            {
                 Some(compute_decision_root(&prev_settlements))
             } else {
                 None
@@ -942,7 +944,11 @@ pub fn verify_world_audit_bundle(
                 curr_settlements.insert(decide.clone(), ent_map);
             }
 
-            let computed_root = Some(compute_decision_root(&curr_settlements));
+            // A program without `decide` blocks records no decision root
+            // (see `WorldSession::apply_batch`); replay must agree.
+            let computed_root = (ref_prog.as_ref().is_some_and(|p| !p.decides.is_empty())
+                || !curr_settlements.is_empty())
+            .then(|| compute_decision_root(&curr_settlements));
 
             if computed_root != record.decision_root {
                 return Err(VerifyError::DecisionRootMismatch {

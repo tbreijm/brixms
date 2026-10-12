@@ -1099,6 +1099,12 @@ fn trace_rel_query_deps(
     if let Some(w) = &query.where_clause {
         trace_expr_deps(w, current_module, reachable, all_configs);
     }
+    if let Some(anti) = &query.not_exists {
+        if let Some(q) = resolve_symbol_ref(&anti.binding.relation, current_module, all_configs) {
+            reachable.insert(q);
+        }
+        trace_expr_deps(&anti.predicate, current_module, reachable, all_configs);
+    }
     for g in &query.group_by {
         trace_expr_deps(g, current_module, reachable, all_configs);
     }

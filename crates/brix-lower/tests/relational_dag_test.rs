@@ -118,6 +118,48 @@ decide dispatch for a in approved per id { propose ship priority 2 when true = a
 }
 
 #[test]
+fn correlated_not_exists_lowers_to_indexed_anti_join_and_refuses_cycles() {
+    let src = r#"
+rel input orders: { id: Str } key id
+rel input quote: { order_id: Str } key order_id
+rel derived unquoted = select { id: o.id } from o in orders
+    where not exists q in quote where q.order_id == o.id
+"#;
+    let mut sources = BTreeMap::new();
+    sources.insert("root".to_string(), src.to_string());
+    let loader = |name: &str| sources.get(name).cloned();
+    let linked = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default())
+        .expect("loads")
+        .link()
+        .expect("links");
+    let dag = lower_relations(&linked).expect("lowers anti-join");
+    assert!(dag.nodes.iter().any(|node| matches!(node,
+        OperatorNode::AntiJoin { left_keys, right_keys, .. }
+            if left_keys == &[brix_lower::relation_dag::FieldRef { binding: "o".into(), field: "id".into() }]
+                && right_keys == &[brix_lower::relation_dag::FieldRef { binding: "q".into(), field: "order_id".into() }]
+    )));
+
+    let cyclic = r#"
+rel input seed: { id: Str } key id
+rel derived a = select { id: s.id } from s in seed where not exists q in b where q.id == s.id
+rel derived b = select { id: x.id } from x in a
+"#;
+    sources.insert("root".to_string(), cyclic.to_string());
+    let linked = ModuleGraph::load(
+        "root",
+        &|name: &str| sources.get(name).cloned(),
+        ModuleLoaderLimits::default(),
+    )
+    .expect("loads")
+    .link()
+    .expect("links");
+    assert!(matches!(
+        lower_relations(&linked),
+        Err(RelationalLowerError::UnstratifiedNegation { .. })
+    ));
+}
+
+#[test]
 fn relation_decide_dependency_cycle_is_refused_with_participants() {
     let src = r#"
 rel input orders: { id: Str, quote: Int } key id

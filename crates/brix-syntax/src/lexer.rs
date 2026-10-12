@@ -35,6 +35,8 @@ pub enum TokenKind {
     For,
     In,
     Where,
+    Not,
+    Exists,
     Yield,
     Otherwise,
     /// `decide NAME for BINDER in LIST_EXPR { propose ... }` (ADR-0043).
@@ -287,6 +289,8 @@ pub fn lex_bounded(source: &str, limits: crate::ParseLimits) -> Result<Vec<Token
                     "for" => TokenKind::For,
                     "in" => TokenKind::In,
                     "where" => TokenKind::Where,
+                    "not" => TokenKind::Not,
+                    "exists" => TokenKind::Exists,
                     "yield" => TokenKind::Yield,
                     "otherwise" => TokenKind::Otherwise,
                     "decide" => TokenKind::Decide,

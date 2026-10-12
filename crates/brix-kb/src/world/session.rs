@@ -12,9 +12,7 @@ use super::batch::{WorldBatch, WorldBatchOp};
 use super::codec::{encode_secondary_key, extract_indexed_field, TupleRecord};
 use super::error::{CrashPoint, WorldError};
 use super::manifest::{RelationDecl, WorldManifest, WORLD_PROFILE};
-use super::network::{
-    DecisionExplanation, SettledDecision, UpstreamSettlementLink, WorldNetwork,
-};
+use super::network::{DecisionExplanation, SettledDecision, UpstreamSettlementLink, WorldNetwork};
 use super::oracle::DiffEvent;
 use super::paths::WorldPaths;
 use super::revision::{SettlementStatus, WorldRevision};
@@ -1803,19 +1801,21 @@ impl WorldSession {
                 continue;
             }
             let (entries, _) = trie.iter_page_with_store(None, usize::MAX, &snapshot.node_store)?;
-            ops.extend(entries.into_iter().map(|(key, tuple)| WorldBatchOp::Upsert {
-                relation: relation.clone(),
-                key,
-                tuple,
-            }));
+            ops.extend(
+                entries
+                    .into_iter()
+                    .map(|(key, tuple)| WorldBatchOp::Upsert {
+                        relation: relation.clone(),
+                        key,
+                        tuple,
+                    }),
+            );
         }
         historical.apply_ops(&ops)?;
         let mut explanation = historical.explain_decision_for(decide_name, entity_key);
         if let Some(explanation) = &mut explanation {
-            let revisions = self.historical_settlement_revisions(
-                seq,
-                &explanation.upstream_settlements,
-            )?;
+            let revisions =
+                self.historical_settlement_revisions(seq, &explanation.upstream_settlements)?;
             for link in &mut explanation.upstream_settlements {
                 let key = (link.decide.clone(), link.entity_id.clone());
                 link.revision = *revisions.get(&key).ok_or_else(|| {
@@ -1840,10 +1840,12 @@ impl WorldSession {
             .collect();
         let mut found = BTreeMap::new();
         for revision in (1..=seq).rev() {
-            if unresolved.is_empty() { break; }
+            if unresolved.is_empty() {
+                break;
+            }
             for (key, settlement) in self.decision_delta(revision)? {
-                if unresolved.remove(&key) {
-                    if settlement.is_some() { found.insert(key, revision); }
+                if unresolved.remove(&key) && settlement.is_some() {
+                    found.insert(key, revision);
                 }
             }
         }
