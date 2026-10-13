@@ -111,6 +111,7 @@ impl Default for WorldAuditDecodeLimits {
 /// Errors decoding or validating a [`WorldAuditBundleV1`].
 #[derive(Debug)]
 pub enum WorldAuditBundleError {
+    MalformedStructuredValue,
     TotalBundleBytesExceeded { limit: usize, found: usize },
     RevisionsExceeded { limit: usize, found: usize },
     DeltaEntriesExceeded { limit: usize, found: usize },
@@ -230,10 +231,44 @@ fn write_value(w: &mut CanonWriter, v: &Value) {
             w.write_uint(5);
             w.write_bytes(&d.canon_bytes());
         }
+        Value::Record { nominal, fields } => {
+            w.write_uint(6);
+            write_text(w, nominal);
+            w.write_uint(fields.len() as u64);
+            for (name, val) in fields {
+                write_text(w, name);
+                write_value(w, val);
+            }
+        }
+        Value::Variant {
+            nominal,
+            variant,
+            args,
+        } => {
+            w.write_uint(7);
+            write_text(w, nominal);
+            write_text(w, variant);
+            w.write_uint(args.len() as u64);
+            for arg in args {
+                write_value(w, arg);
+            }
+        }
     }
 }
 
 fn read_value(r: &mut CanonReader<'_>) -> Result<Value, WorldAuditBundleError> {
+    read_value_bounded(r, 0, &mut 4096)
+}
+
+fn read_value_bounded(
+    r: &mut CanonReader<'_>,
+    depth: usize,
+    remaining: &mut usize,
+) -> Result<Value, WorldAuditBundleError> {
+    if depth >= 32 || *remaining == 0 {
+        return Err(WorldAuditBundleError::MalformedStructuredValue);
+    }
+    *remaining -= 1;
     let tag = r.read_uint()?;
     match tag {
         0 => Ok(Value::Null),
@@ -265,6 +300,45 @@ fn read_value(r: &mut CanonReader<'_>) -> Result<Value, WorldAuditBundleError> {
                 return Err(WorldAuditBundleError::TrailingBytesInFrame("decimal"));
             }
             Ok(Value::Decimal(d))
+        }
+        6 => {
+            let nominal = read_text(r)?;
+            let count = usize::try_from(r.read_uint()?)
+                .map_err(|_| WorldAuditBundleError::TrailingBytesInFrame("record"))?;
+            if count > 256 || count > *remaining {
+                return Err(WorldAuditBundleError::MalformedStructuredValue);
+            }
+            let mut fields = BTreeMap::new();
+            for _ in 0..count {
+                let name = read_text(r)?;
+                let val = read_value_bounded(r, depth + 1, remaining)?;
+                if fields
+                    .last_key_value()
+                    .is_some_and(|(prev, _)| prev >= &name)
+                {
+                    return Err(WorldAuditBundleError::MalformedStructuredValue);
+                }
+                fields.insert(name, val);
+            }
+            Ok(Value::Record { nominal, fields })
+        }
+        7 => {
+            let nominal = read_text(r)?;
+            let variant = read_text(r)?;
+            let count = usize::try_from(r.read_uint()?)
+                .map_err(|_| WorldAuditBundleError::TrailingBytesInFrame("variant"))?;
+            if count > 256 || count > *remaining {
+                return Err(WorldAuditBundleError::MalformedStructuredValue);
+            }
+            let mut args = Vec::with_capacity(count);
+            for _ in 0..count {
+                args.push(read_value_bounded(r, depth + 1, remaining)?);
+            }
+            Ok(Value::Variant {
+                nominal,
+                variant,
+                args,
+            })
         }
         other => Err(WorldAuditBundleError::UnknownValueTag(other)),
     }
@@ -337,6 +411,19 @@ impl Default for ExecProfileV1 {
 impl ExecProfileV1 {
     pub fn current_for_network() -> Self {
         Self::default()
+    }
+
+    pub fn is_supported(&self) -> bool {
+        let default = Self::default();
+        self.profile == default.profile
+            && self.evaluator == default.evaluator
+            && self.numeric_semantics == default.numeric_semantics
+            && self.settlement == default.settlement
+            && self.module_loader_limits == default.module_loader_limits
+            && (matches!(
+                self.crate_version.as_str(),
+                "0.1.0-alpha.5" | "0.1.0-alpha.6"
+            ) || self.crate_version == env!("CARGO_PKG_VERSION"))
     }
 
     pub fn digest(&self) -> Digest {
@@ -1734,5 +1821,40 @@ mod tests {
             final_chain_digest: Digest::of(Domain::Value, b"final"),
         };
         assert_ne!(bundle_id, soc_bundle.id().digest());
+    }
+}
+
+#[cfg(test)]
+mod structured_value_bounds {
+    use super::*;
+
+    #[test]
+    fn structured_audit_values_reject_oversized_counts_and_noncanonical_fields() {
+        let mut w = CanonWriter::new();
+        w.write_uint(7);
+        write_text(&mut w, "root::Decision");
+        write_text(&mut w, "Approved");
+        w.write_uint(u64::MAX);
+        assert!(read_value(&mut CanonReader::new(&w.finish())).is_err());
+        for names in [["a", "a"], ["b", "a"]] {
+            let mut w = CanonWriter::new();
+            w.write_uint(6);
+            write_text(&mut w, "root::Record");
+            w.write_uint(2);
+            for name in names {
+                write_text(&mut w, name);
+                write_value(&mut w, &Value::Int(1));
+            }
+            assert!(read_value(&mut CanonReader::new(&w.finish())).is_err());
+        }
+        let mut w = CanonWriter::new();
+        for _ in 0..40 {
+            w.write_uint(7);
+            write_text(&mut w, "root::Recursive");
+            write_text(&mut w, "Next");
+            w.write_uint(1);
+        }
+        write_value(&mut w, &Value::Int(0));
+        assert!(read_value(&mut CanonReader::new(&w.finish())).is_err());
     }
 }

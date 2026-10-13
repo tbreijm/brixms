@@ -553,7 +553,7 @@ fn execute_explain(
                         "entity_id": settlement.entity_id,
                         "decide_name": decide_name,
                         "winning_candidate": settlement.candidate_name,
-                        "value": settlement.value.to_string(),
+                        "value": settlement.value.to_json(),
                         "priority": settlement.priority,
                         "phase": settlement.phase,
                     },

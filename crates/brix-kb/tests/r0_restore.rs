@@ -506,7 +506,8 @@ fn a_header_of_another_schema_replays_it_is_not_corruption() {
     drop(live);
     let store = StateStore::open_file(dir.path(), 1 << 20).unwrap();
     let mut w = brix_canon::CanonWriter::new();
-    w.write_bytes(b"brix.world.network-state@2");
+    // `@1` is the header schema an Alpha 5 world carries; the current schema is `@2`.
+    w.write_bytes(b"brix.world.network-state@1");
     w.write_uint(1);
     let bytes = w.finish();
     let d = brix_canon::Digest::of(brix_canon::Domain::State, &bytes);

@@ -11,7 +11,7 @@ small policies once from the command line, and it keeps large, long-lived
 decision worlds up to date as facts change, doing work proportional to the
 change rather than to the size of the world.
 
-It is pre-release software (`0.1.0-alpha.5`): useful for bounded policy and
+It is pre-release software (`0.1.0-alpha.6`): useful for bounded policy and
 settlement workflows, with broader proof and production guarantees still in
 progress. See [Status and limits](#status-and-limits).
 
@@ -205,7 +205,27 @@ $BRIX world verify \
 A successful verification reports `status: audited` together with the work it
 did to re-derive the result.
 
-## alpha.5: opening a large world without replay
+## alpha.6: typed decisions that feed later decisions
+
+World relations and decisions now carry nominal records and variants, including
+their typed payloads through restart, explanation, historical reads, and audit.
+A settled decision is also a relation: its winner rows can feed downstream
+relations and decisions in the same atomic batch. Dependencies must be acyclic.
+
+Grouped relations support exact `Int`/`Decimal` sums and ordered `min`/`max`.
+Correlated `not exists` queries track absent evidence; `count_or_zero()` retains
+parents with no matching children. Inserting evidence, correcting it, or removing
+its last support updates the dependent results.
+
+[`examples/world-atlas`](./examples/world-atlas/README.md) combines a typed
+quote → review → dispatch chain with aggregates and missing-evidence decisions.
+The [world profile guide](./docs/world-profile.md) describes the syntax and its
+limits; the [alpha.6 release notes](./docs/planning/alpha6-release-notes.md)
+record format changes and qualification. Alpha.5 worlds replay once when their
+cached operator-state format needs upgrading; subsequent compatible state opens
+by restore.
+
+## Persistent cold open (introduced in alpha.5)
 
 In alpha.4, opening a world rebuilt the operator network by replaying every
 resident fact, so a process restart cost about as much as loading the world:
@@ -246,7 +266,7 @@ At 1M facts (800k decisions), the first full decisions read in a fresh
 process takes about 0.6 s with the checkpoint. On the 100k benchmark world, GC
 reclaimed about 40% of stored nodes.
 
-Known limits in this release:
+Known limits from the alpha.5 qualification (these measurements are not alpha.6 benchmarks):
 
 - Cold open is fast but not constant; it still grows slowly with world size.
 - Bulk loading still slows as the world grows: late batches cost several
@@ -314,8 +334,9 @@ avoids reopening the world per request.
 - ADR-0046, which defines the world runtime, is still a draft; its schemas
   are versioned, but the world program syntax and runtime surface may change
   between alpha releases. The language guide does not yet document the world
-  syntax; [`examples/world-linked`](./examples/world-linked/) is the reference
-  example.
+  syntax; the [world profile guide](./docs/world-profile.md) and
+  [`examples/world-atlas`](./examples/world-atlas/README.md) document the new
+  operators and their supported shapes.
 - The parser recognizes some syntax whose execution profile is not
   implemented; such programs are rejected before execution.
 - Arithmetic and comparison are not all kernel-proven, certified refutation is
@@ -327,10 +348,10 @@ avoids reopening the world per request.
 Prerelease archives target macOS Apple Silicon (`aarch64-apple-darwin`) and
 Linux x86_64 (`x86_64-unknown-linux-gnu`), each with a SHA-256 sidecar. Pick a
 tag from the [GitHub Releases page](https://github.com/tbreijm/brixms/releases)
-(the current one is `v0.1.0-alpha.5`):
+(use `v0.1.0-alpha.6` once its release archives are published):
 
 ```bash
-VERSION=v0.1.0-alpha.5
+VERSION=v0.1.0-alpha.6
 TARGET=x86_64-unknown-linux-gnu # or aarch64-apple-darwin
 curl -LO "https://github.com/tbreijm/brixms/releases/download/${VERSION}/brix-${VERSION}-${TARGET}.tar.gz"
 curl -LO "https://github.com/tbreijm/brixms/releases/download/${VERSION}/brix-${VERSION}-${TARGET}.tar.gz.sha256"
@@ -342,8 +363,8 @@ cd "brix-${VERSION}-${TARGET}"
 ```
 
 An archive contains the CLI, this README, the license, and the `shipping`,
-`shipping-input`, and `numeric-policy` examples. The other examples, including
-`world-linked`, are in the source checkout. The README bundled with an archive
+`shipping-input`, `numeric-policy`, `world-linked`, and `world-atlas` examples.
+The README bundled with an archive
 describes what that archive supports.
 
 ## Documentation

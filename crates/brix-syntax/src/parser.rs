@@ -479,9 +479,25 @@ impl Parser {
                 break;
             }
         }
+        let mut not_exists = None;
         let where_clause = if self.check(&TokenKind::Where) {
             self.advance();
-            Some(self.parse_expr()?)
+            if self.check(&TokenKind::Not) {
+                self.advance();
+                self.consume(TokenKind::Exists, "not exists")?;
+                let var = self.expect_ident("not-exists binding variable")?.0;
+                self.consume(TokenKind::In, "not-exists 'in'")?;
+                let relation = self.parse_qualified_name("not-exists relation name")?;
+                self.consume(TokenKind::Where, "not-exists 'where'")?;
+                let predicate = self.parse_expr()?;
+                not_exists = Some(RelNotExists {
+                    binding: RelBinding { var, relation },
+                    predicate,
+                });
+                None
+            } else {
+                Some(self.parse_expr()?)
+            }
         } else {
             None
         };
@@ -507,6 +523,7 @@ impl Parser {
                 select,
                 from,
                 where_clause,
+                not_exists,
                 group_by,
             },
         })
@@ -1344,8 +1361,18 @@ impl Parser {
             }
         }
 
-        let (name, _) = self.expect_ident("pattern")?;
-        let is_capitalized = name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+        let (mut name, _) = self.expect_ident("pattern")?;
+        while self.check(&TokenKind::ColonColon) {
+            self.advance();
+            let (seg, _) = self.expect_ident("pattern path segment")?;
+            name.push_str("::");
+            name.push_str(&seg);
+        }
+        let last_segment = name.rsplit_once("::").map(|(_, s)| s).unwrap_or(&name);
+        let is_capitalized = last_segment
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase());
 
         if self.check(&TokenKind::OpenParen) {
             self.advance();

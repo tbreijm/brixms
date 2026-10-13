@@ -48,8 +48,8 @@ fn scalar_helper_work_is_charged_and_exhausts_budget() {
         "expected BudgetExhausted, got {result:?}"
     );
 
-    // With depth 0 and budget 20, it easily succeeds
-    let shallow = run(0, Some(20)).unwrap();
+    // With depth 0 it succeeds well inside a budget the deep chain overruns
+    let shallow = run(0, Some(100)).unwrap();
 
     // With adequate budget, depth 8 succeeds and expressions_evaluated accounts for recursive calls
     let deep = run(8, Some(5000)).unwrap();

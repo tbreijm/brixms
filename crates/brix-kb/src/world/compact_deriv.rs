@@ -131,11 +131,15 @@ pub fn leaf_counts(dag: &RelationDag) -> Vec<usize> {
         }
         let c = match &dag.nodes[op] {
             OperatorNode::Scan { .. }
+            | OperatorNode::DecisionRows { .. }
             | OperatorNode::Distinct { .. }
             | OperatorNode::GroupedCount { .. } => 1,
             OperatorNode::Bind { input, .. }
             | OperatorNode::Filter { input, .. }
             | OperatorNode::Project { input, .. } => count(dag, input.0, memo),
+            OperatorNode::AntiJoin { left, .. } | OperatorNode::ParentCount { left, .. } => {
+                count(dag, left.0, memo)
+            }
             OperatorNode::EquiJoin { left, right, .. } => {
                 count(dag, left.0, memo) + count(dag, right.0, memo)
             }
@@ -256,13 +260,18 @@ fn shape(dag: &RelationDag, op: OperatorId, leaves: &[Leaf], i: &mut usize) -> R
         .get(op.0)
         .ok_or_else(|| StateCodecError::NonCanonical(format!("unknown operator {}", op.0)))?;
     match node {
-        OperatorNode::Scan { .. } => match next_leaf(leaves, i)? {
-            Leaf::Base(_) => Ok(()),
-            _ => noncanon("scan operator expects a base leaf"),
-        },
+        OperatorNode::Scan { .. } | OperatorNode::DecisionRows { .. } => {
+            match next_leaf(leaves, i)? {
+                Leaf::Base(_) => Ok(()),
+                _ => noncanon("scan operator expects a base leaf"),
+            }
+        }
         OperatorNode::Bind { input, .. }
         | OperatorNode::Filter { input, .. }
         | OperatorNode::Project { input, .. } => shape(dag, *input, leaves, i),
+        OperatorNode::AntiJoin { left, .. } | OperatorNode::ParentCount { left, .. } => {
+            shape(dag, *left, leaves, i)
+        }
         OperatorNode::EquiJoin { left, right, .. } => {
             shape(dag, *left, leaves, i)?;
             shape(dag, *right, leaves, i)
@@ -291,12 +300,25 @@ fn unfold(dag: &RelationDag, op: OperatorId, leaves: &[Leaf], i: &mut usize) -> 
             }),
             _ => noncanon("scan operator expects a base leaf"),
         },
+        OperatorNode::DecisionRows { decide, .. } => match next_leaf(leaves, i)? {
+            Leaf::Base(key) => Ok(DerivationId::Base {
+                relation: decide.clone(),
+                key: key.clone(),
+            }),
+            _ => noncanon("decision rows operator expects a base leaf"),
+        },
         OperatorNode::Bind { input, .. }
         | OperatorNode::Filter { input, .. }
         | OperatorNode::Project { input, .. } => Ok(DerivationId::Unary {
             op,
             parent: Box::new(unfold(dag, *input, leaves, i)?),
         }),
+        OperatorNode::AntiJoin { left, .. } | OperatorNode::ParentCount { left, .. } => {
+            Ok(DerivationId::Unary {
+                op,
+                parent: Box::new(unfold(dag, *left, leaves, i)?),
+            })
+        }
         OperatorNode::EquiJoin { left, right, .. } => {
             let l = unfold(dag, *left, leaves, i)?;
             let r = unfold(dag, *right, leaves, i)?;

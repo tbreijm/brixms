@@ -113,7 +113,7 @@ fn grouped_projection_contains_only_bound_keys_and_counts() {
     for projection in ["{ id: x.id, count: count() }", "{ count: count() + 1 }"] {
         let error = self::dag(&format!("rel input rows: {{ id: Str, category: Str }} key id\nrel derived result = select {projection} from x in rows group by x.category")).unwrap_err();
         assert!(
-            error.contains("must be an exact group key or count()"),
+            error.contains("must be a group key or supported aggregate"),
             "{error}"
         );
     }

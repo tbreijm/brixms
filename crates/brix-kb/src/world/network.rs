@@ -236,6 +236,10 @@ pub const DEFAULT_SCHEDULING_QUANTUM: usize = 256;
 #[derive(Clone, Debug)]
 pub enum OperatorWorkItem {
     Delta(TupleDelta),
+    SideDelta {
+        delta: TupleDelta,
+        is_left: bool,
+    },
     JoinContinuation {
         delta: TupleDelta,
         is_left: bool,
@@ -250,7 +254,7 @@ pub enum OperatorWorkItem {
 #[inline]
 fn work_item_queued_count(item: &OperatorWorkItem) -> usize {
     match item {
-        OperatorWorkItem::Delta(_) => 1,
+        OperatorWorkItem::Delta(_) | OperatorWorkItem::SideDelta { .. } => 1,
         OperatorWorkItem::JoinContinuation { remaining, .. } => (*remaining).max(1),
     }
 }
@@ -327,11 +331,20 @@ impl CandidateExplanation {
             "name": self.name,
             "priority": self.priority,
             "phase": self.phase,
-            "value": self.value.to_string(),
+            "value": self.value.to_json(),
             "supports_count": self.supports_count,
             "winning": self.winning,
+            "disposition": if self.winning { "selected" } else if self.supports_count == 0 { "ineligible" } else { "superseded" },
         })
     }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct UpstreamSettlementLink {
+    pub decide: String,
+    pub entity_id: String,
+    pub candidate: String,
+    pub revision: u64,
 }
 
 /// Comprehensive explanation of the candidate deliberation and winning settlement for an entity.
@@ -346,6 +359,7 @@ pub struct DecisionExplanation {
     pub calendar_key: Option<Key>,
     pub candidates: Vec<CandidateExplanation>,
     pub contributing_facts: Vec<(String, WorldKey)>,
+    pub upstream_settlements: Vec<UpstreamSettlementLink>,
 }
 
 impl DecisionExplanation {
@@ -354,7 +368,7 @@ impl DecisionExplanation {
             "entity_id": self.entity_id,
             "decide_name": self.decide_name,
             "winning_candidate": self.winning_candidate,
-            "value": self.value.as_ref().map(|v| v.to_string()),
+            "value": self.value.as_ref().map(|v| v.to_json()),
             "priority": self.priority,
             "phase": self.phase,
             "calendar_key": self.calendar_key.map(|k| format!("phase={},priority={},tiebreak={}", k.phase, k.priority, k.tiebreak.to_hex())),
@@ -366,6 +380,12 @@ impl DecisionExplanation {
                     "key": key_repr,
                 })
             }).collect::<Vec<_>>(),
+            "upstream_settlements": self.upstream_settlements.iter().map(|s| serde_json::json!({
+                "decide": s.decide,
+                "entity_id": s.entity_id,
+                "candidate": s.candidate,
+                "revision": s.revision,
+            })).collect::<Vec<_>>(),
         })
     }
 }
@@ -391,6 +411,7 @@ pub struct DecideBlock {
     /// `lower_relations` refuses any world-profile `decide` lacking this, so
     /// by the time a `DecideBlock` exists it is always present.
     pub per_field: String,
+    pub per_type: ast::Ty,
     pub proposals: Vec<ast::ProposeDecl>,
     pub compiled_proposals: Vec<CompiledPropose>,
 }
@@ -469,6 +490,99 @@ impl JoinSide {
             hot: PMap::new(),
         })
     }
+}
+
+fn indexed_side_apply(
+    side: &mut JoinSide,
+    key: ValueList,
+    delta: &TupleDelta,
+    store: &StateStore,
+) -> Result<(usize, usize), WorldError> {
+    let (tuple, derivation) = match delta {
+        TupleDelta::Insert { tuple, derivation } | TupleDelta::Retract { tuple, derivation } => {
+            (tuple, derivation)
+        }
+    };
+    let id = derivation.c.digest();
+    let existing = side.read(&key, store)?;
+    let old = existing.as_ref().map_or(0, SMap::len);
+    let inner = if delta.is_insert() {
+        existing.unwrap_or_default().upsert(
+            id,
+            JoinEntry {
+                tuple: tuple.clone(),
+                deriv: derivation.c.clone(),
+            },
+            store,
+        )?
+    } else if let Some(existing) = existing {
+        existing.remove(&id, store)?
+    } else {
+        SMap::new()
+    };
+    let new = inner.len();
+    side.write(key, inner, store)?;
+    Ok((old, new))
+}
+
+fn indexed_side_rows(
+    side: &JoinSide,
+    key: &ValueList,
+    store: &StateStore,
+    remaining_rows: Option<u64>,
+) -> Result<Vec<JoinEntry>, WorldError> {
+    let Some(inner) = side.read(key, store)? else {
+        return Ok(Vec::new());
+    };
+    // Refuse an over-budget fanout before allocating or decoding its bucket.
+    if remaining_rows.is_some_and(|max| inner.len() as u64 > max) {
+        return Err(WorldError::BudgetExhausted);
+    }
+    let mut rows = Vec::with_capacity(inner.len());
+    let mut cursor = None;
+    loop {
+        let (page, next) = inner.page(cursor.as_ref(), 256, store)?;
+        rows.extend(page.into_iter().map(|(_, entry)| entry));
+        match next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    Ok(rows)
+}
+
+fn tuple_index_key(
+    tuple: &IntermediateTuple,
+    fields: &[FieldRef],
+) -> Result<ValueList, WorldError> {
+    Ok(ValueList(
+        fields
+            .iter()
+            .map(|field| {
+                tuple
+                    .get_qualified(&field.binding, &field.field)
+                    .cloned()
+                    .ok_or_else(|| {
+                        WorldError::NetworkError(format!(
+                            "missing indexed field {}.{}",
+                            field.binding, field.field
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    ))
+}
+
+fn parent_count_tuple(
+    key: &Value,
+    output_key: &str,
+    output_count: &str,
+    count: usize,
+) -> IntermediateTuple {
+    let mut tuple = IntermediateTuple::new();
+    tuple.insert(output_key, key.clone());
+    tuple.insert(output_count, Value::Int(count as i64));
+    tuple
 }
 
 /// The supports of one key, as read from a [`SupportIndex`].
@@ -716,6 +830,926 @@ where
 pub type DistinctSupports = SupportIndex<IntermediateTuple, CompactDeriv>;
 /// Grouped-count index, keyed by the group key values.
 pub type GroupSupports = SupportIndex<ValueList, Digest>;
+
+#[derive(Clone, Debug, Default)]
+pub struct AggregateIndex {
+    pub rows: SMap<ValueList, ValueList>,
+}
+
+impl AggregateIndex {
+    fn accumulator_key(key: &ValueList) -> ValueList {
+        let mut values = vec![Value::Str("world::aggregate_state".into())];
+        values.extend(key.0.iter().cloned());
+        ValueList(values)
+    }
+    fn extremum_node_key(group: &ValueList, projection: usize, value: &Value) -> ValueList {
+        let mut values = vec![
+            Value::Str("world::aggregate_extremum".into()),
+            Value::Int(projection as i64),
+        ];
+        values.extend(group.0.iter().cloned());
+        values.push(value.clone());
+        ValueList(values)
+    }
+    pub fn get(
+        &self,
+        key: &ValueList,
+        store: &StateStore,
+    ) -> Result<Option<ValueList>, WorldError> {
+        Ok(self.rows.get(&Self::accumulator_key(key), store)?)
+    }
+    pub fn set(
+        &mut self,
+        key: ValueList,
+        value: ValueList,
+        store: &StateStore,
+    ) -> Result<(), WorldError> {
+        self.rows = self
+            .rows
+            .upsert(Self::accumulator_key(&key), value, store)?;
+        Ok(())
+    }
+    pub fn remove(&mut self, key: &ValueList, store: &StateStore) -> Result<(), WorldError> {
+        self.rows = self.rows.remove(&Self::accumulator_key(key), store)?;
+        Ok(())
+    }
+    fn insert_extremum(
+        &mut self,
+        group: &ValueList,
+        projection: usize,
+        root: Option<&Value>,
+        value: &Value,
+        store: &StateStore,
+        work: &mut u64,
+    ) -> Result<Value, WorldError> {
+        validate_extremum_value(value)?;
+        let new_root = treap_insert(
+            self,
+            group,
+            projection,
+            root.cloned(),
+            value.clone(),
+            store,
+            0,
+            work,
+        )?;
+        Ok(new_root)
+    }
+    fn remove_extremum(
+        &mut self,
+        group: &ValueList,
+        projection: usize,
+        root: Option<&Value>,
+        value: &Value,
+        store: &StateStore,
+        work: &mut u64,
+    ) -> Result<Option<Value>, WorldError> {
+        treap_remove(
+            self,
+            group,
+            projection,
+            root.cloned(),
+            value,
+            store,
+            0,
+            work,
+        )
+    }
+    fn extremum(
+        &self,
+        group: &ValueList,
+        projection: usize,
+        root: Option<&Value>,
+        max: bool,
+        store: &StateStore,
+        work: &mut u64,
+    ) -> Result<Option<Value>, WorldError> {
+        let Some(mut current) = root.cloned() else {
+            return Ok(None);
+        };
+        let mut visited = BTreeSet::new();
+        loop {
+            if visited.len() >= MAX_EXTREMUM_DEPTH || !visited.insert(current.clone()) {
+                return Err(WorldError::NetworkError(
+                    "malformed ordered aggregate tree depth or cycle".into(),
+                ));
+            }
+            *work = work.saturating_add(1);
+            let node = self.extremum_node(group, projection, &current, store)?;
+            validate_ext_node(group, projection, &current, &node)?;
+            let next = if max { node.right } else { node.left };
+            match next {
+                Some(value) => current = value,
+                None => return Ok(Some(current)),
+            }
+        }
+    }
+    fn extremum_node(
+        &self,
+        group: &ValueList,
+        projection: usize,
+        value: &Value,
+        store: &StateStore,
+    ) -> Result<ExtNode, WorldError> {
+        let key = Self::extremum_node_key(group, projection, value);
+        let stored = self
+            .rows
+            .get(&key, store)?
+            .ok_or_else(|| WorldError::NetworkError("missing ordered aggregate node".into()))?;
+        ExtNode::decode(&stored)
+    }
+    fn set_extremum_node(
+        &mut self,
+        group: &ValueList,
+        projection: usize,
+        value: &Value,
+        node: ExtNode,
+        store: &StateStore,
+    ) -> Result<(), WorldError> {
+        self.rows = self.rows.upsert(
+            Self::extremum_node_key(group, projection, value),
+            node.encode(),
+            store,
+        )?;
+        Ok(())
+    }
+    fn delete_extremum_node(
+        &mut self,
+        group: &ValueList,
+        projection: usize,
+        value: &Value,
+        store: &StateStore,
+    ) -> Result<(), WorldError> {
+        self.rows = self
+            .rows
+            .remove(&Self::extremum_node_key(group, projection, value), store)?;
+        Ok(())
+    }
+    pub fn persist(&self, store: &StateStore) -> usize {
+        self.rows.persist(store)
+    }
+    pub fn dehydrated(&self, store: &StateStore) -> Result<Self, WorldError> {
+        Ok(Self {
+            rows: self.rows.dehydrate(store)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ExtNode {
+    count: usize,
+    left: Option<Value>,
+    right: Option<Value>,
+}
+
+impl ExtNode {
+    fn encode(&self) -> ValueList {
+        ValueList(vec![Value::Record {
+            nominal: "world::AggregateExtremumNode".into(),
+            fields: BTreeMap::from([
+                ("count".into(), Value::Int(self.count as i64)),
+                ("left".into(), encode_extremum_link(self.left.as_ref())),
+                ("right".into(), encode_extremum_link(self.right.as_ref())),
+            ]),
+        }])
+    }
+    fn decode(list: &ValueList) -> Result<Self, WorldError> {
+        let [Value::Record { nominal, fields }] = list.0.as_slice() else {
+            return Err(WorldError::NetworkError(
+                "malformed ordered aggregate node".into(),
+            ));
+        };
+        if nominal != "world::AggregateExtremumNode" || fields.len() != 3 {
+            return Err(WorldError::NetworkError(
+                "malformed ordered aggregate node".into(),
+            ));
+        }
+        let Some(Value::Int(count)) = fields.get("count") else {
+            return Err(WorldError::NetworkError(
+                "malformed ordered aggregate node count".into(),
+            ));
+        };
+        let count = usize::try_from(*count)
+            .ok()
+            .filter(|count| *count > 0)
+            .ok_or_else(|| {
+                WorldError::NetworkError("invalid ordered aggregate multiplicity".into())
+            })?;
+        let child = |name: &str| match fields.get(name) {
+            Some(value) => decode_extremum_link(value),
+            None => Err(WorldError::NetworkError(
+                "malformed ordered aggregate node child".into(),
+            )),
+        };
+        Ok(Self {
+            count,
+            left: child("left")?,
+            right: child("right")?,
+        })
+    }
+}
+
+fn encode_extremum_link(value: Option<&Value>) -> Value {
+    match value {
+        Some(value) => Value::Variant {
+            nominal: "world::AggregateExtremumLink".into(),
+            variant: "Some".into(),
+            args: vec![value.clone()],
+        },
+        None => Value::Variant {
+            nominal: "world::AggregateExtremumLink".into(),
+            variant: "None".into(),
+            args: vec![],
+        },
+    }
+}
+
+fn decode_extremum_link(value: &Value) -> Result<Option<Value>, WorldError> {
+    match value {
+        Value::Variant {
+            nominal,
+            variant,
+            args,
+        } if nominal == "world::AggregateExtremumLink" && variant == "None" && args.is_empty() => {
+            Ok(None)
+        }
+        Value::Variant {
+            nominal,
+            variant,
+            args,
+        } if nominal == "world::AggregateExtremumLink" && variant == "Some" && args.len() == 1 => {
+            validate_extremum_value(&args[0])?;
+            Ok(Some(args[0].clone()))
+        }
+        _ => Err(WorldError::NetworkError(
+            "malformed ordered aggregate child link".into(),
+        )),
+    }
+}
+
+fn encode_extremum_root(value: Option<&Value>) -> Value {
+    match value {
+        Some(value) => Value::Variant {
+            nominal: "world::AggregateExtremumRoot".into(),
+            variant: "Some".into(),
+            args: vec![value.clone()],
+        },
+        None => Value::Null,
+    }
+}
+
+fn decode_extremum_root(value: &Value) -> Result<Option<Value>, WorldError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Variant {
+            nominal,
+            variant,
+            args,
+        } if nominal == "world::AggregateExtremumRoot" && variant == "Some" && args.len() == 1 => {
+            validate_extremum_value(&args[0])?;
+            Ok(Some(args[0].clone()))
+        }
+        _ => Err(WorldError::NetworkError(
+            "malformed ordered aggregate root".into(),
+        )),
+    }
+}
+
+fn extremum_priority(group: &ValueList, projection: usize, value: &Value) -> Digest {
+    let mut parts = vec![Value::Int(projection as i64)];
+    parts.extend(group.0.iter().cloned());
+    parts.push(value.clone());
+    Digest::of(Domain::Value, &ValueList(parts).state_bytes())
+}
+
+const MAX_EXTREMUM_DEPTH: usize = 128;
+
+fn validate_extremum_value(value: &Value) -> Result<(), WorldError> {
+    if matches!(
+        value,
+        Value::Null
+            | Value::Bool(_)
+            | Value::Int(_)
+            | Value::Str(_)
+            | Value::F64(_)
+            | Value::Decimal(_)
+    ) {
+        Ok(())
+    } else {
+        Err(WorldError::NetworkError(
+            "ordered aggregate requires a scalar value".into(),
+        ))
+    }
+}
+
+fn compare_extremum_priority(
+    group: &ValueList,
+    projection: usize,
+    left: &Value,
+    right: &Value,
+) -> std::cmp::Ordering {
+    extremum_priority(group, projection, left)
+        .cmp(&extremum_priority(group, projection, right))
+        .then_with(|| left.cmp(right))
+}
+
+fn validate_ext_node(
+    group: &ValueList,
+    projection: usize,
+    value: &Value,
+    node: &ExtNode,
+) -> Result<(), WorldError> {
+    validate_extremum_value(value)?;
+    for (child, is_left) in [(node.left.as_ref(), true), (node.right.as_ref(), false)] {
+        if let Some(child) = child {
+            validate_extremum_value(child)?;
+            let ordered = if is_left {
+                child < value
+            } else {
+                child > value
+            };
+            if !ordered
+                || compare_extremum_priority(group, projection, value, child)
+                    == std::cmp::Ordering::Greater
+            {
+                return Err(WorldError::NetworkError(
+                    "malformed ordered aggregate child ordering".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn treap_insert(
+    index: &mut AggregateIndex,
+    group: &ValueList,
+    projection: usize,
+    root: Option<Value>,
+    value: Value,
+    store: &StateStore,
+    depth: usize,
+    work: &mut u64,
+) -> Result<Value, WorldError> {
+    if depth >= MAX_EXTREMUM_DEPTH {
+        return Err(WorldError::NetworkError(
+            "ordered aggregate tree depth limit exceeded".into(),
+        ));
+    }
+    *work = work.saturating_add(1);
+    let Some(root_value) = root else {
+        index.set_extremum_node(
+            group,
+            projection,
+            &value,
+            ExtNode {
+                count: 1,
+                left: None,
+                right: None,
+            },
+            store,
+        )?;
+        return Ok(value);
+    };
+    let mut node = index.extremum_node(group, projection, &root_value, store)?;
+    validate_ext_node(group, projection, &root_value, &node)?;
+    if value == root_value {
+        node.count = node.count.checked_add(1).ok_or_else(|| {
+            WorldError::NetworkError("ordered aggregate multiplicity overflow".into())
+        })?;
+        index.set_extremum_node(group, projection, &root_value, node, store)?;
+        return Ok(root_value);
+    }
+    if value < root_value {
+        node.left = Some(treap_insert(
+            index,
+            group,
+            projection,
+            node.left.clone(),
+            value,
+            store,
+            depth + 1,
+            work,
+        )?);
+        index.set_extremum_node(group, projection, &root_value, node.clone(), store)?;
+        let left_value = node.left.clone().expect("inserted left child");
+        if compare_extremum_priority(group, projection, &left_value, &root_value)
+            == std::cmp::Ordering::Less
+        {
+            let mut left = index.extremum_node(group, projection, &left_value, store)?;
+            node.left = left.right.take();
+            index.set_extremum_node(group, projection, &root_value, node, store)?;
+            left.right = Some(root_value.clone());
+            index.set_extremum_node(group, projection, &left_value, left, store)?;
+            return Ok(left_value);
+        }
+    } else {
+        node.right = Some(treap_insert(
+            index,
+            group,
+            projection,
+            node.right.clone(),
+            value,
+            store,
+            depth + 1,
+            work,
+        )?);
+        index.set_extremum_node(group, projection, &root_value, node.clone(), store)?;
+        let right_value = node.right.clone().expect("inserted right child");
+        if compare_extremum_priority(group, projection, &right_value, &root_value)
+            == std::cmp::Ordering::Less
+        {
+            let mut right = index.extremum_node(group, projection, &right_value, store)?;
+            node.right = right.left.take();
+            index.set_extremum_node(group, projection, &root_value, node, store)?;
+            right.left = Some(root_value.clone());
+            index.set_extremum_node(group, projection, &right_value, right, store)?;
+            return Ok(right_value);
+        }
+    }
+    Ok(root_value)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn treap_remove(
+    index: &mut AggregateIndex,
+    group: &ValueList,
+    projection: usize,
+    root: Option<Value>,
+    value: &Value,
+    store: &StateStore,
+    depth: usize,
+    work: &mut u64,
+) -> Result<Option<Value>, WorldError> {
+    if depth >= MAX_EXTREMUM_DEPTH {
+        return Err(WorldError::NetworkError(
+            "ordered aggregate tree depth limit exceeded".into(),
+        ));
+    }
+    *work = work.saturating_add(1);
+    let Some(root_value) = root else {
+        return Err(WorldError::NetworkError(
+            "retracting absent aggregate extremum".into(),
+        ));
+    };
+    let mut node = index.extremum_node(group, projection, &root_value, store)?;
+    validate_ext_node(group, projection, &root_value, &node)?;
+    if value < &root_value {
+        node.left = treap_remove(
+            index,
+            group,
+            projection,
+            node.left.clone(),
+            value,
+            store,
+            depth + 1,
+            work,
+        )?;
+        index.set_extremum_node(group, projection, &root_value, node, store)?;
+        return Ok(Some(root_value));
+    }
+    if value > &root_value {
+        node.right = treap_remove(
+            index,
+            group,
+            projection,
+            node.right.clone(),
+            value,
+            store,
+            depth + 1,
+            work,
+        )?;
+        index.set_extremum_node(group, projection, &root_value, node, store)?;
+        return Ok(Some(root_value));
+    }
+    if node.count > 1 {
+        node.count -= 1;
+        index.set_extremum_node(group, projection, &root_value, node, store)?;
+        return Ok(Some(root_value));
+    }
+    index.delete_extremum_node(group, projection, &root_value, store)?;
+    treap_merge(
+        index, group, projection, node.left, node.right, store, depth, work,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn treap_merge(
+    index: &mut AggregateIndex,
+    group: &ValueList,
+    projection: usize,
+    left: Option<Value>,
+    right: Option<Value>,
+    store: &StateStore,
+    depth: usize,
+    work: &mut u64,
+) -> Result<Option<Value>, WorldError> {
+    if depth >= MAX_EXTREMUM_DEPTH {
+        return Err(WorldError::NetworkError(
+            "ordered aggregate tree depth limit exceeded".into(),
+        ));
+    }
+    match (left, right) {
+        (None, right) => Ok(right),
+        (left, None) => Ok(left),
+        (Some(left_value), Some(right_value)) => {
+            *work = work.saturating_add(1);
+            if compare_extremum_priority(group, projection, &left_value, &right_value)
+                == std::cmp::Ordering::Less
+            {
+                let mut node = index.extremum_node(group, projection, &left_value, store)?;
+                validate_ext_node(group, projection, &left_value, &node)?;
+                node.right = treap_merge(
+                    index,
+                    group,
+                    projection,
+                    node.right.clone(),
+                    Some(right_value),
+                    store,
+                    depth + 1,
+                    work,
+                )?;
+                index.set_extremum_node(group, projection, &left_value, node, store)?;
+                Ok(Some(left_value))
+            } else {
+                let mut node = index.extremum_node(group, projection, &right_value, store)?;
+                validate_ext_node(group, projection, &right_value, &node)?;
+                node.left = treap_merge(
+                    index,
+                    group,
+                    projection,
+                    Some(left_value),
+                    node.left.clone(),
+                    store,
+                    depth + 1,
+                    work,
+                )?;
+                index.set_extremum_node(group, projection, &right_value, node, store)?;
+                Ok(Some(right_value))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GroupAccumulator {
+    pub int_sums: Vec<i128>,
+    pub decimal_sums: Vec<WideSigned>,
+    pub decimal_scales: Vec<u8>,
+    pub extrema_roots: Vec<Option<Value>>,
+}
+
+impl GroupAccumulator {
+    pub fn empty(projections: &[(String, GroupProjection)]) -> Self {
+        let n = projections.len();
+        Self {
+            int_sums: vec![0; n],
+            decimal_sums: vec![WideSigned::default(); n],
+            decimal_scales: vec![0; n],
+            extrema_roots: vec![None; n],
+        }
+    }
+
+    pub fn apply_delta(
+        &mut self,
+        is_ins: bool,
+        projections: &[(String, GroupProjection)],
+        aggregate_values: &[Option<Value>],
+        group: &ValueList,
+        index: &mut AggregateIndex,
+        store: &StateStore,
+    ) -> Result<u64, WorldError> {
+        let mut tree_work = 0u64;
+        for (idx, ((_, projection), value)) in projections.iter().zip(aggregate_values).enumerate()
+        {
+            let Some(value) = value else { continue };
+            match projection {
+                GroupProjection::SumInt(_) => {
+                    let Value::Int(value) = value else {
+                        return Err(WorldError::NetworkError(
+                            "grouped Int sum received non-Int".into(),
+                        ));
+                    };
+                    let amount = i128::from(*value);
+                    self.int_sums[idx] = if is_ins {
+                        self.int_sums[idx].checked_add(amount)
+                    } else {
+                        self.int_sums[idx].checked_sub(amount)
+                    }
+                    .ok_or_else(|| {
+                        WorldError::NetworkError("grouped Int sum accumulator overflow".into())
+                    })?;
+                }
+                GroupProjection::SumDecimal(_) => {
+                    let Value::Decimal(value) = value else {
+                        return Err(WorldError::NetworkError(
+                            "grouped Decimal sum received non-Decimal".into(),
+                        ));
+                    };
+                    let value_scale = value.scale();
+                    if value_scale > self.decimal_scales[idx] {
+                        self.decimal_sums[idx].mul_pow10(value_scale - self.decimal_scales[idx]);
+                        self.decimal_scales[idx] = value_scale;
+                    }
+                    let mut amount = WideSigned::from_i128(value.unscaled());
+                    amount.mul_pow10(self.decimal_scales[idx] - value_scale);
+                    if !is_ins {
+                        amount.negative = !amount.negative;
+                    }
+                    self.decimal_sums[idx].add_assign(&amount);
+                }
+                GroupProjection::Min(_) | GroupProjection::Max(_) => {
+                    self.extrema_roots[idx] = if is_ins {
+                        Some(index.insert_extremum(
+                            group,
+                            idx,
+                            self.extrema_roots[idx].as_ref(),
+                            value,
+                            store,
+                            &mut tree_work,
+                        )?)
+                    } else {
+                        index.remove_extremum(
+                            group,
+                            idx,
+                            self.extrema_roots[idx].as_ref(),
+                            value,
+                            store,
+                            &mut tree_work,
+                        )?
+                    };
+                }
+                GroupProjection::Key(_) | GroupProjection::Count => {}
+            }
+        }
+        Ok(tree_work)
+    }
+
+    pub fn to_value_list(&self, projections: &[(String, GroupProjection)]) -> ValueList {
+        let mut values = Vec::with_capacity(projections.len());
+        for (idx, (_, proj)) in projections.iter().enumerate() {
+            match proj {
+                GroupProjection::Key(_) | GroupProjection::Count => {
+                    values.push(Value::Null);
+                }
+                GroupProjection::SumInt(_) => {
+                    values.push(WideSigned::from_i128(self.int_sums[idx]).stored());
+                }
+                GroupProjection::SumDecimal(_) => {
+                    values.push(Value::Record {
+                        nominal: "world::DecimalAccumulator".into(),
+                        fields: BTreeMap::from([
+                            ("scale".into(), Value::Int(self.decimal_scales[idx] as i64)),
+                            ("sum".into(), self.decimal_sums[idx].stored()),
+                        ]),
+                    });
+                }
+                GroupProjection::Min(_) | GroupProjection::Max(_) => {
+                    values.push(encode_extremum_root(self.extrema_roots[idx].as_ref()))
+                }
+            }
+        }
+        ValueList(values)
+    }
+
+    pub fn from_value_list(
+        list: &ValueList,
+        projections: &[(String, GroupProjection)],
+    ) -> Result<Self, WorldError> {
+        if list.0.len() != projections.len() {
+            return Err(WorldError::NetworkError(
+                "malformed grouped aggregate accumulator length".into(),
+            ));
+        }
+        let mut accum = Self::empty(projections);
+        for (idx, (_, proj)) in projections.iter().enumerate() {
+            let val = &list.0[idx];
+            match proj {
+                GroupProjection::Key(_) | GroupProjection::Count => {
+                    if !matches!(val, Value::Null) {
+                        return Err(WorldError::NetworkError(
+                            "malformed grouped aggregate passthrough slot".into(),
+                        ));
+                    }
+                }
+                GroupProjection::SumInt(_) => {
+                    let w = WideSigned::restored(val)?;
+                    accum.int_sums[idx] = w.to_i128().ok_or_else(|| {
+                        WorldError::NetworkError("stored Int aggregate out of range".into())
+                    })?;
+                }
+                GroupProjection::SumDecimal(_) => {
+                    let Value::Record { nominal, fields } = val else {
+                        return Err(WorldError::NetworkError(
+                            "malformed Decimal aggregate accumulator".into(),
+                        ));
+                    };
+                    if nominal != "world::DecimalAccumulator" || fields.len() != 2 {
+                        return Err(WorldError::NetworkError(
+                            "malformed Decimal aggregate accumulator".into(),
+                        ));
+                    }
+                    let Some(Value::Int(scale)) = fields.get("scale") else {
+                        return Err(WorldError::NetworkError(
+                            "malformed Decimal aggregate scale".into(),
+                        ));
+                    };
+                    accum.decimal_scales[idx] = u8::try_from(*scale)
+                        .ok()
+                        .filter(|scale| *scale <= brix_canon::MAX_DECIMAL_SCALE)
+                        .ok_or_else(|| {
+                            WorldError::NetworkError("malformed Decimal aggregate scale".into())
+                        })?;
+                    let sum = fields.get("sum").ok_or_else(|| {
+                        WorldError::NetworkError("missing Decimal aggregate sum".into())
+                    })?;
+                    accum.decimal_sums[idx] = WideSigned::restored(sum)?;
+                }
+                GroupProjection::Min(_) | GroupProjection::Max(_) => {
+                    accum.extrema_roots[idx] = decode_extremum_root(val)?;
+                }
+            }
+        }
+        Ok(accum)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WideSigned {
+    negative: bool,
+    digits: Vec<u8>,
+}
+
+impl WideSigned {
+    pub fn to_i128(&self) -> Option<i128> {
+        let magnitude = self.digits.iter().rev().try_fold(0u128, |acc, digit| {
+            acc.checked_mul(10)?.checked_add(*digit as u128)
+        })?;
+        if self.negative {
+            if magnitude == i128::MAX as u128 + 1 {
+                Some(i128::MIN)
+            } else {
+                i128::try_from(magnitude).ok().map(|x| -x)
+            }
+        } else {
+            i128::try_from(magnitude).ok()
+        }
+    }
+    fn from_i128(value: i128) -> Self {
+        let mut magnitude = value.unsigned_abs();
+        let mut digits = Vec::new();
+        while magnitude != 0 {
+            digits.push((magnitude % 10) as u8);
+            magnitude /= 10;
+        }
+        Self {
+            negative: value < 0,
+            digits,
+        }
+    }
+    fn mul_pow10(&mut self, power: u8) {
+        if !self.digits.is_empty() {
+            self.digits
+                .splice(0..0, std::iter::repeat_n(0, power as usize));
+        }
+    }
+    fn add_assign(&mut self, other: &Self) {
+        if other.digits.is_empty() {
+            return;
+        }
+        if self.digits.is_empty() {
+            *self = other.clone();
+            return;
+        }
+        if self.negative == other.negative {
+            let mut carry = 0u8;
+            for idx in 0..self.digits.len().max(other.digits.len()) {
+                if idx == self.digits.len() {
+                    self.digits.push(0);
+                }
+                let sum = self.digits[idx] + other.digits.get(idx).copied().unwrap_or(0) + carry;
+                self.digits[idx] = sum % 10;
+                carry = sum / 10;
+            }
+            if carry != 0 {
+                self.digits.push(carry);
+            }
+        } else {
+            match self
+                .digits
+                .len()
+                .cmp(&other.digits.len())
+                .then_with(|| self.digits.iter().rev().cmp(other.digits.iter().rev()))
+            {
+                std::cmp::Ordering::Equal => {
+                    self.digits.clear();
+                    self.negative = false;
+                }
+                std::cmp::Ordering::Greater => self.sub_abs(other),
+                std::cmp::Ordering::Less => {
+                    let mut result = other.clone();
+                    result.sub_abs(self);
+                    *self = result;
+                }
+            }
+        }
+    }
+    fn sub_abs(&mut self, other: &Self) {
+        let mut borrow = 0i8;
+        for idx in 0..self.digits.len() {
+            let mut digit =
+                self.digits[idx] as i8 - other.digits.get(idx).copied().unwrap_or(0) as i8 - borrow;
+            if digit < 0 {
+                digit += 10;
+                borrow = 1;
+            } else {
+                borrow = 0;
+            }
+            self.digits[idx] = digit as u8;
+        }
+        while self.digits.last() == Some(&0) {
+            self.digits.pop();
+        }
+        if self.digits.is_empty() {
+            self.negative = false;
+        }
+    }
+    fn to_decimal(&self, scale: u8) -> Option<brix_canon::Decimal> {
+        let mut wide = self.clone();
+        let mut scale = scale;
+        while scale > 0 && wide.digits.first() == Some(&0) {
+            wide.digits.remove(0);
+            scale -= 1;
+        }
+        let magnitude = wide.digits.iter().rev().try_fold(0u128, |acc, digit| {
+            acc.checked_mul(10)?.checked_add(*digit as u128)
+        })?;
+        let signed = if wide.negative {
+            if magnitude == i128::MAX as u128 + 1 {
+                i128::MIN
+            } else {
+                -i128::try_from(magnitude).ok()?
+            }
+        } else {
+            i128::try_from(magnitude).ok()?
+        };
+        Some(brix_canon::Decimal::new(signed, scale))
+    }
+    fn stored(&self) -> Value {
+        Value::Record {
+            nominal: "world::WideSigned".into(),
+            fields: BTreeMap::from([
+                ("negative".into(), Value::Bool(self.negative)),
+                (
+                    "digits".into(),
+                    Value::Str(self.digits.iter().map(|d| char::from(b'0' + *d)).collect()),
+                ),
+            ]),
+        }
+    }
+    fn restored(value: &Value) -> Result<Self, WorldError> {
+        let Value::Record { nominal, fields } = value else {
+            return Err(WorldError::NetworkError(
+                "bad stored decimal accumulator".into(),
+            ));
+        };
+        if nominal != "world::WideSigned" || fields.len() != 2 {
+            return Err(WorldError::NetworkError(
+                "bad stored decimal accumulator type".into(),
+            ));
+        }
+        let negative = match fields.get("negative") {
+            Some(Value::Bool(b)) => *b,
+            _ => {
+                return Err(WorldError::NetworkError(
+                    "bad stored decimal accumulator sign".into(),
+                ))
+            }
+        };
+        let digits = match fields.get("digits") {
+            Some(Value::Str(s)) => s
+                .bytes()
+                .map(|b| {
+                    b.checked_sub(b'0').filter(|d| *d <= 9).ok_or_else(|| {
+                        WorldError::NetworkError("bad stored decimal accumulator digit".into())
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            _ => {
+                return Err(WorldError::NetworkError(
+                    "bad stored decimal accumulator digits".into(),
+                ))
+            }
+        };
+        if digits.last() == Some(&0) || (digits.is_empty() && negative) {
+            return Err(WorldError::NetworkError(
+                "noncanonical decimal accumulator".into(),
+            ));
+        }
+        Ok(Self { negative, digits })
+    }
+}
 /// Contents of a derived relation that is not a `Distinct` output: each distinct typed tuple
 /// with the digests of the derivations currently supporting it. A tuple is in the relation
 /// iff it has at least one support, so collapsing derivations (several rows projecting to
@@ -1008,6 +2042,24 @@ pub enum OperatorState {
         left_side: JoinSide,
         right_side: JoinSide,
     },
+    AntiJoin {
+        left: OperatorId,
+        right: OperatorId,
+        left_keys: Vec<FieldRef>,
+        right_keys: Vec<FieldRef>,
+        left_side: JoinSide,
+        right_side: JoinSide,
+    },
+    ParentCount {
+        left: OperatorId,
+        right: OperatorId,
+        left_key: FieldRef,
+        right_key: FieldRef,
+        output_key: String,
+        output_count: String,
+        left_side: JoinSide,
+        right_side: JoinSide,
+    },
     Distinct {
         input: OperatorId,
         supports: DistinctSupports,
@@ -1017,7 +2069,9 @@ pub enum OperatorState {
         group_keys: Vec<ast::Expr>,
         compiled_group_keys: Vec<CompiledWorldExpr>,
         projections: Vec<(String, GroupProjection)>,
+        compiled_aggregates: Vec<Option<CompiledWorldExpr>>,
         groups: GroupSupports,
+        aggregates: AggregateIndex,
     },
 }
 
@@ -1064,6 +2118,7 @@ pub struct BatchCtx {
     diagnostics: NetworkDiagnostics,
     total_work: u64,
     total_matches: u64,
+    total_expressions: u64,
     decisions: BTreeMap<(String, String), DecisionTrack>,
     chunks: usize,
 }
@@ -1087,6 +2142,7 @@ pub struct WorldNetwork {
     pub derived_relations: PMap<String, DerivedRel>,
     pub decides: PMap<String, DecideBlock>,
     decision_subscribers: PMap<String, Vec<String>>,
+    pub virtual_relations: BTreeSet<String>,
     /// Content-addressed trie of settled decisions, keyed by [`decision_key`]
     /// (ADR-0046 P6 G2). Store-backed: only fallible, store-aware operations are
     /// reachable, so an unhydrated node can never read as an empty subtree. Its node
@@ -1121,6 +2177,7 @@ impl WorldNetwork {
         let mut relation_subscribers: PMap<String, Vec<OperatorId>> = PMap::new();
         let mut downstream: PMap<OperatorId, Vec<OperatorId>> = PMap::new();
         let mut base_relations = PMap::new();
+        let mut virtual_relations = BTreeSet::new();
 
         for (idx, node) in dag.nodes.iter().enumerate() {
             let op_id = OperatorId(idx);
@@ -1140,6 +2197,28 @@ impl WorldNetwork {
                         OperatorState::Scan {
                             relation: relation.clone(),
                             key_fields: key_fields.clone(),
+                            schema: schema.clone(),
+                            records: PMap::new(),
+                        },
+                    );
+                }
+                OperatorNode::DecisionRows { decide, schema } => {
+                    virtual_relations.insert(decide.clone());
+                    let key_field = match schema {
+                        ast::Ty::Record(fields) => {
+                            fields.first().map(|f| f.name.clone()).unwrap_or_default()
+                        }
+                        _ => String::new(),
+                    };
+                    relation_subscribers
+                        .entry(decide.clone())
+                        .or_default()
+                        .push(op_id);
+                    operator_states.insert(
+                        idx,
+                        OperatorState::Scan {
+                            relation: decide.clone(),
+                            key_fields: vec![key_field],
                             schema: schema.clone(),
                             records: PMap::new(),
                         },
@@ -1197,6 +2276,50 @@ impl WorldNetwork {
                         },
                     );
                 }
+                OperatorNode::AntiJoin {
+                    left,
+                    right,
+                    left_keys,
+                    right_keys,
+                } => {
+                    downstream.entry(*left).or_default().push(op_id);
+                    downstream.entry(*right).or_default().push(op_id);
+                    operator_states.insert(
+                        idx,
+                        OperatorState::AntiJoin {
+                            left: *left,
+                            right: *right,
+                            left_keys: left_keys.clone(),
+                            right_keys: right_keys.clone(),
+                            left_side: JoinSide::default(),
+                            right_side: JoinSide::default(),
+                        },
+                    );
+                }
+                OperatorNode::ParentCount {
+                    left,
+                    right,
+                    left_key,
+                    right_key,
+                    output_key,
+                    output_count,
+                } => {
+                    downstream.entry(*left).or_default().push(op_id);
+                    downstream.entry(*right).or_default().push(op_id);
+                    operator_states.insert(
+                        idx,
+                        OperatorState::ParentCount {
+                            left: *left,
+                            right: *right,
+                            left_key: left_key.clone(),
+                            right_key: right_key.clone(),
+                            output_key: output_key.clone(),
+                            output_count: output_count.clone(),
+                            left_side: JoinSide::default(),
+                            right_side: JoinSide::default(),
+                        },
+                    );
+                }
                 OperatorNode::Distinct { input } => {
                     downstream.entry(*input).or_default().push(op_id);
                     operator_states.insert(
@@ -1220,7 +2343,9 @@ impl WorldNetwork {
                             group_keys: group_keys.clone(),
                             compiled_group_keys: Vec::new(),
                             projections: projections.clone(),
+                            compiled_aggregates: vec![None; projections.len()],
                             groups: GroupSupports::default(),
+                            aggregates: AggregateIndex::default(),
                         },
                     );
                 }
@@ -1258,6 +2383,7 @@ impl WorldNetwork {
             derived_relations,
             decides: PMap::new(),
             decision_subscribers: PMap::new(),
+            virtual_relations,
             decision_tree: SMap::new(),
             candidate_frontier: CandidateFrontier::default(),
             functions: Arc::new(BTreeMap::new()),
@@ -1302,8 +2428,26 @@ impl WorldNetwork {
                     n += left_side.persist(&self.state);
                     n += right_side.persist(&self.state);
                 }
+                OperatorState::AntiJoin {
+                    left_side,
+                    right_side,
+                    ..
+                }
+                | OperatorState::ParentCount {
+                    left_side,
+                    right_side,
+                    ..
+                } => {
+                    n += left_side.persist(&self.state);
+                    n += right_side.persist(&self.state);
+                }
                 OperatorState::Distinct { supports, .. } => n += supports.persist(&self.state),
-                OperatorState::GroupedCount { groups, .. } => n += groups.persist(&self.state),
+                OperatorState::GroupedCount {
+                    groups, aggregates, ..
+                } => {
+                    n += groups.persist(&self.state);
+                    n += aggregates.persist(&self.state);
+                }
                 _ => {}
             }
         }
@@ -1358,6 +2502,50 @@ impl WorldNetwork {
                         },
                     );
                 }
+                OperatorState::AntiJoin {
+                    left,
+                    right,
+                    left_keys,
+                    right_keys,
+                    left_side,
+                    right_side,
+                } => {
+                    out.operator_states.insert(
+                        *idx,
+                        OperatorState::AntiJoin {
+                            left: *left,
+                            right: *right,
+                            left_keys: left_keys.clone(),
+                            right_keys: right_keys.clone(),
+                            left_side: left_side.dehydrated(&self.state)?,
+                            right_side: right_side.dehydrated(&self.state)?,
+                        },
+                    );
+                }
+                OperatorState::ParentCount {
+                    left,
+                    right,
+                    left_key,
+                    right_key,
+                    output_key,
+                    output_count,
+                    left_side,
+                    right_side,
+                } => {
+                    out.operator_states.insert(
+                        *idx,
+                        OperatorState::ParentCount {
+                            left: *left,
+                            right: *right,
+                            left_key: left_key.clone(),
+                            right_key: right_key.clone(),
+                            output_key: output_key.clone(),
+                            output_count: output_count.clone(),
+                            left_side: left_side.dehydrated(&self.state)?,
+                            right_side: right_side.dehydrated(&self.state)?,
+                        },
+                    );
+                }
                 OperatorState::Distinct { input, supports } => {
                     out.operator_states.insert(
                         *idx,
@@ -1372,7 +2560,9 @@ impl WorldNetwork {
                     group_keys,
                     compiled_group_keys,
                     projections,
+                    compiled_aggregates,
                     groups,
+                    aggregates,
                 } => {
                     out.operator_states.insert(
                         *idx,
@@ -1381,7 +2571,9 @@ impl WorldNetwork {
                             group_keys: group_keys.clone(),
                             compiled_group_keys: compiled_group_keys.clone(),
                             projections: projections.clone(),
+                            compiled_aggregates: compiled_aggregates.clone(),
                             groups: groups.dehydrated(&self.state)?,
+                            aggregates: aggregates.dehydrated(&self.state)?,
                         },
                     );
                 }
@@ -1510,12 +2702,31 @@ impl WorldNetwork {
                     left: left_side.outer.sub_root(),
                     right: right_side.outer.sub_root(),
                 },
+                OperatorState::AntiJoin {
+                    left_side,
+                    right_side,
+                    ..
+                } => OperatorRoots::Anti {
+                    left: left_side.outer.sub_root(),
+                    right: right_side.outer.sub_root(),
+                },
+                OperatorState::ParentCount {
+                    left_side,
+                    right_side,
+                    ..
+                } => OperatorRoots::ParentCount {
+                    left: left_side.outer.sub_root(),
+                    right: right_side.outer.sub_root(),
+                },
                 OperatorState::Distinct { supports, .. } => {
                     OperatorRoots::Distinct(supports.outer.sub_root())
                 }
-                OperatorState::GroupedCount { groups, .. } => {
-                    OperatorRoots::Group(groups.outer.sub_root())
-                }
+                OperatorState::GroupedCount {
+                    groups, aggregates, ..
+                } => OperatorRoots::Group {
+                    supports: groups.outer.sub_root(),
+                    aggregates: aggregates.rows.sub_root(),
+                },
                 _ => continue,
             };
             operators.insert(OperatorId(*idx), roots);
@@ -1541,6 +2752,12 @@ impl WorldNetwork {
             match state {
                 OperatorState::EquiJoin { .. } => {
                     expect.insert(OperatorId(*idx), "join");
+                }
+                OperatorState::AntiJoin { .. } => {
+                    expect.insert(OperatorId(*idx), "anti-join");
+                }
+                OperatorState::ParentCount { .. } => {
+                    expect.insert(OperatorId(*idx), "parent-count");
                 }
                 OperatorState::Distinct { .. } => {
                     expect.insert(OperatorId(*idx), "distinct");
@@ -1595,13 +2812,43 @@ impl WorldNetwork {
                     right_side.outer = SMap::from_sub_root(*right);
                     right_side.hot = PMap::new();
                 }
+                (
+                    Some(OperatorState::AntiJoin {
+                        left_side,
+                        right_side,
+                        ..
+                    }),
+                    OperatorRoots::Anti { left, right },
+                )
+                | (
+                    Some(OperatorState::ParentCount {
+                        left_side,
+                        right_side,
+                        ..
+                    }),
+                    OperatorRoots::ParentCount { left, right },
+                ) => {
+                    left_side.outer = SMap::from_sub_root(*left);
+                    left_side.hot = PMap::new();
+                    right_side.outer = SMap::from_sub_root(*right);
+                    right_side.hot = PMap::new();
+                }
                 (Some(OperatorState::Distinct { supports, .. }), OperatorRoots::Distinct(r)) => {
                     supports.outer = SMap::from_sub_root(*r);
                     supports.hot = PMap::new();
                 }
-                (Some(OperatorState::GroupedCount { groups, .. }), OperatorRoots::Group(r)) => {
-                    groups.outer = SMap::from_sub_root(*r);
+                (
+                    Some(OperatorState::GroupedCount {
+                        groups, aggregates, ..
+                    }),
+                    OperatorRoots::Group {
+                        supports,
+                        aggregates: aggregate_root,
+                    },
+                ) => {
+                    groups.outer = SMap::from_sub_root(*supports);
                     groups.hot = PMap::new();
+                    aggregates.rows = SMap::from_sub_root(*aggregate_root);
                 }
                 _ => return Err(mismatch(format!("operator {} has the wrong kind", op.0))),
             }
@@ -1628,11 +2875,27 @@ impl WorldNetwork {
                     left_side.outer.page(None, 1, store)?;
                     right_side.outer.page(None, 1, store)?;
                 }
+                OperatorState::AntiJoin {
+                    left_side,
+                    right_side,
+                    ..
+                }
+                | OperatorState::ParentCount {
+                    left_side,
+                    right_side,
+                    ..
+                } => {
+                    left_side.outer.page(None, 1, store)?;
+                    right_side.outer.page(None, 1, store)?;
+                }
                 OperatorState::Distinct { supports, .. } => {
                     supports.outer.page(None, 1, store)?;
                 }
-                OperatorState::GroupedCount { groups, .. } => {
+                OperatorState::GroupedCount {
+                    groups, aggregates, ..
+                } => {
                     groups.outer.page(None, 1, store)?;
+                    aggregates.rows.page(None, 1, store)?;
                 }
                 _ => {}
             }
@@ -1736,6 +2999,38 @@ impl WorldNetwork {
                     left_side: JoinSide::default(),
                     right_side: JoinSide::default(),
                 },
+                OperatorState::AntiJoin {
+                    left,
+                    right,
+                    left_keys,
+                    right_keys,
+                    ..
+                } => OperatorState::AntiJoin {
+                    left: *left,
+                    right: *right,
+                    left_keys: left_keys.clone(),
+                    right_keys: right_keys.clone(),
+                    left_side: JoinSide::default(),
+                    right_side: JoinSide::default(),
+                },
+                OperatorState::ParentCount {
+                    left,
+                    right,
+                    left_key,
+                    right_key,
+                    output_key,
+                    output_count,
+                    ..
+                } => OperatorState::ParentCount {
+                    left: *left,
+                    right: *right,
+                    left_key: left_key.clone(),
+                    right_key: right_key.clone(),
+                    output_key: output_key.clone(),
+                    output_count: output_count.clone(),
+                    left_side: JoinSide::default(),
+                    right_side: JoinSide::default(),
+                },
                 OperatorState::Distinct { input, .. } => OperatorState::Distinct {
                     input: *input,
                     supports: DistinctSupports::default(),
@@ -1745,13 +3040,16 @@ impl WorldNetwork {
                     group_keys,
                     compiled_group_keys,
                     projections,
+                    compiled_aggregates,
                     ..
                 } => OperatorState::GroupedCount {
                     input: *input,
                     group_keys: group_keys.clone(),
                     compiled_group_keys: compiled_group_keys.clone(),
                     projections: projections.clone(),
+                    compiled_aggregates: compiled_aggregates.clone(),
                     groups: GroupSupports::default(),
+                    aggregates: AggregateIndex::default(),
                 },
             };
             op_states.insert(*idx, cleared_state);
@@ -1830,7 +3128,9 @@ impl WorldNetwork {
                     }
                 }
                 OperatorNode::GroupedCount {
-                    input, group_keys, ..
+                    input,
+                    group_keys,
+                    projections,
                 } => {
                     let bindings = derive_binding_names(&op_schemas[input.0]);
                     let mut compiled_group_keys = Vec::with_capacity(group_keys.len());
@@ -1840,12 +3140,32 @@ impl WorldNetwork {
                             .map_err(WorldError::NetworkError)?;
                         compiled_group_keys.push(compiled);
                     }
+                    let compiled_aggregates = projections
+                        .iter()
+                        .map(|(_, projection)| {
+                            let expr = match projection {
+                                GroupProjection::SumInt(expr)
+                                | GroupProjection::SumDecimal(expr)
+                                | GroupProjection::Min(expr)
+                                | GroupProjection::Max(expr) => expr,
+                                GroupProjection::Key(_) | GroupProjection::Count => {
+                                    return Ok(None);
+                                }
+                            };
+                            program_env
+                                .compile_expr(expr, &bindings)
+                                .map(Some)
+                                .map_err(WorldError::NetworkError)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     if let Some(OperatorState::GroupedCount {
                         compiled_group_keys: ref mut cgk,
+                        compiled_aggregates: ref mut ca,
                         ..
                     }) = network.operator_states.get_mut(&idx)
                     {
                         *cgk = compiled_group_keys;
+                        *ca = compiled_aggregates;
                     }
                 }
                 _ => {}
@@ -1872,6 +3192,15 @@ impl WorldNetwork {
                         "decide '{qname}' unknown source relation '{src}'"
                     ))
                 })?;
+                let per_type = op_schemas[op_id.0]
+                    .get(&format!("{}.{per_field}", decl.binder))
+                    .or_else(|| op_schemas[op_id.0].get(&per_field))
+                    .cloned()
+                    .ok_or_else(|| {
+                        WorldError::NetworkError(format!(
+                            "decide '{qname}' per field '{per_field}' has no resolved type"
+                        ))
+                    })?;
                 let bindings = derive_decide_binding_names(&op_schemas[op_id.0], &decl.binder);
                 let mut compiled_proposals = Vec::with_capacity(decl.proposals.len());
                 for prop in &decl.proposals {
@@ -1893,6 +3222,7 @@ impl WorldNetwork {
                     binder: decl.binder.clone(),
                     source_relation: src,
                     per_field,
+                    per_type,
                     proposals: decl.proposals.clone(),
                     compiled_proposals,
                 });
@@ -1980,7 +3310,137 @@ impl WorldNetwork {
     ) -> Result<NetworkDeltaReport, WorldError> {
         let mut ctx = self.begin_batch();
         self.apply_chunk(&mut ctx, ops, limits, base)?;
-        Ok(self.finish_batch(ctx))
+        self.finish_batch_cascade(ctx, limits, base)
+    }
+
+    /// Finish a chunked batch and run the decision-chain cascade: winner rows of the
+    /// settlements this batch changed are published to the virtual decision relations,
+    /// and any further settlements they cause are applied until quiescence. Every route
+    /// that ends a batch (single chunk, multi-chunk, replay) must use this so the
+    /// outcome never depends on where chunk boundaries fell.
+    pub fn finish_batch_cascade(
+        &mut self,
+        ctx: BatchCtx,
+        limits: &NetworkLimits,
+        base: Option<&BaseLookup<'_>>,
+    ) -> Result<NetworkDeltaReport, WorldError> {
+        let mut total_work = ctx.total_work;
+        let mut total_matches = ctx.total_matches;
+        let mut total_expressions = ctx.total_expressions;
+        self.seed_winner_scan_records(&ctx)?;
+        let mut final_report = self.finish_batch(ctx);
+        let mut stage_report = final_report.clone();
+        loop {
+            let winner_ops = self.winner_row_ops(&stage_report)?;
+            if winner_ops.is_empty() {
+                break;
+            }
+            let prior_revision = self.current_revision;
+            let mut next_ctx = self.begin_batch();
+            next_ctx.total_work = total_work;
+            next_ctx.total_matches = total_matches;
+            next_ctx.total_expressions = total_expressions;
+            self.apply_chunk(&mut next_ctx, &winner_ops, limits, base)?;
+            total_work = next_ctx.total_work;
+            total_matches = next_ctx.total_matches;
+            total_expressions = next_ctx.total_expressions;
+            self.seed_winner_scan_records(&next_ctx)?;
+            let next_report = self.finish_batch(next_ctx);
+            self.current_revision = prior_revision;
+            stage_report = next_report.clone();
+            merge_stage_report(&mut final_report, next_report);
+        }
+        Ok(final_report)
+    }
+
+    fn winner_row_ops(&self, report: &NetworkDeltaReport) -> Result<Vec<WorldBatchOp>, WorldError> {
+        let mut changed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (decide, entities) in &report.settlements {
+            changed
+                .entry(decide.clone())
+                .or_default()
+                .extend(entities.keys().cloned());
+        }
+        for (decide, entities) in &report.removed_settlements {
+            changed
+                .entry(decide.clone())
+                .or_default()
+                .extend(entities.iter().cloned());
+        }
+        let mut ops = Vec::new();
+        for (name, entities) in changed {
+            if !self.virtual_relations.contains(&name) {
+                continue;
+            }
+            let Some(decide) = self.decides.get(&name) else {
+                continue;
+            };
+            for entity_id in entities {
+                let entity_value = Value::from_typed_bytes(entity_id.as_bytes(), &decide.per_type)?;
+                let key = WorldKey::new(entity_value.to_bytes());
+                if let Some(winner) = self.get_settlement(&name, &entity_id)? {
+                    ops.push(WorldBatchOp::Upsert {
+                        relation: name.clone(),
+                        key,
+                        tuple: winner_row_tuple(&name, decide, &entity_value, &winner)?,
+                    });
+                } else {
+                    ops.push(WorldBatchOp::Remove {
+                        relation: name.clone(),
+                        key,
+                    });
+                }
+            }
+        }
+        Ok(ops)
+    }
+
+    /// A restored network's winner `Scan`s start with empty `records`, so the previously
+    /// published winner row of a changed entity could not be retracted and stale rows
+    /// would accumulate downstream. Before the cascade publishes new winner rows, put the
+    /// row each touched entity held *before* this batch (decoded from its prior
+    /// settlement) back into the `Scan`. Lazy: only entities this batch touched, so cold
+    /// open stays independent of the number of decisions.
+    fn seed_winner_scan_records(&mut self, ctx: &BatchCtx) -> Result<(), WorldError> {
+        if self.virtual_relations.is_empty() {
+            return Ok(());
+        }
+        let schemas = self.program_env.as_ref().map(|pe| pe.schemas.clone());
+        let empty_schemas = BTreeMap::new();
+        let schemas = schemas.as_deref().unwrap_or(&empty_schemas);
+        for ((decide, entity), track) in &ctx.decisions {
+            if !self.virtual_relations.contains(decide) {
+                continue;
+            }
+            let Some(prior) = &track.prior else { continue };
+            let Some(block) = self.decides.get(decide) else {
+                continue;
+            };
+            let old = decode_settled_decision(entity, prior.as_bytes())?;
+            let entity_value = Value::from_typed_bytes(entity.as_bytes(), &block.per_type)?;
+            let key = WorldKey::new(entity_value.to_bytes());
+            let tuple = winner_row_tuple(decide, block, &entity_value, &old)?;
+            let scans = self
+                .relation_subscribers
+                .get(decide)
+                .cloned()
+                .unwrap_or_default();
+            for scan_op_id in scans {
+                if let Some(OperatorState::Scan {
+                    relation,
+                    schema,
+                    records,
+                    ..
+                }) = self.operator_states.get_mut(&scan_op_id.0)
+                {
+                    if records.get(&key).is_none() {
+                        let inter = scan_intermediate(relation, schema, &tuple, schemas)?;
+                        records.insert(key.clone(), (tuple.clone(), inter));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Start a batch that is applied as one or more contiguous chunks of its normalized
@@ -2014,6 +3474,7 @@ impl WorldNetwork {
         let mut diagnostics = std::mem::take(&mut ctx.diagnostics);
         let mut total_work: u64 = ctx.total_work;
         let mut total_matches: u64 = ctx.total_matches;
+        let mut total_expressions: u64 = ctx.total_expressions;
 
         let mut ready_operators: std::collections::VecDeque<OperatorId> =
             std::collections::VecDeque::new();
@@ -2037,17 +3498,29 @@ impl WorldNetwork {
 
         // 1. Process base ops at Scan nodes
         let resident = self.base_resident;
-        if !resident && base.is_none() {
+        if !resident
+            && base.is_none()
+            && ops
+                .iter()
+                .any(|op| !self.virtual_relations.contains(op.relation()))
+        {
             return Err(WorldError::NetworkError(
                 "network was restored without its base facts; apply through a BaseLookup".into(),
             ));
         }
+        let empty_schemas = BTreeMap::new();
+        let schemas = self
+            .program_env
+            .as_ref()
+            .map(|pe| pe.schemas.as_ref())
+            .unwrap_or(&empty_schemas);
         for op in ops {
             let rel_name = op.relation();
-            let base_rel = self
-                .base_relations
-                .get_mut(rel_name)
-                .ok_or_else(|| WorldError::UnknownRelation(rel_name.to_string()))?;
+            let is_winner_relation = self.virtual_relations.contains(rel_name);
+            let mut base_rel = self.base_relations.get_mut(rel_name);
+            if base_rel.is_none() && !is_winner_relation {
+                return Err(WorldError::UnknownRelation(rel_name.to_string()));
+            }
 
             let scan_ops = self
                 .relation_subscribers
@@ -2071,7 +3544,7 @@ impl WorldNetwork {
                 {
                     let key = op.key();
                     // The tuple this key currently holds in the Scan, as an intermediate.
-                    let old_inter: Option<IntermediateTuple> = if resident {
+                    let old_inter: Option<IntermediateTuple> = if is_winner_relation || resident {
                         records.get(key).map(|(_, i)| i.clone())
                     } else {
                         if looked_up.is_none() {
@@ -2079,17 +3552,19 @@ impl WorldNetwork {
                             looked_up = Some(lookup(rel_name, key)?);
                         }
                         match looked_up.as_ref().and_then(|t| t.as_ref()) {
-                            Some(t) => Some(scan_intermediate(relation, schema, t)?),
+                            Some(t) => Some(scan_intermediate(relation, schema, t, schemas)?),
                             None => None,
                         }
                     };
                     match op {
                         WorldBatchOp::Upsert { key, tuple, .. } => {
-                            if resident {
-                                base_rel.insert(key.clone(), tuple.clone());
+                            if let Some(base_rel) = base_rel.as_mut() {
+                                if resident {
+                                    base_rel.insert(key.clone(), tuple.clone());
+                                }
                             }
                             let derivation = Derivation::base(relation, key);
-                            let intermediate = scan_intermediate(relation, schema, tuple)?;
+                            let intermediate = scan_intermediate(relation, schema, tuple, schemas)?;
 
                             // If old record existed at key, retract it first
                             if let Some(old_inter) = old_inter {
@@ -2114,7 +3589,7 @@ impl WorldNetwork {
                                 tuple: intermediate.clone(),
                                 derivation,
                             };
-                            if resident {
+                            if resident || is_winner_relation {
                                 records.insert(key.clone(), (tuple.clone(), intermediate));
                             }
                             enqueue(
@@ -2126,8 +3601,12 @@ impl WorldNetwork {
                             );
                         }
                         WorldBatchOp::Remove { key, .. } => {
-                            if resident {
-                                base_rel.remove(key);
+                            if let Some(base_rel) = base_rel.as_mut() {
+                                if resident {
+                                    base_rel.remove(key);
+                                }
+                            }
+                            if resident || is_winner_relation {
                                 records.remove(key);
                             }
                             if let Some(old_inter) = old_inter {
@@ -2162,14 +3641,28 @@ impl WorldNetwork {
         // 2. Fair round-robin propagation across all operators bounded by quantum
         let mut relation_deltas: BTreeMap<String, Vec<TupleDelta>> = BTreeMap::new();
         let quantum = self.scheduling_quantum.max(1);
+        let mut deferred_groups = BTreeSet::new();
 
         while let Some(op_id) = ready_operators.pop_front() {
             in_ready.remove(&op_id);
             let op_idx = op_id.0;
+            let is_group_operator =
+                matches!(self.dag.nodes[op_idx], OperatorNode::GroupedCount { .. });
+            if is_group_operator && has_pending_ancestor(op_id, &self.dag, &operator_queues) {
+                deferred_groups.insert(op_id);
+                continue;
+            }
             let mut work_in_slice: usize = 0;
             let mut out_deltas = Vec::new();
+            let mut grouped_before: BTreeMap<Vec<Value>, Option<IntermediateTuple>> =
+                BTreeMap::new();
+            let slice_quantum = if is_group_operator {
+                usize::MAX
+            } else {
+                quantum
+            };
 
-            while work_in_slice < quantum {
+            while work_in_slice < slice_quantum {
                 let Some(item) = operator_queues.get_mut(&op_id).and_then(|q| q.pop_front()) else {
                     break;
                 };
@@ -2235,9 +3728,10 @@ impl WorldNetwork {
                             };
 
                             diagnostics.expressions_evaluated += 1;
+                            total_expressions += 1;
                             if limits
                                 .max_expressions
-                                .is_some_and(|max| diagnostics.expressions_evaluated > max)
+                                .is_some_and(|max| total_expressions > max)
                             {
                                 return Err(WorldError::BudgetExhausted);
                             }
@@ -2291,9 +3785,10 @@ impl WorldNetwork {
                                 let bindings = scalar_bindings(&tuple)?;
                                 for (name, compiled) in compiled_projections.iter() {
                                     diagnostics.expressions_evaluated += 1;
+                                    total_expressions += 1;
                                     if limits
                                         .max_expressions
-                                        .is_some_and(|max| diagnostics.expressions_evaluated > max)
+                                        .is_some_and(|max| total_expressions > max)
                                     {
                                         return Err(WorldError::BudgetExhausted);
                                     }
@@ -2306,9 +3801,10 @@ impl WorldNetwork {
                             } else {
                                 for (name, expr) in projections.iter() {
                                     diagnostics.expressions_evaluated += 1;
+                                    total_expressions += 1;
                                     if limits
                                         .max_expressions
-                                        .is_some_and(|max| diagnostics.expressions_evaluated > max)
+                                        .is_some_and(|max| total_expressions > max)
                                     {
                                         return Err(WorldError::BudgetExhausted);
                                     }
@@ -2354,6 +3850,9 @@ impl WorldNetwork {
                                 cursor,
                                 remaining,
                             } => (delta, is_left, join_key, matches, cursor, remaining),
+                            OperatorWorkItem::SideDelta { .. } => {
+                                unreachable!("ordinary join uses untagged deltas")
+                            }
                             OperatorWorkItem::Delta(delta) => {
                                 let (tuple, deriv) = match &delta {
                                     TupleDelta::Insert { tuple, derivation }
@@ -2540,6 +4039,177 @@ impl WorldNetwork {
                             );
                         }
                     }
+                    OperatorState::AntiJoin {
+                        left_keys,
+                        right_keys,
+                        left_side,
+                        right_side,
+                        ..
+                    } => {
+                        let OperatorWorkItem::SideDelta { delta, is_left } = item else {
+                            unreachable!("anti-join receives side-tagged deltas")
+                        };
+                        let (tuple, derivation) = match &delta {
+                            TupleDelta::Insert { tuple, derivation }
+                            | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
+                        };
+                        let key =
+                            tuple_index_key(tuple, if is_left { left_keys } else { right_keys })?;
+                        let store = &self.state;
+                        if is_left {
+                            let right_count = right_side.read(&key, store)?.map_or(0, |m| m.len());
+                            let (old_count, new_count) =
+                                indexed_side_apply(left_side, key, &delta, store)?;
+                            if old_count != new_count && right_count == 0 {
+                                let out_deriv =
+                                    Derivation::from_stored(derivation.c.clone(), &self.dag)
+                                        .map_err(|e| WorldError::from(StateError::from(e)))?
+                                        .unary(op_id);
+                                let out = if delta.is_insert() {
+                                    TupleDelta::Insert {
+                                        tuple: tuple.clone(),
+                                        derivation: out_deriv,
+                                    }
+                                } else {
+                                    TupleDelta::Retract {
+                                        tuple: tuple.clone(),
+                                        derivation: out_deriv,
+                                    }
+                                };
+                                out_deltas.push(out);
+                            }
+                        } else {
+                            let (old_count, new_count) =
+                                indexed_side_apply(right_side, key.clone(), &delta, store)?;
+                            if (old_count == 0) != (new_count == 0) {
+                                let remaining_rows = limits
+                                    .max_matches
+                                    .map(|max| max.saturating_sub(total_matches))
+                                    .into_iter()
+                                    .chain(
+                                        limits.max_work.map(|max| max.saturating_sub(total_work)),
+                                    )
+                                    .min();
+                                for entry in
+                                    indexed_side_rows(left_side, &key, store, remaining_rows)?
+                                {
+                                    total_matches += 1;
+                                    total_work += 1;
+                                    *diagnostics.operator_work.entry(op_id).or_default() += 1;
+                                    let left_deriv =
+                                        Derivation::from_stored(entry.deriv, &self.dag)
+                                            .map_err(|e| WorldError::from(StateError::from(e)))?
+                                            .unary(op_id);
+                                    out_deltas.push(if old_count == 0 {
+                                        TupleDelta::Retract {
+                                            tuple: entry.tuple,
+                                            derivation: left_deriv,
+                                        }
+                                    } else {
+                                        TupleDelta::Insert {
+                                            tuple: entry.tuple,
+                                            derivation: left_deriv,
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    OperatorState::ParentCount {
+                        left_key,
+                        right_key,
+                        output_key,
+                        output_count,
+                        left_side,
+                        right_side,
+                        ..
+                    } => {
+                        let OperatorWorkItem::SideDelta { delta, is_left } = item else {
+                            unreachable!("parent-count receives side-tagged deltas")
+                        };
+                        let (tuple, derivation) = match &delta {
+                            TupleDelta::Insert { tuple, derivation }
+                            | TupleDelta::Retract { tuple, derivation } => (tuple, derivation),
+                        };
+                        let field = if is_left { &*left_key } else { &*right_key };
+                        let key = tuple_index_key(tuple, std::slice::from_ref(field))?;
+                        let value = key.0.first().cloned().unwrap_or(Value::Null);
+                        let store = &self.state;
+                        if is_left {
+                            let count = right_side.read(&key, store)?.map_or(0, |m| m.len());
+                            let (old_supports, new_supports) =
+                                indexed_side_apply(left_side, key, &delta, store)?;
+                            if old_supports != new_supports {
+                                let left_deriv =
+                                    Derivation::from_stored(derivation.c.clone(), &self.dag)
+                                        .map_err(|e| WorldError::from(StateError::from(e)))?
+                                        .unary(op_id);
+                                let out_tuple =
+                                    parent_count_tuple(&value, output_key, output_count, count);
+                                out_deltas.push(if delta.is_insert() {
+                                    TupleDelta::Insert {
+                                        tuple: out_tuple,
+                                        derivation: left_deriv,
+                                    }
+                                } else {
+                                    TupleDelta::Retract {
+                                        tuple: out_tuple,
+                                        derivation: left_deriv,
+                                    }
+                                });
+                            }
+                        } else {
+                            let (old_count, new_count) =
+                                indexed_side_apply(right_side, key.clone(), &delta, store)?;
+                            if old_count != new_count {
+                                let remaining_rows = limits
+                                    .max_matches
+                                    .map(|max| max.saturating_sub(total_matches))
+                                    .into_iter()
+                                    .chain(
+                                        limits.max_work.map(|max| max.saturating_sub(total_work)),
+                                    )
+                                    .min();
+                                for entry in
+                                    indexed_side_rows(left_side, &key, store, remaining_rows)?
+                                {
+                                    total_matches += 1;
+                                    total_work += 1;
+                                    *diagnostics.operator_work.entry(op_id).or_default() += 1;
+                                    let left_value = tuple_index_key(
+                                        &entry.tuple,
+                                        std::slice::from_ref(left_key),
+                                    )?
+                                    .0
+                                    .into_iter()
+                                    .next()
+                                    .unwrap_or(Value::Null);
+                                    let left_deriv =
+                                        Derivation::from_stored(entry.deriv, &self.dag)
+                                            .map_err(|e| WorldError::from(StateError::from(e)))?
+                                            .unary(op_id);
+                                    out_deltas.push(TupleDelta::Retract {
+                                        tuple: parent_count_tuple(
+                                            &left_value,
+                                            output_key,
+                                            output_count,
+                                            old_count,
+                                        ),
+                                        derivation: left_deriv.clone(),
+                                    });
+                                    out_deltas.push(TupleDelta::Insert {
+                                        tuple: parent_count_tuple(
+                                            &left_value,
+                                            output_key,
+                                            output_count,
+                                            new_count,
+                                        ),
+                                        derivation: left_deriv,
+                                    });
+                                }
+                            }
+                        }
+                    }
                     OperatorState::Distinct { supports, .. } => match item {
                         OperatorWorkItem::Delta(delta) => {
                             let is_ins = delta.is_insert();
@@ -2578,7 +4248,9 @@ impl WorldNetwork {
                         group_keys,
                         compiled_group_keys,
                         projections,
+                        compiled_aggregates,
                         groups,
+                        aggregates,
                         ..
                     } => match item {
                         OperatorWorkItem::Delta(delta) => {
@@ -2594,9 +4266,11 @@ impl WorldNetwork {
                                     .iter()
                                     .map(|compiled| {
                                         diagnostics.expressions_evaluated += 1;
-                                        if limits.max_expressions.is_some_and(|max| {
-                                            diagnostics.expressions_evaluated > max
-                                        }) {
+                                        total_expressions += 1;
+                                        if limits
+                                            .max_expressions
+                                            .is_some_and(|max| total_expressions > max)
+                                        {
                                             return Err(WorldError::BudgetExhausted);
                                         }
                                         let l3_val = compiled
@@ -2610,9 +4284,11 @@ impl WorldNetwork {
                                     .iter()
                                     .map(|expr| {
                                         diagnostics.expressions_evaluated += 1;
-                                        if limits.max_expressions.is_some_and(|max| {
-                                            diagnostics.expressions_evaluated > max
-                                        }) {
+                                        total_expressions += 1;
+                                        if limits
+                                            .max_expressions
+                                            .is_some_and(|max| total_expressions > max)
+                                        {
                                             return Err(WorldError::BudgetExhausted);
                                         }
                                         eval_expr(expr, &tuple, &self.functions)
@@ -2620,46 +4296,185 @@ impl WorldNetwork {
                                     .collect::<Result<_, _>>()?
                             };
 
+                            let bindings = scalar_bindings(&tuple)?;
+                            let mut aggregate_values =
+                                Vec::with_capacity(compiled_aggregates.len());
+                            for compiled in compiled_aggregates {
+                                if let Some(compiled) = compiled {
+                                    diagnostics.expressions_evaluated += 1;
+                                    total_expressions += 1;
+                                    if limits
+                                        .max_expressions
+                                        .is_some_and(|max| total_expressions > max)
+                                    {
+                                        return Err(WorldError::BudgetExhausted);
+                                    }
+                                    aggregate_values.push(Some(Value::from_scalar(
+                                        compiled
+                                            .eval(&bindings)
+                                            .map_err(WorldError::NetworkError)?,
+                                    )?));
+                                } else {
+                                    aggregate_values.push(None);
+                                }
+                            }
+
                             let store = &self.state;
                             let gk = ValueList(key_vals.clone());
+
+                            if !grouped_before.contains_key(&key_vals) {
+                                let existing_count = groups.read(&gk, store)?.len();
+                                let existing_tuple = if existing_count > 0 {
+                                    let existing_accum = match aggregates.get(&gk, store)? {
+                                        Some(stored_list) => GroupAccumulator::from_value_list(
+                                            &stored_list,
+                                            projections,
+                                        )?,
+                                        None => {
+                                            return Err(WorldError::NetworkError(
+                                                "missing persisted aggregate accumulator".into(),
+                                            ))
+                                        }
+                                    };
+                                    let mut tuple_tree_work = 0;
+                                    let tuple = build_grouped_tuple(
+                                        projections,
+                                        &key_vals,
+                                        &existing_accum,
+                                        existing_count,
+                                        &gk,
+                                        aggregates,
+                                        store,
+                                        &mut tuple_tree_work,
+                                    )?;
+                                    charge_aggregate_tree_work(
+                                        op_id,
+                                        tuple_tree_work,
+                                        &mut total_work,
+                                        &mut diagnostics,
+                                        limits,
+                                    )?;
+                                    Some(tuple)
+                                } else {
+                                    None
+                                };
+                                grouped_before.insert(key_vals.clone(), existing_tuple);
+                            }
+
+                            let mut accum = match aggregates.get(&gk, store)? {
+                                Some(stored_list) => {
+                                    GroupAccumulator::from_value_list(&stored_list, projections)?
+                                }
+                                None if groups.read(&gk, store)?.len() == 0 => {
+                                    GroupAccumulator::empty(projections)
+                                }
+                                None => {
+                                    return Err(WorldError::NetworkError(
+                                        "missing persisted aggregate accumulator".into(),
+                                    ))
+                                }
+                            };
+
                             let (old_count, new_count) = if is_ins {
-                                groups.add(gk, deriv.c.digest(), store)?
+                                groups.add(gk.clone(), deriv.c.digest(), store)?
                             } else {
                                 groups.remove(&gk, &deriv.c.digest(), store)?
                             };
 
                             if new_count != old_count {
-                                let out_deriv = Derivation::group(op_id, key_vals.clone());
-                                if is_ins && old_count == 0 {
-                                    let out_tuple = build_grouped_tuple(projections, &key_vals, 1);
-                                    out_deltas.push(TupleDelta::Insert {
-                                        tuple: out_tuple,
-                                        derivation: out_deriv,
-                                    });
-                                } else if !is_ins && new_count == 0 {
-                                    let old_tuple = build_grouped_tuple(projections, &key_vals, 1);
-                                    out_deltas.push(TupleDelta::Retract {
-                                        tuple: old_tuple,
-                                        derivation: out_deriv,
-                                    });
+                                let tree_work = accum.apply_delta(
+                                    is_ins,
+                                    projections,
+                                    &aggregate_values,
+                                    &gk,
+                                    aggregates,
+                                    store,
+                                )?;
+                                charge_aggregate_tree_work(
+                                    op_id,
+                                    tree_work,
+                                    &mut total_work,
+                                    &mut diagnostics,
+                                    limits,
+                                )?;
+
+                                if new_count == 0 {
+                                    aggregates.remove(&gk, store)?;
                                 } else {
-                                    let old_tuple =
-                                        build_grouped_tuple(projections, &key_vals, old_count);
-                                    let new_tuple =
-                                        build_grouped_tuple(projections, &key_vals, new_count);
-                                    out_deltas.push(TupleDelta::Retract {
-                                        tuple: old_tuple,
-                                        derivation: out_deriv.clone(),
-                                    });
-                                    out_deltas.push(TupleDelta::Insert {
-                                        tuple: new_tuple,
-                                        derivation: out_deriv,
-                                    });
+                                    aggregates.set(
+                                        gk.clone(),
+                                        accum.to_value_list(projections),
+                                        store,
+                                    )?;
                                 }
                             }
                         }
                         _ => unreachable!(),
                     },
+                }
+            }
+
+            if is_group_operator {
+                if let Some(OperatorState::GroupedCount {
+                    projections,
+                    groups,
+                    aggregates,
+                    ..
+                }) = self.operator_states.get_mut(&op_idx)
+                {
+                    let store = &self.state;
+                    for (group_key, old_tuple) in grouped_before {
+                        let gk = ValueList(group_key.clone());
+                        let current_count = groups.read(&gk, store)?.len();
+                        let new_tuple = if current_count > 0 {
+                            let accum = match aggregates.get(&gk, store)? {
+                                Some(stored_list) => {
+                                    GroupAccumulator::from_value_list(&stored_list, projections)?
+                                }
+                                None => {
+                                    return Err(WorldError::NetworkError(
+                                        "missing persisted aggregate accumulator".into(),
+                                    ))
+                                }
+                            };
+                            let mut tuple_tree_work = 0;
+                            let tuple = build_grouped_tuple(
+                                projections,
+                                &group_key,
+                                &accum,
+                                current_count,
+                                &gk,
+                                aggregates,
+                                store,
+                                &mut tuple_tree_work,
+                            )?;
+                            charge_aggregate_tree_work(
+                                op_id,
+                                tuple_tree_work,
+                                &mut total_work,
+                                &mut diagnostics,
+                                limits,
+                            )?;
+                            Some(tuple)
+                        } else {
+                            None
+                        };
+
+                        if old_tuple == new_tuple {
+                            continue;
+                        }
+
+                        let derivation = Derivation::group(op_id, group_key);
+                        if let Some(tuple) = old_tuple {
+                            out_deltas.push(TupleDelta::Retract {
+                                tuple,
+                                derivation: derivation.clone(),
+                            });
+                        }
+                        if let Some(tuple) = new_tuple {
+                            out_deltas.push(TupleDelta::Insert { tuple, derivation });
+                        }
+                    }
                 }
             }
 
@@ -2741,9 +4556,19 @@ impl WorldNetwork {
                             out_deltas.clone()
                         };
                         for od in batch {
+                            let item = match self.operator_states.get(&consumer.0) {
+                                Some(OperatorState::AntiJoin { left, right, .. })
+                                | Some(OperatorState::ParentCount { left, right, .. }) => {
+                                    OperatorWorkItem::SideDelta {
+                                        delta: od,
+                                        is_left: *left == op_id && *right != op_id,
+                                    }
+                                }
+                                _ => OperatorWorkItem::Delta(od),
+                            };
                             enqueue(
                                 *consumer,
-                                OperatorWorkItem::Delta(od),
+                                item,
                                 &mut operator_queues,
                                 &mut ready_operators,
                                 &mut in_ready,
@@ -2756,6 +4581,20 @@ impl WorldNetwork {
             if operator_queues.get(&op_id).is_some_and(|q| !q.is_empty()) && in_ready.insert(op_id)
             {
                 ready_operators.push_back(op_id);
+            }
+
+            let newly_ready: Vec<_> = deferred_groups
+                .iter()
+                .copied()
+                .filter(|group| !has_pending_ancestor(*group, &self.dag, &operator_queues))
+                .collect();
+            for group in newly_ready {
+                deferred_groups.remove(&group);
+                if operator_queues.get(&group).is_some_and(|q| !q.is_empty())
+                    && in_ready.insert(group)
+                {
+                    ready_operators.push_back(group);
+                }
             }
 
             let cur_q_len: usize = operator_queues
@@ -2814,9 +4653,10 @@ impl WorldNetwork {
                     let (guard_passed, val) = if let Some(compiled) = compiled {
                         let bindings = scalar_bindings(&eval_tuple)?;
                         diagnostics.expressions_evaluated += 1;
+                        total_expressions += 1;
                         if limits
                             .max_expressions
-                            .is_some_and(|max| diagnostics.expressions_evaluated > max)
+                            .is_some_and(|max| total_expressions > max)
                         {
                             return Err(WorldError::BudgetExhausted);
                         }
@@ -2834,9 +4674,10 @@ impl WorldNetwork {
                         };
                         if guard_passed {
                             diagnostics.expressions_evaluated += 1;
+                            total_expressions += 1;
                             if limits
                                 .max_expressions
-                                .is_some_and(|max| diagnostics.expressions_evaluated > max)
+                                .is_some_and(|max| total_expressions > max)
                             {
                                 return Err(WorldError::BudgetExhausted);
                             }
@@ -2851,9 +4692,10 @@ impl WorldNetwork {
                         }
                     } else {
                         diagnostics.expressions_evaluated += 1;
+                        total_expressions += 1;
                         if limits
                             .max_expressions
-                            .is_some_and(|max| diagnostics.expressions_evaluated > max)
+                            .is_some_and(|max| total_expressions > max)
                         {
                             return Err(WorldError::BudgetExhausted);
                         }
@@ -2861,9 +4703,10 @@ impl WorldNetwork {
                             eval_expr(&propose.guard, &eval_tuple, &self.functions)?.as_bool()?;
                         if guard_passed {
                             diagnostics.expressions_evaluated += 1;
+                            total_expressions += 1;
                             if limits
                                 .max_expressions
-                                .is_some_and(|max| diagnostics.expressions_evaluated > max)
+                                .is_some_and(|max| total_expressions > max)
                             {
                                 return Err(WorldError::BudgetExhausted);
                             }
@@ -3002,6 +4845,7 @@ impl WorldNetwork {
         ctx.diagnostics = diagnostics;
         ctx.total_work = total_work;
         ctx.total_matches = total_matches;
+        ctx.total_expressions = total_expressions;
         Ok(())
     }
 
@@ -3368,7 +5212,34 @@ impl WorldNetwork {
     ) -> Result<(), WorldError> {
         match deriv {
             DerivationId::Base { relation, key } => {
-                out.insert((relation.clone(), key.clone()));
+                if let Some(decide) = self.decides.get(relation) {
+                    let entity_id = Value::from_typed_bytes(key.as_bytes(), &decide.per_type)
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|_| {
+                            std::str::from_utf8(key.as_bytes())
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|_| key.to_hex())
+                        });
+                    if let Some(settlement) = self.get_settlement(relation, &entity_id)? {
+                        if let Some(bucket) = self
+                            .candidate_frontier
+                            .bucket(&FrontierKey::new(relation, &entity_id), &self.state)?
+                        {
+                            if let Some(rec) = bucket.0.get(&settlement.candidate_name) {
+                                let supports = self.candidate_frontier.supports_of(
+                                    &CandKey::new(relation, &entity_id, &settlement.candidate_name),
+                                    rec,
+                                );
+                                let items = supports.members(&self.state)?;
+                                for parent in self.expand_supports(&items)? {
+                                    self.collect_base_facts_for_derivation(&parent, out)?;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    out.insert((relation.clone(), key.clone()));
+                }
             }
             DerivationId::Unary { parent, .. } => {
                 self.collect_base_facts_for_derivation(parent, out)?;
@@ -3381,12 +5252,75 @@ impl WorldNetwork {
                 if let Some(OperatorState::Distinct { supports, .. }) =
                     self.operator_states.get(&op.0)
                 {
-                    // Keyed lookup: the typed key decodes back to the Distinct tuple.
                     let tuple = IntermediateTuple::state_from_bytes(tuple_key)
                         .map_err(|e| WorldError::from(StateError::from(e)))?;
                     let items = supports.read(&tuple, &self.state)?.members(&self.state)?;
                     for p in self.expand_supports(&items)? {
                         self.collect_base_facts_for_derivation(&p, out)?;
+                    }
+                }
+            }
+            DerivationId::Group { .. } => {}
+        }
+        Ok(())
+    }
+
+    pub fn collect_upstream_settlements_for_derivation(
+        &self,
+        deriv: &DerivationId,
+        out: &mut BTreeSet<UpstreamSettlementLink>,
+    ) -> Result<(), WorldError> {
+        match deriv {
+            DerivationId::Base { relation, key } => {
+                if let Some(decide) = self.decides.get(relation) {
+                    let entity_id = Value::from_typed_bytes(key.as_bytes(), &decide.per_type)
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|_| {
+                            std::str::from_utf8(key.as_bytes())
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|_| key.to_hex())
+                        });
+                    if let Some(settlement) = self.get_settlement(relation, &entity_id)? {
+                        out.insert(UpstreamSettlementLink {
+                            decide: relation.clone(),
+                            entity_id: entity_id.clone(),
+                            candidate: settlement.candidate_name.clone(),
+                            revision: self.current_revision,
+                        });
+                        if let Some(bucket) = self
+                            .candidate_frontier
+                            .bucket(&FrontierKey::new(relation, &entity_id), &self.state)?
+                        {
+                            if let Some(rec) = bucket.0.get(&settlement.candidate_name) {
+                                let supports = self.candidate_frontier.supports_of(
+                                    &CandKey::new(relation, &entity_id, &settlement.candidate_name),
+                                    rec,
+                                );
+                                let items = supports.members(&self.state)?;
+                                for parent in self.expand_supports(&items)? {
+                                    self.collect_upstream_settlements_for_derivation(&parent, out)?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            DerivationId::Unary { parent, .. } => {
+                self.collect_upstream_settlements_for_derivation(parent, out)?;
+            }
+            DerivationId::Join { left, right, .. } => {
+                self.collect_upstream_settlements_for_derivation(left, out)?;
+                self.collect_upstream_settlements_for_derivation(right, out)?;
+            }
+            DerivationId::Distinct { op, tuple_key } => {
+                if let Some(OperatorState::Distinct { supports, .. }) =
+                    self.operator_states.get(&op.0)
+                {
+                    let tuple = IntermediateTuple::state_from_bytes(tuple_key)
+                        .map_err(|e| WorldError::from(StateError::from(e)))?;
+                    let items = supports.read(&tuple, &self.state)?.members(&self.state)?;
+                    for p in self.expand_supports(&items)? {
+                        self.collect_upstream_settlements_for_derivation(&p, out)?;
                     }
                 }
             }
@@ -3427,6 +5361,7 @@ impl WorldNetwork {
 
         let mut candidates = Vec::new();
         let mut contributing_base = BTreeSet::new();
+        let mut upstream_settlements = BTreeSet::new();
 
         for (cand_name, rec) in &bucket.0 {
             let winning = winning_name == Some(cand_name);
@@ -3436,6 +5371,10 @@ impl WorldNetwork {
             let items = supports.members(&self.state)?;
             for deriv in self.expand_supports(&items)? {
                 self.collect_base_facts_for_derivation(&deriv, &mut contributing_base)?;
+                self.collect_upstream_settlements_for_derivation(
+                    &deriv,
+                    &mut upstream_settlements,
+                )?;
             }
             candidates.push(CandidateExplanation {
                 name: cand_name.clone(),
@@ -3445,6 +5384,22 @@ impl WorldNetwork {
                 supports_count: supports.len(),
                 winning,
             });
+        }
+
+        // Also explain proposals that were declared in the decide block but were NOT admitted
+        if let Some(decide) = self.decides.get(decide_name) {
+            for prop in &decide.proposals {
+                if !candidates.iter().any(|c| c.name == prop.name) {
+                    candidates.push(CandidateExplanation {
+                        name: prop.name.clone(),
+                        priority: prop.priority,
+                        phase: 0,
+                        value: Value::Null,
+                        supports_count: 0,
+                        winning: false,
+                    });
+                }
+            }
         }
 
         Ok(Some(DecisionExplanation {
@@ -3457,6 +5412,7 @@ impl WorldNetwork {
             calendar_key: settlement.as_ref().map(|s| s.calendar_key),
             candidates,
             contributing_facts: contributing_base.into_iter().collect(),
+            upstream_settlements: upstream_settlements.into_iter().collect(),
         }))
     }
 }
@@ -3468,24 +5424,194 @@ fn corrupt_derivation() -> WorldError {
     .into()
 }
 
+fn winner_row_tuple(
+    name: &str,
+    decide: &DecideBlock,
+    entity_value: &Value,
+    winner: &SettledDecision,
+) -> Result<WorldTuple, WorldError> {
+    let priority = i64::try_from(winner.priority).map_err(|_| {
+        WorldError::NetworkError(format!(
+            "winner priority for '{name}' exceeds the winner row Int range"
+        ))
+    })?;
+    let mut row = TupleRecord::new();
+    row.set(&decide.per_field, entity_value.to_bytes());
+    row.set(
+        "candidate",
+        Value::Str(winner.candidate_name.clone()).to_bytes(),
+    );
+    row.set("priority", Value::Int(priority).to_bytes());
+    row.set("value", winner.value.to_bytes());
+    Ok(row.to_tuple())
+}
+
+fn has_pending_ancestor(
+    operator: OperatorId,
+    dag: &RelationDag,
+    queues: &BTreeMap<OperatorId, std::collections::VecDeque<OperatorWorkItem>>,
+) -> bool {
+    let mut pending = Vec::new();
+    match &dag.nodes[operator.0] {
+        OperatorNode::Bind { input, .. }
+        | OperatorNode::Filter { input, .. }
+        | OperatorNode::Project { input, .. }
+        | OperatorNode::Distinct { input }
+        | OperatorNode::GroupedCount { input, .. } => pending.push(*input),
+        OperatorNode::EquiJoin { left, right, .. }
+        | OperatorNode::AntiJoin { left, right, .. }
+        | OperatorNode::ParentCount { left, right, .. } => {
+            pending.push(*left);
+            pending.push(*right);
+        }
+        OperatorNode::Scan { .. } | OperatorNode::DecisionRows { .. } => return false,
+    }
+    let mut visited = BTreeSet::new();
+    while let Some(ancestor) = pending.pop() {
+        if !visited.insert(ancestor) {
+            continue;
+        }
+        if queues.get(&ancestor).is_some_and(|queue| !queue.is_empty()) {
+            return true;
+        }
+        match &dag.nodes[ancestor.0] {
+            OperatorNode::Bind { input, .. }
+            | OperatorNode::Filter { input, .. }
+            | OperatorNode::Project { input, .. }
+            | OperatorNode::Distinct { input }
+            | OperatorNode::GroupedCount { input, .. } => pending.push(*input),
+            OperatorNode::EquiJoin { left, right, .. }
+            | OperatorNode::AntiJoin { left, right, .. }
+            | OperatorNode::ParentCount { left, right, .. } => {
+                pending.push(*left);
+                pending.push(*right);
+            }
+            OperatorNode::Scan { .. } | OperatorNode::DecisionRows { .. } => {}
+        }
+    }
+    false
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_grouped_tuple(
     projections: &[(String, GroupProjection)],
     key_vals: &[Value],
+    state: &GroupAccumulator,
     count: usize,
-) -> IntermediateTuple {
+    group_key: &ValueList,
+    aggregates: &AggregateIndex,
+    store: &StateStore,
+    tree_work: &mut u64,
+) -> Result<IntermediateTuple, WorldError> {
     let mut tuple = IntermediateTuple::new();
-    for (name, proj) in projections {
+    for (idx, (name, proj)) in projections.iter().enumerate() {
         match proj {
-            GroupProjection::Key(idx) => {
-                let v = key_vals.get(*idx).cloned().unwrap_or(Value::Null);
+            GroupProjection::Key(k_idx) => {
+                let v = key_vals.get(*k_idx).cloned().unwrap_or(Value::Null);
                 tuple.insert(name, v);
             }
             GroupProjection::Count => {
                 tuple.insert(name, Value::Int(count as i64));
             }
+            GroupProjection::SumInt(_) => {
+                tuple.insert(
+                    name,
+                    Value::Int(i64::try_from(state.int_sums[idx]).map_err(|_| {
+                        WorldError::NetworkError("grouped Int sum overflow".into())
+                    })?),
+                );
+            }
+            GroupProjection::SumDecimal(_) => {
+                let value = state.decimal_sums[idx]
+                    .to_decimal(state.decimal_scales[idx])
+                    .ok_or_else(|| {
+                        WorldError::NetworkError("grouped Decimal sum overflow".into())
+                    })?;
+                tuple.insert(name, Value::Decimal(value));
+            }
+            GroupProjection::Min(_) => {
+                let value = aggregates.extremum(
+                    group_key,
+                    idx,
+                    state.extrema_roots[idx].as_ref(),
+                    false,
+                    store,
+                    tree_work,
+                )?;
+                tuple.insert(name, value.unwrap_or(Value::Null));
+            }
+            GroupProjection::Max(_) => {
+                let value = aggregates.extremum(
+                    group_key,
+                    idx,
+                    state.extrema_roots[idx].as_ref(),
+                    true,
+                    store,
+                    tree_work,
+                )?;
+                tuple.insert(name, value.unwrap_or(Value::Null));
+            }
         }
     }
-    tuple
+    Ok(tuple)
+}
+
+fn charge_aggregate_tree_work(
+    op_id: OperatorId,
+    work: u64,
+    total_work: &mut u64,
+    diagnostics: &mut NetworkDiagnostics,
+    limits: &NetworkLimits,
+) -> Result<(), WorldError> {
+    *total_work = total_work
+        .checked_add(work)
+        .ok_or(WorldError::BudgetExhausted)?;
+    *diagnostics.operator_work.entry(op_id).or_default() += work;
+    if limits.max_work.is_some_and(|max| *total_work > max) {
+        return Err(WorldError::BudgetExhausted);
+    }
+    Ok(())
+}
+
+fn merge_stage_report(into: &mut NetworkDeltaReport, next: NetworkDeltaReport) {
+    into.intermediate_deltas_count += next.intermediate_deltas_count;
+    into.derived_tuples_inserted += next.derived_tuples_inserted;
+    into.derived_tuples_retracted += next.derived_tuples_retracted;
+    into.candidates_inserted += next.candidates_inserted;
+    into.candidates_retracted += next.candidates_retracted;
+    for (decide, mut entities) in next.settlements {
+        into.settlements
+            .entry(decide)
+            .or_default()
+            .append(&mut entities);
+    }
+    for (decide, entities) in next.removed_settlements {
+        into.removed_settlements
+            .entry(decide)
+            .or_default()
+            .extend(entities);
+    }
+    for (op, count) in next.diagnostics.operator_work {
+        *into.diagnostics.operator_work.entry(op).or_default() += count;
+    }
+    for (relation, count) in next.diagnostics.relation_deltas {
+        *into
+            .diagnostics
+            .relation_deltas
+            .entry(relation)
+            .or_default() += count;
+    }
+    for (op, count) in next.diagnostics.join_fanout {
+        *into.diagnostics.join_fanout.entry(op).or_default() += count;
+    }
+    for (key, count) in next.diagnostics.hot_join_keys {
+        *into.diagnostics.hot_join_keys.entry(key).or_default() += count;
+    }
+    into.diagnostics.peak_queue_size = into
+        .diagnostics
+        .peak_queue_size
+        .max(next.diagnostics.peak_queue_size);
+    into.diagnostics.expressions_evaluated += next.diagnostics.expressions_evaluated;
 }
 
 /// Extract a tuple's entity identity using the world profile's declared
@@ -3515,6 +5641,7 @@ fn scan_intermediate(
     relation: &str,
     schema: &ast::Ty,
     tuple: &WorldTuple,
+    schemas: &BTreeMap<String, brix_lower::l3_v2::L3Schema>,
 ) -> Result<IntermediateTuple, WorldError> {
     let rec = TupleRecord::from_tuple(tuple)?;
     let ast::Ty::Record(fields) = schema else {
@@ -3534,7 +5661,7 @@ fn scan_intermediate(
         })?;
         intermediate.insert(
             field.name.clone(),
-            Value::from_typed_bytes(bytes, &field.ty)?,
+            Value::from_typed_bytes_with_schemas(bytes, &field.ty, schemas)?,
         );
     }
     Ok(intermediate)

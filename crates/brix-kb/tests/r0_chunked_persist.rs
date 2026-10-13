@@ -312,7 +312,7 @@ fn run_world(
 }
 
 // ---------------------------------------------------------------------------------------
-// H1: a single chunk is byte-identical to the pre-CPD engine
+// H1: alpha.6 single-chunk golden histories (versioned state roots)
 // ---------------------------------------------------------------------------------------
 
 fn golden_hash(seed: u64, steps: usize, rounds: usize) -> String {
@@ -337,30 +337,79 @@ fn golden_hash(seed: u64, steps: usize, rounds: usize) -> String {
     hex_of(out.as_bytes())
 }
 
-// These hashes were produced by the engine at 67d2910 (before CPD existed), over the same
-// workloads through the public session API. A single chunk (every ordinary batch) must keep
-// producing them: the revision digests and decision-delta bytes are unchanged.
+/// Same workloads as [`golden_hash`] but excluding the revision digest, which binds the
+/// network-state root. Decision-delta bytes and settlements are the compatibility surface.
+fn golden_semantic_hash(seed: u64, steps: usize, rounds: usize) -> String {
+    let dir = TempDir::new(&format!("goldensem{seed}"));
+    let mut s = create(&dir);
+    let mut out = String::new();
+    for (i, ops) in fuzz_batches(seed, steps, rounds).into_iter().enumerate() {
+        let b = WorldBatch::new(s.current_revision, format!("g{seed}-{i}"), ops);
+        let r = s.apply_batch(b).unwrap();
+        let delta = fs::read(WorldPaths::new(dir.path()).decision_delta_file(r.revision_seq))
+            .unwrap_or_default();
+        out.push_str(&format!("{} {}\n", r.revision_seq, hex_of(&delta)));
+    }
+    out.push_str(&hex_of(
+        format!("{:?}", s.all_settlements().unwrap()).as_bytes(),
+    ));
+    Digest::of(Domain::Value, out.as_bytes()).to_hex()
+}
+
+// These three values were measured on the alpha.5 engine (0bad6e4) over the same workloads.
+// Decision-delta bytes and settlements must stay byte-identical across the alpha.6 state
+// changes; only the state-root-bound revision digests below may move.
 #[test]
-fn golden_pre_cpd_seed_1() {
+fn golden_semantic_matches_alpha5_seed_1() {
+    assert_eq!(
+        golden_semantic_hash(1, 25, 1),
+        "22932fc5510015d2e23a754cb67fba4f1cde17e50e1cccdaeac8381f913fadfb"
+    );
+}
+
+#[test]
+fn golden_semantic_matches_alpha5_seed_2() {
+    assert_eq!(
+        golden_semantic_hash(2, 25, 6),
+        "42095a5e9a92d9ea12b283a206827c7492405a003bfe40d0643da1e7586c8e18"
+    );
+}
+
+#[test]
+fn golden_semantic_matches_alpha5_seed_3() {
+    assert_eq!(
+        golden_semantic_hash(3, 25, 20),
+        "f453d50aee9c57bf8a82626fc478168f9da768d53d9dd6a1796cfe10d8eaf467"
+    );
+}
+
+// Alpha.6 golden histories include the revision digest, which binds the network-state
+// root. The state codec @3 and network-state header @2 intentionally change these
+// digests from the pre-CPD / alpha.5 engine (ADR-0047). The original compatibility
+// requirement applies to decision-delta bytes and settlements, pinned above against
+// alpha.5 (0bad6e4) with revision digests excluded.
+// Chunking and quantum equivalence remain checked independently below.
+#[test]
+fn golden_alpha6_seed_1() {
     assert_eq!(
         golden_hash(1, 25, 1),
-        "8f9e6ec7bc4508a15c91eab130af5b09c83cb996708a5e98de09c2edc0f80317"
+        "8914bc1757b78608b6fbf0e22a16b6173e06c705390b7d4ba69dcd86f874f13b"
     );
 }
 
 #[test]
-fn golden_pre_cpd_seed_2() {
+fn golden_alpha6_seed_2() {
     assert_eq!(
         golden_hash(2, 25, 6),
-        "c3c1ba58b3e58a73b539936b56a6d1d4df3ab854f516dc4d4b6fd791cb3b542e"
+        "20630f74a84f6b2b8e3b632ef5eb46c442882f44206393426f2e829671c9324f"
     );
 }
 
 #[test]
-fn golden_pre_cpd_seed_3() {
+fn golden_alpha6_seed_3() {
     assert_eq!(
         golden_hash(3, 25, 20),
-        "975b8fc551be2188302ffe8870aae8afb7704ad63864928605ae94bfcbbfb3f6"
+        "38736355d946bb43fdc26723d20f9a191031729ddc74f19a9ec7e63d0492957f"
     );
 }
 
@@ -487,7 +536,7 @@ fn chunked(
         }
     }
     let chunks = ctx.chunks();
-    let rep = n.finish_batch(ctx);
+    let rep = n.finish_batch_cascade(ctx, &limits, None).unwrap();
     (n, rep, chunks)
 }
 

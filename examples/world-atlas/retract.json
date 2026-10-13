@@ -1,0 +1,9 @@
+{
+  "schema": "brix.world.batch@1",
+  "expected_base_revision": 1,
+  "idempotency_key": "atlas-retract",
+  "operations": [
+    {"op": "remove", "relation": "atlas::lines", "key": "l1"},
+    {"op": "remove", "relation": "atlas::lines", "key": "l2"}
+  ]
+}

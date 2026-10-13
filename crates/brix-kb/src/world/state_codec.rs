@@ -1,6 +1,6 @@
 //! Injective canonical storage codecs for persisted network state (R0 Phase 2, M0).
 //!
-//! Version tag: [`STATE_CODEC_VERSION`] (`brix.world.state-value@2`).
+//! Version tag: [`STATE_CODEC_VERSION`] (`brix.world.state-value@3`).
 //!
 //! Unlike `Value::to_bytes` (Display-based, so `Int(1)` and `Str("1")` collide), every
 //! encoding here is typed and injective: distinct values encode to distinct bytes, and the
@@ -25,10 +25,9 @@ use super::compact_deriv::CompactDeriv;
 use super::network::{compute_candidate_calendar_key, CandidateEntry, IntermediateTuple, Value};
 use super::types::WorldKey;
 
-/// Codec version tag for persisted state values. `@2`: derivations are persisted as
-/// `brix.world.deriv@2` compact derivations (see `compact_deriv`); the validity key of a
-/// persisted network state must include this tag.
-pub const STATE_CODEC_VERSION: &str = "brix.world.state-value@2";
+/// `@3` adds bounded nominal record/variant values. Scalar encodings are unchanged;
+/// the network validity key includes this version, so older state is replayed before reuse.
+pub const STATE_CODEC_VERSION: &str = "brix.world.state-value@3";
 
 /// Failure decoding a persisted state value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +140,14 @@ const V_INT: u64 = 2;
 const V_STR: u64 = 3;
 const V_F64: u64 = 4;
 const V_DECIMAL: u64 = 5;
+const V_RECORD: u64 = 6;
+const V_VARIANT: u64 = 7;
+
+// Match the structured settlement decoder's admission bounds. Charge depth on
+// entry and child counts before allocation or iteration, including nested values.
+const VALUE_MAX_DEPTH: usize = 32;
+const VALUE_MAX_NODES: usize = 4096;
+const VALUE_MAX_CHILDREN: usize = 256;
 
 impl StateCodec for Value {
     fn state_write(&self, w: &mut CanonWriter) {
@@ -167,36 +174,105 @@ impl StateCodec for Value {
                 w.write_int128(d.unscaled());
                 w.write_uint(u64::from(d.scale()));
             }
+            Value::Record { nominal, fields } => {
+                w.write_uint(V_RECORD);
+                w.write_str(nominal);
+                w.write_uint(fields.len() as u64);
+                for (name, value) in fields {
+                    w.write_str(name);
+                    value.state_write(w);
+                }
+            }
+            Value::Variant {
+                nominal,
+                variant,
+                args,
+            } => {
+                w.write_uint(V_VARIANT);
+                w.write_str(nominal);
+                w.write_str(variant);
+                w.write_uint(args.len() as u64);
+                for value in args {
+                    value.state_write(w);
+                }
+            }
         }
     }
 
     fn state_read(r: &mut CanonReader<'_>) -> Res<Self> {
-        match r.read_uint()? {
-            V_NULL => Ok(Value::Null),
-            V_BOOL => Ok(Value::Bool(r.read_bool()?)),
-            V_INT => Ok(Value::Int(r.read_int()?)),
-            V_STR => Ok(Value::Str(read_string(r)?)),
-            V_F64 => {
-                let bits = r.read_uint()?;
-                let f = FiniteF64::from_bits(bits)
-                    .map_err(|_| StateCodecError::NonCanonical("non-finite f64".into()))?;
-                if f.bits() != bits {
-                    return noncanon("f64 bits not normalized (negative zero)");
-                }
-                Ok(Value::F64(f))
+        let mut remaining = VALUE_MAX_NODES;
+        read_value(r, 0, &mut remaining)
+    }
+}
+
+fn value_child_count(r: &mut CanonReader<'_>, remaining: usize) -> Res<usize> {
+    let count = usize::try_from(r.read_uint()?)
+        .map_err(|_| StateCodecError::Canon(CanonError::BadLength))?;
+    if count > VALUE_MAX_CHILDREN || count > remaining {
+        return noncanon("structured value child count exceeds its decode budget");
+    }
+    Ok(count)
+}
+
+fn read_value(r: &mut CanonReader<'_>, depth: usize, remaining: &mut usize) -> Res<Value> {
+    if depth >= VALUE_MAX_DEPTH || *remaining == 0 {
+        return noncanon("structured value depth or node decode budget exhausted");
+    }
+    *remaining -= 1;
+    match r.read_uint()? {
+        V_NULL => Ok(Value::Null),
+        V_BOOL => Ok(Value::Bool(r.read_bool()?)),
+        V_INT => Ok(Value::Int(r.read_int()?)),
+        V_STR => Ok(Value::Str(read_string(r)?)),
+        V_F64 => {
+            let bits = r.read_uint()?;
+            let f = FiniteF64::from_bits(bits)
+                .map_err(|_| StateCodecError::NonCanonical("non-finite f64".into()))?;
+            if f.bits() != bits {
+                return noncanon("f64 bits not normalized (negative zero)");
             }
-            V_DECIMAL => {
-                let unscaled = r.read_int128()?;
-                let scale = u8::try_from(r.read_uint()?)
-                    .map_err(|_| StateCodecError::Canon(CanonError::BadLength))?;
-                let d = Decimal::new(unscaled, scale);
-                if d.unscaled() != unscaled || d.scale() != scale {
-                    return noncanon("decimal not normalized");
-                }
-                Ok(Value::Decimal(d))
-            }
-            t => Err(StateCodecError::UnknownTag(t)),
+            Ok(Value::F64(f))
         }
+        V_DECIMAL => {
+            let unscaled = r.read_int128()?;
+            let scale = u8::try_from(r.read_uint()?)
+                .map_err(|_| StateCodecError::Canon(CanonError::BadLength))?;
+            let d = Decimal::new(unscaled, scale);
+            if d.unscaled() != unscaled || d.scale() != scale {
+                return noncanon("decimal not normalized");
+            }
+            Ok(Value::Decimal(d))
+        }
+        V_RECORD => {
+            let nominal = read_string(r)?;
+            let n = value_child_count(r, *remaining)?;
+            let mut fields = BTreeMap::new();
+            let mut previous: Option<String> = None;
+            for _ in 0..n {
+                let name = read_string(r)?;
+                if previous.as_ref().is_some_and(|p| p >= &name) {
+                    return noncanon("record fields are not strictly sorted");
+                }
+                previous = Some(name.clone());
+                fields.insert(name, read_value(r, depth + 1, remaining)?);
+            }
+            Ok(Value::Record { nominal, fields })
+        }
+        V_VARIANT => {
+            let nominal = read_string(r)?;
+            let variant = read_string(r)?;
+            let n = value_child_count(r, *remaining)?;
+            let mut args = Vec::with_capacity(n);
+            for _ in 0..n {
+                args.push(read_value(r, depth + 1, remaining)?);
+            }
+            Ok(Value::Variant {
+                nominal,
+                variant,
+                args,
+            })
+        }
+        t => Err(StateCodecError::UnknownTag(t)),
     }
 }
 
@@ -676,6 +752,25 @@ mod tests {
                 .map(Value::F64)),
             (any::<i128>(), 0u8..40).prop_map(|(u, s)| Value::Decimal(Decimal::new(u, s))),
         ]
+        .prop_recursive(4, 32, 4, |inner| {
+            prop_oneof![
+                (
+                    "[a-z]{1,6}",
+                    proptest::collection::btree_map("[a-z]{1,6}", inner.clone(), 0..4)
+                )
+                    .prop_map(|(nominal, fields)| Value::Record { nominal, fields }),
+                (
+                    "[a-z]{1,6}",
+                    "[A-Z]{1,6}",
+                    proptest::collection::vec(inner, 0..4)
+                )
+                    .prop_map(|(nominal, variant, args)| Value::Variant {
+                        nominal,
+                        variant,
+                        args
+                    }),
+            ]
+        })
     }
 
     proptest! {
@@ -705,6 +800,125 @@ mod tests {
             Value::Str("1".into()).state_bytes()
         );
         assert_eq!(Value::Int(1).to_bytes(), Value::Str("1".into()).to_bytes());
+    }
+
+    #[test]
+    fn structured_identity_binds_nominal_variant_and_payload() {
+        let record = Value::Record {
+            nominal: "a::Quote".into(),
+            fields: BTreeMap::from([("total".into(), Value::Int(12))]),
+        };
+        let other_nominal = Value::Record {
+            nominal: "b::Quote".into(),
+            fields: BTreeMap::from([("total".into(), Value::Int(12))]),
+        };
+        assert_ne!(record.state_bytes(), other_nominal.state_bytes());
+        let tagged = |nominal: &str, variant: &str, value: Value| Value::Variant {
+            nominal: nominal.into(),
+            variant: variant.into(),
+            args: vec![value],
+        };
+        let value = tagged("a::Result", "Quoted", record.clone());
+        rt(&value);
+        for other in [
+            tagged("b::Result", "Quoted", record.clone()),
+            tagged("a::Result", "Other", record),
+            tagged("a::Result", "Quoted", other_nominal),
+        ] {
+            assert_ne!(value.state_bytes(), other.state_bytes());
+        }
+    }
+
+    #[test]
+    fn structured_field_order_and_truncation_are_rejected() {
+        for names in [["b", "a"], ["a", "a"]] {
+            let mut w = CanonWriter::new();
+            w.write_uint(V_RECORD);
+            w.write_str("m::Record");
+            w.write_uint(2);
+            for name in names {
+                w.write_str(name);
+                Value::Int(1).state_write(&mut w);
+            }
+            assert!(matches!(
+                Value::state_from_bytes(&w.finish()),
+                Err(StateCodecError::NonCanonical(_))
+            ));
+        }
+        let value = Value::Variant {
+            nominal: "m::Result".into(),
+            variant: "Found".into(),
+            args: vec![Value::Record {
+                nominal: "m::Record".into(),
+                fields: BTreeMap::from([("id".into(), Value::Str("item".into()))]),
+            }],
+        };
+        let bytes = value.state_bytes();
+        for end in 0..bytes.len() {
+            assert!(
+                Value::state_from_bytes(&bytes[..end]).is_err(),
+                "prefix {end}"
+            );
+        }
+    }
+
+    #[test]
+    fn structured_decode_checks_counts_before_payloads() {
+        for tag in [V_RECORD, V_VARIANT] {
+            for count in [257, u64::MAX] {
+                let mut w = CanonWriter::new();
+                w.write_uint(tag);
+                w.write_str("m::T");
+                if tag == V_VARIANT {
+                    w.write_str("C");
+                }
+                w.write_uint(count);
+                // No child bytes: a bound error, rather than EOF, establishes
+                // that the count is refused before allocating/reading children.
+                assert!(matches!(
+                    Value::state_from_bytes(&w.finish()),
+                    Err(StateCodecError::NonCanonical(_))
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn structured_decode_enforces_depth_and_cumulative_nodes() {
+        let wrap = |value| Value::Variant {
+            nominal: "m::T".into(),
+            variant: "C".into(),
+            args: vec![value],
+        };
+        let mut value = Value::Null;
+        for _ in 1..VALUE_MAX_DEPTH {
+            value = wrap(value);
+        }
+        rt(&value);
+        assert!(Value::state_from_bytes(&wrap(value).state_bytes()).is_err());
+
+        let branch = |children| Value::Variant {
+            nominal: "m::T".into(),
+            variant: "C".into(),
+            args: vec![Value::Null; children],
+        };
+        let mut branches = vec![branch(255); 16];
+        branches[0] = branch(254);
+        // 1 root + 16 branches + 4079 leaves = 4096 nodes.
+        rt(&Value::Variant {
+            nominal: "m::T".into(),
+            variant: "C".into(),
+            args: branches,
+        });
+        assert!(Value::state_from_bytes(
+            &Value::Variant {
+                nominal: "m::T".into(),
+                variant: "C".into(),
+                args: vec![branch(255); 16],
+            }
+            .state_bytes()
+        )
+        .is_err());
     }
 
     #[test]

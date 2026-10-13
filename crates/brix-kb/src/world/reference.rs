@@ -43,7 +43,9 @@
 //!    WorldTuple}`) — a deterministic, versioned *serialization format*, not relational logic.
 //!    A bug here would corrupt both oracles identically, but the codec's correctness is
 //!    covered separately by `tests/world_tuple_codec.rs`, and this module's job is to catch
-//!    *relational/decision* bugs, not byte-codec bugs.
+//!    *relational/decision* bugs, not byte-codec bugs. The strict tagged input
+//!    decoder and structured-field framing marker are also shared transport
+//!    definitions; value conversion and canonical writing remain independent.
 //! 4. **The scalar expression evaluator** (`brix_lower::world_expr::CompiledWorldExpr`, via
 //!    `brix_lower::l3_v2`) — this lives in `brix-lower`, is already independent of
 //!    `WorldNetwork`'s incremental state (it is a pure function of an expression and a
@@ -101,6 +103,7 @@ use brix_syntax::ast;
 use soc_core::calendar::Key;
 
 use super::codec::TupleRecord;
+use super::decision_codec::STRUCTURED_PREFIX;
 use super::error::WorldError;
 use super::types::{WorldKey, WorldTuple};
 
@@ -115,6 +118,45 @@ pub enum Value {
     Str(String),
     F64(brix_canon::FiniteF64),
     Decimal(brix_canon::Decimal),
+    Record {
+        nominal: String,
+        fields: BTreeMap<String, Value>,
+    },
+    Variant {
+        nominal: String,
+        variant: String,
+        args: Vec<Value>,
+    },
+}
+
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Null => {}
+            Self::Bool(v) => v.hash(state),
+            Self::Int(v) => v.hash(state),
+            Self::Str(v) => v.hash(state),
+            Self::F64(v) => v.to_string().hash(state),
+            Self::Decimal(v) => {
+                v.unscaled().hash(state);
+                v.scale().hash(state);
+            }
+            Self::Record { nominal, fields } => {
+                nominal.hash(state);
+                fields.hash(state);
+            }
+            Self::Variant {
+                nominal,
+                variant,
+                args,
+            } => {
+                nominal.hash(state);
+                variant.hash(state);
+                args.hash(state);
+            }
+        }
+    }
 }
 
 impl Value {
@@ -131,31 +173,78 @@ impl Value {
     /// Decode a byte payload under a resolved scalar schema type. Mirrors the admissible
     /// scalar type set of the tuple codec/schema contract (ADR-0046 §3.2), re-derived from
     /// scratch rather than calling `network::Value::from_typed_bytes`.
+    #[allow(dead_code)]
     fn from_typed_bytes(bytes: &[u8], ty: &ast::Ty) -> Result<Self, WorldError> {
-        let text = std::str::from_utf8(bytes)
-            .map_err(|e| WorldError::NetworkError(format!("invalid scalar UTF-8: {e}")))?;
-        let invalid = || WorldError::NetworkError(format!("invalid {ty:?} scalar {text:?}"));
-        match ty {
-            ast::Ty::Named(name) => match name.as_str() {
-                "Str" => Ok(Self::Str(text.to_owned())),
-                "Int" => text.parse().map(Self::Int).map_err(|_| invalid()),
-                "Bool" => match text {
+        Self::from_typed_bytes_with_schemas(bytes, ty, &BTreeMap::new())
+    }
+
+    fn from_typed_bytes_with_schemas(
+        bytes: &[u8],
+        ty: &ast::Ty,
+        schemas: &BTreeMap<String, brix_lower::l3_v2::L3Schema>,
+    ) -> Result<Self, WorldError> {
+        use brix_lower::l3_v2::{validate_l3_value, L3SchemaType as T};
+        let ast::Ty::Named(name) = ty else {
+            return Err(WorldError::NetworkError(format!(
+                "unsupported field type {ty:?}"
+            )));
+        };
+        let text = || {
+            std::str::from_utf8(bytes)
+                .map_err(|e| WorldError::NetworkError(format!("invalid scalar UTF-8: {e}")))
+        };
+        let invalid = || WorldError::NetworkError(format!("invalid {name} scalar"));
+        match name.as_str() {
+            "Str" => return Ok(Self::Str(text()?.to_owned())),
+            "Int" => return text()?.parse().map(Self::Int).map_err(|_| invalid()),
+            "Bool" => {
+                return match text()? {
                     "true" => Ok(Self::Bool(true)),
                     "false" => Ok(Self::Bool(false)),
                     _ => Err(invalid()),
-                },
-                "F64" => text.parse().map(Self::F64).map_err(|_| invalid()),
-                "Decimal" => brix_canon::decimal_parse(text)
+                }
+            }
+            "F64" => return text()?.parse().map(Self::F64).map_err(|_| invalid()),
+            "Decimal" => {
+                return brix_canon::decimal_parse(text()?)
                     .map(Self::Decimal)
-                    .map_err(|_| invalid()),
-                _ => Err(invalid()),
-            },
-            _ => Err(invalid()),
+                    .map_err(|_| invalid())
+            }
+            _ => {}
         }
+        let value = if let Some(payload) = bytes.strip_prefix(STRUCTURED_PREFIX) {
+            let mut reader = brix_canon::CanonReader::new(payload);
+            let value = Self::canon_read(&mut reader)?;
+            if !reader.is_empty() {
+                return Err(WorldError::NetworkError(
+                    "trailing structured value bytes".into(),
+                ));
+            }
+            value.to_scalar()?
+        } else {
+            brix_lower::input::decode_world_value(bytes, &brix_lower::input::InputLimits::default())
+                .map_err(|e| WorldError::NetworkError(format!("invalid structured value: {e}")))?
+                .to_l3_value()
+        };
+        let expected = schemas
+            .get(name)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| name.clone());
+        validate_l3_value(&value, &T::Named(expected), schemas, "world input")
+            .map_err(|e| WorldError::NetworkError(format!("type validation error: {e}")))?;
+        Self::from_scalar(value)
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        self.to_string().into_bytes()
+        if matches!(self, Self::Record { .. } | Self::Variant { .. }) {
+            let mut writer = CanonWriter::new();
+            self.canon_write(&mut writer);
+            let mut bytes = STRUCTURED_PREFIX.to_vec();
+            bytes.extend(writer.finish());
+            bytes
+        } else {
+            self.to_string().into_bytes()
+        }
     }
 
     fn to_scalar(&self) -> Result<brix_lower::l3_v2::L3ValueV2, WorldError> {
@@ -166,6 +255,31 @@ impl Value {
             Self::Str(v) => V::Str(v.clone()),
             Self::F64(v) => V::F64(*v),
             Self::Decimal(v) => V::Decimal(*v),
+            Self::Record { nominal, fields } => {
+                let mut f_vec = Vec::new();
+                for (k, v) in fields {
+                    f_vec.push((k.clone(), v.to_scalar()?));
+                }
+                V::Record {
+                    nominal_config: nominal.clone(),
+                    fields: f_vec,
+                }
+            }
+            Self::Variant {
+                nominal,
+                variant,
+                args,
+            } => {
+                let mut a_vec = Vec::new();
+                for a in args {
+                    a_vec.push(a.to_scalar()?);
+                }
+                V::Ctor {
+                    nominal_sum: nominal.clone(),
+                    variant: variant.clone(),
+                    args: a_vec,
+                }
+            }
             Self::Null => {
                 return Err(WorldError::NetworkError(
                     "reference evaluator: absent scalar value".into(),
@@ -182,10 +296,147 @@ impl Value {
             V::Str(v) => Self::Str(v),
             V::F64(v) => Self::F64(v),
             V::Decimal(v) => Self::Decimal(v),
+            V::Record {
+                nominal_config,
+                fields,
+            } => {
+                let mut map = BTreeMap::new();
+                for (k, f_val) in fields {
+                    map.insert(k, Self::from_scalar(f_val)?);
+                }
+                Self::Record {
+                    nominal: nominal_config,
+                    fields: map,
+                }
+            }
+            V::Ctor {
+                nominal_sum,
+                variant,
+                args,
+            } => {
+                let mut a_vec = Vec::new();
+                for a in args {
+                    a_vec.push(Self::from_scalar(a)?);
+                }
+                Self::Variant {
+                    nominal: nominal_sum,
+                    variant,
+                    args: a_vec,
+                }
+            }
             _ => {
                 return Err(WorldError::NetworkError(
                     "reference evaluator: expression result is not a scalar".into(),
                 ))
+            }
+        })
+    }
+
+    fn canon_read(r: &mut brix_canon::CanonReader<'_>) -> Result<Self, WorldError> {
+        Self::canon_read_bounded(r, 0, &mut 4096)
+    }
+
+    fn canon_read_bounded(
+        r: &mut brix_canon::CanonReader<'_>,
+        depth: usize,
+        remaining: &mut usize,
+    ) -> Result<Self, WorldError> {
+        if depth >= 32 || *remaining == 0 {
+            return Err(WorldError::NetworkError(
+                "invalid or oversized structured reference value".into(),
+            ));
+        }
+        *remaining -= 1;
+        let canon_err = |e: brix_canon::CanonError| {
+            WorldError::NetworkError(format!("corrupt canonical value: {e:?}"))
+        };
+        let tag = r.read_uint().map_err(canon_err)?;
+        Ok(match tag {
+            0 => Value::Null,
+            1 => Value::Int(r.read_int().map_err(canon_err)?),
+            2 => {
+                let bytes = r.read_bytes().map_err(canon_err)?;
+                Value::Str(
+                    std::str::from_utf8(bytes)
+                        .map_err(|e| WorldError::NetworkError(format!("invalid Str UTF-8: {e}")))?
+                        .to_string(),
+                )
+            }
+            3 => Value::Bool(match r.read_uint().map_err(canon_err)? {
+                0 => false,
+                1 => true,
+                _ => return Err(WorldError::NetworkError("invalid decision boolean".into())),
+            }),
+            4 => {
+                let raw = r.read_raw(8).map_err(canon_err)?;
+                let mut bits = [0u8; 8];
+                bits.copy_from_slice(raw);
+                Value::F64(
+                    brix_canon::FiniteF64::from_bits(u64::from_be_bytes(bits)).map_err(|e| {
+                        WorldError::NetworkError(format!("corrupt value: invalid F64: {e:?}"))
+                    })?,
+                )
+            }
+            5 => Value::Decimal(brix_canon::read_decimal(r).map_err(canon_err)?),
+            6 => {
+                let nominal = std::str::from_utf8(r.read_bytes().map_err(canon_err)?)
+                    .map_err(|e| WorldError::NetworkError(format!("invalid nominal UTF-8: {e}")))?
+                    .to_string();
+                let count = usize::try_from(r.read_uint().map_err(canon_err)?)
+                    .map_err(|_| WorldError::NetworkError("invalid record field count".into()))?;
+                if count > 256 || count > *remaining {
+                    return Err(WorldError::NetworkError(
+                        "invalid or oversized structured reference value".into(),
+                    ));
+                }
+                let mut fields = BTreeMap::new();
+                for _ in 0..count {
+                    let name = std::str::from_utf8(r.read_bytes().map_err(canon_err)?)
+                        .map_err(|e| {
+                            WorldError::NetworkError(format!("invalid field name UTF-8: {e}"))
+                        })?
+                        .to_string();
+                    let val = Self::canon_read_bounded(r, depth + 1, remaining)?;
+                    if fields
+                        .last_key_value()
+                        .is_some_and(|(prev, _)| prev >= &name)
+                    {
+                        return Err(WorldError::NetworkError(
+                            "invalid or oversized structured reference value".into(),
+                        ));
+                    }
+                    fields.insert(name, val);
+                }
+                Value::Record { nominal, fields }
+            }
+            7 => {
+                let nominal = std::str::from_utf8(r.read_bytes().map_err(canon_err)?)
+                    .map_err(|e| WorldError::NetworkError(format!("invalid nominal UTF-8: {e}")))?
+                    .to_string();
+                let variant = std::str::from_utf8(r.read_bytes().map_err(canon_err)?)
+                    .map_err(|e| WorldError::NetworkError(format!("invalid variant UTF-8: {e}")))?
+                    .to_string();
+                let count = usize::try_from(r.read_uint().map_err(canon_err)?)
+                    .map_err(|_| WorldError::NetworkError("invalid variant arg count".into()))?;
+                if count > 256 || count > *remaining {
+                    return Err(WorldError::NetworkError(
+                        "invalid or oversized structured reference value".into(),
+                    ));
+                }
+                let mut args = Vec::with_capacity(count);
+                for _ in 0..count {
+                    args.push(Self::canon_read_bounded(r, depth + 1, remaining)?);
+                }
+                Value::Variant {
+                    nominal,
+                    variant,
+                    args,
+                }
+            }
+            other => {
+                return Err(WorldError::NetworkError(format!(
+                    "unknown value tag {other}"
+                )))
             }
         })
     }
@@ -217,6 +468,28 @@ impl Value {
                 w.write_uint(5);
                 v.canon_write(w);
             }
+            Value::Record { nominal, fields } => {
+                w.write_uint(6);
+                w.write_str(nominal);
+                w.write_uint(fields.len() as u64);
+                for (name, val) in fields {
+                    w.write_str(name);
+                    val.canon_write(w);
+                }
+            }
+            Value::Variant {
+                nominal,
+                variant,
+                args,
+            } => {
+                w.write_uint(7);
+                w.write_str(nominal);
+                w.write_str(variant);
+                w.write_uint(args.len() as u64);
+                for arg in args {
+                    arg.canon_write(w);
+                }
+            }
         }
     }
 }
@@ -230,6 +503,34 @@ impl std::fmt::Display for Value {
             Self::Str(v) => write!(f, "{v}"),
             Self::F64(v) => write!(f, "{v}"),
             Self::Decimal(v) => write!(f, "{}", brix_canon::decimal_format(*v)),
+            Self::Record { nominal, fields } => {
+                write!(f, "{nominal} {{")?;
+                for (i, (k, v)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{k}: {v}")?;
+                }
+                write!(f, "}}")
+            }
+            Self::Variant {
+                nominal: _,
+                variant,
+                args,
+            } => {
+                write!(f, "{variant}")?;
+                if !args.is_empty() {
+                    write!(f, "(")?;
+                    for (i, a) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{a}")?;
+                    }
+                    write!(f, ")")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -307,21 +608,198 @@ fn eval_expr(
 fn build_grouped_row(
     projections: &[(String, GroupProjection)],
     key_vals: &[Value],
-    count: usize,
-) -> Row {
+    values: &[Vec<Option<Value>>],
+) -> Result<Row, WorldError> {
     let mut row = Row::new();
-    for (name, proj) in projections {
+    for (idx, (name, proj)) in projections.iter().enumerate() {
         match proj {
             GroupProjection::Key(idx) => {
                 let v = key_vals.get(*idx).cloned().unwrap_or(Value::Null);
                 row.insert(name.clone(), v);
             }
             GroupProjection::Count => {
-                row.insert(name.clone(), Value::Int(count as i64));
+                row.insert(name.clone(), Value::Int(values.len() as i64));
+            }
+            GroupProjection::SumInt(_) => {
+                let mut sum = 0i128;
+                for value in values.iter().filter_map(|row| row[idx].as_ref()) {
+                    let Value::Int(value) = value else {
+                        return Err(WorldError::NetworkError(
+                            "reference Int sum received non-Int".into(),
+                        ));
+                    };
+                    sum = sum.checked_add(i128::from(*value)).ok_or_else(|| {
+                        WorldError::NetworkError(
+                            "reference grouped Int accumulator overflow".into(),
+                        )
+                    })?;
+                }
+                row.insert(
+                    name.clone(),
+                    Value::Int(i64::try_from(sum).map_err(|_| {
+                        WorldError::NetworkError("reference grouped Int sum overflow".into())
+                    })?),
+                );
+            }
+            GroupProjection::SumDecimal(_) => {
+                let mut sum = ReferenceWideDecimal::default();
+                let mut scale = 0u8;
+                for value in values.iter().filter_map(|row| row[idx].as_ref()) {
+                    let Value::Decimal(value) = value else {
+                        return Err(WorldError::NetworkError(
+                            "reference Decimal sum received non-Decimal".into(),
+                        ));
+                    };
+                    if value.scale() > scale {
+                        sum.mul_pow10(value.scale() - scale);
+                        scale = value.scale();
+                    }
+                    let mut addend = ReferenceWideDecimal::from_i128(value.unscaled());
+                    addend.mul_pow10(scale - value.scale());
+                    sum.add_assign(&addend);
+                }
+                row.insert(
+                    name.clone(),
+                    Value::Decimal(sum.to_decimal(scale).ok_or_else(|| {
+                        WorldError::NetworkError("reference grouped Decimal sum overflow".into())
+                    })?),
+                );
+            }
+            GroupProjection::Min(_) | GroupProjection::Max(_) => {
+                let selected = if matches!(proj, GroupProjection::Min(_)) {
+                    values.iter().filter_map(|row| row[idx].as_ref()).min()
+                } else {
+                    values.iter().filter_map(|row| row[idx].as_ref()).max()
+                };
+                row.insert(name.clone(), selected.cloned().unwrap_or(Value::Null));
             }
         }
     }
-    row
+    Ok(row)
+}
+
+#[derive(Default)]
+struct ReferenceWideDecimal {
+    negative: bool,
+    digits: Vec<u8>,
+}
+
+impl ReferenceWideDecimal {
+    fn from_i128(value: i128) -> Self {
+        let mut magnitude = value.unsigned_abs();
+        let mut digits = Vec::new();
+        while magnitude != 0 {
+            digits.push((magnitude % 10) as u8);
+            magnitude /= 10;
+        }
+        Self {
+            negative: value < 0,
+            digits,
+        }
+    }
+
+    fn mul_pow10(&mut self, power: u8) {
+        if !self.digits.is_empty() {
+            self.digits
+                .splice(0..0, std::iter::repeat_n(0, power as usize));
+        }
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        if other.digits.is_empty() {
+            return;
+        }
+        if self.digits.is_empty() {
+            *self = Self {
+                negative: other.negative,
+                digits: other.digits.clone(),
+            };
+            return;
+        }
+        if self.negative == other.negative {
+            let mut carry = 0u8;
+            for index in 0..self.digits.len().max(other.digits.len()) {
+                if index == self.digits.len() {
+                    self.digits.push(0);
+                }
+                let sum =
+                    self.digits[index] + other.digits.get(index).copied().unwrap_or(0) + carry;
+                self.digits[index] = sum % 10;
+                carry = sum / 10;
+            }
+            if carry != 0 {
+                self.digits.push(carry);
+            }
+            return;
+        }
+        let ordering = self
+            .digits
+            .len()
+            .cmp(&other.digits.len())
+            .then_with(|| self.digits.iter().rev().cmp(other.digits.iter().rev()));
+        match ordering {
+            std::cmp::Ordering::Equal => {
+                self.digits.clear();
+                self.negative = false;
+            }
+            std::cmp::Ordering::Greater => self.sub_abs(other),
+            std::cmp::Ordering::Less => {
+                let mut result = Self {
+                    negative: other.negative,
+                    digits: other.digits.clone(),
+                };
+                result.sub_abs(self);
+                *self = result;
+            }
+        }
+    }
+
+    fn sub_abs(&mut self, other: &Self) {
+        let mut borrow = 0i8;
+        for index in 0..self.digits.len() {
+            let mut digit = self.digits[index] as i8
+                - other.digits.get(index).copied().unwrap_or(0) as i8
+                - borrow;
+            if digit < 0 {
+                digit += 10;
+                borrow = 1;
+            } else {
+                borrow = 0;
+            }
+            self.digits[index] = digit as u8;
+        }
+        while self.digits.last() == Some(&0) {
+            self.digits.pop();
+        }
+        if self.digits.is_empty() {
+            self.negative = false;
+        }
+    }
+
+    fn to_decimal(&self, scale: u8) -> Option<brix_canon::Decimal> {
+        let mut value = Self {
+            negative: self.negative,
+            digits: self.digits.clone(),
+        };
+        let mut scale = scale;
+        while scale > 0 && value.digits.first() == Some(&0) {
+            value.digits.remove(0);
+            scale -= 1;
+        }
+        let magnitude = value.digits.iter().rev().try_fold(0u128, |sum, digit| {
+            sum.checked_mul(10)?.checked_add(*digit as u128)
+        })?;
+        let unscaled = if value.negative {
+            if magnitude == i128::MAX as u128 + 1 {
+                i128::MIN
+            } else {
+                -i128::try_from(magnitude).ok()?
+            }
+        } else {
+            i128::try_from(magnitude).ok()?
+        };
+        Some(brix_canon::Decimal::new(unscaled, scale))
+    }
 }
 
 /// Extract a row's entity identity from its declared `per <field>`
@@ -378,6 +856,7 @@ pub struct DecideSpec {
     /// Declared entity-identity field (ADR-0046, decided 2026-10-04); see
     /// `network::DecideBlock::per_field`.
     pub per_field: String,
+    pub per_type: ast::Ty,
     pub proposals: Vec<ast::ProposeDecl>,
     pub compiled_proposals: Vec<CompiledReferencePropose>,
 }
@@ -434,9 +913,12 @@ pub enum CompiledOperator {
         compiled_projections: Vec<(String, CompiledWorldExpr)>,
     },
     EquiJoin,
+    AntiJoin,
+    ParentCount,
     Distinct,
     GroupedCount {
         compiled_group_keys: Vec<CompiledWorldExpr>,
+        compiled_aggregates: Vec<Option<CompiledWorldExpr>>,
     },
 }
 
@@ -496,6 +978,7 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
     for node in &dag.nodes {
         match node {
             OperatorNode::Scan { .. } => compiled_operators.push(CompiledOperator::Scan),
+            OperatorNode::DecisionRows { .. } => compiled_operators.push(CompiledOperator::Scan),
             OperatorNode::Bind { .. } => compiled_operators.push(CompiledOperator::Bind),
             OperatorNode::Filter { input, predicate } => {
                 let bindings = derive_binding_names(&op_schemas[input.0]);
@@ -518,9 +1001,16 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                 });
             }
             OperatorNode::EquiJoin { .. } => compiled_operators.push(CompiledOperator::EquiJoin),
+            OperatorNode::AntiJoin { .. } => compiled_operators.push(CompiledOperator::AntiJoin),
+            OperatorNode::ParentCount { .. } => {
+                compiled_operators.push(CompiledOperator::ParentCount)
+            }
             OperatorNode::Distinct { .. } => compiled_operators.push(CompiledOperator::Distinct),
             OperatorNode::GroupedCount {
-                input, group_keys, ..
+                input,
+                group_keys,
+                projections,
+                ..
             } => {
                 let bindings = derive_binding_names(&op_schemas[input.0]);
                 let mut compiled_group_keys = Vec::with_capacity(group_keys.len());
@@ -530,8 +1020,24 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                         .map_err(WorldError::NetworkError)?;
                     compiled_group_keys.push(compiled);
                 }
+                let compiled_aggregates = projections
+                    .iter()
+                    .map(|(_, projection)| {
+                        let expr = match projection {
+                            GroupProjection::SumInt(expr)
+                            | GroupProjection::SumDecimal(expr)
+                            | GroupProjection::Min(expr)
+                            | GroupProjection::Max(expr) => Some(expr),
+                            GroupProjection::Key(_) | GroupProjection::Count => None,
+                        };
+                        expr.map(|e| program_env.compile_expr(e, &bindings))
+                            .transpose()
+                            .map_err(WorldError::NetworkError)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 compiled_operators.push(CompiledOperator::GroupedCount {
                     compiled_group_keys,
+                    compiled_aggregates,
                 });
             }
         }
@@ -556,6 +1062,15 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                     "decide '{qname}' unknown source relation '{src}'"
                 ))
             })?;
+            let per_type = op_schemas[op_id.0]
+                .get(&format!("{}.{per_field}", decl.binder))
+                .or_else(|| op_schemas[op_id.0].get(&per_field))
+                .cloned()
+                .ok_or_else(|| {
+                    WorldError::NetworkError(format!(
+                        "reference decide '{qname}' per field '{per_field}' has no resolved type"
+                    ))
+                })?;
             let bindings = derive_decide_binding_names(&op_schemas[op_id.0], &decl.binder);
             let mut compiled_proposals = Vec::with_capacity(decl.proposals.len());
             for prop in &decl.proposals {
@@ -577,6 +1092,7 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                 binder: decl.binder.clone(),
                 source_relation: src,
                 per_field,
+                per_type,
                 proposals: decl.proposals.clone(),
                 compiled_proposals,
             });
@@ -674,6 +1190,58 @@ pub fn evaluate_with_budget(
     max_work: Option<u64>,
     work_offset: u64,
 ) -> Result<ReferenceState, WorldError> {
+    let mut staged_relations = base_relations.clone();
+    for _ in 0..=program.decides.len() {
+        let mut state =
+            evaluate_once_with_budget(program, &staged_relations, meter, max_work, work_offset)?;
+        let mut next_relations = staged_relations.clone();
+        for decide in &program.decides {
+            let mut rows = BTreeMap::new();
+            if let Some(entities) = state.settlements.get(&decide.name) {
+                for (entity_id, winner) in entities {
+                    let entity_value =
+                        Value::from_typed_bytes(entity_id.as_bytes(), &decide.per_type)?;
+                    let priority = i64::try_from(winner.priority).map_err(|_| {
+                        WorldError::NetworkError(format!(
+                            "reference winner priority for '{}' exceeds the winner row Int range",
+                            decide.name
+                        ))
+                    })?;
+                    let row = BTreeMap::from([
+                        (decide.per_field.clone(), entity_value),
+                        (
+                            "candidate".into(),
+                            Value::Str(winner.candidate_name.clone()),
+                        ),
+                        ("priority".into(), Value::Int(priority)),
+                        ("value".into(), winner.value.clone()),
+                    ]);
+                    rows.insert(
+                        WorldKey::new(row[&decide.per_field].to_bytes()),
+                        row_to_tuple_record(&row).to_tuple(),
+                    );
+                }
+            }
+            next_relations.insert(decide.name.clone(), rows);
+        }
+        if next_relations == staged_relations {
+            state.base_relations = base_relations.clone();
+            return Ok(state);
+        }
+        staged_relations = next_relations;
+    }
+    Err(WorldError::NetworkError(
+        "reference winner-row strata did not reach a fixed point despite acyclic lowering".into(),
+    ))
+}
+
+fn evaluate_once_with_budget(
+    program: &ReferenceProgram,
+    base_relations: &BTreeMap<String, BTreeMap<WorldKey, WorldTuple>>,
+    meter: &mut ReferenceWorkMeter,
+    max_work: Option<u64>,
+    work_offset: u64,
+) -> Result<ReferenceState, WorldError> {
     let dag = &program.dag;
     let mut operator_outputs: Vec<Vec<Row>> = Vec::with_capacity(dag.nodes.len());
 
@@ -681,6 +1249,10 @@ pub fn evaluate_with_budget(
         let rows = match node {
             OperatorNode::Scan {
                 relation, schema, ..
+            }
+            | OperatorNode::DecisionRows {
+                decide: relation,
+                schema,
             } => {
                 let ast::Ty::Record(fields) = schema else {
                     return Err(WorldError::NetworkError(format!(
@@ -707,9 +1279,15 @@ pub fn evaluate_with_budget(
                                 field.name
                             ))
                         })?;
+                        let empty_schemas = BTreeMap::new();
+                        let schemas = program
+                            .program_env
+                            .as_ref()
+                            .map(|pe| pe.schemas.as_ref())
+                            .unwrap_or(&empty_schemas);
                         row.insert(
                             field.name.clone(),
-                            Value::from_typed_bytes(bytes, &field.ty)?,
+                            Value::from_typed_bytes_with_schemas(bytes, &field.ty, schemas)?,
                         );
                     }
                     rows.push(row);
@@ -839,6 +1417,91 @@ pub fn evaluate_with_budget(
                 }
                 out
             }
+            OperatorNode::AntiJoin {
+                left,
+                right,
+                left_keys,
+                right_keys,
+            } => {
+                let mut right_index: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
+                for row in &operator_outputs[right.0] {
+                    let key = right_keys
+                        .iter()
+                        .map(|k| {
+                            get_qualified(row, &k.binding, &k.field)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    WorldError::NetworkError(format!(
+                                        "missing anti-join field {}.{}",
+                                        k.binding, k.field
+                                    ))
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    *right_index.entry(key).or_default() += 1;
+                }
+                operator_outputs[left.0]
+                    .iter()
+                    .filter_map(|row| {
+                        let key = left_keys
+                            .iter()
+                            .map(|k| {
+                                get_qualified(row, &k.binding, &k.field)
+                                    .cloned()
+                                    .ok_or_else(|| {
+                                        WorldError::NetworkError(format!(
+                                            "missing anti-join field {}.{}",
+                                            k.binding, k.field
+                                        ))
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, _>>();
+                        match key {
+                            Ok(key) if !right_index.contains_key(&key) => Some(Ok(row.clone())),
+                            Ok(_) => None,
+                            Err(e) => Some(Err(e)),
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+            OperatorNode::ParentCount {
+                left,
+                right,
+                left_key,
+                right_key,
+                output_key,
+                output_count,
+            } => {
+                let left_rows = &operator_outputs[left.0];
+                let right_rows = &operator_outputs[right.0];
+                let mut out = Vec::with_capacity(left_rows.len());
+                for parent in left_rows {
+                    let key = get_qualified(parent, &left_key.binding, &left_key.field)
+                        .cloned()
+                        .ok_or_else(|| {
+                            WorldError::NetworkError(format!(
+                                "missing count correlation field {}.{}",
+                                left_key.binding, left_key.field
+                            ))
+                        })?;
+                    let mut count = 0i64;
+                    for child in right_rows {
+                        meter.rows_evaluated += 1;
+                        charge_work(meter, work_offset, max_work)?;
+                        if get_qualified(child, &right_key.binding, &right_key.field) == Some(&key)
+                        {
+                            count = count.checked_add(1).ok_or_else(|| {
+                                WorldError::NetworkError("count_or_zero overflow".into())
+                            })?;
+                        }
+                    }
+                    let mut row = Row::new();
+                    row.insert(output_key.clone(), key);
+                    row.insert(output_count.clone(), Value::Int(count));
+                    out.push(row);
+                }
+                out
+            }
             OperatorNode::Distinct { input } => {
                 let mut set: BTreeSet<Row> = BTreeSet::new();
                 for row in &operator_outputs[input.0] {
@@ -853,13 +1516,14 @@ pub fn evaluate_with_budget(
                 group_keys: _,
                 projections,
             } => {
-                let compiled_keys = match &program.compiled_operators[idx] {
+                let (compiled_keys, compiled_aggregates) = match &program.compiled_operators[idx] {
                     CompiledOperator::GroupedCount {
                         compiled_group_keys,
-                    } => compiled_group_keys,
+                        compiled_aggregates,
+                    } => (compiled_group_keys, compiled_aggregates),
                     _ => unreachable!(),
                 };
-                let mut groups: BTreeMap<Vec<Value>, usize> = BTreeMap::new();
+                let mut groups: BTreeMap<Vec<Value>, Vec<Vec<Option<Value>>>> = BTreeMap::new();
                 for row in &operator_outputs[input.0] {
                     meter.rows_evaluated += 1;
                     charge_work(meter, work_offset, max_work)?;
@@ -875,12 +1539,28 @@ pub fn evaluate_with_budget(
                         )?;
                         key.push(Value::from_scalar(l3_val)?);
                     }
-                    *groups.entry(key).or_insert(0) += 1;
+                    let mut aggregates = Vec::with_capacity(compiled_aggregates.len());
+                    for compiled in compiled_aggregates {
+                        let value = if let Some(compiled) = compiled {
+                            let l3_val = eval_compiled_with_budget(
+                                compiled,
+                                &bindings,
+                                meter,
+                                work_offset,
+                                max_work,
+                            )?;
+                            Some(Value::from_scalar(l3_val)?)
+                        } else {
+                            None
+                        };
+                        aggregates.push(value);
+                    }
+                    groups.entry(key).or_default().push(aggregates);
                 }
                 groups
                     .into_iter()
-                    .map(|(key, count)| build_grouped_row(projections, &key, count))
-                    .collect()
+                    .map(|(key, values)| build_grouped_row(projections, &key, &values))
+                    .collect::<Result<Vec<_>, _>>()?
             }
         };
         operator_outputs.push(rows);

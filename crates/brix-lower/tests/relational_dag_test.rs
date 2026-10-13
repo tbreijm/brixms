@@ -79,6 +79,187 @@ rel derived fulfillment =
 }
 
 #[test]
+fn decision_winner_sources_share_one_acyclic_lowering_order() {
+    let src = r#"
+rel input orders: { id: Str, quote: Int } key id
+decide approve for o in orders per id { propose accept priority 1 when true = o.quote }
+rel derived approved = select { id: a.id, quote: a.value } from a in approve
+decide dispatch for a in approved per id { propose ship priority 2 when true = a.quote }
+"#;
+    let mut sources = BTreeMap::new();
+    sources.insert("root".to_string(), src.to_string());
+    let loader = |name: &str| sources.get(name).cloned();
+    let linked = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default())
+        .expect("loads")
+        .link()
+        .expect("links");
+    let dag = lower_relations(&linked).expect("lowering");
+
+    let approve = dag.relation_outputs["root::approve"];
+    let approved = dag.relation_outputs["root::approved"];
+    let dispatch = dag.relation_outputs["root::dispatch"];
+    assert!(
+        approve < approved && approved < dispatch,
+        "stages must be topologically ordered"
+    );
+    assert!(matches!(
+        dag.nodes[approve.0],
+        OperatorNode::DecisionRows { .. }
+    ));
+    assert!(matches!(
+        dag.nodes[dispatch.0],
+        OperatorNode::DecisionRows { .. }
+    ));
+    let schemas = brix_lower::relation_dag::decision_field_schemas(&dag, &linked);
+    assert_eq!(
+        schemas[approve.0]["value"],
+        brix_syntax::ast::Ty::Named("Int".into())
+    );
+}
+
+#[test]
+fn correlated_not_exists_lowers_to_indexed_anti_join_and_refuses_cycles() {
+    let src = r#"
+rel input orders: { id: Str } key id
+rel input quote: { order_id: Str } key order_id
+rel derived unquoted = select { id: o.id } from o in orders
+    where not exists q in quote where q.order_id == o.id
+"#;
+    let mut sources = BTreeMap::new();
+    sources.insert("root".to_string(), src.to_string());
+    let loader = |name: &str| sources.get(name).cloned();
+    let linked = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default())
+        .expect("loads")
+        .link()
+        .expect("links");
+    let dag = lower_relations(&linked).expect("lowers anti-join");
+    assert!(dag.nodes.iter().any(|node| matches!(node,
+        OperatorNode::AntiJoin { left_keys, right_keys, .. }
+            if left_keys == &[brix_lower::relation_dag::FieldRef { binding: "o".into(), field: "id".into() }]
+                && right_keys == &[brix_lower::relation_dag::FieldRef { binding: "q".into(), field: "order_id".into() }]
+    )));
+
+    let cyclic = r#"
+rel input seed: { id: Str } key id
+rel derived a = select { id: s.id } from s in seed where not exists q in b where q.id == s.id
+rel derived b = select { id: x.id } from x in a
+"#;
+    sources.insert("root".to_string(), cyclic.to_string());
+    let linked = ModuleGraph::load(
+        "root",
+        &|name: &str| sources.get(name).cloned(),
+        ModuleLoaderLimits::default(),
+    )
+    .expect("loads")
+    .link()
+    .expect("links");
+    assert!(matches!(
+        lower_relations(&linked),
+        Err(RelationalLowerError::UnstratifiedNegation { .. })
+    ));
+}
+
+#[test]
+fn absence_and_zero_count_refuse_ambiguous_or_lossy_query_shapes() {
+    let cases = [
+        (
+            "rel input parents: { id: Str } key id\nrel input children: { id: Str } key id",
+            "select { id: p.id } from p in parents where not exists p in children where p.id == p.id",
+            "duplicates an outer query binding",
+        ),
+        (
+            "rel input parents: { id: Str, tenant: Str } key (id, tenant)\nrel input children: { id: Str } key id",
+            "select { id: p.id, count: count_or_zero() } from p in parents, c in children where p.id == c.id group by p.id",
+            "complete single-field key",
+        ),
+        (
+            "rel input parents: { id: Str } key id\nrel input children: { id: Str } key id",
+            "select { id: p.id, count: count_or_zero(), also: count_or_zero() } from p in parents, c in children where p.id == c.id group by p.id",
+            "exactly two distinctly named projections",
+        ),
+        (
+            "rel input parents: { id: Str } key id\nrel input children: { id: Str } key id",
+            "select { id: p.id, also: p.id, count: count_or_zero() } from p in parents, c in children where p.id == c.id group by p.id",
+            "exactly two distinctly named projections",
+        ),
+        (
+            "rel input parents: { id: Str } key id\nrel input children: { id: Str } key id",
+            "select { id: p.id, id: count_or_zero() } from p in parents, c in children where p.id == c.id group by p.id",
+            "exactly two distinctly named projections",
+        ),
+    ];
+    for (declarations, query, diagnostic) in cases {
+        let source = format!("{declarations}\nrel derived result = {query}");
+        let linked = ModuleGraph::load(
+            "root",
+            &|_: &str| Some(source.clone()),
+            ModuleLoaderLimits::default(),
+        )
+        .expect("parse and load")
+        .link()
+        .expect("link");
+        let error = lower_relations(&linked).expect_err("must refuse before execution");
+        assert!(
+            matches!(&error, RelationalLowerError::UnsupportedExpression(message)
+                        if message.contains(diagnostic)),
+            "{query}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn relation_decide_dependency_cycle_is_refused_with_participants() {
+    let src = r#"
+rel input orders: { id: Str, quote: Int } key id
+rel derived loop = select { id: a.id } from a in approve
+decide approve for x in loop per id { propose accept priority 1 when true = 1 }
+"#;
+    let mut sources = BTreeMap::new();
+    sources.insert("root".to_string(), src.to_string());
+    let loader = |name: &str| sources.get(name).cloned();
+    let linked = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default())
+        .expect("loads")
+        .link()
+        .expect("links");
+    let err = lower_relations(&linked).expect_err("decision/relation cycle is invalid");
+    match err {
+        RelationalLowerError::RecursiveRelationCycle { cycle } => {
+            assert!(cycle.contains(&"root::approve".to_string()));
+            assert!(cycle.contains(&"root::loop".to_string()));
+        }
+        other => panic!("expected a named dependency cycle, got {other:?}"),
+    }
+}
+
+#[test]
+fn winner_row_schema_rejects_conflicting_values_reserved_keys_and_int_overflow() {
+    let cases = [
+        (
+            "rel input rows: { id: Str } key id\ndecide d for r in rows per id { propose a priority 1 when true = 1 propose b priority 2 when true = \"x\" }",
+            "inconsistent result types",
+        ),
+        (
+            "rel input rows: { candidate: Str } key candidate\ndecide d for r in rows per candidate { propose a priority 1 when true = 1 }",
+            "reserved winner-row field",
+        ),
+        (
+            "rel input rows: { id: Str } key id\ndecide d for r in rows per id { propose a priority 18446744073709551615 when true = 1 }",
+            "winner-row Int range",
+        ),
+    ];
+    for (source, expected) in cases {
+        let sources = BTreeMap::from([("root".to_string(), source.to_string())]);
+        let loader = |name: &str| sources.get(name).cloned();
+        let linked = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default())
+            .expect("loads")
+            .link()
+            .expect("links");
+        let error = lower_relations(&linked).expect_err("invalid winner row contract");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
 fn test_grouped_count_lowering_to_operator_dag() {
     let src = r#"
 rel input order: { id: Str, sku: Str, qty: Int } key id

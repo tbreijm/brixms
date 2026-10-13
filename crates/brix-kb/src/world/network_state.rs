@@ -31,12 +31,12 @@ use super::state_codec::{read_op, read_string, StateCodec, StateCodecError, SubR
 use super::state_store::{StateError, StateStore};
 
 /// Schema tag of the header object.
-pub const NETWORK_STATE_SCHEMA: &str = "brix.world.network-state@1";
+pub const NETWORK_STATE_SCHEMA: &str = "brix.world.network-state@2";
 
 /// Version of the program-to-network lowering and operator semantics. Bump whenever a change
 /// to the lowering, the expression compiler or an operator could change persisted state for
 /// the same program; worlds written under another version replay on open.
-pub const NETWORK_LOWERING_VERSION: &str = "brix.world.net-lowering@1";
+pub const NETWORK_LOWERING_VERSION: &str = "brix.world.net-lowering@2";
 
 /// Everything that must be identical for persisted network state to be reusable.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -149,20 +149,31 @@ pub enum OperatorRoots {
     /// `Distinct`: the typed support index.
     Distinct(SubRoot),
     /// `GroupedCount`: the group support index.
-    Group(SubRoot),
+    Group {
+        supports: SubRoot,
+        aggregates: SubRoot,
+    },
+    /// `AntiJoin`: indexed left and right support rows.
+    Anti { left: SubRoot, right: SubRoot },
+    /// `ParentCount`: indexed parent and child rows.
+    ParentCount { left: SubRoot, right: SubRoot },
 }
 
 impl OperatorRoots {
     const KIND_JOIN: u64 = 1;
     const KIND_DISTINCT: u64 = 2;
     const KIND_GROUP: u64 = 3;
+    const KIND_ANTI: u64 = 4;
+    const KIND_PARENT_COUNT: u64 = 5;
 
     /// Human-readable operator kind (for error messages).
     pub fn kind_name(&self) -> &'static str {
         match self {
             Self::Join { .. } => "join",
             Self::Distinct(_) => "distinct",
-            Self::Group(_) => "group",
+            Self::Group { .. } => "group",
+            Self::Anti { .. } => "anti-join",
+            Self::ParentCount { .. } => "parent-count",
         }
     }
 }
@@ -221,9 +232,23 @@ impl NetworkStateHeader {
                     w.write_uint(OperatorRoots::KIND_DISTINCT);
                     r.state_write(&mut w);
                 }
-                OperatorRoots::Group(r) => {
+                OperatorRoots::Group {
+                    supports,
+                    aggregates,
+                } => {
                     w.write_uint(OperatorRoots::KIND_GROUP);
-                    r.state_write(&mut w);
+                    supports.state_write(&mut w);
+                    aggregates.state_write(&mut w);
+                }
+                OperatorRoots::Anti { left, right } => {
+                    w.write_uint(OperatorRoots::KIND_ANTI);
+                    left.state_write(&mut w);
+                    right.state_write(&mut w);
+                }
+                OperatorRoots::ParentCount { left, right } => {
+                    w.write_uint(OperatorRoots::KIND_PARENT_COUNT);
+                    left.state_write(&mut w);
+                    right.state_write(&mut w);
                 }
             }
         }
@@ -274,7 +299,18 @@ impl NetworkStateHeader {
                 OperatorRoots::KIND_DISTINCT => {
                     OperatorRoots::Distinct(SubRoot::state_read(&mut r)?)
                 }
-                OperatorRoots::KIND_GROUP => OperatorRoots::Group(SubRoot::state_read(&mut r)?),
+                OperatorRoots::KIND_GROUP => OperatorRoots::Group {
+                    supports: SubRoot::state_read(&mut r)?,
+                    aggregates: SubRoot::state_read(&mut r)?,
+                },
+                OperatorRoots::KIND_ANTI => OperatorRoots::Anti {
+                    left: SubRoot::state_read(&mut r)?,
+                    right: SubRoot::state_read(&mut r)?,
+                },
+                OperatorRoots::KIND_PARENT_COUNT => OperatorRoots::ParentCount {
+                    left: SubRoot::state_read(&mut r)?,
+                    right: SubRoot::state_read(&mut r)?,
+                },
                 t => return Err(StateCodecError::UnknownTag(t)),
             };
             prev_op = Some(op);
@@ -377,7 +413,13 @@ mod tests {
             },
         );
         operators.insert(OperatorId(5), OperatorRoots::Distinct(sr(5, 6)));
-        operators.insert(OperatorId(6), OperatorRoots::Group(sr(6, 7)));
+        operators.insert(
+            OperatorId(6),
+            OperatorRoots::Group {
+                supports: sr(6, 7),
+                aggregates: sr(7, 8),
+            },
+        );
         NetworkStateHeader {
             validity: ValidityKey::current(d(9), Some(d(10)), d(11)),
             decision: sr(7, 8),
@@ -417,8 +459,13 @@ mod tests {
         e.validity.network_fingerprint = Digest::of(Domain::State, b"other");
         assert_ne!(a.digest(), e.digest());
         let mut d = sample();
-        d.operators
-            .insert(OperatorId(7), OperatorRoots::Group(SubRoot::empty()));
+        d.operators.insert(
+            OperatorId(7),
+            OperatorRoots::Group {
+                supports: SubRoot::empty(),
+                aggregates: SubRoot::empty(),
+            },
+        );
         assert_ne!(a.digest(), d.digest());
     }
 
@@ -450,7 +497,7 @@ mod tests {
         ));
         // A future schema tag is stale, whatever follows it.
         let mut w = CanonWriter::new();
-        put_str(&mut w, "brix.world.network-state@2");
+        put_str(&mut w, "brix.world.network-state@3");
         w.write_uint(7);
         let bytes = w.finish();
         let fd = Digest::of(Domain::State, &bytes);

@@ -14,9 +14,7 @@ use brix_lower::module_graph::{ModuleGraph, ModuleLoaderLimits};
 use soc_core::calendar::Key;
 use soc_core::store::TrieMap;
 
-use super::audit::{
-    DecisionTupleV1, ExecProfileV1, ScopeV1, WorldAuditBundleV1, WorldAuditDecodeLimits,
-};
+use super::audit::{DecisionTupleV1, ScopeV1, WorldAuditBundleV1, WorldAuditDecodeLimits};
 use super::codec::{encode_secondary_key, extract_indexed_field};
 use super::decision_codec::{compute_decision_root, encode_decision_delta, SettledDecision, Value};
 use super::error::WorldError;
@@ -254,20 +252,49 @@ impl From<WorldError> for VerifyError {
     }
 }
 
+fn convert_reference_value(v: &reference::Value) -> Value {
+    match v {
+        reference::Value::Null => Value::Null,
+        reference::Value::Bool(b) => Value::Bool(*b),
+        reference::Value::Int(i) => Value::Int(*i),
+        reference::Value::Str(st) => Value::Str(st.clone()),
+        reference::Value::F64(f) => Value::F64(*f),
+        reference::Value::Decimal(d) => Value::Decimal(*d),
+        reference::Value::Record { nominal, fields } => {
+            let mut map = std::collections::BTreeMap::new();
+            for (k, val) in fields {
+                map.insert(k.clone(), convert_reference_value(val));
+            }
+            Value::Record {
+                nominal: nominal.clone(),
+                fields: map,
+            }
+        }
+        reference::Value::Variant {
+            nominal,
+            variant,
+            args,
+        } => {
+            let mut vec = Vec::with_capacity(args.len());
+            for a in args {
+                vec.push(convert_reference_value(a));
+            }
+            Value::Variant {
+                nominal: nominal.clone(),
+                variant: variant.clone(),
+                args: vec,
+            }
+        }
+    }
+}
+
 fn convert_reference_settlement(s: &ReferenceSettlement) -> SettledDecision {
     SettledDecision {
         entity_id: s.entity_id.clone(),
         candidate_name: s.candidate_name.clone(),
         priority: s.priority,
         phase: s.phase,
-        value: match &s.value {
-            reference::Value::Null => Value::Null,
-            reference::Value::Bool(b) => Value::Bool(*b),
-            reference::Value::Int(i) => Value::Int(*i),
-            reference::Value::Str(st) => Value::Str(st.clone()),
-            reference::Value::F64(f) => Value::F64(*f),
-            reference::Value::Decimal(d) => Value::Decimal(*d),
-        },
+        value: convert_reference_value(&s.value),
         calendar_key: s.calendar_key,
     }
 }
@@ -313,7 +340,7 @@ pub fn verify_world_audit_bundle(
         if bundle.exec_profile.profile != crate::world::EXEC_PROFILE_SCHEMA {
             return Err(VerifyError::UnknownProfile);
         }
-        if bundle.exec_profile != ExecProfileV1::default() {
+        if !bundle.exec_profile.is_supported() {
             return Err(VerifyError::UnsupportedExecProfile(format!(
                 "{:?}",
                 bundle.exec_profile
@@ -632,7 +659,9 @@ pub fn verify_world_audit_bundle(
                     .or_default()
                     .insert(entity.clone(), dec);
             }
-            let computed_root = if ref_prog.is_some() || !prev_settlements.is_empty() {
+            let computed_root = if ref_prog.as_ref().is_some_and(|p| !p.decides.is_empty())
+                || !prev_settlements.is_empty()
+            {
                 Some(compute_decision_root(&prev_settlements))
             } else {
                 None
@@ -913,7 +942,11 @@ pub fn verify_world_audit_bundle(
                 curr_settlements.insert(decide.clone(), ent_map);
             }
 
-            let computed_root = Some(compute_decision_root(&curr_settlements));
+            // A program without `decide` blocks records no decision root
+            // (see `WorldSession::apply_batch`); replay must agree.
+            let computed_root = (ref_prog.as_ref().is_some_and(|p| !p.decides.is_empty())
+                || !curr_settlements.is_empty())
+            .then(|| compute_decision_root(&curr_settlements));
 
             if computed_root != record.decision_root {
                 return Err(VerifyError::DecisionRootMismatch {

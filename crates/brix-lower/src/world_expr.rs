@@ -168,9 +168,65 @@ pub fn build_nominal_schemas(
             body,
         };
         schemas.insert(qname.to_string(), schema.clone());
-        schemas.insert(decl.name.clone(), schema);
+    }
+    // Bare schema aliases are a convenience for direct callers, never a
+    // first-wins nominal identity when packages reuse a local config name.
+    for (qname, decl) in configs {
+        if configs.keys().filter(|q| q.name == qname.name).count() == 1 {
+            schemas.insert(decl.name.clone(), schemas[&qname.to_string()].clone());
+        }
     }
     Ok(Arc::new(schemas))
+}
+
+/// Build constructor resolution tables from nominal schemas.
+/// Returns (nullary_map, variants_of_map, ambiguous_ctors_map).
+pub type ConstructorTables = (
+    BTreeMap<String, String>,
+    BTreeMap<String, String>,
+    BTreeMap<String, Vec<String>>,
+);
+
+pub fn build_constructor_tables(schemas: &BTreeMap<String, L3Schema>) -> ConstructorTables {
+    use crate::l3_v2::L3SchemaBody;
+    let mut names: BTreeMap<String, BTreeSet<(String, String, bool)>> = BTreeMap::new();
+    for schema in schemas.values() {
+        if let L3SchemaBody::Sum(variants) = &schema.body {
+            for (variant, payloads) in variants {
+                let full = format!("{}::{variant}", schema.name);
+                let mut aliases = vec![variant.clone(), full.clone()];
+                if let Some((module, local)) = schema.name.rsplit_once("::") {
+                    aliases.push(format!("{local}::{variant}"));
+                    aliases.push(format!("{module}::{variant}"));
+                }
+                for alias in aliases {
+                    names.entry(alias).or_default().insert((
+                        schema.name.clone(),
+                        full.clone(),
+                        payloads.is_empty(),
+                    ));
+                }
+            }
+        }
+    }
+    let mut nullary = BTreeMap::new();
+    let mut variants_of = BTreeMap::new();
+    let mut ambiguous = BTreeMap::new();
+    for (name, candidates) in names {
+        if candidates.len() > 1 {
+            ambiguous.insert(
+                name,
+                candidates.into_iter().map(|(_, full, _)| full).collect(),
+            );
+        } else if let Some((nominal, _, is_nullary)) = candidates.into_iter().next() {
+            if is_nullary {
+                nullary.insert(name, nominal);
+            } else {
+                variants_of.insert(name, nominal);
+            }
+        }
+    }
+    (nullary, variants_of, ambiguous)
 }
 
 /// Immutable compiled program environment containing compiled helper functions,
@@ -181,6 +237,9 @@ pub struct CompiledProgramEnv {
     pub arities: Arc<BTreeMap<String, usize>>,
     pub functions: Arc<BTreeMap<String, L3FunctionDef>>,
     pub schemas: Arc<BTreeMap<String, L3Schema>>,
+    pub nullary: Arc<BTreeMap<String, String>>,
+    pub variants_of: Arc<BTreeMap<String, String>>,
+    pub ambiguous_ctors: Arc<BTreeMap<String, Vec<String>>>,
 }
 
 impl CompiledProgramEnv {
@@ -192,22 +251,32 @@ impl CompiledProgramEnv {
             .iter()
             .map(|(name, f)| (name.clone(), f.params.len()))
             .collect();
+        let arities_arc = Arc::new(arities);
+        let (nullary, variants_of, ambiguous_ctors) = build_constructor_tables(&schemas);
+        let nullary_arc = Arc::new(nullary);
+        let variants_of_arc = Arc::new(variants_of);
+        let ambiguous_ctors_arc = Arc::new(ambiguous_ctors);
+
         let empty_set = BTreeSet::new();
-        let empty_map = BTreeMap::new();
-        let lower = |expr: &ast::Expr, names: &BTreeSet<String>| {
+        let nullary_ref = nullary_arc.clone();
+        let variants_ref = variants_of_arc.clone();
+        let ambig_ref = ambiguous_ctors_arc.clone();
+        let arities_ref = arities_arc.clone();
+        let lower = move |expr: &ast::Expr, names: &BTreeSet<String>| {
             let normalized = normalize_world_and(expr);
-            l3_v2::lower_expr_v2(
+            l3_v2::lower_expr_v2_with_ambiguous(
                 &normalized,
                 names,
                 names,
                 &empty_set,
-                &empty_map,
-                &empty_map,
-                &arities,
+                &nullary_ref,
+                &variants_ref,
+                &arities_ref,
                 false,
                 true,
+                &ambig_ref,
             )
-            .map_err(|e| format!("world expression lowering: {e:?}"))
+            .map_err(|e| format!("world expression lowering: {e}"))
         };
         let mut functions = BTreeMap::new();
         for (name, f) in helpers {
@@ -230,9 +299,12 @@ impl CompiledProgramEnv {
             );
         }
         Ok(Self {
-            arities: Arc::new(arities),
+            arities: arities_arc,
             functions: Arc::new(functions),
             schemas,
+            nullary: nullary_arc,
+            variants_of: variants_of_arc,
+            ambiguous_ctors: ambiguous_ctors_arc,
         })
     }
 
@@ -240,11 +312,10 @@ impl CompiledProgramEnv {
     pub fn from_linked_program(
         program: &crate::module_graph::LinkedProgram,
     ) -> Result<Arc<Self>, String> {
-        let schemas = build_nominal_schemas(&program.configs)?;
+        let schemas = build_nominal_schemas(&program.available_configs)?;
         let mut helpers = BTreeMap::new();
         for (qname, callable) in &program.functions {
             helpers.insert(qname.to_string(), callable.clone());
-            helpers.insert(callable.name.clone(), callable.clone());
         }
         let env = Self::new(&helpers, schemas)?;
         Ok(Arc::new(env))
@@ -259,20 +330,20 @@ impl CompiledProgramEnv {
     ) -> Result<CompiledWorldExpr, String> {
         EXPR_COMPILATION_COUNT.fetch_add(1, Ordering::SeqCst);
         let empty_set = BTreeSet::new();
-        let empty_map = BTreeMap::new();
         let normalized = normalize_world_and(expr);
-        let lowered = l3_v2::lower_expr_v2(
+        let lowered = l3_v2::lower_expr_v2_with_ambiguous(
             &normalized,
             bindings,
             bindings,
             &empty_set,
-            &empty_map,
-            &empty_map,
+            &self.nullary,
+            &self.variants_of,
             &self.arities,
             false,
             true,
+            &self.ambiguous_ctors,
         )
-        .map_err(|e| format!("world expression lowering: {e:?}"))?;
+        .map_err(|e| format!("world expression lowering: {e}"))?;
 
         Ok(CompiledWorldExpr {
             expr: lowered,
@@ -318,15 +389,49 @@ impl CompiledWorldExpr {
     ) -> Result<(L3ValueV2, usize), String> {
         let mut env = EvalEnv::new()
             .with_functions(self.functions.clone())
-            .with_schemas(self.schemas.clone());
+            .with_schemas(self.schemas.clone())
+            .with_checked_constructors();
         for (name, value) in bindings {
             env = env.with_let(name, value.clone());
         }
-        l3_v2::eval_with_budget(&self.expr, &env, max_steps)
-            .map_err(|fault| format!("Unknown(EvaluationFault): {fault}"))
+        let (value, steps) = l3_v2::eval_with_budget(&self.expr, &env, max_steps)
+            .map_err(|fault| format!("Unknown(EvaluationFault): {fault}"))?;
+        validate_world_result(&value, &self.schemas)?;
+        Ok((value, steps))
     }
 
     pub fn eval(&self, bindings: &BTreeMap<String, L3ValueV2>) -> Result<L3ValueV2, String> {
         self.eval_with_budget(bindings, None).map(|(val, _)| val)
+    }
+}
+
+/// Validate every structured result, including structured fields projected in
+/// anonymous relation tuples, before it enters settlement or persistent state.
+fn validate_world_result(
+    value: &L3ValueV2,
+    schemas: &BTreeMap<String, L3Schema>,
+) -> Result<(), String> {
+    match value {
+        L3ValueV2::Ctor { nominal_sum, .. } => l3_v2::validate_l3_value(
+            value,
+            &L3SchemaType::Named(nominal_sum.clone()),
+            schemas,
+            "<result>",
+        ),
+        L3ValueV2::Record { nominal_config, .. } if !nominal_config.is_empty() => {
+            l3_v2::validate_l3_value(
+                value,
+                &L3SchemaType::Named(nominal_config.clone()),
+                schemas,
+                "<result>",
+            )
+        }
+        L3ValueV2::Record { fields, .. } => {
+            for (_, field) in fields {
+                validate_world_result(field, schemas)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }

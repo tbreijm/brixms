@@ -6,7 +6,7 @@ use brix_lower::relation_dag::{lower_relations, OperatorNode};
 use soc_core::store::{FileNodeStore, TrieMap};
 
 use super::state_store::{StateStore, DEFAULT_NODE_CACHE_BYTES};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,7 +22,7 @@ use super::decision_codec::compute_decision_root;
 use super::error::{CrashPoint, WorldError};
 use super::idempotency::{IdempotencyIndex, IdempotencySource};
 use super::manifest::{RelationDecl, WorldManifest, WORLD_PROFILE};
-use super::network::{DecisionExplanation, SettledDecision, WorldNetwork};
+use super::network::{DecisionExplanation, SettledDecision, UpstreamSettlementLink, WorldNetwork};
 use super::network_state::{Loaded, NetworkStateHeader, ValidityKey};
 use super::oracle::DiffEvent;
 use super::paths::WorldPaths;
@@ -233,7 +233,7 @@ fn apply_ops_chunked(
             }
         }
         run.chunks = ctx.chunks();
-        Ok(sn.finish_batch(ctx))
+        sn.finish_batch_cascade(ctx, lim, Some(lookup))
     })();
     match chunked {
         Ok(report) => Ok((sn, report, run)),
@@ -769,6 +769,20 @@ impl ExecProfileV1 {
         }
     }
 
+    /// Whether this execution profile is supported by the current runtime evaluator.
+    pub fn is_supported(&self) -> bool {
+        let current = Self::current_for_network();
+        self.evaluator == current.evaluator
+            && self.numeric_semantics == current.numeric_semantics
+            && self.settlement == current.settlement
+            && self.module_loader_limits == current.module_loader_limits
+            && Self::is_supported_version(&self.crate_version)
+    }
+
+    pub fn is_supported_version(version: &str) -> bool {
+        matches!(version, "0.1.0-alpha.5" | "0.1.0-alpha.6") || version == env!("CARGO_PKG_VERSION")
+    }
+
     /// Canonical profile identity, including the candidate-value admissibility rule.
     pub fn digest(&self) -> Digest {
         let mut w = CanonWriter::new();
@@ -1295,7 +1309,7 @@ impl WorldSession {
             }
         }
         if let Some(profile) = &session.exec_profile {
-            if profile != &ExecProfileV1::current_for_network() {
+            if !profile.is_supported() {
                 return Err(WorldError::InvalidSchema(
                     "unsupported execution profile".into(),
                 ));
@@ -1514,7 +1528,7 @@ impl WorldSession {
                     network.state_store().flush()?;
                 }
             }
-            network.finish_batch(ctx);
+            network.finish_batch_cascade(ctx, &limits, None)?;
             Ok(())
         })();
         match chunked {
@@ -2884,6 +2898,80 @@ impl WorldSession {
             Some(n) => n.explain_decision_for(decide_name, entity_key),
             None => Ok(None),
         }
+    }
+
+    pub fn historical_explain_decision_for(
+        &self,
+        seq: u64,
+        decide_name: &str,
+        entity_key: &str,
+    ) -> Result<Option<DecisionExplanation>, WorldError> {
+        let snapshot = self.pin_revision(seq)?;
+        let Some(network) = self.network.as_ref() else {
+            return Ok(None);
+        };
+        let mut historical = network.clear_data();
+        let mut ops = Vec::new();
+        for (relation, trie) in &snapshot.relations {
+            if !network.base_relations.contains_key(relation) {
+                continue;
+            }
+            let (entries, _) = trie.iter_page_with_store(None, usize::MAX, &snapshot.node_store)?;
+            ops.extend(
+                entries
+                    .into_iter()
+                    .map(|(key, tuple)| WorldBatchOp::Upsert {
+                        relation: relation.clone(),
+                        key,
+                        tuple,
+                    }),
+            );
+        }
+        historical.apply_ops(&ops)?;
+        let mut explanation = historical.explain_decision_for(decide_name, entity_key)?;
+        if let Some(explanation) = &mut explanation {
+            let revisions =
+                self.historical_settlement_revisions(seq, &explanation.upstream_settlements)?;
+            for link in &mut explanation.upstream_settlements {
+                let key = (link.decide.clone(), link.entity_id.clone());
+                link.revision = *revisions.get(&key).ok_or_else(|| {
+                    WorldError::NetworkError(format!(
+                        "historical provenance has no settlement journal entry for '{}' entity '{}' at revision {seq}",
+                        link.decide, link.entity_id
+                    ))
+                })?;
+            }
+        }
+        Ok(explanation)
+    }
+
+    fn historical_settlement_revisions(
+        &self,
+        seq: u64,
+        links: &[UpstreamSettlementLink],
+    ) -> Result<BTreeMap<(String, String), u64>, WorldError> {
+        let mut unresolved: BTreeSet<(String, String)> = links
+            .iter()
+            .map(|link| (link.decide.clone(), link.entity_id.clone()))
+            .collect();
+        let mut found = BTreeMap::new();
+        for revision in (1..=seq).rev() {
+            if unresolved.is_empty() {
+                break;
+            }
+            for (key, settlement) in self.decision_delta(revision)? {
+                if unresolved.remove(&key) && settlement.is_some() {
+                    found.insert(key, revision);
+                }
+            }
+        }
+        if !unresolved.is_empty() {
+            let (decide, entity) = unresolved.iter().next().unwrap();
+            return Err(WorldError::NetworkError(format!(
+                "historical provenance is missing a settlement journal entry for '{decide}' entity '{entity}' at revision {seq}"
+            )));
+        }
+        Ok(found)
     }
 
     /// Read and authenticate a committed revision's canonical decision changes.
