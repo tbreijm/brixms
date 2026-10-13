@@ -32,6 +32,16 @@ rel derived order_quote_counts =
     from o in orders, q in quote where q.order_id == o.id group by o.id
 "#;
 
+const EXISTS_SOURCE: &str = r#"
+rel input orders: { id: Str } key id
+rel input quote: { id: Str, order_id: Str } key id
+rel derived missing = select { id: o.id } from o in orders
+    where not exists q in quote where q.order_id == o.id
+decide availability for m in missing per id {
+    propose missing_calculation priority 1 when true = "MissingCalculation"
+}
+"#;
+
 fn network(source: &str) -> WorldNetwork {
     let mut sources = BTreeMap::new();
     sources.insert("root".to_string(), source.to_string());
@@ -85,6 +95,7 @@ fn assert_reference(network: &WorldNetwork) {
 fn counts(network: &WorldNetwork) -> Vec<(String, i64)> {
     let mut out = network
         .get_derived_tuples("root::order_quote_counts")
+        .unwrap()
         .expect("count relation")
         .into_iter()
         .map(|tuple| {
@@ -147,12 +158,13 @@ fn persisted_batch(session: &mut WorldSession, revision: u64, ops: Vec<WorldBatc
 }
 
 #[test]
-fn anti_join_tracks_zero_one_multiple_one_zero_and_parent_removal() {
+fn parent_count_tracks_zero_one_multiple_one_zero_and_parent_removal() {
     let mut net = network(SOURCE);
     apply(&mut net, 0, vec![upsert("orders", "o1", &[("id", "o1")])]);
     assert_eq!(counts(&net), [("o1".into(), 0)]);
     assert_eq!(
         net.get_settlement("root::availability", "o1")
+            .unwrap()
             .unwrap()
             .candidate_name,
         "missing_calculation"
@@ -166,6 +178,7 @@ fn anti_join_tracks_zero_one_multiple_one_zero_and_parent_removal() {
     assert_eq!(counts(&net), [("o1".into(), 1)]);
     assert_eq!(
         net.get_settlement("root::availability", "o1")
+            .unwrap()
             .unwrap()
             .candidate_name,
         "quoted"
@@ -186,6 +199,7 @@ fn anti_join_tracks_zero_one_multiple_one_zero_and_parent_removal() {
     assert_eq!(
         net.get_settlement("root::availability", "o1")
             .unwrap()
+            .unwrap()
             .candidate_name,
         "missing_calculation"
     );
@@ -193,6 +207,106 @@ fn anti_join_tracks_zero_one_multiple_one_zero_and_parent_removal() {
     assert!(counts(&net).is_empty());
     apply(&mut net, 6, vec![upsert("orders", "o1", &[("id", "o1")])]);
     assert_eq!(counts(&net), [("o1".into(), 0)]);
+}
+
+#[test]
+fn actual_not_exists_transitions_survive_cold_restore_and_independent_audit() {
+    let (dir, mut world, sources) = persistent_world("actual_absence", EXISTS_SOURCE);
+    let batches = [
+        vec![upsert("orders", "o1", &[("id", "o1")])],
+        vec![upsert("quote", "q1", &[("id", "q1"), ("order_id", "o1")])],
+        vec![upsert("quote", "q2", &[("id", "q2"), ("order_id", "o1")])],
+        vec![remove("quote", "q1")],
+        vec![remove("quote", "q2")],
+        vec![remove("orders", "o1")],
+        vec![upsert("orders", "o1", &[("id", "o1")])],
+        // Simultaneous parent removal and child insertion must leave no stale row.
+        vec![
+            remove("orders", "o1"),
+            upsert("quote", "q3", &[("id", "q3"), ("order_id", "o1")]),
+        ],
+        vec![upsert("orders", "o1", &[("id", "o1")])],
+        vec![remove("quote", "q3")],
+    ];
+    let expected = [
+        true, false, false, false, true, false, true, false, false, true,
+    ];
+    for (revision, (ops, missing)) in batches.into_iter().zip(expected).enumerate() {
+        persisted_batch(&mut world, revision as u64, ops);
+        drop(world);
+        world = WorldSession::open(&dir.0).expect("restore anti-join after each transition");
+        assert_eq!(world.open_mode, brix_kb::world::OpenMode::Restored);
+        world
+            .verify_state()
+            .expect("persisted indexes agree with replay");
+        let rows = world.get_derived("root::missing").unwrap().unwrap();
+        assert_eq!(
+            rows.len(),
+            usize::from(missing),
+            "revision {}",
+            revision + 1
+        );
+        if missing {
+            assert_eq!(rows[0].get_str("id"), Some("o1"));
+        }
+        assert_eq!(
+            world
+                .network
+                .as_ref()
+                .unwrap()
+                .get_settlement("root::availability", "o1")
+                .unwrap()
+                .is_some(),
+            missing
+        );
+    }
+    let closure = ProgramClosureV1 {
+        root_module: "root".into(),
+        sources: sources.into_iter().collect(),
+        program_manifest_digest: world.manifest().program_digest,
+    };
+    let bundle =
+        build_genesis_bundle_from_session(&world, closure, ExecProfileV1::default()).unwrap();
+    let options = VerifyOptions {
+        expect_head: world.current_revision_digest().unwrap(),
+        expect_program: world.manifest().program_digest,
+        trust_checkpoint: None,
+        limits: WorldAuditDecodeLimits::default(),
+        max_work: None,
+    };
+    let report =
+        verify_world_audit_bundle(&bundle, &options).expect("independent anti-join replay");
+    assert_eq!(report.work.revisions_replayed, 10);
+}
+
+#[test]
+fn actual_not_exists_unrelated_growth_does_not_increase_operator_work() {
+    fn measured(unrelated: usize) -> u64 {
+        let mut net = network(EXISTS_SOURCE);
+        let mut ops = vec![upsert("orders", "target", &[("id", "target")])];
+        for i in 0..unrelated {
+            let id = format!("other-{i}");
+            ops.push(upsert("orders", &id, &[("id", &id)]));
+            ops.push(upsert("quote", &id, &[("id", &id), ("order_id", &id)]));
+        }
+        apply(&mut net, 0, ops);
+        let report = apply(
+            &mut net,
+            1,
+            vec![upsert(
+                "quote",
+                "target-quote",
+                &[("id", "target-quote"), ("order_id", "target")],
+            )],
+        );
+        assert!(net
+            .get_derived_tuples("root::missing")
+            .unwrap()
+            .unwrap()
+            .is_empty());
+        report.diagnostics.operator_work.values().sum()
+    }
+    assert_eq!(measured(0), measured(1000));
 }
 
 #[test]
@@ -361,4 +475,50 @@ fn decided_absence_fallback_flips_back_after_last_child_and_reopens_historically
         .historical_explain_decision_for(3, "root::availability", "o1")
         .unwrap()
         .is_some());
+}
+
+#[test]
+fn absence_fanout_obeys_match_and_work_budgets_atomically() {
+    use brix_kb::world::network::NetworkLimits;
+    use brix_kb::world::WorldError;
+    let source = r#"
+rel input orders: { id: Str, sku: Str } key id
+rel input quote: { id: Str, sku: Str } key id
+rel derived missing = select { id: o.id } from o in orders
+    where not exists q in quote where q.sku == o.sku
+"#;
+    let mut net = network(source);
+    let parents = (0..64)
+        .map(|i| {
+            let id = format!("o{i}");
+            upsert("orders", &id, &[("id", &id), ("sku", "shared")])
+        })
+        .collect::<Vec<_>>();
+    apply(&mut net, 0, parents);
+    let before = net.get_derived_tuples("root::missing").unwrap();
+    let ops = vec![upsert("quote", "q", &[("id", "q"), ("sku", "shared")])];
+    for limits in [
+        NetworkLimits {
+            max_matches: Some(63),
+            ..Default::default()
+        },
+        NetworkLimits {
+            max_work: Some(63),
+            ..Default::default()
+        },
+    ] {
+        assert!(matches!(
+            net.apply_ops_bounded(&ops, Some(&limits)),
+            Err(WorldError::BudgetExhausted)
+        ));
+        assert_eq!(net.get_derived_tuples("root::missing").unwrap(), before);
+        assert_reference(&net);
+    }
+    net.apply_ops(&ops).unwrap();
+    assert!(net
+        .get_derived_tuples("root::missing")
+        .unwrap()
+        .unwrap()
+        .is_empty());
+    assert_reference(&net);
 }

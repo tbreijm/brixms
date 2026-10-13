@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 #[cfg(test)]
 use std::fs;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use brix_canon::{CanonDecode, CanonError, CanonReader, CanonWriter, Canonical, Digest, Domain};
 
@@ -198,22 +198,29 @@ pub struct LeafNode<K, V> {
     pub key: K,
     pub value: Arc<V>,
     pub hash: [u8; 32],
-    pub digest: Digest,
+    /// Computed on first use: nodes that are replaced before anyone asks for their digest
+    /// (most intermediate path copies inside a batch) never pay for hashing.
+    digest: OnceLock<Digest>,
 }
 
 impl<K: Canonical, V: Canonical> LeafNode<K, V> {
     pub fn new(key: K, value: Arc<V>, hash: [u8; 32]) -> Self {
-        let digest = Self::compute_digest(&key, &value, &hash);
         Self {
             key,
             value,
             hash,
-            digest,
+            digest: OnceLock::new(),
         }
     }
 
+    pub fn digest(&self) -> Digest {
+        *self
+            .digest
+            .get_or_init(|| Self::compute_digest(&self.key, &self.value, &self.hash))
+    }
+
     fn compute_digest(key: &K, value: &V, hash: &[u8; 32]) -> Digest {
-        let mut w = CanonWriter::new();
+        let mut w = CanonWriter::with_capacity(192);
         w.write_tag("brix:trie:leaf:v1");
         w.write_bytes(hash);
         key.canon_write(&mut w);
@@ -228,18 +235,25 @@ impl<K: Canonical, V: Canonical> LeafNode<K, V> {
 pub struct CollisionNode<K, V> {
     pub hash: [u8; 32],
     pub entries: Vec<(K, Arc<V>)>,
-    pub digest: Digest,
+    digest: OnceLock<Digest>,
 }
 
 impl<K: Canonical + Ord, V: Canonical> CollisionNode<K, V> {
     pub fn new(hash: [u8; 32], mut entries: Vec<(K, Arc<V>)>) -> Self {
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        let digest = Self::compute_digest(&hash, &entries);
         Self {
             hash,
             entries,
-            digest,
+            digest: OnceLock::new(),
         }
+    }
+}
+
+impl<K: Canonical, V: Canonical> CollisionNode<K, V> {
+    pub fn digest(&self) -> Digest {
+        *self
+            .digest
+            .get_or_init(|| Self::compute_digest(&self.hash, &self.entries))
     }
 
     fn compute_digest(hash: &[u8; 32], entries: &[(K, Arc<V>)]) -> Digest {
@@ -264,27 +278,48 @@ pub struct BranchNode<K, V> {
     pub prefix: Vec<u8>,
     pub bitmap: u16,
     pub children: Vec<Arc<Node<K, V>>>,
-    pub digest: Digest,
+    digest: OnceLock<Digest>,
 }
 
-impl<K, V> BranchNode<K, V> {
+impl<K: Canonical, V: Canonical> BranchNode<K, V> {
     pub fn new(prefix: Vec<u8>, bitmap: u16, children: Vec<Arc<Node<K, V>>>) -> Self {
         debug_assert!(
             children.len() >= 2,
             "branch node must have at least 2 children"
         );
         debug_assert_eq!(bitmap.count_ones() as usize, children.len());
-        let digest = Self::compute_digest(&prefix, bitmap, &children);
         Self {
             prefix,
             bitmap,
             children,
-            digest,
+            digest: OnceLock::new(),
+        }
+    }
+
+    pub fn digest(&self) -> Digest {
+        *self
+            .digest
+            .get_or_init(|| Self::compute_digest(&self.prefix, self.bitmap, &self.children))
+    }
+
+    /// A branch with the given (already hashed) digest, for nodes rebuilt around lazy
+    /// children whose digest is known.
+    fn with_known_digest(
+        prefix: Vec<u8>,
+        bitmap: u16,
+        children: Vec<Arc<Node<K, V>>>,
+        digest: Digest,
+    ) -> Self {
+        Self {
+            prefix,
+            bitmap,
+            children,
+            digest: OnceLock::from(digest),
         }
     }
 
     fn compute_digest(prefix: &[u8], bitmap: u16, children: &[Arc<Node<K, V>>]) -> Digest {
-        let mut w = CanonWriter::new();
+        let mut w = CanonWriter::with_capacity(48 + prefix.len() * 2 + children.len() * 34);
         w.write_tag("brix:trie:branch:v1");
         w.write_uint(prefix.len() as u64);
         for &nib in prefix {
@@ -323,12 +358,12 @@ pub enum Node<K, V> {
     Lazy(Digest),
 }
 
-impl<K, V> Node<K, V> {
+impl<K: Canonical, V: Canonical> Node<K, V> {
     pub fn digest(&self) -> Digest {
         match self {
-            Node::Leaf(l) => l.digest,
-            Node::Collision(c) => c.digest,
-            Node::Branch(b) => b.digest,
+            Node::Leaf(l) => l.digest(),
+            Node::Collision(c) => c.digest(),
+            Node::Branch(b) => b.digest(),
             Node::Lazy(d) => *d,
         }
     }
@@ -386,8 +421,22 @@ fn get_recursive<'a, K: Canonical + Ord, V: Canonical>(
                 None => None,
             }
         }
-        Node::Lazy(_) => None,
+        Node::Lazy(_) => lazy_plain_op("get"),
     }
+}
+
+/// The plain (store-less) trie operations cannot look inside an unhydrated [`Node::Lazy`]
+/// subtree. Treating it as empty (the former behaviour of `get`, `iter` and `remove`) turns a
+/// not-yet-loaded subtree into silently wrong data, so reaching one is a logic error and fails
+/// loudly in every build. Callers holding lazily opened tries must use the `*_with_store`
+/// operations, which return a typed error for a missing or corrupt node instead.
+#[cold]
+#[inline(never)]
+fn lazy_plain_op(op: &str) -> ! {
+    panic!(
+        "TrieMap::{op} reached an unhydrated lazy node; use the `{op}_with_store`-style \
+         operation that reads through a NodeStore"
+    )
 }
 
 fn insert_recursive<K: Canonical + Ord + Clone, V: Canonical + Clone>(
@@ -580,7 +629,7 @@ fn insert_recursive<K: Canonical + Ord + Clone, V: Canonical + Clone>(
                 }
             }
         }
-        Node::Lazy(_) => panic!("cannot insert into unhydrated lazy node; use insert_with_store"),
+        Node::Lazy(_) => lazy_plain_op("insert"),
     }
 }
 
@@ -717,7 +766,7 @@ fn remove_recursive<K: Canonical + Ord + Clone, V: Canonical + Clone>(
                 }
             }
         }
-        Node::Lazy(_) => (Some(node.clone()), false),
+        Node::Lazy(_) => lazy_plain_op("remove"),
     }
 }
 
@@ -736,7 +785,7 @@ fn collect_entries<'a, K, V>(node: &'a Node<K, V>, out: &mut Vec<(&'a K, &'a V)>
                 collect_entries(child, out);
             }
         }
-        Node::Lazy(_) => {}
+        Node::Lazy(_) => lazy_plain_op("iter"),
     }
 }
 
@@ -800,6 +849,17 @@ impl<K, V, H: KeyHasher> TrieMap<K, V, H> {
         self.root.is_none()
     }
 
+    /// Whether two snapshots share the exact same root allocation (`Arc` pointer equality).
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        match (&self.root, &other.root) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+impl<K: Canonical, V: Canonical, H: KeyHasher> TrieMap<K, V, H> {
     /// Canonical root digest of the map.
     ///
     /// For an empty map, returns the fixed canonical empty digest `Digest::of(Domain::Value, b"brix:trie:empty:v1")`.
@@ -808,15 +868,6 @@ impl<K, V, H: KeyHasher> TrieMap<K, V, H> {
         match &self.root {
             None => Digest::of(Domain::Value, b"brix:trie:empty:v1"),
             Some(node) => node.digest(),
-        }
-    }
-
-    /// Whether two snapshots share the exact same root allocation (`Arc` pointer equality).
-    pub fn ptr_eq(&self, other: &Self) -> bool {
-        match (&self.root, &other.root) {
-            (None, None) => true,
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-            _ => false,
         }
     }
 }
@@ -913,7 +964,11 @@ impl<K: Canonical + Ord + Clone, V: Canonical + Clone, H: KeyHasher> TrieMap<K, 
 
     /// Persist all unwritten nodes in this tree to `store`.
     /// Returns the number of new nodes written.
-    pub fn persist_to_store<S: NodeStore>(&self, store: &mut S) -> usize {
+    pub fn persist_to_store<S: NodeStore>(&self, store: &mut S) -> usize
+    where
+        K: 'static + Send + Sync,
+        V: 'static + Send + Sync,
+    {
         let mut count = 0;
         if let Some(root) = &self.root {
             persist_node_recursive(root, store, &mut count);
@@ -983,8 +1038,8 @@ impl<K: Canonical + Ord + Clone, V: Canonical + Clone, H: KeyHasher + Default> F
 }
 
 impl<
-        K: Canonical + Ord + Clone + CanonDecode,
-        V: Canonical + Clone + CanonDecode,
+        K: Canonical + Ord + Clone + CanonDecode + 'static + Send + Sync,
+        V: Canonical + Clone + CanonDecode + 'static + Send + Sync,
         H: KeyHasher,
     > TrieMap<K, V, H>
 {
@@ -1166,12 +1221,234 @@ impl<
 /// Content-addressed storage for persistent trie nodes.
 pub trait NodeStore {
     /// Retrieve raw serialized bytes of a node by its Merkle [`Digest`].
-    fn get_node(&self, digest: &Digest) -> Option<Vec<u8>>;
+    ///
+    /// `Ok(None)` means the node is absent; an unreadable or damaged store is an `Err`
+    /// (`CorruptedNode` for pack damage, `Io` for OS errors), never reported as absent.
+    fn get_node(&self, digest: &Digest) -> Result<Option<Vec<u8>>, StorageError>;
     /// Store raw serialized bytes for a node under its Merkle [`Digest`].
     fn put_node(&mut self, digest: Digest, bytes: Vec<u8>);
+    /// Like [`Self::put_node`] for a node the caller has just checked is absent
+    /// (`contains` returned false); stores may skip their own existence probe.
+    fn put_new_node(&mut self, digest: Digest, bytes: Vec<u8>) {
+        self.put_node(digest, bytes);
+    }
+    /// Like [`Self::get_node`] for bulk iteration: stores must not admit the node to their
+    /// own read caches, so a scan cannot evict the hot working set.
+    fn get_node_scan(&self, digest: &Digest) -> Result<Option<Vec<u8>>, StorageError> {
+        self.get_node(digest)
+    }
     /// Whether `digest` exists in the store.
     fn contains(&self, digest: &Digest) -> bool {
-        self.get_node(digest).is_some()
+        matches!(self.get_node(digest), Ok(Some(_)))
+    }
+    /// Optional cache of decoded, digest-verified trie nodes shared by store-aware
+    /// reads. Stores that return `None` decode on every access.
+    fn decoded_cache(&self) -> Option<&DecodedNodeCache> {
+        None
+    }
+    /// Observation hook: a store-aware trie operation resolved the node `digest` (`hit`: from
+    /// the decoded-node cache; otherwise read and decoded from the store, `bytes` encoded
+    /// bytes). Purely informational, never affects results; the default does nothing and
+    /// costs nothing after monomorphization.
+    #[inline(always)]
+    fn note_touch(&self, _digest: &Digest, _hit: bool, _bytes: usize) {}
+}
+
+/// Accounted cost of a decoded node per encoded byte, calibrated against measured RSS (a
+/// decoded node with its `Arc`s and key/value buffers is several times its encoding), so
+/// the cache budget approximates resident memory rather than encoded size.
+pub const DECODED_COST_FACTOR: usize = 8;
+
+/// Byte-bounded cache of decoded, digest-verified trie nodes keyed by
+/// `(TypeId of Node<K, V>, Digest)`. Cost of an entry is [`DECODED_COST_FACTOR`] times its
+/// encoded length.
+/// Only nodes that decoded and verified successfully are ever inserted.
+///
+/// Eviction is second-chance (CLOCK): a hit only sets a flag, so lookups and inserts are one
+/// hash-map operation each (digests are uniformly distributed, so their first bytes serve as
+/// the hash) instead of several ordered-map operations.
+pub struct DecodedNodeCache {
+    inner: std::sync::Mutex<DecodedInner>,
+}
+
+impl std::fmt::Debug for DecodedNodeCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DecodedNodeCache")
+    }
+}
+
+type CacheKey = (std::any::TypeId, Digest);
+
+/// Hasher that reads the leading 8 bytes of a digest (already a cryptographic hash).
+#[derive(Default)]
+struct DigestHasher(u64);
+
+impl std::hash::Hasher for DigestHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        // Keys hash as (TypeId, [u8; 32]); mix everything cheaply, digest bytes dominate.
+        for chunk in bytes.chunks(8) {
+            let mut w = [0u8; 8];
+            w[..chunk.len()].copy_from_slice(chunk);
+            self.0 =
+                (self.0.rotate_left(5) ^ u64::from_le_bytes(w)).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+struct DecodedInner {
+    cap: usize,
+    used: usize,
+    seq: u64,
+    decodes: u64,
+    // Lookup/eviction only; iteration order never reaches a semantic path.
+    #[allow(clippy::disallowed_types)]
+    map: std::collections::HashMap<
+        CacheKey,
+        DecodedEntry,
+        std::hash::BuildHasherDefault<DigestHasher>,
+    >,
+    queue: std::collections::VecDeque<(CacheKey, u64)>,
+}
+
+struct DecodedEntry {
+    node: Arc<dyn std::any::Any + Send + Sync>,
+    cost: usize,
+    seq: u64,
+    referenced: bool,
+}
+
+impl DecodedInner {
+    fn evict_to_cap(&mut self) {
+        while self.used > self.cap {
+            let Some((key, seq)) = self.queue.pop_front() else {
+                break;
+            };
+            match self.map.get_mut(&key) {
+                Some(e) if e.seq == seq => {
+                    if e.referenced {
+                        e.referenced = false;
+                        self.queue.push_back((key, seq));
+                    } else {
+                        let cost = e.cost;
+                        self.map.remove(&key);
+                        self.used -= cost;
+                    }
+                }
+                _ => {} // stale queue slot
+            }
+        }
+        // Reinserted keys leave stale slots behind; compact if they pile up.
+        if self.queue.len() > 2 * self.map.len() + 1024 {
+            let map = &self.map;
+            self.queue
+                .retain(|(k, s)| map.get(k).is_some_and(|e| e.seq == *s));
+        }
+    }
+}
+
+impl DecodedNodeCache {
+    /// New cache bounded to `cap_bytes` of accounted cost.
+    pub fn new(cap_bytes: usize) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(DecodedInner {
+                cap: cap_bytes,
+                used: 0,
+                seq: 0,
+                decodes: 0,
+                map: Default::default(),
+                queue: Default::default(),
+            }),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, DecodedInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Drop every cached node (the bound is kept). Used when the store underneath changed
+    /// without this handle's knowledge, so a hit can no longer vouch for presence.
+    pub fn clear(&self) {
+        let mut g = self.lock();
+        g.map.clear();
+        g.queue.clear();
+        g.used = 0;
+    }
+
+    /// Change the accounted-byte bound, evicting immediately when it shrinks.
+    pub fn set_capacity(&self, cap_bytes: usize) {
+        let mut g = self.lock();
+        g.cap = cap_bytes;
+        g.evict_to_cap();
+    }
+
+    /// Cached node of type `T` for `digest`, marking it recently used.
+    pub fn get<T: std::any::Any + Send + Sync>(&self, digest: &Digest) -> Option<Arc<T>> {
+        let key = (std::any::TypeId::of::<T>(), *digest);
+        let mut g = self.lock();
+        let e = g.map.get_mut(&key)?;
+        e.referenced = true;
+        let node = e.node.clone();
+        drop(g);
+        node.downcast::<T>().ok()
+    }
+
+    /// Whether a node of type `T` is cached under `digest` (does not touch recency).
+    pub fn contains<T: std::any::Any + Send + Sync>(&self, digest: &Digest) -> bool {
+        let key = (std::any::TypeId::of::<T>(), *digest);
+        self.lock().map.contains_key(&key)
+    }
+
+    /// Insert a verified node whose encoding was `encoded_len` bytes.
+    pub fn insert<T: std::any::Any + Send + Sync>(
+        &self,
+        digest: Digest,
+        node: Arc<T>,
+        encoded_len: usize,
+    ) {
+        let key = (std::any::TypeId::of::<T>(), digest);
+        let cost = encoded_len.saturating_mul(DECODED_COST_FACTOR);
+        let mut g = self.lock();
+        g.decodes += 1;
+        if cost > g.cap {
+            return;
+        }
+        g.seq += 1;
+        let seq = g.seq;
+        if let Some(old) = g.map.insert(
+            key,
+            DecodedEntry {
+                node,
+                cost,
+                seq,
+                referenced: false,
+            },
+        ) {
+            g.used -= old.cost;
+        }
+        g.used += cost;
+        g.queue.push_back((key, seq));
+        g.evict_to_cap();
+    }
+
+    /// Accounted bytes currently held.
+    pub fn used_bytes(&self) -> usize {
+        self.lock().used
+    }
+
+    /// Number of node decodes (cache misses that decoded and verified) observed.
+    pub fn decode_count(&self) -> u64 {
+        self.lock().decodes
+    }
+
+    /// Whether any node of any type is cached under `digest`.
+    pub fn contains_digest(&self, digest: &Digest) -> bool {
+        self.lock().map.keys().any(|(_, d)| d == digest)
     }
 }
 
@@ -1196,8 +1473,8 @@ impl MemoryNodeStore {
 }
 
 impl NodeStore for MemoryNodeStore {
-    fn get_node(&self, digest: &Digest) -> Option<Vec<u8>> {
-        self.nodes.get(digest).cloned()
+    fn get_node(&self, digest: &Digest) -> Result<Option<Vec<u8>>, StorageError> {
+        Ok(self.nodes.get(digest).cloned())
     }
 
     fn put_node(&mut self, digest: Digest, bytes: Vec<u8>) {
@@ -1384,26 +1661,70 @@ pub fn decode_node_verified<K: CanonDecode + Canonical + Ord, V: CanonDecode + C
 }
 
 mod file;
-pub use file::{FileNodeStore, StoreIoStats};
+pub use file::{FileNodeStore, StoreIoStats, StoreVerifyReport};
 
-fn resolve_node<K: CanonDecode + Canonical + Ord, V: CanonDecode + Canonical, S: NodeStore>(
+fn resolve_node<
+    K: CanonDecode + Canonical + Ord + 'static + Send + Sync,
+    V: CanonDecode + Canonical + 'static + Send + Sync,
+    S: NodeStore,
+>(
     node: &Arc<Node<K, V>>,
     store: &S,
 ) -> Result<Arc<Node<K, V>>, StorageError> {
+    resolve_node_mode(node, store, None)
+}
+
+/// Scan-resistant resolve for bulk iteration: reads hit the caches as usual, but a miss is
+/// admitted to the decoded cache only for branches near the root (which later pages of the
+/// same scan descend through again), never for leaves or deep branches.
+const SCAN_ADMIT_DEPTH: usize = 3;
+
+fn resolve_node_mode<
+    K: CanonDecode + Canonical + Ord + 'static + Send + Sync,
+    V: CanonDecode + Canonical + 'static + Send + Sync,
+    S: NodeStore,
+>(
+    node: &Arc<Node<K, V>>,
+    store: &S,
+    scan_depth: Option<usize>,
+) -> Result<Arc<Node<K, V>>, StorageError> {
     match &**node {
         Node::Lazy(d) => {
-            let bytes = store.get_node(d).ok_or(StorageError::MissingNode(*d))?;
+            let cache = store.decoded_cache();
+            if let Some(c) = cache {
+                if let Some(hit) = c.get::<Node<K, V>>(d) {
+                    store.note_touch(d, true, 0);
+                    return Ok(hit);
+                }
+            }
+            let bytes = match scan_depth {
+                None => store.get_node(d)?,
+                Some(_) => store.get_node_scan(d)?,
+            }
+            .ok_or(StorageError::MissingNode(*d))?;
+            store.note_touch(d, false, bytes.len());
+            // Digest verified exactly once, before the node can enter the cache.
             let decoded = decode_node_verified::<K, V>(&bytes, d)
                 .map_err(|_| StorageError::CorruptedNode(*d))?;
-            Ok(Arc::new(decoded))
+            let decoded = Arc::new(decoded);
+            if let Some(c) = cache {
+                let admit = match scan_depth {
+                    None => true,
+                    Some(depth) => depth < SCAN_ADMIT_DEPTH && matches!(&*decoded, Node::Branch(_)),
+                };
+                if admit {
+                    c.insert::<Node<K, V>>(*d, decoded.clone(), bytes.len());
+                }
+            }
+            Ok(decoded)
         }
         _ => Ok(node.clone()),
     }
 }
 
 fn insert_recursive_store<
-    K: Canonical + Ord + Clone + CanonDecode,
-    V: Canonical + Clone + CanonDecode,
+    K: Canonical + Ord + Clone + CanonDecode + 'static + Send + Sync,
+    V: Canonical + Clone + CanonDecode + 'static + Send + Sync,
     S: NodeStore,
 >(
     node: &Arc<Node<K, V>>,
@@ -1600,8 +1921,8 @@ fn insert_recursive_store<
 }
 
 fn remove_recursive_store<
-    K: Canonical + Ord + Clone + CanonDecode,
-    V: Canonical + Clone + CanonDecode,
+    K: Canonical + Ord + Clone + CanonDecode + 'static + Send + Sync,
+    V: Canonical + Clone + CanonDecode + 'static + Send + Sync,
     S: NodeStore,
 >(
     node: &Arc<Node<K, V>>,
@@ -1755,8 +2076,8 @@ fn entries_len<T>(v: &[T]) -> usize {
 }
 
 fn iter_page_recursive<
-    K: Canonical + Ord + Clone + CanonDecode,
-    V: Canonical + Clone + CanonDecode,
+    K: Canonical + Ord + Clone + CanonDecode + 'static + Send + Sync,
+    V: Canonical + Clone + CanonDecode + 'static + Send + Sync,
     S: NodeStore,
 >(
     node: &Arc<Node<K, V>>,
@@ -1770,7 +2091,7 @@ fn iter_page_recursive<
     if *done {
         return Ok(());
     }
-    let resolved = resolve_node(node, store)?;
+    let resolved = resolve_node_mode(node, store, Some(depth))?;
     match &*resolved {
         Node::Leaf(leaf) => {
             if let Some((cur_hash, cur_key)) = cursor {
@@ -1844,7 +2165,11 @@ fn iter_page_recursive<
     }
 }
 
-fn persist_node_recursive<K: Canonical, V: Canonical, S: NodeStore>(
+fn persist_node_recursive<
+    K: Canonical + Clone + 'static + Send + Sync,
+    V: Canonical + Clone + 'static + Send + Sync,
+    S: NodeStore,
+>(
     node: &Arc<Node<K, V>>,
     store: &mut S,
     count: &mut usize,
@@ -1853,7 +2178,13 @@ fn persist_node_recursive<K: Canonical, V: Canonical, S: NodeStore>(
         return;
     }
     let digest = node.digest();
-    if store.contains(&digest) {
+    // A decoded node is cached only after it was read from, or written to, the store, so a
+    // cache hit proves the node is already stored without probing the pack indexes.
+    if store
+        .decoded_cache()
+        .is_some_and(|c| c.contains::<Node<K, V>>(&digest))
+        || store.contains(&digest)
+    {
         return;
     }
     if let Node::Branch(branch) = &**node {
@@ -1862,8 +2193,31 @@ fn persist_node_recursive<K: Canonical, V: Canonical, S: NodeStore>(
         }
     }
     let bytes = encode_node(node);
-    store.put_node(digest, bytes);
+    let encoded_len = bytes.len();
+    store.put_new_node(digest, bytes);
     *count += 1;
+    // Write-through: the next store-aware access (after the in-memory tree is
+    // dehydrated) finds this node decoded instead of re-reading and re-hashing it.
+    // Children are stored as `Lazy` references so the cache never pins subtrees.
+    if let Some(cache) = store.decoded_cache() {
+        let shallow = match &**node {
+            Node::Leaf(l) => Some(Node::Leaf(l.clone())),
+            Node::Collision(c) => Some(Node::Collision(c.clone())),
+            Node::Branch(b) => Some(Node::Branch(BranchNode::with_known_digest(
+                b.prefix.clone(),
+                b.bitmap,
+                b.children
+                    .iter()
+                    .map(|c| Arc::new(Node::Lazy(c.digest())))
+                    .collect(),
+                digest,
+            ))),
+            Node::Lazy(_) => None,
+        };
+        if let Some(n) = shallow {
+            cache.insert::<Node<K, V>>(digest, Arc::new(n), encoded_len);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2061,6 +2415,54 @@ mod tests {
             (1..=4).contains(&written3),
             "derived insert writes only changed path nodes: {written3}"
         );
+    }
+
+    struct CachedStore {
+        mem: MemoryNodeStore,
+        cache: DecodedNodeCache,
+    }
+
+    impl NodeStore for CachedStore {
+        fn get_node(&self, d: &Digest) -> Result<Option<Vec<u8>>, StorageError> {
+            self.mem.get_node(d)
+        }
+        fn put_node(&mut self, d: Digest, b: Vec<u8>) {
+            self.mem.put_node(d, b)
+        }
+        fn decoded_cache(&self) -> Option<&DecodedNodeCache> {
+            Some(&self.cache)
+        }
+    }
+
+    fn cached_store(cap: usize, n: u64) -> (CachedStore, TrieMap<u64, u64>) {
+        let mut store = CachedStore {
+            mem: MemoryNodeStore::new(),
+            cache: DecodedNodeCache::new(cap),
+        };
+        let m: TrieMap<u64, u64> = (0..n).map(|i| (i, i * 10)).collect();
+        m.persist_to_store(&mut store);
+        let cold = TrieMap::from_root_digest(m.root_digest(), m.len());
+        (store, cold)
+    }
+
+    #[test]
+    fn decoded_cache_second_read_does_no_decodes() {
+        let (store, cold) = cached_store(1 << 20, 100);
+        assert_eq!(cold.get_with_store(&42, &store).unwrap(), Some(420));
+        let n = store.cache.decode_count();
+        assert!(n > 0);
+        assert_eq!(cold.get_with_store(&42, &store).unwrap(), Some(420));
+        assert_eq!(store.cache.decode_count(), n);
+    }
+
+    #[test]
+    fn decoded_cache_is_byte_bounded() {
+        let (store, cold) = cached_store(1024, 300);
+        for i in 0..300 {
+            assert_eq!(cold.get_with_store(&i, &store).unwrap(), Some(i * 10));
+            assert!(store.cache.used_bytes() <= 1024);
+        }
+        assert!(store.cache.used_bytes() > 0);
     }
 
     #[test]

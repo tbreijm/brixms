@@ -93,27 +93,48 @@ pub enum WorldOp {
     Batch {
         dir: PathBuf,
         batch_file: PathBuf,
+        replay: bool,
     },
     Query {
         dir: PathBuf,
         relation: String,
         cursor: Option<String>,
         limit: Option<usize>,
+        replay: bool,
     },
     Decide {
         dir: PathBuf,
         decide: Option<String>,
         entity: Option<String>,
+        replay: bool,
     },
     Show {
         dir: PathBuf,
         rev: Option<u64>,
+        replay: bool,
     },
     Explain {
         dir: PathBuf,
         entity: String,
         decide: Option<String>,
         rev: Option<u64>,
+        replay: bool,
+    },
+    /// Open a world and report how (restored or replayed); optionally check the restored
+    /// state against a replay and/or refresh the state-cache sidecar.
+    OpenCheck {
+        dir: PathBuf,
+        verify_state: bool,
+        refresh_state: bool,
+        /// Also audit every pack body checksum and index (O(store size)).
+        verify_store: bool,
+    },
+    /// Garbage-collect and compact the node store (single writer; see `world::gc`).
+    Gc {
+        dir: PathBuf,
+        dry_run: bool,
+        /// Keep only the newest N revisions readable (default: all).
+        keep_revisions: Option<u64>,
     },
     Audit {
         dir: PathBuf,
@@ -1426,7 +1447,7 @@ fn parse_rev(raw: &str, cmd_name: &str, json: bool) -> Result<u64, CliUsageError
 pub fn parse_world_args(args: &[String], json: bool) -> Result<Command, CliUsageError> {
     if args.is_empty() {
         return Err(CliUsageError::usage(
-            "missing sub-command for 'brix world'\nUsage: brix world <init|batch|query|decide|show|explain|audit|verify|import-kb> ...".to_string(),
+            "missing sub-command for 'brix world'\nUsage: brix world <init|batch|query|decide|show|explain|audit|verify|import-kb|open-check|gc> ...".to_string(),
             json,
             Some("world".to_string()),
         ));
@@ -1443,9 +1464,13 @@ pub fn parse_world_args(args: &[String], json: bool) -> Result<Command, CliUsage
         "audit" => parse_world_audit_args(rest, json)?,
         "verify" => parse_world_verify_args(rest, json)?,
         "import-kb" => parse_world_import_kb_args(rest, json)?,
+        "open-check" => parse_world_open_check_args(rest, json)?,
+        "gc" => parse_world_gc_args(rest, json)?,
         other => {
             return Err(CliUsageError::usage(
-                format!("unknown 'brix world' sub-command: '{other}'"),
+                format!(
+                    "unknown 'brix world' sub-command: '{other}'\nUsage: brix world <init|batch|query|decide|show|explain|audit|verify|import-kb|open-check|gc> ..."
+                ),
                 json,
                 Some("world".to_string()),
             ))
@@ -1502,11 +1527,14 @@ fn parse_world_init_args(args: &[String], json: bool) -> Result<WorldOp, CliUsag
 fn parse_world_batch_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
     let cmd_name = "world batch";
     let mut positionals = Vec::new();
+    let mut replay = false;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
         if arg == "--json" {
             // Handled
+        } else if arg == "--replay" {
+            replay = true;
         } else if arg.starts_with('-') {
             return Err(CliUsageError::usage(
                 format!("unknown option: '{arg}'"),
@@ -1534,7 +1562,11 @@ fn parse_world_batch_args(args: &[String], json: bool) -> Result<WorldOp, CliUsa
     }
     let batch_file = positionals.pop().unwrap();
     let dir = positionals.pop().unwrap();
-    Ok(WorldOp::Batch { dir, batch_file })
+    Ok(WorldOp::Batch {
+        dir,
+        batch_file,
+        replay,
+    })
 }
 
 fn parse_world_query_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
@@ -1542,11 +1574,14 @@ fn parse_world_query_args(args: &[String], json: bool) -> Result<WorldOp, CliUsa
     let mut positionals = Vec::new();
     let mut cursor = None;
     let mut limit = None;
+    let mut replay = false;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
         if arg == "--json" {
             // Handled
+        } else if arg == "--replay" {
+            replay = true;
         } else if arg == "--cursor" {
             i += 1;
             if i >= args.len() {
@@ -1617,6 +1652,7 @@ fn parse_world_query_args(args: &[String], json: bool) -> Result<WorldOp, CliUsa
         relation,
         cursor,
         limit,
+        replay,
     })
 }
 
@@ -1625,11 +1661,14 @@ fn parse_world_decide_args(args: &[String], json: bool) -> Result<WorldOp, CliUs
     let mut positionals = Vec::new();
     let mut decide = None;
     let mut entity = None;
+    let mut replay = false;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
         if arg == "--json" {
             // Handled
+        } else if arg == "--replay" {
+            replay = true;
         } else if arg == "--decide" {
             i += 1;
             if i >= args.len() {
@@ -1684,6 +1723,7 @@ fn parse_world_decide_args(args: &[String], json: bool) -> Result<WorldOp, CliUs
         dir,
         decide,
         entity,
+        replay,
     })
 }
 
@@ -1691,11 +1731,14 @@ fn parse_world_show_args(args: &[String], json: bool) -> Result<WorldOp, CliUsag
     let cmd_name = "world show";
     let mut positionals = Vec::new();
     let mut rev = None;
+    let mut replay = false;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
         if arg == "--json" {
             // Handled
+        } else if arg == "--replay" {
+            replay = true;
         } else if arg == "--rev" {
             i += 1;
             if i >= args.len() {
@@ -1734,7 +1777,7 @@ fn parse_world_show_args(args: &[String], json: bool) -> Result<WorldOp, CliUsag
         ));
     }
     let dir = positionals.pop().unwrap();
-    Ok(WorldOp::Show { dir, rev })
+    Ok(WorldOp::Show { dir, rev, replay })
 }
 
 fn parse_world_explain_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
@@ -1742,11 +1785,14 @@ fn parse_world_explain_args(args: &[String], json: bool) -> Result<WorldOp, CliU
     let mut positionals = Vec::new();
     let mut decide = None;
     let mut rev = None;
+    let mut replay = false;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
         if arg == "--json" {
             // Handled
+        } else if arg == "--replay" {
+            replay = true;
         } else if arg == "--decide" {
             i += 1;
             if i >= args.len() {
@@ -1803,6 +1849,7 @@ fn parse_world_explain_args(args: &[String], json: bool) -> Result<WorldOp, CliU
         entity,
         decide,
         rev,
+        replay,
     })
 }
 
@@ -2035,6 +2082,101 @@ fn parse_world_verify_args(args: &[String], json: bool) -> Result<WorldOp, CliUs
     })
 }
 
+fn parse_world_open_check_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
+    let cmd_name = "world open-check";
+    let mut positionals = Vec::new();
+    let mut verify_state = false;
+    let mut refresh_state = false;
+    let mut verify_store = false;
+    for arg in args {
+        if arg == "--json" {
+            // Handled
+        } else if arg == "--verify-store" {
+            verify_store = true;
+        } else if arg == "--verify-state" {
+            verify_state = true;
+        } else if arg == "--refresh-state" {
+            refresh_state = true;
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+    }
+    if positionals.is_empty() {
+        return Err(CliUsageError::usage(
+            format!("missing required operand for '{cmd_name}': requires DIR"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    if positionals.len() > 1 {
+        return Err(CliUsageError::usage(
+            format!("unexpected extra operand: '{}'", positionals[1].display()),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    Ok(WorldOp::OpenCheck {
+        dir: positionals.pop().unwrap(),
+        verify_state,
+        refresh_state,
+        verify_store,
+    })
+}
+
+fn parse_world_gc_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
+    let cmd_name = "world gc";
+    let mut positionals = Vec::new();
+    let mut dry_run = false;
+    let mut keep_revisions = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--json" {
+            // Handled
+        } else if arg == "--dry-run" {
+            dry_run = true;
+        } else if arg == "--keep-revisions" {
+            i += 1;
+            keep_revisions = Some(args.get(i).and_then(|v| v.parse::<u64>().ok()).ok_or_else(
+                || {
+                    CliUsageError::usage(
+                        "--keep-revisions requires a number".to_string(),
+                        json,
+                        Some(cmd_name.to_string()),
+                    )
+                },
+            )?);
+        } else if arg.starts_with('-') {
+            return Err(CliUsageError::usage(
+                format!("unknown option: '{arg}'"),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        } else {
+            positionals.push(PathBuf::from(arg));
+        }
+        i += 1;
+    }
+    if positionals.len() != 1 {
+        return Err(CliUsageError::usage(
+            format!("'{cmd_name}' requires exactly one DIR operand"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    Ok(WorldOp::Gc {
+        dir: positionals.pop().unwrap(),
+        dry_run,
+        keep_revisions,
+    })
+}
+
 fn parse_world_import_kb_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
     let cmd_name = "world import-kb";
     let mut positionals = Vec::new();
@@ -2135,6 +2277,14 @@ Commands:
   kb verify <dir> [--package-path <dir>...] [--json]
       Verify the whole knowledge base: every revision's digest, parent chain,
       recomputed program/snapshot identities, and a fresh replay of its result.
+
+  world <init|batch|query|decide|show|explain|audit|verify|import-kb|open-check|gc> <dir> ... [--json]
+      The persistent world runtime (ADR-0046): facts, operator state and decisions in a
+      content-addressed store; opening restores state without replaying facts and a
+      commit costs time proportional to the change. 'open-check' reports how a world
+      opens (--refresh-state, --verify-store); 'gc [--dry-run] [--keep-revisions N]'
+      reclaims storage no retained revision references; 'import-kb' converts a 'brix kb'.
+      See the README for a walkthrough.
 
   serve --stdio
       Run a long-running JSON-lines protocol (schema 'brix.serve@1') over

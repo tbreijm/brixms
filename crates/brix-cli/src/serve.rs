@@ -105,6 +105,8 @@ const SUPPORTED_METHODS: &[&str] = &[
     "world.audit",
     "world.verify",
     "world.import-kb",
+    "world.open-check",
+    "world.gc",
 ];
 
 /// Run the `brix serve --stdio` loop against `stdin`/`stdout`, returning the
@@ -713,7 +715,34 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
     let mut workspace: Option<TempWorkspace> = None;
     let dir = PathBuf::from(required_str_field(params, "dir")?);
 
+    let replay = params
+        .get("replay")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let op = match op_name {
+        "open-check" => WorldOp::OpenCheck {
+            dir,
+            verify_state: params
+                .get("verify_state")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            refresh_state: params
+                .get("refresh_state")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            verify_store: params
+                .get("verify_store")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
+        "gc" => WorldOp::Gc {
+            dir,
+            dry_run: params
+                .get("dry_run")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            keep_revisions: optional_u64_field(params, "keep_revisions"),
+        },
         "init" => {
             let program_spec = params.get("program").cloned().unwrap_or(Value::Null);
             let program = resolve_program_path(&mut workspace, &program_spec, "program")?;
@@ -779,7 +808,11 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
                     "missing required field 'batch' or 'batch_file'".to_string(),
                 ));
             };
-            WorldOp::Batch { dir, batch_file }
+            WorldOp::Batch {
+                dir,
+                batch_file,
+                replay,
+            }
         }
         "query" => {
             let relation = required_str_field(params, "relation")?.to_string();
@@ -793,6 +826,7 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
                 relation,
                 cursor,
                 limit,
+                replay,
             }
         }
         "decisions" | "decide" => {
@@ -809,11 +843,12 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
                 dir,
                 decide,
                 entity,
+                replay,
             }
         }
         "show" => {
             let rev = optional_u64_field(params, "rev");
-            WorldOp::Show { dir, rev }
+            WorldOp::Show { dir, rev, replay }
         }
         "explain" => {
             let entity = match params.get("entity") {
@@ -836,6 +871,7 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
                 entity,
                 decide,
                 rev,
+                replay,
             }
         }
         "audit" => {

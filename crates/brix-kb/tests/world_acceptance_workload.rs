@@ -219,7 +219,7 @@ fn assert_decision(session: &WorldSession, id: &str, expected: Option<&str>) {
         .network
         .as_ref()
         .expect("executable session must have network");
-    let decision = network.get_settlement("root::dispatch", id);
+    let decision = network.get_settlement("root::dispatch", id).unwrap();
     assert_eq!(
         decision.map(|d| d.value),
         expected.map(|s| Value::Str(s.into()))
@@ -466,7 +466,7 @@ fn run_acceptance_matrix(rows: usize, batch_size: usize) {
 
     // Verify peripheral local decide settlement (e.g. ITM-0 in root::dec_003)
     let net = session.network.as_ref().unwrap();
-    let periph_dec = net.get_settlement("root::dec_003", "ITM-0");
+    let periph_dec = net.get_settlement("root::dec_003", "ITM-0").unwrap();
     assert!(periph_dec.is_some(), "peripheral decision must settle");
 
     // 3. Pin old snapshot for immutability and non-erasure verification

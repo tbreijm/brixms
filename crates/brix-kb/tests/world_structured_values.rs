@@ -95,6 +95,7 @@ decide order_decision for o in orders per id {
     // Test explain_decision_for shows both eligible losers and guard-false candidates
     let explanation = net
         .explain_decision_for("root::order_decision", "ORD-1")
+        .unwrap()
         .expect("explanation found");
     assert_eq!(explanation.winning_candidate.as_deref(), Some("approved"));
     assert_eq!(explanation.candidates.len(), 2);
@@ -121,7 +122,7 @@ decide order_decision for o in orders per id {
 
     // Independent reference evaluator agreement
     let ref_prog = reference::from_program(&linked).expect("ref program");
-    let base_relations = net.current_state().base_relations;
+    let base_relations = net.current_state().unwrap().base_relations;
     let ref_state = reference::evaluate(&ref_prog, &base_relations).expect("ref evaluate");
     let ref_settlement = ref_state
         .settlements
@@ -426,7 +427,7 @@ decide approved for o in eligible per id { propose current priority 1 when true 
                 vec![op],
             ))
             .unwrap();
-            let state = net.current_state();
+            let state = net.current_state().unwrap();
             let expected = reference::evaluate(&oracle, &state.base_relations).unwrap();
             assert_eq!(
                 state.derived_relations, expected.derived_relations,

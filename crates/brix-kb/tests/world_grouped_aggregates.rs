@@ -58,7 +58,7 @@ fn linked_network() -> (
 }
 
 fn grouped(network: &brix_kb::world::WorldNetwork) -> BTreeMap<String, TupleRecord> {
-    network.current_state().derived_relations["root::totals"]
+    network.current_state().unwrap().derived_relations["root::totals"]
         .iter()
         .map(|tuple| {
             let tuple = tuple.to_tuple();
@@ -94,7 +94,7 @@ fn exact_aggregates_update_incrementally_and_match_independent_reference() {
         .link()
         .unwrap();
     let oracle = reference::from_program(&linked).unwrap();
-    let current = net.current_state();
+    let current = net.current_state().unwrap();
     let expected = reference::evaluate(&oracle, &current.base_relations).unwrap();
     assert_eq!(current.derived_relations, expected.derived_relations);
 
@@ -267,4 +267,104 @@ fn aggregate_journal_passes_independent_audit_verification() {
     verify_world_audit_bundle(&bundle, &options).unwrap();
     drop(world);
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ordered_extrema_survive_large_group_restart_and_retraction() {
+    let root = std::env::temp_dir().join(format!(
+        "brix_group_extrema_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let sources = sources();
+    let mut world = WorldSession::from_program_with_sources(&root, "root", &sources).unwrap();
+    let rows = (0..384)
+        .map(|value| {
+            item(
+                &format!("i{value:03}"),
+                "p",
+                1,
+                "0.1",
+                value,
+                &format!("v{value:03}"),
+            )
+        })
+        .collect();
+    world
+        .apply_batch(WorldBatch::new(0, "extrema-fill", rows))
+        .unwrap();
+    drop(world);
+
+    let mut world = WorldSession::open(&root).unwrap();
+    let rows = world.get_derived("totals").unwrap().unwrap();
+    let row = TupleRecord::from_tuple(&rows[0].to_tuple()).unwrap();
+    assert_eq!(row.get_str("low"), Some("0"));
+    assert_eq!(row.get_str("high"), Some("383"));
+    assert_eq!(row.get_str("first"), Some("v000"));
+    assert_eq!(row.get_str("last"), Some("v383"));
+
+    world
+        .apply_batch(WorldBatch::new(
+            1,
+            "extrema-retract",
+            vec![
+                WorldBatchOp::Remove {
+                    relation: "root::items".into(),
+                    key: WorldKey::from_str("i000"),
+                },
+                WorldBatchOp::Remove {
+                    relation: "root::items".into(),
+                    key: WorldKey::from_str("i383"),
+                },
+            ],
+        ))
+        .unwrap();
+    let rows = world.get_derived("totals").unwrap().unwrap();
+    let row = TupleRecord::from_tuple(&rows[0].to_tuple()).unwrap();
+    assert_eq!(row.get_str("low"), Some("1"));
+    assert_eq!(row.get_str("high"), Some("382"));
+    assert_eq!(row.get_str("first"), Some("v001"));
+    assert_eq!(row.get_str("last"), Some("v382"));
+    drop(world);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn aggregate_update_work_does_not_grow_with_group_cardinality() {
+    fn measured_update(size: usize) -> u64 {
+        let (_, mut network) = linked_network();
+        let mut rows = Vec::with_capacity(size);
+        for value in 0..size {
+            rows.push(item(
+                &format!("i{value:04}"),
+                "p",
+                1,
+                "0.1",
+                value as i64,
+                &format!("v{value:04}"),
+            ));
+        }
+        network.apply_ops(&rows).unwrap();
+        let target = size / 2;
+        let report = network
+            .apply_ops(&[item(
+                &format!("i{target:04}"),
+                "p",
+                2,
+                "0.2",
+                target as i64,
+                &format!("v{target:04}"),
+            )])
+            .unwrap();
+        report.diagnostics.operator_work.values().sum()
+    }
+
+    let large_group_work = measured_update(384);
+    assert!(
+        large_group_work < 384 / 2,
+        "treap work should stay below a linear scan of the ordered values; got {large_group_work}"
+    );
 }

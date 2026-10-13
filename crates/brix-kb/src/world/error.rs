@@ -18,6 +18,25 @@ pub enum CrashPoint {
     AfterRevisionFsyncBeforeHeadRename,
     /// Crash after atomic HEAD rename, but before parent directory fsync.
     AfterHeadRenameBeforeDirectoryFsync,
+    /// Crash after the base relation and index objects are written, before any network
+    /// state object (operator indexes, frontier, decisions, header) is.
+    AfterBaseObjectsBeforeNetworkObjects,
+    /// Crash after every object, network state header included, is written but before
+    /// any is flushed.
+    AfterNetworkObjectsBeforeFlush,
+    /// State-cache refresh: header written, not yet flushed.
+    SidecarBeforeFlush,
+    /// State-cache refresh: objects flushed, sidecar written to its temp file only.
+    SidecarAfterFlushBeforeRename,
+    /// State-cache refresh: sidecar renamed into place.
+    SidecarAfterRename,
+    /// Settlement checkpoint refresh: written to its temp file only, not renamed into place.
+    CheckpointAfterTmpBeforeRename,
+    /// Chunked apply: a chunk's state was persisted and dehydrated in place; the next
+    /// chunk has not started.
+    AfterChunkPersistedBeforeNextChunk,
+    /// Chunked apply: the intermediate pack was published (the batch is still uncommitted).
+    AfterIntermediatePackFlush,
 }
 
 impl fmt::Display for CrashPoint {
@@ -35,6 +54,29 @@ impl fmt::Display for CrashPoint {
             }
             Self::AfterHeadRenameBeforeDirectoryFsync => {
                 write!(f, "crash after HEAD rename before directory fsync")
+            }
+            Self::AfterBaseObjectsBeforeNetworkObjects => {
+                write!(f, "crash after base objects before network objects")
+            }
+            Self::AfterNetworkObjectsBeforeFlush => {
+                write!(f, "crash after network objects before flush")
+            }
+            Self::SidecarBeforeFlush => write!(f, "crash before state-cache flush"),
+            Self::SidecarAfterFlushBeforeRename => {
+                write!(f, "crash after state-cache flush before rename")
+            }
+            Self::SidecarAfterRename => write!(f, "crash after state-cache rename"),
+            Self::AfterChunkPersistedBeforeNextChunk => {
+                write!(f, "crash after a chunk was persisted before the next chunk")
+            }
+            Self::AfterIntermediatePackFlush => {
+                write!(f, "crash after an intermediate pack flush mid-batch")
+            }
+            Self::CheckpointAfterTmpBeforeRename => {
+                write!(
+                    f,
+                    "crash after settlement checkpoint temp write before rename"
+                )
             }
         }
     }
@@ -79,6 +121,12 @@ pub enum WorldError {
     Json(String),
     /// World directory is locked by another writer.
     WorldLocked(String),
+    /// A garbage collection ran underneath a cache write that was in progress; it was
+    /// abandoned (a cache write only) and nothing was published.
+    StaleSession(String),
+    /// The revision's state was dropped on purpose by `gc --keep-revisions`: history, not
+    /// damage (the journal records remain).
+    RevisionCompacted(u64),
     /// Object file missing from disk.
     MissingObject(Digest),
     /// Revision record digest does not match its contents.
@@ -105,6 +153,21 @@ pub enum WorldError {
     NetworkError(String),
     /// Computational budget or work limit exhausted.
     BudgetExhausted,
+    /// Persisted network-state store failure that is neither corruption nor absence
+    /// (I/O while flushing or opening the state store).
+    State(super::state_store::StateError),
+    /// Persisted network state failed verification: a node did not hash to its address,
+    /// failed canonical decoding, or a stored derivation does not match its operator.
+    /// Never recoverable by retrying; the operator replays explicitly (`open_replay`).
+    CorruptState(super::state_store::StateError),
+    /// Persisted network state refers to a node or root the store does not hold.
+    MissingState(super::state_store::StateError),
+    /// Persisted network state was produced under a different validity key (program,
+    /// execution profile, compiler or codec version) than the one opening it.
+    ValidityMismatch(String),
+    /// Persisted network state is intact but differs from a replay of the base facts
+    /// (`WorldSession::verify_state`).
+    StateMismatch(String),
 }
 
 impl fmt::Display for WorldError {
@@ -141,6 +204,11 @@ impl fmt::Display for WorldError {
             Self::StagingError(s) => write!(f, "staging error: {s}"),
             Self::Json(s) => write!(f, "JSON error: {s}"),
             Self::WorldLocked(s) => write!(f, "world locked: {s}"),
+            Self::StaleSession(s) => write!(f, "stale session: {s}"),
+            Self::RevisionCompacted(seq) => write!(
+                f,
+                "revision {seq} was compacted away by garbage collection (--keep-revisions)"
+            ),
             Self::MissingObject(d) => write!(f, "missing object digest {}", d.to_hex()),
             Self::CorruptedRevision {
                 seq,
@@ -174,6 +242,11 @@ impl fmt::Display for WorldError {
             }
             Self::NetworkError(msg) => write!(f, "network error: {msg}"),
             Self::BudgetExhausted => write!(f, "computational budget exhausted"),
+            Self::State(e) => write!(f, "world state error: {e}"),
+            Self::CorruptState(e) => write!(f, "corrupt persisted world state: {e}"),
+            Self::MissingState(e) => write!(f, "missing persisted world state: {e}"),
+            Self::ValidityMismatch(m) => write!(f, "persisted world state validity mismatch: {m}"),
+            Self::StateMismatch(m) => write!(f, "persisted world state differs from replay: {m}"),
         }
     }
 }
@@ -182,6 +255,7 @@ impl std::error::Error for WorldError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
+            Self::State(e) | Self::CorruptState(e) | Self::MissingState(e) => Some(e),
             _ => None,
         }
     }
@@ -190,6 +264,22 @@ impl std::error::Error for WorldError {
 impl From<std::io::Error> for WorldError {
     fn from(e: std::io::Error) -> Self {
         Self::Io(e)
+    }
+}
+
+impl From<super::state_store::StateError> for WorldError {
+    /// Classify: absence is `MissingState`, any verification/decoding failure is
+    /// `CorruptState`, remaining I/O failures stay `State`.
+    fn from(e: super::state_store::StateError) -> Self {
+        use super::state_store::StateError as S;
+        use soc_core::store::StorageError as St;
+        match &e {
+            S::Storage(St::MissingNode(_)) | S::RootNotPersisted(_) => Self::MissingState(e),
+            S::Storage(St::CorruptedNode(_) | St::DecodeError(_)) | S::Codec(_) => {
+                Self::CorruptState(e)
+            }
+            S::Storage(St::Io(_)) | S::Io(_) => Self::State(e),
+        }
     }
 }
 

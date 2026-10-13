@@ -25,6 +25,9 @@ REQUIRED_SHIPPED_FILES = [
         "brix", "README.md", "LICENSE",
         "examples/shipping.brix", "examples/shipping-input.brix", "examples/shipping-input.json",
         "examples/numeric-policy.brix", "examples/numeric-policy.json",
+        "examples/world-linked/main.brix", "examples/world-linked/policy.brix",
+        "examples/world-atlas/atlas.brix", "examples/world-atlas/seed.json",
+        "examples/world-atlas/retract.json", "examples/world-atlas/README.md",
     )
 ]
 

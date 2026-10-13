@@ -224,6 +224,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build brix-cli
         run: cargo build -p brix-cli
+      - name: Typed world workflow through fresh CLI processes
+        run: python3 scripts/smoke_world_atlas.py ./target/debug/brix
       - uses: actions/setup-python@v7
         with:
           python-version: "3.11"

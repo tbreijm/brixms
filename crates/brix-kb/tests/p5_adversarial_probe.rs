@@ -224,6 +224,7 @@ fn p01_mvp_10k_linked_model_open_session() {
     // Verify network derived relations and settlements
     let fulfillment = network
         .get_derived_tuples("root::fulfillment")
+        .unwrap()
         .expect("fulfillment relation");
     assert_eq!(
         fulfillment.len(),
@@ -231,7 +232,7 @@ fn p01_mvp_10k_linked_model_open_session() {
         "all 8,000 orders must join with their inventory and shipping rows"
     );
 
-    let settlements = network.all_settlements();
+    let settlements = network.all_settlements().unwrap();
     let dispatch_settlements = settlements
         .get("root::dispatch")
         .expect("dispatch decisions");
@@ -328,6 +329,7 @@ fn p02_local_one_fact_edit_exact_metrics() {
     // Capture baseline decision for order #42 (42 % 3 == 0 => express == "yes")
     let baseline_decision = network
         .get_settlement("root::dispatch", "ORD-42")
+        .unwrap()
         .expect("ORD-42 baseline settlement");
     assert_eq!(baseline_decision.candidate_name, "ship_express");
     assert_eq!(baseline_decision.priority, 10);
@@ -335,6 +337,7 @@ fn p02_local_one_fact_edit_exact_metrics() {
     // Capture baseline for unrelated order #43 (43 % 3 != 0 => express == "no")
     let baseline_order_43 = network
         .get_settlement("root::dispatch", "ORD-43")
+        .unwrap()
         .expect("ORD-43 baseline settlement");
     assert_eq!(baseline_order_43.candidate_name, "ship_standard");
 
@@ -411,6 +414,7 @@ fn p02_local_one_fact_edit_exact_metrics() {
     // Verify order #42 re-deliberated to ship_standard
     let new_decision_42 = network
         .get_settlement("root::dispatch", "ORD-42")
+        .unwrap()
         .expect("ORD-42 new settlement");
     assert_eq!(new_decision_42.candidate_name, "ship_standard");
     assert_eq!(new_decision_42.priority, 20);
@@ -418,6 +422,7 @@ fn p02_local_one_fact_edit_exact_metrics() {
     // Verify unrelated order #43 remains 100% UNTOUCHED
     let untouched_43 = network
         .get_settlement("root::dispatch", "ORD-43")
+        .unwrap()
         .expect("ORD-43 untouched settlement");
     assert_eq!(
         untouched_43, baseline_order_43,
@@ -599,6 +604,7 @@ fn p04_per_tuple_and_per_decision_explanation() {
     // 1. Inspect decision explanation for ORD-10
     let winner_a = network
         .get_settlement("root::dispatch", "ORD-10")
+        .unwrap()
         .expect("decision for ORD-10");
     assert_eq!(winner_a.candidate_name, "ship_express");
     assert_eq!(winner_a.priority, 10);
@@ -606,6 +612,7 @@ fn p04_per_tuple_and_per_decision_explanation() {
 
     let candidates_a = network
         .get_candidates("root::dispatch", "ORD-10")
+        .unwrap()
         .expect("frontier for ORD-10");
 
     // Detailed explanation analysis:
@@ -626,6 +633,7 @@ fn p04_per_tuple_and_per_decision_explanation() {
     // Inspect derivation supports for ship_express via explain_decision_for:
     let exp_a = network
         .explain_decision_for("root::dispatch", "ORD-10")
+        .unwrap()
         .expect("decision explanation for ORD-10");
     assert_eq!(exp_a.winning_candidate.as_deref(), Some("ship_express"));
     assert_eq!(exp_a.priority, Some(10));
@@ -668,6 +676,7 @@ fn p04_per_tuple_and_per_decision_explanation() {
     // Re-inspect decision explanation for ORD-10
     let exp_b = network
         .explain_decision_for("root::dispatch", "ORD-10")
+        .unwrap()
         .expect("updated explanation for ORD-10");
     assert_eq!(
         exp_b.winning_candidate.as_deref(),
@@ -679,6 +688,7 @@ fn p04_per_tuple_and_per_decision_explanation() {
 
     let candidates_b = network
         .get_candidates("root::dispatch", "ORD-10")
+        .unwrap()
         .expect("updated frontier");
 
     // Contrastive explanation post-edit:
@@ -1416,11 +1426,12 @@ fn p08_empirical_reporting_nocapture() {
         network
             .get_derived_tuples("root::fulfillment")
             .unwrap()
+            .unwrap()
             .len()
     );
     println!(
         "  - Decisions Settled: {}",
-        network.all_settlements()["root::dispatch"].len()
+        network.all_settlements().unwrap()["root::dispatch"].len()
     );
     println!();
     println!("Targeted 1-Fact Edit in Linked Model:");

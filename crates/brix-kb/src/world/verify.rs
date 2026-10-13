@@ -14,14 +14,12 @@ use brix_lower::module_graph::{ModuleGraph, ModuleLoaderLimits};
 use soc_core::calendar::Key;
 use soc_core::store::TrieMap;
 
-use super::audit::{
-    DecisionTupleV1, ExecProfileV1, ScopeV1, WorldAuditBundleV1, WorldAuditDecodeLimits,
-};
+use super::audit::{DecisionTupleV1, ScopeV1, WorldAuditBundleV1, WorldAuditDecodeLimits};
 use super::codec::{encode_secondary_key, extract_indexed_field};
 use super::decision_codec::{compute_decision_root, encode_decision_delta, SettledDecision, Value};
 use super::error::WorldError;
 use super::reference::{self, ReferenceSettlement};
-use super::revision::{SettlementStatus, REVISION_SCHEMA_V2};
+use super::revision::SettlementStatus;
 use super::types::{WorldKey, WorldTuple};
 
 /// Configuration and external trust pins for verification.
@@ -342,7 +340,7 @@ pub fn verify_world_audit_bundle(
         if bundle.exec_profile.profile != crate::world::EXEC_PROFILE_SCHEMA {
             return Err(VerifyError::UnknownProfile);
         }
-        if bundle.exec_profile != ExecProfileV1::default() {
+        if !bundle.exec_profile.is_supported() {
             return Err(VerifyError::UnsupportedExecProfile(format!(
                 "{:?}",
                 bundle.exec_profile
@@ -1027,7 +1025,7 @@ pub fn verify_world_audit_bundle(
                     if computed_delta_digest != expected_digest {
                         return Err(VerifyError::DecisionDeltaMismatch { seq: record.seq });
                     }
-                } else if record.schema == REVISION_SCHEMA_V2 {
+                } else if record.has_decision_evidence() {
                     return Err(VerifyError::DecisionDeltaMismatch { seq: record.seq });
                 }
             }

@@ -15,7 +15,13 @@ fn legacy_apply(p: &LinkedProgram, with_flag: bool) {
         tuple: t.to_tuple(),
     }])
     .unwrap();
-    assert!(n.derived_relations.values().all(|r| r.len() == 1));
+    for name in n.derived_relations.keys() {
+        assert_eq!(
+            n.get_derived_tuples(name).unwrap().unwrap().len(),
+            1,
+            "{name}"
+        );
+    }
 }
 
 fn link(src: &str) -> LinkedProgram {

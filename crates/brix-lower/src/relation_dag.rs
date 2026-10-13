@@ -945,6 +945,14 @@ fn lower_derived_query(
             )));
         }
     }
+    if let Some(anti) = &query.not_exists {
+        if aliases.contains(&anti.binding.var) {
+            return Err(RelationalLowerError::UnsupportedExpression(format!(
+                "not exists binding '{}' duplicates an outer query binding",
+                anti.binding.var
+            )));
+        }
+    }
     let mut query = query.clone();
     qualify_query_expr(&mut query.select, owner, program)?;
     if let Some(predicate) = &mut query.where_clause {
@@ -1018,10 +1026,11 @@ fn lower_derived_query(
                 },
             )?;
         match &all_relations[&left_rel] {
-            RelationSource::Input(decl) if decl.key_fields.contains(&left_key.field) => {}
+            RelationSource::Input(decl)
+                if decl.key_fields.len() == 1 && decl.key_fields[0] == left_key.field => {}
             _ => {
                 return Err(RelationalLowerError::UnsupportedExpression(
-                    "count_or_zero() parent correlation must use a key field of an input relation"
+                    "count_or_zero() parent correlation must use the complete single-field key of an input relation"
                         .into(),
                 ))
             }
@@ -1044,6 +1053,11 @@ fn lower_derived_query(
                 ))
             }
         };
+        if projections.len() != 2 || projections[0].0 == projections[1].0 {
+            return Err(RelationalLowerError::UnsupportedExpression(
+                "count_or_zero() requires exactly two distinctly named projections: its parent key and count".into(),
+            ));
+        }
         let mut output_key = None;
         let mut output_count = None;
         for (name, expression) in projections {

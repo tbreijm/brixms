@@ -1,0 +1,40 @@
+config Quote = { total: Int }
+config QuoteResult = Quoted(Quote) | Rejected
+config Availability = MissingCalculation | Received(Int)
+
+fn acceptable(q: QuoteResult): Bool = match q {
+  Quoted(value) => value.total > 0
+  Rejected => false
+}
+
+rel input orders: { id: Str } key id
+rel input lines: { id: Str, order_id: Str, amount: Int } key id
+
+rel derived totals = select { id: l.order_id, total: sum(l.amount) }
+  from l in lines group by l.order_id
+
+rel derived line_counts = select { id: o.id, count: count_or_zero() }
+  from o in orders, l in lines where l.order_id == o.id group by o.id
+
+rel derived missing = select { id: o.id } from o in orders
+  where not exists l in lines where l.order_id == o.id
+
+decide availability for c in line_counts per id {
+  propose missing priority 1 when c.count == 0 = MissingCalculation
+  propose received priority 2 when c.count > 0 = Received(c.count)
+}
+
+decide quote for t in totals per id {
+  propose quoted priority 1 when t.total > 0 = Quoted(Quote { total: t.total })
+  propose rejected priority 2 when t.total <= 0 = Rejected
+}
+
+decide review for q in quote per id {
+  propose approved priority 1 when acceptable(q.value) = q.value
+  propose held priority 2 when !acceptable(q.value) = Rejected
+}
+
+decide dispatch for r in review per id {
+  propose ship priority 1 when acceptable(r.value) = r.value
+  propose hold priority 2 when !acceptable(r.value) = Rejected
+}

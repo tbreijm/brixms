@@ -91,7 +91,10 @@ fn test_crash_recovery_ignores_unfinalized_temp_packs() {
 
     let reopened2 = FileNodeStore::new(dir.path()).expect("second reopen");
     assert!(reopened2.contains(&d2));
-    assert_eq!(reopened2.get_node(&d2), Some(b"item2-payload".to_vec()));
+    assert_eq!(
+        reopened2.get_node(&d2).unwrap(),
+        Some(b"item2-payload".to_vec())
+    );
 }
 
 #[test]
@@ -109,7 +112,10 @@ fn cloned_pending_reader_survives_concurrent_flush_rename() {
     let read_thread = thread::spawn(move || {
         reader_barrier.wait();
         for _ in 0..10_000 {
-            assert_eq!(reader.get_node(&digest), Some(expected_payload.clone()));
+            assert_eq!(
+                reader.get_node(&digest).unwrap(),
+                Some(expected_payload.clone())
+            );
         }
         reader
     });
@@ -117,7 +123,7 @@ fn cloned_pending_reader_survives_concurrent_flush_rename() {
     barrier.wait();
     store.flush().expect("flush while clone reads");
     let reader = read_thread.join().expect("reader thread");
-    assert_eq!(reader.get_node(&digest), Some(payload));
+    assert_eq!(reader.get_node(&digest).unwrap(), Some(payload));
     assert!(reader.contains(&digest));
 }
 
@@ -211,7 +217,10 @@ fn body_corruption_is_latched_and_semantic_digest_is_still_verified() {
 
     let reopened = FileNodeStore::new(dir.path()).expect("index framing stays valid");
     assert!(reopened.contains(&digest));
-    assert_eq!(reopened.get_node(&digest), None);
+    assert!(matches!(
+        reopened.get_node(&digest),
+        Err(soc_core::store::StorageError::CorruptedNode(d)) if d == digest
+    ));
     assert!(
         !reopened.contains(&digest),
         "checksum failure latches the handle"
@@ -227,6 +236,7 @@ fn body_corruption_is_latched_and_semantic_digest_is_still_verified() {
     map.persist_to_store(&mut memory);
     let node_bytes = memory
         .get_node(&map.root_digest())
+        .unwrap()
         .expect("root node bytes");
     let wrong_digest = Digest::of(Domain::Value, b"not-the-root-digest");
     store_put(&mut semantic_store, wrong_digest, node_bytes);
@@ -236,7 +246,10 @@ fn body_corruption_is_latched_and_semantic_digest_is_still_verified() {
 }
 
 #[test]
-fn duplicate_digest_across_packs_is_rejected_on_open() {
+fn duplicate_digest_across_packs_is_tolerated_and_reads_identically() {
+    // The sorted-idx open path cannot cheaply detect cross-pack duplicates
+    // (that would be O(total nodes)). Content addressing makes them benign:
+    // either copy yields the same checksummed bytes.
     let dir = TestDir::new("duplicate-pack-digest");
     let mut first = FileNodeStore::new(dir.path()).expect("open first writer");
     let mut second = FileNodeStore::new(dir.path()).expect("open second writer");
@@ -247,9 +260,10 @@ fn duplicate_digest_across_packs_is_rejected_on_open() {
     first.flush().expect("publish first pack");
     second.flush().expect("publish second pack");
 
-    assert!(
-        FileNodeStore::new(dir.path()).is_err(),
-        "ambiguous duplicate digest entries must not depend on directory order"
+    let reopened = FileNodeStore::new(dir.path()).expect("duplicates are benign");
+    assert_eq!(
+        reopened.get_node(&digest).unwrap(),
+        Some(b"same object".to_vec())
     );
 }
 
@@ -319,7 +333,6 @@ fn test_roots_come_out_identical_whatever_batch_split_or_storage_layout() {
     map_mem.persist_to_store(&mut mem_store);
 
     // Save all nodes from memory store to legacy loose files
-    let legacy_store = FileNodeStore::new(dir_legacy.path()).expect("create store");
     // Manually write one node to verify legacy read
     let hex = expected_root.to_hex();
     let prefix = &hex[..2];
@@ -327,13 +340,15 @@ fn test_roots_come_out_identical_whatever_batch_split_or_storage_layout() {
     let sub = objects_dir.join(prefix);
     fs::create_dir_all(&sub).expect("create prefix dir");
     let legacy_node_path = sub.join(format!("{rest}.bin"));
-    if let Some(bytes) = mem_store.get_node(&expected_root) {
+    if let Ok(Some(bytes)) = mem_store.get_node(&expected_root) {
         fs::write(&legacy_node_path, &bytes).expect("write legacy node");
     }
 
-    // Verify FileNodeStore can read the legacy file directly
+    // Verify FileNodeStore can read the legacy file directly (legacy shards are
+    // discovered at open, so the store is created after the layout exists).
+    let legacy_store = FileNodeStore::new(dir_legacy.path()).expect("create store");
     assert!(legacy_store.contains(&expected_root));
-    assert!(legacy_store.get_node(&expected_root).is_some());
+    assert!(legacy_store.get_node(&expected_root).unwrap().is_some());
 }
 
 #[test]
@@ -357,7 +372,7 @@ fn test_legacy_one_file_per_object_layout_stays_readable_and_updatable() {
         "legacy node must be detected by contains"
     );
     assert_eq!(
-        store.get_node(&d_leg),
+        store.get_node(&d_leg).unwrap(),
         Some(leg_bytes.to_vec()),
         "legacy node bytes must be read back exactly"
     );
@@ -370,14 +385,14 @@ fn test_legacy_one_file_per_object_layout_stays_readable_and_updatable() {
 
     // Both legacy and new node must be available
     assert!(store.contains(&d_leg));
-    assert_eq!(store.get_node(&d_leg), Some(leg_bytes.to_vec()));
+    assert_eq!(store.get_node(&d_leg).unwrap(), Some(leg_bytes.to_vec()));
     assert!(store.contains(&d_new));
-    assert_eq!(store.get_node(&d_new), Some(new_bytes.to_vec()));
+    assert_eq!(store.get_node(&d_new).unwrap(), Some(new_bytes.to_vec()));
 
     // Reopen and check again
     let reopened = FileNodeStore::new(dir.path()).expect("reopen store");
     assert!(reopened.contains(&d_leg));
-    assert_eq!(reopened.get_node(&d_leg), Some(leg_bytes.to_vec()));
+    assert_eq!(reopened.get_node(&d_leg).unwrap(), Some(leg_bytes.to_vec()));
     assert!(reopened.contains(&d_new));
-    assert_eq!(reopened.get_node(&d_new), Some(new_bytes.to_vec()));
+    assert_eq!(reopened.get_node(&d_new).unwrap(), Some(new_bytes.to_vec()));
 }

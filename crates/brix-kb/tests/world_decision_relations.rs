@@ -97,19 +97,19 @@ fn winner_rows_feed_later_decisions_in_the_same_revision_and_retract_atomically(
     assert!(first.settlements["root::review"].contains_key("o-1"));
     assert!(first.settlements["root::dispatch"].contains_key("o-1"));
     assert_eq!(
-        network.current_state().derived_relations["root::approve"].len(),
+        network.current_state().unwrap().derived_relations["root::approve"].len(),
         1
     );
     assert_eq!(
-        network.current_state().derived_relations["root::approved_orders"].len(),
+        network.current_state().unwrap().derived_relations["root::approved_orders"].len(),
         1
     );
     assert_eq!(
-        network.current_state().derived_relations["root::review"].len(),
+        network.current_state().unwrap().derived_relations["root::review"].len(),
         1
     );
     assert_eq!(
-        network.current_state().derived_relations["root::reviewed_orders"].len(),
+        network.current_state().unwrap().derived_relations["root::reviewed_orders"].len(),
         1
     );
     assert_independent_reference_matches(&network);
@@ -124,11 +124,12 @@ fn winner_rows_feed_later_decisions_in_the_same_revision_and_retract_atomically(
     assert!(changed.settlements["root::dispatch"].contains_key("o-1"));
     assert_eq!(old.current_revision, 1);
     assert_eq!(
-        old.current_state().derived_relations["root::approved_orders"].len(),
+        old.current_state().unwrap().derived_relations["root::approved_orders"].len(),
         1
     );
     let explanation = old
         .explain_decision_for("root::dispatch", "o-1")
+        .unwrap()
         .expect("historical downstream explanation");
     assert!(explanation
         .contributing_facts
@@ -147,11 +148,27 @@ fn winner_rows_feed_later_decisions_in_the_same_revision_and_retract_atomically(
     assert!(expired.removed_settlements["root::approve"].contains("o-1"));
     assert!(expired.removed_settlements["root::review"].contains("o-1"));
     assert!(expired.removed_settlements["root::dispatch"].contains("o-1"));
-    assert!(network.current_state().derived_relations["root::approve"].is_empty());
-    assert!(network.current_state().derived_relations["root::approved_orders"].is_empty());
-    assert!(network.current_state().derived_relations["root::review"].is_empty());
-    assert!(network.current_state().derived_relations["root::reviewed_orders"].is_empty());
+    assert!(network.current_state().unwrap().derived_relations["root::approve"].is_empty());
+    assert!(network.current_state().unwrap().derived_relations["root::approved_orders"].is_empty());
+    assert!(network.current_state().unwrap().derived_relations["root::review"].is_empty());
+    assert!(network.current_state().unwrap().derived_relations["root::reviewed_orders"].is_empty());
     assert_independent_reference_matches(&network);
+}
+
+#[test]
+fn expression_budget_is_cumulative_across_decision_cascade_stages() {
+    let mut network = network();
+    let result = network.apply_ops_staged_bounded(
+        &[order(17), gate_for("o-1", 1)],
+        &brix_kb::world::network::NetworkLimits {
+            max_expressions: Some(3),
+            ..Default::default()
+        },
+    );
+    assert!(
+        matches!(result, Err(brix_kb::world::WorldError::BudgetExhausted)),
+        "the initial approval fits in the budget, but its dependent decisions must share it"
+    );
 }
 
 fn assert_independent_reference_matches(network: &WorldNetwork) {
@@ -162,7 +179,7 @@ fn assert_independent_reference_matches(network: &WorldNetwork) {
         .link()
         .unwrap();
     let reference = brix_kb::world::reference::from_program(&linked).unwrap();
-    let current = network.current_state();
+    let current = network.current_state().unwrap();
     let expected =
         brix_kb::world::reference::evaluate(&reference, &current.base_relations).unwrap();
     assert_eq!(current.settlements.len(), expected.settlements.len());
@@ -227,7 +244,10 @@ fn decision_chain_survives_persistence_restart_and_verification() {
             vec![order(23), gate_for("o-1", 2)],
         ))
         .unwrap();
-    let current_explanation = world.explain_decision_for("root::dispatch", "o-1").unwrap();
+    let current_explanation = world
+        .explain_decision_for("root::dispatch", "o-1")
+        .unwrap()
+        .unwrap();
     assert!(current_explanation
         .upstream_settlements
         .iter()
@@ -294,6 +314,7 @@ fn decision_chain_survives_persistence_restart_and_verification() {
         .any(|link| { link.decide == "root::review" && link.entity_id == "o-1" }));
     let explanation = reopened
         .explain_decision_for("root::dispatch", "o-1")
+        .unwrap()
         .unwrap();
     assert_eq!(explanation.upstream_settlements.len(), 2);
     assert!(explanation

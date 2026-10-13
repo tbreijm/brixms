@@ -1,0 +1,11 @@
+{
+  "schema": "brix.world.batch@1",
+  "expected_base_revision": 0,
+  "idempotency_key": "atlas-seed",
+  "operations": [
+    {"op": "upsert", "relation": "atlas::orders", "key": "o1", "tuple": {"id": "o1"}},
+    {"op": "upsert", "relation": "atlas::orders", "key": "o2", "tuple": {"id": "o2"}},
+    {"op": "upsert", "relation": "atlas::lines", "key": "l1", "tuple": {"id": "l1", "order_id": "o1", "amount": 7}},
+    {"op": "upsert", "relation": "atlas::lines", "key": "l2", "tuple": {"id": "l2", "order_id": "o1", "amount": 5}}
+  ]
+}

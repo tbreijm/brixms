@@ -160,6 +160,54 @@ rel derived b = select { id: x.id } from x in a
 }
 
 #[test]
+fn absence_and_zero_count_refuse_ambiguous_or_lossy_query_shapes() {
+    let cases = [
+        (
+            "rel input parents: { id: Str } key id\nrel input children: { id: Str } key id",
+            "select { id: p.id } from p in parents where not exists p in children where p.id == p.id",
+            "duplicates an outer query binding",
+        ),
+        (
+            "rel input parents: { id: Str, tenant: Str } key (id, tenant)\nrel input children: { id: Str } key id",
+            "select { id: p.id, count: count_or_zero() } from p in parents, c in children where p.id == c.id group by p.id",
+            "complete single-field key",
+        ),
+        (
+            "rel input parents: { id: Str } key id\nrel input children: { id: Str } key id",
+            "select { id: p.id, count: count_or_zero(), also: count_or_zero() } from p in parents, c in children where p.id == c.id group by p.id",
+            "exactly two distinctly named projections",
+        ),
+        (
+            "rel input parents: { id: Str } key id\nrel input children: { id: Str } key id",
+            "select { id: p.id, also: p.id, count: count_or_zero() } from p in parents, c in children where p.id == c.id group by p.id",
+            "exactly two distinctly named projections",
+        ),
+        (
+            "rel input parents: { id: Str } key id\nrel input children: { id: Str } key id",
+            "select { id: p.id, id: count_or_zero() } from p in parents, c in children where p.id == c.id group by p.id",
+            "exactly two distinctly named projections",
+        ),
+    ];
+    for (declarations, query, diagnostic) in cases {
+        let source = format!("{declarations}\nrel derived result = {query}");
+        let linked = ModuleGraph::load(
+            "root",
+            &|_: &str| Some(source.clone()),
+            ModuleLoaderLimits::default(),
+        )
+        .expect("parse and load")
+        .link()
+        .expect("link");
+        let error = lower_relations(&linked).expect_err("must refuse before execution");
+        assert!(
+            matches!(&error, RelationalLowerError::UnsupportedExpression(message)
+                        if message.contains(diagnostic)),
+            "{query}: {error:?}"
+        );
+    }
+}
+
+#[test]
 fn relation_decide_dependency_cycle_is_refused_with_participants() {
     let src = r#"
 rel input orders: { id: Str, quote: Int } key id

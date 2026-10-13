@@ -413,6 +413,19 @@ impl ExecProfileV1 {
         Self::default()
     }
 
+    pub fn is_supported(&self) -> bool {
+        let default = Self::default();
+        self.profile == default.profile
+            && self.evaluator == default.evaluator
+            && self.numeric_semantics == default.numeric_semantics
+            && self.settlement == default.settlement
+            && self.module_loader_limits == default.module_loader_limits
+            && (matches!(
+                self.crate_version.as_str(),
+                "0.1.0-alpha.5" | "0.1.0-alpha.6"
+            ) || self.crate_version == env!("CARGO_PKG_VERSION"))
+    }
+
     pub fn digest(&self) -> Digest {
         let mut w = CanonWriter::new();
         w.write_tag(crate::world::EXEC_PROFILE_SCHEMA);
