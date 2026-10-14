@@ -127,6 +127,8 @@ pub enum Value {
         variant: String,
         args: Vec<Value>,
     },
+    /// Ordered value; duplicates are significant.
+    List(Vec<Value>),
 }
 
 impl std::hash::Hash for Value {
@@ -134,6 +136,7 @@ impl std::hash::Hash for Value {
         std::mem::discriminant(self).hash(state);
         match self {
             Self::Null => {}
+            Self::List(items) => items.hash(state),
             Self::Bool(v) => v.hash(state),
             Self::Int(v) => v.hash(state),
             Self::Str(v) => v.hash(state),
@@ -183,12 +186,9 @@ impl Value {
         ty: &ast::Ty,
         schemas: &BTreeMap<String, brix_lower::l3_v2::L3Schema>,
     ) -> Result<Self, WorldError> {
-        use brix_lower::l3_v2::{validate_l3_value, L3SchemaType as T};
-        let ast::Ty::Named(name) = ty else {
-            return Err(WorldError::NetworkError(format!(
-                "unsupported field type {ty:?}"
-            )));
-        };
+        use brix_lower::l3_v2::validate_l3_value;
+        let expected = brix_lower::world_expr::contract(ty).map_err(WorldError::NetworkError)?;
+        let name = expected.display_name();
         let text = || {
             std::str::from_utf8(bytes)
                 .map_err(|e| WorldError::NetworkError(format!("invalid scalar UTF-8: {e}")))
@@ -226,17 +226,16 @@ impl Value {
                 .map_err(|e| WorldError::NetworkError(format!("invalid structured value: {e}")))?
                 .to_l3_value()
         };
-        let expected = schemas
-            .get(name)
-            .map(|s| s.name.clone())
-            .unwrap_or_else(|| name.clone());
-        validate_l3_value(&value, &T::Named(expected), schemas, "world input")
+        validate_l3_value(&value, &expected, schemas, "world input")
             .map_err(|e| WorldError::NetworkError(format!("type validation error: {e}")))?;
         Self::from_scalar(value)
     }
 
     fn to_bytes(&self) -> Vec<u8> {
-        if matches!(self, Self::Record { .. } | Self::Variant { .. }) {
+        if matches!(
+            self,
+            Self::Record { .. } | Self::Variant { .. } | Self::List(_)
+        ) {
             let mut writer = CanonWriter::new();
             self.canon_write(&mut writer);
             let mut bytes = STRUCTURED_PREFIX.to_vec();
@@ -250,6 +249,13 @@ impl Value {
     fn to_scalar(&self) -> Result<brix_lower::l3_v2::L3ValueV2, WorldError> {
         use brix_lower::l3_v2::L3ValueV2 as V;
         Ok(match self {
+            Self::List(items) => V::List(
+                items
+                    .iter()
+                    .map(Self::to_scalar)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into(),
+            ),
             Self::Bool(v) => V::Bool(*v),
             Self::Int(v) => V::Int(*v),
             Self::Str(v) => V::Str(v.clone()),
@@ -324,16 +330,19 @@ impl Value {
                     args: a_vec,
                 }
             }
-            _ => {
-                return Err(WorldError::NetworkError(
-                    "reference evaluator: expression result is not a scalar".into(),
-                ))
-            }
+            V::List(items) => Self::List(
+                items
+                    .iter()
+                    .cloned()
+                    .map(Self::from_scalar)
+                    .collect::<Result<_, _>>()?,
+            ),
         })
     }
 
     fn canon_read(r: &mut brix_canon::CanonReader<'_>) -> Result<Self, WorldError> {
-        Self::canon_read_bounded(r, 0, &mut 4096)
+        let mut remaining = brix_lower::input::MAX_INPUT_VALUE_NODES;
+        Self::canon_read_bounded(r, 0, &mut remaining)
     }
 
     fn canon_read_bounded(
@@ -341,7 +350,7 @@ impl Value {
         depth: usize,
         remaining: &mut usize,
     ) -> Result<Self, WorldError> {
-        if depth >= 32 || *remaining == 0 {
+        if depth >= brix_lower::input::MAX_INPUT_VALUE_DEPTH || *remaining == 0 {
             return Err(WorldError::NetworkError(
                 "invalid or oversized structured reference value".into(),
             ));
@@ -384,7 +393,7 @@ impl Value {
                     .to_string();
                 let count = usize::try_from(r.read_uint().map_err(canon_err)?)
                     .map_err(|_| WorldError::NetworkError("invalid record field count".into()))?;
-                if count > 256 || count > *remaining {
+                if count > brix_lower::input::MAX_INPUT_CONTAINER_WIDTH || count > *remaining {
                     return Err(WorldError::NetworkError(
                         "invalid or oversized structured reference value".into(),
                     ));
@@ -418,7 +427,7 @@ impl Value {
                     .to_string();
                 let count = usize::try_from(r.read_uint().map_err(canon_err)?)
                     .map_err(|_| WorldError::NetworkError("invalid variant arg count".into()))?;
-                if count > 256 || count > *remaining {
+                if count > brix_lower::input::MAX_INPUT_CONTAINER_WIDTH || count > *remaining {
                     return Err(WorldError::NetworkError(
                         "invalid or oversized structured reference value".into(),
                     ));
@@ -433,6 +442,20 @@ impl Value {
                     args,
                 }
             }
+            8 => {
+                let count = usize::try_from(r.read_uint().map_err(canon_err)?)
+                    .map_err(|_| WorldError::NetworkError("invalid list length".into()))?;
+                if count > brix_lower::input::MAX_INPUT_CONTAINER_WIDTH || count > *remaining {
+                    return Err(WorldError::NetworkError(
+                        "list value exceeds container width or node limit".into(),
+                    ));
+                }
+                let mut items = Vec::with_capacity(count);
+                for _ in 0..count {
+                    items.push(Self::canon_read_bounded(r, depth + 1, remaining)?);
+                }
+                Value::List(items)
+            }
             other => {
                 return Err(WorldError::NetworkError(format!(
                     "unknown value tag {other}"
@@ -445,6 +468,13 @@ impl Value {
     /// (see module docs point 6: the calendar tie-break formula is a shared spec contract).
     fn canon_write(&self, w: &mut CanonWriter) {
         match self {
+            Value::List(items) => {
+                w.write_uint(8);
+                w.write_uint(items.len() as u64);
+                for item in items {
+                    item.canon_write(w);
+                }
+            }
             Value::Int(i) => {
                 w.write_uint(1);
                 w.write_int(*i);
@@ -497,6 +527,16 @@ impl Value {
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::List(items) => {
+                write!(f, "[")?;
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, "]")
+            }
             Self::Null => write!(f, "null"),
             Self::Bool(v) => write!(f, "{v}"),
             Self::Int(v) => write!(f, "{v}"),
@@ -915,6 +955,7 @@ pub enum CompiledOperator {
     EquiJoin,
     AntiJoin,
     ParentCount,
+    DisjointUnion,
     Distinct,
     GroupedCount {
         compiled_group_keys: Vec<CompiledWorldExpr>,
@@ -1002,6 +1043,9 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
             }
             OperatorNode::EquiJoin { .. } => compiled_operators.push(CompiledOperator::EquiJoin),
             OperatorNode::AntiJoin { .. } => compiled_operators.push(CompiledOperator::AntiJoin),
+            OperatorNode::DisjointUnion { .. } => {
+                compiled_operators.push(CompiledOperator::DisjointUnion)
+            }
             OperatorNode::ParentCount { .. } => {
                 compiled_operators.push(CompiledOperator::ParentCount)
             }
@@ -1262,7 +1306,7 @@ fn evaluate_once_with_budget(
                 let empty = BTreeMap::new();
                 let records = base_relations.get(relation).unwrap_or(&empty);
                 let mut rows = Vec::with_capacity(records.len());
-                for tuple in records.values() {
+                for (key, tuple) in records {
                     meter.tuples_scanned += 1;
                     charge_work(meter, work_offset, max_work)?;
                     let rec = TupleRecord::from_tuple(tuple)?;
@@ -1287,7 +1331,13 @@ fn evaluate_once_with_budget(
                             .unwrap_or(&empty_schemas);
                         row.insert(
                             field.name.clone(),
-                            Value::from_typed_bytes_with_schemas(bytes, &field.ty, schemas)?,
+                            Value::from_typed_bytes_with_schemas(bytes, &field.ty, schemas)
+                                .map_err(|e| match e {
+                                    WorldError::NetworkError(msg) => WorldError::NetworkError(
+                                        format!("{relation}[{key}].{}: {msg}", field.name),
+                                    ),
+                                    other => other,
+                                })?,
                         );
                     }
                     rows.push(row);
@@ -1463,6 +1513,36 @@ fn evaluate_once_with_budget(
                         }
                     })
                     .collect::<Result<Vec<_>, _>>()?
+            }
+            OperatorNode::DisjointUnion {
+                left,
+                right,
+                key_fields,
+            } => {
+                let mut keys = BTreeSet::new();
+                let mut out = Vec::new();
+                for row in operator_outputs[left.0]
+                    .iter()
+                    .chain(&operator_outputs[right.0])
+                {
+                    meter.rows_evaluated += 1;
+                    charge_work(meter, work_offset, max_work)?;
+                    let key: Vec<_> = key_fields
+                        .iter()
+                        .map(|name| {
+                            row.get(name).cloned().ok_or_else(|| {
+                                WorldError::NetworkError(format!("missing union key field {name}"))
+                            })
+                        })
+                        .collect::<Result<_, _>>()?;
+                    if !keys.insert(key.clone()) {
+                        return Err(WorldError::NetworkError(format!(
+                            "duplicate key in disjoint union: {key:?}"
+                        )));
+                    }
+                    out.push(row.clone());
+                }
+                out
             }
             OperatorNode::ParentCount {
                 left,

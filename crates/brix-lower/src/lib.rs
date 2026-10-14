@@ -1722,3 +1722,5 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
 
 /// Shared scalar evaluation for persistent world expressions.
 pub mod world_expr;
+
+mod world_type;

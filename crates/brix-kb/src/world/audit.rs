@@ -210,6 +210,13 @@ fn read_i64(r: &mut CanonReader<'_>) -> Result<i64, WorldAuditBundleError> {
 
 fn write_value(w: &mut CanonWriter, v: &Value) {
     match v {
+        Value::List(items) => {
+            w.write_uint(8);
+            w.write_uint(items.len() as u64);
+            for item in items {
+                write_value(w, item);
+            }
+        }
         Value::Null => w.write_uint(0),
         Value::Int(i) => {
             w.write_uint(1);
@@ -257,7 +264,8 @@ fn write_value(w: &mut CanonWriter, v: &Value) {
 }
 
 fn read_value(r: &mut CanonReader<'_>) -> Result<Value, WorldAuditBundleError> {
-    read_value_bounded(r, 0, &mut 4096)
+    let mut remaining = brix_lower::input::MAX_INPUT_VALUE_NODES;
+    read_value_bounded(r, 0, &mut remaining)
 }
 
 fn read_value_bounded(
@@ -265,7 +273,7 @@ fn read_value_bounded(
     depth: usize,
     remaining: &mut usize,
 ) -> Result<Value, WorldAuditBundleError> {
-    if depth >= 32 || *remaining == 0 {
+    if depth >= brix_lower::input::MAX_INPUT_VALUE_DEPTH || *remaining == 0 {
         return Err(WorldAuditBundleError::MalformedStructuredValue);
     }
     *remaining -= 1;
@@ -305,7 +313,7 @@ fn read_value_bounded(
             let nominal = read_text(r)?;
             let count = usize::try_from(r.read_uint()?)
                 .map_err(|_| WorldAuditBundleError::TrailingBytesInFrame("record"))?;
-            if count > 256 || count > *remaining {
+            if count > brix_lower::input::MAX_INPUT_CONTAINER_WIDTH || count > *remaining {
                 return Err(WorldAuditBundleError::MalformedStructuredValue);
             }
             let mut fields = BTreeMap::new();
@@ -327,7 +335,7 @@ fn read_value_bounded(
             let variant = read_text(r)?;
             let count = usize::try_from(r.read_uint()?)
                 .map_err(|_| WorldAuditBundleError::TrailingBytesInFrame("variant"))?;
-            if count > 256 || count > *remaining {
+            if count > brix_lower::input::MAX_INPUT_CONTAINER_WIDTH || count > *remaining {
                 return Err(WorldAuditBundleError::MalformedStructuredValue);
             }
             let mut args = Vec::with_capacity(count);
@@ -339,6 +347,18 @@ fn read_value_bounded(
                 variant,
                 args,
             })
+        }
+        8 => {
+            let count = usize::try_from(r.read_uint()?)
+                .map_err(|_| WorldAuditBundleError::MalformedStructuredValue)?;
+            if count > brix_lower::input::MAX_INPUT_CONTAINER_WIDTH || count > *remaining {
+                return Err(WorldAuditBundleError::MalformedStructuredValue);
+            }
+            let mut items = Vec::with_capacity(count);
+            for _ in 0..count {
+                items.push(read_value_bounded(r, depth + 1, remaining)?);
+            }
+            Ok(Value::List(items))
         }
         other => Err(WorldAuditBundleError::UnknownValueTag(other)),
     }
@@ -422,7 +442,7 @@ impl ExecProfileV1 {
             && self.module_loader_limits == default.module_loader_limits
             && (matches!(
                 self.crate_version.as_str(),
-                "0.1.0-alpha.5" | "0.1.0-alpha.6"
+                "0.1.0-alpha.5" | "0.1.0-alpha.6" | "0.1.0-alpha.7"
             ) || self.crate_version == env!("CARGO_PKG_VERSION"))
     }
 

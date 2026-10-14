@@ -429,3 +429,208 @@ fn test_cli_world_import_kb_lifecycle() {
     assert_eq!(err_res["ok"], false);
     assert_eq!(err_res["status"], "unknown");
 }
+
+#[test]
+fn test_cli_r5_repro_qualified_nominal_long_name_commits_settles_and_verifies() {
+    let scratch = Scratch::new("r5_cli");
+    let world_dir = scratch.path().join("world");
+
+    let p_brix = scratch.path().join("p.brix");
+    let p_brix_content = r#"
+config Mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx = { amt: Int }
+config Out = Ok(Mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx) | No
+rel input orders: { id: Str, m: Mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx } key id
+decide d for o in orders per id {
+  propose ok priority 1 when o.m.amt > 0 = Ok(o.m)
+  propose no priority 2 when true = No
+}
+"#;
+    fs::write(&p_brix, p_brix_content).unwrap();
+
+    // 1. world init
+    let init_res = parse_stdout(
+        binary()
+            .args(["world", "init", "--json"])
+            .arg(&world_dir)
+            .arg(&p_brix)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(init_res["ok"], true);
+    let program_digest = init_res["program_digest"].as_str().unwrap().to_string();
+
+    // 2. world batch with 65-byte qualified nominal
+    let batch_file = scratch.path().join("b.json");
+    let batch_content = json!({
+        "schema": "brix.world.batch@1",
+        "expected_base_revision": 0,
+        "idempotency_key": "k",
+        "operations": [
+            {
+                "op": "upsert",
+                "relation": "p::orders",
+                "key": "o1",
+                "tuple": {
+                    "id": "o1",
+                    "m": {
+                        "type": "record",
+                        "nominal": "p::Mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                        "fields": [
+                            {"name": "amt", "value": {"type": "int", "value": "5"}}
+                        ]
+                    }
+                }
+            }
+        ]
+    });
+    fs::write(&batch_file, serde_json::to_vec(&batch_content).unwrap()).unwrap();
+
+    let batch_res = parse_stdout(
+        binary()
+            .args(["world", "batch", "--json"])
+            .arg(&world_dir)
+            .arg(&batch_file)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(batch_res["ok"], true);
+    assert_eq!(batch_res["revision"], 1);
+    let head_digest = batch_res["digest"].as_str().unwrap().to_string();
+
+    // 3. world decide
+    let decide_res = parse_stdout(
+        binary()
+            .args(["world", "decide", "--json"])
+            .arg(&world_dir)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(decide_res["ok"], true);
+    let settlement = &decide_res["settlements"]["p::d"]["o1"];
+    assert_eq!(settlement["candidate_name"], "ok");
+    assert_eq!(settlement["value"]["type"], "sum");
+    assert_eq!(settlement["value"]["nominal"], "p::Out");
+    assert_eq!(settlement["value"]["variant"], "Ok");
+    assert_eq!(
+        settlement["value"]["args"][0]["nominal"],
+        "p::Mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    );
+    assert_eq!(
+        settlement["value"]["args"][0]["fields"][0]["value"]["value"],
+        "5"
+    );
+
+    // 4. world audit
+    let bundle_file = scratch.path().join("bundle.brixaudit");
+    let audit_res = parse_stdout(
+        binary()
+            .args(["world", "audit", "--json"])
+            .arg(&world_dir)
+            .args(["--out", bundle_file.to_str().unwrap()])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(audit_res["ok"], true);
+    assert_eq!(audit_res["head_seq"], 1);
+    assert_eq!(audit_res["head_digest"], head_digest);
+    assert!(bundle_file.exists());
+
+    // 5. world verify
+    let verify_res = parse_stdout(
+        binary()
+            .args(["world", "verify", "--json"])
+            .args(["--expect-head", &head_digest])
+            .args(["--expect-program", &program_digest])
+            .arg(&bundle_file)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(verify_res["ok"], true);
+    assert_eq!(verify_res["status"], "audited");
+    assert_eq!(verify_res["head_revision"], 1);
+
+    // 6. Test rejection of segment > 64 bytes via CLI
+    let seg_65 = "M".repeat(65);
+    let bad_batch_file = scratch.path().join("bad_batch.json");
+    let bad_batch_content = json!({
+        "schema": "brix.world.batch@1",
+        "expected_base_revision": 1,
+        "idempotency_key": "k2",
+        "operations": [
+            {
+                "op": "upsert",
+                "relation": "p::orders",
+                "key": "o2",
+                "tuple": {
+                    "id": "o2",
+                    "m": {
+                        "type": "record",
+                        "nominal": format!("p::{seg_65}"),
+                        "fields": [
+                            {"name": "amt", "value": {"type": "int", "value": "5"}}
+                        ]
+                    }
+                }
+            }
+        ]
+    });
+    fs::write(
+        &bad_batch_file,
+        serde_json::to_vec(&bad_batch_content).unwrap(),
+    )
+    .unwrap();
+
+    let (bad_code, bad_res) = parse_output_json(
+        binary()
+            .args(["world", "batch", "--json"])
+            .arg(&world_dir)
+            .arg(&bad_batch_file)
+            .output()
+            .unwrap(),
+    );
+    assert_ne!(bad_code, 0);
+    assert_eq!(bad_res["ok"], false);
+    let err_msg = bad_res["errors"][0].as_str().unwrap();
+    assert!(
+        err_msg.contains("p::orders[o2].m"),
+        "error message must include relation/key/field: {err_msg}"
+    );
+    assert!(
+        err_msg.contains(&format!("p::{seg_65}")),
+        "error message must name nominal: {err_msg}"
+    );
+    assert!(
+        err_msg.contains(&seg_65),
+        "error message must name segment: {err_msg}"
+    );
+    assert!(
+        !err_msg.contains("string value length"),
+        "error message must not say string value length: {err_msg}"
+    );
+
+    // Also verify non-JSON output format directly
+    let raw_out = binary()
+        .args(["world", "batch"])
+        .arg(&world_dir)
+        .arg(&bad_batch_file)
+        .output()
+        .unwrap();
+    assert!(!raw_out.status.success());
+    let stderr_str = String::from_utf8_lossy(&raw_out.stderr);
+    assert!(
+        stderr_str.contains("p::orders[o2].m"),
+        "stderr must include relation/key/field: {stderr_str}"
+    );
+    assert!(
+        stderr_str.contains(&format!("p::{seg_65}")),
+        "stderr must name nominal: {stderr_str}"
+    );
+    assert!(
+        stderr_str.contains(&seg_65),
+        "stderr must name segment: {stderr_str}"
+    );
+    assert!(
+        !stderr_str.contains("string value length"),
+        "stderr must not say string value length: {stderr_str}"
+    );
+}

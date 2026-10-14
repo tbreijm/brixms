@@ -11,7 +11,7 @@ use brix_lower::input::{
     canonicalize_input_shards, decode_input_shard, decode_input_shard_from_file, input_context_id,
     load_input_snapshot_from_paths, validate_against_declarations, validate_completeness,
     InputDecodeError, InputError, InputLimits, InputScalarValue, InputSnapshot,
-    InputValidationError, MAX_INPUT_NAME_BYTES,
+    InputValidationError, MAX_INPUT_NAME_BYTES, MAX_QUALIFIED_NAME_BYTES,
 };
 use brix_lower::l3_v2::L3ValueV2;
 use brix_lower::{L3ValueType, Outcome};
@@ -404,6 +404,7 @@ fn test_enforce_shard_limits() {
         max_aggregate_bytes: 1000,
         max_input_count: 2,
         max_name_bytes: 10,
+        max_qualified_name_bytes: 22,
         max_string_value_bytes: 50,
         max_depth: 4,
         max_value_depth: 32,
@@ -1467,6 +1468,7 @@ fn test_whole_set_preflight_and_limits() {
 fn test_name_bounds_source_lowering_and_artifact_decoding() {
     let limits = InputLimits::default();
     assert_eq!(limits.max_name_bytes, MAX_INPUT_NAME_BYTES);
+    assert_eq!(limits.max_qualified_name_bytes, MAX_QUALIFIED_NAME_BYTES);
 
     // 1. Source lowering: exact boundary (64 bytes)
     let name_64 = "a".repeat(64);

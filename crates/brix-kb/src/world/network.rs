@@ -573,6 +573,35 @@ fn tuple_index_key(
     ))
 }
 
+// Check counts before materializing a row; even a corrupt/high-fanout bucket
+// cannot turn duplicate-key validation into an unbounded scan.
+fn disjoint_union_tuple(
+    left: &mut JoinSide,
+    right: &mut JoinSide,
+    key: &ValueList,
+    store: &StateStore,
+) -> Result<Option<IntermediateTuple>, WorldError> {
+    let left_count = left.read(key, store)?.map_or(0, |m| m.len());
+    let right_count = right.read(key, store)?.map_or(0, |m| m.len());
+    if left_count > 1 || right_count > 1 || (left_count == 1 && right_count == 1) {
+        return Err(WorldError::NetworkError(format!(
+            "duplicate key in disjoint union: {:?}",
+            key.0
+        )));
+    }
+    let side = if left_count == 1 {
+        left
+    } else if right_count == 1 {
+        right
+    } else {
+        return Ok(None);
+    };
+    Ok(indexed_side_rows(side, key, store, Some(1))?
+        .into_iter()
+        .next()
+        .map(|entry| entry.tuple))
+}
+
 fn parent_count_tuple(
     key: &Value,
     output_key: &str,
@@ -2050,6 +2079,13 @@ pub enum OperatorState {
         left_side: JoinSide,
         right_side: JoinSide,
     },
+    DisjointUnion {
+        left: OperatorId,
+        right: OperatorId,
+        key_fields: Vec<FieldRef>,
+        left_side: JoinSide,
+        right_side: JoinSide,
+    },
     ParentCount {
         left: OperatorId,
         right: OperatorId,
@@ -2296,6 +2332,30 @@ impl WorldNetwork {
                         },
                     );
                 }
+                OperatorNode::DisjointUnion {
+                    left,
+                    right,
+                    key_fields,
+                } => {
+                    downstream.entry(*left).or_default().push(op_id);
+                    downstream.entry(*right).or_default().push(op_id);
+                    operator_states.insert(
+                        idx,
+                        OperatorState::DisjointUnion {
+                            left: *left,
+                            right: *right,
+                            key_fields: key_fields
+                                .iter()
+                                .map(|field| FieldRef {
+                                    binding: String::new(),
+                                    field: field.clone(),
+                                })
+                                .collect(),
+                            left_side: JoinSide::default(),
+                            right_side: JoinSide::default(),
+                        },
+                    );
+                }
                 OperatorNode::ParentCount {
                     left,
                     right,
@@ -2433,6 +2493,11 @@ impl WorldNetwork {
                     right_side,
                     ..
                 }
+                | OperatorState::DisjointUnion {
+                    left_side,
+                    right_side,
+                    ..
+                }
                 | OperatorState::ParentCount {
                     left_side,
                     right_side,
@@ -2517,6 +2582,24 @@ impl WorldNetwork {
                             right: *right,
                             left_keys: left_keys.clone(),
                             right_keys: right_keys.clone(),
+                            left_side: left_side.dehydrated(&self.state)?,
+                            right_side: right_side.dehydrated(&self.state)?,
+                        },
+                    );
+                }
+                OperatorState::DisjointUnion {
+                    left,
+                    right,
+                    key_fields,
+                    left_side,
+                    right_side,
+                } => {
+                    out.operator_states.insert(
+                        *idx,
+                        OperatorState::DisjointUnion {
+                            left: *left,
+                            right: *right,
+                            key_fields: key_fields.clone(),
                             left_side: left_side.dehydrated(&self.state)?,
                             right_side: right_side.dehydrated(&self.state)?,
                         },
@@ -2694,7 +2777,12 @@ impl WorldNetwork {
         let mut operators = BTreeMap::new();
         for (idx, state) in self.operator_states.iter() {
             let roots = match state {
-                OperatorState::EquiJoin {
+                OperatorState::DisjointUnion {
+                    left_side,
+                    right_side,
+                    ..
+                }
+                | OperatorState::EquiJoin {
                     left_side,
                     right_side,
                     ..
@@ -2750,7 +2838,7 @@ impl WorldNetwork {
         let mut expect: BTreeMap<OperatorId, &'static str> = BTreeMap::new();
         for (idx, state) in self.operator_states.iter() {
             match state {
-                OperatorState::EquiJoin { .. } => {
+                OperatorState::DisjointUnion { .. } | OperatorState::EquiJoin { .. } => {
                     expect.insert(OperatorId(*idx), "join");
                 }
                 OperatorState::AntiJoin { .. } => {
@@ -2800,11 +2888,18 @@ impl WorldNetwork {
         for (op, roots) in &header.operators {
             match (self.operator_states.get_mut(&op.0), roots) {
                 (
-                    Some(OperatorState::EquiJoin {
-                        left_side,
-                        right_side,
-                        ..
-                    }),
+                    Some(
+                        OperatorState::DisjointUnion {
+                            left_side,
+                            right_side,
+                            ..
+                        }
+                        | OperatorState::EquiJoin {
+                            left_side,
+                            right_side,
+                            ..
+                        },
+                    ),
                     OperatorRoots::Join { left, right },
                 ) => {
                     left_side.outer = SMap::from_sub_root(*left);
@@ -2876,6 +2971,11 @@ impl WorldNetwork {
                     right_side.outer.page(None, 1, store)?;
                 }
                 OperatorState::AntiJoin {
+                    left_side,
+                    right_side,
+                    ..
+                }
+                | OperatorState::DisjointUnion {
                     left_side,
                     right_side,
                     ..
@@ -3010,6 +3110,18 @@ impl WorldNetwork {
                     right: *right,
                     left_keys: left_keys.clone(),
                     right_keys: right_keys.clone(),
+                    left_side: JoinSide::default(),
+                    right_side: JoinSide::default(),
+                },
+                OperatorState::DisjointUnion {
+                    left,
+                    right,
+                    key_fields,
+                    ..
+                } => OperatorState::DisjointUnion {
+                    left: *left,
+                    right: *right,
+                    key_fields: key_fields.clone(),
                     left_side: JoinSide::default(),
                     right_side: JoinSide::default(),
                 },
@@ -3434,7 +3546,8 @@ impl WorldNetwork {
                 }) = self.operator_states.get_mut(&scan_op_id.0)
                 {
                     if records.get(&key).is_none() {
-                        let inter = scan_intermediate(relation, schema, &tuple, schemas)?;
+                        let inter =
+                            scan_intermediate(relation, Some(&key), schema, &tuple, schemas)?;
                         records.insert(key.clone(), (tuple.clone(), inter));
                     }
                 }
@@ -3552,7 +3665,9 @@ impl WorldNetwork {
                             looked_up = Some(lookup(rel_name, key)?);
                         }
                         match looked_up.as_ref().and_then(|t| t.as_ref()) {
-                            Some(t) => Some(scan_intermediate(relation, schema, t, schemas)?),
+                            Some(t) => {
+                                Some(scan_intermediate(relation, Some(key), schema, t, schemas)?)
+                            }
                             None => None,
                         }
                     };
@@ -3564,7 +3679,8 @@ impl WorldNetwork {
                                 }
                             }
                             let derivation = Derivation::base(relation, key);
-                            let intermediate = scan_intermediate(relation, schema, tuple, schemas)?;
+                            let intermediate =
+                                scan_intermediate(relation, Some(key), schema, tuple, schemas)?;
 
                             // If old record existed at key, retract it first
                             if let Some(old_inter) = old_inter {
@@ -3646,14 +3762,19 @@ impl WorldNetwork {
         while let Some(op_id) = ready_operators.pop_front() {
             in_ready.remove(&op_id);
             let op_idx = op_id.0;
-            let is_group_operator =
-                matches!(self.dag.nodes[op_idx], OperatorNode::GroupedCount { .. });
+            let is_group_operator = matches!(
+                self.dag.nodes[op_idx],
+                OperatorNode::GroupedCount { .. }
+                    | OperatorNode::ParentCount { .. }
+                    | OperatorNode::DisjointUnion { .. }
+            );
             if is_group_operator && has_pending_ancestor(op_id, &self.dag, &operator_queues) {
                 deferred_groups.insert(op_id);
                 continue;
             }
             let mut work_in_slice: usize = 0;
             let mut out_deltas = Vec::new();
+            let mut union_before: BTreeMap<ValueList, Option<IntermediateTuple>> = BTreeMap::new();
             let mut grouped_before: BTreeMap<Vec<Value>, Option<IntermediateTuple>> =
                 BTreeMap::new();
             let slice_quantum = if is_group_operator {
@@ -4115,6 +4236,25 @@ impl WorldNetwork {
                             }
                         }
                     }
+                    OperatorState::DisjointUnion {
+                        key_fields,
+                        left_side,
+                        right_side,
+                        ..
+                    } => {
+                        let OperatorWorkItem::SideDelta { delta, is_left } = item else {
+                            unreachable!("union receives side-tagged deltas")
+                        };
+                        let key = tuple_index_key(delta.tuple(), key_fields)?;
+                        if !union_before.contains_key(&key) {
+                            union_before.insert(
+                                key.clone(),
+                                disjoint_union_tuple(left_side, right_side, &key, &self.state)?,
+                            );
+                        }
+                        let side = if is_left { left_side } else { right_side };
+                        indexed_side_apply(side, key, &delta, &self.state)?;
+                    }
                     OperatorState::ParentCount {
                         left_key,
                         right_key,
@@ -4478,6 +4618,38 @@ impl WorldNetwork {
                 }
             }
 
+            if let Some(OperatorState::DisjointUnion {
+                left_side,
+                right_side,
+                ..
+            }) = self.operator_states.get_mut(&op_idx)
+            {
+                for (key, old) in union_before {
+                    let new = disjoint_union_tuple(left_side, right_side, &key, &self.state)?;
+                    if old == new {
+                        continue;
+                    }
+                    let derivation = Derivation::group(op_id, key.0);
+                    if let Some(tuple) = old {
+                        out_deltas.push(TupleDelta::Retract {
+                            tuple,
+                            derivation: derivation.clone(),
+                        });
+                    }
+                    if let Some(tuple) = new {
+                        out_deltas.push(TupleDelta::Insert { tuple, derivation });
+                    }
+                }
+            }
+
+            // Parent counts are batch observations too. Let all ancestor work
+            // settle, then cancel transient counts before the next cascade stage
+            // joins them. Otherwise each intermediate count multiplies downstream
+            // work even though only the final count can survive the transaction.
+            if matches!(self.dag.nodes[op_idx], OperatorNode::ParentCount { .. }) {
+                out_deltas = net_effect(&out_deltas).into_iter().cloned().collect();
+            }
+
             // Propagate out_deltas. Each consumer of the batch gets a copy except the last,
             // which takes ownership (avoids one full clone of every batch).
             if !out_deltas.is_empty() {
@@ -4558,6 +4730,7 @@ impl WorldNetwork {
                         for od in batch {
                             let item = match self.operator_states.get(&consumer.0) {
                                 Some(OperatorState::AntiJoin { left, right, .. })
+                                | Some(OperatorState::DisjointUnion { left, right, .. })
                                 | Some(OperatorState::ParentCount { left, right, .. }) => {
                                     OperatorWorkItem::SideDelta {
                                         delta: od,
@@ -5460,6 +5633,7 @@ fn has_pending_ancestor(
         | OperatorNode::GroupedCount { input, .. } => pending.push(*input),
         OperatorNode::EquiJoin { left, right, .. }
         | OperatorNode::AntiJoin { left, right, .. }
+        | OperatorNode::DisjointUnion { left, right, .. }
         | OperatorNode::ParentCount { left, right, .. } => {
             pending.push(*left);
             pending.push(*right);
@@ -5482,6 +5656,7 @@ fn has_pending_ancestor(
             | OperatorNode::GroupedCount { input, .. } => pending.push(*input),
             OperatorNode::EquiJoin { left, right, .. }
             | OperatorNode::AntiJoin { left, right, .. }
+            | OperatorNode::DisjointUnion { left, right, .. }
             | OperatorNode::ParentCount { left, right, .. } => {
                 pending.push(*left);
                 pending.push(*right);
@@ -5639,6 +5814,7 @@ fn entity_id_for(
 /// Evaluate a base row into the typed intermediate tuple the Scan operator emits.
 fn scan_intermediate(
     relation: &str,
+    key: Option<&WorldKey>,
     schema: &ast::Ty,
     tuple: &WorldTuple,
     schemas: &BTreeMap<String, brix_lower::l3_v2::L3Schema>,
@@ -5661,7 +5837,21 @@ fn scan_intermediate(
         })?;
         intermediate.insert(
             field.name.clone(),
-            Value::from_typed_bytes_with_schemas(bytes, &field.ty, schemas)?,
+            Value::from_typed_bytes_with_schemas(bytes, &field.ty, schemas).map_err(
+                |e| match e {
+                    WorldError::NetworkError(msg) => {
+                        if let Some(k) = key {
+                            WorldError::NetworkError(format!(
+                                "{relation}[{k}].{}: {msg}",
+                                field.name
+                            ))
+                        } else {
+                            WorldError::NetworkError(format!("{relation}.{}: {msg}", field.name))
+                        }
+                    }
+                    other => other,
+                },
+            )?,
         );
     }
     Ok(intermediate)

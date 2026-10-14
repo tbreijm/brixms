@@ -80,6 +80,20 @@ impl fmt::Debug for WorldKey {
     }
 }
 
+impl fmt::Display for WorldKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut r = CanonReader::new(&self.0);
+        let s = r
+            .read_bytes()
+            .ok()
+            .filter(|_| r.is_empty())
+            .and_then(|b| std::str::from_utf8(b).ok())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| self.to_hex());
+        write!(f, "{s}")
+    }
+}
+
 /// An opaque, canonical record tuple payload.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct WorldTuple(pub Vec<u8>);

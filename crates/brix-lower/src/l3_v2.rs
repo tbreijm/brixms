@@ -470,6 +470,7 @@ pub enum L3SchemaType {
     Named(String),
     F64,
     Decimal,
+    List(Box<L3SchemaType>),
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -493,6 +494,7 @@ impl L3SchemaType {
             Self::Named(name) => name.clone(),
             Self::F64 => "F64".to_string(),
             Self::Decimal => "Decimal".to_string(),
+            Self::List(element) => format!("List<{}>", element.display_name()),
         }
     }
 }
@@ -506,6 +508,12 @@ pub fn validate_l3_value(
     path: &str,
 ) -> Result<(), String> {
     match (value, expected) {
+        (L3ValueV2::List(items), L3SchemaType::List(element)) => {
+            for (index, item) in items.iter().enumerate() {
+                validate_l3_value(item, element, schemas, &format!("{path}[{index}]"))?;
+            }
+            Ok(())
+        }
         (L3ValueV2::Int(_), L3SchemaType::Int)
         | (L3ValueV2::Bool(_), L3SchemaType::Bool)
         | (L3ValueV2::Str(_), L3SchemaType::Str)
@@ -607,10 +615,6 @@ pub fn validate_l3_value(
             "{path}: expected {}, found '{nominal_sum}'",
             expected.display_name()
         )),
-        // Lists are never nested inside a record/sum schema or a helper
-        // contract (ADR-0037 §Scope defers nested lists); reaching here means
-        // a list value was passed where a scalar or nominal schema type was
-        // expected.
         (L3ValueV2::List(_), expected) => Err(format!(
             "{path}: expected {}, found list",
             expected.display_name()

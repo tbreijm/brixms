@@ -142,16 +142,24 @@ const V_F64: u64 = 4;
 const V_DECIMAL: u64 = 5;
 const V_RECORD: u64 = 6;
 const V_VARIANT: u64 = 7;
+const V_LIST: u64 = 8;
 
 // Match the structured settlement decoder's admission bounds. Charge depth on
 // entry and child counts before allocation or iteration, including nested values.
-const VALUE_MAX_DEPTH: usize = 32;
-const VALUE_MAX_NODES: usize = 4096;
-const VALUE_MAX_CHILDREN: usize = 256;
+const VALUE_MAX_DEPTH: usize = brix_lower::input::MAX_INPUT_VALUE_DEPTH;
+const VALUE_MAX_NODES: usize = brix_lower::input::MAX_INPUT_VALUE_NODES;
+const VALUE_MAX_CHILDREN: usize = brix_lower::input::MAX_INPUT_CONTAINER_WIDTH;
 
 impl StateCodec for Value {
     fn state_write(&self, w: &mut CanonWriter) {
         match self {
+            Value::List(items) => {
+                w.write_uint(V_LIST);
+                w.write_uint(items.len() as u64);
+                for item in items {
+                    item.state_write(w);
+                }
+            }
             Value::Null => w.write_uint(V_NULL),
             Value::Bool(b) => {
                 w.write_uint(V_BOOL);
@@ -220,6 +228,14 @@ fn read_value(r: &mut CanonReader<'_>, depth: usize, remaining: &mut usize) -> R
     }
     *remaining -= 1;
     match r.read_uint()? {
+        V_LIST => {
+            let count = value_child_count(r, *remaining)?;
+            let mut items = Vec::with_capacity(count);
+            for _ in 0..count {
+                items.push(read_value(r, depth + 1, remaining)?);
+            }
+            Ok(Value::List(items))
+        }
         V_NULL => Ok(Value::Null),
         V_BOOL => Ok(Value::Bool(r.read_bool()?)),
         V_INT => Ok(Value::Int(r.read_int()?)),
