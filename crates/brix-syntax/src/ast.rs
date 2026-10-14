@@ -83,6 +83,9 @@ pub struct RelDerivedDecl {
 /// A relational query in a `rel derived` declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelQuery {
+    /// `union a, b key ...`: the two sources in `from` are merged without a
+    /// projection. Keys must be disjoint at each committed batch boundary.
+    pub union_keys: Option<Vec<String>>,
     pub select: Expr,
     pub from: Vec<RelBinding>,
     pub where_clause: Option<Expr>,

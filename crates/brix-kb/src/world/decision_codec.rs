@@ -28,6 +28,8 @@ pub enum Value {
         variant: String,
         args: Vec<Value>,
     },
+    /// Ordered value; duplicates are significant.
+    List(Vec<Value>),
 }
 
 impl std::hash::Hash for Value {
@@ -35,6 +37,7 @@ impl std::hash::Hash for Value {
         std::mem::discriminant(self).hash(state);
         match self {
             Self::Null => {}
+            Self::List(items) => items.hash(state),
             Self::Bool(v) => v.hash(state),
             Self::Int(v) => v.hash(state),
             Self::Str(v) => v.hash(state),
@@ -84,7 +87,10 @@ impl Value {
         }
     }
     pub fn to_bytes(&self) -> Vec<u8> {
-        if matches!(self, Self::Record { .. } | Self::Variant { .. }) {
+        if matches!(
+            self,
+            Self::Record { .. } | Self::Variant { .. } | Self::List(_)
+        ) {
             let mut writer = CanonWriter::new();
             canon_write_value(self, &mut writer);
             let mut bytes = STRUCTURED_PREFIX.to_vec();
@@ -104,7 +110,7 @@ impl Value {
     /// Existing scalar outputs remain strings; structured outcomes retain type tags.
     pub fn to_json(&self) -> serde_json::Value {
         match self {
-            Self::Record { .. } | Self::Variant { .. } => self.to_tagged_json(),
+            Self::Record { .. } | Self::Variant { .. } | Self::List(_) => self.to_tagged_json(),
             Self::Null => serde_json::Value::Null,
             _ => serde_json::Value::String(self.to_string()),
         }
@@ -114,6 +120,9 @@ impl Value {
         use serde_json::json;
         match self {
             Self::Null => serde_json::Value::Null,
+            Self::List(items) => {
+                json!({"type":"list", "items":items.iter().map(Self::to_tagged_json).collect::<Vec<_>>()})
+            }
             Self::Bool(v) => json!({"type":"bool", "value":v}),
             Self::Int(v) => json!({"type":"int", "value":v.to_string()}),
             Self::Str(v) => json!({"type":"string", "value":v}),
@@ -137,12 +146,9 @@ impl Value {
         ty: &ast::Ty,
         schemas: &BTreeMap<String, brix_lower::l3_v2::L3Schema>,
     ) -> Result<Self, WorldError> {
-        use brix_lower::l3_v2::{validate_l3_value, L3SchemaType as T};
-        let ast::Ty::Named(name) = ty else {
-            return Err(WorldError::NetworkError(format!(
-                "unsupported field type {ty:?}"
-            )));
-        };
+        use brix_lower::l3_v2::validate_l3_value;
+        let expected = brix_lower::world_expr::contract(ty).map_err(WorldError::NetworkError)?;
+        let name = expected.display_name();
         let text = || {
             std::str::from_utf8(bytes)
                 .map_err(|e| WorldError::NetworkError(format!("invalid scalar UTF-8: {e}")))
@@ -180,11 +186,7 @@ impl Value {
                 .map_err(|e| WorldError::NetworkError(format!("invalid structured value: {e}")))?
                 .to_l3_value()
         };
-        let expected = schemas
-            .get(name)
-            .map(|s| s.name.clone())
-            .unwrap_or_else(|| name.clone());
-        validate_l3_value(&value, &T::Named(expected), schemas, "world input")
+        validate_l3_value(&value, &expected, schemas, "world input")
             .map_err(|e| WorldError::NetworkError(format!("type validation error: {e}")))?;
         Self::from_scalar(value)
     }
@@ -192,6 +194,13 @@ impl Value {
     pub fn to_scalar(&self) -> Result<brix_lower::l3_v2::L3ValueV2, WorldError> {
         use brix_lower::l3_v2::L3ValueV2 as V;
         Ok(match self {
+            Self::List(items) => V::List(
+                items
+                    .iter()
+                    .map(Self::to_scalar)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into(),
+            ),
             Self::Bool(v) => V::Bool(*v),
             Self::Int(v) => V::Int(*v),
             Self::Str(v) => V::Str(v.clone()),
@@ -265,17 +274,29 @@ impl Value {
                     args: a_vec,
                 }
             }
-            _ => {
-                return Err(WorldError::NetworkError(
-                    "expression result is not a scalar".into(),
-                ))
-            }
+            V::List(items) => Self::List(
+                items
+                    .iter()
+                    .cloned()
+                    .map(Self::from_scalar)
+                    .collect::<Result<_, _>>()?,
+            ),
         })
     }
 }
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::List(items) => {
+                write!(f, "[")?;
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, "]")
+            }
             Self::Null => write!(f, "null"),
             Self::Bool(v) => write!(f, "{v}"),
             Self::Int(v) => write!(f, "{v}"),
@@ -378,7 +399,8 @@ fn canon_decode_err(e: brix_canon::CanonError) -> WorldError {
 }
 
 fn canon_read_value(r: &mut CanonReader<'_>) -> Result<Value, WorldError> {
-    canon_read_value_bounded(r, 0, &mut 4096)
+    let mut remaining = brix_lower::input::MAX_INPUT_VALUE_NODES;
+    canon_read_value_bounded(r, 0, &mut remaining)
 }
 
 fn canon_read_value_bounded(
@@ -386,7 +408,7 @@ fn canon_read_value_bounded(
     depth: usize,
     remaining: &mut usize,
 ) -> Result<Value, WorldError> {
-    if depth >= 32 || *remaining == 0 {
+    if depth >= brix_lower::input::MAX_INPUT_VALUE_DEPTH || *remaining == 0 {
         return Err(WorldError::NetworkError(
             "invalid or oversized structured value".into(),
         ));
@@ -426,7 +448,7 @@ fn canon_read_value_bounded(
                 .to_string();
             let count = usize::try_from(r.read_uint().map_err(canon_decode_err)?)
                 .map_err(|_| WorldError::NetworkError("invalid record field count".into()))?;
-            if count > 256 || count > *remaining {
+            if count > brix_lower::input::MAX_INPUT_CONTAINER_WIDTH || count > *remaining {
                 return Err(WorldError::NetworkError(
                     "invalid or oversized structured value".into(),
                 ));
@@ -460,7 +482,7 @@ fn canon_read_value_bounded(
                 .to_string();
             let count = usize::try_from(r.read_uint().map_err(canon_decode_err)?)
                 .map_err(|_| WorldError::NetworkError("invalid variant arg count".into()))?;
-            if count > 256 || count > *remaining {
+            if count > brix_lower::input::MAX_INPUT_CONTAINER_WIDTH || count > *remaining {
                 return Err(WorldError::NetworkError(
                     "invalid or oversized structured value".into(),
                 ));
@@ -474,6 +496,20 @@ fn canon_read_value_bounded(
                 variant,
                 args,
             }
+        }
+        8 => {
+            let count = usize::try_from(r.read_uint().map_err(canon_decode_err)?)
+                .map_err(|_| WorldError::NetworkError("invalid list length".into()))?;
+            if count > brix_lower::input::MAX_INPUT_CONTAINER_WIDTH || count > *remaining {
+                return Err(WorldError::NetworkError(
+                    "list value exceeds container width or node limit".into(),
+                ));
+            }
+            let mut items = Vec::with_capacity(count);
+            for _ in 0..count {
+                items.push(canon_read_value_bounded(r, depth + 1, remaining)?);
+            }
+            Value::List(items)
         }
         other => {
             return Err(WorldError::NetworkError(format!(
@@ -576,6 +612,13 @@ pub fn encode_decision_delta(
 /// The state maintained inside an operator node.
 pub(crate) fn canon_write_value(value: &Value, w: &mut CanonWriter) {
     match value {
+        Value::List(items) => {
+            w.write_uint(8);
+            w.write_uint(items.len() as u64);
+            for item in items {
+                canon_write_value(item, w);
+            }
+        }
         Value::Int(i) => {
             w.write_uint(1);
             w.write_int(*i);

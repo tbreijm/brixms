@@ -7,9 +7,9 @@ use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_syntax::ast;
 
 use crate::l3_v2::{
-    check_exhaustive_expr, is_reserved_list_operation_name, lower_expr_v2, DivModOpV2,
-    L3ConfigBodyV2, L3ConfigDeclV2, L3ExprV2, L3PatternV2, L3Schema, L3SchemaBody, L3SchemaType,
-    L3V2LowerError, L3ValueType, NumericBuiltinV2,
+    check_exhaustive_expr, is_reserved_list_operation_name, lower_expr_v2_with_ambiguous,
+    DivModOpV2, L3ConfigBodyV2, L3ConfigDeclV2, L3ExprV2, L3PatternV2, L3Schema, L3SchemaBody,
+    L3SchemaType, L3V2LowerError, L3ValueType, NumericBuiltinV2,
 };
 
 pub const MAX_SCHEMA_COUNT: usize = 128;
@@ -1584,6 +1584,7 @@ pub fn lower_finite_decision_plan(
     let mut record_configs: BTreeSet<String> = BTreeSet::new();
     let mut variants_of: BTreeMap<String, String> = BTreeMap::new();
     let mut nullary: BTreeMap<String, String> = BTreeMap::new();
+    let mut constructor_owners: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut sum_of_variant: BTreeMap<String, String> = BTreeMap::new();
     let mut variants_of_sum: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
@@ -1622,6 +1623,15 @@ pub fn lower_finite_decision_plan(
                                 kind: "constructor",
                             });
                         }
+                        constructor_owners
+                            .entry(v.name.clone())
+                            .or_default()
+                            .push(format!("{}::{}", c.name, v.name));
+                        variants_of.insert(format!("{}::{}", c.name, v.name), c.name.clone());
+                        sum_of_variant.insert(format!("{}::{}", c.name, v.name), c.name.clone());
+                        if v.params.is_empty() {
+                            nullary.insert(format!("{}::{}", c.name, v.name), c.name.clone());
+                        }
                         variants_of.insert(v.name.clone(), c.name.clone());
                         sum_of_variant.insert(v.name.clone(), c.name.clone());
                         var_names.push(v.name.clone());
@@ -1638,6 +1648,15 @@ pub fn lower_finite_decision_plan(
             _ => {}
         }
     }
+
+    let ambiguous_ctors: BTreeMap<_, _> = constructor_owners
+        .into_iter()
+        .filter_map(|(name, mut owners)| {
+            owners.sort();
+            owners.dedup();
+            (owners.len() > 1).then_some((name, owners))
+        })
+        .collect();
 
     let schemas = collect_reachable_schemas(module)?;
     let bounded = has_functions || !schemas.is_empty();
@@ -1888,6 +1907,10 @@ pub fn lower_finite_decision_plan(
                 if !has_functions {
                     if let ast::ConfigBody::Sum(variants) = &c.body {
                         for v in variants {
+                            variants_of.insert(format!("{}::{}", c.name, v.name), c.name.clone());
+                            if v.params.is_empty() {
+                                nullary.insert(format!("{}::{}", c.name, v.name), c.name.clone());
+                            }
                             variants_of.insert(v.name.clone(), c.name.clone());
                             if v.params.is_empty() {
                                 nullary.insert(v.name.clone(), c.name.clone());
@@ -1919,7 +1942,7 @@ pub fn lower_finite_decision_plan(
                 check_expr_bounds(&f.body, 0, &mut node_count)?;
 
                 let param_set: BTreeSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
-                let body = lower_expr_v2(
+                let body = lower_expr_v2_with_ambiguous(
                     &f.body,
                     &param_set,
                     &param_set,
@@ -1929,6 +1952,7 @@ pub fn lower_finite_decision_plan(
                     &function_arities,
                     false,
                     true,
+                    &ambiguous_ctors,
                 )
                 .map_err(|e| match e {
                     L3V2LowerError::UnresolvedReference(n) if all_input_names.contains(&n) => {
@@ -1984,7 +2008,7 @@ pub fn lower_finite_decision_plan(
 
                 let mut visible_bindings = let_names.clone();
                 visible_bindings.extend(input_names.iter().cloned());
-                let value = lower_expr_v2(
+                let value = lower_expr_v2_with_ambiguous(
                     &l.value,
                     &visible_bindings,
                     &BTreeSet::new(),
@@ -1994,6 +2018,7 @@ pub fn lower_finite_decision_plan(
                     &function_arities,
                     false,
                     has_functions,
+                    &ambiguous_ctors,
                 )
                 .map_err(map_lower_err)?;
 
@@ -2053,7 +2078,7 @@ pub fn lower_finite_decision_plan(
                 };
                 let mut visible_bindings = let_names.clone();
                 visible_bindings.extend(input_names.iter().cloned());
-                let body = lower_expr_v2(
+                let body = lower_expr_v2_with_ambiguous(
                     &r.body,
                     &visible_bindings,
                     &BTreeSet::new(),
@@ -2063,6 +2088,7 @@ pub fn lower_finite_decision_plan(
                     &function_arities,
                     true,
                     has_functions,
+                    &ambiguous_ctors,
                 )
                 .map_err(|e| match e {
                     L3V2LowerError::UnresolvedReference(n) if rule_names.contains(&n) => {
@@ -2162,7 +2188,7 @@ pub fn lower_finite_decision_plan(
                 };
                 let mut visible_bindings = let_names.clone();
                 visible_bindings.extend(input_names.iter().cloned());
-                let guard = lower_expr_v2(
+                let guard = lower_expr_v2_with_ambiguous(
                     &p.guard,
                     &visible_bindings,
                     &BTreeSet::new(),
@@ -2172,6 +2198,7 @@ pub fn lower_finite_decision_plan(
                     &function_arities,
                     true,
                     has_functions,
+                    &ambiguous_ctors,
                 )
                 .map_err(|e| match e {
                     L3V2LowerError::UnresolvedReference(n) if rule_names.contains(&n) => {
@@ -2209,7 +2236,7 @@ pub fn lower_finite_decision_plan(
                         .map_err(FiniteDecisionLowerError::ExprError)?;
                 }
 
-                let value = lower_expr_v2(
+                let value = lower_expr_v2_with_ambiguous(
                     &p.value,
                     &visible_bindings,
                     &BTreeSet::new(),
@@ -2219,6 +2246,7 @@ pub fn lower_finite_decision_plan(
                     &function_arities,
                     true,
                     has_functions,
+                    &ambiguous_ctors,
                 )
                 .map_err(|e| match e {
                     L3V2LowerError::UnresolvedReference(n) if rule_names.contains(&n) => {
@@ -2298,7 +2326,7 @@ pub fn lower_finite_decision_plan(
                 let mut show_readable = rule_names.clone();
                 show_readable.extend(commit_items.iter().map(|c| c.name.clone()));
                 show_readable.extend(decide_items.iter().map(|d| d.name.clone()));
-                let show = lower_expr_v2(
+                let show = lower_expr_v2_with_ambiguous(
                     expr,
                     &visible_bindings,
                     &BTreeSet::new(),
@@ -2308,6 +2336,7 @@ pub fn lower_finite_decision_plan(
                     &function_arities,
                     true,
                     has_functions,
+                    &ambiguous_ctors,
                 )
                 .map_err(map_lower_err)?;
 
@@ -2337,7 +2366,7 @@ pub fn lower_finite_decision_plan(
 
                 let mut visible_bindings = let_names.clone();
                 visible_bindings.extend(input_names.iter().cloned());
-                let list = lower_expr_v2(
+                let list = lower_expr_v2_with_ambiguous(
                     &d.list,
                     &visible_bindings,
                     &BTreeSet::new(),
@@ -2347,6 +2376,7 @@ pub fn lower_finite_decision_plan(
                     &function_arities,
                     true,
                     has_functions,
+                    &ambiguous_ctors,
                 )
                 .map_err(map_lower_err)?;
 
@@ -2403,7 +2433,7 @@ pub fn lower_finite_decision_plan(
                         rule_names.clone()
                     };
 
-                    let guard = lower_expr_v2(
+                    let guard = lower_expr_v2_with_ambiguous(
                         &p.guard,
                         &visible_bindings,
                         &binder_locals,
@@ -2413,6 +2443,7 @@ pub fn lower_finite_decision_plan(
                         &function_arities,
                         true,
                         has_functions,
+                        &ambiguous_ctors,
                     )
                     .map_err(|e| {
                         map_decide_propose_err(
@@ -2429,7 +2460,7 @@ pub fn lower_finite_decision_plan(
                             .map_err(FiniteDecisionLowerError::ExprError)?;
                     }
 
-                    let value = lower_expr_v2(
+                    let value = lower_expr_v2_with_ambiguous(
                         &p.value,
                         &visible_bindings,
                         &binder_locals,
@@ -2439,6 +2470,7 @@ pub fn lower_finite_decision_plan(
                         &function_arities,
                         true,
                         has_functions,
+                        &ambiguous_ctors,
                     )
                     .map_err(|e| {
                         map_decide_propose_err(
@@ -2805,6 +2837,7 @@ fn encode_schema_type(w: &mut CanonWriter, ty: &L3SchemaType) {
         L3SchemaType::Named(name) => w.write_enum(3, |w| w.write_ident(name)),
         L3SchemaType::F64 => w.write_enum(4, |_| {}),
         L3SchemaType::Decimal => w.write_enum(5, |_| {}),
+        L3SchemaType::List(element) => w.write_enum(6, |w| encode_schema_type(w, element)),
     }
 }
 

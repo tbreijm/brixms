@@ -460,6 +460,43 @@ impl Parser {
     fn parse_rel_derived_decl(&mut self) -> Result<RelDerivedDecl, ParseError> {
         let name = self.expect_ident("rel derived name")?.0;
         self.consume(TokenKind::Equals, "rel derived '='")?;
+        if matches!(self.peek(), TokenKind::Ident(s) if s == "union") {
+            self.advance();
+            let left = self.parse_qualified_name("union left relation")?;
+            self.consume(TokenKind::Comma, "union ','")?;
+            let right = self.parse_qualified_name("union right relation")?;
+            self.consume(TokenKind::Key, "union 'key'")?;
+            let keys = if self.check(&TokenKind::OpenParen) {
+                self.advance();
+                let keys = self.parse_comma_separated(TokenKind::CloseParen, |p| {
+                    p.expect_ident("union key field").map(|(s, _)| s)
+                })?;
+                self.consume(TokenKind::CloseParen, "union key ')'")?;
+                keys
+            } else {
+                vec![self.expect_ident("union key field")?.0]
+            };
+            return Ok(RelDerivedDecl {
+                name,
+                query: RelQuery {
+                    union_keys: Some(keys),
+                    select: Expr::AnonRecord(Vec::new()),
+                    from: vec![
+                        RelBinding {
+                            var: "left".into(),
+                            relation: left,
+                        },
+                        RelBinding {
+                            var: "right".into(),
+                            relation: right,
+                        },
+                    ],
+                    where_clause: None,
+                    not_exists: None,
+                    group_by: Vec::new(),
+                },
+            });
+        }
         self.consume(TokenKind::Select, "rel derived 'select'")?;
         let select = self.parse_expr()?;
         self.consume(TokenKind::From, "rel derived 'from'")?;
@@ -482,6 +519,22 @@ impl Parser {
         let mut not_exists = None;
         let where_clause = if self.check(&TokenKind::Where) {
             self.advance();
+            let filter = if self.check(&TokenKind::Not) {
+                None
+            } else {
+                self.enter()?;
+                let filter = self.parse_expr_bp_before_absence(true);
+                self.leave();
+                Some(filter?)
+            };
+            if self.check(&TokenKind::AmpAmp)
+                && self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|t| t.kind == TokenKind::Not)
+            {
+                self.advance();
+            }
             if self.check(&TokenKind::Not) {
                 self.advance();
                 self.consume(TokenKind::Exists, "not exists")?;
@@ -494,10 +547,8 @@ impl Parser {
                     binding: RelBinding { var, relation },
                     predicate,
                 });
-                None
-            } else {
-                Some(self.parse_expr()?)
             }
+            filter
         } else {
             None
         };
@@ -520,6 +571,7 @@ impl Parser {
         Ok(RelDerivedDecl {
             name,
             query: RelQuery {
+                union_keys: None,
                 select,
                 from,
                 where_clause,
@@ -531,6 +583,19 @@ impl Parser {
 
     /// `use brix.soc` — a dotted or qualified package path.
     fn parse_use_path(&mut self) -> Result<String, ParseError> {
+        if !matches!(
+            self.peek(),
+            TokenKind::Ident(_)
+                | TokenKind::Key
+                | TokenKind::Group
+                | TokenKind::By
+                | TokenKind::Rel
+                | TokenKind::Select
+                | TokenKind::Export
+                | TokenKind::Per
+        ) {
+            return Err(self.error(format!("reserved keyword {:?} cannot be a module name; rename the module (for example 'match_module')", self.peek())));
+        }
         let mut path = self.expect_ident("package name")?.0;
         while self.check(&TokenKind::Dot) || self.check(&TokenKind::ColonColon) {
             if self.check(&TokenKind::Dot) {
@@ -1005,6 +1070,12 @@ impl Parser {
     /// (unary minus binds tighter than every binary operator here), and `-a.field`
     /// is `-(a.field)` (postfix binds tighter than prefix).
     fn parse_expr_bp(&mut self) -> Result<Expr, ParseError> {
+        self.parse_expr_bp_before_absence(false)
+    }
+
+    // A correlated absence predicate is a top-level query conjunct, not a
+    // general expression. Nested expressions retain the ordinary grammar.
+    fn parse_expr_bp_before_absence(&mut self, stop_at_absence: bool) -> Result<Expr, ParseError> {
         // The recursive Pratt form retained one parser frame per active
         // precedence level. A nested expression on the right of a match could
         // therefore consume many frames per charged depth level. Keep the
@@ -1014,6 +1085,21 @@ impl Parser {
         let mut operators: Vec<(u8, BinOp, bool)> = Vec::new();
 
         loop {
+            if stop_at_absence
+                && self.check(&TokenKind::AmpAmp)
+                && self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|t| t.kind == TokenKind::Not)
+            {
+                if operators
+                    .iter()
+                    .any(|(_, op, _)| matches!(op, BinOp::OrOr | BinOp::Then | BinOp::And))
+                {
+                    return Err(self.error("not exists must be a top-level conjunct; parenthesize the preceding filter"));
+                }
+                break;
+            }
             let (binding_power, op, is_comparison) = match self.peek() {
                 TokenKind::Then => (1, BinOp::Then, false),
                 TokenKind::And => (1, BinOp::And, false),

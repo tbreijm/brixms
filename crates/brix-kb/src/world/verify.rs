@@ -254,6 +254,9 @@ impl From<WorldError> for VerifyError {
 
 fn convert_reference_value(v: &reference::Value) -> Value {
     match v {
+        reference::Value::List(items) => {
+            Value::List(items.iter().map(convert_reference_value).collect())
+        }
         reference::Value::Null => Value::Null,
         reference::Value::Bool(b) => Value::Bool(*b),
         reference::Value::Int(i) => Value::Int(*i),

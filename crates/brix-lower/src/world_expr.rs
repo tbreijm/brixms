@@ -103,7 +103,8 @@ fn normalize_world_and(expr: &ast::Expr) -> ast::Expr {
     }
 }
 
-fn contract(ty: &ast::Ty) -> Result<L3SchemaType, String> {
+/// Resolve a world value or helper contract, including ordered list values.
+pub fn contract(ty: &ast::Ty) -> Result<L3SchemaType, String> {
     match ty {
         ast::Ty::Named(name) => Ok(match name.as_str() {
             "Int" => L3SchemaType::Int,
@@ -113,6 +114,9 @@ fn contract(ty: &ast::Ty) -> Result<L3SchemaType, String> {
             "Decimal" => L3SchemaType::Decimal,
             other => L3SchemaType::Named(other.to_owned()),
         }),
+        ast::Ty::App(name, args) if name == "List" && args.len() == 1 => {
+            Ok(L3SchemaType::List(Box::new(contract(&args[0])?)))
+        }
         ast::Ty::Graded(_, _) => Err("graded helper contracts require grade evidence".into()),
         other => Err(format!("unsupported world helper contract: {other:?}")),
     }
@@ -396,6 +400,8 @@ impl CompiledWorldExpr {
         }
         let (value, steps) = l3_v2::eval_with_budget(&self.expr, &env, max_steps)
             .map_err(|fault| format!("Unknown(EvaluationFault): {fault}"))?;
+        let mut remaining = crate::input::MAX_INPUT_VALUE_NODES;
+        validate_value_bounds(&value, 0, &mut remaining)?;
         validate_world_result(&value, &self.schemas)?;
         Ok((value, steps))
     }
@@ -405,6 +411,40 @@ impl CompiledWorldExpr {
     }
 }
 
+// Apply the brix.input@2 value budget to the complete result, before it can
+// enter persistent state. Lists preserve expression order and duplicates.
+fn validate_value_bounds(
+    value: &L3ValueV2,
+    depth: usize,
+    remaining: &mut usize,
+) -> Result<(), String> {
+    use crate::input::{MAX_INPUT_CONTAINER_WIDTH, MAX_INPUT_VALUE_DEPTH};
+    if depth >= MAX_INPUT_VALUE_DEPTH || *remaining == 0 {
+        return Err("world value (including list values) exceeds depth or node limit".into());
+    }
+    *remaining -= 1;
+    let children: Vec<&L3ValueV2> = match value {
+        L3ValueV2::List(items) => items.iter().collect(),
+        L3ValueV2::Record { fields, .. } => fields.iter().map(|(_, v)| v).collect(),
+        L3ValueV2::Ctor { args, .. } => args.iter().collect(),
+        _ => return Ok(()),
+    };
+    if children.len() > MAX_INPUT_CONTAINER_WIDTH || children.len() > *remaining {
+        let kind = if matches!(value, L3ValueV2::List(_)) {
+            "list"
+        } else {
+            "structured"
+        };
+        return Err(format!(
+            "{kind} value exceeds container width ({MAX_INPUT_CONTAINER_WIDTH}) or node limit"
+        ));
+    }
+    for child in children {
+        validate_value_bounds(child, depth + 1, remaining)?;
+    }
+    Ok(())
+}
+
 /// Validate every structured result, including structured fields projected in
 /// anonymous relation tuples, before it enters settlement or persistent state.
 fn validate_world_result(
@@ -412,6 +452,12 @@ fn validate_world_result(
     schemas: &BTreeMap<String, L3Schema>,
 ) -> Result<(), String> {
     match value {
+        L3ValueV2::List(items) => {
+            for item in items.iter() {
+                validate_world_result(item, schemas)?;
+            }
+            Ok(())
+        }
         L3ValueV2::Ctor { nominal_sum, .. } => l3_v2::validate_l3_value(
             value,
             &L3SchemaType::Named(nominal_sum.clone()),

@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "brix-canon"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "blake3",
  "indexmap",
@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "brix-cli"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "brix-canon",
  "brix-elaborate",
@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "brix-elaborate"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "brix-canon",
  "brix-kernel",
@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "brix-kb"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "brix-canon",
  "brix-lower",
@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "brix-kernel"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "brix-canon",
  "brix-semantic",
@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "brix-lower"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "brix-canon",
  "brix-elaborate",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "brix-semantic"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "brix-canon",
  "proptest",
@@ -132,7 +132,7 @@ dependencies = [
 
 [[package]]
 name = "brix-syntax"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "proptest",
 ]
@@ -482,7 +482,7 @@ checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "soc-core"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "brix-canon",
  "brix-semantic",
@@ -491,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "soc-regimes"
-version = "0.1.0-alpha.6"
+version = "0.1.0-alpha.7"
 dependencies = [
  "brix-canon",
  "brix-elaborate",

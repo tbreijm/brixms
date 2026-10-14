@@ -57,6 +57,11 @@ pub const MAX_INPUT_COUNT: usize = 256;
 /// Maximum allowed byte length for an input identifier name (64 B).
 pub const MAX_INPUT_NAME_BYTES: usize = 64;
 
+/// Maximum allowed byte length for a fully-qualified nominal type name (e.g. `<module>::<Type>`).
+/// Bounded at 2 * MAX_INPUT_NAME_BYTES + 2 (130 bytes), allowing each identifier segment
+/// up to `MAX_INPUT_NAME_BYTES` (64 bytes) separated by `::` (2 bytes).
+pub const MAX_QUALIFIED_NAME_BYTES: usize = 2 * MAX_INPUT_NAME_BYTES + 2;
+
 /// Maximum allowed declared `max` bound for a `List<T> max N` input
 /// declaration (ADR-0037). `max` is otherwise unconstrained (any value in
 /// `0..=256` is admitted, including zero).
@@ -82,6 +87,7 @@ pub struct InputLimits {
     pub max_aggregate_bytes: usize,
     pub max_input_count: usize,
     pub max_name_bytes: usize,
+    pub max_qualified_name_bytes: usize,
     pub max_string_value_bytes: usize,
     pub max_depth: usize,
     pub max_value_depth: usize,
@@ -97,6 +103,7 @@ impl Default for InputLimits {
             max_aggregate_bytes: MAX_AGGREGATE_BYTES,
             max_input_count: MAX_INPUT_COUNT,
             max_name_bytes: MAX_INPUT_NAME_BYTES,
+            max_qualified_name_bytes: MAX_QUALIFIED_NAME_BYTES,
             max_string_value_bytes: MAX_STRING_VALUE_BYTES,
             max_depth: MAX_JSON_DEPTH,
             max_value_depth: MAX_INPUT_VALUE_DEPTH,
@@ -578,6 +585,15 @@ pub enum InputDecodeError {
     NameTooLong {
         limit: usize,
     },
+    NominalNameTooLong {
+        limit: usize,
+        found: usize,
+    },
+    NominalSegmentTooLong {
+        nominal: String,
+        segment: String,
+        limit: usize,
+    },
     InvalidIdentifier {
         name: String,
         reason: &'static str,
@@ -638,6 +654,22 @@ impl fmt::Display for InputDecodeError {
             }
             Self::NameTooLong { limit } => {
                 write!(f, "input name exceeds length limit ({limit} bytes)")
+            }
+            Self::NominalNameTooLong { limit, found } => {
+                write!(
+                    f,
+                    "nominal name exceeds length limit ({found} bytes, limit {limit})"
+                )
+            }
+            Self::NominalSegmentTooLong {
+                nominal,
+                segment,
+                limit,
+            } => {
+                write!(
+                    f,
+                    "nominal '{nominal}' segment '{segment}' exceeds identifier length limit ({limit} bytes)"
+                )
             }
             Self::InvalidIdentifier { name, reason } => {
                 write!(f, "invalid identifier '{name}': {reason}")
@@ -1409,6 +1441,96 @@ impl<'a> StrictJsonParser<'a> {
         })
     }
 
+    fn parse_nominal_name(&mut self, qualified: bool) -> Result<String, InputDecodeError> {
+        self.skip_whitespace();
+        if self.peek() != Some(b'"') {
+            return Err(InputDecodeError::SyntaxError {
+                message: "expected opening quote '\"'".to_string(),
+                offset: self.pos,
+            });
+        }
+        self.pos += 1;
+        let start_offset = self.pos;
+        let mut s = String::new();
+
+        let max_len = if qualified {
+            self.limits.max_qualified_name_bytes
+        } else {
+            self.limits.max_name_bytes
+        };
+
+        while self.pos < self.bytes.len() {
+            let b = self.bytes[self.pos];
+            if b == b'"' {
+                self.pos += 1;
+                if qualified {
+                    for segment in s.split("::") {
+                        if segment.len() > self.limits.max_name_bytes {
+                            return Err(InputDecodeError::NominalSegmentTooLong {
+                                nominal: s.clone(),
+                                segment: segment.to_string(),
+                                limit: self.limits.max_name_bytes,
+                            });
+                        }
+                        validate_identifier(segment, self.limits.max_name_bytes)?;
+                    }
+                } else {
+                    validate_identifier(&s, self.limits.max_name_bytes)?;
+                }
+                return Ok(s);
+            } else if b == b'\\' {
+                self.pos += 1;
+                if self.pos >= self.bytes.len() {
+                    return Err(InputDecodeError::UnexpectedEof);
+                }
+                let esc = self.bytes[self.pos];
+                self.pos += 1;
+                match esc {
+                    b'"' => s.push('"'),
+                    b'\\' => s.push('\\'),
+                    b'/' => s.push('/'),
+                    b'b' => s.push('\x08'),
+                    b'f' => s.push('\x0c'),
+                    b'n' => s.push('\n'),
+                    b'r' => s.push('\r'),
+                    b't' => s.push('\t'),
+                    b'u' => {
+                        let ch = self.parse_unicode_escape()?;
+                        s.push(ch);
+                    }
+                    other => {
+                        return Err(InputDecodeError::SyntaxError {
+                            message: format!("unrecognized escape character '\\{}'", other as char),
+                            offset: self.pos - 1,
+                        });
+                    }
+                }
+            } else if b < 0x20 {
+                return Err(InputDecodeError::SyntaxError {
+                    message: "control character in nominal name".to_string(),
+                    offset: self.pos,
+                });
+            } else {
+                let remaining = &self.text[self.pos..];
+                let ch = remaining.chars().next().unwrap();
+                s.push(ch);
+                self.pos += ch.len_utf8();
+            }
+
+            if s.len() > max_len {
+                return Err(InputDecodeError::NominalNameTooLong {
+                    limit: max_len,
+                    found: s.len(),
+                });
+            }
+        }
+
+        Err(InputDecodeError::SyntaxError {
+            message: "unterminated string literal in nominal name".to_string(),
+            offset: start_offset,
+        })
+    }
+
     fn parse_envelope(&mut self) -> Result<InputShard, InputDecodeError> {
         self.enter_depth()?;
         self.consume(b'{', "root envelope object")?;
@@ -1656,15 +1778,7 @@ impl<'a> StrictJsonParser<'a> {
                 }
                 "value" => raw_value = Some(self.parse_raw_scalar_field()?),
                 "nominal" => {
-                    nominal = Some(if self.qualified_nominals {
-                        let name = self.parse_string(self.limits.max_name_bytes)?;
-                        for segment in name.split("::") {
-                            validate_identifier(segment, self.limits.max_name_bytes)?;
-                        }
-                        name
-                    } else {
-                        self.parse_input_name()?
-                    });
+                    nominal = Some(self.parse_nominal_name(self.qualified_nominals)?);
                 }
                 "variant" => variant = Some(self.parse_input_name()?),
                 "args" => args = Some(self.parse_value_array()?),

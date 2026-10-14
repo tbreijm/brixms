@@ -780,7 +780,8 @@ impl ExecProfileV1 {
     }
 
     pub fn is_supported_version(version: &str) -> bool {
-        matches!(version, "0.1.0-alpha.5" | "0.1.0-alpha.6") || version == env!("CARGO_PKG_VERSION")
+        matches!(version, "0.1.0-alpha.5" | "0.1.0-alpha.6" | "0.1.0-alpha.7")
+            || version == env!("CARGO_PKG_VERSION")
     }
 
     /// Canonical profile identity, including the candidate-value admissibility rule.

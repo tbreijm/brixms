@@ -133,7 +133,8 @@ pub fn leaf_counts(dag: &RelationDag) -> Vec<usize> {
             OperatorNode::Scan { .. }
             | OperatorNode::DecisionRows { .. }
             | OperatorNode::Distinct { .. }
-            | OperatorNode::GroupedCount { .. } => 1,
+            | OperatorNode::GroupedCount { .. }
+            | OperatorNode::DisjointUnion { .. } => 1,
             OperatorNode::Bind { input, .. }
             | OperatorNode::Filter { input, .. }
             | OperatorNode::Project { input, .. } => count(dag, input.0, memo),
@@ -280,10 +281,12 @@ fn shape(dag: &RelationDag, op: OperatorId, leaves: &[Leaf], i: &mut usize) -> R
             Leaf::Distinct(_) => Ok(()),
             _ => noncanon("distinct operator expects a distinct leaf"),
         },
-        OperatorNode::GroupedCount { .. } => match next_leaf(leaves, i)? {
-            Leaf::Group(_) => Ok(()),
-            _ => noncanon("grouped-count operator expects a group leaf"),
-        },
+        OperatorNode::GroupedCount { .. } | OperatorNode::DisjointUnion { .. } => {
+            match next_leaf(leaves, i)? {
+                Leaf::Group(_) => Ok(()),
+                _ => noncanon("grouped-count operator expects a group leaf"),
+            }
+        }
     }
 }
 
@@ -335,13 +338,15 @@ fn unfold(dag: &RelationDag, op: OperatorId, leaves: &[Leaf], i: &mut usize) -> 
             }),
             _ => noncanon("distinct operator expects a distinct leaf"),
         },
-        OperatorNode::GroupedCount { .. } => match next_leaf(leaves, i)? {
-            Leaf::Group(k) => Ok(DerivationId::Group {
-                op,
-                group_key: k.clone(),
-            }),
-            _ => noncanon("grouped-count operator expects a group leaf"),
-        },
+        OperatorNode::GroupedCount { .. } | OperatorNode::DisjointUnion { .. } => {
+            match next_leaf(leaves, i)? {
+                Leaf::Group(k) => Ok(DerivationId::Group {
+                    op,
+                    group_key: k.clone(),
+                }),
+                _ => noncanon("grouped-count operator expects a group leaf"),
+            }
+        }
     }
 }
 

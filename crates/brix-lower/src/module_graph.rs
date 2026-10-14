@@ -387,6 +387,17 @@ impl ModuleGraph {
             }
         }
 
+        for component in module_name.split("::").flat_map(|part| part.split('.')) {
+            if component.chars().all(|c| c.is_alphabetic() || c == '_')
+                && brix_syntax::parse(&format!("use {component}")).is_err()
+            {
+                return Err(ModuleLinkError::Parse {
+                    module: module_name.to_string(),
+                    error: format!("reserved keyword '{component}' cannot be a module name; rename it (for example '{component}_module')"),
+                });
+            }
+        }
+
         let Some(source) = loader.load_module(module_name) else {
             return Err(ModuleLinkError::NotFound(module_name.to_string()));
         };
@@ -1327,8 +1338,14 @@ impl NominalResolver<'_> {
                 }
             }
         }
-        // Local declarations shadow imports, just like other module symbols.
-        let candidates = if local.is_empty() { visible } else { local };
+        // Constructors denote nominal types: moving a visible sum across a
+        // module boundary must not silently change which type a bare name builds.
+        // Other declarations retain ordinary local-over-import precedence.
+        let candidates = if constructor || local.is_empty() {
+            visible
+        } else {
+            local
+        };
         if candidates.len() > 1 {
             return Err(ModuleLinkError::AmbiguousSymbol {
                 name: name.to_owned(),

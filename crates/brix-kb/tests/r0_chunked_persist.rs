@@ -383,33 +383,33 @@ fn golden_semantic_matches_alpha5_seed_3() {
     );
 }
 
-// Alpha.6 golden histories include the revision digest, which binds the network-state
+// Alpha.7 golden histories include the revision digest, which binds the network-state
 // root. The state codec @3 and network-state header @2 intentionally change these
 // digests from the pre-CPD / alpha.5 engine (ADR-0047). The original compatibility
 // requirement applies to decision-delta bytes and settlements, pinned above against
 // alpha.5 (0bad6e4) with revision digests excluded.
 // Chunking and quantum equivalence remain checked independently below.
 #[test]
-fn golden_alpha6_seed_1() {
+fn golden_alpha7_seed_1() {
     assert_eq!(
         golden_hash(1, 25, 1),
-        "8914bc1757b78608b6fbf0e22a16b6173e06c705390b7d4ba69dcd86f874f13b"
+        "9a8e618a12163140d21dae4a3d3c2b814d5e644a8b7ca2055b0b673b3c0a5b35"
     );
 }
 
 #[test]
-fn golden_alpha6_seed_2() {
+fn golden_alpha7_seed_2() {
     assert_eq!(
         golden_hash(2, 25, 6),
-        "20630f74a84f6b2b8e3b632ef5eb46c442882f44206393426f2e829671c9324f"
+        "92596be8ce0026826f1a8f251f44b3f674f2c5e2a5a5ae3f4e1207841ea06150"
     );
 }
 
 #[test]
-fn golden_alpha6_seed_3() {
+fn golden_alpha7_seed_3() {
     assert_eq!(
         golden_hash(3, 25, 20),
-        "38736355d946bb43fdc26723d20f9a191031729ddc74f19a9ec7e63d0492957f"
+        "2321863f9b6724375bbe43f1d3029729734d609586bb34f8133fe8b48f67b101"
     );
 }
 

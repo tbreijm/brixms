@@ -99,6 +99,12 @@ pub enum OperatorNode {
         output_key: String,
         output_count: String,
     },
+    /// Disjoint keyed union; duplicate keys are a deterministic transaction error.
+    DisjointUnion {
+        left: OperatorId,
+        right: OperatorId,
+        key_fields: Vec<String>,
+    },
     /// Distinct / set semantics.
     Distinct { input: OperatorId },
     /// Grouped count aggregation.
@@ -335,6 +341,32 @@ pub fn lower_relations(program: &LinkedProgram) -> Result<RelationDag, Relationa
         let source = &all_relations[&rel_name];
         match source {
             RelationSource::Input(input_decl) => {
+                let fields = match &input_decl.ty {
+                    ast::Ty::Record(fields) => Some(fields),
+                    ast::Ty::Named(name) => {
+                        let (module, local) = name
+                            .rsplit_once("::")
+                            .unwrap_or((owner_module(&rel_name), name));
+                        program
+                            .available_configs
+                            .get(&crate::module_graph::QualifiedName::new(module, local))
+                            .and_then(|config| match &config.body {
+                                ast::ConfigBody::Record(fields) => Some(fields),
+                                _ => None,
+                            })
+                    }
+                    _ => None,
+                };
+                if let Some(field) = fields
+                    .into_iter()
+                    .flatten()
+                    .find(|field| matches!(&field.ty, ast::Ty::App(name, _) if name == "List"))
+                {
+                    return Err(RelationalLowerError::UnsupportedExpression(format!(
+                        "list-valued input tuple field '{}.{}' is unsupported; normalize input lists into child relations",
+                        rel_name, field.name
+                    )));
+                }
                 let op = dag.add_node(OperatorNode::Scan {
                     relation: rel_name.clone(),
                     schema: input_decl.ty.clone(),
@@ -475,34 +507,6 @@ pub fn decision_field_schemas(
     dag: &RelationDag,
     program: &LinkedProgram,
 ) -> Vec<BTreeMap<String, ast::Ty>> {
-    fn expr_ty(
-        e: &Expr,
-        fields: &BTreeMap<String, ast::Ty>,
-        program: &LinkedProgram,
-    ) -> Option<ast::Ty> {
-        match e {
-            Expr::Var(v) => fields.get(v).cloned(),
-            Expr::Field(base, field) => match base.as_ref() {
-                Expr::Var(v) => fields.get(&format!("{v}.{field}")).cloned(),
-                _ => None,
-            },
-            Expr::Str(_) => Some(ast::Ty::Named("Str".into())),
-            Expr::Bool(_) | Expr::Not(_) => Some(ast::Ty::Named("Bool".into())),
-            Expr::Num(n) => Some(ast::Ty::Named(
-                if n.contains('.') { "F64" } else { "Int" }.into(),
-            )),
-            Expr::Bin { op, lhs, .. } => match op {
-                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => expr_ty(lhs, fields, program),
-                _ => Some(ast::Ty::Named("Bool".into())),
-            },
-            Expr::Call { func, .. } => program
-                .functions
-                .iter()
-                .find(|(k, _)| k.to_string() == *func)
-                .and_then(|(_, f)| f.ret.clone()),
-            _ => None,
-        }
-    }
     let mut schemas: Vec<BTreeMap<String, ast::Ty>> = Vec::new();
     for node in &dag.nodes {
         let fields = match node {
@@ -553,7 +557,9 @@ pub fn decision_field_schemas(
                 f.extend(schemas[right.0].clone());
                 f
             }
-            OperatorNode::AntiJoin { left, .. } => schemas[left.0].clone(),
+            OperatorNode::AntiJoin { left, .. } | OperatorNode::DisjointUnion { left, .. } => {
+                schemas[left.0].clone()
+            }
             OperatorNode::ParentCount {
                 left,
                 left_key,
@@ -574,7 +580,7 @@ pub fn decision_field_schemas(
             OperatorNode::Project { input, projections } => projections
                 .iter()
                 .map(|(k, e)| {
-                    let ty = expr_ty(e, &schemas[input.0], program)
+                    let ty = crate::world_type::infer(e, &schemas[input.0], "", program)
                         .unwrap_or_else(|| ast::Ty::Named("Any".into()));
                     (k.clone(), ty)
                 })
@@ -593,10 +599,12 @@ pub fn decision_field_schemas(
                         Some((k.clone(), ast::Ty::Named("Decimal".into())))
                     }
                     GroupProjection::Min(expr) | GroupProjection::Max(expr) => {
-                        expr_ty(expr, &schemas[input.0], program).map(|t| (k.clone(), t))
+                        crate::world_type::infer(expr, &schemas[input.0], "", program)
+                            .map(|t| (k.clone(), t))
                     }
                     GroupProjection::Key(i) => {
-                        expr_ty(&group_keys[*i], &schemas[input.0], program).map(|t| (k.clone(), t))
+                        crate::world_type::infer(&group_keys[*i], &schemas[input.0], "", program)
+                            .map(|t| (k.clone(), t))
                     }
                 })
                 .collect(),
@@ -649,63 +657,6 @@ fn infer_decision_value_type(
     program: &LinkedProgram,
     decide_name: &str,
 ) -> Result<ast::Ty, RelationalLowerError> {
-    fn infer(
-        expr: &Expr,
-        fields: &BTreeMap<String, ast::Ty>,
-        module: &str,
-        program: &LinkedProgram,
-    ) -> Option<ast::Ty> {
-        match expr {
-            Expr::Str(_) => Some(ast::Ty::Named("Str".into())),
-            Expr::Bool(_) => Some(ast::Ty::Named("Bool".into())),
-            Expr::Num(n) => Some(ast::Ty::Named(
-                if n.contains('.') { "F64" } else { "Int" }.into(),
-            )),
-            Expr::Var(v) => fields
-                .get(v)
-                .cloned()
-                .or_else(|| constructor_sum_type(v, module, program)),
-            Expr::Field(base, field) => match base.as_ref() {
-                Expr::Var(alias) => fields.get(&format!("{alias}.{field}")).cloned(),
-                _ => None,
-            },
-            Expr::Record { config, .. } => {
-                let q = if config.contains("::") {
-                    config.clone()
-                } else {
-                    format!("{module}::{config}")
-                };
-                Some(ast::Ty::Named(q))
-            }
-            Expr::AnonRecord(record_fields) => Some(ast::Ty::Record(
-                record_fields
-                    .iter()
-                    .map(|(name, expr)| {
-                        Some(ast::FieldDecl {
-                            name: name.clone(),
-                            ty: infer(expr, fields, module, program)?,
-                        })
-                    })
-                    .collect::<Option<Vec<_>>>()?,
-            )),
-            Expr::Call { func, .. } => {
-                if let Some((_, f)) = program
-                    .functions
-                    .iter()
-                    .find(|(q, f)| q.to_string() == *func || f.name == *func)
-                {
-                    f.ret.clone()
-                } else {
-                    constructor_sum_type(func, module, program)
-                }
-            }
-            Expr::Bin { op, .. } if op.is_comparison() || op.is_logical() => {
-                Some(ast::Ty::Named("Bool".into()))
-            }
-            Expr::Bin { lhs, .. } => infer(lhs, fields, module, program),
-            _ => None,
-        }
-    }
     let mut fields = source_fields.clone();
     for (name, ty) in source_fields {
         if let Some((alias, field)) = name.split_once('.') {
@@ -725,12 +676,14 @@ fn infer_decision_value_type(
                 proposal.name, proposal.priority
             ))
         })?;
-        let ty = infer(&proposal.value, &fields, module, program).ok_or_else(|| {
-            RelationalLowerError::UnsupportedExpression(format!(
-                "cannot infer proposal result type for decide '{decide_name}' candidate '{}'",
-                proposal.name
-            ))
-        })?;
+        let ty = crate::world_type::infer(&proposal.value, &fields, module, program).ok_or_else(
+            || {
+                RelationalLowerError::UnsupportedExpression(format!(
+                    "cannot infer proposal result type for decide '{decide_name}' candidate '{}'",
+                    proposal.name
+                ))
+            },
+        )?;
         if result.as_ref().is_some_and(|existing| existing != &ty) {
             return Err(RelationalLowerError::UnsupportedExpression(format!(
                 "decide '{decide_name}' proposals have inconsistent result types: {result:?} and {ty:?}"
@@ -743,33 +696,6 @@ fn infer_decision_value_type(
             "decide '{decide_name}' has no proposals, so its winner-row value type is unknown"
         ))
     })
-}
-
-/// The nominal Sum type a (bare or qualified) variant constructor builds.
-/// A bare name prefers a Sum declared in `module`; otherwise it must be unique
-/// in the program (the linker rejects ambiguous constructors before this runs).
-fn constructor_sum_type(name: &str, module: &str, program: &LinkedProgram) -> Option<ast::Ty> {
-    let mut matches = program.configs.iter().filter_map(|(qname, config)| {
-        let ast::ConfigBody::Sum(variants) = &config.body else {
-            return None;
-        };
-        let full = qname.to_string();
-        variants
-            .iter()
-            .any(|variant| {
-                let qualified = format!("{full}::{}", variant.name);
-                name == variant.name
-                    || name == qualified
-                    || qualified.ends_with(&format!("::{name}")) && name.contains("::")
-            })
-            .then_some(full)
-    });
-    let all: Vec<String> = matches.by_ref().collect();
-    let chosen = all
-        .iter()
-        .find(|full| owner_module(full) == module)
-        .or_else(|| (all.len() == 1).then(|| &all[0]))?;
-    Some(ast::Ty::Named(chosen.clone()))
 }
 
 fn owner_module(qualified_name: &str) -> &str {
@@ -933,6 +859,52 @@ fn lower_derived_query(
         return Err(RelationalLowerError::UnsupportedExpression(
             "relational query must have at least one 'from' source".to_string(),
         ));
+    }
+
+    if let Some(keys) = &query.union_keys {
+        if query.from.len() != 2
+            || keys.is_empty()
+            || keys.iter().collect::<BTreeSet<_>>().len() != keys.len()
+        {
+            return Err(RelationalLowerError::UnsupportedExpression(
+                "union requires two sources and nonempty, unique key fields".into(),
+            ));
+        }
+        let left_name = resolve_binding_relation(
+            &query.from[0].relation,
+            owner_module(rel_name),
+            all_relations,
+        )?;
+        let right_name = resolve_binding_relation(
+            &query.from[1].relation,
+            owner_module(rel_name),
+            all_relations,
+        )?;
+        let left = dag.relation_outputs[&left_name];
+        let right = dag.relation_outputs[&right_name];
+        let schemas = decision_field_schemas(dag, program);
+        if schemas[left.0] != schemas[right.0]
+            || schemas[left.0].is_empty()
+            || schemas[left.0]
+                .values()
+                .any(|ty| matches!(ty, ast::Ty::Named(name) if name == "Any"))
+        {
+            return Err(RelationalLowerError::UnsupportedExpression(format!(
+                "union '{rel_name}' requires identical, fully typed source schemas"
+            )));
+        }
+        for key in keys {
+            if !schemas[left.0].contains_key(key) {
+                return Err(RelationalLowerError::UnsupportedExpression(format!(
+                    "union '{rel_name}' key field '{key}' is missing"
+                )));
+            }
+        }
+        return Ok(dag.add_node(OperatorNode::DisjointUnion {
+            left,
+            right,
+            key_fields: keys.clone(),
+        }));
     }
 
     let owner = owner_module(rel_name);
@@ -1553,19 +1525,7 @@ fn expr_ty_for_aggregate(
     fields: &BTreeMap<String, ast::Ty>,
     program: &LinkedProgram,
 ) -> Option<ast::Ty> {
-    match expr {
-        Expr::Var(v) => fields.get(v).cloned(),
-        Expr::Field(base, field) => match base.as_ref() {
-            Expr::Var(alias) => fields.get(&format!("{alias}.{field}")).cloned(),
-            _ => None,
-        },
-        Expr::Call { func, .. } => program
-            .functions
-            .iter()
-            .find(|(q, _)| q.to_string() == *func)
-            .and_then(|(_, f)| f.ret.clone()),
-        _ => None,
-    }
+    crate::world_type::infer(expr, fields, "", program)
 }
 
 fn expr_contains_count_or_zero(expr: &Expr) -> bool {
