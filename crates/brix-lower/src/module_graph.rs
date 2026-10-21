@@ -1169,6 +1169,16 @@ fn trace_ty_deps(
                 trace_ty_deps(a, current_module, reachable, all_configs);
             }
         }
+        ast::Ty::Refine {
+            base, predicate, ..
+        } => {
+            trace_ty_deps(base, current_module, reachable, all_configs);
+            trace_expr_deps(predicate, current_module, reachable, all_configs);
+        }
+        ast::Ty::Given { inner, .. } => {
+            trace_ty_deps(inner, current_module, reachable, all_configs);
+        }
+        ast::Ty::Scalar(_) => {}
     }
 }
 
@@ -1249,6 +1259,10 @@ fn trace_expr_deps(
             trace_expr_deps(yield_expr, current_module, reachable, all_configs);
         }
         ast::Expr::Num(_) | ast::Expr::Str(_) | ast::Expr::Bool(_) => {}
+        ast::Expr::Validate { ty, arg } => {
+            trace_ty_deps(ty, current_module, reachable, all_configs);
+            trace_expr_deps(arg, current_module, reachable, all_configs);
+        }
     }
 }
 
@@ -1383,6 +1397,14 @@ impl NominalResolver<'_> {
                     self.ty(arg)?;
                 }
             }
+            ast::Ty::Refine {
+                base, predicate, ..
+            } => {
+                self.ty(base)?;
+                self.expr(predicate, &BTreeSet::new())?;
+            }
+            ast::Ty::Given { inner, .. } => self.ty(inner)?,
+            ast::Ty::Scalar(_) => {}
         }
         Ok(())
     }
@@ -1474,6 +1496,10 @@ impl NominalResolver<'_> {
                 self.expr(yield_expr, &scope)?;
             }
             Expr::Var(_) | Expr::Num(_) | Expr::Str(_) | Expr::Bool(_) => {}
+            Expr::Validate { ty, arg } => {
+                self.ty(ty)?;
+                self.expr(arg, bound)?;
+            }
         }
         Ok(())
     }

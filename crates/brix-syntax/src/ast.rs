@@ -63,6 +63,16 @@ pub enum Item {
     RelInput(RelInputDecl),
     /// `rel derived name = select ... from ...` — relational derived declaration (ADR-0046).
     RelDerived(RelDerivedDecl),
+    /// `newtype Name[<Index>] = Repr` — a nominal type with an underlying
+    /// representation (ADR-0048). Contextual at item position; `newtype` is
+    /// not a reserved word.
+    Newtype(NewtypeDecl),
+    /// `type Name[<Param>] = { binder: Repr | predicate }` — a refinement
+    /// alias (ADR-0048). Contextual at item position.
+    TypeDef(TypeDefDecl),
+    /// `assume name` — an explicit unchecked assumption. It may support a
+    /// conditional receipt and cannot satisfy an unconditional requirement.
+    Assume(String),
 }
 
 /// `rel input NAME: TYPE key KEY` or `key (KEY1, KEY2, ...)` (ADR-0046).
@@ -131,6 +141,35 @@ pub struct DecideDecl {
     pub proposals: Vec<ProposeDecl>,
 }
 
+/// `newtype Name = Repr` or `newtype Name<Index, ...> = Repr` (ADR-0048).
+///
+/// The name is a distinct type. It does not inherit predicates from `repr`,
+/// and two newtypes that share a representation are not interchangeable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewtypeDecl {
+    pub name: String,
+    /// Index parameter names. Empty keeps an unindexed newtype.
+    pub params: Vec<String>,
+    pub repr: Ty,
+}
+
+/// One parameter of a `type` alias. `sort` is `Some(Int)` when the parameter
+/// is an immutable scalar index; `None` means a nominal tag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexParam {
+    pub name: String,
+    pub sort: Option<Ty>,
+}
+
+/// `type Name = Body` (ADR-0048). The body is a refinement or another named
+/// type in the evidence profile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeDefDecl {
+    pub name: String,
+    pub params: Vec<IndexParam>,
+    pub body: Ty,
+}
+
 /// `input NAME: TYPE` or `input NAME: List<TYPE> max N` (ADR-0037).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputDecl {
@@ -196,6 +235,16 @@ pub struct Callable {
     pub params: Vec<Param>,
     /// Optional declared return type (inferred when absent).
     pub ret: Option<Ty>,
+    /// Explicit type parameters, `fn add<U>(...)`. Empty for an ordinary
+    /// callable, which keeps every existing declaration unchanged.
+    pub type_params: Vec<String>,
+    /// `requires` predicate (ADR-0048). `None` when the source declares none.
+    pub requires: Option<Expr>,
+    /// `ensures` predicate. `result` names the returned value.
+    pub ensures: Option<Expr>,
+    /// `converts <rule>` — this function is an admitted nominal conversion,
+    /// not a predicate proof.
+    pub converts: Option<String>,
     pub body: Expr,
     /// Whether a parenthesized parameter list was written in the source.
     ///
@@ -281,6 +330,23 @@ pub enum Ty {
     /// Type application, `List<Int>` — a parameterized config at a specific
     /// instantiation.
     App(String, Vec<Ty>),
+    /// `{ binder: Base | predicate }` — values of `Base` satisfying `predicate`
+    /// (ADR-0048). The predicate is a surface expression in the admitted
+    /// fragment; it is not discharged by typing.
+    Refine {
+        binder: String,
+        base: Box<Ty>,
+        predicate: Box<Expr>,
+    },
+    /// An immutable scalar index, written as a numeral in a type argument
+    /// (`BoundedIndex<4>`). Not a value type.
+    Scalar(i64),
+    /// `Ty given assumption, ...` — the payload type, plus assumptions the
+    /// consumer has agreed to see. Absent assumptions means unconditional.
+    Given {
+        inner: Box<Ty>,
+        assumptions: Vec<String>,
+    },
 }
 
 /// An epistemic grade on the outcome lattice (`Derived → Audited → Proven`).
@@ -356,6 +422,10 @@ pub enum Expr {
     },
     /// `{ field: expr, ... }` — an anonymous record literal (ADR-0046).
     AnonRecord(Vec<(String, Expr)>),
+    /// `validate<Ty>(expr)` — an explicit runtime validation boundary
+    /// (ADR-0048). The result is an outcome, not the refined value. Only the
+    /// `Satisfied` arm binds that value, and the receipt is not a kernel proof.
+    Validate { ty: Box<Ty>, arg: Box<Expr> },
 }
 
 /// Binary operators. Arithmetic ops are ordinary; `Then`/`And` are the witness

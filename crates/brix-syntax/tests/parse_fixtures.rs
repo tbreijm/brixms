@@ -57,6 +57,7 @@ fn test_parse_pricing_fixture() {
             ret,
             body,
             params_declared,
+            ..
         }) => {
             assert!(params_declared, "explicit '(i: Item)' dependency list");
             assert_eq!(name, "cost");
@@ -142,6 +143,7 @@ fn test_parse_nat_fixture() {
             ret,
             body,
             params_declared,
+            ..
         }) => {
             assert!(params_declared, "'fn' always writes an explicit '(...)'");
             assert_eq!(name, "double");

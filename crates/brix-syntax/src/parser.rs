@@ -94,6 +94,12 @@ pub fn parse_bounded_with_source_map(
     ))
 }
 
+struct CallableContracts {
+    requires: Option<Expr>,
+    ensures: Option<Expr>,
+    converts: Option<String>,
+}
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -430,6 +436,22 @@ impl Parser {
                     Err(self.error("Expected 'input' or 'derived' after 'rel'"))
                 }
             }
+            // `newtype`, `type`, and `assume` are contextual item introducers
+            // (ADR-0048). They stay identifiers everywhere else, so a binding
+            // named `newtype` keeps parsing.
+            TokenKind::Ident(s) if s == "newtype" => {
+                self.advance();
+                self.parse_newtype_decl().map(Item::Newtype)
+            }
+            TokenKind::Ident(s) if s == "type" => {
+                self.advance();
+                self.parse_type_def().map(Item::TypeDef)
+            }
+            TokenKind::Ident(s) if s == "assume" => {
+                self.advance();
+                let name = self.expect_ident("assume name")?.0;
+                Ok(Item::Assume(name))
+            }
             other => Err(self.error(format!("Unexpected token {:?} at top-level item", other))),
         }
     }
@@ -697,21 +719,31 @@ impl Parser {
 
     fn parse_callable(&mut self) -> Result<Callable, ParseError> {
         let name = self.expect_ident("callable name")?.0;
+        let type_params = self.parse_optional_type_params()?;
         self.consume(TokenKind::OpenParen, "callable '('")?;
         let params = self.parse_comma_separated(TokenKind::CloseParen, |p| p.parse_param())?;
         self.consume(TokenKind::CloseParen, "callable ')'")?;
-        let ret = if self.check(&TokenKind::Colon) {
-            self.advance();
+        let ret = if self.at_return_arrow() {
+            self.consume_return_arrow()?;
             Some(self.parse_ty()?)
         } else {
             None
         };
+        let CallableContracts {
+            requires,
+            ensures,
+            converts,
+        } = self.parse_optional_contracts()?;
         self.consume(TokenKind::Equals, "callable '='")?;
         let body = self.parse_expr()?;
         Ok(Callable {
             name,
             params,
             ret,
+            type_params,
+            requires,
+            ensures,
+            converts,
             body,
             params_declared: true,
         })
@@ -730,21 +762,138 @@ impl Parser {
         } else {
             (Vec::new(), false)
         };
-        let ret = if self.check(&TokenKind::Colon) {
-            self.advance();
+        let ret = if self.at_return_arrow() {
+            self.consume_return_arrow()?;
             Some(self.parse_ty()?)
         } else {
             None
         };
+        let CallableContracts {
+            requires,
+            ensures,
+            converts,
+        } = self.parse_optional_contracts()?;
         self.consume(TokenKind::Equals, "rule declaration '='")?;
         let body = self.parse_expr()?;
         Ok(Callable {
             name,
             params,
             ret,
+            type_params: Vec::new(),
+            requires,
+            ensures,
+            converts,
             body,
             params_declared,
         })
+    }
+
+    /// `:` or `->` before a return type. `->` is two tokens (`-` then `>`).
+    /// Existing signatures keep the colon form.
+    fn at_return_arrow(&self) -> bool {
+        self.check(&TokenKind::Colon)
+            || (self.check(&TokenKind::Minus)
+                && matches!(
+                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                    Some(TokenKind::Gt)
+                ))
+    }
+
+    fn consume_return_arrow(&mut self) -> Result<(), ParseError> {
+        if self.check(&TokenKind::Colon) {
+            self.advance();
+            return Ok(());
+        }
+        self.consume(TokenKind::Minus, "return type '->'")?;
+        self.consume(TokenKind::Gt, "return type '->'")?;
+        Ok(())
+    }
+
+    /// `<A, B>` after a `newtype` or `fn` name. Absent when the next token is
+    /// not `<`, so existing declarations are unchanged.
+    fn parse_optional_type_params(&mut self) -> Result<Vec<String>, ParseError> {
+        if !self.check(&TokenKind::Lt) {
+            return Ok(Vec::new());
+        }
+        self.advance();
+        let params = self.parse_comma_separated(TokenKind::Gt, |p| {
+            p.expect_ident("type parameter").map(|(s, _)| s)
+        })?;
+        self.consume(TokenKind::Gt, "type parameter list '>'")?;
+        Ok(params)
+    }
+
+    /// `requires E`, `ensures E`, and `converts RULE`, in any order, each at
+    /// most once, between a signature and `=`. The words are contextual.
+    fn parse_optional_contracts(&mut self) -> Result<CallableContracts, ParseError> {
+        let mut requires = None;
+        let mut ensures = None;
+        let mut converts = None;
+        loop {
+            match self.peek() {
+                TokenKind::Ident(s) if s == "requires" => {
+                    if requires.is_some() {
+                        return Err(self.error("duplicate 'requires'"));
+                    }
+                    self.advance();
+                    requires = Some(self.parse_expr()?);
+                }
+                TokenKind::Ident(s) if s == "ensures" => {
+                    if ensures.is_some() {
+                        return Err(self.error("duplicate 'ensures'"));
+                    }
+                    self.advance();
+                    ensures = Some(self.parse_expr()?);
+                }
+                TokenKind::Ident(s) if s == "converts" => {
+                    if converts.is_some() {
+                        return Err(self.error("duplicate 'converts'"));
+                    }
+                    self.advance();
+                    converts = Some(self.expect_ident("conversion rule")?.0);
+                }
+                _ => break,
+            }
+        }
+        Ok(CallableContracts {
+            requires,
+            ensures,
+            converts,
+        })
+    }
+
+    fn parse_newtype_decl(&mut self) -> Result<NewtypeDecl, ParseError> {
+        let name = self.expect_ident("newtype name")?.0;
+        let params = self.parse_optional_type_params()?;
+        self.consume(TokenKind::Equals, "newtype '='")?;
+        let repr = self.parse_ty()?;
+        Ok(NewtypeDecl { name, params, repr })
+    }
+
+    fn parse_type_def(&mut self) -> Result<TypeDefDecl, ParseError> {
+        let name = self.expect_ident("type name")?.0;
+        let params = if self.check(&TokenKind::Lt) {
+            self.advance();
+            let params = self.parse_comma_separated(TokenKind::Gt, |p| p.parse_index_param())?;
+            self.consume(TokenKind::Gt, "type parameter list '>'")?;
+            params
+        } else {
+            Vec::new()
+        };
+        self.consume(TokenKind::Equals, "type '='")?;
+        let body = self.parse_ty()?;
+        Ok(TypeDefDecl { name, params, body })
+    }
+
+    fn parse_index_param(&mut self) -> Result<IndexParam, ParseError> {
+        let name = self.expect_ident("index parameter")?.0;
+        let sort = if self.check(&TokenKind::Colon) {
+            self.advance();
+            Some(self.parse_ty()?)
+        } else {
+            None
+        };
+        Ok(IndexParam { name, sort })
     }
 
     fn parse_param(&mut self) -> Result<Param, ParseError> {
@@ -763,6 +912,28 @@ impl Parser {
         let ty = if self.check(&TokenKind::Colon) {
             self.advance();
             Some(self.parse_ty()?)
+        } else {
+            None
+        };
+        let ty = if let Some(ty) = ty {
+            if matches!(self.peek(), TokenKind::Ident(s) if s == "given") {
+                self.advance();
+                let mut assumptions = Vec::new();
+                loop {
+                    assumptions.push(self.expect_ident("assumption name")?.0);
+                    if self.check(&TokenKind::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                Some(Ty::Given {
+                    inner: Box::new(ty),
+                    assumptions,
+                })
+            } else {
+                Some(ty)
+            }
         } else {
             None
         };
@@ -963,12 +1134,51 @@ impl Parser {
     }
 
     fn parse_ty(&mut self) -> Result<Ty, ParseError> {
-        let base_ty = if self.check(&TokenKind::OpenBrace) {
+        let base_ty = if let TokenKind::Num(n) = self.peek().clone() {
+            if n.contains('.') {
+                return Err(
+                    self.error("a type index must be an integer, not a decimal or float literal")
+                );
+            }
             self.advance();
-            let fields =
-                self.parse_comma_separated(TokenKind::CloseBrace, |p| p.parse_field_decl())?;
-            self.consume(TokenKind::CloseBrace, "record type '}'")?;
-            Ty::Record(fields)
+            match n.parse::<i64>() {
+                Ok(v) => Ty::Scalar(v),
+                Err(_) => {
+                    return Err(self.error(format!(
+                        "type index '{n}' is outside the admitted integer range"
+                    )));
+                }
+            }
+        } else if self.check(&TokenKind::OpenBrace) {
+            self.advance();
+            // `{ x: Int | P }` is a refinement. `{ a: Int, b: Str }` stays a
+            // record. The split is the token after the first field's type.
+            let first_name = self.expect_ident("field or refinement binder")?.0;
+            self.consume(TokenKind::Colon, "':' in type")?;
+            let first_ty = self.parse_ty()?;
+            if self.check(&TokenKind::Pipe) {
+                self.advance();
+                let predicate = self.parse_expr()?;
+                self.consume(TokenKind::CloseBrace, "refinement type '}'")?;
+                Ty::Refine {
+                    binder: first_name,
+                    base: Box::new(first_ty),
+                    predicate: Box::new(predicate),
+                }
+            } else {
+                let mut fields = vec![FieldDecl {
+                    name: first_name,
+                    ty: first_ty,
+                }];
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                    let rest = self
+                        .parse_comma_separated(TokenKind::CloseBrace, |p| p.parse_field_decl())?;
+                    fields.extend(rest);
+                }
+                self.consume(TokenKind::CloseBrace, "record type '}'")?;
+                Ty::Record(fields)
+            }
         } else {
             let name = self.parse_qualified_name("type name")?;
             // `List<Int>` — a parameterized config at an instantiation. The `<`
@@ -1376,6 +1586,18 @@ impl Parser {
             let seg = self.expect_ident("path segment")?.0;
             id.push_str("::");
             id.push_str(&seg);
+        }
+        if id == "validate" && self.check(&TokenKind::Lt) {
+            self.advance();
+            let ty = self.parse_ty()?;
+            self.consume(TokenKind::Gt, "validate type argument '>'")?;
+            self.consume(TokenKind::OpenParen, "validate argument '('")?;
+            let arg = self.parse_expr()?;
+            self.consume(TokenKind::CloseParen, "validate argument ')'")?;
+            return Ok(Expr::Validate {
+                ty: Box::new(ty),
+                arg: Box::new(arg),
+            });
         }
         if is_record {
             self.advance(); // consume '{'

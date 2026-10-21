@@ -174,7 +174,10 @@ fn resolve_one(
             other => other,
         };
         // Declarations only. A library's bindings are its examples.
-        if !matches!(decl, Item::Config(_) | Item::Fn(_)) {
+        if !matches!(
+            decl,
+            Item::Config(_) | Item::Fn(_) | Item::Newtype(_) | Item::TypeDef(_)
+        ) {
             continue;
         }
         let Some(name) = declared_name(decl) else {
@@ -211,6 +214,8 @@ fn declared_name(item: &Item) -> Option<String> {
         Item::Export(inner) => declared_name(inner),
         Item::RelInput(r) => Some(r.name.clone()),
         Item::RelDerived(r) => Some(r.name.clone()),
-        Item::Show(_) | Item::Use(_) => None,
+        Item::Newtype(n) => Some(n.name.clone()),
+        Item::TypeDef(t) => Some(t.name.clone()),
+        Item::Assume(_) | Item::Show(_) | Item::Use(_) => None,
     }
 }

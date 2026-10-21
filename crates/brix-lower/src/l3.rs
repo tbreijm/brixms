@@ -438,6 +438,18 @@ pub fn lower_l3_plan(
                     r.name
                 )));
             }
+            ast::Item::Newtype(n) => {
+                return Err(L3LowerError::FnItemNotAllowed(format!(
+                    "newtype {}",
+                    n.name
+                )))
+            }
+            ast::Item::TypeDef(t) => {
+                return Err(L3LowerError::FnItemNotAllowed(format!("type {}", t.name)))
+            }
+            ast::Item::Assume(name) => {
+                return Err(L3LowerError::FnItemNotAllowed(format!("assume {name}")))
+            }
             ast::Item::Config(_) | ast::Item::Let(_) | ast::Item::Rule(_) => {}
         }
     }
@@ -664,6 +676,9 @@ fn resolve_ty(ty: &ast::Ty, config_names: &BTreeSet<String>) -> Result<L3TypeRef
         // constructors are nullary anyway (`PayloadBearingConstructor`), so it
         // is refused here by name rather than approximated by a nominal one.
         ast::Ty::Record(_) => Err(L3LowerError::AnonymousRecordTypeNotAllowed),
+        ast::Ty::Refine { .. } | ast::Ty::Scalar(_) | ast::Ty::Given { .. } => Err(
+            L3LowerError::UnknownTypeName("evidence-profile type".to_string()),
+        ),
         ast::Ty::Named(n) => match n.as_str() {
             "Int" => Ok(L3TypeRef::Int),
             "Str" => Ok(L3TypeRef::Str),
@@ -859,6 +874,7 @@ fn normalize_static_value(expr: &ast::Expr, env: &NormEnv) -> Result<L3ValueV1, 
         ast::Expr::ListLit(_) => Err(L3LowerError::ListSyntaxNotAllowed("list literal")),
         ast::Expr::Comprehension { .. } => Err(L3LowerError::ListSyntaxNotAllowed("comprehension")),
         ast::Expr::AnonRecord(_) => Err(L3LowerError::AnonymousRecordLiteralNotAllowed),
+        ast::Expr::Validate { .. } => Err(L3LowerError::FnItemNotAllowed("validate".to_string())),
     }
 }
 
