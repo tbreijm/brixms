@@ -114,6 +114,10 @@ fn missing_fields_and_helper_contracts_fail_closed() {
             }],
             ret: Some(Ty::Named("Int".into())),
             body: bin(BinOp::Add, Expr::Var("x".into()), num(1)),
+            type_params: Vec::new(),
+            requires: None,
+            ensures: None,
+            converts: None,
             params_declared: true,
         },
     )]);
@@ -156,6 +160,10 @@ fn named_record_helper_checks_nominal_identity_and_field_types() {
             }],
             ret: Some(Ty::Named("Decimal".into())),
             body: Expr::Field(Box::new(Expr::Var("o".into())), "amount".into()),
+            type_params: Vec::new(),
+            requires: None,
+            ensures: None,
+            converts: None,
             params_declared: true,
         },
     )]);

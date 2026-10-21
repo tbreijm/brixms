@@ -100,6 +100,10 @@ fn normalize_world_and(expr: &ast::Expr) -> ast::Expr {
                 .map(|(n, e)| (n.clone(), normalize_world_and(e)))
                 .collect(),
         ),
+        Expr::Validate { ty, arg } => Expr::Validate {
+            ty: ty.clone(),
+            arg: Box::new(normalize_world_and(arg)),
+        },
     }
 }
 

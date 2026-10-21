@@ -850,6 +850,7 @@ fn check_expr_bounds(
             }
             Ok(())
         }
+        ast::Expr::Validate { arg, .. } => check_expr_bounds(arg, depth + 1, node_count),
     }
 }
 
@@ -899,6 +900,13 @@ fn schema_type_from_ast(
             name: owner.to_string(),
             detail: "anonymous record schema components are unsupported".to_string(),
         }),
+        ast::Ty::Refine { .. } | ast::Ty::Scalar(_) | ast::Ty::Given { .. } => {
+            Err(FiniteDecisionLowerError::InvalidSchema {
+                name: owner.to_string(),
+                detail: "evidence-profile types are not finite-decision schemas (ADR-0048)"
+                    .to_string(),
+            })
+        }
     }
 }
 
@@ -1175,6 +1183,12 @@ fn parse_contract(
                 detail: "nested grade annotations are not supported".to_string(),
             });
         }
+        ast::Ty::Refine { .. } | ast::Ty::Scalar(_) | ast::Ty::Given { .. } => {
+            return Err(FiniteDecisionLowerError::UnsupportedContractType {
+                ty: "evidence profile type".to_string(),
+                detail: "nominal, refinement, and evidence types are checked by the evidence profile, not as finite-decision contracts (ADR-0048)".to_string(),
+            });
+        }
     };
 
     let schema_ty = match &value_type {
@@ -1425,6 +1439,23 @@ fn map_decide_propose_err(
     }
 }
 
+/// Finite-decision does not enforce `requires`, `ensures`, `converts`, or
+/// callable type parameters. Reject them here so a later pass cannot execute
+/// the body and drop the clause.
+fn unsupported_evidence_clause(callable: &ast::Callable) -> Option<&'static str> {
+    if callable.requires.is_some() {
+        Some("requires")
+    } else if callable.ensures.is_some() {
+        Some("ensures")
+    } else if callable.converts.is_some() {
+        Some("converts")
+    } else if !callable.type_params.is_empty() {
+        Some("type parameters")
+    } else {
+        None
+    }
+}
+
 /// Lower a parsed syntax module into a validated [`FiniteDecisionPlan`].
 pub fn lower_finite_decision_plan(
     module: &ast::Module,
@@ -1445,11 +1476,24 @@ pub fn lower_finite_decision_plan(
         match item {
             ast::Item::Config(_)
             | ast::Item::Let(_)
-            | ast::Item::Rule(_)
             | ast::Item::Propose(_)
             | ast::Item::Show(_)
             | ast::Item::Input(_) => {}
-            ast::Item::Fn(_) => {
+            ast::Item::Rule(rule) => {
+                if let Some(clause) = unsupported_evidence_clause(rule) {
+                    return Err(FiniteDecisionLowerError::ItemNotAllowed(format!(
+                        "rule {} {clause}",
+                        rule.name
+                    )));
+                }
+            }
+            ast::Item::Fn(fun) => {
+                if let Some(clause) = unsupported_evidence_clause(fun) {
+                    return Err(FiniteDecisionLowerError::ItemNotAllowed(format!(
+                        "fn {} {clause}",
+                        fun.name
+                    )));
+                }
                 fn_count += 1;
             }
             ast::Item::Commit(c) => {
@@ -1487,6 +1531,23 @@ pub fn lower_finite_decision_plan(
                 return Err(FiniteDecisionLowerError::ItemNotAllowed(format!(
                     "rel derived {}",
                     r.name
+                )));
+            }
+            ast::Item::Newtype(n) => {
+                return Err(FiniteDecisionLowerError::ItemNotAllowed(format!(
+                    "newtype {}",
+                    n.name
+                )));
+            }
+            ast::Item::TypeDef(t) => {
+                return Err(FiniteDecisionLowerError::ItemNotAllowed(format!(
+                    "type {}",
+                    t.name
+                )));
+            }
+            ast::Item::Assume(name) => {
+                return Err(FiniteDecisionLowerError::ItemNotAllowed(format!(
+                    "assume {name}"
                 )));
             }
         }

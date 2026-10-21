@@ -21,6 +21,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod audit_bundle;
+pub mod evidence;
 pub mod finite_decision;
 pub mod imports;
 pub mod input;
@@ -587,6 +588,9 @@ fn resolve_config_ty_in(
             }
             Ok(resolved)
         }
+        ast::Ty::Refine { .. } | ast::Ty::Scalar(_) | ast::Ty::Given { .. } => {
+            Err(ConfigTyError::Unknown("evidence-profile type".to_string()))
+        }
     }
 }
 
@@ -989,6 +993,9 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
         )),
         ast::Expr::AnonRecord(_) => Err(LowerError::Unsupported(
             "anonymous records not in L2-first fragment".to_string(),
+        )),
+        ast::Expr::Validate { .. } => Err(LowerError::Unsupported(
+            "validate is an evidence-profile boundary, not a typing proof".to_string(),
         )),
     }
 }
@@ -1420,6 +1427,7 @@ fn check_declared_field_types(
             }
             Ok(())
         }
+        ast::Expr::Validate { arg, .. } => check_declared_field_types(arg, ctx, ty_ctx),
     }
 }
 

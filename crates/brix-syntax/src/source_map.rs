@@ -111,5 +111,8 @@ pub(crate) fn item_kind_name(item: &Item) -> (&'static str, Option<String>) {
         }
         Item::RelInput(r) => ("rel_input", Some(r.name.clone())),
         Item::RelDerived(r) => ("rel_derived", Some(r.name.clone())),
+        Item::Newtype(n) => ("newtype", Some(n.name.clone())),
+        Item::TypeDef(t) => ("type", Some(t.name.clone())),
+        Item::Assume(name) => ("assume", Some(name.clone())),
     }
 }

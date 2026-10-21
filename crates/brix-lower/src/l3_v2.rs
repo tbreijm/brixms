@@ -1069,6 +1069,18 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
                     r.name
                 )))
             }
+            ast::Item::Newtype(n) => {
+                return Err(L3V2LowerError::ItemNotAllowed(format!(
+                    "newtype {}",
+                    n.name
+                )))
+            }
+            ast::Item::TypeDef(t) => {
+                return Err(L3V2LowerError::ItemNotAllowed(format!("type {}", t.name)))
+            }
+            ast::Item::Assume(name) => {
+                return Err(L3V2LowerError::ItemNotAllowed(format!("assume {name}")))
+            }
         }
     }
 
@@ -1933,6 +1945,7 @@ fn lower_expr_v2_impl(
         ast::Expr::AnonRecord(_) => {
             Err(L3V2LowerError::Unsupported("anonymous record".to_string()))
         }
+        ast::Expr::Validate { .. } => Err(L3V2LowerError::Unsupported("validate".to_string())),
     }
 }
 

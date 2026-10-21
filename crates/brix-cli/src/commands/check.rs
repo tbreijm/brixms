@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use brix_lower::evidence::{self, Disposition};
 use brix_lower::finite_decision::{FiniteDecisionStop, FINITE_DECISION_PROFILE};
 use brix_lower::{check_module, evaluate_let_module, render_ty, LetEvalOutcome};
 use brix_syntax::ast::Item;
@@ -249,17 +250,79 @@ pub fn execute_check(
     // explains the absence of) a value for each binding `check_module`
     // already accepted. The two walk `resolved_module` the same way, so
     // their result vectors line up 1:1 by position.
+    //
+    // Evidence-profile bindings (ADR-0048) are checked separately and removed
+    // before the typing pass, so a refinement is not reported as a `HasType`
+    // proof.
+    let evidence = evidence::check_module(&resolved_module);
+    let mut evidence_lines = Vec::new();
+    if evidence.opted_in {
+        evidence_lines.push(format!("evidence profile {}", evidence::PROFILE));
+        for binding in &evidence.bindings {
+            let route = binding
+                .disposition
+                .authority()
+                .map(|authority| format!("{authority:?}"))
+                .unwrap_or_else(|| "unsatisfied".to_string());
+            let kernel = match &binding.disposition {
+                Disposition::Satisfied(receipt) => match receipt.kernel_certificate {
+                    Some(_) => "kernel-certificate",
+                    None => "not kernel-proven",
+                },
+                _ => "not kernel-proven",
+            };
+            evidence_lines.push(format!(
+                "  {} : {} satisfied {route} ({kernel})",
+                binding.path, binding.ty
+            ));
+        }
+        for arm in &evidence.arms {
+            evidence_lines.push(format!(
+                "  arm {} : {} {}",
+                arm.path,
+                arm.ty,
+                if arm.reachable {
+                    "reachable"
+                } else {
+                    "not reached"
+                }
+            ));
+        }
+        for diagnostic in &evidence.diagnostics {
+            evidence_lines.push(format!(
+                "  {}: {}",
+                diagnostic.item,
+                evidence_disposition(&diagnostic.disposition)
+            ));
+        }
+    }
+    let resolved_module = if evidence.opted_in {
+        evidence::without_evidence_bindings(&resolved_module)
+    } else {
+        resolved_module
+    };
     let results = check_module(&resolved_module);
     let evaluated = evaluate_let_module(&resolved_module);
-    let mut had_error = false;
-    let mut diagnostics = Vec::new();
+    let mut had_error = evidence.opted_in && !evidence.ok;
+    let mut diagnostics: Vec<String> = evidence
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            format!(
+                "{}: {}",
+                diagnostic.item,
+                evidence_disposition(&diagnostic.disposition)
+            )
+        })
+        .collect();
     let mut locations = Vec::new();
     let mut human_lines = Vec::new();
     let mut bindings_json = Vec::new();
 
-    if results.is_empty() {
+    human_lines.extend(evidence_lines);
+    if results.is_empty() && !evidence.opted_in {
         human_lines.push("(no `let` bindings to check)".to_string());
-    } else {
+    } else if !results.is_empty() {
         for (r, (_, eval_outcome)) in results.iter().zip(evaluated.iter()) {
             match r {
                 Ok(cr) => {
@@ -351,5 +414,24 @@ pub fn execute_check(
         EXIT_REJECTED_OR_UNKNOWN
     } else {
         EXIT_SUCCESS
+    }
+}
+
+fn evidence_disposition(disposition: &Disposition) -> String {
+    match disposition {
+        Disposition::Satisfied(receipt) => format!(
+            "satisfied {:?} {} ({})",
+            receipt.authority,
+            receipt.proposition,
+            if receipt.kernel_certificate.is_some() {
+                "kernel-certificate"
+            } else {
+                "not kernel-proven"
+            }
+        ),
+        Disposition::Violated { predicate, at } => {
+            format!("violated predicate {predicate} at {at}")
+        }
+        Disposition::Unknown { reason } => format!("unresolved {reason:?}"),
     }
 }
