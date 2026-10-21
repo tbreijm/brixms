@@ -4,6 +4,66 @@ The world profile evaluates pure helpers, relation projections and predicates,
 and per-entity proposal guards and values. Linked packages provide declarations;
 the root program owns the decisions to execute.
 
+## Policy-backed dispatch requests
+
+The library API admits one policy workflow from ADR-0048: `qty>=1` for a
+record with `id: Str` and `qty: Int`, addressed by its string primary key in
+a named base relation. Order IDs follow the journal codec's token restriction:
+nonempty, with no spaces, newlines, `;`, or `=`. This is a runtime predicate check, not a kernel proof
+or a claim about stock, permissions, delivery, or the truth of external data.
+
+```rust,ignore
+use brix_kb::world::policy_evidence::{DispatchEvidence, verify_dispatch_evidence};
+use brix_lower::evidence::DISPATCH_POLICY;
+
+let revision = world.current_revision();
+let expected = world.dispatch_target(revision, "root::orders", "o1", DISPATCH_POLICY)?;
+let evidence = world.request_dispatch(revision, "root::orders", "o1", DISPATCH_POLICY)?;
+let receipt = world.use_dispatch_evidence(
+    &evidence, revision, "root::orders", "o1", DISPATCH_POLICY,
+)?;
+
+// After reopening the world, load and recheck the retained artifact.
+let retained = world.load_dispatch_evidence(&expected)?;
+
+// An independent process needs only these bytes and a separately selected target.
+let portable = DispatchEvidence::decode(&retained.encode()?)?;
+let independently_checked = verify_dispatch_evidence(&portable, &expected)?;
+assert_eq!(receipt, independently_checked);
+```
+
+`request_dispatch` reads the immutable revision and its persisted tuple; the
+application supplies neither quantity nor digest. A successful request atomically
+stores `revisions/<revision>.policy-<target-digest>.evidence` under the world writer
+lock. The JSON artifact (`brix.world.dispatch-evidence@1`) contains the target,
+revision record, dispatch certificate, journal, and Merkle lookup path. Requests
+are idempotent: an existing artifact is rechecked, and corruption is an error.
+Refused requests do not publish certificates or change the revision identity.
+
+Use requires the same world manifest digest, revision number and digest, relation,
+order, and policy. Even an unrelated edit requires a new request for the new
+revision. Earlier certificates remain valid historical claims; later updates,
+retractions, and journal reloads do not rewrite them. The artifact carries its
+lookup nodes, so independent verification and `load_dispatch_evidence` can still
+check it after old trie nodes are compacted. Ordinary use through a session still
+requires that the requested revision is available to that session.
+
+The independent verifier recomputes the revision digest, verifies the lookup path
+against the relation root, decodes the order's `id` and signed 64-bit `qty`, and
+checks both the certificate and journal against that quantity. Cached decisions,
+receipt seals and recorded authority labels cannot authorize use. A successful
+check issues fresh `RuntimeCheck` evidence. Unsupported policies, missing orders,
+malformed quantities, mismatched contexts, missing nodes and corrupted proofs
+are refused; a well-formed quantity below one produces `Violated`.
+
+The consumer must obtain its expected world and revision identities independently
+of the artifact. The trusted base is that choice of context, the canonical
+revision and tuple codecs, hash/Merkle verification, integer decoding, and the
+bounded predicate checker. The artifact does not authenticate who supplied the
+world or establish general context confinement. It also does not execute a
+dispatch or reserve resources. This workflow is exposed through the library;
+there is no additional CLI command.
+
 ## Records and variants
 
 Nominal records and sum variants are values in world expressions and tuple

@@ -271,7 +271,7 @@ fn validate_program_relations(
     Ok(())
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WorldError> {
+pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WorldError> {
     let temp = path.with_extension(format!("tmp.{}", std::process::id()));
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -1348,7 +1348,7 @@ impl WorldSession {
     /// writer lock before any write that persists trie nodes (a decoded-cache hit is taken as
     /// proof a node is stored), so a session that was open across a GC re-writes what GC
     /// deleted instead of committing a HEAD whose nodes are gone. Transparent to the caller.
-    fn sync_gc_epoch(&mut self) -> Result<(), WorldError> {
+    pub(super) fn sync_gc_epoch(&mut self) -> Result<(), WorldError> {
         let now = super::gc::read_gc_epoch(&self.paths);
         if now != self.gc_epoch {
             self.node_store.reload_from_disk()?;

@@ -323,6 +323,12 @@ rejected, and at what priority. Two things beyond a trace are worth adding:
 
 ## Deprioritize for beta
 
+[`ADR-0048`](../../spec/adr/ADR-0048_Evidence_Bearing_Types.md) (proposed,
+2026-10-17) would reverse the two items below for a bounded proof profile:
+proof-producing typing first, and one policy-proof workflow only after its
+evaluation semantics and context handling are explicit judgments. Until that
+ADR is accepted, the ordering in this section remains the plan.
+
 Real work, but not what blocks someone from building something real with
 this language today:
 

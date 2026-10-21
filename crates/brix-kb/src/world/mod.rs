@@ -20,6 +20,7 @@ pub mod network_state;
 pub mod oracle;
 pub mod paths;
 pub mod persistent;
+pub mod policy_evidence;
 pub mod policy_trace;
 pub mod reference;
 pub mod revision;

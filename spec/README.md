@@ -88,6 +88,10 @@ spec/
                                    multiple commit pools, persistent knowledge
                                    base, one evaluator — check each one's own
                                    Status line)
+    ADR-0048_Evidence_Bearing_Types.md
+                                ← PROPOSED: evidence-bearing types and
+                                   proof-carrying judgments. Not part of the
+                                   beta compatibility contract.
   Build_Plan_v3_SOC.md          ← CURRENT master plan
   Next_Steps.md                 ← immediate actions
   Issue_Disposition_2026-07.md  ← issue re-classification + new issues
