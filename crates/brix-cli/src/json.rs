@@ -289,9 +289,41 @@ pub struct BindingJson {
     pub value: Option<TaggedValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_evaluated: Option<String>,
+    /// What the kernel-accepted typing proof closed and what it left open
+    /// (ADR-0015 Stage D), additive under schema `brix.cli.result@1` and
+    /// present only when a leaf occurrence was actually closed. A typing
+    /// claim, not an evaluation claim: `value` is never derived from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typing: Option<TypingJson>,
+}
+
+/// One leaf occurrence named by [`TypingJson`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TypingLeafJson {
+    /// Position in the derivation's left-to-right leaf order.
+    pub index: usize,
+    /// The generator's name, or its digest hex when this regime did not mint it.
+    pub generator: String,
+}
+
+/// The closure account of a typing proof: leaf occurrences closed by an
+/// accepted kernel primitive instance, and the obligations that remain.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TypingJson {
+    /// Occurrences closed by an accepted `PrimRealizes` instance.
+    pub kernel_checked_leaves: Vec<TypingLeafJson>,
+    /// Occurrences still discharged by neither a tight generator nor an
+    /// accepted primitive instance.
+    pub remaining_obligations: Vec<TypingLeafJson>,
 }
 
 impl BindingJson {
+    /// Attach the typing-proof closure account.
+    pub fn with_typing(mut self, typing: TypingJson) -> Self {
+        self.typing = Some(typing);
+        self
+    }
+
     pub fn evaluated(
         name: impl Into<String>,
         ty: impl Into<String>,
@@ -304,6 +336,7 @@ impl BindingJson {
             grade: grade.into(),
             value: Some(value),
             not_evaluated: None,
+            typing: None,
         }
     }
 
@@ -319,6 +352,7 @@ impl BindingJson {
             grade: grade.into(),
             value: None,
             not_evaluated: Some(reason.into()),
+            typing: None,
         }
     }
 }

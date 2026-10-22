@@ -14,6 +14,12 @@
 //! entry points ([`elaborate_decomposition`], [`elaborate_tree`]) perform it
 //! and return [`ElaborationResult::Refused`] when it fails.
 
+mod tree_proof;
+
+pub use tree_proof::{
+    verify_tree_proof, AcceptedTreeProof, LeafOccurrence, LeafStatus, TreeProofError,
+};
+
 use brix_kernel::{ExplicitTerm, ObjectTerm, Prop, TermKind, Var};
 use brix_semantic::{
     AuditedSource, Authority, Decomposition, Dependency, EdgeKind, Judgement, Outcome,
@@ -63,28 +69,38 @@ pub fn elaborate_and_publish(
     term: &brix_kernel::ExplicitTerm,
     budget: brix_kernel::Budget,
 ) -> ElaborationResult {
-    let source = source.judgement();
-    match brix_kernel::acceptance(&source.context, proposition, term, budget) {
+    match brix_kernel::acceptance(&source.judgement().context, proposition, term, budget) {
         brix_kernel::Verdict::Accepted(certificate) => {
-            let support = Support::KernelCertificate {
-                verifier: certificate.verifier,
-                certificate: certificate.certificate_id,
-            };
-            match Judgement::publish(
-                Authority::ProofKernel,
-                source.context,
-                proposition.proposition_id(),
-                Outcome::Proven,
-                support,
-            ) {
-                Ok(judgement) => {
-                    let edge = Dependency::new(EdgeKind::ElaborationBoundary, source.id().digest());
-                    ElaborationResult::Proven { judgement, edge }
-                }
-                Err(err) => ElaborationResult::Refused(err),
-            }
+            publish_accepted(source.judgement(), proposition, &certificate)
         }
         verdict => ElaborationResult::NotElaborated(verdict),
+    }
+}
+
+/// Publish the `Proven` judgement for a proposition the kernel **already
+/// accepted**, linked to `source` by an elaboration-boundary edge. Every caller
+/// holds a certificate taken from `Verdict::Accepted`.
+fn publish_accepted(
+    source: &Judgement,
+    proposition: &brix_kernel::Prop,
+    certificate: &brix_kernel::Certificate,
+) -> ElaborationResult {
+    let support = Support::KernelCertificate {
+        verifier: certificate.verifier,
+        certificate: certificate.certificate_id,
+    };
+    match Judgement::publish(
+        Authority::ProofKernel,
+        source.context,
+        proposition.proposition_id(),
+        Outcome::Proven,
+        support,
+    ) {
+        Ok(judgement) => {
+            let edge = Dependency::new(EdgeKind::ElaborationBoundary, source.id().digest());
+            ElaborationResult::Proven { judgement, edge }
+        }
+        Err(err) => ElaborationResult::Refused(err),
     }
 }
 
@@ -219,6 +235,38 @@ pub fn witness_object(tree: &RealizesTree) -> ObjectTerm {
     }
 }
 
+/// The result of [`elaborate_tree_certified`]: [`ElaborationResult`] plus, on
+/// acceptance, the [`AcceptedTreeProof`] the judgement was published from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TreeElaboration {
+    /// The kernel accepted the proof. `proof` retains the exact proposition,
+    /// term, certificate and per-occurrence closure account.
+    Proven {
+        judgement: Judgement,
+        edge: Dependency,
+        proof: Box<AcceptedTreeProof>,
+    },
+    /// Any non-Accepted verdict: no `Proven`, no closure evidence, and — for
+    /// `ResourceExhausted` in particular — no refutation.
+    NotElaborated(brix_kernel::Verdict),
+    /// The caller never had standing to ask (see
+    /// [`ElaborationResult::Refused`]).
+    Refused(PublicationError),
+}
+
+impl TreeElaboration {
+    /// Drop the proof artifact, keeping the established result shape.
+    pub fn into_result(self) -> ElaborationResult {
+        match self {
+            TreeElaboration::Proven {
+                judgement, edge, ..
+            } => ElaborationResult::Proven { judgement, edge },
+            TreeElaboration::NotElaborated(verdict) => ElaborationResult::NotElaborated(verdict),
+            TreeElaboration::Refused(err) => ElaborationResult::Refused(err),
+        }
+    }
+}
+
 /// Elaborate a tree-structured typing derivation into a kernel proof term (ADR-0007).
 ///
 /// Takes the checked [`TreeDerivation`] artifact rather than a bare
@@ -231,94 +279,83 @@ pub fn witness_object(tree: &RealizesTree) -> ObjectTerm {
 /// This replaces the provisional binding ADR-0016 §7 reported, where the
 /// support was a digest of the proposition being claimed and so bound to
 /// nothing.
+///
+/// Leaves are no longer all hypotheses (ADR-0015 §5 Stage D): see
+/// [`elaborate_tree_certified`], which this wraps. Callers that need the
+/// accepted proof and its closure account call that instead.
 pub fn elaborate_tree(
     source: &Judgement,
     derivation: &TreeDerivation,
     budget: brix_kernel::Budget,
 ) -> ElaborationResult {
+    elaborate_tree_certified(source, derivation, budget).into_result()
+}
+
+/// [`elaborate_tree`], retaining the accepted proof.
+///
+/// Each leaf occurrence is classified deterministically. A leaf whose
+/// generator, judgment kind and endpoints a compiled-in kernel primitive
+/// relation admits (today: `g_arith` under `TypingArithV2`) is emitted as a
+/// closed [`brix_kernel::TermKind::PrimRealizes`]; every other leaf — including
+/// both arithmetic vocabulary bridges — stays a hypothesis. The implication
+/// proposition and the enclosing lambdas are built from the remaining
+/// hypotheses only, with de Bruijn indices recomputed from their positions in
+/// that list. The kernel remains the authority: classification only selects
+/// what to submit.
+///
+/// A `Proven` result is typing evidence for the occurrences it closed. It says
+/// nothing about evaluation, a computed value, or policy compliance.
+pub fn elaborate_tree_certified(
+    source: &Judgement,
+    derivation: &TreeDerivation,
+    budget: brix_kernel::Budget,
+) -> TreeElaboration {
     let source = match AuditedSource::verify(source, Support::Tree(derivation)) {
         Ok(verified) => verified,
-        Err(err) => return ElaborationResult::Refused(err),
+        Err(err) => return TreeElaboration::Refused(err),
     };
     let tree = derivation.tree();
 
     if !tree.well_formed() {
-        return ElaborationResult::NotElaborated(brix_kernel::Verdict::Rejected(
+        return TreeElaboration::NotElaborated(brix_kernel::Verdict::Rejected(
             brix_kernel::RejectionReason::Custom("malformed Seq middle".into()),
         ));
     }
-
-    let leaves = tree.leaves();
-    let m = leaves.len();
-    if m == 0 {
-        return ElaborationResult::NotElaborated(brix_kernel::Verdict::Rejected(
+    if tree.leaves().is_empty() {
+        return TreeElaboration::NotElaborated(brix_kernel::Verdict::Rejected(
             brix_kernel::RejectionReason::Custom("empty leaves".into()),
         ));
     }
 
-    let mut h_props = Vec::with_capacity(m);
-    for leaf_node in &leaves {
-        match leaf_node {
-            RealizesTree::Leaf {
-                generator,
-                src,
-                dst,
-            } => {
-                let g_term = ObjectTerm::Const(PropositionId(generator.digest()));
-                let src_term = tree_obj_to_object_term(src);
-                let dst_term = tree_obj_to_object_term(dst);
-                h_props.push(Prop::Realizes(g_term, src_term, dst_term));
-            }
-            _ => {
-                return ElaborationResult::NotElaborated(brix_kernel::Verdict::Rejected(
-                    brix_kernel::RejectionReason::Custom("non-leaf in leaves enumeration".into()),
-                ));
+    let context = source.judgement().context;
+    let Some(candidate) = tree_proof::candidate(tree, context) else {
+        return TreeElaboration::NotElaborated(brix_kernel::Verdict::Rejected(
+            brix_kernel::RejectionReason::Custom("non-leaf in leaves enumeration".into()),
+        ));
+    };
+
+    let verdict =
+        brix_kernel::acceptance(&context, &candidate.proposition, &candidate.term, budget);
+    match verdict {
+        brix_kernel::Verdict::Accepted(certificate) => {
+            let proposition = candidate.proposition.clone();
+            match publish_accepted(source.judgement(), &proposition, &certificate) {
+                ElaborationResult::Proven { judgement, edge } => {
+                    let proof = tree_proof::accepted(derivation, context, candidate, certificate);
+                    TreeElaboration::Proven {
+                        judgement,
+                        edge,
+                        proof: Box::new(proof),
+                    }
+                }
+                ElaborationResult::Refused(err) => TreeElaboration::Refused(err),
+                ElaborationResult::NotElaborated(verdict) => {
+                    TreeElaboration::NotElaborated(verdict)
+                }
             }
         }
+        verdict => TreeElaboration::NotElaborated(verdict),
     }
-
-    let goal_prop = Prop::Realizes(
-        witness_object(tree),
-        tree_obj_to_object_term(&tree.src()),
-        tree_obj_to_object_term(&tree.dst()),
-    );
-
-    let mut implication_prop = goal_prop;
-    for h_i in h_props.into_iter().rev() {
-        implication_prop = Prop::Impl(Box::new(h_i), Box::new(implication_prop));
-    }
-
-    fn to_term(tree: &RealizesTree, m: usize, k: &mut usize) -> TermKind {
-        match tree {
-            RealizesTree::Leaf { .. } => {
-                let idx = m - 1 - *k;
-                *k += 1;
-                TermKind::Hyp(Var::Index(idx))
-            }
-            RealizesTree::Seq { left, right } => TermKind::RealizesComp {
-                left: Box::new(to_term(left, m, k)),
-                right: Box::new(to_term(right, m, k)),
-            },
-            RealizesTree::Tensor { left, right } => TermKind::RealizesTensor {
-                left: Box::new(to_term(left, m, k)),
-                right: Box::new(to_term(right, m, k)),
-            },
-        }
-    }
-
-    let mut k = 0;
-    let body_kind = to_term(tree, m, &mut k);
-
-    let mut kind = body_kind;
-    for i in (0..m).rev() {
-        kind = TermKind::Lam {
-            var_name: Some(format!("h{}", i + 1)),
-            body: Box::new(kind),
-        };
-    }
-
-    let term = ExplicitTerm::new(source.judgement().context, kind);
-    elaborate_and_publish(&source, &implication_prop, &term, budget)
 }
 
 #[cfg(test)]

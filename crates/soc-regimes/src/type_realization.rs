@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use brix_canon::{CanonWriter, Canonical};
-use brix_elaborate::{RealizesTree, TreeObj};
+use brix_elaborate::{AcceptedTreeProof, RealizesTree, TreeObj};
 use brix_kernel::{
     ArithOperatorV1, ArithTypingInputV1, CoercionEdgeV1, CoercionKind, NumericResultTypeV1,
     NumericTypeNameV1,
@@ -1168,6 +1168,92 @@ pub fn honest_result_outcome(composition: Outcome, tree: &RealizesTree) -> Outco
     } else {
         Outcome::Audited
     }
+}
+
+/// One leaf occurrence named in a [`TypingGrounds`] report.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LeafGround {
+    /// Position in the derivation's left-to-right leaf order.
+    pub index: usize,
+    /// The leaf's generator.
+    pub generator: GeneratorId,
+    /// [`generator_name`] of it, if this regime minted it.
+    pub name: Option<String>,
+}
+
+/// Why a typing result has the grade it has, read off an **accepted** proof.
+///
+/// `closed` lists occurrences discharged by an accepted `PrimRealizes`
+/// instance; `obligations` lists occurrences discharged by neither a tight
+/// generator nor an accepted instance. The grade is the composition outcome
+/// only when `obligations` is empty.
+///
+/// Typing only (ADR-0015 ⟨D-JUDGE⟩): nothing here speaks to evaluation, a
+/// computed value, or policy compliance.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TypingGrounds {
+    /// The honest grade: the composition outcome, capped by `obligations`.
+    pub outcome: Outcome,
+    /// Occurrences closed by an accepted primitive instance, in leaf order.
+    pub closed: Vec<LeafGround>,
+    /// Occurrences discharged by neither ground, in leaf order.
+    pub obligations: Vec<LeafGround>,
+}
+
+/// The proof offered as evidence was not built from this derivation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TypingGroundsError {
+    /// The artifact's derivation identity or leaf occurrences differ from the
+    /// derivation being graded. Evidence from another tree, or a relabelled
+    /// copy of this one, never transfers.
+    ProofDoesNotBindDerivation,
+}
+
+/// The evidence-aware companion to [`honest_result_outcome`] (ADR-0015 §5
+/// Stage D; Type Realization Contract §9.5).
+///
+/// A leaf is discharged when its generator is tight for typing (the existing
+/// grounds, preserved as they were), **or** when the accepted proof closed
+/// *that occurrence* with a primitive instance. The second ground is read from
+/// the [`AcceptedTreeProof`] — whose only constructors run the kernel — and
+/// never from [`generator_is_tight`], which stays a capability hint: a proof
+/// whose `g_arith` leaf is still a hypothesis gains nothing here.
+///
+/// Refuses ([`TypingGroundsError`]) a proof that does not bind `derivation`.
+/// `1 + 2` stays [`Outcome::Audited`]: `g_arith_input` and `g_arith_result`
+/// are still undischarged and appear in `obligations`.
+pub fn typing_grounds(
+    composition: Outcome,
+    derivation: &TreeDerivation,
+    proof: &AcceptedTreeProof,
+) -> Result<TypingGrounds, TypingGroundsError> {
+    if !proof.binds(derivation) {
+        return Err(TypingGroundsError::ProofDoesNotBindDerivation);
+    }
+    let mut closed = Vec::new();
+    let mut obligations = Vec::new();
+    for occurrence in proof.occurrences() {
+        let ground = || LeafGround {
+            index: occurrence.index(),
+            generator: *occurrence.generator(),
+            name: generator_name(occurrence.generator()),
+        };
+        if occurrence.is_closed() {
+            closed.push(ground());
+        } else if !generator_is_tight(ClaimKind::Typing, occurrence.generator()) {
+            obligations.push(ground());
+        }
+    }
+    let outcome = if obligations.is_empty() {
+        composition
+    } else {
+        Outcome::Audited
+    };
+    Ok(TypingGrounds {
+        outcome,
+        closed,
+        obligations,
+    })
 }
 
 /// A short, human-readable name for a typing-rule generator (ADR-0010 L4:
@@ -4590,6 +4676,76 @@ mod tests {
             "the matrix must be exhaustive, not sampled"
         );
         assert_eq!(checked, relation.rows.len());
+    }
+
+    /// ADR-0015 §5 Stage D — the exhaustive arithmetic matrix through the
+    /// production tree-elaboration path.
+    ///
+    /// Exercises `elaborate_tree_certified` and `typing_grounds` on every
+    /// admitted operand pair × operator: each one produces an accepted proof
+    /// closing the `g_arith` leaf, remains honestly `@Audited` due to the two
+    /// bridge obligations, and is independently verified.
+    #[test]
+    fn exhaustive_arithmetic_matrix_through_production_elaboration() {
+        use brix_elaborate::elaborate_tree_certified;
+        use brix_kernel::Budget;
+
+        let ops = [ArithOp::Add, ArithOp::Sub, ArithOp::Mul, ArithOp::Div];
+        let mut tested = 0;
+
+        for op in ops {
+            for (lhs, rhs, _) in JOINABLE {
+                let ctx = TyCtx::new()
+                    .extend("l", Ty::Con(lhs))
+                    .extend("r", Ty::Con(rhs));
+                let expr = Expr::Arith(
+                    op,
+                    Box::new(Expr::Var("l".to_string())),
+                    Box::new(Expr::Var("r".to_string())),
+                );
+
+                let (judgement, derivation) =
+                    audited_type_check_tree(&expr, &ctx).expect("joinable operands type check");
+
+                let res =
+                    elaborate_tree_certified(&judgement, &derivation, Budget::new(10_000, 256));
+                let brix_elaborate::TreeElaboration::Proven { proof, .. } = res else {
+                    panic!("{op:?} {lhs} {rhs}: elaboration failed");
+                };
+                let proof = *proof;
+
+                // The g_arith leaf is closed.
+                assert_eq!(proof.closed_occurrences().count(), 1, "{op:?} {lhs} {rhs}");
+                let closed = proof.closed_occurrences().next().unwrap();
+                assert_eq!(*closed.generator(), g_arith());
+
+                // The evidence-aware grounds report the leaf closed, the two bridges open,
+                // and the overall outcome capped at Audited.
+                let grounds = typing_grounds(Outcome::Proven, &derivation, &proof)
+                    .expect("proof binds derivation");
+                assert_eq!(grounds.outcome, Outcome::Audited);
+                assert_eq!(grounds.closed.len(), 1);
+                assert_eq!(grounds.closed[0].name.as_deref(), Some("g_arith"));
+                let rem_names: Vec<_> = grounds
+                    .obligations
+                    .iter()
+                    .map(|o| o.name.as_deref().unwrap())
+                    .collect();
+                assert_eq!(rem_names, vec!["g_arith_input", "g_arith_result"]);
+
+                // Independent re-verification succeeds.
+                proof
+                    .recheck(&derivation, &judgement.context, Budget::new(10_000, 256))
+                    .expect("independent recheck");
+
+                tested += 1;
+            }
+        }
+        assert_eq!(
+            tested,
+            30 * ops.len(),
+            "exhaustive matrix tested through production elaborator"
+        );
     }
 
     /// The pairs with no join produce no derivation at all, so no leaf exists to

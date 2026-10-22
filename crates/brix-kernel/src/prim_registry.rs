@@ -7,17 +7,19 @@
 //! sibling-domain constraint on the settlement lane (⟨D-DISJOINT⟩), and the
 //! endpoint-vocabulary finding that re-scoped ADR-0015 Stage D's gate 1.
 //!
-//! **What problem this solves.** `elaborate_tree` turns every derivation leaf
-//! into a *hypothesis*, so the kernel proves `leaves ⇒ conclusion` and never
-//! checks that any leaf's realization actually holds. That is why a result must
+//! **What problem this solves.** Tree elaboration historically turned every derivation leaf
+//! into a *hypothesis*, so the kernel proved `leaves ⇒ conclusion` and never
+//! checked that any leaf's realization actually held. That is why a result had to
 //! be capped by its least-discharged leaf. Which leaves count as discharged was
 //! established by **prose**: a doc comment argued `g_var ↔ Hyp`, `g_app2 ↔ modus
 //! ponens`. Those correspondences are real, but the mechanism does not scale and
 //! cannot be audited — and `g_arith` has no kernel rule to correspond to at all,
 //! so under that mechanism its discharge could only ever be an assertion.
 //!
-//! This module is the mechanism that replaces the argument: a finite, exact,
-//! kernel-owned relation, and a zero-premise term ([`crate::TermKind::PrimRealizes`])
+//! Under ADR-0015 Stage D, tree elaboration classifies leaf occurrences and emits
+//! [`crate::TermKind::PrimRealizes`] for supported arithmetic leaves, while unclosed
+//! leaves remain hypotheses. This module is the mechanism that replaces the argument:
+//! a finite, exact, kernel-owned relation, and a zero-premise term ([`crate::TermKind::PrimRealizes`])
 //! that synthesizes `Prop::Realizes(g, src, dst)` **iff** `(src, dst)` is an
 //! exact member of it.
 //!
@@ -543,10 +545,10 @@ fn registry() -> &'static BTreeMap<PrimitiveRelationId, PrimitiveRelation> {
 /// **`TypingArithV1` is deliberately absent** (ADR-0024 §3). It was retained
 /// briefly on §7's plain reading that identities persist, and retired on the
 /// maintainer ruling that §7 promises this to certificates that *exist*: none
-/// naming V1 ever did, because Stage D has not landed and `elaborate_tree`
-/// still emits every leaf as a `Hyp`. Keeping it would have been trusted TCB
-/// data with nothing consulting it — the same thing ⟨D-EXACTCOVERED⟩ refused a
-/// per-edge coercion relation for — and worse, its rows spelled
+/// naming V1 ever did, because prior to Stage D `elaborate_tree` emitted every
+/// leaf as a `Hyp` and Stage D uses `TypingArithV2`. Keeping it would have been
+/// trusted TCB data with nothing consulting it — the same thing ⟨D-EXACTCOVERED⟩
+/// refused a per-edge coercion relation for — and worse, its rows spelled
 /// `type.rule.num.promote.Int_Float@1`, a generator family the lattice no
 /// longer declares. Its id now resolves to `None`, which per §7 means the
 /// kernel has not introduced the fact, never that its negation holds.

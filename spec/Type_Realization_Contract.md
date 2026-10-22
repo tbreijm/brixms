@@ -393,15 +393,19 @@ Measured through `check_module` on a 2 MiB thread, as chain length:
 | before | ~12 |
 | after | ~57 |
 
-**What remains, stated as a limit rather than a fix.** The kernel still
-recurses once per `RealizesComp` node, so a long enough chain still aborts on a
-small enough stack. `brix check` is safe for *any* input only because its 8 MiB
-main thread outlasts the 2000-step budget that ends the search around 140
-terms — two numbers that happen to be ordered correctly. That is not the
-guarantee this clause asks for, and it silently depends on a budget chosen for
-a different purpose (§5.4). Closing it properly means an iterative
-`infer_type`, which is a `brix-kernel` change; pinned meanwhile by
-`brix-lower/tests/deep_expression.rs`.**]**
+**What remains, stated as a limit rather than a fix.** `infer_realizes_comp`
+now walks a right-nested `RealizesComp` spine with a loop (steps and depth are
+accounted per node exactly as the recursion did; pinned by
+`brix-kernel/tests/realizes_comp_spine.rs`), and the 50- and 55-term chains in
+`brix-lower/tests/deep_expression.rs` complete on a 2 MiB thread. This is one
+spine made iterative. Left-nested composition, tensor, and recursive
+`Clone`/`Hash`/`Eq`/`Drop` over proof terms remain recursive, so a long enough
+input of those shapes can still abort a small enough stack. `brix check` is safe
+for *any* input only because its 8 MiB main thread outlasts the step budget that
+ends the search — two numbers that happen to be ordered correctly, and a budget
+chosen for a different purpose (§5.4). That is not the guarantee this clause
+asks for; closing it properly means an iterative `infer_type`, a `brix-kernel`
+change.**]**
 
 ---
 
@@ -517,8 +521,12 @@ document recording it SHALL say so. `g_record_empty` is such an interim: ADR-002
 **9.5 Kernel-closed leaves.** After ⟨D-PRIM⟩, a leaf is closed only when the
 certificate contains the `PrimRealizes` term for that leaf *and* the kernel
 accepted the resulting proof. Registry membership implies nothing about
-occurrences (ADR-0015 §8.7). `elaborate_tree` still emits every leaf as a
-`Hyp`, so no leaf is closed this way today. **[Specified]**
+occurrences (ADR-0015 §8.7). Under ADR-0015 Stage D, supported arithmetic leaves
+(`g_arith` under `TypingArithV2`) are classified deterministically and emitted
+as closed `PrimRealizes` instances across tree elaboration. The two
+vocabulary-bridge leaves (`g_arith_input` and `g_arith_result`) remain
+hypotheses (`Hyp`), keeping the overall result `@Audited`. **[Implemented:
+ADR-0015 Stage D]**
 
 **9.6** The result grade is the composition outcome capped by the
 least-discharged leaf. **[Pinned: `honest_result_outcome`, and the standing
@@ -561,10 +569,11 @@ against `main` at the date above.
 - The λ-calculus core, the structural product/coproduct fragment, literals, and
   the two zero-arity introductions reach genuine `Proven`.
 - **Arithmetic is capped.** `1 + 2` is `Int @Audited` and `7 / 2` is
-  `Float @Audited`, capped by `g_arith_input`, `g_arith`, and `g_arith_result`.
-  `g_arith`'s realization *is* decided by a kernel relation (`TypingArithV2`),
-  but no certificate closes the leaf with it yet, and the two bridges are not
-  dischargeable by that mechanism.
+  `Float @Audited`, capped by `g_arith_input` and `g_arith_result`.
+  `g_arith`'s realization is closed by the kernel relation (`TypingArithV2`)
+  under ADR-0015 Stage D with an accepted `PrimRealizes` proof term, while the two
+  bridges remain open hypotheses because each connects to regime-encoded `Ty`
+  endpoints outside kernel vocabulary.
 - **Comparison is capped** by `g_cmp`.
 - **Recursion is capped** by `g_fix`, deliberately: it assumes the definition's
   own type in order to check the body, which is the standard and sound rule for

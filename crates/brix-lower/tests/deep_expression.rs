@@ -22,12 +22,16 @@
 //! threads were already dying.
 //!
 //! **The residual, stated because this is where someone will look for it.**
-//! The abort is pushed out, not eliminated: the kernel still recurses once per
-//! `RealizesComp` node. Measured through `check_module` on a 2 MiB thread, the
-//! chain length it survives went from ~12 to ~57. `brix check` survives *any*
-//! input only because its 8 MiB main thread outlasts the 2000-step budget that
-//! stops the search around 140 terms — two numbers that happen to be ordered
-//! correctly, not a guarantee. See `Type_Realization_Contract.md` §5.5.
+//! The right-nested `RealizesComp` spine is now walked by a loop in
+//! `infer_realizes_comp` (pinned directly by
+//! `brix-kernel/tests/realizes_comp_spine.rs`), which is what lets the
+//! 50- and 55-term chains below finish on a 2 MiB test thread. That is one
+//! spine made iterative, not a general guarantee: left-nested composition,
+//! tensor, and recursive `Clone`/`Hash`/`Eq`/`Drop` over the proof terms are
+//! still recursive. `brix check` survives *any* input only because its 8 MiB
+//! main thread outlasts the step budget that stops the search; the limits
+//! have been measured only for the shapes tested here.
+//! See `Type_Realization_Contract.md` §5.5.
 
 use brix_lower::check_module;
 use brix_syntax::parse;

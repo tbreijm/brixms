@@ -27,9 +27,9 @@
 //! does not encode every field that affects admissibility, the primitive MUST
 //! NOT be discharged.**
 //!
-//! [`ArithTypingInputV1`] is that source object. Stage B0 only changes what is
-//! *emitted* — no registry exists yet, every leaf is still a hypothesis, and
-//! no grade moves.
+//! [`ArithTypingInputV1`] is that source object. Historically in Stage B0, only what was
+//! *emitted* was changed (no registry existed yet, and every leaf remained a hypothesis).
+//! Stage D subsequently introduced kernel-closed arithmetic leaves via [`TypingArithV2`].
 //!
 //! **Judgment scope.** These schemas describe a **typing** judgment
 //! (`Γ ⊢ e₁ op e₂ : T`) and nothing else. Per ⟨D-JUDGE⟩ a typing rule is

@@ -120,15 +120,15 @@ pub use world_expr::{
     CompiledProgramEnv, CompiledWorldExpr,
 };
 
-use brix_elaborate::{elaborate_tree, ElaborationResult, RealizesTree};
+use brix_elaborate::{elaborate_tree_certified, AcceptedTreeProof, RealizesTree, TreeElaboration};
 use brix_kernel::{Budget, Verdict};
-use brix_semantic::{Dependency, EvidenceId, PropositionId};
+use brix_semantic::{Dependency, EvidenceId, PropositionId, TreeDerivation};
 use brix_syntax::ast::{self, Item};
 use soc_regimes::coverage::certify_exhaustive;
 pub use soc_regimes::coverage::CoverageOutcome;
 use soc_regimes::type_realization::{
-    audited_type_check_tree, grade_assertion_satisfied, honest_result_outcome, infer_tree, zonk,
-    ArithOp, CmpOp, Expr as TrExpr, Infer, Pattern as TrPattern, Ty as TrTy, TyCtx, TypeError,
+    audited_type_check_tree, grade_assertion_satisfied, infer_tree, typing_grounds, zonk, ArithOp,
+    CmpOp, Expr as TrExpr, Infer, Pattern as TrPattern, Ty as TrTy, TyCtx, TypeError,
 };
 
 /// Lowering context holding top-level functions, config declarations, and constructors.
@@ -162,7 +162,7 @@ pub enum LowerError {
     /// `brix_elaborate::elaborate_tree` returned `NotElaborated`: the kernel
     /// did not accept the composition term. Carries the kernel's own
     /// [`Verdict`] rather than a formatted string (ADR-0010 L4, issue #43) so
-    /// `brix prove`/`brix whynot` can distinguish, e.g., resource exhaustion
+    /// callers such as `brix check` can distinguish, e.g., resource exhaustion
     /// from an outright rejection — **this is the absence of a proof, never
     /// evidence that the proposition is false** (ADR-0002 §5.3).
     ElaborationFailed(Verdict),
@@ -1115,13 +1115,14 @@ pub struct CheckResult {
     /// coverage outcome (a separate proposition from the typing result).
     pub coverage: Option<CoverageOutcome>,
     /// L4 (ADR-0010; issue #43) — additive fields surfacing what
-    /// `elaborate_tree` already computes so `brix prove`/`brix why` can
+    /// `elaborate_tree` already computes so callers such as `brix check` can
     /// report it instead of discarding it. **Not necessarily "`name : ty`"
-    /// itself**: `elaborate_tree` always proves the *composition* theorem
-    /// "leaves ⇒ name : ty" (this field), and the unconditional result only
-    /// inherits that grade when every leaf generator is independently tight
+    /// itself**: `elaborate_tree` proves the *composition* theorem
+    /// "remaining_hypotheses ⇒ name : ty" (this field), with closed primitive
+    /// leaves verified via `PrimRealizes`, and the unconditional result only
+    /// inherits that grade when every leaf is independently discharged (tight or closed)
     /// — i.e. exactly when `outcome == Outcome::Proven`
-    /// (`soc_regimes::type_realization::honest_result_outcome`). A caller
+    /// (`soc_regimes::type_realization::typing_grounds`). A caller
     /// that prints `certificate`/`proposition` as proof of `name : ty` when
     /// `outcome != Outcome::Proven` would be rounding `Audited` up to
     /// `Proven` — the one thing ADR-0012 §9 forbids.
@@ -1141,12 +1142,46 @@ pub struct CheckResult {
     /// `certificate` (proof) per ADR-0002 §4.1/§5.
     pub elaboration_edge: Dependency,
     /// The tree-structured realization derivation (ADR-0007) whose leaves are
-    /// the primitive typing-rule generators — provenance, not proof. `brix
-    /// why` walks this to name which leaf(s), if any, capped the result below
-    /// `Proven` (`soc_regimes::type_realization::generator_is_tight`, queried
-    /// against `ClaimKind::Typing` — this is a typing derivation, ADR-0015
-    /// ⟨D-JUDGE⟩).
+    /// the primitive typing-rule generators — provenance, not proof. Callers
+    /// (such as `brix check`) walk this and its accepted proof artifact to
+    /// report which leaf(s), if any, capped the result below `Proven`
+    /// (`soc_regimes::type_realization::typing_grounds`).
     pub derivation: RealizesTree,
+    /// The checked derivation artifact `typing_proof` was constructed from —
+    /// the independent expectation [`AcceptedTreeProof::recheck`] needs, since
+    /// its `StructureVerified` tag cannot be rebuilt by a caller.
+    pub tree_derivation: TreeDerivation,
+    /// The kernel-accepted proof behind `proposition` (ADR-0015 §5 Stage D):
+    /// the exact proposition and term, the certificate, and which leaf
+    /// *occurrences* a primitive instance closed. This — not a generator list
+    /// or a digest — is what authorizes a closure claim; see
+    /// [`CheckResult::grounds`].
+    ///
+    /// It is typing evidence only: no evaluation, computed value, or policy
+    /// compliance follows from it.
+    pub typing_proof: AcceptedTreeProof,
+}
+
+impl CheckResult {
+    /// Why `outcome` is what it is: which leaf occurrences the accepted proof
+    /// closed with primitive instances, and which obligations remain.
+    ///
+    /// `Err` only if `typing_proof` does not bind `tree_derivation`, which
+    /// the production path cannot produce.
+    pub fn grounds(
+        &self,
+    ) -> Result<
+        soc_regimes::type_realization::TypingGrounds,
+        soc_regimes::type_realization::TypingGroundsError,
+    > {
+        soc_regimes::type_realization::typing_grounds(
+            // The composition outcome is `Proven` for any accepted proof; the
+            // grade cap is what `typing_grounds` computes from the leaves.
+            Outcome::Proven,
+            &self.tree_derivation,
+            &self.typing_proof,
+        )
+    }
 }
 
 /// Lower each `let` binding in a parsed surface AST module to native SOC expressions,
@@ -1668,14 +1703,26 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                 // (ADR-0017), not a bare tree — `elaborate_tree` binds the
                 // source to it at the boundary.
                 let (audited_judgement, derivation) = audited_type_check_tree(&tr_expr, &ty_ctx)?;
-                match elaborate_tree(&audited_judgement, &derivation, Budget::new(2000, 2000)) {
-                    ElaborationResult::Proven { judgement, edge } => {
-                        // The kernel proves the *composition* (judgement.outcome,
-                        // e.g. Proven) conditional on the primitive typing-rule
-                        // leaves. The honest status of the typing result is that
-                        // capped by leaf discharge — Audited until the leaves are
-                        // proven tight (the SOC tight-generator obligation).
-                        let outcome = honest_result_outcome(judgement.outcome, derivation.tree());
+                match elaborate_tree_certified(
+                    &audited_judgement,
+                    &derivation,
+                    Budget::new(2000, 2000),
+                ) {
+                    TreeElaboration::Proven {
+                        judgement,
+                        edge,
+                        proof,
+                    } => {
+                        let proof = *proof;
+                        let outcome = typing_grounds(judgement.outcome, &derivation, &proof)
+                            .map_err(|_| {
+                                LowerError::ElaborationFailed(brix_kernel::Verdict::Rejected(
+                                    brix_kernel::RejectionReason::Custom(
+                                        "accepted proof does not bind its derivation".into(),
+                                    ),
+                                ))
+                            })?
+                            .outcome;
 
                         // Discharge any `@grade` assertion against the earned grade
                         // via the GRADE coercion lattice: the actual grade may only
@@ -1702,14 +1749,16 @@ pub fn check_module(m: &ast::Module) -> Vec<Result<CheckResult, (String, LowerEr
                                 certificate: judgement.evidence,
                                 elaboration_edge: edge,
                                 derivation: derivation.tree().clone(),
+                                tree_derivation: derivation.clone(),
+                                typing_proof: proof,
                             },
                             inferred_ty,
                         ))
                     }
-                    ElaborationResult::NotElaborated(verdict) => {
+                    TreeElaboration::NotElaborated(verdict) => {
                         Err(LowerError::ElaborationFailed(verdict))
                     }
-                    ElaborationResult::Refused(err) => Err(LowerError::ElaborationRefused(err)),
+                    TreeElaboration::Refused(err) => Err(LowerError::ElaborationRefused(err)),
                 }
             })();
 

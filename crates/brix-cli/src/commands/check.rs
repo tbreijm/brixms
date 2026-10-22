@@ -12,7 +12,10 @@ use crate::commands::{
     candidate_disposition_to_json, decision_to_json, fact_to_json, fmt_value_human,
     format_finite_decision_human, render_location_snippet, unknown_reason_to_code_and_detail,
 };
-use crate::json::{to_tagged_value, BindingJson, CliResultJson, LocationJson, BRIX_CLI_SCHEMA};
+use crate::json::{
+    to_tagged_value, BindingJson, CliResultJson, LocationJson, TypingJson, TypingLeafJson,
+    BRIX_CLI_SCHEMA,
+};
 use crate::pipeline;
 
 /// Execute `brix check <file.brix> [--input <path>...]`.
@@ -332,6 +335,7 @@ pub fn execute_check(
                         .map(render_ty)
                         .unwrap_or_else(|| "?".to_string());
                     let grade = format!("{:?}", cr.outcome);
+                    let (typing_lines, typing_json) = typing_closure_report(cr);
                     match eval_outcome {
                         LetEvalOutcome::Value(v) => {
                             let tagged = to_tagged_value(v);
@@ -340,16 +344,21 @@ pub fn execute_check(
                                 cr.name,
                                 fmt_value_human(v)
                             ));
-                            bindings_json
-                                .push(BindingJson::evaluated(&cr.name, &ty, &grade, tagged));
+                            human_lines.extend(typing_lines);
+                            let mut binding = BindingJson::evaluated(&cr.name, &ty, &grade, tagged);
+                            binding.typing = typing_json;
+                            bindings_json.push(binding);
                         }
                         LetEvalOutcome::NotEvaluated(reason) => {
                             human_lines.push(format!(
                                 "  {} : {ty} @{grade} (not evaluated: {reason})",
                                 cr.name
                             ));
-                            bindings_json
-                                .push(BindingJson::not_evaluated(&cr.name, &ty, &grade, reason));
+                            human_lines.extend(typing_lines);
+                            let mut binding =
+                                BindingJson::not_evaluated(&cr.name, &ty, &grade, reason);
+                            binding.typing = typing_json;
+                            bindings_json.push(binding);
                         }
                     }
                 }
@@ -434,4 +443,75 @@ fn evidence_disposition(disposition: &Disposition) -> String {
         }
         Disposition::Unknown { reason } => format!("unresolved {reason:?}"),
     }
+}
+
+/// The typing-proof closure account for one checked binding, as indented human
+/// lines and the additive JSON form — or nothing when no leaf occurrence was
+/// closed by an accepted primitive instance (output is then unchanged).
+///
+/// Reports a **typing** fact only. It sits beside, and never replaces, the
+/// binding's evaluated value, and it never raises the grade: the bridge
+/// obligations it lists are exactly what keeps `1 + 2` at `Audited`.
+fn typing_closure_report(cr: &brix_lower::CheckResult) -> (Vec<String>, Option<TypingJson>) {
+    let Ok(grounds) = cr.grounds() else {
+        return (Vec::new(), None);
+    };
+    if grounds.closed.is_empty() {
+        return (Vec::new(), None);
+    }
+    let name = |g: &soc_regimes::type_realization::LeafGround| {
+        g.name
+            .clone()
+            .unwrap_or_else(|| g.generator.digest().to_hex())
+    };
+    let leaf = |g: &soc_regimes::type_realization::LeafGround| TypingLeafJson {
+        index: g.index,
+        generator: name(g),
+    };
+
+    let mut lines = Vec::new();
+    let mut kinds: Vec<String> = Vec::new();
+    for g in &grounds.closed {
+        let label = match g.name.as_deref() {
+            Some("g_arith") => "arithmetic typing leaf".to_string(),
+            _ => format!("typing leaf {}", name(g)),
+        };
+        if !kinds.contains(&label) {
+            kinds.push(label);
+        }
+    }
+    for label in kinds {
+        let count = grounds
+            .closed
+            .iter()
+            .filter(|g| match g.name.as_deref() {
+                Some("g_arith") => label == "arithmetic typing leaf",
+                _ => label == format!("typing leaf {}", name(g)),
+            })
+            .count();
+        if count > 1 {
+            lines.push(format!("    {label}: kernel-checked ({count} occurrences)"));
+        } else {
+            lines.push(format!("    {label}: kernel-checked"));
+        }
+    }
+    let mut remaining: Vec<String> = Vec::new();
+    for g in &grounds.obligations {
+        let n = name(g);
+        if !remaining.contains(&n) {
+            remaining.push(n);
+        }
+    }
+    if !remaining.is_empty() {
+        lines.push(format!(
+            "    remaining obligations: {}",
+            remaining.join(", ")
+        ));
+    }
+
+    let json = TypingJson {
+        kernel_checked_leaves: grounds.closed.iter().map(leaf).collect(),
+        remaining_obligations: grounds.obligations.iter().map(leaf).collect(),
+    };
+    (lines, Some(json))
 }
