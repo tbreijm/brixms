@@ -1321,6 +1321,15 @@ fn collect_reachable_schemas(
                         )?;
                     }
                 }
+                collect_ascribe_schemas_from_expr(
+                    &function.body,
+                    &configs,
+                    &type_env,
+                    &mut schemas,
+                    &mut visiting,
+                    &mut expansions,
+                    &mut edges,
+                )?;
             }
             ast::Item::Let(l) => {
                 collect_ascribe_schemas_from_expr(
@@ -1363,6 +1372,37 @@ fn collect_reachable_schemas(
                     &mut expansions,
                     &mut edges,
                 )?;
+            }
+            ast::Item::Decide(d) => {
+                collect_ascribe_schemas_from_expr(
+                    &d.list,
+                    &configs,
+                    &type_env,
+                    &mut schemas,
+                    &mut visiting,
+                    &mut expansions,
+                    &mut edges,
+                )?;
+                for p in &d.proposals {
+                    collect_ascribe_schemas_from_expr(
+                        &p.guard,
+                        &configs,
+                        &type_env,
+                        &mut schemas,
+                        &mut visiting,
+                        &mut expansions,
+                        &mut edges,
+                    )?;
+                    collect_ascribe_schemas_from_expr(
+                        &p.value,
+                        &configs,
+                        &type_env,
+                        &mut schemas,
+                        &mut visiting,
+                        &mut expansions,
+                        &mut edges,
+                    )?;
+                }
             }
             _ => {}
         }

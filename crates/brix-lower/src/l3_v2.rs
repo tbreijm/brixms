@@ -629,7 +629,11 @@ pub fn validate_l3_value(
             },
             L3SchemaType::Named(name),
         ) => {
-            let Some(schema) = schemas.get(name) else {
+            let schema = schemas.get(name).or_else(|| {
+                let simple = name.rsplit_once("::").map(|(_, s)| s).unwrap_or(name);
+                schemas.get(simple)
+            });
+            let Some(schema) = schema else {
                 return Err(format!("{path}: unknown schema '{name}'"));
             };
             let L3SchemaBody::Sum(variants) = &schema.body else {
@@ -663,7 +667,11 @@ pub fn validate_l3_value(
             },
             L3SchemaType::Named(name),
         ) => {
-            let Some(schema) = schemas.get(name) else {
+            let schema = schemas.get(name).or_else(|| {
+                let simple = name.rsplit_once("::").map(|(_, s)| s).unwrap_or(name);
+                schemas.get(simple)
+            });
+            let Some(schema) = schema else {
                 return Err(format!("{path}: unknown schema '{name}'"));
             };
             let L3SchemaBody::Record(expected_fields) = &schema.body else {
@@ -2197,11 +2205,15 @@ fn lower_expr_v2_impl(
                 helper_enabled,
                 ambiguous_ctors,
             )?;
-            check_list_ascription(&inner, &element_str)?;
-            Ok(L3ExprV2::Ascribe {
-                expr: Box::new(inner),
-                element: element_str,
-            })
+            let is_redundant = check_list_ascription(&inner, &element_str)?;
+            if is_redundant {
+                Ok(inner)
+            } else {
+                Ok(L3ExprV2::Ascribe {
+                    expr: Box::new(inner),
+                    element: element_str,
+                })
+            }
         }
     }
 }
@@ -3827,14 +3839,10 @@ fn eval_distinct(
 
 /// Check a `List<element>` ascription against a lowered expression.
 ///
-/// What is decided here is exactly what lowering can see: an expression that
-/// is plainly not a list is refused, and every *literal* element of a list
-/// literal must belong to `element`. An element whose type lowering cannot
-/// determine (a reference, call, field, match) is not guessed at; the
-/// evaluator's own checks stay the boundary for it. A nonempty list is checked
-/// the same way an empty one is typed, so the syntax is not an escape hatch for
-/// `[]`.
-fn check_list_ascription(inner: &L3ExprV2, element: &str) -> Result<(), L3V2LowerError> {
+/// Returns `Ok(true)` if the annotation is proven redundant (such as on an
+/// empty list `[]: List<T>`), allowing lowering to erase the wrapper.
+/// Returns `Ok(false)` if the annotation must be retained for runtime validation.
+fn check_list_ascription(inner: &L3ExprV2, element: &str) -> Result<bool, L3V2LowerError> {
     let mismatch = |found: &str| L3V2LowerError::AscriptionMismatch {
         expected: format!("List<{element}>"),
         found: found.to_string(),
@@ -3842,6 +3850,9 @@ fn check_list_ascription(inner: &L3ExprV2, element: &str) -> Result<(), L3V2Lowe
     let simple = |name: &str| name.rsplit_once("::").map_or(name, |(_, s)| s).to_string();
     match inner {
         L3ExprV2::ListLit(items) => {
+            if items.is_empty() {
+                return Ok(true);
+            }
             for item in items {
                 let found = match item {
                     L3ExprV2::Int(_) => Some("Int".to_string()),
@@ -3862,7 +3873,7 @@ fn check_list_ascription(inner: &L3ExprV2, element: &str) -> Result<(), L3V2Lowe
                     }
                 }
             }
-            Ok(())
+            Ok(false)
         }
         L3ExprV2::Int(_) => Err(mismatch("Int")),
         L3ExprV2::Str(_) => Err(mismatch("Str")),
@@ -3881,7 +3892,26 @@ fn check_list_ascription(inner: &L3ExprV2, element: &str) -> Result<(), L3V2Lowe
             Err(mismatch(&simple(nominal_sum)))
         }
         L3ExprV2::Record { nominal_config, .. } => Err(mismatch(&simple(nominal_config))),
-        _ => Ok(()),
+        _ => Ok(false),
+    }
+}
+
+/// Parse an element type string (e.g. `Int`, `Decimal`, `Ship`, `List<Str>`) into an [`L3SchemaType`].
+pub fn parse_schema_type_from_str(s: &str) -> L3SchemaType {
+    let s = s.trim();
+    match s {
+        "Int" => L3SchemaType::Int,
+        "Bool" => L3SchemaType::Bool,
+        "Str" => L3SchemaType::Str,
+        "F64" => L3SchemaType::F64,
+        "Decimal" => L3SchemaType::Decimal,
+        other => {
+            if let Some(inner) = other.strip_prefix("List<").and_then(|r| r.strip_suffix('>')) {
+                L3SchemaType::List(Box::new(parse_schema_type_from_str(inner)))
+            } else {
+                L3SchemaType::Named(other.to_string())
+            }
+        }
     }
 }
 
@@ -3925,21 +3955,9 @@ fn eval_ascribe(
     let L3ValueV2::List(items) = &val else {
         return Err(EvalFault::OperandShape("ascription requires a List value"));
     };
-    let simple = element.rsplit_once("::").map_or(element, |(_, s)| s);
+    let schema_ty = parse_schema_type_from_str(element);
     for item in items.iter() {
-        let matches_elem = match item {
-            L3ValueV2::Int(_) => simple == "Int",
-            L3ValueV2::Str(_) => simple == "Str",
-            L3ValueV2::Bool(_) => simple == "Bool",
-            L3ValueV2::F64(_) => simple == "F64",
-            L3ValueV2::Decimal(_) => simple == "Decimal",
-            L3ValueV2::Ctor { nominal_sum, .. } => nominal_matches(nominal_sum, element),
-            L3ValueV2::Record { nominal_config, .. } => {
-                nominal_matches(nominal_config, element)
-            }
-            _ => false,
-        };
-        if !matches_elem {
+        if let Err(_) = validate_l3_value(item, &schema_ty, &env.schemas, "<ascribe>") {
             return Err(EvalFault::OperandShape(
                 "ascribed list element type mismatch",
             ));
