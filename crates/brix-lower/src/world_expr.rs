@@ -104,6 +104,10 @@ fn normalize_world_and(expr: &ast::Expr) -> ast::Expr {
             ty: ty.clone(),
             arg: Box::new(normalize_world_and(arg)),
         },
+        Expr::Ascribe { expr, ty } => Expr::Ascribe {
+            expr: Box::new(normalize_world_and(expr)),
+            ty: ty.clone(),
+        },
     }
 }
 

@@ -997,6 +997,10 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
         ast::Expr::Validate { .. } => Err(LowerError::Unsupported(
             "validate is an evidence-profile boundary, not a typing proof".to_string(),
         )),
+        ast::Expr::Ascribe { .. } => Err(LowerError::Unsupported(
+            "type ascription is a finite-decision form, not part of the typing fragment"
+                .to_string(),
+        )),
     }
 }
 
@@ -1463,6 +1467,7 @@ fn check_declared_field_types(
             Ok(())
         }
         ast::Expr::Validate { arg, .. } => check_declared_field_types(arg, ctx, ty_ctx),
+        ast::Expr::Ascribe { expr, .. } => check_declared_field_types(expr, ctx, ty_ctx),
     }
 }
 

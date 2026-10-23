@@ -176,6 +176,17 @@ pub enum L3ExprV2 {
     /// `distinct(xs)` (ADR-0040): first occurrence kept, order otherwise
     /// preserved.
     Distinct(Box<L3ExprV2>),
+    /// `only(xs)`: the single element of a list. Exactly one element yields
+    /// that element, unchanged and uncoerced; zero or several is a typed
+    /// [`EvalFault::NotSingleton`] carrying the actual cardinality. Never a
+    /// default value.
+    Only(Box<L3ExprV2>),
+    /// `e: List<T>` (ADR-0040): ascription of a list expression. Retained
+    /// until complete type check and validated dynamically if needed.
+    Ascribe {
+        expr: Box<L3ExprV2>,
+        element: String,
+    },
     /// Explicit numeric construction, conversion, rounding, or negation.
     NumericBuiltin(NumericBuiltinV2, Vec<L3ExprV2>),
 }
@@ -296,7 +307,8 @@ impl FoldOpV2 {
 /// module may not declare a helper or constructor that shadows one, exactly
 /// as ADR-0035 reserves `div_floor`/`div_ceil`/`div_half_even`/`mod_euclid`.
 pub fn is_reserved_list_operation_name(name: &str) -> bool {
-    FoldOpV2::from_name(name).is_some() || matches!(name, "filter" | "map" | "len" | "distinct")
+    FoldOpV2::from_name(name).is_some()
+        || matches!(name, "filter" | "map" | "len" | "distinct" | "only")
 }
 
 /// Maximum length of a list produced by `filter`, `map`, a comprehension, a
@@ -803,9 +815,60 @@ impl CmpOpV2 {
 pub enum L3PatternV2 {
     /// `Variant(x, y)` — sub-patterns are binders or wildcards only.
     Ctor {
+        nominal_sum: Option<String>,
         variant: String,
         binders: Vec<Option<String>>,
     },
+    /// `_` — the final catch-all arm. It binds nothing and is admitted only as
+    /// the **last** arm of a `match`. The scrutinee is still evaluated and must
+    /// be a well-formed sum value before any arm is tried, so a wildcard cannot
+    /// hide malformed input, and it never matches a value whose nominal owner
+    /// differs from the one the explicit constructor arms name.
+    Wildcard,
+}
+
+impl L3PatternV2 {
+    /// Check whether this pattern matches the given runtime value.
+    pub fn matches_value(&self, v: &L3ValueV2) -> bool {
+        match self {
+            L3PatternV2::Ctor {
+                nominal_sum: expected_nom,
+                variant: pv,
+                ..
+            } => {
+                let simple_pv = pv.rsplit_once("::").map_or(pv.as_str(), |(_, s)| s);
+                match v {
+                    L3ValueV2::Ctor {
+                        nominal_sum,
+                        variant,
+                        ..
+                    } => {
+                        if let Some(expected_nom) = expected_nom {
+                            if nominal_sum != expected_nom {
+                                return false;
+                            }
+                        } else if let Some((owner, _)) = pv.rsplit_once("::") {
+                            if nominal_sum != owner {
+                                return false;
+                            }
+                        }
+                        variant == simple_pv
+                    }
+                    L3ValueV2::Bool(b) => {
+                        let bool_str = if *b { "true" } else { "false" };
+                        if let Some(expected_nom) = expected_nom {
+                            if expected_nom != "Bool" {
+                                return false;
+                            }
+                        }
+                        simple_pv == bool_str
+                    }
+                    _ => false,
+                }
+            }
+            L3PatternV2::Wildcard => true,
+        }
+    }
 }
 
 /// One item of a lowered v2 plan.
@@ -897,6 +960,20 @@ pub enum L3V2LowerError {
     /// A wildcard or binder arm at the top level of a `match`. Rejected so a
     /// default arm cannot silently swallow malformed input.
     DefaultArmNotAllowed,
+    /// A `_` arm that is not the final arm of its `match`. Arms after a
+    /// wildcard could never be reached.
+    WildcardArmNotLast,
+    /// A final `_` arm after explicit arms that already cover every variant of
+    /// the scrutinee's sum: the wildcard can never be taken.
+    UnreachableWildcardArm {
+        sum: String,
+    },
+    /// A `e: List<T>` ascription that does not describe the expression it is
+    /// attached to, or whose annotation is not an admitted `List<T>` form.
+    AscriptionMismatch {
+        expected: String,
+        found: String,
+    },
     /// A nested constructor pattern. Not in Stage A.
     NestedPatternNotAllowed,
     /// `/` (ADR-0042): the operator has an exact meaning — `Int / Int → Float`
@@ -972,6 +1049,19 @@ impl fmt::Display for L3V2LowerError {
                 write!(f, "non-exhaustive match on '{sum}', missing: {missing:?}")
             }
             Self::DefaultArmNotAllowed => write!(f, "default arm not allowed in match"),
+            Self::WildcardArmNotLast => {
+                write!(f, "wildcard arm '_' must be the last arm of a match")
+            }
+            Self::AscriptionMismatch { expected, found } => {
+                write!(
+                    f,
+                    "type ascription mismatch: expected {expected}, found {found}"
+                )
+            }
+            Self::UnreachableWildcardArm { sum } => write!(
+                f,
+                "unreachable wildcard arm: every variant of '{sum}' is already matched"
+            ),
             Self::NestedPatternNotAllowed => write!(f, "nested pattern not allowed in match"),
             Self::DivisionNotAllowed => write!(f, "{}", division_not_admitted_reason()),
             Self::FloatLiteralNotAllowed(lit) => write!(f, "float literal not allowed: {lit}"),
@@ -1607,6 +1697,28 @@ fn lower_expr_v2_impl(
                 )?;
                 return Ok(L3ExprV2::Distinct(Box::new(inner)));
             }
+            if func == "only" {
+                if args.len() != 1 {
+                    return Err(L3V2LowerError::FunctionArityMismatch {
+                        func: func.clone(),
+                        expected: 1,
+                        found: args.len(),
+                    });
+                }
+                let inner = lower_expr_v2_impl(
+                    &args[0],
+                    lets,
+                    locals,
+                    rules,
+                    nullary,
+                    variants_of,
+                    functions,
+                    in_rule,
+                    helper_enabled,
+                    ambiguous_ctors,
+                )?;
+                return Ok(L3ExprV2::Only(Box::new(inner)));
+            }
             if let Some(op) = DivModOpV2::from_name(func) {
                 if args.len() != 2 {
                     return Err(L3V2LowerError::FunctionArityMismatch {
@@ -1760,7 +1872,8 @@ fn lower_expr_v2_impl(
                 ambiguous_ctors,
             )?);
             let mut out = Vec::new();
-            for arm in arms {
+            let last_arm = arms.len().saturating_sub(1);
+            for (arm_index, arm) in arms.iter().enumerate() {
                 let pat = match &arm.pattern {
                     ast::Pattern::Ctor { name, args } => {
                         if let Some(alts) = ambiguous_ctors.get(name) {
@@ -1788,26 +1901,35 @@ fn lower_expr_v2_impl(
                             }
                         }
                         let simple_variant = name.rsplit_once("::").map(|(_, v)| v).unwrap_or(name);
+                        let nominal = if name == "true" || name == "false" {
+                            Some("Bool".to_string())
+                        } else {
+                            nullary.get(name).or_else(|| variants_of.get(name)).cloned()
+                        };
                         L3PatternV2::Ctor {
+                            nominal_sum: nominal.clone(),
                             // Qualified patterns retain their nominal owner.
                             // Legacy bare patterns keep their frozen encoding.
                             variant: if name.contains("::") {
-                                let nominal = nullary
-                                    .get(name)
-                                    .or_else(|| variants_of.get(name))
-                                    .ok_or_else(|| {
+                                let nom = nominal.ok_or_else(|| {
                                     L3V2LowerError::UnresolvedReference(name.clone())
                                 })?;
-                                format!("{nominal}::{simple_variant}")
+                                format!("{nom}::{simple_variant}")
                             } else {
                                 simple_variant.to_string()
                             },
                             binders,
                         }
                     }
-                    // A top-level wildcard or binder is a default arm. Refused
-                    // so malformed input cannot be swallowed by a catch-all.
-                    ast::Pattern::Wildcard | ast::Pattern::Var(_) => {
+                    // A single *final* `_` is the one admitted catch-all (it
+                    // binds nothing). A variable binder at the top level would
+                    // bind the whole scrutinee, which has no meaning here, and
+                    // stays refused; so does a `_` that is not last.
+                    ast::Pattern::Wildcard if arm_index == last_arm => L3PatternV2::Wildcard,
+                    ast::Pattern::Wildcard => {
+                        return Err(L3V2LowerError::WildcardArmNotLast);
+                    }
+                    ast::Pattern::Var(_) => {
                         return Err(L3V2LowerError::DefaultArmNotAllowed);
                     }
                 };
@@ -1815,9 +1937,10 @@ fn lower_expr_v2_impl(
                 // `match b { MkBox(v) => v }` reports `v` unresolved — the
                 // pattern binds it and the body could not see it.
                 let mut arm_locals = locals.clone();
-                let L3PatternV2::Ctor { binders, .. } = &pat;
-                for b in binders.iter().flatten() {
-                    arm_locals.insert(b.clone());
+                if let L3PatternV2::Ctor { binders, .. } = &pat {
+                    for b in binders.iter().flatten() {
+                        arm_locals.insert(b.clone());
+                    }
                 }
                 out.push((
                     pat,
@@ -1946,6 +2069,45 @@ fn lower_expr_v2_impl(
             Err(L3V2LowerError::Unsupported("anonymous record".to_string()))
         }
         ast::Expr::Validate { .. } => Err(L3V2LowerError::Unsupported("validate".to_string())),
+        ast::Expr::Ascribe { expr, ty } => {
+            // Only `List<T>` is admitted as an ascription; that is what gives a
+            // bare `[]` an element type. The annotation is checked against the
+            // lowered expression and then erased: the plan, its canonical
+            // bytes and the evaluated value are exactly those of the
+            // unannotated expression, so old identities cannot move.
+            let element = match ty.as_ref() {
+                ast::Ty::App(name, args) if name == "List" && args.len() == 1 => &args[0],
+                other => {
+                    return Err(L3V2LowerError::AscriptionMismatch {
+                        expected: "List<T>".to_string(),
+                        found: format!("{other:?}"),
+                    })
+                }
+            };
+            let ast::Ty::Named(element) = element else {
+                return Err(L3V2LowerError::AscriptionMismatch {
+                    expected: "List of a named element type".to_string(),
+                    found: format!("{element:?}"),
+                });
+            };
+            let inner = lower_expr_v2_impl(
+                expr,
+                lets,
+                locals,
+                rules,
+                nullary,
+                variants_of,
+                functions,
+                in_rule,
+                helper_enabled,
+                ambiguous_ctors,
+            )?;
+            check_list_ascription(&inner, element)?;
+            Ok(L3ExprV2::Ascribe {
+                expr: Box::new(inner),
+                element: element.clone(),
+            })
+        }
     }
 }
 
@@ -2043,6 +2205,10 @@ pub enum EvalFault {
     /// empty aggregate has no minimum or maximum to report, so this is a
     /// typed evaluation fault rather than `0` or any other placeholder.
     EmptyAggregate(FoldOpV2),
+    /// `only(xs)` over a list that does not hold exactly one element
+    /// (checkpoint 3 / R9). Carries the actual cardinality; like
+    /// [`Self::EmptyAggregate`] it is never replaced by a default value.
+    NotSingleton { found: usize },
     /// An invalid numeric value, overflow, zero divisor, or inexact decimal result.
     Numeric(String),
 }
@@ -2067,6 +2233,9 @@ impl fmt::Display for EvalFault {
             }
             Self::ResourceExhausted { limit, detail } => {
                 write!(f, "resource limit ({limit}) exhausted: {detail}")
+            }
+            Self::NotSingleton { found } => {
+                write!(f, "only() requires exactly one element, found {found}")
             }
             Self::ContractViolation {
                 func,
@@ -2514,7 +2683,9 @@ fn expr_has_list_form(e: &L3ExprV2) -> bool {
         | L3ExprV2::ListLit(_)
         | L3ExprV2::In(..)
         | L3ExprV2::Len(_)
-        | L3ExprV2::Distinct(_) => true,
+        | L3ExprV2::Distinct(_)
+        | L3ExprV2::Only(_)
+        | L3ExprV2::Ascribe { .. } => true,
         L3ExprV2::Int(_)
         | L3ExprV2::Str(_)
         | L3ExprV2::Bool(_)
@@ -2939,27 +3110,52 @@ fn eval_internal_body(
         }
         L3ExprV2::Match { scrutinee, arms } => {
             let v = eval_internal(scrutinee, env, budget, current_func)?;
-            let (variant, args) = match &v {
-                L3ValueV2::Ctor { variant, args, .. } => (variant.as_str(), args.as_slice()),
-                // A boolean scrutinee matches the `true`/`false` constructors,
-                // which is how `Bool` is spelled as a two-variant sum.
-                L3ValueV2::Bool(b) => (if *b { "true" } else { "false" }, [].as_slice()),
+            let args = match &v {
+                L3ValueV2::Ctor { args, .. } => args.as_slice(),
+                L3ValueV2::Bool(_) => [].as_slice(),
                 _ => return Err(EvalFault::OperandShape("match requires a sum value")),
             };
-            for (pat, body) in arms {
-                let L3PatternV2::Ctor {
-                    variant: pv,
-                    binders,
-                } = pat;
-                if let Some((expected_nominal, expected_variant)) = pv.rsplit_once("::") {
-                    if expected_variant != variant
-                        || !matches!(&v, L3ValueV2::Ctor { nominal_sum, .. } if nominal_sum == expected_nominal)
-                    {
-                        continue;
+            // A wildcard must not swallow a constructor of another nominal
+            // type. Resolve and enforce the expected nominal regardless of spelling.
+            let expected_nominal = arms.iter().find_map(|(pat, _)| match pat {
+                L3PatternV2::Ctor {
+                    nominal_sum,
+                    variant,
+                    ..
+                } => nominal_sum
+                    .as_deref()
+                    .or_else(|| variant.rsplit_once("::").map(|(owner, _)| owner)),
+                L3PatternV2::Wildcard => None,
+            });
+            if let Some(expected_nominal) = expected_nominal {
+                match &v {
+                    L3ValueV2::Ctor { nominal_sum, .. } if nominal_sum != expected_nominal => {
+                        return Err(EvalFault::OperandShape(
+                            "match scrutinee belongs to a different sum than its arms",
+                        ));
                     }
-                } else if pv != variant {
-                    continue;
+                    L3ValueV2::Bool(_) if expected_nominal != "Bool" => {
+                        return Err(EvalFault::OperandShape(
+                            "match scrutinee belongs to a different sum than its arms",
+                        ));
+                    }
+                    _ => {}
                 }
+            }
+            for (pat, body) in arms {
+                let binders = match pat {
+                    L3PatternV2::Ctor { binders, .. } => {
+                        if !pat.matches_value(&v) {
+                            continue;
+                        }
+                        binders
+                    }
+                    // Final catch-all: binds nothing, matches the validated sum
+                    // value that reached this point.
+                    L3PatternV2::Wildcard => {
+                        return eval_internal(body, env, budget, current_func);
+                    }
+                };
                 if binders.len() != args.len() {
                     return Err(EvalFault::OperandShape("constructor arity mismatch"));
                 }
@@ -3137,6 +3333,10 @@ fn eval_internal_body(
         L3ExprV2::In(needle, haystack) => eval_in(needle, haystack, env, budget, current_func),
         L3ExprV2::Len(list) => eval_len(list, env, budget, current_func),
         L3ExprV2::Distinct(list) => eval_distinct(list, env, budget, current_func),
+        L3ExprV2::Only(list) => eval_only(list, env, budget, current_func),
+        L3ExprV2::Ascribe { expr, element } => {
+            eval_ascribe(expr, element, env, budget, current_func)
+        }
     }
 }
 
@@ -3526,6 +3726,124 @@ fn eval_distinct(
     Ok(L3ValueV2::List(out.into()))
 }
 
+/// Check a `List<element>` ascription against a lowered expression.
+///
+/// What is decided here is exactly what lowering can see: an expression that
+/// is plainly not a list is refused, and every *literal* element of a list
+/// literal must belong to `element`. An element whose type lowering cannot
+/// determine (a reference, call, field, match) is not guessed at; the
+/// evaluator's own checks stay the boundary for it. A nonempty list is checked
+/// the same way an empty one is typed, so the syntax is not an escape hatch for
+/// `[]`.
+fn check_list_ascription(inner: &L3ExprV2, element: &str) -> Result<(), L3V2LowerError> {
+    let mismatch = |found: &str| L3V2LowerError::AscriptionMismatch {
+        expected: format!("List<{element}>"),
+        found: found.to_string(),
+    };
+    let simple = |name: &str| name.rsplit_once("::").map_or(name, |(_, s)| s).to_string();
+    let wanted = simple(element);
+    match inner {
+        L3ExprV2::ListLit(items) => {
+            for item in items {
+                let found = match item {
+                    L3ExprV2::Int(_) => Some("Int".to_string()),
+                    L3ExprV2::Str(_) => Some("Str".to_string()),
+                    L3ExprV2::Bool(_) => Some("Bool".to_string()),
+                    L3ExprV2::NullaryVariant { nominal_sum, .. }
+                    | L3ExprV2::Ctor { nominal_sum, .. } => Some(simple(nominal_sum)),
+                    L3ExprV2::Record { nominal_config, .. } => Some(simple(nominal_config)),
+                    _ => None,
+                };
+                if let Some(found) = found {
+                    if found != wanted {
+                        return Err(mismatch(&format!("List<{found}>")));
+                    }
+                }
+            }
+            Ok(())
+        }
+        L3ExprV2::Int(_) => Err(mismatch("Int")),
+        L3ExprV2::Str(_) => Err(mismatch("Str")),
+        L3ExprV2::Bool(_) => Err(mismatch("Bool")),
+        L3ExprV2::Arith(..)
+        | L3ExprV2::IntDivMod(..)
+        | L3ExprV2::Cmp(..)
+        | L3ExprV2::And(..)
+        | L3ExprV2::Or(..)
+        | L3ExprV2::Not(_)
+        | L3ExprV2::Len(_)
+        | L3ExprV2::In(..)
+        | L3ExprV2::Fold { .. }
+        | L3ExprV2::NumericBuiltin(..) => Err(mismatch("a non-list value")),
+        L3ExprV2::NullaryVariant { nominal_sum, .. } | L3ExprV2::Ctor { nominal_sum, .. } => {
+            Err(mismatch(&simple(nominal_sum)))
+        }
+        L3ExprV2::Record { nominal_config, .. } => Err(mismatch(&simple(nominal_config))),
+        _ => Ok(()),
+    }
+}
+
+/// `only(xs)`: evaluate `xs` once and return its single element.
+///
+/// The element is returned as-is (no coercion). A list of any other length is
+/// a typed fault carrying the real cardinality — never a default, a `false`
+/// predicate, or a fallback decision.
+fn eval_only(
+    list: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    let list_val = eval_internal(list, env, budget, current_func)?;
+    let L3ValueV2::List(items) = list_val else {
+        return Err(EvalFault::OperandShape("only requires a List operand"));
+    };
+    if let Some(b) = budget.as_mut() {
+        b.tick_step()?;
+    }
+    match items.as_ref() {
+        [only] => {
+            if let Some(b) = budget.as_mut() {
+                b.charge_clone(only)?;
+            }
+            Ok(only.clone())
+        }
+        other => Err(EvalFault::NotSingleton { found: other.len() }),
+    }
+}
+
+fn eval_ascribe(
+    expr: &L3ExprV2,
+    element: &str,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    let val = eval_internal(expr, env, budget, current_func)?;
+    let L3ValueV2::List(items) = &val else {
+        return Err(EvalFault::OperandShape("ascription requires a List value"));
+    };
+    let simple = element.rsplit_once("::").map_or(element, |(_, s)| s);
+    for item in items.iter() {
+        let matches_elem = match item {
+            L3ValueV2::Int(_) => simple == "Int",
+            L3ValueV2::Str(_) => simple == "Str",
+            L3ValueV2::Bool(_) => simple == "Bool",
+            L3ValueV2::Ctor { nominal_sum, .. } => nominal_sum == element || nominal_sum == simple,
+            L3ValueV2::Record { nominal_config, .. } => {
+                nominal_config == element || nominal_config == simple
+            }
+            _ => false,
+        };
+        if !matches_elem {
+            return Err(EvalFault::OperandShape(
+                "ascribed list element type mismatch",
+            ));
+        }
+    }
+    Ok(val)
+}
+
 /// Check that every `match` in `plan` is exhaustive over its scrutinee's sum.
 ///
 /// ADR-0027 §5 requires exhaustiveness, and Stage A deliberately declared no
@@ -3579,9 +3897,15 @@ pub(crate) fn check_exhaustive_expr(
             for (_, body) in arms {
                 check_exhaustive_expr(body, sum_of_variant, variants_of_sum)?;
             }
+            let has_wildcard = arms
+                .iter()
+                .any(|(pat, _)| matches!(pat, L3PatternV2::Wildcard));
             let covered: BTreeSet<&str> = arms
                 .iter()
-                .map(|(L3PatternV2::Ctor { variant, .. }, _)| variant.as_str())
+                .filter_map(|(pat, _)| match pat {
+                    L3PatternV2::Ctor { variant, .. } => Some(variant.as_str()),
+                    L3PatternV2::Wildcard => None,
+                })
                 .collect();
             // The sum is identified from the arms, not from the scrutinee:
             // Stage A does not type expressions, and an arm's constructor
@@ -3592,7 +3916,11 @@ pub(crate) fn check_exhaustive_expr(
                     missing: Vec::new(),
                 });
             };
-            let L3PatternV2::Ctor { variant, .. } = &first.0;
+            let L3PatternV2::Ctor { variant, .. } = &first.0 else {
+                // A wildcard-only match names no sum from its arms. The
+                // scrutinee is still evaluated and shape-checked at run time.
+                return Ok(());
+            };
             let Some(sum) = sum_of_variant.get(variant) else {
                 return Ok(()); // unknown sum — left alone rather than guessed
             };
@@ -3604,6 +3932,15 @@ pub(crate) fn check_exhaustive_expr(
                 .filter(|v| !covered.contains(v.as_str()))
                 .cloned()
                 .collect();
+            if has_wildcard {
+                // A catch-all covers whatever is missing; it is only an error
+                // when there is nothing left for it to catch.
+                return if missing.is_empty() {
+                    Err(L3V2LowerError::UnreachableWildcardArm { sum: sum.clone() })
+                } else {
+                    Ok(())
+                };
+            }
             if missing.is_empty() {
                 Ok(())
             } else {
@@ -3641,8 +3978,11 @@ pub(crate) fn check_exhaustive_expr(
             check_exhaustive_expr(a, sum_of_variant, variants_of_sum)?;
             check_exhaustive_expr(b, sum_of_variant, variants_of_sum)
         }
-        L3ExprV2::Len(a) | L3ExprV2::Distinct(a) => {
+        L3ExprV2::Len(a) | L3ExprV2::Distinct(a) | L3ExprV2::Only(a) => {
             check_exhaustive_expr(a, sum_of_variant, variants_of_sum)
+        }
+        L3ExprV2::Ascribe { expr, .. } => {
+            check_exhaustive_expr(expr, sum_of_variant, variants_of_sum)
         }
         L3ExprV2::ListLit(items) => {
             for item in items {

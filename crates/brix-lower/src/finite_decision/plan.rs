@@ -851,6 +851,7 @@ fn check_expr_bounds(
             Ok(())
         }
         ast::Expr::Validate { arg, .. } => check_expr_bounds(arg, depth + 1, node_count),
+        ast::Expr::Ascribe { expr, .. } => check_expr_bounds(expr, depth + 1, node_count),
     }
 }
 
@@ -1291,7 +1292,10 @@ fn collect_rule_fact_reads(e: &L3ExprV2, out: &mut BTreeSet<String>) {
             collect_rule_fact_reads(a, out);
             collect_rule_fact_reads(b, out);
         }
-        L3ExprV2::Len(a) | L3ExprV2::Distinct(a) => collect_rule_fact_reads(a, out),
+        L3ExprV2::Len(a)
+        | L3ExprV2::Distinct(a)
+        | L3ExprV2::Only(a)
+        | L3ExprV2::Ascribe { expr: a, .. } => collect_rule_fact_reads(a, out),
     }
 }
 
@@ -2083,10 +2087,8 @@ pub fn lower_finite_decision_plan(
                 )
                 .map_err(map_lower_err)?;
 
-                if bounded {
-                    check_exhaustive_expr(&value, &sum_of_variant, &variants_of_sum)
-                        .map_err(FiniteDecisionLowerError::ExprError)?;
-                }
+                check_exhaustive_expr(&value, &sum_of_variant, &variants_of_sum)
+                    .map_err(FiniteDecisionLowerError::ExprError)?;
 
                 let_names.insert(l.name.clone());
                 lets.push((l.name.clone(), value));
@@ -2184,10 +2186,8 @@ pub fn lower_finite_decision_plan(
                     other => FiniteDecisionLowerError::ExprError(other),
                 })?;
 
-                if bounded {
-                    check_exhaustive_expr(&body, &sum_of_variant, &variants_of_sum)
-                        .map_err(FiniteDecisionLowerError::ExprError)?;
-                }
+                check_exhaustive_expr(&body, &sum_of_variant, &variants_of_sum)
+                    .map_err(FiniteDecisionLowerError::ExprError)?;
 
                 let depends_on = if r.params_declared {
                     declared_deps
@@ -2292,10 +2292,8 @@ pub fn lower_finite_decision_plan(
                     other => FiniteDecisionLowerError::ExprError(other),
                 })?;
 
-                if bounded {
-                    check_exhaustive_expr(&guard, &sum_of_variant, &variants_of_sum)
-                        .map_err(FiniteDecisionLowerError::ExprError)?;
-                }
+                check_exhaustive_expr(&guard, &sum_of_variant, &variants_of_sum)
+                    .map_err(FiniteDecisionLowerError::ExprError)?;
 
                 let value = lower_expr_v2_with_ambiguous(
                     &p.value,
@@ -2340,10 +2338,8 @@ pub fn lower_finite_decision_plan(
                     other => FiniteDecisionLowerError::ExprError(other),
                 })?;
 
-                if bounded {
-                    check_exhaustive_expr(&value, &sum_of_variant, &variants_of_sum)
-                        .map_err(FiniteDecisionLowerError::ExprError)?;
-                }
+                check_exhaustive_expr(&value, &sum_of_variant, &variants_of_sum)
+                    .map_err(FiniteDecisionLowerError::ExprError)?;
 
                 let deps = if p.deps_declared {
                     declared_deps
@@ -2401,10 +2397,8 @@ pub fn lower_finite_decision_plan(
                 )
                 .map_err(map_lower_err)?;
 
-                if bounded {
-                    check_exhaustive_expr(&show, &sum_of_variant, &variants_of_sum)
-                        .map_err(FiniteDecisionLowerError::ExprError)?;
-                }
+                check_exhaustive_expr(&show, &sum_of_variant, &variants_of_sum)
+                    .map_err(FiniteDecisionLowerError::ExprError)?;
 
                 shows.push(show);
             }
@@ -2441,10 +2435,8 @@ pub fn lower_finite_decision_plan(
                 )
                 .map_err(map_lower_err)?;
 
-                if bounded {
-                    check_exhaustive_expr(&list, &sum_of_variant, &variants_of_sum)
-                        .map_err(FiniteDecisionLowerError::ExprError)?;
-                }
+                check_exhaustive_expr(&list, &sum_of_variant, &variants_of_sum)
+                    .map_err(FiniteDecisionLowerError::ExprError)?;
 
                 check_otherwise_decide(&d.name, &d.proposals)?;
 
@@ -2516,10 +2508,8 @@ pub fn lower_finite_decision_plan(
                         )
                     })?;
 
-                    if bounded {
-                        check_exhaustive_expr(&guard, &sum_of_variant, &variants_of_sum)
-                            .map_err(FiniteDecisionLowerError::ExprError)?;
-                    }
+                    check_exhaustive_expr(&guard, &sum_of_variant, &variants_of_sum)
+                        .map_err(FiniteDecisionLowerError::ExprError)?;
 
                     let value = lower_expr_v2_with_ambiguous(
                         &p.value,
@@ -2543,10 +2533,8 @@ pub fn lower_finite_decision_plan(
                         )
                     })?;
 
-                    if bounded {
-                        check_exhaustive_expr(&value, &sum_of_variant, &variants_of_sum)
-                            .map_err(FiniteDecisionLowerError::ExprError)?;
-                    }
+                    check_exhaustive_expr(&value, &sum_of_variant, &variants_of_sum)
+                        .map_err(FiniteDecisionLowerError::ExprError)?;
 
                     let deps = if p.deps_declared {
                         declared_deps
@@ -2704,7 +2692,9 @@ fn encode_config_body_v2(w: &mut CanonWriter, body: &L3ConfigBodyV2) {
 
 fn encode_pattern_v2(w: &mut CanonWriter, pat: &L3PatternV2) {
     match pat {
-        L3PatternV2::Ctor { variant, binders } => {
+        L3PatternV2::Ctor {
+            variant, binders, ..
+        } => {
             w.write_ident(variant);
             w.write_uint(binders.len() as u64);
             for b in binders {
@@ -2713,6 +2703,13 @@ fn encode_pattern_v2(w: &mut CanonWriter, pat: &L3PatternV2) {
                     Some(name) => w.write_enum(1, |w| w.write_ident(name)),
                 }
             }
+        }
+        // Append-only: patterns are untagged (a constructor name, then its
+        // binder count). `_` is not a legal constructor name, so the pair
+        // `("_", 0)` cannot collide with any existing pattern encoding.
+        L3PatternV2::Wildcard => {
+            w.write_ident("_");
+            w.write_uint(0);
         }
     }
 }
@@ -2863,6 +2860,13 @@ fn encode_expr_v2(w: &mut CanonWriter, e: &L3ExprV2) {
                 encode_expr_v2(w, arg);
             }
         }),
+        // Append-only: a new ordinal, so no existing expression's bytes move.
+        L3ExprV2::Only(a) => w.write_enum(26, |w| {
+            encode_expr_v2(w, a);
+        }),
+        L3ExprV2::Ascribe { expr, .. } => {
+            encode_expr_v2(w, expr);
+        }
     }
 }
 

@@ -1326,6 +1326,7 @@ fn qualify_query_expr(
         }
         Expr::Num(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Var(_) => {}
         Expr::Validate { arg, .. } => qualify_query_expr(arg, owner, program)?,
+        Expr::Ascribe { expr, .. } => qualify_query_expr(expr, owner, program)?,
     }
     Ok(())
 }

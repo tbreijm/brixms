@@ -76,6 +76,40 @@ fn unknown() -> Shape {
     Arc::new(Type::Unknown)
 }
 
+fn type_name(t: &Type) -> String {
+    match t {
+        Type::Known(ty) => ty.to_string(),
+        Type::Record(_) => "record".to_string(),
+        Type::Sum { nominal, .. } => nominal.clone(),
+        Type::List(elem) => format!("List<{}>", type_name(elem)),
+        Type::Either(options) => {
+            if let Some(first) = options.first() {
+                let name = type_name(first);
+                if options.iter().all(|o| type_name(o) == name) {
+                    return name;
+                }
+            }
+            "either".to_string()
+        }
+        Type::Unknown => "unknown".to_string(),
+    }
+}
+
+fn shapes_compatible(actual: &Type, expected: &Type) -> bool {
+    match (actual, expected) {
+        (Type::Unknown, _) | (_, Type::Unknown) => true,
+        (Type::Either(options), exp) => options.iter().all(|opt| shapes_compatible(opt, exp)),
+        (Type::Known(a), Type::Known(b)) => a == b,
+        (Type::Sum { nominal: n1, .. }, Type::Sum { nominal: n2, .. }) => n1 == n2,
+        (Type::Record(..), Type::Record(..)) => true,
+        (Type::Known(L3ValueType::Sum(n1)), Type::Sum { nominal: n2, .. }) => n1 == n2,
+        (Type::Sum { nominal: n1, .. }, Type::Known(L3ValueType::Sum(n2))) => n1 == n2,
+        (Type::Known(L3ValueType::Record(_)), Type::Record(..)) => true,
+        (Type::Record(..), Type::Known(L3ValueType::Record(_))) => true,
+        _ => false,
+    }
+}
+
 struct Checker<'a> {
     plan: &'a FiniteDecisionPlan,
     configs: BTreeMap<&'a str, &'a ast::ConfigBody>,
@@ -419,14 +453,19 @@ impl Checker<'_> {
             Expr::Match { scrutinee, arms } => {
                 let scrutinee = self.expr(scrutinee, env, next)?;
                 let mut result = Vec::new();
-                for (L3PatternV2::Ctor { variant, binders }, body) in arms {
+                for (pattern, body) in arms {
                     let mut locals = env.clone();
-                    for (index, binder) in binders.iter().enumerate() {
-                        if let Some(name) = binder {
-                            locals.insert(
-                                name.clone(),
-                                self.payload(&scrutinee, variant, index, next)?,
-                            );
+                    if let L3PatternV2::Ctor {
+                        variant, binders, ..
+                    } = pattern
+                    {
+                        for (index, binder) in binders.iter().enumerate() {
+                            if let Some(name) = binder {
+                                locals.insert(
+                                    name.clone(),
+                                    self.payload(&scrutinee, variant, index, next)?,
+                                );
+                            }
                         }
                     }
                     let body = self.expr(body, &locals, next)?;
@@ -477,7 +516,9 @@ impl Checker<'_> {
             | Expr::Comprehension { .. }
             | Expr::In(..)
             | Expr::Len(_)
-            | Expr::Distinct(_) => self.list_expr(expr, env, next)?,
+            | Expr::Distinct(_)
+            | Expr::Only(_)
+            | Expr::Ascribe { .. } => self.list_expr(expr, env, next)?,
         })
     }
 
@@ -574,6 +615,38 @@ impl Checker<'_> {
                 let list_shape = self.expr(list, env, next)?;
                 let elem_shape = self.list_element(&list_shape);
                 Arc::new(Type::List(elem_shape))
+            }
+            // `only(xs)` is the element itself: same shape, no coercion.
+            Expr::Only(list) => {
+                let list_shape = self.expr(list, env, next)?;
+                self.list_element(&list_shape)
+            }
+            Expr::Ascribe { expr, element } => {
+                let shape = self.expr(expr, env, next)?;
+                let expected_elem = self.declared_shape(&ast::Ty::Named(element.clone()));
+                match shape.as_ref() {
+                    Type::List(elem) => {
+                        if !shapes_compatible(elem, &expected_elem) {
+                            return Err(Error::ExprError(
+                                crate::l3_v2::L3V2LowerError::AscriptionMismatch {
+                                    expected: format!("List<{element}>"),
+                                    found: format!("List<{}>", type_name(elem)),
+                                },
+                            ));
+                        }
+                    }
+                    Type::Known(L3ValueType::List) => {}
+                    Type::Unknown => {}
+                    other => {
+                        return Err(Error::ExprError(
+                            crate::l3_v2::L3V2LowerError::AscriptionMismatch {
+                                expected: format!("List<{element}>"),
+                                found: type_name(other),
+                            },
+                        ));
+                    }
+                }
+                Arc::new(Type::List(expected_elem))
             }
             _ => unreachable!("list_expr is only called for list and relation forms"),
         })
@@ -681,7 +754,9 @@ fn needs_shape_check(mut pending: Vec<&Expr>) -> bool {
             | Expr::Not(..)
             | Expr::NumericBuiltin(..)
             | Expr::Arith(ArithOpV2::Div, ..) => return true,
-            Expr::Fold { .. } | Expr::Filter { .. } | Expr::Map { .. } => return true,
+            Expr::Fold { .. } | Expr::Filter { .. } | Expr::Map { .. } | Expr::Ascribe { .. } => {
+                return true
+            }
             Expr::Arith(_, a, b) | Expr::IntDivMod(_, a, b) | Expr::Cmp(_, a, b) => {
                 pending.extend([a.as_ref(), b.as_ref()]);
             }
@@ -709,7 +784,7 @@ fn needs_shape_check(mut pending: Vec<&Expr>) -> bool {
             }
             Expr::ListLit(items) => pending.extend(items),
             Expr::In(a, b) => pending.extend([a.as_ref(), b.as_ref()]),
-            Expr::Len(a) | Expr::Distinct(a) => pending.push(a),
+            Expr::Len(a) | Expr::Distinct(a) | Expr::Only(a) => pending.push(a),
             _ => {}
         }
     }
