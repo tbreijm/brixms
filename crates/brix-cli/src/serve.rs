@@ -821,11 +821,25 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
                 .and_then(Value::as_str)
                 .map(|s| s.to_string());
             let limit = optional_u64_field(params, "limit").and_then(|n| usize::try_from(n).ok());
+            let rev = optional_u64_field(params, "rev")
+                .or_else(|| optional_u64_field(params, "revision"));
+            let expect_digest = params
+                .get("expect_digest")
+                .or_else(|| params.get("expect_revision_digest"))
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let typed = params
+                .get("typed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             WorldOp::Query {
                 dir,
                 relation,
                 cursor,
                 limit,
+                rev,
+                expect_digest,
+                typed,
                 replay,
             }
         }

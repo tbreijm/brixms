@@ -135,6 +135,12 @@ pub enum WorldError {
         expected: Digest,
         actual: Digest,
     },
+    /// Expected revision digest did not match the actual revision digest.
+    RevisionDigestMismatch {
+        seq: u64,
+        expected: Digest,
+        actual: Digest,
+    },
     /// Invalid upload id for staging.
     InvalidUploadId(String),
     /// Idempotency key reused with mismatched batch payload.
@@ -218,6 +224,18 @@ impl fmt::Display for WorldError {
                 write!(
                     f,
                     "corrupted revision {seq}: expected digest {}, got {}",
+                    expected.to_hex(),
+                    actual.to_hex()
+                )
+            }
+            Self::RevisionDigestMismatch {
+                seq,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "revision digest mismatch for revision {seq}: expected {}, got {}",
                     expected.to_hex(),
                     actual.to_hex()
                 )

@@ -100,6 +100,9 @@ pub enum WorldOp {
         relation: String,
         cursor: Option<String>,
         limit: Option<usize>,
+        rev: Option<u64>,
+        expect_digest: Option<String>,
+        typed: bool,
         replay: bool,
     },
     Decide {
@@ -1574,6 +1577,9 @@ fn parse_world_query_args(args: &[String], json: bool) -> Result<WorldOp, CliUsa
     let mut positionals = Vec::new();
     let mut cursor = None;
     let mut limit = None;
+    let mut rev = None;
+    let mut expect_digest = None;
+    let mut typed = false;
     let mut replay = false;
     let mut i = 0;
     while i < args.len() {
@@ -1582,6 +1588,8 @@ fn parse_world_query_args(args: &[String], json: bool) -> Result<WorldOp, CliUsa
             // Handled
         } else if arg == "--replay" {
             replay = true;
+        } else if arg == "--typed" {
+            typed = true;
         } else if arg == "--cursor" {
             i += 1;
             if i >= args.len() {
@@ -1594,6 +1602,44 @@ fn parse_world_query_args(args: &[String], json: bool) -> Result<WorldOp, CliUsa
             cursor = Some(args[i].clone());
         } else if let Some(val) = arg.strip_prefix("--cursor=") {
             cursor = Some(val.to_string());
+        } else if arg == "--rev" || arg == "--revision" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    format!("missing value for '{arg}'"),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            let n: u64 = args[i].parse().map_err(|_| {
+                CliUsageError::usage(
+                    format!("invalid revision: '{}' (expected non-negative integer)", args[i]),
+                    json,
+                    Some(cmd_name.to_string()),
+                )
+            })?;
+            rev = Some(n);
+        } else if let Some(val) = arg.strip_prefix("--rev=").or_else(|| arg.strip_prefix("--revision=")) {
+            let n: u64 = val.parse().map_err(|_| {
+                CliUsageError::usage(
+                    format!("invalid revision: '{val}' (expected non-negative integer)"),
+                    json,
+                    Some(cmd_name.to_string()),
+                )
+            })?;
+            rev = Some(n);
+        } else if arg == "--expect-digest" || arg == "--expect-revision-digest" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    format!("missing value for '{arg}'"),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            expect_digest = Some(args[i].clone());
+        } else if let Some(val) = arg.strip_prefix("--expect-digest=").or_else(|| arg.strip_prefix("--expect-revision-digest=")) {
+            expect_digest = Some(val.to_string());
         } else if arg == "--limit" {
             i += 1;
             if i >= args.len() {
@@ -1652,6 +1698,9 @@ fn parse_world_query_args(args: &[String], json: bool) -> Result<WorldOp, CliUsa
         relation,
         cursor,
         limit,
+        rev,
+        expect_digest,
+        typed,
         replay,
     })
 }

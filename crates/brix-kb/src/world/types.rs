@@ -195,3 +195,178 @@ impl WorldCursor {
         Ok(Self { hash, key })
     }
 }
+
+/// Position within a relation for logarithmic pagination.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum QueryCursorPosition {
+    Hamt { hash: [u8; 32], key: WorldKey },
+    Offset(usize),
+}
+
+/// A scope-bound pagination cursor ensuring a continuation is resumed
+/// only against the exact world, revision, relation, and ordering it was issued for.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct QueryCursor {
+    pub world_id: String,
+    pub revision: Digest,
+    pub relation: String,
+    pub ordering: String,
+    pub position: QueryCursorPosition,
+}
+
+impl QueryCursor {
+    pub fn new_hamt(
+        world_id: impl Into<String>,
+        revision: Digest,
+        relation: impl Into<String>,
+        hash: [u8; 32],
+        key: WorldKey,
+    ) -> Self {
+        Self {
+            world_id: world_id.into(),
+            revision,
+            relation: relation.into(),
+            ordering: "canonical".to_string(),
+            position: QueryCursorPosition::Hamt { hash, key },
+        }
+    }
+
+    pub fn new_offset(
+        world_id: impl Into<String>,
+        revision: Digest,
+        relation: impl Into<String>,
+        offset: usize,
+    ) -> Self {
+        Self {
+            world_id: world_id.into(),
+            revision,
+            relation: relation.into(),
+            ordering: "offset".to_string(),
+            position: QueryCursorPosition::Offset(offset),
+        }
+    }
+
+    pub fn to_token(&self) -> String {
+        let mut writer = CanonWriter::new();
+        writer.write_str("brix.query-cursor@1");
+        writer.write_str(&self.world_id);
+        writer.write_bytes(self.revision.as_bytes());
+        writer.write_str(&self.relation);
+        writer.write_str(&self.ordering);
+        match &self.position {
+            QueryCursorPosition::Hamt { hash, key } => {
+                writer.write_uint(0);
+                writer.write_bytes(hash);
+                writer.write_bytes(key.as_bytes());
+            }
+            QueryCursorPosition::Offset(offset) => {
+                writer.write_uint(1);
+                writer.write_uint(*offset as u64);
+            }
+        }
+        WorldKey::new(writer.finish()).to_hex()
+    }
+
+    pub fn from_token(token: &str) -> Result<Self, WorldError> {
+        let bytes = WorldKey::from_hex(token).map_err(|_| {
+            WorldError::InvalidCursor("invalid hex in query cursor".into())
+        })?;
+        let mut reader = CanonReader::new(bytes.as_bytes());
+        let invalid = || WorldError::InvalidCursor("malformed query cursor".into());
+        let magic = match reader.read_bytes() {
+            Ok(m) => m,
+            Err(_) => {
+                if let Ok(legacy) = WorldCursor::from_token(token) {
+                    return Ok(Self {
+                        world_id: String::new(),
+                        revision: Digest::from_bytes([0u8; 32]),
+                        relation: String::new(),
+                        ordering: "canonical".to_string(),
+                        position: QueryCursorPosition::Hamt {
+                            hash: legacy.hash,
+                            key: legacy.key,
+                        },
+                    });
+                }
+                if let Ok(offset) = token.parse::<usize>() {
+                    return Ok(Self {
+                        world_id: String::new(),
+                        revision: Digest::from_bytes([0u8; 32]),
+                        relation: String::new(),
+                        ordering: "offset".to_string(),
+                        position: QueryCursorPosition::Offset(offset),
+                    });
+                }
+                return Err(invalid());
+            }
+        };
+        if magic != b"brix.query-cursor@1" {
+            if let Ok(legacy) = WorldCursor::from_token(token) {
+                return Ok(Self {
+                    world_id: String::new(),
+                    revision: Digest::from_bytes([0u8; 32]),
+                    relation: String::new(),
+                    ordering: "canonical".to_string(),
+                    position: QueryCursorPosition::Hamt {
+                        hash: legacy.hash,
+                        key: legacy.key,
+                    },
+                });
+            }
+            if let Ok(offset) = token.parse::<usize>() {
+                return Ok(Self {
+                    world_id: String::new(),
+                    revision: Digest::from_bytes([0u8; 32]),
+                    relation: String::new(),
+                    ordering: "offset".to_string(),
+                    position: QueryCursorPosition::Offset(offset),
+                });
+            }
+            return Err(invalid());
+        }
+        let world_id = std::str::from_utf8(reader.read_bytes().map_err(|_| invalid())?)
+            .map_err(|_| invalid())?
+            .to_string();
+        let revision_bytes: [u8; 32] = reader
+            .read_bytes()
+            .map_err(|_| invalid())?
+            .try_into()
+            .map_err(|_| invalid())?;
+        let relation = std::str::from_utf8(reader.read_bytes().map_err(|_| invalid())?)
+            .map_err(|_| invalid())?
+            .to_string();
+        let ordering = std::str::from_utf8(reader.read_bytes().map_err(|_| invalid())?)
+            .map_err(|_| invalid())?
+            .to_string();
+        let kind = reader.read_uint().map_err(|_| invalid())?;
+        let position = match kind {
+            0 => {
+                let hash: [u8; 32] = reader
+                    .read_bytes()
+                    .map_err(|_| invalid())?
+                    .try_into()
+                    .map_err(|_| invalid())?;
+                let key_bytes = reader.read_bytes().map_err(|_| invalid())?.to_vec();
+                QueryCursorPosition::Hamt {
+                    hash,
+                    key: WorldKey::new(key_bytes),
+                }
+            }
+            1 => {
+                let offset = reader.read_uint().map_err(|_| invalid())? as usize;
+                QueryCursorPosition::Offset(offset)
+            }
+            _ => return Err(invalid()),
+        };
+        if !reader.is_empty() {
+            return Err(invalid());
+        }
+        Ok(Self {
+            world_id,
+            revision: Digest::from_bytes(revision_bytes),
+            relation,
+            ordering,
+            position,
+        })
+    }
+}

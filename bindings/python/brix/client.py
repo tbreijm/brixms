@@ -582,3 +582,62 @@ class BrixClient:
     ) -> Dict[str, Any]:
         """`brix kb verify` — verify the whole knowledge base end to end."""
         return self._kb_call("verify", kb_dir, package_paths, timeout=timeout)
+
+    def world_init(
+        self,
+        world_dir: Union[str, os.PathLike],
+        program: ProgramSpec,
+        package_paths: Optional[List[str]] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """`brix world init` via serve."""
+        params: Dict[str, Any] = {
+            "dir": str(world_dir),
+            "program": _normalize_spec(program),
+        }
+        if package_paths is not None:
+            params["package_paths"] = package_paths
+        return self.result("world.init", params, timeout=timeout)
+
+    def world_batch(
+        self,
+        world_dir: Union[str, os.PathLike],
+        batch: Union[str, os.PathLike, Dict[str, Any], List[Any]],
+        replay: bool = False,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """`brix world batch` via serve."""
+        params: Dict[str, Any] = {
+            "dir": str(world_dir),
+            "batch": batch if isinstance(batch, (dict, list)) else str(batch),
+            "replay": replay,
+        }
+        return self.result("world.batch", params, timeout=timeout)
+
+    def world_query(
+        self,
+        world_dir: Union[str, os.PathLike],
+        relation: str,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+        rev: Optional[int] = None,
+        expect_digest: Optional[str] = None,
+        typed: bool = False,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """`brix world query` via serve."""
+        params: Dict[str, Any] = {
+            "dir": str(world_dir),
+            "relation": relation,
+        }
+        if cursor is not None:
+            params["cursor"] = cursor
+        if limit is not None:
+            params["limit"] = limit
+        if rev is not None:
+            params["rev"] = rev
+        if expect_digest is not None:
+            params["expect_digest"] = expect_digest
+        if typed:
+            params["typed"] = True
+        return self.result("world.query", params, timeout=timeout)

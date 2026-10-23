@@ -270,10 +270,10 @@ propose p(r) priority 10 when r == 0 = Ship
 commit c from (p)
 "#;
     assert_eq!(selected(typed), "p");
-    assert_eq!(
+    assert_ne!(
         finite_decision_program_id(&plan(plain)),
         finite_decision_program_id(&plan(typed)),
-        "the annotation is checked and then erased"
+        "the annotation is retained for runtime checking"
     );
 }
 

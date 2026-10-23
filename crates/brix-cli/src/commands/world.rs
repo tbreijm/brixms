@@ -38,12 +38,18 @@ pub fn execute_world(op: &WorldOp, json_out: bool) -> u8 {
             relation,
             cursor,
             limit,
+            rev,
+            expect_digest,
+            typed,
             replay,
         } => execute_query(
             dir,
             relation,
             cursor.as_deref(),
             limit.unwrap_or(50),
+            *rev,
+            expect_digest.as_deref(),
+            *typed,
             *replay,
             json_out,
         ),
@@ -266,6 +272,7 @@ fn execute_batch(dir: &Path, batch_file: &Path, replay: bool, json_out: bool) ->
             "ok": true,
             "revision": receipt.revision_seq,
             "digest": receipt.revision_digest.to_hex(),
+            "revision_digest": receipt.revision_digest.to_hex(),
             "idempotency_key": receipt.idempotency_key,
             "is_idempotent_replay": receipt.is_idempotent_replay,
             "changed_keys_count": receipt.changed_keys_count,
@@ -297,6 +304,9 @@ fn execute_query(
     relation: &str,
     cursor: Option<&str>,
     limit: usize,
+    rev: Option<u64>,
+    expect_digest: Option<&str>,
+    typed: bool,
     replay: bool,
     json_out: bool,
 ) -> u8 {
@@ -305,34 +315,113 @@ fn execute_query(
         Err(e) => return print_world_error("world query", &e, json_out),
     };
 
-    let derived_known = match session.get_derived(relation) {
-        Ok(rows) => rows.is_some(),
-        Err(e) => return print_world_error("world query", &e, json_out),
-    };
-    let page = if session.relations.contains_key(relation) {
-        session.query_page(relation, cursor, limit)
-    } else if derived_known {
-        session.query_derived_page(relation, cursor, limit)
-    } else if let Some(qualified) = session
-        .relations
-        .keys()
-        .find(|k| k.ends_with(&format!("::{relation}")))
-        .cloned()
-    {
-        session.query_page(&qualified, cursor, limit)
-    } else if let Some(qualified) = session
-        .network
-        .as_ref()
-        .and_then(|n| {
-            n.derived_relations
-                .keys()
-                .find(|k| k.ends_with(&format!("::{relation}")))
-        })
-        .cloned()
-    {
-        session.query_derived_page(&qualified, cursor, limit)
+    let target_rev_seq = rev.unwrap_or(session.current_revision);
+    let target_rev_digest = if let Some(r) = rev {
+        let snapshot = match session.pin_revision(r) {
+            Ok(s) => s,
+            Err(e) => return print_world_error("world query", &e, json_out),
+        };
+        snapshot.revision_digest()
     } else {
-        Err(WorldError::UnknownRelation(relation.to_string()))
+        match session.current_revision_digest() {
+            Some(d) => d,
+            None => {
+                return print_world_error(
+                    "world query",
+                    &WorldError::CorruptedHead("current revision digest missing".into()),
+                    json_out,
+                )
+            }
+        }
+    };
+
+    if let Some(exp) = expect_digest {
+        let expected = match parse_digest_hex(exp) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("brix world query: invalid expected digest: {e}");
+                return EXIT_USAGE_OR_IO;
+            }
+        };
+        if expected != target_rev_digest {
+            return print_world_error(
+                "world query",
+                &WorldError::RevisionDigestMismatch {
+                    seq: target_rev_seq,
+                    expected,
+                    actual: target_rev_digest,
+                },
+                json_out,
+            );
+        }
+    }
+
+    let page = if let Some(r) = rev {
+        let snapshot = match session.pin_revision(r) {
+            Ok(s) => s,
+            Err(e) => return print_world_error("world query", &e, json_out),
+        };
+        if snapshot.relations.contains_key(relation) {
+            snapshot.query_page(relation, cursor, limit)
+        } else if let Some(qualified) = snapshot
+            .relations
+            .keys()
+            .find(|k| k.ends_with(&format!("::{relation}")))
+            .cloned()
+        {
+            snapshot.query_page(&qualified, cursor, limit)
+        } else {
+            let derived_known = match session.get_derived_at(r, relation) {
+                Ok(rows) => rows.is_some(),
+                Err(e) => return print_world_error("world query", &e, json_out),
+            };
+            if derived_known {
+                session.query_derived_page_at(r, relation, cursor, limit)
+            } else if let Some(qualified) = session
+                .network
+                .as_ref()
+                .and_then(|n| {
+                    n.derived_relations
+                        .keys()
+                        .find(|k| k.ends_with(&format!("::{relation}")))
+                })
+                .cloned()
+            {
+                session.query_derived_page_at(r, &qualified, cursor, limit)
+            } else {
+                Err(WorldError::UnknownRelation(relation.to_string()))
+            }
+        }
+    } else {
+        let derived_known = match session.get_derived(relation) {
+            Ok(rows) => rows.is_some(),
+            Err(e) => return print_world_error("world query", &e, json_out),
+        };
+        if session.relations.contains_key(relation) {
+            session.query_page(relation, cursor, limit)
+        } else if derived_known {
+            session.query_derived_page(relation, cursor, limit)
+        } else if let Some(qualified) = session
+            .relations
+            .keys()
+            .find(|k| k.ends_with(&format!("::{relation}")))
+            .cloned()
+        {
+            session.query_page(&qualified, cursor, limit)
+        } else if let Some(qualified) = session
+            .network
+            .as_ref()
+            .and_then(|n| {
+                n.derived_relations
+                    .keys()
+                    .find(|k| k.ends_with(&format!("::{relation}")))
+            })
+            .cloned()
+        {
+            session.query_derived_page(&qualified, cursor, limit)
+        } else {
+            Err(WorldError::UnknownRelation(relation.to_string()))
+        }
     };
 
     let page = match page {
@@ -350,10 +439,25 @@ fn execute_query(
             if let Ok(rec) = TupleRecord::from_tuple(t) {
                 let mut fields = serde_json::Map::new();
                 for (fname, fbytes) in &rec.fields {
-                    let s = std::str::from_utf8(fbytes)
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|_| WorldKey::new(fbytes.clone()).to_hex());
-                    fields.insert(fname.clone(), serde_json::Value::String(s));
+                    let val = if typed {
+                        if let Ok(s) = std::str::from_utf8(fbytes) {
+                            if let Ok(n) = s.parse::<i64>() {
+                                serde_json::Value::Number(n.into())
+                            } else if let Ok(b) = s.parse::<bool>() {
+                                serde_json::Value::Bool(b)
+                            } else {
+                                serde_json::Value::String(s.to_string())
+                            }
+                        } else {
+                            serde_json::Value::String(WorldKey::new(fbytes.clone()).to_hex())
+                        }
+                    } else {
+                        let s = std::str::from_utf8(fbytes)
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|_| WorldKey::new(fbytes.clone()).to_hex());
+                        serde_json::Value::String(s)
+                    };
+                    fields.insert(fname.clone(), val);
                 }
                 json!({ "key": key_str, "tuple": fields })
             } else {
@@ -367,6 +471,10 @@ fn execute_query(
             "schema": WORLD_JSON_SCHEMA,
             "command": "world query",
             "ok": true,
+            "world": session.manifest.world_id,
+            "program": session.manifest.program_digest.to_hex(),
+            "revision": target_rev_seq,
+            "revision_digest": target_rev_digest.to_hex(),
             "relation": page.relation,
             "count": entries_json.len(),
             "has_more": page.has_more,
@@ -377,8 +485,9 @@ fn execute_query(
         crate::json::emit_result_json(&res);
     } else {
         println!(
-            "Query relation '{}' ({} entries):",
+            "Query relation '{}' at revision {} ({} entries):",
             page.relation,
+            target_rev_seq,
             page.entries.len()
         );
         for (k, t) in &page.entries {
@@ -916,6 +1025,10 @@ fn print_world_error(cmd: &str, err: &WorldError, json_out: bool) -> u8 {
             ("batch-conflict", EXIT_REJECTED_OR_UNKNOWN)
         }
         WorldError::StaleBaseRevision { .. } => ("stale-base-revision", EXIT_REJECTED_OR_UNKNOWN),
+        WorldError::RevisionDigestMismatch { .. } => {
+            ("revision-digest-mismatch", EXIT_REJECTED_OR_UNKNOWN)
+        }
+        WorldError::InvalidCursor(_) => ("invalid-cursor", EXIT_REJECTED_OR_UNKNOWN),
         // Another writer (or an operator command that writes) holds the world: retry.
         WorldError::WorldLocked(_) => ("world-locked", EXIT_REJECTED_OR_UNKNOWN),
         WorldError::StaleSession(_) => ("stale-session", EXIT_REJECTED_OR_UNKNOWN),

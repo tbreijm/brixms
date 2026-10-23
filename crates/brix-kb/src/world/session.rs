@@ -30,7 +30,9 @@ use super::revision::{SettlementStatus, WorldRevision, REVISION_SCHEMA_V3};
 use super::settlement_checkpoint::{apply_delta, SettlementCheckpoint};
 use super::staging::StagingManager;
 use super::state_cache::StateCache;
-use super::types::{WorldCursor, WorldKey, WorldTuple};
+use super::types::{
+    QueryCursor, QueryCursorPosition, WorldCursor, WorldKey, WorldTuple,
+};
 
 fn parse_digest(hex: &str, field: &str) -> Result<Digest, WorldError> {
     if hex.len() != 64 {
@@ -613,6 +615,7 @@ pub struct CompactionReport {
 /// An immutable read snapshot pinned to a specific revision.
 #[derive(Clone, Debug)]
 pub struct WorldSnapshot {
+    pub world_id: String,
     pub revision: WorldRevision,
     pub relations: BTreeMap<String, TrieMap<WorldKey, WorldTuple>>,
     pub secondary_indexes: BTreeMap<String, TrieMap<WorldKey, WorldTuple>>,
@@ -695,17 +698,47 @@ impl WorldSnapshot {
             .ok_or_else(|| WorldError::UnknownRelation(relation.to_string()))?;
 
         let parsed_cursor = match cursor {
-            Some(token) => Some(WorldCursor::from_token(token)?),
+            Some(token) => {
+                let qc = QueryCursor::from_token(token)?;
+                if !qc.world_id.is_empty() {
+                    if qc.world_id != self.world_id
+                        || qc.revision != self.revision.revision_digest
+                        || qc.relation != relation
+                        || qc.ordering != "canonical"
+                    {
+                        return Err(WorldError::InvalidCursor(
+                            "query cursor scope mismatch".into(),
+                        ));
+                    }
+                }
+                match qc.position {
+                    QueryCursorPosition::Hamt { hash, key } => Some((hash, key)),
+                    QueryCursorPosition::Offset(_) => {
+                        return Err(WorldError::InvalidCursor(
+                            "query cursor ordering mismatch (offset cursor on hamt relation)".into(),
+                        ));
+                    }
+                }
+            }
             None => None,
         };
 
         let (entries, next_pos) = trie.iter_page_with_store(
-            parsed_cursor.as_ref().map(|c| (&c.hash, &c.key)),
+            parsed_cursor.as_ref().map(|(h, k)| (h, k)),
             limit,
             &self.node_store,
         )?;
 
-        let next_cursor = next_pos.map(|(hash, key)| WorldCursor::new(hash, key).to_token());
+        let next_cursor = next_pos.map(|(hash, key)| {
+            QueryCursor::new_hamt(
+                &self.world_id,
+                self.revision.revision_digest,
+                relation,
+                hash,
+                key,
+            )
+            .to_token()
+        });
         let has_more = next_cursor.is_some();
 
         Ok(QueryPage {
@@ -2422,6 +2455,7 @@ impl WorldSession {
         }
 
         Ok(WorldSnapshot {
+            world_id: self.manifest.world_id.clone(),
             revision: rev,
             relations,
             secondary_indexes,
@@ -2543,23 +2577,56 @@ impl WorldSession {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<QueryPage, WorldError> {
+        let current_digest = self
+            .current_revision_digest
+            .ok_or_else(|| WorldError::CorruptedHead("current revision digest missing".into()))?;
         let trie = self
             .relations
             .get(relation)
             .ok_or_else(|| WorldError::UnknownRelation(relation.to_string()))?;
 
         let parsed_cursor = match cursor {
-            Some(token) => Some(WorldCursor::from_token(token)?),
+            Some(token) => {
+                let qc = QueryCursor::from_token(token)?;
+                if !qc.world_id.is_empty() {
+                    if qc.world_id != self.manifest.world_id
+                        || qc.revision != current_digest
+                        || qc.relation != relation
+                        || qc.ordering != "canonical"
+                    {
+                        return Err(WorldError::InvalidCursor(
+                            "query cursor scope mismatch".into(),
+                        ));
+                    }
+                }
+                match qc.position {
+                    QueryCursorPosition::Hamt { hash, key } => Some((hash, key)),
+                    QueryCursorPosition::Offset(_) => {
+                        return Err(WorldError::InvalidCursor(
+                            "query cursor ordering mismatch (offset cursor on hamt relation)".into(),
+                        ));
+                    }
+                }
+            }
             None => None,
         };
 
         let (entries, next_pos) = trie.iter_page_with_store(
-            parsed_cursor.as_ref().map(|c| (&c.hash, &c.key)),
+            parsed_cursor.as_ref().map(|(h, k)| (h, k)),
             limit,
             &self.node_store,
         )?;
 
-        let next_cursor = next_pos.map(|(hash, key)| WorldCursor::new(hash, key).to_token());
+        let next_cursor = next_pos.map(|(hash, key)| {
+            QueryCursor::new_hamt(
+                &self.manifest.world_id,
+                current_digest,
+                relation,
+                hash,
+                key,
+            )
+            .to_token()
+        });
         let has_more = next_cursor.is_some();
 
         Ok(QueryPage {
@@ -2598,6 +2665,9 @@ impl WorldSession {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<QueryPage, WorldError> {
+        let current_digest = self
+            .current_revision_digest
+            .ok_or_else(|| WorldError::CorruptedHead("current revision digest missing".into()))?;
         if limit == 0 {
             return Err(WorldError::InvalidSchema(
                 "query page limit must be positive".to_string(),
@@ -2608,11 +2678,28 @@ impl WorldSession {
             .ok_or_else(|| WorldError::UnknownRelation(relation.to_string()))?;
 
         let offset = match cursor {
-            Some(token) => token.parse::<usize>().map_err(|_| {
-                WorldError::InvalidCursor(
-                    "invalid derived page cursor (expected integer offset)".to_string(),
-                )
-            })?,
+            Some(token) => {
+                let qc = QueryCursor::from_token(token)?;
+                if !qc.world_id.is_empty() {
+                    if qc.world_id != self.manifest.world_id
+                        || qc.revision != current_digest
+                        || qc.relation != relation
+                        || qc.ordering != "offset"
+                    {
+                        return Err(WorldError::InvalidCursor(
+                            "query cursor scope mismatch".into(),
+                        ));
+                    }
+                }
+                match qc.position {
+                    QueryCursorPosition::Offset(off) => off,
+                    QueryCursorPosition::Hamt { .. } => {
+                        return Err(WorldError::InvalidCursor(
+                            "query cursor ordering mismatch (hamt cursor on derived relation)".into(),
+                        ));
+                    }
+                }
+            }
             None => 0,
         };
 
@@ -2631,7 +2718,142 @@ impl WorldSession {
         let next_offset = offset + entries.len();
         let has_more = next_offset < total;
         let next_cursor = if has_more {
-            Some(next_offset.to_string())
+            Some(
+                QueryCursor::new_offset(
+                    &self.manifest.world_id,
+                    current_digest,
+                    relation,
+                    next_offset,
+                )
+                .to_token(),
+            )
+        } else {
+            None
+        };
+
+        Ok(QueryPage {
+            relation: relation.to_string(),
+            entries,
+            next_cursor,
+            has_more,
+        })
+    }
+
+    /// Retrieve derived tuples for a relation at a specific historical revision `seq`.
+    pub fn get_derived_at(
+        &self,
+        seq: u64,
+        relation: &str,
+    ) -> Result<Option<Vec<TupleRecord>>, WorldError> {
+        if seq == self.current_revision {
+            return self.get_derived(relation);
+        }
+        let snapshot = self.pin_revision(seq)?;
+        let Some(network) = self.network.as_ref() else {
+            return Ok(None);
+        };
+        let mut historical = network.clear_data();
+        let mut ops = Vec::new();
+        for (rel, trie) in &snapshot.relations {
+            if !network.base_relations.contains_key(rel) {
+                continue;
+            }
+            let (entries, _) = trie.iter_page_with_store(None, usize::MAX, &snapshot.node_store)?;
+            ops.extend(
+                entries
+                    .into_iter()
+                    .map(|(key, tuple)| WorldBatchOp::Upsert {
+                        relation: rel.clone(),
+                        key,
+                        tuple,
+                    }),
+            );
+        }
+        historical.apply_ops(&ops)?;
+        if let Some(rows) = historical.get_derived_tuples(relation)? {
+            return Ok(Some(rows));
+        }
+        let qualified = historical
+            .derived_relations
+            .keys()
+            .find(|k| k.ends_with(&format!("::{relation}")))
+            .cloned();
+        if let Some(k) = qualified {
+            historical.get_derived_tuples(&k)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Query a paged slice of derived tuples at a specific historical revision `seq`.
+    pub fn query_derived_page_at(
+        &self,
+        seq: u64,
+        relation: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<QueryPage, WorldError> {
+        let snapshot = self.pin_revision(seq)?;
+        let rev_digest = snapshot.revision_digest();
+        if limit == 0 {
+            return Err(WorldError::InvalidSchema(
+                "query page limit must be positive".to_string(),
+            ));
+        }
+        let records = self
+            .get_derived_at(seq, relation)?
+            .ok_or_else(|| WorldError::UnknownRelation(relation.to_string()))?;
+
+        let offset = match cursor {
+            Some(token) => {
+                let qc = QueryCursor::from_token(token)?;
+                if !qc.world_id.is_empty() {
+                    if qc.world_id != self.manifest.world_id
+                        || qc.revision != rev_digest
+                        || qc.relation != relation
+                        || qc.ordering != "offset"
+                    {
+                        return Err(WorldError::InvalidCursor(
+                            "query cursor scope mismatch".into(),
+                        ));
+                    }
+                }
+                match qc.position {
+                    QueryCursorPosition::Offset(off) => off,
+                    QueryCursorPosition::Hamt { .. } => {
+                        return Err(WorldError::InvalidCursor(
+                            "query cursor ordering mismatch (hamt cursor on derived relation)".into(),
+                        ));
+                    }
+                }
+            }
+            None => 0,
+        };
+
+        let total = records.len();
+        let entries: Vec<(WorldKey, WorldTuple)> = records
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .enumerate()
+            .map(|(i, r)| {
+                let key = WorldKey::from_str(&format!("{}", offset + i));
+                (key, r.to_tuple())
+            })
+            .collect();
+
+        let next_offset = offset + entries.len();
+        let has_more = next_offset < total;
+        let next_cursor = if has_more {
+            Some(
+                QueryCursor::new_offset(
+                    &self.manifest.world_id,
+                    rev_digest,
+                    relation,
+                    next_offset,
+                )
+                .to_token(),
+            )
         } else {
             None
         };
