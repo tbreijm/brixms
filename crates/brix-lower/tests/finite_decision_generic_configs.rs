@@ -162,7 +162,7 @@ fn test_generic_config_still_refused_as_helper_contract_with_clear_diagnostic() 
 config Stack<T> = SNil | SCons(T, Stack<T>)
 config Decision = Done
 
-fn head(s: Stack<Int>): Int = match s {
+fn head(s: Stack): Int = match s {
   SNil => 0
   SCons(x, rest) => x
 }

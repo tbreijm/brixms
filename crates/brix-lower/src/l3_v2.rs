@@ -511,6 +511,82 @@ impl L3SchemaType {
     }
 }
 
+pub fn nominal_base(name: &str) -> &str {
+    name.split_once('<').map(|(base, _)| base.trim()).unwrap_or(name)
+}
+
+pub fn nominal_matches(actual: &str, expected: &str) -> bool {
+    if actual == expected {
+        return true;
+    }
+    let actual_base = nominal_base(actual);
+    let expected_base = nominal_base(expected);
+    if actual_base != expected_base {
+        return false;
+    }
+    if actual.contains('<') && expected.contains('<') {
+        return actual == expected;
+    }
+    true
+}
+
+pub fn specialize_nominal_value(
+    val: &mut L3ValueV2,
+    expected: &L3SchemaType,
+    schemas: &BTreeMap<String, L3Schema>,
+) {
+    match (val, expected) {
+        (
+            L3ValueV2::Ctor {
+                nominal_sum,
+                variant,
+                args,
+            },
+            L3SchemaType::Named(name),
+        ) => {
+            if nominal_matches(nominal_sum, name) {
+                *nominal_sum = name.clone();
+            }
+            if let Some(schema) = schemas.get(name) {
+                if let L3SchemaBody::Sum(variants) = &schema.body {
+                    if let Some((_, payloads)) = variants.iter().find(|(v, _)| v == variant) {
+                        for (arg, p_ty) in args.iter_mut().zip(payloads) {
+                            specialize_nominal_value(arg, p_ty, schemas);
+                        }
+                    }
+                }
+            }
+        }
+        (
+            L3ValueV2::Record {
+                nominal_config,
+                fields,
+            },
+            L3SchemaType::Named(name),
+        ) => {
+            if nominal_matches(nominal_config, name) {
+                *nominal_config = name.clone();
+            }
+            if let Some(schema) = schemas.get(name) {
+                if let L3SchemaBody::Record(expected_fields) = &schema.body {
+                    for (field_name, f_val) in fields.iter_mut() {
+                        if let Some(f_ty) = expected_fields.get(field_name) {
+                            specialize_nominal_value(f_val, f_ty, schemas);
+                        }
+                    }
+                }
+            }
+        }
+        (L3ValueV2::List(items), L3SchemaType::List(element)) => {
+            let slice = Arc::make_mut(items);
+            for item in slice.iter_mut() {
+                specialize_nominal_value(item, element, schemas);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Validate a runtime value against a closed schema, retaining a precise
 /// nested path for contract and external-input diagnostics.
 pub fn validate_l3_value(
@@ -521,6 +597,12 @@ pub fn validate_l3_value(
 ) -> Result<(), String> {
     match (value, expected) {
         (L3ValueV2::List(items), L3SchemaType::List(element)) => {
+            if items.len() > 256 {
+                return Err(format!(
+                    "{path}: list has {} element(s), exceeding maximum of 256",
+                    items.len()
+                ));
+            }
             for (index, item) in items.iter().enumerate() {
                 validate_l3_value(item, element, schemas, &format!("{path}[{index}]"))?;
             }
@@ -553,7 +635,7 @@ pub fn validate_l3_value(
             let L3SchemaBody::Sum(variants) = &schema.body else {
                 return Err(format!("{path}: expected record '{name}', found sum"));
             };
-            if nominal_sum != name {
+            if !nominal_matches(nominal_sum, name) {
                 return Err(format!(
                     "{path}: expected nominal '{name}', found '{nominal_sum}'"
                 ));
@@ -587,7 +669,7 @@ pub fn validate_l3_value(
             let L3SchemaBody::Record(expected_fields) = &schema.body else {
                 return Err(format!("{path}: expected sum '{name}', found record"));
             };
-            if nominal_config != name {
+            if !nominal_matches(nominal_config, name) {
                 return Err(format!(
                     "{path}: expected nominal '{name}', found '{nominal_config}'"
                 ));
@@ -844,11 +926,11 @@ impl L3PatternV2 {
                         ..
                     } => {
                         if let Some(expected_nom) = expected_nom {
-                            if nominal_sum != expected_nom {
+                            if !nominal_matches(nominal_sum, expected_nom) {
                                 return false;
                             }
                         } else if let Some((owner, _)) = pv.rsplit_once("::") {
-                            if nominal_sum != owner {
+                            if !nominal_matches(nominal_sum, owner) {
                                 return false;
                             }
                         }
@@ -2084,11 +2166,24 @@ fn lower_expr_v2_impl(
                     })
                 }
             };
-            let ast::Ty::Named(element) = element else {
-                return Err(L3V2LowerError::AscriptionMismatch {
-                    expected: "List of a named element type".to_string(),
-                    found: format!("{element:?}"),
-                });
+            let element_str = match element {
+                ast::Ty::Named(n) => n.clone(),
+                ast::Ty::App(name, args) => {
+                    let mut parts = Vec::new();
+                    for a in args {
+                        match a {
+                            ast::Ty::Named(n) => parts.push(n.clone()),
+                            _ => parts.push(format!("{a:?}")),
+                        }
+                    }
+                    format!("{}<{}>", name, parts.join(", "))
+                }
+                other => {
+                    return Err(L3V2LowerError::AscriptionMismatch {
+                        expected: "List of a named element type".to_string(),
+                        found: format!("{other:?}"),
+                    });
+                }
             };
             let inner = lower_expr_v2_impl(
                 expr,
@@ -2102,10 +2197,10 @@ fn lower_expr_v2_impl(
                 helper_enabled,
                 ambiguous_ctors,
             )?;
-            check_list_ascription(&inner, element)?;
+            check_list_ascription(&inner, &element_str)?;
             Ok(L3ExprV2::Ascribe {
                 expr: Box::new(inner),
-                element: element.clone(),
+                element: element_str,
             })
         }
     }
@@ -3129,7 +3224,9 @@ fn eval_internal_body(
             });
             if let Some(expected_nominal) = expected_nominal {
                 match &v {
-                    L3ValueV2::Ctor { nominal_sum, .. } if nominal_sum != expected_nominal => {
+                    L3ValueV2::Ctor { nominal_sum, .. }
+                        if !nominal_matches(nominal_sum, expected_nominal) =>
+                    {
                         return Err(EvalFault::OperandShape(
                             "match scrutinee belongs to a different sum than its arms",
                         ));
@@ -3206,7 +3303,7 @@ fn eval_internal_body(
             }
 
             // Parameter contract checks.
-            for (val, (param_name, contract)) in evaluated_args.iter().zip(def.params.iter()) {
+            for (val, (param_name, contract)) in evaluated_args.iter_mut().zip(def.params.iter()) {
                 if let Some(expected_ty) = contract {
                     if let Err(detail) = validate_l3_value(val, expected_ty, &def.schemas, "<root>")
                     {
@@ -3226,6 +3323,7 @@ fn eval_internal_body(
                             path,
                         });
                     }
+                    specialize_nominal_value(val, expected_ty, &def.schemas);
                 }
             }
 
@@ -3278,7 +3376,7 @@ fn eval_internal_body(
                 b.call_depth -= 1;
             }
 
-            let ret_val = ret_res?;
+            let mut ret_val = ret_res?;
 
             // Return contract check.
             if let Some(expected_ret_ty) = &def.ret_contract {
@@ -3301,6 +3399,7 @@ fn eval_internal_body(
                         path,
                     });
                 }
+                specialize_nominal_value(&mut ret_val, expected_ret_ty, &def.schemas);
             }
 
             Ok(ret_val)
@@ -3741,7 +3840,6 @@ fn check_list_ascription(inner: &L3ExprV2, element: &str) -> Result<(), L3V2Lowe
         found: found.to_string(),
     };
     let simple = |name: &str| name.rsplit_once("::").map_or(name, |(_, s)| s).to_string();
-    let wanted = simple(element);
     match inner {
         L3ExprV2::ListLit(items) => {
             for item in items {
@@ -3749,13 +3847,17 @@ fn check_list_ascription(inner: &L3ExprV2, element: &str) -> Result<(), L3V2Lowe
                     L3ExprV2::Int(_) => Some("Int".to_string()),
                     L3ExprV2::Str(_) => Some("Str".to_string()),
                     L3ExprV2::Bool(_) => Some("Bool".to_string()),
+                    L3ExprV2::NumericBuiltin(NumericBuiltinV2::Decimal, _) => {
+                        Some("Decimal".to_string())
+                    }
+                    L3ExprV2::NumericBuiltin(NumericBuiltinV2::F64, _) => Some("F64".to_string()),
                     L3ExprV2::NullaryVariant { nominal_sum, .. }
-                    | L3ExprV2::Ctor { nominal_sum, .. } => Some(simple(nominal_sum)),
-                    L3ExprV2::Record { nominal_config, .. } => Some(simple(nominal_config)),
+                    | L3ExprV2::Ctor { nominal_sum, .. } => Some(nominal_sum.clone()),
+                    L3ExprV2::Record { nominal_config, .. } => Some(nominal_config.clone()),
                     _ => None,
                 };
                 if let Some(found) = found {
-                    if found != wanted {
+                    if !nominal_matches(&found, element) {
                         return Err(mismatch(&format!("List<{found}>")));
                     }
                 }
@@ -3829,9 +3931,11 @@ fn eval_ascribe(
             L3ValueV2::Int(_) => simple == "Int",
             L3ValueV2::Str(_) => simple == "Str",
             L3ValueV2::Bool(_) => simple == "Bool",
-            L3ValueV2::Ctor { nominal_sum, .. } => nominal_sum == element || nominal_sum == simple,
+            L3ValueV2::F64(_) => simple == "F64",
+            L3ValueV2::Decimal(_) => simple == "Decimal",
+            L3ValueV2::Ctor { nominal_sum, .. } => nominal_matches(nominal_sum, element),
             L3ValueV2::Record { nominal_config, .. } => {
-                nominal_config == element || nominal_config == simple
+                nominal_matches(nominal_config, element)
             }
             _ => false,
         };
@@ -3903,7 +4007,10 @@ pub(crate) fn check_exhaustive_expr(
             let covered: BTreeSet<&str> = arms
                 .iter()
                 .filter_map(|(pat, _)| match pat {
-                    L3PatternV2::Ctor { variant, .. } => Some(variant.as_str()),
+                    L3PatternV2::Ctor { variant, .. } => {
+                        let bare = variant.rsplit_once("::").map_or(variant.as_str(), |(_, v)| v);
+                        Some(bare)
+                    }
                     L3PatternV2::Wildcard => None,
                 })
                 .collect();

@@ -35,6 +35,9 @@ pub const INPUT_SCHEMA_V2: &str = "brix.input@2";
 pub const INPUT_SCHEMA_V3: &str = "brix.input@3";
 /// Adds finite binary64 and exact decimal values with string payloads.
 pub const INPUT_SCHEMA_V4: &str = "brix.input@4";
+/// `brix.input@5` (R8): admits nested list values inside sum variants and records,
+/// bounded by container width, node limits, and nesting depth budgets.
+pub const INPUT_SCHEMA_V5: &str = "brix.input@5";
 
 /// The canonical domain tag for input snapshot identity (ADR-0031 ⟨D-IDENTITY⟩).
 pub const INPUT_SNAPSHOT_TAG: &str = "brix.input.snapshot@1";
@@ -1463,20 +1466,7 @@ impl<'a> StrictJsonParser<'a> {
             let b = self.bytes[self.pos];
             if b == b'"' {
                 self.pos += 1;
-                if qualified {
-                    for segment in s.split("::") {
-                        if segment.len() > self.limits.max_name_bytes {
-                            return Err(InputDecodeError::NominalSegmentTooLong {
-                                nominal: s.clone(),
-                                segment: segment.to_string(),
-                                limit: self.limits.max_name_bytes,
-                            });
-                        }
-                        validate_identifier(segment, self.limits.max_name_bytes)?;
-                    }
-                } else {
-                    validate_identifier(&s, self.limits.max_name_bytes)?;
-                }
+                validate_nominal_type_name(&s, self.limits.max_name_bytes, qualified)?;
                 return Ok(s);
             } else if b == b'\\' {
                 self.pos += 1;
@@ -1566,6 +1556,7 @@ impl<'a> StrictJsonParser<'a> {
                         && schema_val != INPUT_SCHEMA_V2
                         && schema_val != INPUT_SCHEMA_V3
                         && schema_val != INPUT_SCHEMA_V4
+                        && schema_val != INPUT_SCHEMA_V5
                     {
                         return Err(InputDecodeError::InvalidSchema {
                             expected: INPUT_SCHEMA_V1,
@@ -1614,9 +1605,12 @@ impl<'a> StrictJsonParser<'a> {
         let schema = schema.ok_or(InputDecodeError::MissingField("schema"))?;
         let values = values.ok_or(InputDecodeError::MissingField("values"))?;
 
-        if schema != INPUT_SCHEMA_V4 && values.values().any(value_has_numeric) {
+        if schema != INPUT_SCHEMA_V4
+            && schema != INPUT_SCHEMA_V5
+            && values.values().any(value_has_numeric)
+        {
             return Err(InputDecodeError::InvalidType {
-                expected: "f64 and decimal values require brix.input@4",
+                expected: "f64 and decimal values require brix.input@4 or later",
                 found: "numeric value in an older schema".to_string(),
                 offset: 0,
             });
@@ -1643,7 +1637,7 @@ impl<'a> StrictJsonParser<'a> {
         }
         // Lists are admitted only as a top-level `@3` value (ADR-0037
         // §Scope): a list nested inside a sum's `args` or a record's
-        // `fields` is refused even under `@3`.
+        // `fields` is refused under `@3` and `@4`, but admitted under `@5`.
         if (schema == INPUT_SCHEMA_V3 || schema == INPUT_SCHEMA_V4)
             && values.values().any(value_has_nested_list)
         {
@@ -2297,6 +2291,116 @@ impl RawValue {
             Self::Array => "array",
             Self::Object => "object",
         }
+    }
+}
+
+fn split_generic_nominal(s: &str) -> Option<(&str, &str)> {
+    if !s.ends_with('>') {
+        return None;
+    }
+    let open = s.find('<')?;
+    let base = &s[..open];
+    let inner = &s[open + 1..s.len() - 1];
+    Some((base, inner))
+}
+
+fn split_type_args(s: &str) -> Result<Vec<&str>, InputDecodeError> {
+    let mut args = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, b) in s.bytes().enumerate() {
+        match b {
+            b'<' => depth += 1,
+            b'>' => {
+                if depth == 0 {
+                    return Err(InputDecodeError::InvalidIdentifier {
+                        name: s.to_string(),
+                        reason: "unmatched closing '>' in type arguments",
+                    });
+                }
+                depth -= 1;
+            }
+            b',' if depth == 0 => {
+                let part = s[start..i].trim();
+                if part.is_empty() {
+                    return Err(InputDecodeError::InvalidIdentifier {
+                        name: s.to_string(),
+                        reason: "empty type argument in type argument list",
+                    });
+                }
+                args.push(part);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return Err(InputDecodeError::InvalidIdentifier {
+            name: s.to_string(),
+            reason: "unmatched opening '<' in type arguments",
+        });
+    }
+    let part = s[start..].trim();
+    if part.is_empty() {
+        return Err(InputDecodeError::InvalidIdentifier {
+            name: s.to_string(),
+            reason: "empty type argument in type argument list",
+        });
+    }
+    args.push(part);
+    Ok(args)
+}
+
+fn validate_nominal_base(
+    base: &str,
+    max_segment_len: usize,
+    qualified: bool,
+    full_name: &str,
+) -> Result<(), InputDecodeError> {
+    if qualified {
+        for segment in base.split("::") {
+            if segment.len() > max_segment_len {
+                return Err(InputDecodeError::NominalSegmentTooLong {
+                    nominal: full_name.to_string(),
+                    segment: segment.to_string(),
+                    limit: max_segment_len,
+                });
+            }
+            validate_identifier(segment, max_segment_len)?;
+        }
+    } else {
+        if base.len() > max_segment_len {
+            return Err(InputDecodeError::NominalSegmentTooLong {
+                nominal: full_name.to_string(),
+                segment: base.to_string(),
+                limit: max_segment_len,
+            });
+        }
+        validate_identifier(base, max_segment_len)?;
+    }
+    Ok(())
+}
+
+fn validate_nominal_type_name(
+    s: &str,
+    max_segment_len: usize,
+    qualified: bool,
+) -> Result<(), InputDecodeError> {
+    if let Some((base, args_str)) = split_generic_nominal(s) {
+        validate_nominal_base(base, max_segment_len, qualified, s)?;
+        let args = split_type_args(args_str)?;
+        if args.is_empty() {
+            return Err(InputDecodeError::InvalidIdentifier {
+                name: s.to_string(),
+                reason: "generic type argument list cannot be empty",
+            });
+        }
+        for arg in args {
+            validate_nominal_type_name(arg.trim(), max_segment_len, qualified)?;
+        }
+        Ok(())
+    } else {
+        validate_nominal_base(s, max_segment_len, qualified, s)
     }
 }
 

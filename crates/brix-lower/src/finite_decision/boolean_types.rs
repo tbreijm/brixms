@@ -99,11 +99,23 @@ fn shapes_compatible(actual: &Type, expected: &Type) -> bool {
     match (actual, expected) {
         (Type::Unknown, _) | (_, Type::Unknown) => true,
         (Type::Either(options), exp) => options.iter().all(|opt| shapes_compatible(opt, exp)),
-        (Type::Known(a), Type::Known(b)) => a == b,
-        (Type::Sum { nominal: n1, .. }, Type::Sum { nominal: n2, .. }) => n1 == n2,
+        (Type::Known(a), Type::Known(b)) => match (a, b) {
+            (L3ValueType::Sum(n1), L3ValueType::Sum(n2)) => crate::l3_v2::nominal_matches(n1, n2),
+            (L3ValueType::Record(n1), L3ValueType::Record(n2)) => {
+                crate::l3_v2::nominal_matches(n1, n2)
+            }
+            _ => a == b,
+        },
+        (Type::Sum { nominal: n1, .. }, Type::Sum { nominal: n2, .. }) => {
+            crate::l3_v2::nominal_matches(n1, n2)
+        }
         (Type::Record(..), Type::Record(..)) => true,
-        (Type::Known(L3ValueType::Sum(n1)), Type::Sum { nominal: n2, .. }) => n1 == n2,
-        (Type::Sum { nominal: n1, .. }, Type::Known(L3ValueType::Sum(n2))) => n1 == n2,
+        (Type::Known(L3ValueType::Sum(n1)), Type::Sum { nominal: n2, .. }) => {
+            crate::l3_v2::nominal_matches(n1, n2)
+        }
+        (Type::Sum { nominal: n1, .. }, Type::Known(L3ValueType::Sum(n2))) => {
+            crate::l3_v2::nominal_matches(n1, n2)
+        }
         (Type::Known(L3ValueType::Record(_)), Type::Record(..)) => true,
         (Type::Record(..), Type::Known(L3ValueType::Record(_))) => true,
         _ => false,
@@ -137,20 +149,56 @@ impl Checker<'_> {
     }
 
     fn declared_shape(&self, ty: &ast::Ty) -> Shape {
-        let ast::Ty::Named(name) = ty else {
-            return unknown();
-        };
-        match name.as_str() {
-            "Int" => known(L3ValueType::Int),
-            "Bool" => known(L3ValueType::Bool),
-            "Str" => known(L3ValueType::Str),
-            "F64" => known(L3ValueType::F64),
-            "Decimal" => known(L3ValueType::Decimal),
-            _ => match self.configs.get(name.as_str()) {
-                Some(ast::ConfigBody::Record(_)) => known(L3ValueType::Record(name.clone())),
-                Some(ast::ConfigBody::Sum(_)) => known(L3ValueType::Sum(name.clone())),
-                None => unknown(),
+        match ty {
+            ast::Ty::Named(name) => match name.as_str() {
+                "Int" => known(L3ValueType::Int),
+                "Bool" => known(L3ValueType::Bool),
+                "Str" => known(L3ValueType::Str),
+                "F64" => known(L3ValueType::F64),
+                "Decimal" => known(L3ValueType::Decimal),
+                _ => {
+                    if let Some(schema) = self.plan.schemas.get(name) {
+                        match &schema.body {
+                            crate::l3_v2::L3SchemaBody::Record(_) => {
+                                known(L3ValueType::Record(name.clone()))
+                            }
+                            crate::l3_v2::L3SchemaBody::Sum(_) => {
+                                known(L3ValueType::Sum(name.clone()))
+                            }
+                        }
+                    } else {
+                        match self.configs.get(name.as_str()) {
+                            Some(ast::ConfigBody::Record(_)) => {
+                                known(L3ValueType::Record(name.clone()))
+                            }
+                            Some(ast::ConfigBody::Sum(_)) => {
+                                known(L3ValueType::Sum(name.clone()))
+                            }
+                            None => unknown(),
+                        }
+                    }
+                }
             },
+            ast::Ty::App(name, args) if name == "List" && args.len() == 1 => {
+                Arc::new(Type::List(self.declared_shape(&args[0])))
+            }
+            ast::Ty::App(name, args) => {
+                let mut resolved_args = Vec::new();
+                for a in args {
+                    let s = self.declared_shape(a);
+                    resolved_args.push(type_name(&s));
+                }
+                let full = format!("{}<{}>", name, resolved_args.join(", "));
+                if let Some(schema) = self.plan.schemas.get(&full) {
+                    match &schema.body {
+                        crate::l3_v2::L3SchemaBody::Record(_) => known(L3ValueType::Record(full)),
+                        crate::l3_v2::L3SchemaBody::Sum(_) => known(L3ValueType::Sum(full)),
+                    }
+                } else {
+                    known(L3ValueType::Sum(full))
+                }
+            }
+            _ => unknown(),
         }
     }
 
