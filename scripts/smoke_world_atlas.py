@@ -93,8 +93,152 @@ def smoke(binary, example):
         run("audit", world, "--out", bundle)
         verified = run("verify", "--expect-head", head, "--expect-program", program, bundle)
         require(verified.get("status") == "audited", f"Independent audit failed: {verified}")
-        print("PASS: typed decision chain, exact sum, absence, zero counts, retries, cold restore, "
-              "checkpoint, retraction, history, and independent audit")
+
+    smoke_alpha8(binary)
+    print("PASS: typed decision chain, exact sum, absence, zero counts, retries, cold restore, "
+          "checkpoint, retraction, history, grouped collect, portable decision evidence, and independent audit")
+
+
+ALPHA8_ATLAS_PROGRAM = """
+config Plan = AskBack(List<Str>) | Done
+
+fn no_slots(): List<Str> = []
+
+rel input pages: { id: Str, domain: Str, title: Str } key id
+rel input questions: { parent: Str } key parent
+rel input slots: { id: Str, parent: Str, slot: Str, ord: Int } key id
+
+rel derived nonempty_slots = select {
+  parent: s.parent,
+  missing: collect(s.slot, s.ord, 16)
+} from s in slots group by s.parent
+
+rel derived empty_slots = select {
+  parent: q.parent,
+  missing: no_slots()
+} from q in questions
+where not exists s in slots where s.parent == q.parent
+
+rel derived question_slots = union nonempty_slots, empty_slots key parent
+
+decide plan for g in question_slots per parent {
+  propose ask priority 1 when true = Plan::AskBack(g.missing)
+}
+""".strip()
+
+
+def smoke_alpha8(binary: Path):
+    with tempfile.TemporaryDirectory(prefix="brix_alpha8_smoke_") as scratch_str:
+        scratch = Path(scratch_str)
+        world = scratch / "world_v8"
+        isolated_dir = scratch / "isolated_verifier"
+        isolated_dir.mkdir(parents=True, exist_ok=True)
+        prog_path = scratch / "atlas_v8.brix"
+        prog_path.write_text(ALPHA8_ATLAS_PROGRAM, encoding="utf-8")
+
+        def run(*args, cwd=scratch, expect_ok=True):
+            command = [str(binary), "world", *map(str, args), "--json"]
+            result = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=120)
+            data = json.loads(result.stdout)
+            if expect_ok:
+                require(result.returncode == 0 and data.get("ok") is True,
+                        f"{command} failed ({result.returncode}): {result.stdout}\n{result.stderr}")
+            else:
+                require(result.returncode != 0 and data.get("ok") is False,
+                        f"{command} unexpectedly succeeded: {data}")
+            return data
+
+        init = run("init", world, prog_path)
+        manifest_digest = init["manifest_digest"]
+        program_digest = init["program_digest"]
+
+        seed_v8 = scratch / "seed_v8.json"
+        seed_v8.write_text(json.dumps({
+            "schema": "brix.world.batch@1",
+            "expected_base_revision": 0,
+            "idempotency_key": "atlas-v8-seed",
+            "operations": [
+                {"op": "upsert", "relation": "atlas_v8::pages", "key": "p1",
+                 "tuple": {"id": "p1", "domain": "finance", "title": "Revenue Overview"}},
+                {"op": "upsert", "relation": "atlas_v8::questions", "key": "q1",
+                 "tuple": {"parent": "q1"}},
+                {"op": "upsert", "relation": "atlas_v8::slots", "key": "s1",
+                 "tuple": {"id": "s1", "parent": "q1", "slot": "volume", "ord": 1}},
+                {"op": "upsert", "relation": "atlas_v8::slots", "key": "s2",
+                 "tuple": {"id": "s2", "parent": "q1", "slot": "customer-grain", "ord": 2}},
+            ]
+        }), encoding="utf-8")
+
+        rev1 = run("batch", world, seed_v8)
+        rev1_digest = rev1["digest"]
+
+        settled1 = run("decide", world)["settlements"]["atlas_v8::plan"]["q1"]
+        require(settled1["candidate_name"] == "ask", f"Expected ask candidate at rev 1: {settled1}")
+        require(settled1["value"]["variant"] == "AskBack", f"Expected AskBack variant: {settled1}")
+        require([x["value"] for x in settled1["value"]["args"][0]["items"]] == ["volume", "customer-grain"],
+                f"Unexpected collected slots at rev 1: {settled1}")
+
+        ev_file = isolated_dir / "evidence_rev1.json"
+        run("evidence", world, "q1", "--decide", "atlas_v8::plan", "--rev", 1,
+            "--caller", "service:atlas", "--grant", "read:atlas", "--out", ev_file)
+
+        # Fresh-process verification in isolated_dir without world path access
+        ver1 = run("verify-evidence", ev_file,
+                   "--expect-manifest", manifest_digest,
+                   "--expect-program", program_digest,
+                   "--expect-revision", 1,
+                   "--expect-revision-digest", rev1_digest,
+                   "--expect-decide", "atlas_v8::plan",
+                   "--expect-key", "q1",
+                   "--expect-caller", "service:atlas",
+                   "--expect-grant", "read:atlas",
+                   cwd=isolated_dir)
+        require(ver1["receipt"]["authority"] == "runtime_check", f"Expected runtime_check receipt: {ver1}")
+
+        # Typed revision-pinned surface query at rev 1
+        pages1 = run("query", world, "atlas_v8::pages", "--rev", 1, "--expect-digest", rev1_digest, "--typed")
+        require(pages1["entries"][0]["tuple"]["title"] == "Revenue Overview",
+                f"Unexpected typed surface tuple: {pages1}")
+
+        # Commit rev 2: retract all child slots -> parent-anchored empty list []
+        retract_v8 = scratch / "retract_v8.json"
+        retract_v8.write_text(json.dumps({
+            "schema": "brix.world.batch@1",
+            "expected_base_revision": 1,
+            "idempotency_key": "atlas-v8-retract",
+            "operations": [
+                {"op": "remove", "relation": "atlas_v8::slots", "key": "s1"},
+                {"op": "remove", "relation": "atlas_v8::slots", "key": "s2"},
+            ]
+        }), encoding="utf-8")
+        run("batch", world, retract_v8)
+
+        settled2 = run("decide", world)["settlements"]["atlas_v8::plan"]["q1"]
+        require(settled2["candidate_name"] == "ask", f"Expected ask candidate at rev 2: {settled2}")
+        require(settled2["value"]["variant"] == "AskBack", f"Expected AskBack variant: {settled2}")
+        require(settled2["value"]["args"][0]["items"] == [],
+                f"Expected empty list [] after final child retraction: {settled2}")
+
+        # Historical evidence request at rev 1 after advancing to rev 2
+        ev_hist_file = isolated_dir / "evidence_hist_rev1.json"
+        run("evidence", world, "q1", "--decide", "atlas_v8::plan", "--rev", 1,
+            "--caller", "service:atlas", "--grant", "read:atlas", "--out", ev_hist_file)
+        ver_hist = run("verify-evidence", ev_hist_file,
+                       "--expect-manifest", manifest_digest,
+                       "--expect-program", program_digest,
+                       "--expect-revision", 1,
+                       "--expect-revision-digest", rev1_digest,
+                       "--expect-decide", "atlas_v8::plan",
+                       "--expect-key", "q1",
+                       "--expect-caller", "service:atlas",
+                       "--expect-grant", "read:atlas",
+                       cwd=isolated_dir)
+        require(ver_hist["receipt"]["authority"] == "runtime_check", f"Historical verify failed: {ver_hist}")
+
+        # Stale compilation check: querying rev 2 with rev 1 digest must fail
+        stale = run("query", world, "atlas_v8::pages", "--rev", 2, "--expect-digest", rev1_digest, expect_ok=False)
+        require(stale.get("status") == "revision-digest-mismatch", f"Expected revision-digest-mismatch: {stale}")
+
 
 
 if __name__ == "__main__":

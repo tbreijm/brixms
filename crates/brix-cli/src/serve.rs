@@ -964,7 +964,7 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
         "evidence" => {
             let rev = required_u64_field(params, "rev")?;
             let decide = required_str_field(params, "decide")?.to_string();
-            let entity = match params.get("entity") {
+            let entity = match params.get("entity").or_else(|| params.get("key")) {
                 Some(Value::String(s)) => s.clone(),
                 Some(Value::Number(n)) => n.to_string(),
                 _ => {
@@ -974,17 +974,22 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
                     ))
                 }
             };
+            let caller = params
+                .get("caller")
+                .and_then(Value::as_str)
+                .map(String::from);
             let grants = str_array_field(params, "grants")?;
             let out = params.get("out").and_then(Value::as_str).map(PathBuf::from);
             let include_bundle = params
                 .get("include_bundle")
                 .and_then(Value::as_bool)
-                .unwrap_or(false);
+                .unwrap_or(true);
             WorldOp::Evidence {
                 dir,
                 rev,
                 decide,
                 entity,
+                caller,
                 grants,
                 out,
                 include_bundle,
@@ -1007,8 +1012,19 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
                     ))
                 }
             };
-            let expect_candidate = required_str_field(params, "expect_candidate")?.to_string();
+            let expect_candidate = params
+                .get("expect_candidate")
+                .and_then(Value::as_str)
+                .map(String::from);
+            let expect_caller = params
+                .get("expect_caller")
+                .and_then(Value::as_str)
+                .map(String::from);
             let expect_grants = str_array_field(params, "expect_grants")?;
+            let expect_release = params
+                .get("expect_release")
+                .and_then(Value::as_str)
+                .map(String::from);
             WorldOp::VerifyEvidence {
                 evidence,
                 expect_world,
@@ -1018,7 +1034,9 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
                 expect_decide,
                 expect_entity,
                 expect_candidate,
+                expect_caller,
                 expect_grants,
+                expect_release,
             }
         }
         other => return Err(("unknown-method", format!("unknown method 'world.{other}'"))),

@@ -596,7 +596,9 @@ fn merge_rows(left: &Row, right: &Row) -> Row {
 fn row_to_tuple_record(row: &Row) -> TupleRecord {
     let mut rec = TupleRecord::new();
     for (k, v) in row {
-        rec.set(k.clone(), v.to_bytes());
+        if k != BRIX_PROVENANCE_KEY {
+            rec.set(k.clone(), v.to_bytes());
+        }
     }
     rec
 }
@@ -612,6 +614,9 @@ fn scalar_bindings(
     let mut bindings = BTreeMap::new();
     let mut records: BTreeMap<String, Vec<(String, L3ValueV2)>> = BTreeMap::new();
     for (name, value) in row {
+        if name == BRIX_PROVENANCE_KEY {
+            continue;
+        }
         if let Some((binding, field)) = name.split_once('.') {
             records
                 .entry(binding.to_owned())
@@ -644,6 +649,8 @@ fn eval_expr(
         .map_err(WorldError::NetworkError)?;
     Value::from_scalar(compiled.eval(&bindings).map_err(WorldError::NetworkError)?)
 }
+
+const BRIX_PROVENANCE_KEY: &str = "__brix_provenance_key";
 
 type GroupEntry = (Vec<Option<Value>>, Vec<Option<Value>>, Row);
 
@@ -729,11 +736,11 @@ fn build_grouped_row(
                         .get(idx)
                         .and_then(|v| v.clone())
                         .unwrap_or_else(|| item_val.clone());
-                    let tie_breaker = Value::Record {
-                        nominal: "".into(),
-                        fields: child_row.clone(),
-                    };
-                    items_with_order.push((order_val, tie_breaker, item_val));
+                    let child_key = child_row
+                        .get(BRIX_PROVENANCE_KEY)
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    items_with_order.push((order_val, child_key, item_val));
                 }
                 items_with_order.sort_by(|a, b| {
                     a.0.partial_cmp(&b.0)
@@ -1393,6 +1400,7 @@ fn evaluate_once_with_budget(
                                 })?,
                         );
                     }
+                    row.insert(BRIX_PROVENANCE_KEY.to_string(), Value::Str(key.to_hex()));
                     rows.push(row);
                 }
                 rows
@@ -1463,6 +1471,9 @@ fn evaluate_once_with_budget(
                             max_work,
                         )?;
                         projected.insert(name.clone(), Value::from_scalar(l3_val)?);
+                    }
+                    if let Some(k) = row.get(BRIX_PROVENANCE_KEY) {
+                        projected.insert(BRIX_PROVENANCE_KEY.to_string(), k.clone());
                     }
                     out.push(projected);
                 }

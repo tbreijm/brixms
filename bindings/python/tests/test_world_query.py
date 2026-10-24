@@ -96,3 +96,130 @@ def test_world_pinned_query(client, tmp_path):
     q_bad = client.world_query(world_dir, "policy::orders", rev=1, expect_digest=wrong_digest)
     assert q_bad["ok"] is False
     assert q_bad["status"] == "revision-digest-mismatch"
+
+
+def test_world_decision_evidence_and_parent_anchored_collect(client, tmp_path):
+    world_dir = tmp_path / "atlas_world"
+    prog_file = tmp_path / "atlas_collect.brix"
+    prog_file.write_text(
+        """
+config Plan = AskBack(List<Str>) | Done
+
+fn no_slots(): List<Str> = []
+
+rel input parents: { parent: Str } key parent
+rel input slots: { id: Str, parent: Str, slot: Str, ord: Int } key id
+
+rel derived nonempty_slots = select {
+  parent: s.parent,
+  missing: collect(s.slot, s.ord, 16)
+} from s in slots group by s.parent
+
+rel derived empty_slots = select {
+  parent: p.parent,
+  missing: no_slots()
+} from p in parents
+where not exists s in slots where s.parent == p.parent
+
+rel derived parent_slots = union nonempty_slots, empty_slots key parent
+
+decide plan for g in parent_slots per parent {
+  propose ask priority 1 when true = Plan::AskBack(g.missing)
+}
+""".strip()
+    )
+
+    init_res = client.world_init(world_dir, str(prog_file))
+    assert init_res["ok"] is True
+    manifest_digest = init_res["manifest_digest"]
+    program_digest = init_res["program_digest"]
+
+    b1 = client.world_batch(
+        world_dir,
+        {
+            "schema": "brix.world.batch@1",
+            "expected_base_revision": 0,
+            "idempotency_key": "collect-seed-1",
+            "operations": [
+                {"op": "upsert", "relation": "atlas_collect::parents", "key": "q1", "tuple": {"parent": "q1"}},
+                {
+                    "op": "upsert",
+                    "relation": "atlas_collect::slots",
+                    "key": "s1",
+                    "tuple": {"id": "s1", "parent": "q1", "slot": "volume", "ord": 1},
+                },
+                {
+                    "op": "upsert",
+                    "relation": "atlas_collect::slots",
+                    "key": "s2",
+                    "tuple": {"id": "s2", "parent": "q1", "slot": "customer-grain", "ord": 2},
+                },
+            ],
+        },
+    )
+    assert b1["ok"] is True
+    rev1_digest = b1["revision_digest"]
+
+    ev_res = client.get_decision_evidence(
+        world_dir,
+        decide="atlas_collect::plan",
+        key="q1",
+        rev=1,
+        caller="service:atlas",
+        grants=["read:atlas"],
+    )
+    assert ev_res["ok"] is True
+    evidence = ev_res["evidence"]
+    assert evidence["bundle"] is not None
+
+    ver_ok = client.verify_decision_evidence(
+        evidence,
+        world_manifest_digest=manifest_digest,
+        program_digest=program_digest,
+        revision=1,
+        revision_digest=rev1_digest,
+        decide_name="atlas_collect::plan",
+        entity_key="q1",
+        caller="service:atlas",
+        grants=["read:atlas"],
+    )
+    assert ver_ok["ok"] is True
+    assert ver_ok["receipt"]["authority"] == "runtime_check"
+
+    # Retracting all children preserves parent settlement with empty list []
+    b2 = client.world_batch(
+        world_dir,
+        {
+            "schema": "brix.world.batch@1",
+            "expected_base_revision": 1,
+            "idempotency_key": "collect-retract-all",
+            "operations": [
+                {"op": "remove", "relation": "atlas_collect::slots", "key": "s1"},
+                {"op": "remove", "relation": "atlas_collect::slots", "key": "s2"},
+            ],
+        },
+    )
+    assert b2["ok"] is True
+
+    # Historical evidence request at rev 1 after advancing to rev 2 must still verify
+    ev_hist = client.get_decision_evidence(
+        world_dir,
+        decide="atlas_collect::plan",
+        key="q1",
+        rev=1,
+        caller="service:atlas",
+        grants=["read:atlas"],
+    )
+    assert ev_hist["ok"] is True
+    ver_hist = client.verify_decision_evidence(
+        ev_hist["evidence"],
+        world_manifest_digest=manifest_digest,
+        program_digest=program_digest,
+        revision=1,
+        revision_digest=rev1_digest,
+        decide_name="atlas_collect::plan",
+        entity_key="q1",
+        caller="service:atlas",
+        grants=["read:atlas"],
+    )
+    assert ver_hist["ok"] is True

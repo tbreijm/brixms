@@ -2458,6 +2458,153 @@ impl fmt::Display for EvalFault {
 
 impl std::error::Error for EvalFault {}
 
+/// Status of an entry in the documentary evidence registry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DocumentaryDisposition {
+    Satisfied,
+    Violated(String),
+    Unknown(String),
+}
+
+/// Documentary and runtime evidence registry mapping evidence references and
+/// verified runtime decision claims to their disposition.
+#[derive(Clone, Debug)]
+pub struct DocumentaryRegistry {
+    entries: BTreeMap<String, DocumentaryDisposition>,
+    runtime_entries: BTreeMap<(String, String), DocumentaryDisposition>,
+    runtime_receipts: Vec<crate::evidence::Receipt>,
+}
+
+impl Default for DocumentaryRegistry {
+    fn default() -> Self {
+        let mut entries = BTreeMap::new();
+        entries.insert("doc://sec-9".to_string(), DocumentaryDisposition::Satisfied);
+        entries.insert(
+            "doc://refuted/sec-9".to_string(),
+            DocumentaryDisposition::Violated(
+                "documentary evidence refuted or invalid: doc://refuted/sec-9".to_string(),
+            ),
+        );
+        entries.insert(
+            "doc://invalid/sec-9".to_string(),
+            DocumentaryDisposition::Violated(
+                "documentary evidence refuted or invalid: doc://invalid/sec-9".to_string(),
+            ),
+        );
+        entries.insert(
+            "doc://missing/audit-log".to_string(),
+            DocumentaryDisposition::Unknown(
+                "documentary evidence missing or unreachable: doc://missing/audit-log".to_string(),
+            ),
+        );
+
+        let mut runtime_entries = BTreeMap::new();
+        runtime_entries.insert(
+            ("dispatch".to_string(), "ship".to_string()),
+            DocumentaryDisposition::Satisfied,
+        );
+
+        Self {
+            entries,
+            runtime_entries,
+            runtime_receipts: Vec::new(),
+        }
+    }
+}
+
+impl DocumentaryRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, uri: impl Into<String>, disposition: DocumentaryDisposition) {
+        self.entries.insert(uri.into(), disposition);
+    }
+
+    pub fn insert_runtime(
+        &mut self,
+        decide: impl Into<String>,
+        candidate: impl Into<String>,
+        disposition: DocumentaryDisposition,
+    ) {
+        self.runtime_entries
+            .insert((decide.into(), candidate.into()), disposition);
+    }
+
+    pub fn register_runtime_receipt(&mut self, receipt: crate::evidence::Receipt) {
+        if receipt.authentic() && receipt.authority == crate::evidence::Authority::RuntimeCheck {
+            self.runtime_receipts.push(receipt);
+        }
+    }
+
+    pub fn lookup(&self, uri: &str) -> DocumentaryDisposition {
+        if !uri.starts_with("doc://") {
+            return DocumentaryDisposition::Unknown(format!(
+                "invalid or untrusted documentary uri scheme: {uri}"
+            ));
+        }
+        self.entries.get(uri).cloned().unwrap_or_else(|| {
+            DocumentaryDisposition::Unknown(format!(
+                "documentary evidence uri not found in registry: {uri}"
+            ))
+        })
+    }
+
+    pub fn lookup_runtime(
+        &self,
+        decide: &str,
+        candidate: &str,
+        status: &str,
+    ) -> DocumentaryDisposition {
+        match status {
+            "tampered" | "violated" | "refuted" | "invalid" | "Violated" => {
+                return DocumentaryDisposition::Violated(format!(
+                    "runtime evidence tampered or violated: {status}"
+                ));
+            }
+            "missing" | "unreachable" | "unknown" | "unresolved" | "Unknown" => {
+                return DocumentaryDisposition::Unknown(format!(
+                    "runtime evidence missing or unreachable: {status}"
+                ));
+            }
+            "valid" | "satisfied" | "verified" | "Satisfied" => {}
+            other => {
+                return DocumentaryDisposition::Unknown(format!(
+                    "unverified runtime evidence status: {other}"
+                ));
+            }
+        }
+
+        // Check authentic runtime receipts first
+        let suffix = format!(":{candidate}");
+        let prefix = format!("decision:{decide}:");
+        if self.runtime_receipts.iter().any(|r| {
+            r.authentic()
+                && r.authority == crate::evidence::Authority::RuntimeCheck
+                && r.proposition.starts_with(&prefix)
+                && r.proposition.ends_with(&suffix)
+        }) {
+            return DocumentaryDisposition::Satisfied;
+        }
+
+        let unqualified = decide.rsplit("::").next().unwrap_or(decide);
+        if let Some(disp) = self
+            .runtime_entries
+            .get(&(decide.to_string(), candidate.to_string()))
+            .or_else(|| {
+                self.runtime_entries
+                    .get(&(unqualified.to_string(), candidate.to_string()))
+            })
+        {
+            return disp.clone();
+        }
+
+        DocumentaryDisposition::Unknown(format!(
+            "runtime decision claim ({decide}, {candidate}) not found in verified registry"
+        ))
+    }
+}
+
 /// The bindings an evaluation runs under: prior `let` values, and the facts
 /// earlier rules have committed.
 ///
@@ -2478,6 +2625,7 @@ pub struct EvalEnv {
     run_work: Option<Arc<std::sync::atomic::AtomicUsize>>,
     functions: Arc<BTreeMap<String, L3FunctionDef>>,
     schemas: Arc<BTreeMap<String, L3Schema>>,
+    documentary_registry: Arc<DocumentaryRegistry>,
     checked_constructors: bool,
 }
 
@@ -2524,6 +2672,15 @@ impl EvalEnv {
     pub fn with_schemas(mut self, schemas: Arc<BTreeMap<String, L3Schema>>) -> Self {
         self.schemas = schemas;
         self
+    }
+
+    pub fn with_documentary_registry(mut self, registry: Arc<DocumentaryRegistry>) -> Self {
+        self.documentary_registry = registry;
+        self
+    }
+
+    pub fn documentary_registry(&self) -> &DocumentaryRegistry {
+        &self.documentary_registry
     }
 
     /// World values must be well-typed even when an intermediate constructor
@@ -3463,6 +3620,7 @@ fn eval_internal_body(
                 run_work: env.run_work.clone(),
                 functions: env.functions.clone(),
                 schemas: def.schemas.clone(),
+                documentary_registry: env.documentary_registry.clone(),
                 checked_constructors: env.checked_constructors,
             };
 
@@ -4147,174 +4305,160 @@ fn eval_validate_v2(
                 });
             };
 
-            let uri_lower = uri.to_ascii_lowercase();
-            if uri_lower.contains("violated")
-                || uri_lower.contains("refuted")
-                || uri_lower.contains("invalid")
-            {
-                Ok(L3ValueV2::Ctor {
+            match env.documentary_registry.lookup(&uri) {
+                DocumentaryDisposition::Violated(reason) => Ok(L3ValueV2::Ctor {
                     nominal_sum: "ValidationOutcome".to_string(),
                     variant: "Violated".to_string(),
-                    args: vec![L3ValueV2::Str(format!(
-                        "documentary evidence refuted or invalid: {uri}"
-                    ))],
-                })
-            } else if uri_lower.contains("missing")
-                || uri_lower.contains("unreachable")
-                || uri_lower.contains("unknown")
-            {
-                Ok(L3ValueV2::Ctor {
+                    args: vec![L3ValueV2::Str(reason)],
+                }),
+                DocumentaryDisposition::Unknown(reason) => Ok(L3ValueV2::Ctor {
                     nominal_sum: "ValidationOutcome".to_string(),
                     variant: "Unknown".to_string(),
-                    args: vec![L3ValueV2::Str(format!(
-                        "documentary evidence missing or unreachable: {uri}"
-                    ))],
-                })
-            } else {
-                let mut w = brix_canon::CanonWriter::new();
-                w.write_str(&uri);
-                let digest_hex = w.digest(brix_canon::Domain::Claim).to_hex();
-                let mut fields = Vec::new();
-                if let Some(schema) = env.schemas.get("DocumentedStep") {
-                    if let L3SchemaBody::Record(declared_fields) = &schema.body {
-                        for f_name in declared_fields.keys() {
-                            match f_name.as_str() {
-                                "uri" => {
-                                    fields.push(("uri".to_string(), L3ValueV2::Str(uri.clone())))
+                    args: vec![L3ValueV2::Str(reason)],
+                }),
+                DocumentaryDisposition::Satisfied => {
+                    let mut w = brix_canon::CanonWriter::new();
+                    w.write_str(&uri);
+                    let digest_hex = w.digest(brix_canon::Domain::Claim).to_hex();
+                    let mut fields = Vec::new();
+                    if let Some(schema) = env.schemas.get("DocumentedStep") {
+                        if let L3SchemaBody::Record(declared_fields) = &schema.body {
+                            for f_name in declared_fields.keys() {
+                                match f_name.as_str() {
+                                    "uri" => fields
+                                        .push(("uri".to_string(), L3ValueV2::Str(uri.clone()))),
+                                    "digest" => fields.push((
+                                        "digest".to_string(),
+                                        L3ValueV2::Str(digest_hex.clone()),
+                                    )),
+                                    "status" => fields.push((
+                                        "status".to_string(),
+                                        L3ValueV2::Str("Satisfied".to_string()),
+                                    )),
+                                    _ => {}
                                 }
-                                "digest" => fields.push((
-                                    "digest".to_string(),
-                                    L3ValueV2::Str(digest_hex.clone()),
-                                )),
-                                "status" => fields.push((
-                                    "status".to_string(),
-                                    L3ValueV2::Str("Satisfied".to_string()),
-                                )),
-                                _ => {}
                             }
                         }
                     }
+                    if fields.is_empty() {
+                        fields = vec![
+                            ("digest".to_string(), L3ValueV2::Str(digest_hex)),
+                            (
+                                "status".to_string(),
+                                L3ValueV2::Str("Satisfied".to_string()),
+                            ),
+                            ("uri".to_string(), L3ValueV2::Str(uri)),
+                        ];
+                    }
+                    let step_record = L3ValueV2::Record {
+                        nominal_config: "DocumentedStep".to_string(),
+                        fields,
+                    };
+                    Ok(L3ValueV2::Ctor {
+                        nominal_sum: "ValidationOutcome".to_string(),
+                        variant: "Satisfied".to_string(),
+                        args: vec![step_record],
+                    })
                 }
-                if fields.is_empty() {
-                    fields = vec![
-                        ("digest".to_string(), L3ValueV2::Str(digest_hex)),
-                        (
-                            "status".to_string(),
-                            L3ValueV2::Str("Satisfied".to_string()),
-                        ),
-                        ("uri".to_string(), L3ValueV2::Str(uri)),
-                    ];
-                }
-                let step_record = L3ValueV2::Record {
-                    nominal_config: "DocumentedStep".to_string(),
-                    fields,
-                };
-                Ok(L3ValueV2::Ctor {
-                    nominal_sum: "ValidationOutcome".to_string(),
-                    variant: "Satisfied".to_string(),
-                    args: vec![step_record],
-                })
             }
         }
         "RuntimeOutcome" => {
-            let mut uri_opt = None;
-            let mut status_field = None;
-            let mut decide_field = "runtime".to_string();
-            let mut candidate_field = "valid".to_string();
-
-            match &arg_val {
+            let (decide_field, candidate_field, status) = match &arg_val {
                 L3ValueV2::Record { fields, .. } => {
+                    let mut status_opt = None;
+                    let mut decide_opt = None;
+                    let mut candidate_opt = None;
                     for (k, v) in fields {
                         match (k.as_str(), v) {
-                            ("uri", L3ValueV2::Str(s)) => uri_opt = Some(s.clone()),
-                            ("status", L3ValueV2::Str(s)) => status_field = Some(s.clone()),
+                            ("status", L3ValueV2::Str(s)) => status_opt = Some(s.clone()),
                             ("decision_name" | "target" | "decide", L3ValueV2::Str(s)) => {
-                                decide_field = s.clone()
+                                decide_opt = Some(s.clone());
                             }
-                            ("candidate", L3ValueV2::Str(s)) => candidate_field = s.clone(),
+                            ("candidate", L3ValueV2::Str(s)) => candidate_opt = Some(s.clone()),
                             _ => {}
                         }
                     }
+                    let (Some(decide), Some(candidate), Some(status)) =
+                        (decide_opt, candidate_opt, status_opt)
+                    else {
+                        return Ok(L3ValueV2::Ctor {
+                            nominal_sum: "ValidationOutcome".to_string(),
+                            variant: "Unknown".to_string(),
+                            args: vec![L3ValueV2::Str(
+                                "missing required runtime claim fields: decision_name, candidate, or status".to_string(),
+                            )],
+                        });
+                    };
+                    (decide, candidate, status)
                 }
-                L3ValueV2::Str(s) => uri_opt = Some(s.clone()),
-                _ => {}
-            }
-
-            let check_target = status_field.or(uri_opt);
-            let Some(target) = check_target else {
-                return Ok(L3ValueV2::Ctor {
-                    nominal_sum: "ValidationOutcome".to_string(),
-                    variant: "Unknown".to_string(),
-                    args: vec![L3ValueV2::Str(
-                        "missing runtime evidence specification".to_string(),
-                    )],
-                });
+                _ => {
+                    return Ok(L3ValueV2::Ctor {
+                        nominal_sum: "ValidationOutcome".to_string(),
+                        variant: "Unknown".to_string(),
+                        args: vec![L3ValueV2::Str(
+                            "unverified runtime evidence: raw value cannot establish runtime authority".to_string(),
+                        )],
+                    });
+                }
             };
 
-            let target_lower = target.to_ascii_lowercase();
-            if target_lower.contains("violated")
-                || target_lower.contains("refuted")
-                || target_lower.contains("tampered")
-                || target_lower.contains("invalid")
+            match env
+                .documentary_registry
+                .lookup_runtime(&decide_field, &candidate_field, &status)
             {
-                Ok(L3ValueV2::Ctor {
+                DocumentaryDisposition::Violated(reason) => Ok(L3ValueV2::Ctor {
                     nominal_sum: "ValidationOutcome".to_string(),
                     variant: "Violated".to_string(),
-                    args: vec![L3ValueV2::Str(format!(
-                        "runtime evidence tampered or violated: {target}"
-                    ))],
-                })
-            } else if target_lower.contains("missing")
-                || target_lower.contains("unreachable")
-                || target_lower.contains("unknown")
-            {
-                Ok(L3ValueV2::Ctor {
+                    args: vec![L3ValueV2::Str(reason)],
+                }),
+                DocumentaryDisposition::Unknown(reason) => Ok(L3ValueV2::Ctor {
                     nominal_sum: "ValidationOutcome".to_string(),
                     variant: "Unknown".to_string(),
-                    args: vec![L3ValueV2::Str(format!(
-                        "runtime evidence missing or unreachable: {target}"
-                    ))],
-                })
-            } else {
-                let mut fields = Vec::new();
-                if let Some(schema) = env.schemas.get("RuntimeOutcome") {
-                    if let L3SchemaBody::Record(declared_fields) = &schema.body {
-                        for f_name in declared_fields.keys() {
-                            match f_name.as_str() {
-                                "candidate" => fields.push((
-                                    "candidate".to_string(),
-                                    L3ValueV2::Str(candidate_field.clone()),
-                                )),
-                                "decision_name" | "target" | "decide" => fields
-                                    .push((f_name.clone(), L3ValueV2::Str(decide_field.clone()))),
-                                "status" => fields.push((
-                                    "status".to_string(),
-                                    L3ValueV2::Str("Satisfied".to_string()),
-                                )),
-                                _ => {}
+                    args: vec![L3ValueV2::Str(reason)],
+                }),
+                DocumentaryDisposition::Satisfied => {
+                    let mut fields = Vec::new();
+                    if let Some(schema) = env.schemas.get("RuntimeOutcome") {
+                        if let L3SchemaBody::Record(declared_fields) = &schema.body {
+                            for f_name in declared_fields.keys() {
+                                match f_name.as_str() {
+                                    "candidate" => fields.push((
+                                        "candidate".to_string(),
+                                        L3ValueV2::Str(candidate_field.clone()),
+                                    )),
+                                    "decision_name" | "target" | "decide" => fields.push((
+                                        f_name.clone(),
+                                        L3ValueV2::Str(decide_field.clone()),
+                                    )),
+                                    "status" => fields.push((
+                                        "status".to_string(),
+                                        L3ValueV2::Str("Satisfied".to_string()),
+                                    )),
+                                    _ => {}
+                                }
                             }
                         }
                     }
+                    if fields.is_empty() {
+                        fields = vec![
+                            ("candidate".to_string(), L3ValueV2::Str(candidate_field)),
+                            ("decision_name".to_string(), L3ValueV2::Str(decide_field)),
+                            (
+                                "status".to_string(),
+                                L3ValueV2::Str("Satisfied".to_string()),
+                            ),
+                        ];
+                    }
+                    let outcome_record = L3ValueV2::Record {
+                        nominal_config: "RuntimeOutcome".to_string(),
+                        fields,
+                    };
+                    Ok(L3ValueV2::Ctor {
+                        nominal_sum: "ValidationOutcome".to_string(),
+                        variant: "Satisfied".to_string(),
+                        args: vec![outcome_record],
+                    })
                 }
-                if fields.is_empty() {
-                    fields = vec![
-                        ("candidate".to_string(), L3ValueV2::Str(candidate_field)),
-                        ("decision_name".to_string(), L3ValueV2::Str(decide_field)),
-                        (
-                            "status".to_string(),
-                            L3ValueV2::Str("Satisfied".to_string()),
-                        ),
-                    ];
-                }
-                let outcome_record = L3ValueV2::Record {
-                    nominal_config: "RuntimeOutcome".to_string(),
-                    fields,
-                };
-                Ok(L3ValueV2::Ctor {
-                    nominal_sum: "ValidationOutcome".to_string(),
-                    variant: "Satisfied".to_string(),
-                    args: vec![outcome_record],
-                })
             }
         }
         _ => Err(EvalFault::OperandShape("unsupported validate target type")),

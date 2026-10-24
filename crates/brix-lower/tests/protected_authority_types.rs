@@ -30,6 +30,50 @@ fn run_program_with_input(source: &str, input_json: &str) -> Result<FiniteDecisi
     Ok(runtime.run().stop)
 }
 
+// Review regressions: an untrusted string is not evidence of either authority.
+fn assert_unverified_string_cannot_establish_authority(target: &str, declaration: &str) {
+    let source = format!(
+        r#"
+config {target} = {declaration}
+config Decision = Ship | Hold
+input raw: Str
+rule accepted() = match validate<{target}>(raw) {{
+  Satisfied(_) => true
+  Violated(_) => false
+  Unknown(_) => false
+}}
+propose ship priority 10 when accepted = Ship
+propose hold otherwise = Hold
+commit d from (ship, hold)
+"#
+    );
+    let input = r#"{"schema":"brix.input@5","values":{"raw":{"type":"string","value":"attacker-chosen-authority"}}}"#;
+    let stop = run_program_with_input(&source, input).expect("runs");
+    let FiniteDecisionStop::Selected(decision) = stop else {
+        panic!("expected hold, got {stop:?}");
+    };
+    assert_eq!(
+        decision.candidate, "hold",
+        "{target} requires checked evidence"
+    );
+}
+
+#[test]
+fn review_documentary_authority_requires_registry_evidence() {
+    assert_unverified_string_cannot_establish_authority(
+        "DocumentedStep",
+        "{ digest: Str, status: Str, uri: Str }",
+    );
+}
+
+#[test]
+fn review_runtime_authority_requires_verified_decision_evidence() {
+    assert_unverified_string_cannot_establish_authority(
+        "RuntimeOutcome",
+        "{ candidate: Str, decision_name: Str, status: Str }",
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 1. Direct JSON input decoding rejection
 // ---------------------------------------------------------------------------

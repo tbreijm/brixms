@@ -23,14 +23,14 @@ use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
 
-use brix_canon::{CanonWriter, Digest, Domain};
+use brix_canon::{CanonReader, CanonWriter, Digest, Domain};
 use brix_lower::evidence::{Authority, Disposition, Reason, Receipt};
 use serde_json::{json, Value as Json};
 use soc_core::calendar::Key;
 use soc_core::store::{MemoryNodeStore, NodeStore, TrieMap};
 
 use super::audit::{
-    build_genesis_bundle_from_session, decode_world_audit_bundle_v1, ProgramClosureV1,
+    build_genesis_bundle_up_to_revision, decode_world_audit_bundle_v1, ProgramClosureV1,
     WorldAuditDecodeLimits,
 };
 use super::decision_codec::{
@@ -42,6 +42,7 @@ use super::verify::{verify_world_audit_bundle, VerifyOptions};
 use super::{WorldError, WorldKey, WorldRevision, WorldSession, WorldTuple};
 
 pub const DECISION_EVIDENCE_SCHEMA: &str = "brix.world.decision-evidence@1";
+pub const DECISION_CLAIM_BUNDLE_PREFIX: &[u8; 8] = b"BRIXDCB1";
 pub const MAX_DECISION_PROOF_NODES: usize = 512;
 pub const MAX_DECISION_ARTIFACT_BYTES: usize = 16 * 1024 * 1024;
 
@@ -56,7 +57,9 @@ pub struct DecisionTarget {
     pub entity: String,
     pub candidate: String,
     pub value_digest: Digest,
+    pub caller: Option<String>,
     pub grants: Vec<String>,
+    pub release: String,
 }
 
 impl DecisionTarget {
@@ -70,7 +73,9 @@ impl DecisionTarget {
             "entity": self.entity,
             "candidate": self.candidate,
             "value_digest": self.value_digest.to_hex(),
+            "caller": self.caller,
             "grants": self.grants,
+            "release": self.release,
         })
     }
 
@@ -85,10 +90,20 @@ impl DecisionTarget {
         writer.write_str(&self.entity);
         writer.write_str(&self.candidate);
         writer.write_bytes(self.value_digest.as_bytes());
+        match &self.caller {
+            Some(c) => {
+                writer.write_uint(1);
+                writer.write_str(c);
+            }
+            None => {
+                writer.write_uint(0);
+            }
+        }
         writer.write_uint(self.grants.len() as u64);
         for g in &self.grants {
             writer.write_str(g);
         }
+        writer.write_str(&self.release);
         writer.digest(Domain::Claim)
     }
 }
@@ -167,6 +182,10 @@ impl DecisionEvidence {
         }
 
         let target_json = &val["target"];
+        let caller: Option<String> = target_json
+            .get("caller")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let grants: Vec<String> = target_json["grants"]
             .as_array()
             .map(|arr| {
@@ -175,6 +194,11 @@ impl DecisionEvidence {
                     .collect()
             })
             .unwrap_or_default();
+        let release: String = target_json
+            .get("release")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .unwrap_or_else(|| super::audit::ExecProfileV1::default().crate_version);
 
         let target = DecisionTarget {
             world: digest_from_hex(
@@ -212,7 +236,9 @@ impl DecisionEvidence {
                     .as_str()
                     .ok_or_else(|| malformed("target.value_digest"))?,
             )?,
+            caller,
             grants,
+            release,
         };
 
         let sett_json = &val["settlement"];
@@ -301,13 +327,97 @@ impl DecisionEvidence {
     }
 }
 
+fn is_grants_relation_name(name: &str) -> bool {
+    let unqualified = name.rsplit("::").next().unwrap_or(name);
+    matches!(
+        unqualified,
+        "grants" | "claims" | "caller_grants" | "permissions" | "authority"
+    )
+}
+
+/// Modeled `(inferred_caller, modeled_grants)` extracted from revision relation tuples.
+type ModeledClaimContext = (Option<String>, Vec<String>);
+
+/// Extract modeled grants and caller from relation tuples at a revision.
+/// Returns `Some((inferred_caller, modeled_grants))` if the world declares a
+/// grants/claims relation, or `None` if the world schema does not model grants
+/// in a dedicated relation.
+fn extract_modeled_claim_context(
+    relations: &BTreeMap<String, BTreeMap<WorldKey, WorldTuple>>,
+    caller_filter: Option<&str>,
+    entity: &str,
+) -> Result<Option<ModeledClaimContext>, PolicyError> {
+    let mut has_grants_rel = false;
+    let mut modeled_grants = Vec::new();
+    let mut callers = std::collections::BTreeSet::new();
+
+    for (rel_name, rows) in relations {
+        if !is_grants_relation_name(rel_name) {
+            continue;
+        }
+        has_grants_rel = true;
+        for tuple in rows.values() {
+            let rec = super::TupleRecord::from_tuple(tuple)?;
+            if let Some(row_ent) = rec
+                .get_str("entity")
+                .or_else(|| rec.get_str("subject"))
+                .or_else(|| rec.get_str("target"))
+                .or_else(|| rec.get_str("parent"))
+            {
+                if row_ent != entity && row_ent != "*" {
+                    continue;
+                }
+            }
+            let row_caller = rec.get_str("caller").or_else(|| rec.get_str("principal"));
+            if let Some(expected_caller) = caller_filter {
+                if let Some(rc) = row_caller {
+                    if rc != expected_caller && rc != "*" {
+                        continue;
+                    }
+                }
+            }
+            if let Some(rc) = row_caller {
+                callers.insert(rc.to_string());
+            }
+            for field_name in ["grant", "permission", "claim"] {
+                if let Some(g) = rec.get_str(field_name) {
+                    if !g.is_empty() && !modeled_grants.contains(&g.to_string()) {
+                        modeled_grants.push(g.to_string());
+                    }
+                }
+            }
+            if let Some(gs) = rec.get_str("grants") {
+                for g in gs.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    if !modeled_grants.contains(&g.to_string()) {
+                        modeled_grants.push(g.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if !has_grants_rel {
+        return Ok(None);
+    }
+
+    let inferred_caller = caller_filter.map(String::from).or_else(|| {
+        if callers.len() == 1 {
+            callers.into_iter().next()
+        } else {
+            None
+        }
+    });
+    Ok(Some((inferred_caller, modeled_grants)))
+}
+
 /// Verify portable decision evidence against the consumer's expected target.
 ///
 /// Recomputes authority independently:
-/// 1. Verifies exact target matching (world, program, revision, revision_digest, decide, entity, candidate, value_digest, grants).
+/// 1. Verifies exact target matching (world, program, revision, revision_digest, decide, entity, candidate, value_digest, caller, grants, release).
 /// 2. Verifies the revision record's self-consistent digest.
 /// 3. Resolves the Merkle lookup of `(decide, entity)` from `revision.decision_root` using the supplied proof nodes.
-/// 4. If an audit bundle is included, replays and re-derives the settlement independently via the reference verifier.
+/// 4. Requires an audit bundle and replays the world from genesis up to `expected.revision` via the reference verifier,
+///    confirming the recomputed settlement value, release identity, and modeled claim context.
 pub fn verify_decision_evidence(
     evidence: &DecisionEvidence,
     expected: &DecisionTarget,
@@ -380,44 +490,142 @@ pub fn verify_decision_evidence(
         return Err(malformed("Merkle proof tuple does not match settlement"));
     }
 
-    // 2. If bundle is included, recompute typed settlement independently
-    if let Some(bundle_bytes) = &evidence.bundle {
-        let limits = WorldAuditDecodeLimits::strict();
-        let decoded = decode_world_audit_bundle_v1(bundle_bytes, &limits)
-            .map_err(|e| malformed(format!("decode audit bundle: {e}")))?;
+    // 2. Independent replay is mandatory before issuing RuntimeCheck receipt
+    let bundle_bytes = evidence
+        .bundle
+        .as_ref()
+        .ok_or_else(|| malformed("independent replay bundle is mandatory for runtime authority"))?;
 
-        if decoded.world_manifest.digest() != expected.world {
-            return Err(malformed("bundle manifest digest mismatch"));
-        }
-        if decoded.program.program_manifest_digest != expected.program {
-            return Err(malformed("bundle program digest mismatch"));
-        }
-
-        let report = verify_world_audit_bundle(
-            &decoded,
-            &VerifyOptions {
-                expect_head: expected.revision_digest,
-                expect_program: expected.program,
-                trust_checkpoint: None,
-                limits,
-                max_work: None,
-            },
-        )
-        .map_err(|e| malformed(format!("audit bundle verification failed: {e:?}")))?;
-
-        let matched = report
-            .verified_settlements
-            .iter()
-            .any(|(seq, decide, ent, cand)| {
-                *seq == expected.revision
-                    && decide == &expected.decide
-                    && ent == &expected.entity
-                    && cand == &expected.candidate
-            });
-        if !matched {
+    let (replayed_caller, replayed_release, replayed_grants, raw_bundle_bytes) =
+        if bundle_bytes.starts_with(DECISION_CLAIM_BUNDLE_PREFIX) {
+            let mut r = CanonReader::new(&bundle_bytes[DECISION_CLAIM_BUNDLE_PREFIX.len()..]);
+            let has_caller = r.read_uint().map_err(|e| malformed(format!("{e:?}")))?;
+            let caller = if has_caller == 1 {
+                let bytes = r.read_bytes().map_err(|e| malformed(format!("{e:?}")))?;
+                let s = std::str::from_utf8(bytes).map_err(|e| malformed(e.to_string()))?;
+                Some(s.to_string())
+            } else {
+                None
+            };
+            let rel_bytes = r.read_bytes().map_err(|e| malformed(format!("{e:?}")))?;
+            let release = std::str::from_utf8(rel_bytes)
+                .map_err(|e| malformed(e.to_string()))?
+                .to_string();
+            let count = r.read_uint().map_err(|e| malformed(format!("{e:?}")))? as usize;
+            let mut grants = Vec::with_capacity(count);
+            for _ in 0..count {
+                let bytes = r.read_bytes().map_err(|e| malformed(format!("{e:?}")))?;
+                let s = std::str::from_utf8(bytes).map_err(|e| malformed(e.to_string()))?;
+                grants.push(s.to_string());
+            }
+            let raw_bundle = r.read_bytes().map_err(|e| malformed(format!("{e:?}")))?;
+            (caller, release, grants, raw_bundle)
+        } else {
             return Err(malformed(
-                "recomputed settlement not found in verified replay report",
+                "replay bundle missing revision-bound claim context header",
             ));
+        };
+
+    if replayed_caller != expected.caller {
+        return Err(PolicyError::Refused(Disposition::Unknown {
+            reason: Reason::ContextMismatch {
+                expected: format!("caller={:?}", expected.caller),
+                found: format!("caller={replayed_caller:?}"),
+            },
+        }));
+    }
+
+    if replayed_release != expected.release {
+        return Err(PolicyError::Refused(Disposition::Unknown {
+            reason: Reason::ContextMismatch {
+                expected: format!("release={}", expected.release),
+                found: format!("release={replayed_release}"),
+            },
+        }));
+    }
+
+    if replayed_grants != expected.grants {
+        return Err(PolicyError::Refused(Disposition::Unknown {
+            reason: Reason::ContextMismatch {
+                expected: format!("grants={:?}", expected.grants),
+                found: format!("grants={replayed_grants:?}"),
+            },
+        }));
+    }
+
+    let limits = WorldAuditDecodeLimits::strict();
+    let decoded = decode_world_audit_bundle_v1(raw_bundle_bytes, &limits)
+        .map_err(|e| malformed(format!("decode audit bundle: {e}")))?;
+
+    if decoded.world_manifest.digest() != expected.world {
+        return Err(malformed("bundle manifest digest mismatch"));
+    }
+    if decoded.program.program_manifest_digest != expected.program {
+        return Err(malformed("bundle program digest mismatch"));
+    }
+    if decoded.exec_profile.crate_version != expected.release {
+        return Err(PolicyError::Refused(Disposition::Unknown {
+            reason: Reason::ContextMismatch {
+                expected: format!("crate_version={}", expected.release),
+                found: format!("crate_version={}", decoded.exec_profile.crate_version),
+            },
+        }));
+    }
+
+    let report = verify_world_audit_bundle(
+        &decoded,
+        &VerifyOptions {
+            expect_head: expected.revision_digest,
+            expect_program: expected.program,
+            trust_checkpoint: None,
+            limits,
+            max_work: None,
+        },
+    )
+    .map_err(|e| malformed(format!("audit bundle verification failed: {e:?}")))?;
+
+    let replayed_settlement = report
+        .head_settlements
+        .get(&expected.decide)
+        .and_then(|ents| ents.get(&expected.entity))
+        .ok_or_else(|| malformed("recomputed settlement not found in verified replay report"))?;
+
+    if replayed_settlement.candidate_name != expected.candidate
+        || replayed_settlement.value.compute_digest() != expected.value_digest
+        || replayed_settlement.value != evidence.settlement.value
+        || replayed_settlement.priority != evidence.settlement.priority
+        || replayed_settlement.phase != evidence.settlement.phase
+    {
+        return Err(malformed(
+            "recomputed settlement from replay disagrees with claimed decision evidence",
+        ));
+    }
+
+    // Verify grants against the replayed revision's modeled claim context when a grants relation is present
+    if let Some((modeled_caller, modeled_grants)) = extract_modeled_claim_context(
+        &report.head_relations,
+        expected.caller.as_deref(),
+        &expected.entity,
+    )? {
+        if let (Some(exp_caller), Some(mod_caller)) = (&expected.caller, &modeled_caller) {
+            if exp_caller != mod_caller {
+                return Err(PolicyError::Refused(Disposition::Unknown {
+                    reason: Reason::ContextMismatch {
+                        expected: format!("caller={exp_caller}"),
+                        found: format!("modeled_caller={mod_caller}"),
+                    },
+                }));
+            }
+        }
+        for g in &expected.grants {
+            if !modeled_grants.contains(g) {
+                return Err(PolicyError::Refused(Disposition::Unknown {
+                    reason: Reason::ContextMismatch {
+                        expected: format!("grant '{g}' in modeled revision context"),
+                        found: format!("modeled_grants={modeled_grants:?}"),
+                    },
+                }));
+            }
         }
     }
 
@@ -435,12 +643,52 @@ pub fn verify_decision_evidence(
 }
 
 impl WorldSession {
+    fn revision_relations_at(
+        &self,
+        revision: u64,
+    ) -> Result<BTreeMap<String, BTreeMap<WorldKey, WorldTuple>>, PolicyError> {
+        let snapshot = self.pin_revision(revision)?;
+        let mut relations = BTreeMap::new();
+        for rel_name in self.manifest.relations.keys() {
+            let mut rows = BTreeMap::new();
+            if let Some(root) = snapshot.revision.relation_roots.get(rel_name) {
+                let card = snapshot
+                    .revision
+                    .relation_cardinalities
+                    .get(rel_name)
+                    .copied()
+                    .unwrap_or(0);
+                let trie = TrieMap::<WorldKey, WorldTuple>::from_root_digest(*root, card);
+                let (entries, _) = trie
+                    .iter_page_with_store(None, usize::MAX, &snapshot.node_store)
+                    .map_err(WorldError::from)?;
+                for (k, v) in entries {
+                    rows.insert(k, v);
+                }
+            }
+            relations.insert(rel_name.clone(), rows);
+        }
+        Ok(relations)
+    }
+
     /// Inspect world state to construct the exact expected `DecisionTarget`.
     pub fn decision_target(
         &self,
         revision: u64,
         decide: &str,
         entity: &str,
+        grants: Vec<String>,
+    ) -> Result<DecisionTarget, PolicyError> {
+        self.decision_target_with_caller(revision, decide, entity, None, grants)
+    }
+
+    /// Inspect world state to construct the exact expected `DecisionTarget` with an optional caller binding.
+    pub fn decision_target_with_caller(
+        &self,
+        revision: u64,
+        decide: &str,
+        entity: &str,
+        caller: Option<String>,
         grants: Vec<String>,
     ) -> Result<DecisionTarget, PolicyError> {
         let snapshot = self.pin_revision(revision)?;
@@ -453,7 +701,34 @@ impl WorldSession {
             })?
             .1;
 
+        let relations = self.revision_relations_at(revision)?;
+        let (resolved_caller, resolved_grants) =
+            match extract_modeled_claim_context(&relations, caller.as_deref(), entity)? {
+                Some((modeled_caller, modeled_grants)) => {
+                    let final_grants = if grants.is_empty() {
+                        modeled_grants
+                    } else {
+                        for g in &grants {
+                            if !modeled_grants.contains(g) {
+                                return Err(PolicyError::Refused(Disposition::Unknown {
+                                    reason: Reason::ContextMismatch {
+                                        expected: format!(
+                                            "grant '{g}' in modeled revision context"
+                                        ),
+                                        found: format!("modeled_grants={modeled_grants:?}"),
+                                    },
+                                }));
+                            }
+                        }
+                        grants
+                    };
+                    (caller.or(modeled_caller), final_grants)
+                }
+                None => (caller, grants),
+            };
+
         let value_digest = settlement.value.compute_digest();
+        let release = super::audit::ExecProfileV1::default().crate_version;
 
         Ok(DecisionTarget {
             world: self.manifest.digest(),
@@ -464,7 +739,9 @@ impl WorldSession {
             entity: entity.to_string(),
             candidate: settlement.candidate_name,
             value_digest,
-            grants,
+            caller: resolved_caller,
+            grants: resolved_grants,
+            release,
         })
     }
 
@@ -520,9 +797,29 @@ impl WorldSession {
         grants: Vec<String>,
         include_bundle: bool,
     ) -> Result<DecisionEvidence, PolicyError> {
+        self.request_decision_evidence_with_caller(
+            revision,
+            decide,
+            entity,
+            None,
+            grants,
+            include_bundle,
+        )
+    }
+
+    /// Request, verify, and durably cache portable decision evidence with an optional caller binding.
+    pub fn request_decision_evidence_with_caller(
+        &mut self,
+        revision: u64,
+        decide: &str,
+        entity: &str,
+        caller: Option<String>,
+        grants: Vec<String>,
+        include_bundle: bool,
+    ) -> Result<DecisionEvidence, PolicyError> {
         let _lock = WorldLockGuard::acquire(&self.root)?;
         self.sync_gc_epoch()?;
-        let target = self.decision_target(revision, decide, entity, grants)?;
+        let target = self.decision_target_with_caller(revision, decide, entity, caller, grants)?;
         let path = self.decision_evidence_path(&target);
         if path.exists() {
             return self.load_decision_evidence(&target);
@@ -551,13 +848,31 @@ impl WorldSession {
         let bundle_bytes = if include_bundle {
             if let Ok(closure) = self.program_closure() {
                 let ep = super::audit::ExecProfileV1::default();
-                let bundle = build_genesis_bundle_from_session(self, closure, ep)?;
+                let bundle =
+                    build_genesis_bundle_up_to_revision(self, closure, ep, target.revision)?;
                 let limits = WorldAuditDecodeLimits::strict();
-                Some(
-                    bundle
-                        .encode(&limits)
-                        .map_err(|e| WorldError::NetworkError(e.to_string()))?,
-                )
+                let raw_bundle = bundle
+                    .encode(&limits)
+                    .map_err(|e| WorldError::NetworkError(e.to_string()))?;
+                let mut w = CanonWriter::new();
+                match &target.caller {
+                    Some(c) => {
+                        w.write_uint(1);
+                        w.write_str(c);
+                    }
+                    None => {
+                        w.write_uint(0);
+                    }
+                }
+                w.write_str(&target.release);
+                w.write_uint(target.grants.len() as u64);
+                for g in &target.grants {
+                    w.write_str(g);
+                }
+                w.write_bytes(&raw_bundle);
+                let mut full_payload = DECISION_CLAIM_BUNDLE_PREFIX.to_vec();
+                full_payload.extend_from_slice(&w.finish());
+                Some(full_payload)
             } else {
                 None
             }

@@ -161,6 +161,7 @@ pub enum WorldOp {
         rev: u64,
         decide: String,
         entity: String,
+        caller: Option<String>,
         grants: Vec<String>,
         out: Option<PathBuf>,
         include_bundle: bool,
@@ -173,8 +174,10 @@ pub enum WorldOp {
         expect_rev_digest: String,
         expect_decide: String,
         expect_entity: String,
-        expect_candidate: String,
+        expect_candidate: Option<String>,
+        expect_caller: Option<String>,
         expect_grants: Vec<String>,
+        expect_release: Option<String>,
     },
 }
 
@@ -2169,9 +2172,10 @@ fn parse_world_evidence_args(args: &[String], json: bool) -> Result<WorldOp, Cli
     let mut rev = None;
     let mut decide = None;
     let mut entity = None;
+    let mut caller = None;
     let mut grants = Vec::new();
     let mut out = None;
-    let mut include_bundle = false;
+    let mut include_bundle = true;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -2213,18 +2217,33 @@ fn parse_world_evidence_args(args: &[String], json: bool) -> Result<WorldOp, Cli
             decide = Some(args[i].clone());
         } else if let Some(val) = arg.strip_prefix("--decide=") {
             decide = Some(val.to_string());
-        } else if arg == "--entity" {
+        } else if arg == "--entity" || arg == "--key" {
             i += 1;
             if i >= args.len() {
                 return Err(CliUsageError::usage(
-                    "missing value for '--entity'".to_string(),
+                    format!("missing value for '{arg}'"),
                     json,
                     Some(cmd_name.to_string()),
                 ));
             }
             entity = Some(args[i].clone());
-        } else if let Some(val) = arg.strip_prefix("--entity=") {
+        } else if let Some(val) = arg
+            .strip_prefix("--entity=")
+            .or_else(|| arg.strip_prefix("--key="))
+        {
             entity = Some(val.to_string());
+        } else if arg == "--caller" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--caller'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            caller = Some(args[i].clone());
+        } else if let Some(val) = arg.strip_prefix("--caller=") {
+            caller = Some(val.to_string());
         } else if arg == "--grant" {
             i += 1;
             if i >= args.len() {
@@ -2251,6 +2270,8 @@ fn parse_world_evidence_args(args: &[String], json: bool) -> Result<WorldOp, Cli
             out = Some(PathBuf::from(val));
         } else if arg == "--include-bundle" {
             include_bundle = true;
+        } else if arg == "--no-bundle" || arg == "--omit-bundle" {
+            include_bundle = false;
         } else if arg.starts_with('-') {
             return Err(CliUsageError::usage(
                 format!("unknown option for '{cmd_name}': '{arg}'"),
@@ -2291,19 +2312,24 @@ fn parse_world_evidence_args(args: &[String], json: bool) -> Result<WorldOp, Cli
         )
     })?;
 
-    let entity = entity.ok_or_else(|| {
-        CliUsageError::usage(
-            "missing required '--entity <ID>'".to_string(),
-            json,
-            Some(cmd_name.to_string()),
-        )
-    })?;
+    let entity = match entity {
+        Some(e) => e,
+        None if !positionals.is_empty() => positionals.remove(0),
+        None => {
+            return Err(CliUsageError::usage(
+                "missing required '--entity <ID>'".to_string(),
+                json,
+                Some(cmd_name.to_string()),
+            ));
+        }
+    };
 
     Ok(WorldOp::Evidence {
         dir,
         rev,
         decide,
         entity,
+        caller,
         grants,
         out,
         include_bundle,
@@ -2321,7 +2347,9 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
     let mut expect_decide = None;
     let mut expect_entity = None;
     let mut expect_candidate = None;
+    let mut expect_caller = None;
     let mut expect_grants = Vec::new();
+    let mut expect_release = None;
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -2339,17 +2367,20 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
             evidence = Some(PathBuf::from(&args[i]));
         } else if let Some(val) = arg.strip_prefix("--evidence=") {
             evidence = Some(PathBuf::from(val));
-        } else if arg == "--expect-world" {
+        } else if arg == "--expect-world" || arg == "--expect-manifest" {
             i += 1;
             if i >= args.len() {
                 return Err(CliUsageError::usage(
-                    "missing value for '--expect-world'".to_string(),
+                    format!("missing value for '{arg}'"),
                     json,
                     Some(cmd_name.to_string()),
                 ));
             }
             expect_world = Some(args[i].clone());
-        } else if let Some(val) = arg.strip_prefix("--expect-world=") {
+        } else if let Some(val) = arg
+            .strip_prefix("--expect-world=")
+            .or_else(|| arg.strip_prefix("--expect-manifest="))
+        {
             expect_world = Some(val.to_string());
         } else if arg == "--expect-program" {
             i += 1;
@@ -2363,29 +2394,35 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
             expect_program = Some(args[i].clone());
         } else if let Some(val) = arg.strip_prefix("--expect-program=") {
             expect_program = Some(val.to_string());
-        } else if arg == "--expect-rev" {
+        } else if arg == "--expect-rev" || arg == "--expect-revision" {
             i += 1;
             if i >= args.len() {
                 return Err(CliUsageError::usage(
-                    "missing value for '--expect-rev'".to_string(),
+                    format!("missing value for '{arg}'"),
                     json,
                     Some(cmd_name.to_string()),
                 ));
             }
             expect_rev = Some(parse_rev(&args[i], cmd_name, json)?);
-        } else if let Some(val) = arg.strip_prefix("--expect-rev=") {
+        } else if let Some(val) = arg
+            .strip_prefix("--expect-rev=")
+            .or_else(|| arg.strip_prefix("--expect-revision="))
+        {
             expect_rev = Some(parse_rev(val, cmd_name, json)?);
-        } else if arg == "--expect-rev-digest" {
+        } else if arg == "--expect-rev-digest" || arg == "--expect-revision-digest" {
             i += 1;
             if i >= args.len() {
                 return Err(CliUsageError::usage(
-                    "missing value for '--expect-rev-digest'".to_string(),
+                    format!("missing value for '{arg}'"),
                     json,
                     Some(cmd_name.to_string()),
                 ));
             }
             expect_rev_digest = Some(args[i].clone());
-        } else if let Some(val) = arg.strip_prefix("--expect-rev-digest=") {
+        } else if let Some(val) = arg
+            .strip_prefix("--expect-rev-digest=")
+            .or_else(|| arg.strip_prefix("--expect-revision-digest="))
+        {
             expect_rev_digest = Some(val.to_string());
         } else if arg == "--expect-decide" {
             i += 1;
@@ -2399,17 +2436,20 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
             expect_decide = Some(args[i].clone());
         } else if let Some(val) = arg.strip_prefix("--expect-decide=") {
             expect_decide = Some(val.to_string());
-        } else if arg == "--expect-entity" {
+        } else if arg == "--expect-entity" || arg == "--expect-key" {
             i += 1;
             if i >= args.len() {
                 return Err(CliUsageError::usage(
-                    "missing value for '--expect-entity'".to_string(),
+                    format!("missing value for '{arg}'"),
                     json,
                     Some(cmd_name.to_string()),
                 ));
             }
             expect_entity = Some(args[i].clone());
-        } else if let Some(val) = arg.strip_prefix("--expect-entity=") {
+        } else if let Some(val) = arg
+            .strip_prefix("--expect-entity=")
+            .or_else(|| arg.strip_prefix("--expect-key="))
+        {
             expect_entity = Some(val.to_string());
         } else if arg == "--expect-candidate" {
             i += 1;
@@ -2423,6 +2463,30 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
             expect_candidate = Some(args[i].clone());
         } else if let Some(val) = arg.strip_prefix("--expect-candidate=") {
             expect_candidate = Some(val.to_string());
+        } else if arg == "--expect-caller" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--expect-caller'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            expect_caller = Some(args[i].clone());
+        } else if let Some(val) = arg.strip_prefix("--expect-caller=") {
+            expect_caller = Some(val.to_string());
+        } else if arg == "--expect-release" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--expect-release'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            expect_release = Some(args[i].clone());
+        } else if let Some(val) = arg.strip_prefix("--expect-release=") {
+            expect_release = Some(val.to_string());
         } else if arg == "--expect-grant" {
             i += 1;
             if i >= args.len() {
@@ -2502,13 +2566,6 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
             Some(cmd_name.to_string()),
         )
     })?;
-    let expect_candidate = expect_candidate.ok_or_else(|| {
-        CliUsageError::usage(
-            "missing required '--expect-candidate <NAME>'".to_string(),
-            json,
-            Some(cmd_name.to_string()),
-        )
-    })?;
 
     Ok(WorldOp::VerifyEvidence {
         evidence,
@@ -2519,7 +2576,9 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
         expect_decide,
         expect_entity,
         expect_candidate,
+        expect_caller,
         expect_grants,
+        expect_release,
     })
 }
 

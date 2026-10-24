@@ -107,6 +107,7 @@ pub fn execute_world(op: &WorldOp, json_out: bool) -> u8 {
             rev,
             decide,
             entity,
+            caller,
             grants,
             out,
             include_bundle,
@@ -115,6 +116,7 @@ pub fn execute_world(op: &WorldOp, json_out: bool) -> u8 {
             *rev,
             decide,
             entity,
+            caller.as_deref(),
             grants,
             out.as_deref(),
             *include_bundle,
@@ -129,7 +131,9 @@ pub fn execute_world(op: &WorldOp, json_out: bool) -> u8 {
             expect_decide,
             expect_entity,
             expect_candidate,
+            expect_caller,
             expect_grants,
+            expect_release,
         } => execute_verify_evidence(
             evidence,
             expect_world,
@@ -138,8 +142,10 @@ pub fn execute_world(op: &WorldOp, json_out: bool) -> u8 {
             expect_rev_digest,
             expect_decide,
             expect_entity,
-            expect_candidate,
+            expect_candidate.as_deref(),
+            expect_caller.as_deref(),
             expect_grants,
+            expect_release.as_deref(),
             json_out,
         ),
     }
@@ -229,6 +235,8 @@ fn execute_init(dir: &Path, program: &Path, package_paths: &[PathBuf], json_out:
             "dir": dir.display().to_string(),
             "revision": session.current_revision,
             "digest": session.current_revision_digest.map(|d| d.to_hex()),
+            "manifest_digest": session.manifest().digest().to_hex(),
+            "world_digest": session.manifest().digest().to_hex(),
             "program_digest": session.manifest().program_digest.to_hex(),
             "relations": relations,
             "exec_profile": session.exec_profile.as_ref().map(|p| p.to_json()),
@@ -1529,6 +1537,7 @@ fn execute_evidence(
     rev: u64,
     decide: &str,
     entity: &str,
+    caller: Option<&str>,
     grants: &[String],
     out: Option<&Path>,
     include_bundle: bool,
@@ -1539,10 +1548,11 @@ fn execute_evidence(
         Err(e) => return print_world_error("world evidence", &e, json_out),
     };
 
-    let evidence = match session.request_decision_evidence(
+    let evidence = match session.request_decision_evidence_with_caller(
         rev,
         decide,
         entity,
+        caller.map(String::from),
         grants.to_vec(),
         include_bundle,
     ) {
@@ -1574,6 +1584,8 @@ fn execute_evidence(
     }
 
     let default_path = session.decision_evidence_path(&evidence.target);
+    let evidence_json: serde_json::Value =
+        serde_json::from_slice(&encoded).unwrap_or(serde_json::Value::Null);
     if json_out {
         let res = json!({
             "schema": WORLD_JSON_SCHEMA,
@@ -1582,6 +1594,7 @@ fn execute_evidence(
             "target": evidence.target.to_json(),
             "path": default_path.display().to_string(),
             "settlement": evidence.settlement.to_json(),
+            "evidence": evidence_json,
         });
         crate::json::emit_result_json(&res);
     } else {
@@ -1601,8 +1614,10 @@ fn execute_verify_evidence(
     expect_rev_digest: &str,
     expect_decide: &str,
     expect_entity: &str,
-    expect_candidate: &str,
+    expect_candidate: Option<&str>,
+    expect_caller: Option<&str>,
     expect_grants: &[String],
+    expect_release: Option<&str>,
     json_out: bool,
 ) -> u8 {
     let bytes = match std::fs::read(evidence_path) {
@@ -1661,9 +1676,15 @@ fn execute_verify_evidence(
         revision_digest: rev_digest,
         decide: expect_decide.to_string(),
         entity: expect_entity.to_string(),
-        candidate: expect_candidate.to_string(),
+        candidate: expect_candidate
+            .map(String::from)
+            .unwrap_or_else(|| evidence.target.candidate.clone()),
         value_digest: evidence.settlement.value.compute_digest(),
+        caller: expect_caller.map(String::from),
         grants: expect_grants.to_vec(),
+        release: expect_release
+            .map(String::from)
+            .unwrap_or_else(|| brix_kb::world::audit::ExecProfileV1::default().crate_version),
     };
 
     let receipt =
@@ -1678,6 +1699,12 @@ fn execute_verify_evidence(
             }
         };
 
+    let authority_str = match receipt.authority {
+        brix_lower::evidence::Authority::RuntimeCheck => "runtime_check",
+        brix_lower::evidence::Authority::BoundedFragment => "bounded_fragment",
+        brix_lower::evidence::Authority::ProofKernel => "proof_kernel",
+    };
+
     if json_out {
         let res = json!({
             "schema": WORLD_JSON_SCHEMA,
@@ -1687,7 +1714,7 @@ fn execute_verify_evidence(
                 "proposition": receipt.proposition,
                 "subject": receipt.subject,
                 "context": receipt.context,
-                "authority": format!("{:?}", receipt.authority),
+                "authority": authority_str,
                 "assumptions": receipt.assumptions,
             }
         });

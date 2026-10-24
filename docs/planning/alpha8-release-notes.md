@@ -14,22 +14,27 @@ Alpha.8 delivers complete, integrated support across Checkpoints 1 through 9:
   - Structural annotation schema resolution in lowering and canonical plan encoding.
 
 - **R10: Incremental Grouped Collection (`collect`)**:
-  - Incremental aggregation operator `GroupProjection::Collect` with deterministic primary sorting and child `WorldKey` tie-breaking.
+  - Incremental aggregation operator `GroupProjection::Collect` with deterministic primary sorting and canonical child `WorldKey` (`child_key.to_hex()`) tie-breaking across both the incremental network and reference evaluators.
   - Full multiplicity preservation for distinct child records producing identical projected values.
-  - Parent-anchored aggregation contract: retraction of the final child cleanly settles the parent to an empty list `[]`.
+  - Parent-anchored aggregation model (`union nonempty_slots, empty_slots` with `where not exists` and annotated `fn no_slots(): List<Str> = []`): retraction of the final child retains the parent settlement with an empty list `[]`.
   - Bounded cardinality limits: overflow aborts the transaction with an explicit error, leaving HEAD and settlements unchanged.
   - Verified against naive reference evaluator differential fuzzing.
 
 - **R11: Portable Settled Decision Evidence (`brix.world.decision-evidence@1`)**:
-  - Canonical artifact binding world manifest digest, program digest, revision sequence, revision digest, decide name, entity key, candidate, value digest, and caller/grants context.
-  - Cryptographic verification via decision trie Merkle proof paths and independent audit bundle replay.
-  - End-to-end support across CLI (`brix world evidence` / `verify-evidence`), RPC (`brix serve --stdio`), and Python SDK (`BrixClient`).
+  - Canonical artifact binding world manifest digest, program digest, revision sequence, revision digest, decide name, entity key, candidate, value digest, and caller/grants context (`DECISION_CLAIM_BUNDLE_PREFIX` sealed inside replay bundle bytes).
+  - Mandatory independent audit bundle replay (`build_genesis_bundle_up_to_revision` ending at the requested revision) and decision trie Merkle proof verification before issuing `Authority::RuntimeCheck` receipts; `include_bundle` defaults to `true` across CLI, RPC, and Python SDK.
+  - End-to-end support across CLI (`brix world evidence` / `verify-evidence`), RPC (`brix serve --stdio`), and Python SDK (`BrixClient.get_decision_evidence` / `verify_decision_evidence`).
 
 - **R12: Protected Finite Authority Types**:
   - Protected `DocumentedStep` and `RuntimeOutcome` types lowerable exclusively via `validate<T>(...)`.
+  - Documentary authority validated against `DocumentaryRegistry` (`doc://` registered URIs); runtime authority validated against structured decision outcome records rather than substring matching.
   - Direct literal construction and wire input injection fail closed with compile-time and runtime diagnostics.
   - Honest three-valued disposition: `ValidationOutcome::Satisfied`, `Violated`, `Unknown`.
   - Verified preservation and rechecking on reload and replay.
+
+- **Packaged World & Atlas Qualification (Checkpoint 9)**:
+  - `scripts/smoke_world_atlas.py` exercises both the baseline alpha.6 world workflow (`examples/world-atlas/atlas.brix`) and the alpha.8 surface/binding/collect/evidence/freshness workflow in isolated CLI processes.
+  - Downstream Atlas repository integration (`semantics/compile.py`, full Atlas domain/surface schema migration, and `model/runtime-lock.json` binary hash pinning) is tracked in the downstream Atlas repository upon consuming the `v0.1.0-alpha.8` release artifact.
 
 ## Storage and Compatibility
 

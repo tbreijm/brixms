@@ -14,7 +14,7 @@
 
 #![deny(unsafe_code)]
 
-use super::compact_deriv::{leaf_counts, CompactDeriv, DRoot, Derivation};
+use super::compact_deriv::{leaf_counts, CompactDeriv, DRoot, Derivation, Leaf};
 use super::network_state::{NetworkStateHeader, OperatorRoots, ValidityKey};
 use super::persistent::{PMap, PSet};
 use super::state_codec::{
@@ -1449,7 +1449,7 @@ impl GroupAccumulator {
         projections: &[(String, GroupProjection)],
         aggregate_values: &[Option<Value>],
         order_values: &[Option<Value>],
-        child_tuple: &IntermediateTuple,
+        child_key: WorldKey,
         child_id: Digest,
         group: &ValueList,
         index: &mut AggregateIndex,
@@ -1465,23 +1465,18 @@ impl GroupAccumulator {
                         .get(idx)
                         .and_then(|v| v.clone())
                         .unwrap_or_else(|| item_val.clone());
-                    let tuple_val = Value::Record {
-                        nominal: "".into(),
-                        fields: child_tuple.fields.clone(),
-                    };
+                    let key_val = Value::Str(child_key.to_hex());
                     self.collected[idx].retain(|(_, _, id, _)| id != &child_id);
                     if self.collected[idx].len() >= *limit {
                         return Err(WorldError::NetworkError(format!(
                             "grouped collect exceeded maximum cardinality limit of {limit}"
                         )));
                     }
-                    self.collected[idx].push((order_val, tuple_val, child_id, item_val));
+                    self.collected[idx].push((order_val, key_val, child_id, item_val));
                     self.collected[idx].sort_by(|a, b| {
                         a.0.partial_cmp(&b.0)
                             .unwrap_or(std::cmp::Ordering::Equal)
-                            .then_with(|| {
-                                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-                            })
+                            .then_with(|| a.1.cmp(&b.1))
                             .then_with(|| a.2.cmp(&b.2))
                     });
                 } else {
@@ -1579,11 +1574,11 @@ impl GroupAccumulator {
                 GroupProjection::Collect { .. } => {
                     let items = self.collected[idx]
                         .iter()
-                        .map(|(order, tuple_val, id, item)| Value::Record {
+                        .map(|(order, key_val, id, item)| Value::Record {
                             nominal: "world::CollectedItem".into(),
                             fields: BTreeMap::from([
                                 ("order".into(), order.clone()),
-                                ("tuple".into(), tuple_val.clone()),
+                                ("key".into(), key_val.clone()),
                                 ("id".into(), Value::Str(id.to_hex())),
                                 ("item".into(), item.clone()),
                             ]),
@@ -1666,7 +1661,11 @@ impl GroupAccumulator {
                             ));
                         };
                         let order = fields.get("order").cloned().unwrap_or(Value::Null);
-                        let tuple_val = fields.get("tuple").cloned().unwrap_or(Value::Null);
+                        let key_val = fields
+                            .get("key")
+                            .cloned()
+                            .or_else(|| fields.get("tuple").cloned())
+                            .unwrap_or(Value::Null);
                         let id_str = match fields.get("id") {
                             Some(Value::Str(s)) => s,
                             _ => {
@@ -1687,7 +1686,7 @@ impl GroupAccumulator {
                         arr.copy_from_slice(&key.0);
                         let id = Digest::from_bytes(arr);
                         let item = fields.get("item").cloned().unwrap_or(Value::Null);
-                        entries.push((order, tuple_val, id, item));
+                        entries.push((order, key_val, id, item));
                     }
                     accum.collected[idx] = entries;
                 }
@@ -4664,12 +4663,16 @@ impl WorldNetwork {
                             };
 
                             if new_count != old_count {
+                                let child_key = match deriv.c.leaves.first() {
+                                    Some(Leaf::Base(k)) => k.clone(),
+                                    _ => WorldKey::new(deriv.c.digest().as_bytes().to_vec()),
+                                };
                                 let tree_work = accum.apply_delta(
                                     is_ins,
                                     projections,
                                     &aggregate_values,
                                     &order_values,
-                                    &tuple,
+                                    child_key,
                                     deriv.c.digest(),
                                     &gk,
                                     aggregates,

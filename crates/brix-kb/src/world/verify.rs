@@ -74,6 +74,8 @@ pub struct VerifyReport {
     pub program_digest: Digest,
     pub work: VerifyWorkReport,
     pub verified_settlements: Vec<(u64, String, String, String)>,
+    pub head_settlements: BTreeMap<String, BTreeMap<String, SettledDecision>>,
+    pub head_relations: BTreeMap<String, BTreeMap<WorldKey, WorldTuple>>,
 }
 
 /// Errors refusing verification. Every refusal maps to an explicit `Unknown(<reason>)`.
@@ -1069,5 +1071,7 @@ pub fn verify_world_audit_bundle(
         program_digest: options.expect_program,
         work,
         verified_settlements,
+        head_settlements: prev_settlements,
+        head_relations: relations,
     })
 }

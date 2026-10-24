@@ -318,3 +318,239 @@ decide entity_decide for e in entity_tags per entity {
         "omitted order_by orders by item expression itself"
     );
 }
+
+#[test]
+fn review_collect_equal_ordinals_use_child_keys_not_unrelated_fields() {
+    let program = r#"
+rel input tags: { id: Str, entity: Str, tag: Str, a_label: Str, ordinal: Int } key id
+rel derived entity_tags = select {
+    entity: t.entity,
+    tags: collect(t.tag, t.ordinal, 5)
+} from t in tags group by t.entity
+decide entity_decide for e in entity_tags per entity {
+    propose p priority 1 when true = e.tags
+}
+"#;
+    let dir = TestDir::new("key_tie_breaker");
+    let sources = BTreeMap::from([("root".into(), program.into())]);
+    let mut session =
+        WorldSession::from_program_with_sources(&dir.0, "root", &sources).expect("create session");
+    let row = |id: &str, tag: &str, label: &str| {
+        let mut record = TupleRecord::new();
+        record.set_str("id", id);
+        record.set_str("entity", "e1");
+        record.set_str("tag", tag);
+        record.set_str("a_label", label);
+        record.set_str("ordinal", "0");
+        WorldBatchOp::Upsert {
+            relation: "root::tags".into(),
+            key: WorldKey::from_str(id),
+            tuple: record.to_tuple(),
+        }
+    };
+    session
+        .apply_batch(WorldBatch::new(
+            0,
+            "seed equal ordinals",
+            vec![row("1", "first", "a"), row("2", "second", "b")],
+        ))
+        .expect("seed");
+    let expected = Value::List(vec![
+        Value::Str("first".into()),
+        Value::Str("second".into()),
+    ]);
+    assert_eq!(
+        session.all_settlements().unwrap()["root::entity_decide"]["e1"].value,
+        expected
+    );
+    session
+        .apply_batch(WorldBatch::new(
+            1,
+            "change unrelated label",
+            vec![row("1", "first", "z")],
+        ))
+        .expect("update");
+    assert_eq!(
+        session.all_settlements().unwrap()["root::entity_decide"]["e1"].value,
+        expected,
+        "unchanged ordinal and child key must preserve collection order"
+    );
+}
+
+#[test]
+fn test_grouped_collect_parent_anchored_empty_list_settlement() {
+    let program = r#"
+config Plan = AskBack(List<Str>) | Done
+
+fn no_slots(): List<Str> = []
+
+rel input parents: { id: Str } key id
+rel input slots: { id: Str, parent: Str, slot: Str, prio: Int } key id
+
+rel derived nonempty_slots = select {
+    parent: s.parent,
+    items: collect(s.slot, s.prio, 5)
+} from s in slots group by s.parent
+
+rel derived empty_slots = select {
+    parent: p.id,
+    items: no_slots()
+} from p in parents where not exists s in slots where s.parent == p.id
+
+rel derived parent_slots = union nonempty_slots, empty_slots key parent
+
+decide parent_plan for p in parent_slots per parent {
+    propose winner priority 1 when true = Plan::AskBack(p.items)
+}
+"#;
+    let dir = TestDir::new("parent_anchored");
+    let sources = BTreeMap::from([("root".into(), program.into())]);
+    let mut session =
+        WorldSession::from_program_with_sources(&dir.0, "root", &sources).expect("create session");
+
+    let parent_upsert = |id: &str| {
+        let mut r = TupleRecord::new();
+        r.set_str("id", id);
+        WorldBatchOp::Upsert {
+            relation: "root::parents".into(),
+            key: WorldKey::from_str(id),
+            tuple: r.to_tuple(),
+        }
+    };
+    let parent_retract = |id: &str| WorldBatchOp::Remove {
+        relation: "root::parents".into(),
+        key: WorldKey::from_str(id),
+    };
+
+    // 1. Insert parent with no children: settlement produces AskBack([])
+    session
+        .apply_batch(WorldBatch::new(
+            0,
+            "create parent",
+            vec![parent_upsert("p1")],
+        ))
+        .expect("batch 0");
+
+    let settlements = session.all_settlements().expect("settlements");
+    let plan = &settlements["root::parent_plan"]["p1"].value;
+    assert_eq!(
+        plan,
+        &Value::Variant {
+            nominal: "root::Plan".into(),
+            variant: "AskBack".into(),
+            args: vec![Value::List(vec![])],
+        },
+        "parent without children produces settlement containing empty list []"
+    );
+
+    // 2. Insert children: settlement updates to AskBack(["volume", "customer-grain"])
+    session
+        .apply_batch(WorldBatch::new(
+            1,
+            "add children",
+            vec![
+                slot_upsert("s1", "p1", "customer-grain", 20),
+                slot_upsert("s2", "p1", "volume", 10),
+            ],
+        ))
+        .expect("batch 1");
+
+    let settlements = session.all_settlements().expect("settlements");
+    let plan = &settlements["root::parent_plan"]["p1"].value;
+    assert_eq!(
+        plan,
+        &Value::Variant {
+            nominal: "root::Plan".into(),
+            variant: "AskBack".into(),
+            args: vec![Value::List(vec![
+                Value::Str("volume".into()),
+                Value::Str("customer-grain".into()),
+            ])],
+        },
+        "parent with children produces ordered list"
+    );
+
+    // 3. Retract one child: settlement updates to AskBack(["customer-grain"])
+    session
+        .apply_batch(WorldBatch::new(
+            2,
+            "retract volume child",
+            vec![slot_retract("s2")],
+        ))
+        .expect("batch 2");
+
+    let settlements = session.all_settlements().expect("settlements");
+    let plan = &settlements["root::parent_plan"]["p1"].value;
+    assert_eq!(
+        plan,
+        &Value::Variant {
+            nominal: "root::Plan".into(),
+            variant: "AskBack".into(),
+            args: vec![Value::List(vec![Value::Str("customer-grain".into())])],
+        },
+        "retracting one child updates list"
+    );
+
+    // 4. Retract the final child: parent settlement is NOT deleted, but transitions to AskBack([])
+    session
+        .apply_batch(WorldBatch::new(
+            3,
+            "retract final child",
+            vec![slot_retract("s1")],
+        ))
+        .expect("batch 3");
+
+    let settlements = session.all_settlements().expect("settlements");
+    let plan = &settlements["root::parent_plan"]["p1"].value;
+    assert_eq!(
+        plan,
+        &Value::Variant {
+            nominal: "root::Plan".into(),
+            variant: "AskBack".into(),
+            args: vec![Value::List(vec![])],
+        },
+        "retracting final child retains parent settlement containing empty list []"
+    );
+
+    // 5. Verify state, oracle, and audit bundle
+    session.verify_state().expect("state");
+    session.verify_oracle().expect("oracle");
+    let closure = ProgramClosureV1 {
+        root_module: "root".into(),
+        sources: vec![("root".into(), program.into())],
+        program_manifest_digest: session.manifest().program_digest,
+    };
+    let bundle = build_genesis_bundle_from_session(&session, closure, ExecProfileV1::default())
+        .expect("bundle");
+    let limits = WorldAuditDecodeLimits::default();
+    let bytes = bundle.encode(&limits).expect("encode");
+    let decoded = decode_world_audit_bundle_v1(&bytes, &limits).expect("decode");
+    verify_world_audit_bundle(
+        &decoded,
+        &VerifyOptions {
+            expect_head: session.current_revision_digest().expect("head"),
+            expect_program: session.manifest().program_digest,
+            trust_checkpoint: None,
+            limits,
+            max_work: None,
+        },
+    )
+    .expect("verify bundle");
+
+    // 6. Retract the parent itself: settlement is now deleted
+    session
+        .apply_batch(WorldBatch::new(
+            4,
+            "retract parent",
+            vec![parent_retract("p1")],
+        ))
+        .expect("batch 4");
+
+    let settlements = session.all_settlements().expect("settlements");
+    assert!(
+        settlements
+            .get("root::parent_plan")
+            .is_none_or(|m| !m.contains_key("p1")),
+        "retracting parent removes settlement"
+    );
+}
