@@ -641,3 +641,54 @@ class BrixClient:
         if typed:
             params["typed"] = True
         return self.result("world.query", params, timeout=timeout)
+
+    def world_evidence(
+        self,
+        world_dir: Union[str, os.PathLike],
+        rev: int,
+        decide: str,
+        entity: str,
+        grants: Optional[List[str]] = None,
+        out: Optional[Union[str, os.PathLike]] = None,
+        include_bundle: bool = False,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """`brix world evidence` via serve."""
+        params: Dict[str, Any] = {
+            "dir": str(world_dir),
+            "rev": rev,
+            "decide": decide,
+            "entity": entity,
+            "grants": grants or [],
+            "include_bundle": include_bundle,
+        }
+        if out is not None:
+            params["out"] = str(out)
+        return self.result("world.evidence", params, timeout=timeout)
+
+    def world_verify_evidence(
+        self,
+        evidence: Union[str, os.PathLike],
+        expect_world: str,
+        expect_program: str,
+        expect_rev: int,
+        expect_rev_digest: str,
+        expect_decide: str,
+        expect_entity: str,
+        expect_candidate: str,
+        expect_grants: Optional[List[str]] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """`brix world verify-evidence` via serve."""
+        params: Dict[str, Any] = {
+            "evidence": str(evidence),
+            "expect_world": expect_world,
+            "expect_program": expect_program,
+            "expect_rev": expect_rev,
+            "expect_rev_digest": expect_rev_digest,
+            "expect_decide": expect_decide,
+            "expect_entity": expect_entity,
+            "expect_candidate": expect_candidate,
+            "expect_grants": expect_grants or [],
+        }
+        return self.result("world.verify-evidence", params, timeout=timeout)

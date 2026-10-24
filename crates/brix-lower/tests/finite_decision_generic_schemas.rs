@@ -42,8 +42,8 @@ fn try_run_with_input(
         .map_err(|e| format!("{e:?}"))?;
     let snapshot = canonicalize_input_shards(vec![shard], &InputLimits::default())
         .map_err(|e| format!("{e:?}"))?;
-    let runtime = FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot)
-        .map_err(|e| format!("{e:?}"))?;
+    let runtime =
+        FiniteDecisionRuntime::build_with_inputs(&plan, &snapshot).map_err(|e| format!("{e:?}"))?;
     Ok(runtime.run())
 }
 
@@ -104,7 +104,11 @@ commit d from (ship, hold)
 }"#;
 
     let run = run_with_input(source, input_json);
-    assert!(run.first_fault().is_none(), "unexpected fault: {:?}", run.first_fault());
+    assert!(
+        run.first_fault().is_none(),
+        "unexpected fault: {:?}",
+        run.first_fault()
+    );
     assert_eq!(run.decision.map(|d| d.candidate).as_deref(), Some("ship"));
 }
 
@@ -141,7 +145,11 @@ commit d from (hold, ship)
 }"#;
 
     let run = run_with_input(source, input_json);
-    assert!(run.first_fault().is_none(), "unexpected fault: {:?}", run.first_fault());
+    assert!(
+        run.first_fault().is_none(),
+        "unexpected fault: {:?}",
+        run.first_fault()
+    );
     assert_eq!(run.decision.map(|d| d.candidate).as_deref(), Some("hold"));
 }
 
@@ -204,7 +212,11 @@ commit d from (ok, err)
 }"#;
 
     let run = run_with_input(source, input_json);
-    assert!(run.first_fault().is_none(), "unexpected fault: {:?}", run.first_fault());
+    assert!(
+        run.first_fault().is_none(),
+        "unexpected fault: {:?}",
+        run.first_fault()
+    );
     assert_eq!(run.decision.map(|d| d.candidate).as_deref(), Some("ok"));
 }
 
@@ -251,7 +263,11 @@ commit d from (pass, fail)
 }"#;
 
     let run = run_with_input(source, input_json);
-    assert!(run.first_fault().is_none(), "unexpected fault: {:?}", run.first_fault());
+    assert!(
+        run.first_fault().is_none(),
+        "unexpected fault: {:?}",
+        run.first_fault()
+    );
     assert_eq!(run.decision.map(|d| d.candidate).as_deref(), Some("pass"));
 }
 
@@ -297,7 +313,8 @@ fn test_nested_list_rejected_under_v3_and_v4_admitted_under_v5() {
 
     // Under @5: admitted
     let json_v5 = json_template.replace("<SCHEMA>", "brix.input@5");
-    let shard_v5 = decode_input_shard(json_v5.as_bytes(), &limits).expect("v5 must admit nested list");
+    let shard_v5 =
+        decode_input_shard(json_v5.as_bytes(), &limits).expect("v5 must admit nested list");
     assert_eq!(shard_v5.schema(), "brix.input@5");
 }
 
@@ -336,10 +353,15 @@ commit d from (pass, fail)
 }"#;
 
     let res = try_run_with_input(source, bad_input);
-    assert!(res.is_err(), "must fail closed when payload violates concrete schema: {res:?}");
+    assert!(
+        res.is_err(),
+        "must fail closed when payload violates concrete schema: {res:?}"
+    );
     let err_msg = res.unwrap_err();
     assert!(
-        err_msg.contains("ContractViolation") || err_msg.contains("TypeMismatch") || err_msg.contains("InvalidValue"),
+        err_msg.contains("ContractViolation")
+            || err_msg.contains("TypeMismatch")
+            || err_msg.contains("InvalidValue"),
         "expected type error, got {err_msg}"
     );
 }
@@ -427,7 +449,11 @@ commit d from (pass, fail)
 }"#;
 
     let run = run_with_input(source, input_json);
-    assert!(run.first_fault().is_none(), "unexpected fault: {:?}", run.first_fault());
+    assert!(
+        run.first_fault().is_none(),
+        "unexpected fault: {:?}",
+        run.first_fault()
+    );
     assert_eq!(run.decision.map(|d| d.candidate).as_deref(), Some("pass"));
 }
 
@@ -470,6 +496,10 @@ commit d from (ship, hold)
 }"#;
 
     let run = run_with_input(source, input_json);
-    assert!(run.first_fault().is_none(), "unexpected fault: {:?}", run.first_fault());
+    assert!(
+        run.first_fault().is_none(),
+        "unexpected fault: {:?}",
+        run.first_fault()
+    );
     assert_eq!(run.decision.map(|d| d.candidate).as_deref(), Some("ship"));
 }

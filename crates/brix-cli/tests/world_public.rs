@@ -487,3 +487,104 @@ decide record for o in orders per id { propose current priority 1 when true = Re
     assert_eq!(verified["status"], "audited");
     assert_eq!(verified["head_revision"], 2);
 }
+
+#[test]
+fn test_world_evidence_and_verify_evidence_cli() {
+    let scratch = Scratch::new("decision-evidence");
+    let program = scratch.path().join("main.brix");
+    fs::write(
+        &program,
+        r#"
+config Status = Approved | Rejected
+rel input orders: { id: Str, qty: Int } key id
+decide review for o in orders per id {
+    propose approved priority 10 when o.qty > 5 = Status::Approved
+    propose rejected priority 20 when true = Status::Rejected
+}
+"#,
+    )
+    .unwrap();
+
+    let world = scratch.path().join("world");
+    let init_out = parse_stdout(
+        binary()
+            .args(["world", "init", "--json"])
+            .arg(&world)
+            .arg(&program)
+            .output()
+            .unwrap(),
+    );
+    let program_digest = init_out["program_digest"].as_str().unwrap();
+
+    let batch = scratch.path().join("batch.json");
+    fs::write(
+        &batch,
+        r#"{
+  "schema": "brix.world.batch@1",
+  "expected_base_revision": 0,
+  "idempotency_key": "b1",
+  "operations": [
+    {
+      "op": "upsert",
+      "relation": "main::orders",
+      "key": "o-1",
+      "tuple": { "id": "o-1", "qty": "10" }
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+
+    let batch_out = parse_stdout(
+        binary()
+            .args(["world", "batch", "--json"])
+            .arg(&world)
+            .arg(&batch)
+            .output()
+            .unwrap(),
+    );
+    let rev = batch_out["revision"].as_u64().unwrap();
+    let rev_digest = batch_out["revision_digest"].as_str().unwrap();
+
+    let world_manifest_digest = {
+        let session = brix_kb::world::WorldSession::open(&world).unwrap();
+        session.manifest().digest().to_hex()
+    };
+
+    let evidence_file = scratch.path().join("o1.evidence");
+    let ev_out = parse_stdout(
+        binary()
+            .args(["world", "evidence", "--json"])
+            .arg(&world)
+            .args(["--rev", &rev.to_string()])
+            .args(["--decide", "main::review"])
+            .args(["--entity", "o-1"])
+            .args(["--grant", "read:orders"])
+            .args(["--grant", "role:admin"])
+            .args(["--out", evidence_file.to_str().unwrap()])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(ev_out["ok"], true);
+    assert_eq!(ev_out["settlement"]["candidate_name"], "approved");
+
+    // Verify evidence file in standalone mode (no world dir supplied)
+    let verify_out = parse_stdout(
+        binary()
+            .args(["world", "verify-evidence", "--json"])
+            .args(["--evidence", evidence_file.to_str().unwrap()])
+            .args(["--expect-world", &world_manifest_digest])
+            .args(["--expect-program", program_digest])
+            .args(["--expect-rev", &rev.to_string()])
+            .args(["--expect-rev-digest", rev_digest])
+            .args(["--expect-decide", "main::review"])
+            .args(["--expect-entity", "o-1"])
+            .args(["--expect-candidate", "approved"])
+            .args(["--expect-grant", "read:orders"])
+            .args(["--expect-grant", "role:admin"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(verify_out["ok"], true);
+    assert_eq!(verify_out["receipt"]["subject"], "o-1");
+}

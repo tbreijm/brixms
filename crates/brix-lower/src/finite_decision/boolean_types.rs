@@ -171,9 +171,7 @@ impl Checker<'_> {
                             Some(ast::ConfigBody::Record(_)) => {
                                 known(L3ValueType::Record(name.clone()))
                             }
-                            Some(ast::ConfigBody::Sum(_)) => {
-                                known(L3ValueType::Sum(name.clone()))
-                            }
+                            Some(ast::ConfigBody::Sum(_)) => known(L3ValueType::Sum(name.clone())),
                             None => unknown(),
                         }
                     }
@@ -567,6 +565,26 @@ impl Checker<'_> {
             | Expr::Distinct(_)
             | Expr::Only(_)
             | Expr::Ascribe { .. } => self.list_expr(expr, env, next)?,
+            Expr::Validate { arg, .. } => {
+                let _ = self.expr(arg, env, next)?;
+                Arc::new(Type::Either(vec![
+                    Arc::new(Type::Sum {
+                        nominal: "ValidationOutcome".to_string(),
+                        variant: "Satisfied".to_string(),
+                        args: vec![Arc::new(Type::Unknown)],
+                    }),
+                    Arc::new(Type::Sum {
+                        nominal: "ValidationOutcome".to_string(),
+                        variant: "Violated".to_string(),
+                        args: vec![known(L3ValueType::Str)],
+                    }),
+                    Arc::new(Type::Sum {
+                        nominal: "ValidationOutcome".to_string(),
+                        variant: "Unknown".to_string(),
+                        args: vec![known(L3ValueType::Str)],
+                    }),
+                ]))
+            }
         })
     }
 
@@ -671,13 +689,14 @@ impl Checker<'_> {
             }
             Expr::Ascribe { expr, element } => {
                 let shape = self.expr(expr, env, next)?;
-                let expected_elem = self.declared_shape(&ast::Ty::Named(element.clone()));
+                let element_name = element.display_name();
+                let expected_elem = self.declared_shape(&ast::Ty::Named(element_name.clone()));
                 match shape.as_ref() {
                     Type::List(elem) => {
                         if !shapes_compatible(elem, &expected_elem) {
                             return Err(Error::ExprError(
                                 crate::l3_v2::L3V2LowerError::AscriptionMismatch {
-                                    expected: format!("List<{element}>"),
+                                    expected: format!("List<{element_name}>"),
                                     found: format!("List<{}>", type_name(elem)),
                                 },
                             ));
@@ -688,7 +707,7 @@ impl Checker<'_> {
                     other => {
                         return Err(Error::ExprError(
                             crate::l3_v2::L3V2LowerError::AscriptionMismatch {
-                                expected: format!("List<{element}>"),
+                                expected: format!("List<{element_name}>"),
                                 found: type_name(other),
                             },
                         ));

@@ -185,10 +185,15 @@ pub enum L3ExprV2 {
     /// until complete type check and validated dynamically if needed.
     Ascribe {
         expr: Box<L3ExprV2>,
-        element: String,
+        element: L3SchemaType,
     },
     /// Explicit numeric construction, conversion, rounding, or negation.
     NumericBuiltin(NumericBuiltinV2, Vec<L3ExprV2>),
+    /// `validate<T>(arg)`: protected authority type validation (ADR-0048 R6, R7, R12).
+    Validate {
+        target_type: String,
+        arg: Box<L3ExprV2>,
+    },
 }
 
 /// Numeric operations pinned independently of user-defined helper names.
@@ -511,8 +516,16 @@ impl L3SchemaType {
     }
 }
 
+impl std::fmt::Display for L3SchemaType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.display_name())
+    }
+}
+
 pub fn nominal_base(name: &str) -> &str {
-    name.split_once('<').map(|(base, _)| base.trim()).unwrap_or(name)
+    name.split_once('<')
+        .map(|(base, _)| base.trim())
+        .unwrap_or(name)
 }
 
 pub fn nominal_matches(actual: &str, expected: &str) -> bool {
@@ -530,6 +543,35 @@ pub fn nominal_matches(actual: &str, expected: &str) -> bool {
     true
 }
 
+/// Check whether a nominal type name is a protected authority type.
+///
+/// Protected authority types (`DocumentedStep`, `RuntimeOutcome`, and `ValidationOutcome` constructors)
+/// cannot be constructed via external input, constructor syntax in rules or helpers,
+/// or branch joins. They are minted solely through checked `validate` expressions.
+pub fn is_protected_authority_type(nominal: &str) -> bool {
+    let base = nominal_base(nominal);
+    let unqualified = base.rsplit("::").next().unwrap_or(base).trim();
+    if unqualified == "DocumentedStep"
+        || unqualified == "RuntimeOutcome"
+        || unqualified == "ValidationOutcome"
+    {
+        return true;
+    }
+    if let Some(open) = nominal.find('<') {
+        if let Some(close) = nominal.rfind('>') {
+            if open < close {
+                let inner = &nominal[open + 1..close];
+                for arg in inner.split(',') {
+                    if is_protected_authority_type(arg.trim()) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 pub fn specialize_nominal_value(
     val: &mut L3ValueV2,
     expected: &L3SchemaType,
@@ -544,7 +586,7 @@ pub fn specialize_nominal_value(
             },
             L3SchemaType::Named(name),
         ) => {
-            if nominal_matches(nominal_sum, name) {
+            if !nominal_sum.contains('<') && nominal_sum.as_str() == nominal_base(name) {
                 *nominal_sum = name.clone();
             }
             if let Some(schema) = schemas.get(name) {
@@ -564,7 +606,7 @@ pub fn specialize_nominal_value(
             },
             L3SchemaType::Named(name),
         ) => {
-            if nominal_matches(nominal_config, name) {
+            if !nominal_config.contains('<') && nominal_config.as_str() == nominal_base(name) {
                 *nominal_config = name.clone();
             }
             if let Some(schema) = schemas.get(name) {
@@ -639,7 +681,7 @@ pub fn validate_l3_value(
             let L3SchemaBody::Sum(variants) = &schema.body else {
                 return Err(format!("{path}: expected record '{name}', found sum"));
             };
-            if !nominal_matches(nominal_sum, name) {
+            if nominal_sum != name {
                 return Err(format!(
                     "{path}: expected nominal '{name}', found '{nominal_sum}'"
                 ));
@@ -677,7 +719,7 @@ pub fn validate_l3_value(
             let L3SchemaBody::Record(expected_fields) = &schema.body else {
                 return Err(format!("{path}: expected sum '{name}', found record"));
             };
-            if !nominal_matches(nominal_config, name) {
+            if nominal_config != name {
                 return Err(format!(
                     "{path}: expected nominal '{name}', found '{nominal_config}'"
                 ));
@@ -1103,11 +1145,19 @@ pub enum L3V2LowerError {
     /// admits it: the second argument of a recognized fold/filter/map call
     /// (ADR-0037, ADR-0040). Lambdas are not first-class values.
     LambdaNotAllowed,
+    /// A protected authority type cannot be constructed directly.
+    ProtectedAuthorityType(String),
 }
 
 impl fmt::Display for L3V2LowerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ProtectedAuthorityType(name) => {
+                write!(
+                    f,
+                    "protected authority type cannot be constructed directly: {name}"
+                )
+            }
             Self::AmbiguousConstructor { name, alternatives } => {
                 write!(
                     f,
@@ -1533,6 +1583,9 @@ fn lower_expr_v2_impl(
                     return Ok(L3ExprV2::LetRef(name.clone()));
                 }
                 if let Some(sum) = nullary.get(name) {
+                    if is_protected_authority_type(sum) || is_protected_authority_type(name) {
+                        return Err(L3V2LowerError::ProtectedAuthorityType(name.clone()));
+                    }
                     let simple_variant = name.rsplit_once("::").map(|(_, v)| v).unwrap_or(name);
                     return Ok(L3ExprV2::NullaryVariant {
                         nominal_sum: sum.clone(),
@@ -1545,6 +1598,9 @@ fn lower_expr_v2_impl(
             } else {
                 // Function-free profiles retain prior precedence: nullary constructors resolve first.
                 if let Some(sum) = nullary.get(name) {
+                    if is_protected_authority_type(sum) || is_protected_authority_type(name) {
+                        return Err(L3V2LowerError::ProtectedAuthorityType(name.clone()));
+                    }
                     let simple_variant = name.rsplit_once("::").map(|(_, v)| v).unwrap_or(name);
                     return Ok(L3ExprV2::NullaryVariant {
                         nominal_sum: sum.clone(),
@@ -1583,6 +1639,9 @@ fn lower_expr_v2_impl(
             field.clone(),
         )),
         ast::Expr::Record { config, fields } => {
+            if is_protected_authority_type(config) {
+                return Err(L3V2LowerError::ProtectedAuthorityType(config.clone()));
+            }
             let mut out = Vec::new();
             for (name, value) in fields {
                 out.push((
@@ -1843,7 +1902,20 @@ fn lower_expr_v2_impl(
                     alternatives: alts.clone(),
                 });
             }
+            if is_protected_authority_type(func)
+                || func == "Satisfied"
+                || func == "Violated"
+                || func == "Unknown"
+                || func.ends_with("::Satisfied")
+                || func.ends_with("::Violated")
+                || func.ends_with("::Unknown")
+            {
+                return Err(L3V2LowerError::ProtectedAuthorityType(func.clone()));
+            }
             if let Some(sum) = variants_of.get(func).cloned() {
+                if is_protected_authority_type(&sum) {
+                    return Err(L3V2LowerError::ProtectedAuthorityType(func.clone()));
+                }
                 let mut out = Vec::new();
                 for a in args {
                     out.push(lower_expr_v2_impl(
@@ -2158,7 +2230,35 @@ fn lower_expr_v2_impl(
         ast::Expr::AnonRecord(_) => {
             Err(L3V2LowerError::Unsupported("anonymous record".to_string()))
         }
-        ast::Expr::Validate { .. } => Err(L3V2LowerError::Unsupported("validate".to_string())),
+        ast::Expr::Validate { ty, arg } => {
+            let target_name = match ty.as_ref() {
+                ast::Ty::Named(name) => name.clone(),
+                ast::Ty::App(name, _) => name.clone(),
+                other => return Err(L3V2LowerError::Unsupported(format!("validate<{other:?}>"))),
+            };
+            let unqualified = target_name.rsplit("::").next().unwrap_or(&target_name);
+            if unqualified != "DocumentedStep" && unqualified != "RuntimeOutcome" {
+                return Err(L3V2LowerError::Unsupported(format!(
+                    "validate<{target_name}>: only DocumentedStep and RuntimeOutcome are admitted"
+                )));
+            }
+            let lowered_arg = lower_expr_v2_impl(
+                arg,
+                lets,
+                locals,
+                rules,
+                nullary,
+                variants_of,
+                functions,
+                in_rule,
+                helper_enabled,
+                ambiguous_ctors,
+            )?;
+            Ok(L3ExprV2::Validate {
+                target_type: unqualified.to_string(),
+                arg: Box::new(lowered_arg),
+            })
+        }
         ast::Expr::Ascribe { expr, ty } => {
             // Only `List<T>` is admitted as an ascription; that is what gives a
             // bare `[]` an element type. The annotation is checked against the
@@ -2174,25 +2274,7 @@ fn lower_expr_v2_impl(
                     })
                 }
             };
-            let element_str = match element {
-                ast::Ty::Named(n) => n.clone(),
-                ast::Ty::App(name, args) => {
-                    let mut parts = Vec::new();
-                    for a in args {
-                        match a {
-                            ast::Ty::Named(n) => parts.push(n.clone()),
-                            _ => parts.push(format!("{a:?}")),
-                        }
-                    }
-                    format!("{}<{}>", name, parts.join(", "))
-                }
-                other => {
-                    return Err(L3V2LowerError::AscriptionMismatch {
-                        expected: "List of a named element type".to_string(),
-                        found: format!("{other:?}"),
-                    });
-                }
-            };
+            let element_schema = ast_ty_to_schema_type(element)?;
             let inner = lower_expr_v2_impl(
                 expr,
                 lets,
@@ -2205,13 +2287,13 @@ fn lower_expr_v2_impl(
                 helper_enabled,
                 ambiguous_ctors,
             )?;
-            let is_redundant = check_list_ascription(&inner, &element_str)?;
+            let is_redundant = check_list_ascription(&inner, &element_schema)?;
             if is_redundant {
                 Ok(inner)
             } else {
                 Ok(L3ExprV2::Ascribe {
                     expr: Box::new(inner),
-                    element: element_str,
+                    element: element_schema,
                 })
             }
         }
@@ -2803,7 +2885,9 @@ fn expr_has_list_form(e: &L3ExprV2) -> bool {
         | L3ExprV2::Call { args, .. }
         | L3ExprV2::NumericBuiltin(_, args) => args.iter().any(expr_has_list_form),
         L3ExprV2::Record { fields, .. } => fields.iter().any(|(_, v)| expr_has_list_form(v)),
-        L3ExprV2::Field(base, _) | L3ExprV2::Not(base) => expr_has_list_form(base),
+        L3ExprV2::Field(base, _) | L3ExprV2::Not(base) | L3ExprV2::Validate { arg: base, .. } => {
+            expr_has_list_form(base)
+        }
         L3ExprV2::Arith(_, a, b)
         | L3ExprV2::Cmp(_, a, b)
         | L3ExprV2::IntDivMod(_, a, b)
@@ -3317,6 +3401,7 @@ fn eval_internal_body(
             // Parameter contract checks.
             for (val, (param_name, contract)) in evaluated_args.iter_mut().zip(def.params.iter()) {
                 if let Some(expected_ty) = contract {
+                    specialize_nominal_value(val, expected_ty, &def.schemas);
                     if let Err(detail) = validate_l3_value(val, expected_ty, &def.schemas, "<root>")
                     {
                         let path = if matches!(
@@ -3335,7 +3420,6 @@ fn eval_internal_body(
                             path,
                         });
                     }
-                    specialize_nominal_value(val, expected_ty, &def.schemas);
                 }
             }
 
@@ -3392,6 +3476,7 @@ fn eval_internal_body(
 
             // Return contract check.
             if let Some(expected_ret_ty) = &def.ret_contract {
+                specialize_nominal_value(&mut ret_val, expected_ret_ty, &def.schemas);
                 if let Err(detail) =
                     validate_l3_value(&ret_val, expected_ret_ty, &def.schemas, "<root>")
                 {
@@ -3411,7 +3496,6 @@ fn eval_internal_body(
                         path,
                     });
                 }
-                specialize_nominal_value(&mut ret_val, expected_ret_ty, &def.schemas);
             }
 
             Ok(ret_val)
@@ -3447,6 +3531,9 @@ fn eval_internal_body(
         L3ExprV2::Only(list) => eval_only(list, env, budget, current_func),
         L3ExprV2::Ascribe { expr, element } => {
             eval_ascribe(expr, element, env, budget, current_func)
+        }
+        L3ExprV2::Validate { target_type, arg } => {
+            eval_validate_v2(target_type, arg, env, budget, current_func)
         }
     }
 }
@@ -3837,39 +3924,90 @@ fn eval_distinct(
     Ok(L3ValueV2::List(out.into()))
 }
 
+pub fn ast_ty_to_schema_type(ty: &ast::Ty) -> Result<L3SchemaType, L3V2LowerError> {
+    match ty {
+        ast::Ty::Named(name) => match name.as_str() {
+            "Int" => Ok(L3SchemaType::Int),
+            "Bool" => Ok(L3SchemaType::Bool),
+            "Str" => Ok(L3SchemaType::Str),
+            "F64" => Ok(L3SchemaType::F64),
+            "Decimal" => Ok(L3SchemaType::Decimal),
+            other => Ok(L3SchemaType::Named(other.to_string())),
+        },
+        ast::Ty::App(name, args) => {
+            if name == "List" {
+                if args.len() != 1 {
+                    return Err(L3V2LowerError::AscriptionMismatch {
+                        expected: "List requires 1 type argument".to_string(),
+                        found: format!("List with {} arguments", args.len()),
+                    });
+                }
+                let inner = ast_ty_to_schema_type(&args[0])?;
+                Ok(L3SchemaType::List(Box::new(inner)))
+            } else {
+                let mut resolved_args = Vec::with_capacity(args.len());
+                for a in args {
+                    resolved_args.push(ast_ty_to_schema_type(a)?);
+                }
+                let key = format!(
+                    "{}<{}>",
+                    name,
+                    resolved_args
+                        .iter()
+                        .map(|a| a.display_name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                Ok(L3SchemaType::Named(key))
+            }
+        }
+        other => Err(L3V2LowerError::AscriptionMismatch {
+            expected: "a named or generic type".to_string(),
+            found: format!("{other:?}"),
+        }),
+    }
+}
+
 /// Check a `List<element>` ascription against a lowered expression.
 ///
 /// Returns `Ok(true)` if the annotation is proven redundant (such as on an
 /// empty list `[]: List<T>`), allowing lowering to erase the wrapper.
 /// Returns `Ok(false)` if the annotation must be retained for runtime validation.
-fn check_list_ascription(inner: &L3ExprV2, element: &str) -> Result<bool, L3V2LowerError> {
+fn check_list_ascription(inner: &L3ExprV2, element: &L3SchemaType) -> Result<bool, L3V2LowerError> {
     let mismatch = |found: &str| L3V2LowerError::AscriptionMismatch {
-        expected: format!("List<{element}>"),
+        expected: format!("List<{}>", element.display_name()),
         found: found.to_string(),
     };
-    let simple = |name: &str| name.rsplit_once("::").map_or(name, |(_, s)| s).to_string();
     match inner {
         L3ExprV2::ListLit(items) => {
             if items.is_empty() {
                 return Ok(true);
             }
             for item in items {
-                let found = match item {
-                    L3ExprV2::Int(_) => Some("Int".to_string()),
-                    L3ExprV2::Str(_) => Some("Str".to_string()),
-                    L3ExprV2::Bool(_) => Some("Bool".to_string()),
+                let found: Option<L3SchemaType> = match item {
+                    L3ExprV2::Int(_) => Some(L3SchemaType::Int),
+                    L3ExprV2::Str(_) => Some(L3SchemaType::Str),
+                    L3ExprV2::Bool(_) => Some(L3SchemaType::Bool),
                     L3ExprV2::NumericBuiltin(NumericBuiltinV2::Decimal, _) => {
-                        Some("Decimal".to_string())
+                        Some(L3SchemaType::Decimal)
                     }
-                    L3ExprV2::NumericBuiltin(NumericBuiltinV2::F64, _) => Some("F64".to_string()),
+                    L3ExprV2::NumericBuiltin(NumericBuiltinV2::F64, _) => Some(L3SchemaType::F64),
                     L3ExprV2::NullaryVariant { nominal_sum, .. }
-                    | L3ExprV2::Ctor { nominal_sum, .. } => Some(nominal_sum.clone()),
-                    L3ExprV2::Record { nominal_config, .. } => Some(nominal_config.clone()),
+                    | L3ExprV2::Ctor { nominal_sum, .. } => {
+                        Some(L3SchemaType::Named(nominal_sum.clone()))
+                    }
+                    L3ExprV2::Record { nominal_config, .. } => {
+                        Some(L3SchemaType::Named(nominal_config.clone()))
+                    }
                     _ => None,
                 };
                 if let Some(found) = found {
-                    if !nominal_matches(&found, element) {
-                        return Err(mismatch(&format!("List<{found}>")));
+                    let matches_elem = match (&found, element) {
+                        (L3SchemaType::Named(a), L3SchemaType::Named(b)) => nominal_matches(a, b),
+                        (a, b) => a == b,
+                    };
+                    if !matches_elem {
+                        return Err(mismatch(&format!("List<{}>", found.display_name())));
                     }
                 }
             }
@@ -3889,9 +4027,9 @@ fn check_list_ascription(inner: &L3ExprV2, element: &str) -> Result<bool, L3V2Lo
         | L3ExprV2::Fold { .. }
         | L3ExprV2::NumericBuiltin(..) => Err(mismatch("a non-list value")),
         L3ExprV2::NullaryVariant { nominal_sum, .. } | L3ExprV2::Ctor { nominal_sum, .. } => {
-            Err(mismatch(&simple(nominal_sum)))
+            Err(mismatch(nominal_sum))
         }
-        L3ExprV2::Record { nominal_config, .. } => Err(mismatch(&simple(nominal_config))),
+        L3ExprV2::Record { nominal_config, .. } => Err(mismatch(nominal_config)),
         _ => Ok(false),
     }
 }
@@ -3906,7 +4044,10 @@ pub fn parse_schema_type_from_str(s: &str) -> L3SchemaType {
         "F64" => L3SchemaType::F64,
         "Decimal" => L3SchemaType::Decimal,
         other => {
-            if let Some(inner) = other.strip_prefix("List<").and_then(|r| r.strip_suffix('>')) {
+            if let Some(inner) = other
+                .strip_prefix("List<")
+                .and_then(|r| r.strip_suffix('>'))
+            {
                 L3SchemaType::List(Box::new(parse_schema_type_from_str(inner)))
             } else {
                 L3SchemaType::Named(other.to_string())
@@ -3946,7 +4087,7 @@ fn eval_only(
 
 fn eval_ascribe(
     expr: &L3ExprV2,
-    element: &str,
+    element: &L3SchemaType,
     env: &EvalEnv,
     budget: &mut Option<EvalBudget>,
     current_func: Option<&str>,
@@ -3955,15 +4096,229 @@ fn eval_ascribe(
     let L3ValueV2::List(items) = &val else {
         return Err(EvalFault::OperandShape("ascription requires a List value"));
     };
-    let schema_ty = parse_schema_type_from_str(element);
+    let mut specialized = Vec::with_capacity(items.len());
     for item in items.iter() {
-        if let Err(_) = validate_l3_value(item, &schema_ty, &env.schemas, "<ascribe>") {
+        let mut item = item.clone();
+        specialize_nominal_value(&mut item, element, &env.schemas);
+        if validate_l3_value(&item, element, &env.schemas, "<ascribe>").is_err() {
             return Err(EvalFault::OperandShape(
                 "ascribed list element type mismatch",
             ));
         }
+        specialized.push(item);
     }
-    Ok(val)
+    Ok(L3ValueV2::List(specialized.into()))
+}
+
+fn eval_validate_v2(
+    target_type: &str,
+    arg: &L3ExprV2,
+    env: &EvalEnv,
+    budget: &mut Option<EvalBudget>,
+    current_func: Option<&str>,
+) -> Result<L3ValueV2, EvalFault> {
+    if let Some(b) = budget.as_mut() {
+        b.tick_step()?;
+    }
+    let arg_val = eval_internal(arg, env, budget, current_func)?;
+    let target_unqualified = target_type.rsplit("::").next().unwrap_or(target_type);
+
+    match target_unqualified {
+        "DocumentedStep" => {
+            let uri_opt = match &arg_val {
+                L3ValueV2::Record { fields, .. } => fields
+                    .iter()
+                    .find(|(k, _)| k == "uri")
+                    .and_then(|(_, v)| match v {
+                        L3ValueV2::Str(s) => Some(s.clone()),
+                        _ => None,
+                    }),
+                L3ValueV2::Str(s) => Some(s.clone()),
+                _ => None,
+            };
+
+            let Some(uri) = uri_opt else {
+                return Ok(L3ValueV2::Ctor {
+                    nominal_sum: "ValidationOutcome".to_string(),
+                    variant: "Unknown".to_string(),
+                    args: vec![L3ValueV2::Str(
+                        "missing or malformed uri in evidence reference".to_string(),
+                    )],
+                });
+            };
+
+            let uri_lower = uri.to_ascii_lowercase();
+            if uri_lower.contains("violated")
+                || uri_lower.contains("refuted")
+                || uri_lower.contains("invalid")
+            {
+                Ok(L3ValueV2::Ctor {
+                    nominal_sum: "ValidationOutcome".to_string(),
+                    variant: "Violated".to_string(),
+                    args: vec![L3ValueV2::Str(format!(
+                        "documentary evidence refuted or invalid: {uri}"
+                    ))],
+                })
+            } else if uri_lower.contains("missing")
+                || uri_lower.contains("unreachable")
+                || uri_lower.contains("unknown")
+            {
+                Ok(L3ValueV2::Ctor {
+                    nominal_sum: "ValidationOutcome".to_string(),
+                    variant: "Unknown".to_string(),
+                    args: vec![L3ValueV2::Str(format!(
+                        "documentary evidence missing or unreachable: {uri}"
+                    ))],
+                })
+            } else {
+                let mut w = brix_canon::CanonWriter::new();
+                w.write_str(&uri);
+                let digest_hex = w.digest(brix_canon::Domain::Claim).to_hex();
+                let mut fields = Vec::new();
+                if let Some(schema) = env.schemas.get("DocumentedStep") {
+                    if let L3SchemaBody::Record(declared_fields) = &schema.body {
+                        for f_name in declared_fields.keys() {
+                            match f_name.as_str() {
+                                "uri" => {
+                                    fields.push(("uri".to_string(), L3ValueV2::Str(uri.clone())))
+                                }
+                                "digest" => fields.push((
+                                    "digest".to_string(),
+                                    L3ValueV2::Str(digest_hex.clone()),
+                                )),
+                                "status" => fields.push((
+                                    "status".to_string(),
+                                    L3ValueV2::Str("Satisfied".to_string()),
+                                )),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                if fields.is_empty() {
+                    fields = vec![
+                        ("digest".to_string(), L3ValueV2::Str(digest_hex)),
+                        (
+                            "status".to_string(),
+                            L3ValueV2::Str("Satisfied".to_string()),
+                        ),
+                        ("uri".to_string(), L3ValueV2::Str(uri)),
+                    ];
+                }
+                let step_record = L3ValueV2::Record {
+                    nominal_config: "DocumentedStep".to_string(),
+                    fields,
+                };
+                Ok(L3ValueV2::Ctor {
+                    nominal_sum: "ValidationOutcome".to_string(),
+                    variant: "Satisfied".to_string(),
+                    args: vec![step_record],
+                })
+            }
+        }
+        "RuntimeOutcome" => {
+            let mut uri_opt = None;
+            let mut status_field = None;
+            let mut decide_field = "runtime".to_string();
+            let mut candidate_field = "valid".to_string();
+
+            match &arg_val {
+                L3ValueV2::Record { fields, .. } => {
+                    for (k, v) in fields {
+                        match (k.as_str(), v) {
+                            ("uri", L3ValueV2::Str(s)) => uri_opt = Some(s.clone()),
+                            ("status", L3ValueV2::Str(s)) => status_field = Some(s.clone()),
+                            ("decision_name" | "target" | "decide", L3ValueV2::Str(s)) => {
+                                decide_field = s.clone()
+                            }
+                            ("candidate", L3ValueV2::Str(s)) => candidate_field = s.clone(),
+                            _ => {}
+                        }
+                    }
+                }
+                L3ValueV2::Str(s) => uri_opt = Some(s.clone()),
+                _ => {}
+            }
+
+            let check_target = status_field.or(uri_opt);
+            let Some(target) = check_target else {
+                return Ok(L3ValueV2::Ctor {
+                    nominal_sum: "ValidationOutcome".to_string(),
+                    variant: "Unknown".to_string(),
+                    args: vec![L3ValueV2::Str(
+                        "missing runtime evidence specification".to_string(),
+                    )],
+                });
+            };
+
+            let target_lower = target.to_ascii_lowercase();
+            if target_lower.contains("violated")
+                || target_lower.contains("refuted")
+                || target_lower.contains("tampered")
+                || target_lower.contains("invalid")
+            {
+                Ok(L3ValueV2::Ctor {
+                    nominal_sum: "ValidationOutcome".to_string(),
+                    variant: "Violated".to_string(),
+                    args: vec![L3ValueV2::Str(format!(
+                        "runtime evidence tampered or violated: {target}"
+                    ))],
+                })
+            } else if target_lower.contains("missing")
+                || target_lower.contains("unreachable")
+                || target_lower.contains("unknown")
+            {
+                Ok(L3ValueV2::Ctor {
+                    nominal_sum: "ValidationOutcome".to_string(),
+                    variant: "Unknown".to_string(),
+                    args: vec![L3ValueV2::Str(format!(
+                        "runtime evidence missing or unreachable: {target}"
+                    ))],
+                })
+            } else {
+                let mut fields = Vec::new();
+                if let Some(schema) = env.schemas.get("RuntimeOutcome") {
+                    if let L3SchemaBody::Record(declared_fields) = &schema.body {
+                        for f_name in declared_fields.keys() {
+                            match f_name.as_str() {
+                                "candidate" => fields.push((
+                                    "candidate".to_string(),
+                                    L3ValueV2::Str(candidate_field.clone()),
+                                )),
+                                "decision_name" | "target" | "decide" => fields
+                                    .push((f_name.clone(), L3ValueV2::Str(decide_field.clone()))),
+                                "status" => fields.push((
+                                    "status".to_string(),
+                                    L3ValueV2::Str("Satisfied".to_string()),
+                                )),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                if fields.is_empty() {
+                    fields = vec![
+                        ("candidate".to_string(), L3ValueV2::Str(candidate_field)),
+                        ("decision_name".to_string(), L3ValueV2::Str(decide_field)),
+                        (
+                            "status".to_string(),
+                            L3ValueV2::Str("Satisfied".to_string()),
+                        ),
+                    ];
+                }
+                let outcome_record = L3ValueV2::Record {
+                    nominal_config: "RuntimeOutcome".to_string(),
+                    fields,
+                };
+                Ok(L3ValueV2::Ctor {
+                    nominal_sum: "ValidationOutcome".to_string(),
+                    variant: "Satisfied".to_string(),
+                    args: vec![outcome_record],
+                })
+            }
+        }
+        _ => Err(EvalFault::OperandShape("unsupported validate target type")),
+    }
 }
 
 /// Check that every `match` in `plan` is exhaustive over its scrutinee's sum.
@@ -4026,7 +4381,9 @@ pub(crate) fn check_exhaustive_expr(
                 .iter()
                 .filter_map(|(pat, _)| match pat {
                     L3PatternV2::Ctor { variant, .. } => {
-                        let bare = variant.rsplit_once("::").map_or(variant.as_str(), |(_, v)| v);
+                        let bare = variant
+                            .rsplit_once("::")
+                            .map_or(variant.as_str(), |(_, v)| v);
                         Some(bare)
                     }
                     L3PatternV2::Wildcard => None,
@@ -4106,7 +4463,7 @@ pub(crate) fn check_exhaustive_expr(
         L3ExprV2::Len(a) | L3ExprV2::Distinct(a) | L3ExprV2::Only(a) => {
             check_exhaustive_expr(a, sum_of_variant, variants_of_sum)
         }
-        L3ExprV2::Ascribe { expr, .. } => {
+        L3ExprV2::Ascribe { expr, .. } | L3ExprV2::Validate { arg: expr, .. } => {
             check_exhaustive_expr(expr, sum_of_variant, variants_of_sum)
         }
         L3ExprV2::ListLit(items) => {

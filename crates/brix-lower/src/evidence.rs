@@ -109,6 +109,24 @@ impl Receipt {
     fn verified(self) -> Option<Self> {
         self.authentic().then_some(self)
     }
+
+    pub fn issue(
+        proposition: impl Into<String>,
+        subject: impl Into<String>,
+        context: impl Into<String>,
+        authority: Authority,
+        assumptions: Vec<String>,
+        kernel_certificate: Option<String>,
+    ) -> Self {
+        issue(
+            proposition,
+            subject,
+            context,
+            authority,
+            assumptions,
+            kernel_certificate,
+        )
+    }
 }
 
 fn seal_receipt(receipt: &Receipt) -> String {

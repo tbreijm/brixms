@@ -361,7 +361,12 @@ fn render(e: &L3ExprV2) -> String {
         L3ExprV2::Len(list) => format!("len({})", render(list)),
         L3ExprV2::Distinct(list) => format!("distinct({})", render(list)),
         L3ExprV2::Only(list) => format!("only({})", render(list)),
-        L3ExprV2::Ascribe { expr, element } => format!("{}: List<{element}>", render(expr)),
+        L3ExprV2::Ascribe { expr, element } => {
+            format!("{}: List<{}>", render(expr), element.display_name())
+        }
+        L3ExprV2::Validate { target_type, arg } => {
+            format!("validate<{target_type}>({})", render(arg))
+        }
     }
 }
 
@@ -734,7 +739,8 @@ impl TraceBuilder {
             L3ExprV2::Len(list)
             | L3ExprV2::Distinct(list)
             | L3ExprV2::Only(list)
-            | L3ExprV2::Ascribe { expr: list, .. } => {
+            | L3ExprV2::Ascribe { expr: list, .. }
+            | L3ExprV2::Validate { arg: list, .. } => {
                 let child = self.build(list, env, helper_depth);
                 TraceNode {
                     source: render(e),

@@ -645,10 +645,12 @@ fn eval_expr(
     Value::from_scalar(compiled.eval(&bindings).map_err(WorldError::NetworkError)?)
 }
 
+type GroupEntry = (Vec<Option<Value>>, Vec<Option<Value>>, Row);
+
 fn build_grouped_row(
     projections: &[(String, GroupProjection)],
     key_vals: &[Value],
-    values: &[Vec<Option<Value>>],
+    entries: &[GroupEntry],
 ) -> Result<Row, WorldError> {
     let mut row = Row::new();
     for (idx, (name, proj)) in projections.iter().enumerate() {
@@ -658,21 +660,18 @@ fn build_grouped_row(
                 row.insert(name.clone(), v);
             }
             GroupProjection::Count => {
-                row.insert(name.clone(), Value::Int(values.len() as i64));
+                row.insert(name.clone(), Value::Int(entries.len() as i64));
             }
             GroupProjection::SumInt(_) => {
                 let mut sum = 0i128;
-                for value in values.iter().filter_map(|row| row[idx].as_ref()) {
-                    let Value::Int(value) = value else {
-                        return Err(WorldError::NetworkError(
-                            "reference Int sum received non-Int".into(),
-                        ));
-                    };
-                    sum = sum.checked_add(i128::from(*value)).ok_or_else(|| {
-                        WorldError::NetworkError(
-                            "reference grouped Int accumulator overflow".into(),
-                        )
-                    })?;
+                for (agg, _, _) in entries {
+                    if let Some(Value::Int(value)) = &agg[idx] {
+                        sum = sum.checked_add(i128::from(*value)).ok_or_else(|| {
+                            WorldError::NetworkError(
+                                "reference grouped Int accumulator overflow".into(),
+                            )
+                        })?;
+                    }
                 }
                 row.insert(
                     name.clone(),
@@ -684,19 +683,16 @@ fn build_grouped_row(
             GroupProjection::SumDecimal(_) => {
                 let mut sum = ReferenceWideDecimal::default();
                 let mut scale = 0u8;
-                for value in values.iter().filter_map(|row| row[idx].as_ref()) {
-                    let Value::Decimal(value) = value else {
-                        return Err(WorldError::NetworkError(
-                            "reference Decimal sum received non-Decimal".into(),
-                        ));
-                    };
-                    if value.scale() > scale {
-                        sum.mul_pow10(value.scale() - scale);
-                        scale = value.scale();
+                for (agg, _, _) in entries {
+                    if let Some(Value::Decimal(value)) = &agg[idx] {
+                        if value.scale() > scale {
+                            sum.mul_pow10(value.scale() - scale);
+                            scale = value.scale();
+                        }
+                        let mut addend = ReferenceWideDecimal::from_i128(value.unscaled());
+                        addend.mul_pow10(scale - value.scale());
+                        sum.add_assign(&addend);
                     }
-                    let mut addend = ReferenceWideDecimal::from_i128(value.unscaled());
-                    addend.mul_pow10(scale - value.scale());
-                    sum.add_assign(&addend);
                 }
                 row.insert(
                     name.clone(),
@@ -707,11 +703,48 @@ fn build_grouped_row(
             }
             GroupProjection::Min(_) | GroupProjection::Max(_) => {
                 let selected = if matches!(proj, GroupProjection::Min(_)) {
-                    values.iter().filter_map(|row| row[idx].as_ref()).min()
+                    entries
+                        .iter()
+                        .filter_map(|(agg, _, _)| agg[idx].as_ref())
+                        .min()
                 } else {
-                    values.iter().filter_map(|row| row[idx].as_ref()).max()
+                    entries
+                        .iter()
+                        .filter_map(|(agg, _, _)| agg[idx].as_ref())
+                        .max()
                 };
                 row.insert(name.clone(), selected.cloned().unwrap_or(Value::Null));
+            }
+            GroupProjection::Collect { limit, .. } => {
+                if entries.len() > *limit {
+                    return Err(WorldError::NetworkError(format!(
+                        "grouped collect exceeded maximum cardinality limit of {limit}"
+                    )));
+                }
+                let mut items_with_order: Vec<(Value, Value, Value)> =
+                    Vec::with_capacity(entries.len());
+                for (agg, orders, child_row) in entries {
+                    let item_val = agg[idx].clone().unwrap_or(Value::Null);
+                    let order_val = orders
+                        .get(idx)
+                        .and_then(|v| v.clone())
+                        .unwrap_or_else(|| item_val.clone());
+                    let tie_breaker = Value::Record {
+                        nominal: "".into(),
+                        fields: child_row.clone(),
+                    };
+                    items_with_order.push((order_val, tie_breaker, item_val));
+                }
+                items_with_order.sort_by(|a, b| {
+                    a.0.partial_cmp(&b.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                });
+                let collected_list: Vec<Value> = items_with_order
+                    .into_iter()
+                    .map(|(_, _, item)| item)
+                    .collect();
+                row.insert(name.clone(), Value::List(collected_list));
             }
         }
     }
@@ -960,6 +993,7 @@ pub enum CompiledOperator {
     GroupedCount {
         compiled_group_keys: Vec<CompiledWorldExpr>,
         compiled_aggregates: Vec<Option<CompiledWorldExpr>>,
+        compiled_collect_orders: Vec<Option<CompiledWorldExpr>>,
     },
 }
 
@@ -1071,7 +1105,8 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                             GroupProjection::SumInt(expr)
                             | GroupProjection::SumDecimal(expr)
                             | GroupProjection::Min(expr)
-                            | GroupProjection::Max(expr) => Some(expr),
+                            | GroupProjection::Max(expr)
+                            | GroupProjection::Collect { expr, .. } => Some(expr),
                             GroupProjection::Key(_) | GroupProjection::Count => None,
                         };
                         expr.map(|e| program_env.compile_expr(e, &bindings))
@@ -1079,9 +1114,27 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                             .map_err(WorldError::NetworkError)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                let compiled_collect_orders = projections
+                    .iter()
+                    .map(|(_, projection)| {
+                        if let GroupProjection::Collect {
+                            order_by: Some(order_expr),
+                            ..
+                        } = projection
+                        {
+                            program_env
+                                .compile_expr(order_expr, &bindings)
+                                .map(Some)
+                                .map_err(WorldError::NetworkError)
+                        } else {
+                            Ok(None)
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 compiled_operators.push(CompiledOperator::GroupedCount {
                     compiled_group_keys,
                     compiled_aggregates,
+                    compiled_collect_orders,
                 });
             }
         }
@@ -1596,14 +1649,20 @@ fn evaluate_once_with_budget(
                 group_keys: _,
                 projections,
             } => {
-                let (compiled_keys, compiled_aggregates) = match &program.compiled_operators[idx] {
-                    CompiledOperator::GroupedCount {
-                        compiled_group_keys,
-                        compiled_aggregates,
-                    } => (compiled_group_keys, compiled_aggregates),
-                    _ => unreachable!(),
-                };
-                let mut groups: BTreeMap<Vec<Value>, Vec<Vec<Option<Value>>>> = BTreeMap::new();
+                let (compiled_keys, compiled_aggregates, compiled_collect_orders) =
+                    match &program.compiled_operators[idx] {
+                        CompiledOperator::GroupedCount {
+                            compiled_group_keys,
+                            compiled_aggregates,
+                            compiled_collect_orders,
+                        } => (
+                            compiled_group_keys,
+                            compiled_aggregates,
+                            compiled_collect_orders,
+                        ),
+                        _ => unreachable!(),
+                    };
+                let mut groups: BTreeMap<Vec<Value>, Vec<GroupEntry>> = BTreeMap::new();
                 for row in &operator_outputs[input.0] {
                     meter.rows_evaluated += 1;
                     charge_work(meter, work_offset, max_work)?;
@@ -1635,11 +1694,30 @@ fn evaluate_once_with_budget(
                         };
                         aggregates.push(value);
                     }
-                    groups.entry(key).or_default().push(aggregates);
+                    let mut orders = Vec::with_capacity(compiled_collect_orders.len());
+                    for compiled in compiled_collect_orders {
+                        let value = if let Some(compiled) = compiled {
+                            let l3_val = eval_compiled_with_budget(
+                                compiled,
+                                &bindings,
+                                meter,
+                                work_offset,
+                                max_work,
+                            )?;
+                            Some(Value::from_scalar(l3_val)?)
+                        } else {
+                            None
+                        };
+                        orders.push(value);
+                    }
+                    groups
+                        .entry(key)
+                        .or_default()
+                        .push((aggregates, orders, row.clone()));
                 }
                 groups
                     .into_iter()
-                    .map(|(key, values)| build_grouped_row(projections, &key, &values))
+                    .map(|(key, entries)| build_grouped_row(projections, &key, &entries))
                     .collect::<Result<Vec<_>, _>>()?
             }
         };

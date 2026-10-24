@@ -12,15 +12,22 @@ fn plan(annotation: &str) -> FiniteDecisionPlan {
          propose p(r) priority 10 when r == 1 = Ship\n\
          commit c from (p)\n"
     );
-    lower_finite_decision_plan(&brix_syntax::parse(&source).unwrap(), FINITE_DECISION_PROFILE)
-        .expect("valid decimal list must lower")
+    lower_finite_decision_plan(
+        &brix_syntax::parse(&source).unwrap(),
+        FINITE_DECISION_PROFILE,
+    )
+    .expect("valid decimal list must lower")
 }
 
 #[test]
 fn correctly_ascribed_decimal_list_runs() {
     let plan = plan(": List<Decimal>");
     let run = FiniteDecisionRuntime::build(&plan).unwrap().run();
-    assert!(run.is_selected(), "valid annotation faulted: {:?}", run.stop);
+    assert!(
+        run.is_selected(),
+        "valid annotation faulted: {:?}",
+        run.stop
+    );
 }
 
 #[test]

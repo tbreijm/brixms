@@ -310,16 +310,16 @@ fn order_quantity(tuple: &WorldTuple, order: &str) -> Result<i64, PolicyError> {
 }
 
 // Bypass decoded caches so every node used by the lookup is retained.
-struct RecordingStore<'a, S> {
-    inner: &'a S,
-    nodes: RefCell<BTreeMap<Digest, Vec<u8>>>,
+pub(crate) struct RecordingStore<'a, S> {
+    pub(crate) inner: &'a S,
+    pub(crate) nodes: RefCell<BTreeMap<Digest, Vec<u8>>>,
 }
 
 // A serialized lazy stub has the digest of the node it references, so digest
 // equality alone does not distinguish it from the materialized node. Trie
 // lookups expect a store to resolve these references, never return another
 // stub. Enforce that contract for both portable and on-disk evidence reads.
-fn require_materialized_node(digest: &Digest, bytes: &[u8]) -> Result<(), StorageError> {
+pub(crate) fn require_materialized_node(digest: &Digest, bytes: &[u8]) -> Result<(), StorageError> {
     let tag = CanonReader::new(bytes)
         .read_uint()
         .map_err(StorageError::DecodeError)?;

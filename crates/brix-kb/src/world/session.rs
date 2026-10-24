@@ -31,7 +31,7 @@ use super::settlement_checkpoint::{apply_delta, SettlementCheckpoint};
 use super::staging::StagingManager;
 use super::state_cache::StateCache;
 use super::types::{
-    QueryCursor, QueryCursorPosition, WorldCursor, WorldKey, WorldTuple,
+    QueryCursor, QueryCursorKind, QueryCursorPosition, WorldCursor, WorldKey, WorldTuple,
 };
 
 fn parse_digest(hex: &str, field: &str) -> Result<Digest, WorldError> {
@@ -700,22 +700,26 @@ impl WorldSnapshot {
         let parsed_cursor = match cursor {
             Some(token) => {
                 let qc = QueryCursor::from_token(token)?;
-                if !qc.world_id.is_empty() {
-                    if qc.world_id != self.world_id
-                        || qc.revision != self.revision.revision_digest
-                        || qc.relation != relation
-                        || qc.ordering != "canonical"
-                    {
-                        return Err(WorldError::InvalidCursor(
-                            "query cursor scope mismatch".into(),
-                        ));
-                    }
+                if qc.kind == QueryCursorKind::Legacy {
+                    return Err(WorldError::InvalidCursor(
+                        "legacy cursor not accepted for revision-pinned query".into(),
+                    ));
+                }
+                if qc.world_id != self.world_id
+                    || qc.revision != self.revision.revision_digest
+                    || qc.relation != relation
+                    || qc.ordering != "canonical"
+                {
+                    return Err(WorldError::InvalidCursor(
+                        "query cursor scope mismatch".into(),
+                    ));
                 }
                 match qc.position {
                     QueryCursorPosition::Hamt { hash, key } => Some((hash, key)),
                     QueryCursorPosition::Offset(_) => {
                         return Err(WorldError::InvalidCursor(
-                            "query cursor ordering mismatch (offset cursor on hamt relation)".into(),
+                            "query cursor ordering mismatch (offset cursor on hamt relation)"
+                                .into(),
                         ));
                     }
                 }
@@ -813,8 +817,10 @@ impl ExecProfileV1 {
     }
 
     pub fn is_supported_version(version: &str) -> bool {
-        matches!(version, "0.1.0-alpha.5" | "0.1.0-alpha.6" | "0.1.0-alpha.7")
-            || version == env!("CARGO_PKG_VERSION")
+        matches!(
+            version,
+            "0.1.0-alpha.5" | "0.1.0-alpha.6" | "0.1.0-alpha.7" | "0.1.0-alpha.8"
+        ) || version == env!("CARGO_PKG_VERSION")
     }
 
     /// Canonical profile identity, including the candidate-value admissibility rule.
@@ -2588,22 +2594,22 @@ impl WorldSession {
         let parsed_cursor = match cursor {
             Some(token) => {
                 let qc = QueryCursor::from_token(token)?;
-                if !qc.world_id.is_empty() {
-                    if qc.world_id != self.manifest.world_id
+                if qc.kind == QueryCursorKind::Versioned
+                    && (qc.world_id != self.manifest.world_id
                         || qc.revision != current_digest
                         || qc.relation != relation
-                        || qc.ordering != "canonical"
-                    {
-                        return Err(WorldError::InvalidCursor(
-                            "query cursor scope mismatch".into(),
-                        ));
-                    }
+                        || qc.ordering != "canonical")
+                {
+                    return Err(WorldError::InvalidCursor(
+                        "query cursor scope mismatch".into(),
+                    ));
                 }
                 match qc.position {
                     QueryCursorPosition::Hamt { hash, key } => Some((hash, key)),
                     QueryCursorPosition::Offset(_) => {
                         return Err(WorldError::InvalidCursor(
-                            "query cursor ordering mismatch (offset cursor on hamt relation)".into(),
+                            "query cursor ordering mismatch (offset cursor on hamt relation)"
+                                .into(),
                         ));
                     }
                 }
@@ -2618,14 +2624,8 @@ impl WorldSession {
         )?;
 
         let next_cursor = next_pos.map(|(hash, key)| {
-            QueryCursor::new_hamt(
-                &self.manifest.world_id,
-                current_digest,
-                relation,
-                hash,
-                key,
-            )
-            .to_token()
+            QueryCursor::new_hamt(&self.manifest.world_id, current_digest, relation, hash, key)
+                .to_token()
         });
         let has_more = next_cursor.is_some();
 
@@ -2680,22 +2680,22 @@ impl WorldSession {
         let offset = match cursor {
             Some(token) => {
                 let qc = QueryCursor::from_token(token)?;
-                if !qc.world_id.is_empty() {
-                    if qc.world_id != self.manifest.world_id
+                if qc.kind == QueryCursorKind::Versioned
+                    && (qc.world_id != self.manifest.world_id
                         || qc.revision != current_digest
                         || qc.relation != relation
-                        || qc.ordering != "offset"
-                    {
-                        return Err(WorldError::InvalidCursor(
-                            "query cursor scope mismatch".into(),
-                        ));
-                    }
+                        || qc.ordering != "offset")
+                {
+                    return Err(WorldError::InvalidCursor(
+                        "query cursor scope mismatch".into(),
+                    ));
                 }
                 match qc.position {
                     QueryCursorPosition::Offset(off) => off,
                     QueryCursorPosition::Hamt { .. } => {
                         return Err(WorldError::InvalidCursor(
-                            "query cursor ordering mismatch (hamt cursor on derived relation)".into(),
+                            "query cursor ordering mismatch (hamt cursor on derived relation)"
+                                .into(),
                         ));
                     }
                 }
@@ -2807,22 +2807,26 @@ impl WorldSession {
         let offset = match cursor {
             Some(token) => {
                 let qc = QueryCursor::from_token(token)?;
-                if !qc.world_id.is_empty() {
-                    if qc.world_id != self.manifest.world_id
-                        || qc.revision != rev_digest
-                        || qc.relation != relation
-                        || qc.ordering != "offset"
-                    {
-                        return Err(WorldError::InvalidCursor(
-                            "query cursor scope mismatch".into(),
-                        ));
-                    }
+                if qc.kind == QueryCursorKind::Legacy {
+                    return Err(WorldError::InvalidCursor(
+                        "legacy cursor not accepted for revision-pinned query".into(),
+                    ));
+                }
+                if qc.world_id != self.manifest.world_id
+                    || qc.revision != rev_digest
+                    || qc.relation != relation
+                    || qc.ordering != "offset"
+                {
+                    return Err(WorldError::InvalidCursor(
+                        "query cursor scope mismatch".into(),
+                    ));
                 }
                 match qc.position {
                     QueryCursorPosition::Offset(off) => off,
                     QueryCursorPosition::Hamt { .. } => {
                         return Err(WorldError::InvalidCursor(
-                            "query cursor ordering mismatch (hamt cursor on derived relation)".into(),
+                            "query cursor ordering mismatch (hamt cursor on derived relation)"
+                                .into(),
                         ));
                     }
                 }
@@ -2846,13 +2850,8 @@ impl WorldSession {
         let has_more = next_offset < total;
         let next_cursor = if has_more {
             Some(
-                QueryCursor::new_offset(
-                    &self.manifest.world_id,
-                    rev_digest,
-                    relation,
-                    next_offset,
-                )
-                .to_token(),
+                QueryCursor::new_offset(&self.manifest.world_id, rev_digest, relation, next_offset)
+                    .to_token(),
             )
         } else {
             None

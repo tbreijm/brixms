@@ -25,7 +25,7 @@ use brix_semantic::{ConfigId, ContextId};
 
 use crate::finite_decision::plan::{FiniteDecisionPlan, FiniteDecisionProgramId};
 use crate::finite_decision::runtime::L3ValueType;
-use crate::l3_v2::{validate_l3_value, L3SchemaType, L3ValueV2};
+use crate::l3_v2::{is_protected_authority_type, validate_l3_value, L3SchemaType, L3ValueV2};
 
 /// The canonical schema identifier for external input artifacts (ADR-0031 ⟨D-SCHEMA⟩).
 pub const INPUT_SCHEMA_V1: &str = "brix.input@1";
@@ -620,11 +620,20 @@ pub enum InputDecodeError {
         message: String,
         offset: usize,
     },
+    ProtectedAuthorityType {
+        nominal: String,
+    },
 }
 
 impl fmt::Display for InputDecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ProtectedAuthorityType { nominal } => {
+                write!(
+                    f,
+                    "protected authority type '{nominal}' cannot be constructed from external input"
+                )
+            }
             Self::FileTooLarge { limit, found } => {
                 write!(
                     f,
@@ -2357,6 +2366,11 @@ fn validate_nominal_base(
     qualified: bool,
     full_name: &str,
 ) -> Result<(), InputDecodeError> {
+    if is_protected_authority_type(base) || is_protected_authority_type(full_name) {
+        return Err(InputDecodeError::ProtectedAuthorityType {
+            nominal: full_name.to_string(),
+        });
+    }
     if qualified {
         for segment in base.split("::") {
             if segment.len() > max_segment_len {
@@ -2386,6 +2400,11 @@ fn validate_nominal_type_name(
     max_segment_len: usize,
     qualified: bool,
 ) -> Result<(), InputDecodeError> {
+    if is_protected_authority_type(s) {
+        return Err(InputDecodeError::ProtectedAuthorityType {
+            nominal: s.to_string(),
+        });
+    }
     if let Some((base, args_str)) = split_generic_nominal(s) {
         validate_nominal_base(base, max_segment_len, qualified, s)?;
         let args = split_type_args(args_str)?;

@@ -94,7 +94,8 @@ fn collect_refs(
         | L3ExprV2::Len(a)
         | L3ExprV2::Distinct(a)
         | L3ExprV2::Only(a)
-        | L3ExprV2::Ascribe { expr: a, .. } => collect_refs(a, let_refs, rule_refs),
+        | L3ExprV2::Ascribe { expr: a, .. }
+        | L3ExprV2::Validate { arg: a, .. } => collect_refs(a, let_refs, rule_refs),
         // A fold/filter/map binder is a hygienic local, not a `let`/rule
         // reference (ADR-0037, ADR-0040) — exactly like a function parameter
         // or match binder above, its own body is walked for *other* names it

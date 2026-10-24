@@ -10,7 +10,9 @@ use brix_kb::world::audit::{
     decode_world_audit_bundle_v1, ExecProfileV1, ProgramClosureV1, ScopeV1, WorldAuditDecodeLimits,
 };
 use brix_kb::world::verify::{verify_world_audit_bundle, VerifyOptions};
-use brix_kb::world::{OpenPolicy, TupleRecord, WorldBatch, WorldError, WorldKey, WorldSession};
+use brix_kb::world::{
+    OpenPolicy, TupleRecord, Value, WorldBatch, WorldError, WorldKey, WorldSession,
+};
 use brix_lower::module_graph::{ModuleGraph, ModuleLoaderLimits};
 use serde_json::json;
 
@@ -100,6 +102,46 @@ pub fn execute_world(op: &WorldOp, json_out: bool) -> u8 {
             json_out,
         ),
         WorldOp::ImportKb { kb_dir, world_dir } => execute_import_kb(kb_dir, world_dir, json_out),
+        WorldOp::Evidence {
+            dir,
+            rev,
+            decide,
+            entity,
+            grants,
+            out,
+            include_bundle,
+        } => execute_evidence(
+            dir,
+            *rev,
+            decide,
+            entity,
+            grants,
+            out.as_deref(),
+            *include_bundle,
+            json_out,
+        ),
+        WorldOp::VerifyEvidence {
+            evidence,
+            expect_world,
+            expect_program,
+            expect_rev,
+            expect_rev_digest,
+            expect_decide,
+            expect_entity,
+            expect_candidate,
+            expect_grants,
+        } => execute_verify_evidence(
+            evidence,
+            expect_world,
+            expect_program,
+            *expect_rev,
+            expect_rev_digest,
+            expect_decide,
+            expect_entity,
+            expect_candidate,
+            expect_grants,
+            json_out,
+        ),
     }
 }
 
@@ -299,6 +341,7 @@ fn execute_batch(dir: &Path, batch_file: &Path, replay: bool, json_out: bool) ->
     EXIT_SUCCESS
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_query(
     dir: &Path,
     relation: &str,
@@ -429,42 +472,91 @@ fn execute_query(
         Err(e) => return print_world_error("world query", &e, json_out),
     };
 
-    let entries_json: Vec<serde_json::Value> = page
-        .entries
-        .iter()
-        .map(|(k, t)| {
-            let key_str = std::str::from_utf8(k.as_bytes())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|_| k.to_hex());
-            if let Ok(rec) = TupleRecord::from_tuple(t) {
-                let mut fields = serde_json::Map::new();
-                for (fname, fbytes) in &rec.fields {
-                    let val = if typed {
-                        if let Ok(s) = std::str::from_utf8(fbytes) {
-                            if let Ok(n) = s.parse::<i64>() {
-                                serde_json::Value::Number(n.into())
-                            } else if let Ok(b) = s.parse::<bool>() {
-                                serde_json::Value::Bool(b)
-                            } else {
-                                serde_json::Value::String(s.to_string())
-                            }
-                        } else {
-                            serde_json::Value::String(WorldKey::new(fbytes.clone()).to_hex())
-                        }
-                    } else {
-                        let s = std::str::from_utf8(fbytes)
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|_| WorldKey::new(fbytes.clone()).to_hex());
-                        serde_json::Value::String(s)
-                    };
-                    fields.insert(fname.clone(), val);
+    let empty_schemas = BTreeMap::new();
+    let rel_schema = if typed {
+        if session.manifest.program_required {
+            let net = session.network.as_ref().ok_or_else(|| {
+                WorldError::InvalidSchema(
+                    "executable world is missing initialized operator network".into(),
+                )
+            });
+            let net = match net {
+                Ok(n) => n,
+                Err(e) => return print_world_error("world query", &e, json_out),
+            };
+            let schema_opt = net.dag.relation_schemas.get(&page.relation).or_else(|| {
+                net.dag
+                    .relation_schemas
+                    .iter()
+                    .find(|(k, _)| k.ends_with(&format!("::{}", page.relation)))
+                    .map(|(_, v)| v)
+            });
+            match schema_opt {
+                Some(s) => Some((
+                    s,
+                    net.program_env
+                        .as_ref()
+                        .map(|env| &*env.schemas)
+                        .unwrap_or(&empty_schemas),
+                )),
+                None => {
+                    let err = WorldError::InvalidSchema(format!(
+                        "missing schema for relation '{}'",
+                        page.relation
+                    ));
+                    return print_world_error("world query", &err, json_out);
                 }
-                json!({ "key": key_str, "tuple": fields })
-            } else {
-                json!({ "key": key_str, "tuple": t.to_hex() })
             }
-        })
-        .collect();
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut entries_json = Vec::with_capacity(page.entries.len());
+    for (k, t) in &page.entries {
+        let key_str = std::str::from_utf8(k.as_bytes())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| k.to_hex());
+        let rec = match TupleRecord::from_tuple(t) {
+            Ok(r) => r,
+            Err(e) => {
+                if typed && session.manifest.program_required {
+                    return print_world_error("world query", &e, json_out);
+                } else {
+                    entries_json.push(json!({ "key": key_str, "tuple": t.to_hex() }));
+                    continue;
+                }
+            }
+        };
+        let mut fields = serde_json::Map::new();
+        for (fname, fbytes) in &rec.fields {
+            let val = if let Some((field_schemas, nominal_schemas)) = rel_schema {
+                let field_ty = match field_schemas.get(fname) {
+                    Some(ty) => ty,
+                    None => {
+                        let err = WorldError::InvalidSchema(format!(
+                            "missing schema for field '{fname}' in relation '{}'",
+                            page.relation
+                        ));
+                        return print_world_error("world query", &err, json_out);
+                    }
+                };
+                match Value::from_typed_bytes_with_schemas(fbytes, field_ty, nominal_schemas) {
+                    Ok(v) => v.to_query_json(),
+                    Err(e) => return print_world_error("world query", &e, json_out),
+                }
+            } else {
+                let s = std::str::from_utf8(fbytes)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|_| WorldKey::new(fbytes.clone()).to_hex());
+                serde_json::Value::String(s)
+            };
+            fields.insert(fname.clone(), val);
+        }
+        entries_json.push(json!({ "key": key_str, "tuple": fields }));
+    }
 
     if json_out {
         let mut res = json!({
@@ -1429,4 +1521,182 @@ fn execute_import_kb(kb_dir: &Path, world_dir: &Path, json_out: bool) -> u8 {
             EXIT_REJECTED_OR_UNKNOWN
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_evidence(
+    dir: &Path,
+    rev: u64,
+    decide: &str,
+    entity: &str,
+    grants: &[String],
+    out: Option<&Path>,
+    include_bundle: bool,
+    json_out: bool,
+) -> u8 {
+    let mut session = match WorldSession::open(dir) {
+        Ok(s) => s,
+        Err(e) => return print_world_error("world evidence", &e, json_out),
+    };
+
+    let evidence = match session.request_decision_evidence(
+        rev,
+        decide,
+        entity,
+        grants.to_vec(),
+        include_bundle,
+    ) {
+        Ok(ev) => ev,
+        Err(e) => {
+            return print_world_error(
+                "world evidence",
+                &WorldError::NetworkError(format!("{e}")),
+                json_out,
+            );
+        }
+    };
+
+    let encoded = match evidence.encode() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return print_world_error(
+                "world evidence",
+                &WorldError::NetworkError(format!("{e}")),
+                json_out,
+            );
+        }
+    };
+
+    if let Some(out_path) = out {
+        if let Err(e) = std::fs::write(out_path, &encoded) {
+            return print_world_error("world evidence", &WorldError::Io(e), json_out);
+        }
+    }
+
+    let default_path = session.decision_evidence_path(&evidence.target);
+    if json_out {
+        let res = json!({
+            "schema": WORLD_JSON_SCHEMA,
+            "command": "world evidence",
+            "ok": true,
+            "target": evidence.target.to_json(),
+            "path": default_path.display().to_string(),
+            "settlement": evidence.settlement.to_json(),
+        });
+        crate::json::emit_result_json(&res);
+    } else {
+        println!("Evidence written to: {}", default_path.display());
+        println!("Candidate: {}", evidence.settlement.candidate_name);
+        println!("Value: {}", evidence.settlement.value);
+    }
+    EXIT_SUCCESS
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_verify_evidence(
+    evidence_path: &Path,
+    expect_world: &str,
+    expect_program: &str,
+    expect_rev: u64,
+    expect_rev_digest: &str,
+    expect_decide: &str,
+    expect_entity: &str,
+    expect_candidate: &str,
+    expect_grants: &[String],
+    json_out: bool,
+) -> u8 {
+    let bytes = match std::fs::read(evidence_path) {
+        Ok(b) => b,
+        Err(e) => return print_world_error("world verify-evidence", &WorldError::Io(e), json_out),
+    };
+
+    let evidence = match brix_kb::world::decision_evidence::DecisionEvidence::decode(&bytes) {
+        Ok(ev) => ev,
+        Err(e) => {
+            return print_world_error(
+                "world verify-evidence",
+                &WorldError::NetworkError(format!("{e}")),
+                json_out,
+            );
+        }
+    };
+
+    let world_digest = match parse_digest_hex(expect_world) {
+        Ok(d) => d,
+        Err(e) => {
+            return print_world_error(
+                "world verify-evidence",
+                &WorldError::InvalidSchema(format!("invalid expect-world: {e}")),
+                json_out,
+            );
+        }
+    };
+
+    let program_digest = match parse_digest_hex(expect_program) {
+        Ok(d) => d,
+        Err(e) => {
+            return print_world_error(
+                "world verify-evidence",
+                &WorldError::InvalidSchema(format!("invalid expect-program: {e}")),
+                json_out,
+            );
+        }
+    };
+
+    let rev_digest = match parse_digest_hex(expect_rev_digest) {
+        Ok(d) => d,
+        Err(e) => {
+            return print_world_error(
+                "world verify-evidence",
+                &WorldError::InvalidSchema(format!("invalid expect-rev-digest: {e}")),
+                json_out,
+            );
+        }
+    };
+
+    let expected = brix_kb::world::decision_evidence::DecisionTarget {
+        world: world_digest,
+        program: program_digest,
+        revision: expect_rev,
+        revision_digest: rev_digest,
+        decide: expect_decide.to_string(),
+        entity: expect_entity.to_string(),
+        candidate: expect_candidate.to_string(),
+        value_digest: evidence.settlement.value.compute_digest(),
+        grants: expect_grants.to_vec(),
+    };
+
+    let receipt =
+        match brix_kb::world::decision_evidence::verify_decision_evidence(&evidence, &expected) {
+            Ok(r) => r,
+            Err(e) => {
+                return print_world_error(
+                    "world verify-evidence",
+                    &WorldError::NetworkError(format!("{e}")),
+                    json_out,
+                );
+            }
+        };
+
+    if json_out {
+        let res = json!({
+            "schema": WORLD_JSON_SCHEMA,
+            "command": "world verify-evidence",
+            "ok": true,
+            "receipt": {
+                "proposition": receipt.proposition,
+                "subject": receipt.subject,
+                "context": receipt.context,
+                "authority": format!("{:?}", receipt.authority),
+                "assumptions": receipt.assumptions,
+            }
+        });
+        crate::json::emit_result_json(&res);
+    } else {
+        println!("Decision evidence verified: OK");
+        println!("Proposition: {}", receipt.proposition);
+        println!("Subject: {}", receipt.subject);
+        println!("Authority: {:?}", receipt.authority);
+    }
+    EXIT_SUCCESS
 }

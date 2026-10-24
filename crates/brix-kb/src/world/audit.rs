@@ -442,7 +442,7 @@ impl ExecProfileV1 {
             && self.module_loader_limits == default.module_loader_limits
             && (matches!(
                 self.crate_version.as_str(),
-                "0.1.0-alpha.5" | "0.1.0-alpha.6" | "0.1.0-alpha.7"
+                "0.1.0-alpha.5" | "0.1.0-alpha.6" | "0.1.0-alpha.7" | "0.1.0-alpha.8"
             ) || self.crate_version == env!("CARGO_PKG_VERSION"))
     }
 

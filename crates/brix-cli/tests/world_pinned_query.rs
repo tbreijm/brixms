@@ -179,7 +179,15 @@ fn test_revision_pinned_world_query_acceptance() {
         binary()
             .args(["world", "query", "--json"])
             .arg(&world)
-            .args(["policy::orders", "--rev", "1", "--cursor", &cursor_rev1, "--limit", "2"])
+            .args([
+                "policy::orders",
+                "--rev",
+                "1",
+                "--cursor",
+                &cursor_rev1,
+                "--limit",
+                "2",
+            ])
             .output()
             .unwrap(),
     );
@@ -211,7 +219,13 @@ fn test_revision_pinned_world_query_acceptance() {
         binary()
             .args(["world", "query", "--json"])
             .arg(&world)
-            .args(["policy::orders", "--rev", "1", "--expect-digest", &rev1_digest])
+            .args([
+                "policy::orders",
+                "--rev",
+                "1",
+                "--expect-digest",
+                &rev1_digest,
+            ])
             .output()
             .unwrap(),
     );
@@ -221,7 +235,13 @@ fn test_revision_pinned_world_query_acceptance() {
     let wrong_digest_out = binary()
         .args(["world", "query", "--json"])
         .arg(&world)
-        .args(["policy::orders", "--rev", "1", "--expect-digest", wrong_digest])
+        .args([
+            "policy::orders",
+            "--rev",
+            "1",
+            "--expect-digest",
+            wrong_digest,
+        ])
         .output()
         .unwrap();
     let wrong_json: Value = serde_json::from_slice(&wrong_digest_out.stdout).unwrap();
@@ -259,7 +279,7 @@ fn test_revision_pinned_world_query_acceptance() {
                 "rev": 1,
                 "expect_digest": wrong_digest
             }
-        })
+        }),
     ];
     let mut child = binary()
         .args(["serve", "--stdio"])

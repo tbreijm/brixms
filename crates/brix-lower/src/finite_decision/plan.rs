@@ -891,6 +891,7 @@ fn has_config_reference(ty: &ast::Ty, configs: &BTreeMap<String, &ast::ConfigDec
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_schema_type(
     ty: &ast::Ty,
     owner: &str,
@@ -946,14 +947,7 @@ fn resolve_schema_type(
                     }
                     if !schemas.contains_key(other) {
                         instantiate_schema(
-                            &key,
-                            config,
-                            configs,
-                            schemas,
-                            visiting,
-                            expansions,
-                            edges,
-                            next_depth,
+                            &key, config, configs, schemas, visiting, expansions, edges, next_depth,
                         )?;
                     }
                     Ok(L3SchemaType::Named(other.to_string()))
@@ -969,15 +963,7 @@ fn resolve_schema_type(
                     });
                 }
                 let elem = resolve_schema_type(
-                    &args[0],
-                    owner,
-                    configs,
-                    type_env,
-                    schemas,
-                    visiting,
-                    expansions,
-                    edges,
-                    depth,
+                    &args[0], owner, configs, type_env, schemas, visiting, expansions, edges, depth,
                 )?;
                 Ok(L3SchemaType::List(Box::new(elem)))
             } else {
@@ -1000,15 +986,7 @@ fn resolve_schema_type(
                 let mut resolved_args = Vec::with_capacity(args.len());
                 for arg in args {
                     let r = resolve_schema_type(
-                        arg,
-                        owner,
-                        configs,
-                        type_env,
-                        schemas,
-                        visiting,
-                        expansions,
-                        edges,
-                        depth,
+                        arg, owner, configs, type_env, schemas, visiting, expansions, edges, depth,
                     )?;
                     resolved_args.push(r);
                 }
@@ -1025,14 +1003,7 @@ fn resolve_schema_type(
                 }
                 if !schemas.contains_key(&display_name) {
                     instantiate_schema(
-                        &key,
-                        config,
-                        configs,
-                        schemas,
-                        visiting,
-                        expansions,
-                        edges,
-                        next_depth,
+                        &key, config, configs, schemas, visiting, expansions, edges, next_depth,
                     )?;
                 }
                 Ok(L3SchemaType::Named(display_name))
@@ -1056,6 +1027,7 @@ fn resolve_schema_type(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn instantiate_schema(
     key: &InstantiationKey,
     config: &ast::ConfigDecl,
@@ -1152,13 +1124,7 @@ fn instantiate_schema(
     };
     visiting.remove(key);
     let name = key.display_name();
-    schemas.insert(
-        name.clone(),
-        L3Schema {
-            name,
-            body,
-        },
-    );
+    schemas.insert(name.clone(), L3Schema { name, body });
     if schemas.len() > MAX_SCHEMA_COUNT {
         return Err(FiniteDecisionLowerError::SchemaLimitExceeded {
             limit: MAX_SCHEMA_COUNT,
@@ -1179,74 +1145,102 @@ fn collect_ascribe_schemas_from_expr(
 ) -> Result<(), FiniteDecisionLowerError> {
     match expr {
         ast::Expr::Ascribe { expr, ty } => {
-            if has_config_reference(ty, configs) {
-                let _ = resolve_schema_type(
-                    ty,
-                    "ascribe",
-                    configs,
-                    type_env,
-                    schemas,
-                    visiting,
-                    expansions,
-                    edges,
-                    0,
-                )?;
-            }
-            collect_ascribe_schemas_from_expr(expr, configs, type_env, schemas, visiting, expansions, edges)?;
+            let _ = resolve_schema_type(
+                ty, "ascribe", configs, type_env, schemas, visiting, expansions, edges, 0,
+            )?;
+            collect_ascribe_schemas_from_expr(
+                expr, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
         }
         ast::Expr::Bin { lhs, rhs, .. } => {
-            collect_ascribe_schemas_from_expr(lhs, configs, type_env, schemas, visiting, expansions, edges)?;
-            collect_ascribe_schemas_from_expr(rhs, configs, type_env, schemas, visiting, expansions, edges)?;
+            collect_ascribe_schemas_from_expr(
+                lhs, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
+            collect_ascribe_schemas_from_expr(
+                rhs, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
         }
         ast::Expr::Not(expr)
         | ast::Expr::Prove(expr)
         | ast::Expr::Why(expr)
         | ast::Expr::Audit(expr) => {
-            collect_ascribe_schemas_from_expr(expr, configs, type_env, schemas, visiting, expansions, edges)?;
+            collect_ascribe_schemas_from_expr(
+                expr, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
         }
         ast::Expr::Validate { arg, .. } => {
-            collect_ascribe_schemas_from_expr(arg, configs, type_env, schemas, visiting, expansions, edges)?;
+            collect_ascribe_schemas_from_expr(
+                arg, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
         }
         ast::Expr::Call { args, .. } => {
             for a in args {
-                collect_ascribe_schemas_from_expr(a, configs, type_env, schemas, visiting, expansions, edges)?;
+                collect_ascribe_schemas_from_expr(
+                    a, configs, type_env, schemas, visiting, expansions, edges,
+                )?;
             }
         }
-        ast::Expr::Match { scrutinee, arms, .. } => {
-            collect_ascribe_schemas_from_expr(scrutinee, configs, type_env, schemas, visiting, expansions, edges)?;
+        ast::Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_ascribe_schemas_from_expr(
+                scrutinee, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
             for arm in arms {
-                collect_ascribe_schemas_from_expr(&arm.body, configs, type_env, schemas, visiting, expansions, edges)?;
+                collect_ascribe_schemas_from_expr(
+                    &arm.body, configs, type_env, schemas, visiting, expansions, edges,
+                )?;
             }
         }
         ast::Expr::Record { fields, .. } => {
             for (_, f_expr) in fields {
-                collect_ascribe_schemas_from_expr(f_expr, configs, type_env, schemas, visiting, expansions, edges)?;
+                collect_ascribe_schemas_from_expr(
+                    f_expr, configs, type_env, schemas, visiting, expansions, edges,
+                )?;
             }
         }
         ast::Expr::AnonRecord(fields) => {
             for (_, f_expr) in fields {
-                collect_ascribe_schemas_from_expr(f_expr, configs, type_env, schemas, visiting, expansions, edges)?;
+                collect_ascribe_schemas_from_expr(
+                    f_expr, configs, type_env, schemas, visiting, expansions, edges,
+                )?;
             }
         }
         ast::Expr::Lambda { body, .. } => {
-            collect_ascribe_schemas_from_expr(body, configs, type_env, schemas, visiting, expansions, edges)?;
+            collect_ascribe_schemas_from_expr(
+                body, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
         }
-        ast::Expr::Comprehension { generators, where_clause, yield_expr } => {
+        ast::Expr::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => {
             for (_, g_expr) in generators {
-                collect_ascribe_schemas_from_expr(g_expr, configs, type_env, schemas, visiting, expansions, edges)?;
+                collect_ascribe_schemas_from_expr(
+                    g_expr, configs, type_env, schemas, visiting, expansions, edges,
+                )?;
             }
             if let Some(w) = where_clause {
-                collect_ascribe_schemas_from_expr(w, configs, type_env, schemas, visiting, expansions, edges)?;
+                collect_ascribe_schemas_from_expr(
+                    w, configs, type_env, schemas, visiting, expansions, edges,
+                )?;
             }
-            collect_ascribe_schemas_from_expr(yield_expr, configs, type_env, schemas, visiting, expansions, edges)?;
+            collect_ascribe_schemas_from_expr(
+                yield_expr, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
         }
         ast::Expr::ListLit(items) => {
             for item in items {
-                collect_ascribe_schemas_from_expr(item, configs, type_env, schemas, visiting, expansions, edges)?;
+                collect_ascribe_schemas_from_expr(
+                    item, configs, type_env, schemas, visiting, expansions, edges,
+                )?;
             }
         }
         ast::Expr::Field(base, _) => {
-            collect_ascribe_schemas_from_expr(base, configs, type_env, schemas, visiting, expansions, edges)?;
+            collect_ascribe_schemas_from_expr(
+                base, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
         }
         _ => {}
     }
@@ -1675,7 +1669,8 @@ fn collect_rule_fact_reads(e: &L3ExprV2, out: &mut BTreeSet<String>) {
         L3ExprV2::Len(a)
         | L3ExprV2::Distinct(a)
         | L3ExprV2::Only(a)
-        | L3ExprV2::Ascribe { expr: a, .. } => collect_rule_fact_reads(a, out),
+        | L3ExprV2::Ascribe { expr: a, .. }
+        | L3ExprV2::Validate { arg: a, .. } => collect_rule_fact_reads(a, out),
     }
 }
 
@@ -2103,13 +2098,80 @@ pub fn lower_finite_decision_plan(
         })
         .collect();
 
-    let schemas = collect_reachable_schemas(module)?;
+    let mut schemas = collect_reachable_schemas(module)?;
+    schemas
+        .entry("ValidationOutcome".to_string())
+        .or_insert_with(|| L3Schema {
+            name: "ValidationOutcome".to_string(),
+            body: L3SchemaBody::Sum(vec![
+                ("Satisfied".to_string(), vec![]),
+                ("Violated".to_string(), vec![L3SchemaType::Str]),
+                ("Unknown".to_string(), vec![L3SchemaType::Str]),
+            ]),
+        });
+    schemas
+        .entry("DocumentedStep".to_string())
+        .or_insert_with(|| L3Schema {
+            name: "DocumentedStep".to_string(),
+            body: L3SchemaBody::Record(BTreeMap::from([
+                ("digest".to_string(), L3SchemaType::Str),
+                ("status".to_string(), L3SchemaType::Str),
+                ("uri".to_string(), L3SchemaType::Str),
+            ])),
+        });
+    schemas
+        .entry("RuntimeOutcome".to_string())
+        .or_insert_with(|| L3Schema {
+            name: "RuntimeOutcome".to_string(),
+            body: L3SchemaBody::Record(BTreeMap::from([
+                ("candidate".to_string(), L3SchemaType::Str),
+                ("decision_name".to_string(), L3SchemaType::Str),
+                ("status".to_string(), L3SchemaType::Str),
+            ])),
+        });
     let bounded = has_functions || !schemas.is_empty();
 
     // Builtin Bool sum for exhaustiveness checking.
     variants_of_sum.insert("Bool".to_string(), vec!["false".into(), "true".into()]);
     sum_of_variant.insert("true".to_string(), "Bool".to_string());
     sum_of_variant.insert("false".to_string(), "Bool".to_string());
+
+    // Builtin ValidationOutcome sum for validate expressions (ADR-0048 R7).
+    variants_of_sum.insert(
+        "ValidationOutcome".to_string(),
+        vec!["Satisfied".into(), "Violated".into(), "Unknown".into()],
+    );
+    sum_of_variant.insert("Satisfied".to_string(), "ValidationOutcome".to_string());
+    sum_of_variant.insert("Violated".to_string(), "ValidationOutcome".to_string());
+    sum_of_variant.insert("Unknown".to_string(), "ValidationOutcome".to_string());
+    sum_of_variant.insert(
+        "ValidationOutcome::Satisfied".to_string(),
+        "ValidationOutcome".to_string(),
+    );
+    sum_of_variant.insert(
+        "ValidationOutcome::Violated".to_string(),
+        "ValidationOutcome".to_string(),
+    );
+    sum_of_variant.insert(
+        "ValidationOutcome::Unknown".to_string(),
+        "ValidationOutcome".to_string(),
+    );
+
+    variants_of.insert("Satisfied".to_string(), "ValidationOutcome".to_string());
+    variants_of.insert("Violated".to_string(), "ValidationOutcome".to_string());
+    variants_of.insert("Unknown".to_string(), "ValidationOutcome".to_string());
+    variants_of.insert(
+        "ValidationOutcome::Satisfied".to_string(),
+        "ValidationOutcome".to_string(),
+    );
+    variants_of.insert(
+        "ValidationOutcome::Violated".to_string(),
+        "ValidationOutcome".to_string(),
+    );
+    variants_of.insert(
+        "ValidationOutcome::Unknown".to_string(),
+        "ValidationOutcome".to_string(),
+    );
 
     // Pre-scan functions: validate parameters, contracts, arities, and uniqueness.
     let mut fn_names: BTreeSet<String> = BTreeSet::new();
@@ -2189,6 +2251,21 @@ pub fn lower_finite_decision_plan(
     if !has_functions {
         variants_of.clear();
         nullary.clear();
+        variants_of.insert("Satisfied".to_string(), "ValidationOutcome".to_string());
+        variants_of.insert("Violated".to_string(), "ValidationOutcome".to_string());
+        variants_of.insert("Unknown".to_string(), "ValidationOutcome".to_string());
+        variants_of.insert(
+            "ValidationOutcome::Satisfied".to_string(),
+            "ValidationOutcome".to_string(),
+        );
+        variants_of.insert(
+            "ValidationOutcome::Violated".to_string(),
+            "ValidationOutcome".to_string(),
+        );
+        variants_of.insert(
+            "ValidationOutcome::Unknown".to_string(),
+            "ValidationOutcome".to_string(),
+        );
     }
 
     let generic_config_names: BTreeSet<String> = module
@@ -2315,9 +2392,7 @@ pub fn lower_finite_decision_plan(
                                     name: inp.name.clone(),
                                 });
                             }
-                            ast::Ty::App(_, _) => {
-                                resolve_type_ast_simple(&args[0], &schemas)?
-                            }
+                            ast::Ty::App(_, _) => resolve_type_ast_simple(&args[0], &schemas)?,
                             other => {
                                 return Err(FiniteDecisionLowerError::UnsupportedListElementType {
                                     name: inp.name.clone(),
@@ -3287,7 +3362,11 @@ fn encode_expr_v2(w: &mut CanonWriter, e: &L3ExprV2) {
         }),
         L3ExprV2::Ascribe { expr, element } => w.write_enum(27, |w| {
             encode_expr_v2(w, expr);
-            w.write_ident(element);
+            w.write_ident(&element.display_name());
+        }),
+        L3ExprV2::Validate { target_type, arg } => w.write_enum(28, |w| {
+            w.write_ident(target_type);
+            encode_expr_v2(w, arg);
         }),
     }
 }

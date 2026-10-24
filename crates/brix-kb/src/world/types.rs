@@ -203,10 +203,17 @@ pub enum QueryCursorPosition {
     Offset(usize),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum QueryCursorKind {
+    Versioned,
+    Legacy,
+}
+
 /// A scope-bound pagination cursor ensuring a continuation is resumed
 /// only against the exact world, revision, relation, and ordering it was issued for.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct QueryCursor {
+    pub kind: QueryCursorKind,
     pub world_id: String,
     pub revision: Digest,
     pub relation: String,
@@ -223,6 +230,7 @@ impl QueryCursor {
         key: WorldKey,
     ) -> Self {
         Self {
+            kind: QueryCursorKind::Versioned,
             world_id: world_id.into(),
             revision,
             relation: relation.into(),
@@ -238,12 +246,17 @@ impl QueryCursor {
         offset: usize,
     ) -> Self {
         Self {
+            kind: QueryCursorKind::Versioned,
             world_id: world_id.into(),
             revision,
             relation: relation.into(),
             ordering: "offset".to_string(),
             position: QueryCursorPosition::Offset(offset),
         }
+    }
+
+    pub fn position(&self) -> &QueryCursorPosition {
+        &self.position
     }
 
     pub fn to_token(&self) -> String {
@@ -268,16 +281,13 @@ impl QueryCursor {
     }
 
     pub fn from_token(token: &str) -> Result<Self, WorldError> {
-        let bytes = WorldKey::from_hex(token).map_err(|_| {
-            WorldError::InvalidCursor("invalid hex in query cursor".into())
-        })?;
-        let mut reader = CanonReader::new(bytes.as_bytes());
-        let invalid = || WorldError::InvalidCursor("malformed query cursor".into());
-        let magic = match reader.read_bytes() {
-            Ok(m) => m,
+        let bytes_res = WorldKey::from_hex(token);
+        let bytes = match bytes_res {
+            Ok(b) => b,
             Err(_) => {
                 if let Ok(legacy) = WorldCursor::from_token(token) {
                     return Ok(Self {
+                        kind: QueryCursorKind::Legacy,
                         world_id: String::new(),
                         revision: Digest::from_bytes([0u8; 32]),
                         relation: String::new(),
@@ -290,6 +300,7 @@ impl QueryCursor {
                 }
                 if let Ok(offset) = token.parse::<usize>() {
                     return Ok(Self {
+                        kind: QueryCursorKind::Legacy,
                         world_id: String::new(),
                         revision: Digest::from_bytes([0u8; 32]),
                         relation: String::new(),
@@ -297,12 +308,101 @@ impl QueryCursor {
                         position: QueryCursorPosition::Offset(offset),
                     });
                 }
-                return Err(invalid());
+                return Err(WorldError::InvalidCursor("malformed query cursor".into()));
             }
         };
-        if magic != b"brix.query-cursor@1" {
+
+        let mut reader = CanonReader::new(bytes.as_bytes());
+        let magic_matched = match reader.read_bytes() {
+            Ok(m) => m == b"brix.query-cursor@1",
+            Err(_) => false,
+        };
+        let raw_matched = bytes.as_bytes().starts_with(b"brix.query-cursor@1")
+            || bytes
+                .as_bytes()
+                .windows(b"brix.query-cursor@1".len())
+                .any(|w| w == b"brix.query-cursor@1");
+
+        if magic_matched {
+            let invalid = || WorldError::InvalidCursor("malformed versioned query cursor".into());
+            let world_id_bytes = reader.read_bytes().map_err(|_| invalid())?;
+            let world_id = std::str::from_utf8(world_id_bytes)
+                .map_err(|_| invalid())?
+                .to_string();
+            if world_id.is_empty() {
+                return Err(invalid());
+            }
+
+            let revision_bytes: [u8; 32] = reader
+                .read_bytes()
+                .map_err(|_| invalid())?
+                .try_into()
+                .map_err(|_| invalid())?;
+            let revision = Digest::from_bytes(revision_bytes);
+
+            let rel_bytes = reader.read_bytes().map_err(|_| invalid())?;
+            let relation = std::str::from_utf8(rel_bytes)
+                .map_err(|_| invalid())?
+                .to_string();
+            if relation.is_empty() {
+                return Err(invalid());
+            }
+
+            let ord_bytes = reader.read_bytes().map_err(|_| invalid())?;
+            let ordering = std::str::from_utf8(ord_bytes)
+                .map_err(|_| invalid())?
+                .to_string();
+            if ordering.is_empty() {
+                return Err(invalid());
+            }
+
+            let kind = reader.read_uint().map_err(|_| invalid())?;
+            let position = match kind {
+                0 => {
+                    if ordering != "canonical" {
+                        return Err(invalid());
+                    }
+                    let hash: [u8; 32] = reader
+                        .read_bytes()
+                        .map_err(|_| invalid())?
+                        .try_into()
+                        .map_err(|_| invalid())?;
+                    let key_bytes = reader.read_bytes().map_err(|_| invalid())?.to_vec();
+                    QueryCursorPosition::Hamt {
+                        hash,
+                        key: WorldKey::new(key_bytes),
+                    }
+                }
+                1 => {
+                    if ordering != "offset" {
+                        return Err(invalid());
+                    }
+                    let offset = reader.read_uint().map_err(|_| invalid())? as usize;
+                    QueryCursorPosition::Offset(offset)
+                }
+                _ => return Err(invalid()),
+            };
+
+            if !reader.is_empty() {
+                return Err(invalid());
+            }
+
+            Ok(Self {
+                kind: QueryCursorKind::Versioned,
+                world_id,
+                revision,
+                relation,
+                ordering,
+                position,
+            })
+        } else if raw_matched {
+            Err(WorldError::InvalidCursor(
+                "malformed versioned query cursor".into(),
+            ))
+        } else {
             if let Ok(legacy) = WorldCursor::from_token(token) {
                 return Ok(Self {
+                    kind: QueryCursorKind::Legacy,
                     world_id: String::new(),
                     revision: Digest::from_bytes([0u8; 32]),
                     relation: String::new(),
@@ -315,6 +415,7 @@ impl QueryCursor {
             }
             if let Ok(offset) = token.parse::<usize>() {
                 return Ok(Self {
+                    kind: QueryCursorKind::Legacy,
                     world_id: String::new(),
                     revision: Digest::from_bytes([0u8; 32]),
                     relation: String::new(),
@@ -322,51 +423,7 @@ impl QueryCursor {
                     position: QueryCursorPosition::Offset(offset),
                 });
             }
-            return Err(invalid());
+            Err(WorldError::InvalidCursor("malformed query cursor".into()))
         }
-        let world_id = std::str::from_utf8(reader.read_bytes().map_err(|_| invalid())?)
-            .map_err(|_| invalid())?
-            .to_string();
-        let revision_bytes: [u8; 32] = reader
-            .read_bytes()
-            .map_err(|_| invalid())?
-            .try_into()
-            .map_err(|_| invalid())?;
-        let relation = std::str::from_utf8(reader.read_bytes().map_err(|_| invalid())?)
-            .map_err(|_| invalid())?
-            .to_string();
-        let ordering = std::str::from_utf8(reader.read_bytes().map_err(|_| invalid())?)
-            .map_err(|_| invalid())?
-            .to_string();
-        let kind = reader.read_uint().map_err(|_| invalid())?;
-        let position = match kind {
-            0 => {
-                let hash: [u8; 32] = reader
-                    .read_bytes()
-                    .map_err(|_| invalid())?
-                    .try_into()
-                    .map_err(|_| invalid())?;
-                let key_bytes = reader.read_bytes().map_err(|_| invalid())?.to_vec();
-                QueryCursorPosition::Hamt {
-                    hash,
-                    key: WorldKey::new(key_bytes),
-                }
-            }
-            1 => {
-                let offset = reader.read_uint().map_err(|_| invalid())? as usize;
-                QueryCursorPosition::Offset(offset)
-            }
-            _ => return Err(invalid()),
-        };
-        if !reader.is_empty() {
-            return Err(invalid());
-        }
-        Ok(Self {
-            world_id,
-            revision: Digest::from_bytes(revision_bytes),
-            relation,
-            ordering,
-            position,
-        })
     }
 }
