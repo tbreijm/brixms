@@ -464,6 +464,63 @@ impl Value {
         })
     }
 
+    /// Injective canonical storage encoding matching `state_codec::Value::state_write`.
+    fn state_write(&self, w: &mut CanonWriter) {
+        match self {
+            Value::List(items) => {
+                w.write_uint(8);
+                w.write_uint(items.len() as u64);
+                for item in items {
+                    item.state_write(w);
+                }
+            }
+            Value::Null => w.write_uint(0),
+            Value::Bool(b) => {
+                w.write_uint(1);
+                w.write_bool(*b);
+            }
+            Value::Int(i) => {
+                w.write_uint(2);
+                w.write_int(*i);
+            }
+            Value::Str(s) => {
+                w.write_uint(3);
+                w.write_str(s);
+            }
+            Value::F64(f) => {
+                w.write_uint(4);
+                w.write_uint(f.bits());
+            }
+            Value::Decimal(d) => {
+                w.write_uint(5);
+                w.write_int128(d.unscaled());
+                w.write_uint(u64::from(d.scale()));
+            }
+            Value::Record { nominal, fields } => {
+                w.write_uint(6);
+                w.write_str(nominal);
+                w.write_uint(fields.len() as u64);
+                for (name, value) in fields {
+                    w.write_str(name);
+                    value.state_write(w);
+                }
+            }
+            Value::Variant {
+                nominal,
+                variant,
+                args,
+            } => {
+                w.write_uint(7);
+                w.write_str(nominal);
+                w.write_str(variant);
+                w.write_uint(args.len() as u64);
+                for value in args {
+                    value.state_write(w);
+                }
+            }
+        }
+    }
+
     /// Canonical write, reproduced from `network.rs`'s `canon_write_value` byte-for-byte
     /// (see module docs point 6: the calendar tie-break formula is a shared spec contract).
     fn canon_write(&self, w: &mut CanonWriter) {
@@ -575,10 +632,64 @@ impl std::fmt::Display for Value {
     }
 }
 
-/// A row flowing between operators: a plain field-name -> value map, with no derivation or
-/// provenance tracking of any kind (contrast `network::IntermediateTuple`, which exists only
-/// as a vehicle for `network.rs`'s derivation ids).
+/// A row flowing between operators: a plain field-name -> value map.
 pub type Row = BTreeMap<String, Value>;
+
+/// Source and derivation provenance carried alongside a relational row's semantic values,
+/// kept separate from [`Row`] so relational deduplication (`Distinct`) compares only values.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+pub struct Provenance {
+    pub leaves: Vec<String>,
+}
+
+impl Provenance {
+    pub fn base(key: &WorldKey) -> Self {
+        Self {
+            leaves: vec![key.to_hex()],
+        }
+    }
+
+    pub fn join(&self, right: &Self) -> Self {
+        let mut leaves = Vec::with_capacity(self.leaves.len() + right.leaves.len());
+        leaves.extend_from_slice(&self.leaves);
+        leaves.extend_from_slice(&right.leaves);
+        Self { leaves }
+    }
+
+    pub fn distinct_row(values: &Row) -> Self {
+        let mut w = CanonWriter::new();
+        w.write_uint(values.len() as u64);
+        for (k, v) in values {
+            w.write_str(k);
+            v.state_write(&mut w);
+        }
+        Self {
+            leaves: vec![WorldKey::new(w.finish()).to_hex()],
+        }
+    }
+
+    pub fn group_key(key: &[Value]) -> Self {
+        let mut w = CanonWriter::new();
+        w.write_uint(key.len() as u64);
+        for v in key {
+            v.state_write(&mut w);
+        }
+        Self {
+            leaves: vec![WorldKey::new(w.finish()).to_hex()],
+        }
+    }
+
+    pub fn ordering_key(&self) -> Value {
+        Value::Str(self.leaves.join(":"))
+    }
+}
+
+/// An evaluated relational row pairing semantic values with provenance metadata.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct EvaluatedRow {
+    pub values: Row,
+    pub provenance: Provenance,
+}
 
 fn get_qualified<'a>(row: &'a Row, binding: &str, field: &str) -> Option<&'a Value> {
     row.get(&format!("{binding}.{field}"))
@@ -596,9 +707,7 @@ fn merge_rows(left: &Row, right: &Row) -> Row {
 fn row_to_tuple_record(row: &Row) -> TupleRecord {
     let mut rec = TupleRecord::new();
     for (k, v) in row {
-        if k != BRIX_PROVENANCE_KEY {
-            rec.set(k.clone(), v.to_bytes());
-        }
+        rec.set(k.clone(), v.to_bytes());
     }
     rec
 }
@@ -614,9 +723,6 @@ fn scalar_bindings(
     let mut bindings = BTreeMap::new();
     let mut records: BTreeMap<String, Vec<(String, L3ValueV2)>> = BTreeMap::new();
     for (name, value) in row {
-        if name == BRIX_PROVENANCE_KEY {
-            continue;
-        }
         if let Some((binding, field)) = name.split_once('.') {
             records
                 .entry(binding.to_owned())
@@ -650,15 +756,13 @@ fn eval_expr(
     Value::from_scalar(compiled.eval(&bindings).map_err(WorldError::NetworkError)?)
 }
 
-const BRIX_PROVENANCE_KEY: &str = "__brix_provenance_key";
-
-type GroupEntry = (Vec<Option<Value>>, Vec<Option<Value>>, Row);
+type GroupEntry = (Vec<Option<Value>>, Vec<Option<Value>>, EvaluatedRow);
 
 fn build_grouped_row(
     projections: &[(String, GroupProjection)],
     key_vals: &[Value],
     entries: &[GroupEntry],
-) -> Result<Row, WorldError> {
+) -> Result<EvaluatedRow, WorldError> {
     let mut row = Row::new();
     for (idx, (name, proj)) in projections.iter().enumerate() {
         match proj {
@@ -736,10 +840,7 @@ fn build_grouped_row(
                         .get(idx)
                         .and_then(|v| v.clone())
                         .unwrap_or_else(|| item_val.clone());
-                    let child_key = child_row
-                        .get(BRIX_PROVENANCE_KEY)
-                        .cloned()
-                        .unwrap_or(Value::Null);
+                    let child_key = child_row.provenance.ordering_key();
                     items_with_order.push((order_val, child_key, item_val));
                 }
                 items_with_order.sort_by(|a, b| {
@@ -755,7 +856,10 @@ fn build_grouped_row(
             }
         }
     }
-    Ok(row)
+    Ok(EvaluatedRow {
+        values: row,
+        provenance: Provenance::group_key(key_vals),
+    })
 }
 
 #[derive(Default)]
@@ -1347,7 +1451,7 @@ fn evaluate_once_with_budget(
     work_offset: u64,
 ) -> Result<ReferenceState, WorldError> {
     let dag = &program.dag;
-    let mut operator_outputs: Vec<Vec<Row>> = Vec::with_capacity(dag.nodes.len());
+    let mut operator_outputs: Vec<Vec<EvaluatedRow>> = Vec::with_capacity(dag.nodes.len());
 
     for (idx, node) in dag.nodes.iter().enumerate() {
         let rows = match node {
@@ -1400,8 +1504,10 @@ fn evaluate_once_with_budget(
                                 })?,
                         );
                     }
-                    row.insert(BRIX_PROVENANCE_KEY.to_string(), Value::Str(key.to_hex()));
-                    rows.push(row);
+                    rows.push(EvaluatedRow {
+                        values: row,
+                        provenance: Provenance::base(key),
+                    });
                 }
                 rows
             }
@@ -1411,11 +1517,14 @@ fn evaluate_once_with_budget(
                     meter.rows_evaluated += 1;
                     charge_work(meter, work_offset, max_work)?;
                     let mut bound = Row::new();
-                    for (k, v) in row {
+                    for (k, v) in &row.values {
                         bound.insert(format!("{alias}.{k}"), v.clone());
                         bound.insert(k.clone(), v.clone());
                     }
-                    bound_rows.push(bound);
+                    bound_rows.push(EvaluatedRow {
+                        values: bound,
+                        provenance: row.provenance.clone(),
+                    });
                 }
                 bound_rows
             }
@@ -1428,7 +1537,7 @@ fn evaluate_once_with_budget(
                 for row in &operator_outputs[input.0] {
                     meter.rows_evaluated += 1;
                     charge_work(meter, work_offset, max_work)?;
-                    let bindings = scalar_bindings(row)?;
+                    let bindings = scalar_bindings(&row.values)?;
                     let l3_val = eval_compiled_with_budget(
                         compiled_pred,
                         &bindings,
@@ -1460,7 +1569,7 @@ fn evaluate_once_with_budget(
                 let mut out = Vec::with_capacity(operator_outputs[input.0].len());
                 for row in &operator_outputs[input.0] {
                     meter.rows_evaluated += 1;
-                    let bindings = scalar_bindings(row)?;
+                    let bindings = scalar_bindings(&row.values)?;
                     let mut projected = Row::new();
                     for (name, compiled) in compiled_projs {
                         let l3_val = eval_compiled_with_budget(
@@ -1472,10 +1581,10 @@ fn evaluate_once_with_budget(
                         )?;
                         projected.insert(name.clone(), Value::from_scalar(l3_val)?);
                     }
-                    if let Some(k) = row.get(BRIX_PROVENANCE_KEY) {
-                        projected.insert(BRIX_PROVENANCE_KEY.to_string(), k.clone());
-                    }
-                    out.push(projected);
+                    out.push(EvaluatedRow {
+                        values: projected,
+                        provenance: row.provenance.clone(),
+                    });
                 }
                 out
             }
@@ -1488,12 +1597,12 @@ fn evaluate_once_with_budget(
                 let left_rows = &operator_outputs[left.0];
                 let right_rows = &operator_outputs[right.0];
 
-                let mut right_index: BTreeMap<Vec<Value>, Vec<&Row>> = BTreeMap::new();
+                let mut right_index: BTreeMap<Vec<Value>, Vec<&EvaluatedRow>> = BTreeMap::new();
                 for r in right_rows {
                     let rkey: Vec<Value> = right_keys
                         .iter()
                         .map(|k| {
-                            get_qualified(r, &k.binding, &k.field)
+                            get_qualified(&r.values, &k.binding, &k.field)
                                 .cloned()
                                 .ok_or_else(|| {
                                     WorldError::NetworkError(format!(
@@ -1511,7 +1620,7 @@ fn evaluate_once_with_budget(
                     let lkey: Vec<Value> = left_keys
                         .iter()
                         .map(|k| {
-                            get_qualified(l, &k.binding, &k.field)
+                            get_qualified(&l.values, &k.binding, &k.field)
                                 .cloned()
                                 .ok_or_else(|| {
                                     WorldError::NetworkError(format!(
@@ -1525,7 +1634,10 @@ fn evaluate_once_with_budget(
                         for r in matches {
                             meter.join_pairs_evaluated += 1;
                             charge_work(meter, work_offset, max_work)?;
-                            out.push(merge_rows(l, r));
+                            out.push(EvaluatedRow {
+                                values: merge_rows(&l.values, &r.values),
+                                provenance: l.provenance.join(&r.provenance),
+                            });
                         }
                     }
                 }
@@ -1542,7 +1654,7 @@ fn evaluate_once_with_budget(
                     let key = right_keys
                         .iter()
                         .map(|k| {
-                            get_qualified(row, &k.binding, &k.field)
+                            get_qualified(&row.values, &k.binding, &k.field)
                                 .cloned()
                                 .ok_or_else(|| {
                                     WorldError::NetworkError(format!(
@@ -1560,7 +1672,7 @@ fn evaluate_once_with_budget(
                         let key = left_keys
                             .iter()
                             .map(|k| {
-                                get_qualified(row, &k.binding, &k.field)
+                                get_qualified(&row.values, &k.binding, &k.field)
                                     .cloned()
                                     .ok_or_else(|| {
                                         WorldError::NetworkError(format!(
@@ -1594,7 +1706,7 @@ fn evaluate_once_with_budget(
                     let key: Vec<_> = key_fields
                         .iter()
                         .map(|name| {
-                            row.get(name).cloned().ok_or_else(|| {
+                            row.values.get(name).cloned().ok_or_else(|| {
                                 WorldError::NetworkError(format!("missing union key field {name}"))
                             })
                         })
@@ -1604,7 +1716,10 @@ fn evaluate_once_with_budget(
                             "duplicate key in disjoint union: {key:?}"
                         )));
                     }
-                    out.push(row.clone());
+                    out.push(EvaluatedRow {
+                        values: row.values.clone(),
+                        provenance: Provenance::group_key(&key),
+                    });
                 }
                 out
             }
@@ -1620,7 +1735,7 @@ fn evaluate_once_with_budget(
                 let right_rows = &operator_outputs[right.0];
                 let mut out = Vec::with_capacity(left_rows.len());
                 for parent in left_rows {
-                    let key = get_qualified(parent, &left_key.binding, &left_key.field)
+                    let key = get_qualified(&parent.values, &left_key.binding, &left_key.field)
                         .cloned()
                         .ok_or_else(|| {
                             WorldError::NetworkError(format!(
@@ -1632,7 +1747,8 @@ fn evaluate_once_with_budget(
                     for child in right_rows {
                         meter.rows_evaluated += 1;
                         charge_work(meter, work_offset, max_work)?;
-                        if get_qualified(child, &right_key.binding, &right_key.field) == Some(&key)
+                        if get_qualified(&child.values, &right_key.binding, &right_key.field)
+                            == Some(&key)
                         {
                             count = count.checked_add(1).ok_or_else(|| {
                                 WorldError::NetworkError("count_or_zero overflow".into())
@@ -1642,7 +1758,10 @@ fn evaluate_once_with_budget(
                     let mut row = Row::new();
                     row.insert(output_key.clone(), key);
                     row.insert(output_count.clone(), Value::Int(count));
-                    out.push(row);
+                    out.push(EvaluatedRow {
+                        values: row,
+                        provenance: parent.provenance.clone(),
+                    });
                 }
                 out
             }
@@ -1651,9 +1770,14 @@ fn evaluate_once_with_budget(
                 for row in &operator_outputs[input.0] {
                     meter.rows_evaluated += 1;
                     charge_work(meter, work_offset, max_work)?;
-                    set.insert(row.clone());
+                    set.insert(row.values.clone());
                 }
-                set.into_iter().collect()
+                set.into_iter()
+                    .map(|values| {
+                        let provenance = Provenance::distinct_row(&values);
+                        EvaluatedRow { values, provenance }
+                    })
+                    .collect()
             }
             OperatorNode::GroupedCount {
                 input,
@@ -1677,7 +1801,7 @@ fn evaluate_once_with_budget(
                 for row in &operator_outputs[input.0] {
                     meter.rows_evaluated += 1;
                     charge_work(meter, work_offset, max_work)?;
-                    let bindings = scalar_bindings(row)?;
+                    let bindings = scalar_bindings(&row.values)?;
                     let mut key = Vec::with_capacity(compiled_keys.len());
                     for compiled in compiled_keys {
                         let l3_val = eval_compiled_with_budget(
@@ -1742,7 +1866,7 @@ fn evaluate_once_with_budget(
         }
         let set: BTreeSet<TupleRecord> = operator_outputs[op_id.0]
             .iter()
-            .map(row_to_tuple_record)
+            .map(|r| row_to_tuple_record(&r.values))
             .collect();
         derived_relations.insert(name.clone(), set);
     }
@@ -1768,8 +1892,8 @@ fn evaluate_once_with_budget(
         let mut entities: BTreeMap<String, BTreeMap<String, ReferenceCandidate>> = BTreeMap::new();
 
         for row in source_rows {
-            let mut eval_row = row.clone();
-            for (k, v) in row {
+            let mut eval_row = row.values.clone();
+            for (k, v) in &row.values {
                 eval_row.insert(format!("{}.{k}", decide.binder), v.clone());
             }
 

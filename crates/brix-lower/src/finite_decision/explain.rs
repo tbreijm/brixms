@@ -983,7 +983,8 @@ impl TraceBuilder {
                     // inputs leak in.
                     let mut fn_env = EvalEnv::new()
                         .with_functions(env.functions().clone())
-                        .with_schemas(def.schemas.clone());
+                        .with_schemas(def.schemas.clone())
+                        .with_documentary_registry(env.documentary_registry_arc());
                     for ((param_name, _), val) in def.params.iter().zip(arg_values) {
                         fn_env = fn_env.with_local(param_name.clone(), val);
                     }

@@ -496,10 +496,38 @@ fn test_world_evidence_and_verify_evidence_cli() {
         &program,
         r#"
 config Status = Approved | Rejected
-rel input orders: { id: Str, qty: Int } key id
-decide review for o in orders per id {
-    propose approved priority 10 when o.qty > 5 = Status::Approved
-    propose rejected priority 20 when true = Status::Rejected
+config CertifiedAnswer = { path: Status, caller: Str, release_id: Str, grants: List<Str> }
+
+rel input orders: { id: Str, qty: Int, caller: Str, release_id: Str } key id
+rel input order_grants: { id: Str, order_id: Str, grant: Str, ord: Int } key id
+
+rel derived collected_grants = select {
+    order_id: g.order_id,
+    grants: collect(g.grant, g.ord, 10)
+} from g in order_grants group by g.order_id
+
+rel derived order_context = select {
+    id: o.id,
+    qty: o.qty,
+    caller: o.caller,
+    release_id: o.release_id,
+    grants: cg.grants
+} from o in orders, cg in collected_grants
+where o.id == cg.order_id
+
+decide review for o in order_context per id {
+    propose approved priority 10 when o.qty > 5 = CertifiedAnswer {
+        path: Status::Approved,
+        caller: o.caller,
+        release_id: o.release_id,
+        grants: o.grants
+    }
+    propose rejected priority 20 when true = CertifiedAnswer {
+        path: Status::Rejected,
+        caller: o.caller,
+        release_id: o.release_id,
+        grants: o.grants
+    }
 }
 "#,
     )
@@ -528,7 +556,19 @@ decide review for o in orders per id {
       "op": "upsert",
       "relation": "main::orders",
       "key": "o-1",
-      "tuple": { "id": "o-1", "qty": "10" }
+      "tuple": { "id": "o-1", "qty": "10", "caller": "service:orders", "release_id": "atlas-2026.10" }
+    },
+    {
+      "op": "upsert",
+      "relation": "main::order_grants",
+      "key": "g-1",
+      "tuple": { "id": "g-1", "order_id": "o-1", "grant": "read:orders", "ord": "1" }
+    },
+    {
+      "op": "upsert",
+      "relation": "main::order_grants",
+      "key": "g-2",
+      "tuple": { "id": "g-2", "order_id": "o-1", "grant": "role:admin", "ord": "2" }
     }
   ]
 }"#,
@@ -559,6 +599,7 @@ decide review for o in orders per id {
             .args(["--rev", &rev.to_string()])
             .args(["--decide", "main::review"])
             .args(["--entity", "o-1"])
+            .args(["--caller", "service:orders"])
             .args(["--grant", "read:orders"])
             .args(["--grant", "role:admin"])
             .args(["--out", evidence_file.to_str().unwrap()])
@@ -567,8 +608,12 @@ decide review for o in orders per id {
     );
     assert_eq!(ev_out["ok"], true);
     assert_eq!(ev_out["settlement"]["candidate_name"], "approved");
+    let value_digest = ev_out["target"]["value_digest"].as_str().unwrap();
 
-    // Verify evidence file in standalone mode (no world dir supplied)
+    // Delete the producer world directory before running fresh-process verify-evidence
+    // so portable verification is proven independent of the live world directory.
+    fs::remove_dir_all(&world).expect("remove producer world directory");
+
     let verify_out = parse_stdout(
         binary()
             .args(["world", "verify-evidence", "--json"])
@@ -580,6 +625,9 @@ decide review for o in orders per id {
             .args(["--expect-decide", "main::review"])
             .args(["--expect-entity", "o-1"])
             .args(["--expect-candidate", "approved"])
+            .args(["--expect-value-digest", value_digest])
+            .args(["--expect-caller", "service:orders"])
+            .args(["--expect-release", "atlas-2026.10"])
             .args(["--expect-grant", "read:orders"])
             .args(["--expect-grant", "role:admin"])
             .output()

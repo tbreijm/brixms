@@ -31,6 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
+use brix_canon::{CanonWriter, Digest, Domain};
 use brix_syntax::ast;
 
 /// A `config` as Stage A knows it: names and shapes, without resolved payload
@@ -2466,142 +2467,436 @@ pub enum DocumentaryDisposition {
     Unknown(String),
 }
 
-/// Documentary and runtime evidence registry mapping evidence references and
-/// verified runtime decision claims to their disposition.
-#[derive(Clone, Debug)]
-pub struct DocumentaryRegistry {
-    entries: BTreeMap<String, DocumentaryDisposition>,
-    runtime_entries: BTreeMap<(String, String), DocumentaryDisposition>,
-    runtime_receipts: Vec<crate::evidence::Receipt>,
+/// A single documentary evidence record inside an immutable [`DocumentarySnapshot`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocumentaryEntry {
+    pub evidence_id: String,
+    pub content_digest: Digest,
+    pub evidence_kind: String,
+    pub authority_scope: String,
+    pub disposition: DocumentaryDisposition,
 }
 
-impl Default for DocumentaryRegistry {
-    fn default() -> Self {
-        let mut entries = BTreeMap::new();
-        entries.insert("doc://sec-9".to_string(), DocumentaryDisposition::Satisfied);
-        entries.insert(
-            "doc://refuted/sec-9".to_string(),
-            DocumentaryDisposition::Violated(
-                "documentary evidence refuted or invalid: doc://refuted/sec-9".to_string(),
-            ),
-        );
-        entries.insert(
-            "doc://invalid/sec-9".to_string(),
-            DocumentaryDisposition::Violated(
-                "documentary evidence refuted or invalid: doc://invalid/sec-9".to_string(),
-            ),
-        );
-        entries.insert(
-            "doc://missing/audit-log".to_string(),
-            DocumentaryDisposition::Unknown(
-                "documentary evidence missing or unreachable: doc://missing/audit-log".to_string(),
-            ),
-        );
-
-        let mut runtime_entries = BTreeMap::new();
-        runtime_entries.insert(
-            ("dispatch".to_string(), "ship".to_string()),
-            DocumentaryDisposition::Satisfied,
-        );
-
-        Self {
-            entries,
-            runtime_entries,
-            runtime_receipts: Vec::new(),
-        }
-    }
+/// An immutable snapshot of documentary evidence records verified against an
+/// independently supplied expected snapshot digest before admission.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DocumentarySnapshot {
+    entries: BTreeMap<String, DocumentaryEntry>,
 }
 
-impl DocumentaryRegistry {
+impl DocumentarySnapshot {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn insert(&mut self, uri: impl Into<String>, disposition: DocumentaryDisposition) {
-        self.entries.insert(uri.into(), disposition);
+    pub fn with_entry(mut self, entry: DocumentaryEntry) -> Self {
+        self.insert(entry);
+        self
     }
 
-    pub fn insert_runtime(
+    pub fn insert(&mut self, entry: DocumentaryEntry) {
+        self.entries.insert(entry.evidence_id.clone(), entry);
+    }
+
+    pub fn entries(&self) -> &BTreeMap<String, DocumentaryEntry> {
+        &self.entries
+    }
+
+    pub fn get(&self, evidence_id: &str) -> Option<&DocumentaryEntry> {
+        self.entries.get(evidence_id)
+    }
+
+    /// Canonical digest over all documentary entries in key order.
+    pub fn digest(&self) -> Digest {
+        let mut w = CanonWriter::new();
+        w.write_tag("brix.evidence.documentary-snapshot@1");
+        w.write_uint(self.entries.len() as u64);
+        for (id, entry) in &self.entries {
+            w.write_str(id);
+            w.write_str(&entry.evidence_id);
+            w.write_bytes(entry.content_digest.as_bytes());
+            w.write_str(&entry.evidence_kind);
+            w.write_str(&entry.authority_scope);
+            match &entry.disposition {
+                DocumentaryDisposition::Satisfied => w.write_uint(0),
+                DocumentaryDisposition::Violated(reason) => {
+                    w.write_uint(1);
+                    w.write_str(reason);
+                }
+                DocumentaryDisposition::Unknown(reason) => {
+                    w.write_uint(2);
+                    w.write_str(reason);
+                }
+            }
+        }
+        w.digest(Domain::Snapshot)
+    }
+}
+
+pub const ADMITTED_DOCUMENTED_STEP_KINDS: &[&str] = &[
+    "documentary",
+    "documented-step",
+    "policy-clause",
+    "standard-clause",
+    "regulatory-clause",
+    "specification",
+    "audit-record",
+    "attestation",
+    "checklist-item",
+    "certification",
+    "approval",
+    "sign-off",
+];
+
+pub fn is_admitted_documented_step_kind(kind: &str) -> bool {
+    let k = kind.to_ascii_lowercase();
+    if k.contains("runtime") || k.contains("decision") || k.contains("outcome") {
+        return false;
+    }
+    ADMITTED_DOCUMENTED_STEP_KINDS.contains(&k.as_str())
+}
+
+pub fn is_admitted_documented_step_scope(scope: &str) -> bool {
+    let s = scope.to_ascii_lowercase();
+    if s.is_empty()
+        || s == "any"
+        || s == "*"
+        || s == "none"
+        || s.contains("runtime")
+        || s.contains("decision")
+        || s.contains("outcome")
+    {
+        return false;
+    }
+    true
+}
+
+fn parse_digest_hex(hex: &str) -> Option<Digest> {
+    if hex.len() != 64 || !hex.is_ascii() {
+        return None;
+    }
+    let bytes = hex.as_bytes();
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        let hi = (bytes[i * 2] as char).to_digit(16)?;
+        let lo = (bytes[i * 2 + 1] as char).to_digit(16)?;
+        *byte = ((hi << 4) | lo) as u8;
+    }
+    Some(Digest::from_bytes(out))
+}
+
+/// Complete runtime claim target fields extracted from an input record passed to
+/// `validate<RuntimeOutcome>(...)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeClaimQuery {
+    pub decide: String,
+    pub entity: String,
+    pub world: Digest,
+    pub program: Option<Digest>,
+    pub revision: u64,
+    pub revision_digest: Option<Digest>,
+    pub candidate: String,
+    pub result: Digest,
+    pub caller: Option<String>,
+    pub release: String,
+    pub grants: Vec<String>,
+}
+
+/// Verified documentary and runtime evidence registry.
+///
+/// `Default::default()` and `new()` construct an **empty** registry with no
+/// built-in fixture URIs or runtime claims.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DocumentaryRegistry {
+    snapshot: Option<(DocumentarySnapshot, Digest)>,
+    runtime_claims: Vec<crate::evidence::VerifiedDecisionClaim>,
+}
+
+/// Trusted embedding boundary for runtime claims. Implementations are part of
+/// the host's trusted computing base, not evidence supplied by a Brix program.
+/// Production hosts should use brix-kb's opaque VerifiedDecisionEvidence,
+/// whose private fields are created only after complete independent replay.
+/// Implementing this trait is an explicit host trust decision; it does not mint
+/// a verified handle. Neither input decoding nor validate<T> implements it.
+pub trait TrustedRuntimeEvidenceProvider {
+    fn runtime_claim(&self) -> &crate::evidence::VerifiedDecisionClaim;
+}
+
+impl DocumentaryRegistry {
+    /// Install a claim from a trusted host adapter. Do not implement an adapter
+    /// over unverified input; use the brix-kb verifier's handle and admit_into.
+    pub fn admit_trusted_runtime_provider(
         &mut self,
-        decide: impl Into<String>,
-        candidate: impl Into<String>,
-        disposition: DocumentaryDisposition,
+        provider: &impl TrustedRuntimeEvidenceProvider,
     ) {
-        self.runtime_entries
-            .insert((decide.into(), candidate.into()), disposition);
-    }
-
-    pub fn register_runtime_receipt(&mut self, receipt: crate::evidence::Receipt) {
-        if receipt.authentic() && receipt.authority == crate::evidence::Authority::RuntimeCheck {
-            self.runtime_receipts.push(receipt);
+        let claim = provider.runtime_claim();
+        if !self.runtime_claims.contains(claim) {
+            self.runtime_claims.push(claim.clone());
+            self.runtime_claims.sort();
         }
     }
 
-    pub fn lookup(&self, uri: &str) -> DocumentaryDisposition {
-        if !uri.starts_with("doc://") {
-            return DocumentaryDisposition::Unknown(format!(
-                "invalid or untrusted documentary uri scheme: {uri}"
+    /// Construct an empty registry with no documentary snapshot and no runtime claims.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Construct a registry from an immutable documentary snapshot after verifying
+    /// its canonical digest against `expected_digest`.
+    pub fn from_snapshot(
+        snapshot: DocumentarySnapshot,
+        expected_digest: Digest,
+    ) -> Result<Self, String> {
+        let mut reg = Self::new();
+        reg.with_verified_snapshot(snapshot, expected_digest)?;
+        Ok(reg)
+    }
+
+    /// Load an immutable documentary snapshot after verifying `snapshot.digest() == expected_digest`.
+    pub fn with_verified_snapshot(
+        &mut self,
+        snapshot: DocumentarySnapshot,
+        expected_digest: Digest,
+    ) -> Result<(), String> {
+        let actual = snapshot.digest();
+        if actual != expected_digest {
+            return Err(format!(
+                "documentary snapshot digest mismatch: expected {}, found {}",
+                expected_digest.to_hex(),
+                actual.to_hex()
             ));
         }
-        self.entries.get(uri).cloned().unwrap_or_else(|| {
-            DocumentaryDisposition::Unknown(format!(
-                "documentary evidence uri not found in registry: {uri}"
-            ))
-        })
+        self.snapshot = Some((snapshot, expected_digest));
+        Ok(())
     }
 
-    pub fn lookup_runtime(
-        &self,
-        decide: &str,
-        candidate: &str,
-        status: &str,
-    ) -> DocumentaryDisposition {
-        match status {
-            "tampered" | "violated" | "refuted" | "invalid" | "Violated" => {
-                return DocumentaryDisposition::Violated(format!(
-                    "runtime evidence tampered or violated: {status}"
-                ));
-            }
-            "missing" | "unreachable" | "unknown" | "unresolved" | "Unknown" => {
-                return DocumentaryDisposition::Unknown(format!(
-                    "runtime evidence missing or unreachable: {status}"
-                ));
-            }
-            "valid" | "satisfied" | "verified" | "Satisfied" => {}
-            other => {
-                return DocumentaryDisposition::Unknown(format!(
-                    "unverified runtime evidence status: {other}"
-                ));
-            }
-        }
-
-        // Check authentic runtime receipts first
-        let suffix = format!(":{candidate}");
-        let prefix = format!("decision:{decide}:");
-        if self.runtime_receipts.iter().any(|r| {
-            r.authentic()
-                && r.authority == crate::evidence::Authority::RuntimeCheck
-                && r.proposition.starts_with(&prefix)
-                && r.proposition.ends_with(&suffix)
-        }) {
-            return DocumentaryDisposition::Satisfied;
-        }
-
-        let unqualified = decide.rsplit("::").next().unwrap_or(decide);
-        if let Some(disp) = self
-            .runtime_entries
-            .get(&(decide.to_string(), candidate.to_string()))
-            .or_else(|| {
-                self.runtime_entries
-                    .get(&(unqualified.to_string(), candidate.to_string()))
-            })
+    /// Retired prototype admission API. Prototype handles are always refused;
+    /// use brix-kb VerifiedDecisionEvidence::admit_into after complete replay.
+    pub fn admit_runtime_evidence(
+        &mut self,
+        evidence: crate::evidence::VerifiedDecisionEvidence,
+    ) -> Result<(), String> {
+        if !evidence.authentic()
+            || evidence.receipt().authority != crate::evidence::Authority::RuntimeCheck
         {
-            return disp.clone();
+            return Err("unauthentic or non-runtime decision evidence rejected".to_string());
+        }
+        self.runtime_claims.push(evidence.claim().clone());
+        Ok(())
+    }
+
+    /// Canonical identity of this evidence environment (`None` when completely empty).
+    pub fn environment_digest(&self) -> Option<Digest> {
+        if self.snapshot.is_none() && self.runtime_claims.is_empty() {
+            return None;
+        }
+        let mut w = CanonWriter::new();
+        w.write_tag("brix.evidence.environment@1");
+        match &self.snapshot {
+            Some((_, snap_digest)) => {
+                w.write_uint(1);
+                w.write_bytes(snap_digest.as_bytes());
+            }
+            None => w.write_uint(0),
+        }
+        w.write_uint(self.runtime_claims.len() as u64);
+        for c in &self.runtime_claims {
+            w.write_bytes(c.world.as_bytes());
+            w.write_bytes(c.program.as_bytes());
+            w.write_uint(c.revision);
+            w.write_bytes(c.revision_digest.as_bytes());
+            w.write_str(&c.decide);
+            w.write_str(&c.entity);
+            w.write_str(&c.candidate);
+            w.write_bytes(c.value_digest.as_bytes());
+            match &c.caller {
+                Some(caller) => {
+                    w.write_uint(1);
+                    w.write_str(caller);
+                }
+                None => w.write_uint(0),
+            }
+            w.write_str(&c.release);
+            w.write_uint(c.grants.len() as u64);
+            for g in &c.grants {
+                w.write_str(g);
+            }
+        }
+        Some(w.digest(Domain::Snapshot))
+    }
+
+    /// Resolve a documentary evidence reference in the checked snapshot and verify its kind and scope.
+    pub fn lookup_documentary(
+        &self,
+        uri: &str,
+        expected_kind: Option<&str>,
+        expected_scope: Option<&str>,
+    ) -> Result<&DocumentaryEntry, DocumentaryDisposition> {
+        if !uri.starts_with("doc://") {
+            return Err(DocumentaryDisposition::Unknown(format!(
+                "invalid or untrusted documentary uri scheme: {uri}"
+            )));
+        }
+        let Some((snapshot, _)) = &self.snapshot else {
+            return Err(DocumentaryDisposition::Unknown(format!(
+                "no verified documentary registry snapshot loaded while resolving {uri}"
+            )));
+        };
+        let Some(entry) = snapshot.get(uri) else {
+            return Err(DocumentaryDisposition::Unknown(format!(
+                "documentary evidence uri not found in verified snapshot: {uri}"
+            )));
+        };
+        match &entry.disposition {
+            DocumentaryDisposition::Unknown(reason) => {
+                return Err(DocumentaryDisposition::Unknown(reason.clone()));
+            }
+            DocumentaryDisposition::Violated(reason) => {
+                return Err(DocumentaryDisposition::Violated(reason.clone()));
+            }
+            DocumentaryDisposition::Satisfied => {}
+        }
+        if entry.evidence_kind.is_empty() || entry.authority_scope.is_empty() {
+            return Err(DocumentaryDisposition::Violated(format!(
+                "documentary snapshot entry '{uri}' has empty kind or authority scope"
+            )));
+        }
+        if !is_admitted_documented_step_kind(&entry.evidence_kind)
+            || !is_admitted_documented_step_scope(&entry.authority_scope)
+        {
+            return Err(DocumentaryDisposition::Violated(format!(
+                "documentary snapshot entry '{uri}' kind '{}' / scope '{}' is not admitted as DocumentedStep authority",
+                entry.evidence_kind, entry.authority_scope
+            )));
+        }
+        let Some(kind) = expected_kind else {
+            return Err(DocumentaryDisposition::Violated(format!(
+                "documentary evidence reference for '{uri}' is missing required evidence kind"
+            )));
+        };
+        if !is_admitted_documented_step_kind(kind) {
+            return Err(DocumentaryDisposition::Violated(format!(
+                "evidence kind '{kind}' is not admitted as DocumentedStep authority"
+            )));
+        }
+        if kind != entry.evidence_kind {
+            return Err(DocumentaryDisposition::Violated(format!(
+                "documentary evidence kind mismatch for '{uri}': expected '{}', found '{kind}'",
+                entry.evidence_kind
+            )));
+        }
+        let Some(scope) = expected_scope else {
+            return Err(DocumentaryDisposition::Violated(format!(
+                "documentary evidence reference for '{uri}' is missing required authority scope"
+            )));
+        };
+        if !is_admitted_documented_step_scope(scope) {
+            return Err(DocumentaryDisposition::Violated(format!(
+                "authority scope '{scope}' is not admitted as DocumentedStep authority"
+            )));
+        }
+        if scope != entry.authority_scope {
+            return Err(DocumentaryDisposition::Violated(format!(
+                "documentary authority scope mismatch for '{uri}': expected '{}', found '{scope}'",
+                entry.authority_scope
+            )));
+        }
+        Ok(entry)
+    }
+
+    /// Look up an admitted runtime decision claim matching the exact qualified decision,
+    /// entity, world, revision, result digest, caller, release, and grants.
+    pub fn lookup_runtime_claim(
+        &self,
+        query: &RuntimeClaimQuery,
+    ) -> Result<&crate::evidence::VerifiedDecisionClaim, DocumentaryDisposition> {
+        if !query.decide.contains("::") {
+            return Err(DocumentaryDisposition::Unknown(format!(
+                "runtime decision name '{}' must be fully qualified",
+                query.decide
+            )));
+        }
+        // Locate admitted evidence for the exact (decide, entity, world, revision) subject.
+        let Some(admitted) = self.runtime_claims.iter().find(|c| {
+            c.decide == query.decide
+                && c.entity == query.entity
+                && c.world == query.world
+                && c.revision == query.revision
+        }) else {
+            return Err(DocumentaryDisposition::Unknown(format!(
+                "runtime decision evidence for ({}, entity={}, world={}, rev={}) not found in verified registry",
+                query.decide,
+                query.entity,
+                query.world.to_hex(),
+                query.revision
+            )));
+        };
+
+        let Some(expected_prog) = query.program else {
+            return Err(DocumentaryDisposition::Unknown(
+                "runtime decision claim query is missing required program digest pin".to_string(),
+            ));
+        };
+        if admitted.program != expected_prog {
+            return Err(DocumentaryDisposition::Violated(format!(
+                "runtime program digest mismatch for ({}, {}): admitted {}, claimed {}",
+                query.decide,
+                query.entity,
+                admitted.program.to_hex(),
+                expected_prog.to_hex()
+            )));
+        }
+        let Some(expected_rev_digest) = query.revision_digest else {
+            return Err(DocumentaryDisposition::Unknown(
+                "runtime decision claim query is missing required revision digest pin".to_string(),
+            ));
+        };
+        if admitted.revision_digest != expected_rev_digest {
+            return Err(DocumentaryDisposition::Violated(format!(
+                "runtime revision digest mismatch for ({}, {}): admitted {}, claimed {}",
+                query.decide,
+                query.entity,
+                admitted.revision_digest.to_hex(),
+                expected_rev_digest.to_hex()
+            )));
         }
 
-        DocumentaryDisposition::Unknown(format!(
-            "runtime decision claim ({decide}, {candidate}) not found in verified registry"
-        ))
+        // Check every predicate / result / authority field against the admitted claim.
+        if admitted.candidate != query.candidate {
+            return Err(DocumentaryDisposition::Violated(format!(
+                "runtime candidate mismatch for ({}, {}): admitted '{}', claimed '{}'",
+                query.decide, query.entity, admitted.candidate, query.candidate
+            )));
+        }
+        if admitted.value_digest != query.result {
+            return Err(DocumentaryDisposition::Violated(format!(
+                "runtime result digest mismatch for ({}, {}): admitted {}, claimed {}",
+                query.decide,
+                query.entity,
+                admitted.value_digest.to_hex(),
+                query.result.to_hex()
+            )));
+        }
+        if admitted.caller != query.caller {
+            return Err(DocumentaryDisposition::Violated(format!(
+                "runtime caller mismatch for ({}, {}): admitted {:?}, claimed {:?}",
+                query.decide, query.entity, admitted.caller, query.caller
+            )));
+        }
+        if admitted.release != query.release {
+            return Err(DocumentaryDisposition::Violated(format!(
+                "runtime release mismatch for ({}, {}): admitted '{}', claimed '{}'",
+                query.decide, query.entity, admitted.release, query.release
+            )));
+        }
+        if admitted.grants != query.grants {
+            return Err(DocumentaryDisposition::Violated(format!(
+                "runtime grants mismatch for ({}, {}): admitted {:?}, claimed {:?}",
+                query.decide, query.entity, admitted.grants, query.grants
+            )));
+        }
+
+        Ok(admitted)
     }
 }
 
@@ -2681,6 +2976,10 @@ impl EvalEnv {
 
     pub fn documentary_registry(&self) -> &DocumentaryRegistry {
         &self.documentary_registry
+    }
+
+    pub fn documentary_registry_arc(&self) -> Arc<DocumentaryRegistry> {
+        self.documentary_registry.clone()
     }
 
     /// World values must be well-typed even when an intermediate constructor
@@ -4283,16 +4582,25 @@ fn eval_validate_v2(
 
     match target_unqualified {
         "DocumentedStep" => {
-            let uri_opt = match &arg_val {
-                L3ValueV2::Record { fields, .. } => fields
-                    .iter()
-                    .find(|(k, _)| k == "uri")
-                    .and_then(|(_, v)| match v {
-                        L3ValueV2::Str(s) => Some(s.clone()),
-                        _ => None,
-                    }),
-                L3ValueV2::Str(s) => Some(s.clone()),
-                _ => None,
+            let (uri_opt, kind_opt, scope_opt) = match &arg_val {
+                L3ValueV2::Record { fields, .. } => {
+                    let mut uri = None;
+                    let mut kind = None;
+                    let mut scope = None;
+                    for (k, v) in fields {
+                        if let L3ValueV2::Str(s) = v {
+                            match k.as_str() {
+                                "uri" | "evidence_id" => uri = Some(s.clone()),
+                                "kind" | "evidence_kind" => kind = Some(s.clone()),
+                                "scope" | "authority_scope" => scope = Some(s.clone()),
+                                _ => {}
+                            }
+                        }
+                    }
+                    (uri, kind, scope)
+                }
+                L3ValueV2::Str(s) => (Some(s.clone()), None, None),
+                _ => (None, None, None),
             };
 
             let Some(uri) = uri_opt else {
@@ -4305,31 +4613,42 @@ fn eval_validate_v2(
                 });
             };
 
-            match env.documentary_registry.lookup(&uri) {
-                DocumentaryDisposition::Violated(reason) => Ok(L3ValueV2::Ctor {
+            match env.documentary_registry.lookup_documentary(
+                &uri,
+                kind_opt.as_deref(),
+                scope_opt.as_deref(),
+            ) {
+                Err(DocumentaryDisposition::Violated(reason)) => Ok(L3ValueV2::Ctor {
                     nominal_sum: "ValidationOutcome".to_string(),
                     variant: "Violated".to_string(),
                     args: vec![L3ValueV2::Str(reason)],
                 }),
-                DocumentaryDisposition::Unknown(reason) => Ok(L3ValueV2::Ctor {
+                Err(DocumentaryDisposition::Unknown(reason)) => Ok(L3ValueV2::Ctor {
                     nominal_sum: "ValidationOutcome".to_string(),
                     variant: "Unknown".to_string(),
                     args: vec![L3ValueV2::Str(reason)],
                 }),
-                DocumentaryDisposition::Satisfied => {
-                    let mut w = brix_canon::CanonWriter::new();
-                    w.write_str(&uri);
-                    let digest_hex = w.digest(brix_canon::Domain::Claim).to_hex();
+                Err(DocumentaryDisposition::Satisfied) => unreachable!(),
+                Ok(entry) => {
+                    let digest_hex = entry.content_digest.to_hex();
                     let mut fields = Vec::new();
                     if let Some(schema) = env.schemas.get("DocumentedStep") {
                         if let L3SchemaBody::Record(declared_fields) = &schema.body {
                             for f_name in declared_fields.keys() {
                                 match f_name.as_str() {
-                                    "uri" => fields
-                                        .push(("uri".to_string(), L3ValueV2::Str(uri.clone()))),
-                                    "digest" => fields.push((
-                                        "digest".to_string(),
-                                        L3ValueV2::Str(digest_hex.clone()),
+                                    "uri" | "evidence_id" => fields.push((
+                                        f_name.clone(),
+                                        L3ValueV2::Str(entry.evidence_id.clone()),
+                                    )),
+                                    "digest" | "content_digest" => fields
+                                        .push((f_name.clone(), L3ValueV2::Str(digest_hex.clone()))),
+                                    "kind" | "evidence_kind" => fields.push((
+                                        f_name.clone(),
+                                        L3ValueV2::Str(entry.evidence_kind.clone()),
+                                    )),
+                                    "scope" | "authority_scope" => fields.push((
+                                        f_name.clone(),
+                                        L3ValueV2::Str(entry.authority_scope.clone()),
                                     )),
                                     "status" => fields.push((
                                         "status".to_string(),
@@ -4347,7 +4666,7 @@ fn eval_validate_v2(
                                 "status".to_string(),
                                 L3ValueV2::Str("Satisfied".to_string()),
                             ),
-                            ("uri".to_string(), L3ValueV2::Str(uri)),
+                            ("uri".to_string(), L3ValueV2::Str(entry.evidence_id.clone())),
                         ];
                     }
                     let step_record = L3ValueV2::Record {
@@ -4363,33 +4682,189 @@ fn eval_validate_v2(
             }
         }
         "RuntimeOutcome" => {
-            let (decide_field, candidate_field, status) = match &arg_val {
+            let query = match &arg_val {
                 L3ValueV2::Record { fields, .. } => {
-                    let mut status_opt = None;
+                    // Never inspect or trust caller-supplied `status` text.
                     let mut decide_opt = None;
+                    let mut entity_opt = None;
+                    let mut world_hex_opt = None;
+                    let mut program_hex_opt = None;
+                    let mut revision_opt = None;
+                    let mut revision_digest_hex_opt = None;
                     let mut candidate_opt = None;
+                    let mut result_hex_opt = None;
+                    let mut caller_opt: Option<Option<String>> = None;
+                    let mut release_opt = None;
+                    let mut grants_opt = None;
+
                     for (k, v) in fields {
                         match (k.as_str(), v) {
-                            ("status", L3ValueV2::Str(s)) => status_opt = Some(s.clone()),
                             ("decision_name" | "target" | "decide", L3ValueV2::Str(s)) => {
                                 decide_opt = Some(s.clone());
                             }
-                            ("candidate", L3ValueV2::Str(s)) => candidate_opt = Some(s.clone()),
+                            ("entity" | "question", L3ValueV2::Str(s)) => {
+                                entity_opt = Some(s.clone());
+                            }
+                            ("world" | "world_digest", L3ValueV2::Str(s)) => {
+                                world_hex_opt = Some(s.clone());
+                            }
+                            ("program" | "program_digest", L3ValueV2::Str(s)) => {
+                                program_hex_opt = Some(s.clone());
+                            }
+                            ("revision" | "seq", L3ValueV2::Int(n)) => {
+                                revision_opt = u64::try_from(*n).ok();
+                            }
+                            ("revision_digest", L3ValueV2::Str(s)) => {
+                                revision_digest_hex_opt = Some(s.clone());
+                            }
+                            ("candidate", L3ValueV2::Str(s)) => {
+                                candidate_opt = Some(s.clone());
+                            }
+                            ("result" | "value_digest", L3ValueV2::Str(s)) => {
+                                result_hex_opt = Some(s.clone());
+                            }
+                            ("caller", L3ValueV2::Str(s)) => {
+                                caller_opt =
+                                    Some(if s.is_empty() { None } else { Some(s.clone()) });
+                            }
+                            ("release" | "release_id", L3ValueV2::Str(s)) => {
+                                release_opt = Some(s.clone());
+                            }
+                            ("grants", L3ValueV2::List(items)) => {
+                                let mut gs = Vec::with_capacity(items.len());
+                                let mut all_str = true;
+                                for item in items.iter() {
+                                    if let L3ValueV2::Str(s) = item {
+                                        gs.push(s.clone());
+                                    } else {
+                                        all_str = false;
+                                        break;
+                                    }
+                                }
+                                if all_str {
+                                    grants_opt = Some(gs);
+                                }
+                            }
                             _ => {}
                         }
                     }
-                    let (Some(decide), Some(candidate), Some(status)) =
-                        (decide_opt, candidate_opt, status_opt)
+
+                    let world = if let Some(ref hex) = world_hex_opt {
+                        match parse_digest_hex(hex) {
+                            Some(d) => Some(d),
+                            None => {
+                                return Ok(L3ValueV2::Ctor {
+                                    nominal_sum: "ValidationOutcome".to_string(),
+                                    variant: "Violated".to_string(),
+                                    args: vec![L3ValueV2::Str(format!(
+                                        "invalid world digest hex in runtime claim: {hex}"
+                                    ))],
+                                });
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    let program = if let Some(ref hex) = program_hex_opt {
+                        match parse_digest_hex(hex) {
+                            Some(d) => Some(d),
+                            None => {
+                                return Ok(L3ValueV2::Ctor {
+                                    nominal_sum: "ValidationOutcome".to_string(),
+                                    variant: "Violated".to_string(),
+                                    args: vec![L3ValueV2::Str(format!(
+                                        "invalid program digest hex in runtime claim: {hex}"
+                                    ))],
+                                });
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    let revision_digest = if let Some(ref hex) = revision_digest_hex_opt {
+                        match parse_digest_hex(hex) {
+                            Some(d) => Some(d),
+                            None => {
+                                return Ok(L3ValueV2::Ctor {
+                                    nominal_sum: "ValidationOutcome".to_string(),
+                                    variant: "Violated".to_string(),
+                                    args: vec![L3ValueV2::Str(format!(
+                                        "invalid revision_digest hex in runtime claim: {hex}"
+                                    ))],
+                                });
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    let result = if let Some(ref hex) = result_hex_opt {
+                        match parse_digest_hex(hex) {
+                            Some(d) => Some(d),
+                            None => {
+                                return Ok(L3ValueV2::Ctor {
+                                    nominal_sum: "ValidationOutcome".to_string(),
+                                    variant: "Violated".to_string(),
+                                    args: vec![L3ValueV2::Str(format!(
+                                        "invalid result digest hex in runtime claim: {hex}"
+                                    ))],
+                                });
+                            }
+                        }
+                    } else {
+                        None
+                    };
+
+                    let (
+                        Some(decide),
+                        Some(entity),
+                        Some(world),
+                        Some(program),
+                        Some(revision),
+                        Some(revision_digest),
+                        Some(candidate),
+                        Some(result),
+                        Some(caller),
+                        Some(release),
+                        Some(grants),
+                    ) = (
+                        decide_opt,
+                        entity_opt,
+                        world,
+                        program,
+                        revision_opt,
+                        revision_digest,
+                        candidate_opt,
+                        result,
+                        caller_opt,
+                        release_opt,
+                        grants_opt,
+                    )
                     else {
                         return Ok(L3ValueV2::Ctor {
                             nominal_sum: "ValidationOutcome".to_string(),
                             variant: "Unknown".to_string(),
                             args: vec![L3ValueV2::Str(
-                                "missing required runtime claim fields: decision_name, candidate, or status".to_string(),
+                                "runtime claim is missing required target fields (decision_name, entity, world, program, revision, revision_digest, candidate, result, caller, release, grants)".to_string(),
                             )],
                         });
                     };
-                    (decide, candidate, status)
+
+                    RuntimeClaimQuery {
+                        decide,
+                        entity,
+                        world,
+                        program: Some(program),
+                        revision,
+                        revision_digest: Some(revision_digest),
+                        candidate,
+                        result,
+                        caller,
+                        release,
+                        grants,
+                    }
                 }
                 _ => {
                     return Ok(L3ValueV2::Ctor {
@@ -4402,21 +4877,19 @@ fn eval_validate_v2(
                 }
             };
 
-            match env
-                .documentary_registry
-                .lookup_runtime(&decide_field, &candidate_field, &status)
-            {
-                DocumentaryDisposition::Violated(reason) => Ok(L3ValueV2::Ctor {
+            match env.documentary_registry.lookup_runtime_claim(&query) {
+                Err(DocumentaryDisposition::Violated(reason)) => Ok(L3ValueV2::Ctor {
                     nominal_sum: "ValidationOutcome".to_string(),
                     variant: "Violated".to_string(),
                     args: vec![L3ValueV2::Str(reason)],
                 }),
-                DocumentaryDisposition::Unknown(reason) => Ok(L3ValueV2::Ctor {
+                Err(DocumentaryDisposition::Unknown(reason)) => Ok(L3ValueV2::Ctor {
                     nominal_sum: "ValidationOutcome".to_string(),
                     variant: "Unknown".to_string(),
                     args: vec![L3ValueV2::Str(reason)],
                 }),
-                DocumentaryDisposition::Satisfied => {
+                Err(DocumentaryDisposition::Satisfied) => unreachable!(),
+                Ok(admitted) => {
                     let mut fields = Vec::new();
                     if let Some(schema) = env.schemas.get("RuntimeOutcome") {
                         if let L3SchemaBody::Record(declared_fields) = &schema.body {
@@ -4424,11 +4897,55 @@ fn eval_validate_v2(
                                 match f_name.as_str() {
                                     "candidate" => fields.push((
                                         "candidate".to_string(),
-                                        L3ValueV2::Str(candidate_field.clone()),
+                                        L3ValueV2::Str(admitted.candidate.clone()),
                                     )),
                                     "decision_name" | "target" | "decide" => fields.push((
                                         f_name.clone(),
-                                        L3ValueV2::Str(decide_field.clone()),
+                                        L3ValueV2::Str(admitted.decide.clone()),
+                                    )),
+                                    "entity" | "question" => fields.push((
+                                        f_name.clone(),
+                                        L3ValueV2::Str(admitted.entity.clone()),
+                                    )),
+                                    "world" | "world_digest" => fields.push((
+                                        f_name.clone(),
+                                        L3ValueV2::Str(admitted.world.to_hex()),
+                                    )),
+                                    "program" | "program_digest" => fields.push((
+                                        f_name.clone(),
+                                        L3ValueV2::Str(admitted.program.to_hex()),
+                                    )),
+                                    "revision" | "seq" => fields.push((
+                                        f_name.clone(),
+                                        L3ValueV2::Int(admitted.revision as i64),
+                                    )),
+                                    "revision_digest" => fields.push((
+                                        f_name.clone(),
+                                        L3ValueV2::Str(admitted.revision_digest.to_hex()),
+                                    )),
+                                    "result" | "value_digest" => fields.push((
+                                        f_name.clone(),
+                                        L3ValueV2::Str(admitted.value_digest.to_hex()),
+                                    )),
+                                    "caller" => fields.push((
+                                        "caller".to_string(),
+                                        L3ValueV2::Str(admitted.caller.clone().unwrap_or_default()),
+                                    )),
+                                    "release" | "release_id" => fields.push((
+                                        f_name.clone(),
+                                        L3ValueV2::Str(admitted.release.clone()),
+                                    )),
+                                    "grants" => fields.push((
+                                        "grants".to_string(),
+                                        L3ValueV2::List(
+                                            admitted
+                                                .grants
+                                                .iter()
+                                                .cloned()
+                                                .map(L3ValueV2::Str)
+                                                .collect::<Vec<_>>()
+                                                .into(),
+                                        ),
                                     )),
                                     "status" => fields.push((
                                         "status".to_string(),
@@ -4441,8 +4958,14 @@ fn eval_validate_v2(
                     }
                     if fields.is_empty() {
                         fields = vec![
-                            ("candidate".to_string(), L3ValueV2::Str(candidate_field)),
-                            ("decision_name".to_string(), L3ValueV2::Str(decide_field)),
+                            (
+                                "candidate".to_string(),
+                                L3ValueV2::Str(admitted.candidate.clone()),
+                            ),
+                            (
+                                "decision_name".to_string(),
+                                L3ValueV2::Str(admitted.decide.clone()),
+                            ),
                             (
                                 "status".to_string(),
                                 L3ValueV2::Str("Satisfied".to_string()),

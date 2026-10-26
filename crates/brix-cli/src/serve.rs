@@ -1016,6 +1016,11 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
                 .get("expect_candidate")
                 .and_then(Value::as_str)
                 .map(String::from);
+            let expect_value_digest = params
+                .get("expect_value_digest")
+                .or_else(|| params.get("expect_result"))
+                .and_then(Value::as_str)
+                .map(String::from);
             let expect_caller = params
                 .get("expect_caller")
                 .and_then(Value::as_str)
@@ -1034,6 +1039,7 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
                 expect_decide,
                 expect_entity,
                 expect_candidate,
+                expect_value_digest,
                 expect_caller,
                 expect_grants,
                 expect_release,

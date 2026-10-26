@@ -107,6 +107,25 @@ pub fn distinct_key(tuple: &IntermediateTuple) -> Vec<u8> {
     tuple.state_bytes()
 }
 
+fn derivation_provenance_key(leaves: &[Leaf]) -> Value {
+    let mut parts = Vec::with_capacity(leaves.len());
+    for leaf in leaves {
+        match leaf {
+            Leaf::Base(k) => parts.push(k.to_hex()),
+            Leaf::Distinct(k) => parts.push(WorldKey::new(k.clone()).to_hex()),
+            Leaf::Group(vs) => {
+                let mut w = CanonWriter::new();
+                w.write_uint(vs.len() as u64);
+                for v in vs {
+                    v.state_write(&mut w);
+                }
+                parts.push(WorldKey::new(w.finish()).to_hex());
+            }
+        }
+    }
+    Value::Str(parts.join(":"))
+}
+
 /// A derivation identifier uniquely tracking justifications for TMS truth maintenance.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum DerivationId {
@@ -1449,7 +1468,7 @@ impl GroupAccumulator {
         projections: &[(String, GroupProjection)],
         aggregate_values: &[Option<Value>],
         order_values: &[Option<Value>],
-        child_key: WorldKey,
+        child_key: Value,
         child_id: Digest,
         group: &ValueList,
         index: &mut AggregateIndex,
@@ -1465,7 +1484,7 @@ impl GroupAccumulator {
                         .get(idx)
                         .and_then(|v| v.clone())
                         .unwrap_or_else(|| item_val.clone());
-                    let key_val = Value::Str(child_key.to_hex());
+                    let key_val = child_key.clone();
                     self.collected[idx].retain(|(_, _, id, _)| id != &child_id);
                     if self.collected[idx].len() >= *limit {
                         return Err(WorldError::NetworkError(format!(
@@ -4663,10 +4682,7 @@ impl WorldNetwork {
                             };
 
                             if new_count != old_count {
-                                let child_key = match deriv.c.leaves.first() {
-                                    Some(Leaf::Base(k)) => k.clone(),
-                                    _ => WorldKey::new(deriv.c.digest().as_bytes().to_vec()),
-                                };
+                                let child_key = derivation_provenance_key(&deriv.c.leaves);
                                 let tree_work = accum.apply_delta(
                                     is_ins,
                                     projections,

@@ -131,6 +131,7 @@ pub fn execute_world(op: &WorldOp, json_out: bool) -> u8 {
             expect_decide,
             expect_entity,
             expect_candidate,
+            expect_value_digest,
             expect_caller,
             expect_grants,
             expect_release,
@@ -143,6 +144,7 @@ pub fn execute_world(op: &WorldOp, json_out: bool) -> u8 {
             expect_decide,
             expect_entity,
             expect_candidate.as_deref(),
+            expect_value_digest.as_deref(),
             expect_caller.as_deref(),
             expect_grants,
             expect_release.as_deref(),
@@ -1592,6 +1594,7 @@ fn execute_evidence(
             "command": "world evidence",
             "ok": true,
             "target": evidence.target.to_json(),
+            "target_id": evidence.target.id().to_hex(),
             "path": default_path.display().to_string(),
             "settlement": evidence.settlement.to_json(),
             "evidence": evidence_json,
@@ -1615,22 +1618,65 @@ fn execute_verify_evidence(
     expect_decide: &str,
     expect_entity: &str,
     expect_candidate: Option<&str>,
+    expect_value_digest: Option<&str>,
     expect_caller: Option<&str>,
     expect_grants: &[String],
     expect_release: Option<&str>,
     json_out: bool,
 ) -> u8 {
-    let bytes = match std::fs::read(evidence_path) {
+    let limits = brix_kb::world::decision_evidence::DecisionEvidenceDecodeLimits::strict();
+    let bytes = match brix_kb::world::decision_evidence::read_decision_evidence_file(
+        evidence_path,
+        &limits,
+    ) {
         Ok(b) => b,
-        Err(e) => return print_world_error("world verify-evidence", &WorldError::Io(e), json_out),
+        Err(e) => {
+            return print_world_error(
+                "world verify-evidence",
+                &WorldError::NetworkError(format!("{e}")),
+                json_out,
+            );
+        }
     };
-
-    let evidence = match brix_kb::world::decision_evidence::DecisionEvidence::decode(&bytes) {
+    let evidence = match brix_kb::world::decision_evidence::DecisionEvidence::decode_with_limits(
+        &bytes, &limits,
+    ) {
         Ok(ev) => ev,
         Err(e) => {
             return print_world_error(
                 "world verify-evidence",
                 &WorldError::NetworkError(format!("{e}")),
+                json_out,
+            );
+        }
+    };
+
+    let Some(candidate) = expect_candidate else {
+        return print_world_error(
+            "world verify-evidence",
+            &WorldError::InvalidSchema(
+                "missing required '--expect-candidate <NAME>': consumer must specify expected candidate rather than trusting the artifact".into(),
+            ),
+            json_out,
+        );
+    };
+
+    let Some(expect_value_digest_hex) = expect_value_digest else {
+        return print_world_error(
+            "world verify-evidence",
+            &WorldError::InvalidSchema(
+                "missing required '--expect-value-digest <HEX>': consumer must specify expected payload digest rather than trusting the artifact".into(),
+            ),
+            json_out,
+        );
+    };
+
+    let value_digest = match parse_digest_hex(expect_value_digest_hex) {
+        Ok(d) => d,
+        Err(e) => {
+            return print_world_error(
+                "world verify-evidence",
+                &WorldError::InvalidSchema(format!("invalid expect-value-digest: {e}")),
                 json_out,
             );
         }
@@ -1676,15 +1722,11 @@ fn execute_verify_evidence(
         revision_digest: rev_digest,
         decide: expect_decide.to_string(),
         entity: expect_entity.to_string(),
-        candidate: expect_candidate
-            .map(String::from)
-            .unwrap_or_else(|| evidence.target.candidate.clone()),
-        value_digest: evidence.settlement.value.compute_digest(),
+        candidate: candidate.to_string(),
+        value_digest,
         caller: expect_caller.map(String::from),
         grants: expect_grants.to_vec(),
-        release: expect_release
-            .map(String::from)
-            .unwrap_or_else(|| brix_kb::world::audit::ExecProfileV1::default().crate_version),
+        release: expect_release.map(String::from).unwrap_or_default(),
     };
 
     let receipt =

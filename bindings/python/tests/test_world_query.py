@@ -104,10 +104,12 @@ def test_world_decision_evidence_and_parent_anchored_collect(client, tmp_path):
     prog_file.write_text(
         """
 config Plan = AskBack(List<Str>) | Done
+config CertifiedAnswer = { path: Plan, caller: Str, release_id: Str, grants: List<Str> }
 
 fn no_slots(): List<Str> = []
 
-rel input parents: { parent: Str } key parent
+rel input parents: { parent: Str, caller: Str, release_id: Str } key parent
+rel input parent_grants: { id: Str, parent: Str, grant: Str, ord: Int } key id
 rel input slots: { id: Str, parent: Str, slot: Str, ord: Int } key id
 
 rel derived nonempty_slots = select {
@@ -115,16 +117,38 @@ rel derived nonempty_slots = select {
   missing: collect(s.slot, s.ord, 16)
 } from s in slots group by s.parent
 
-rel derived empty_slots = select {
+rel derived collected_grants = select {
+  parent: g.parent,
+  grants: collect(g.grant, g.ord, 16)
+} from g in parent_grants group by g.parent
+
+rel derived nonempty_context = select {
+  parent: s.parent,
+  missing: s.missing,
+  caller: p.caller,
+  release_id: p.release_id,
+  grants: g.grants
+} from s in nonempty_slots, p in parents, g in collected_grants
+where s.parent == p.parent && s.parent == g.parent
+
+rel derived empty_context = select {
   parent: p.parent,
-  missing: no_slots()
-} from p in parents
-where not exists s in slots where s.parent == p.parent
+  missing: no_slots(),
+  caller: p.caller,
+  release_id: p.release_id,
+  grants: g.grants
+} from p in parents, g in collected_grants
+where p.parent == g.parent && not exists s in slots where s.parent == p.parent
 
-rel derived parent_slots = union nonempty_slots, empty_slots key parent
+rel derived parent_context = union nonempty_context, empty_context key parent
 
-decide plan for g in parent_slots per parent {
-  propose ask priority 1 when true = Plan::AskBack(g.missing)
+decide plan for g in parent_context per parent {
+  propose ask priority 1 when true = CertifiedAnswer {
+    path: Plan::AskBack(g.missing),
+    caller: g.caller,
+    release_id: g.release_id,
+    grants: g.grants
+  }
 }
 """.strip()
     )
@@ -141,7 +165,22 @@ decide plan for g in parent_slots per parent {
             "expected_base_revision": 0,
             "idempotency_key": "collect-seed-1",
             "operations": [
-                {"op": "upsert", "relation": "atlas_collect::parents", "key": "q1", "tuple": {"parent": "q1"}},
+                {
+                    "op": "upsert",
+                    "relation": "atlas_collect::parents",
+                    "key": "q1",
+                    "tuple": {
+                        "parent": "q1",
+                        "caller": "service:atlas",
+                        "release_id": "atlas-2026.10",
+                    },
+                },
+                {
+                    "op": "upsert",
+                    "relation": "atlas_collect::parent_grants",
+                    "key": "g1",
+                    "tuple": {"id": "g1", "parent": "q1", "grant": "read:atlas", "ord": 1},
+                },
                 {
                     "op": "upsert",
                     "relation": "atlas_collect::slots",
@@ -171,6 +210,7 @@ decide plan for g in parent_slots per parent {
     assert ev_res["ok"] is True
     evidence = ev_res["evidence"]
     assert evidence["bundle"] is not None
+    expected_value_digest = ev_res["target"]["value_digest"]
 
     ver_ok = client.verify_decision_evidence(
         evidence,
@@ -180,7 +220,10 @@ decide plan for g in parent_slots per parent {
         revision_digest=rev1_digest,
         decide_name="atlas_collect::plan",
         entity_key="q1",
+        candidate="ask",
+        value_digest=expected_value_digest,
         caller="service:atlas",
+        release="atlas-2026.10",
         grants=["read:atlas"],
     )
     assert ver_ok["ok"] is True
@@ -219,7 +262,10 @@ decide plan for g in parent_slots per parent {
         revision_digest=rev1_digest,
         decide_name="atlas_collect::plan",
         entity_key="q1",
+        candidate="ask",
+        value_digest=expected_value_digest,
         caller="service:atlas",
+        release="atlas-2026.10",
         grants=["read:atlas"],
     )
     assert ver_hist["ok"] is True

@@ -101,11 +101,13 @@ def smoke(binary, example):
 
 ALPHA8_ATLAS_PROGRAM = """
 config Plan = AskBack(List<Str>) | Done
+config CertifiedAnswer = { path: Plan, caller: Str, release_id: Str, grants: List<Str> }
 
 fn no_slots(): List<Str> = []
 
 rel input pages: { id: Str, domain: Str, title: Str } key id
-rel input questions: { parent: Str } key parent
+rel input questions: { parent: Str, caller: Str, release_id: Str } key parent
+rel input question_grants: { id: Str, parent: Str, grant: Str, ord: Int } key id
 rel input slots: { id: Str, parent: Str, slot: Str, ord: Int } key id
 
 rel derived nonempty_slots = select {
@@ -113,21 +115,44 @@ rel derived nonempty_slots = select {
   missing: collect(s.slot, s.ord, 16)
 } from s in slots group by s.parent
 
-rel derived empty_slots = select {
+rel derived collected_grants = select {
+  parent: g.parent,
+  grants: collect(g.grant, g.ord, 16)
+} from g in question_grants group by g.parent
+
+rel derived nonempty_context = select {
+  parent: s.parent,
+  missing: s.missing,
+  caller: q.caller,
+  release_id: q.release_id,
+  grants: g.grants
+} from s in nonempty_slots, q in questions, g in collected_grants
+where s.parent == q.parent && s.parent == g.parent
+
+rel derived empty_context = select {
   parent: q.parent,
-  missing: no_slots()
-} from q in questions
-where not exists s in slots where s.parent == q.parent
+  missing: no_slots(),
+  caller: q.caller,
+  release_id: q.release_id,
+  grants: g.grants
+} from q in questions, g in collected_grants
+where q.parent == g.parent && not exists s in slots where s.parent == q.parent
 
-rel derived question_slots = union nonempty_slots, empty_slots key parent
+rel derived question_context = union nonempty_context, empty_context key parent
 
-decide plan for g in question_slots per parent {
-  propose ask priority 1 when true = Plan::AskBack(g.missing)
+decide plan for g in question_context per parent {
+  propose ask priority 1 when true = CertifiedAnswer {
+    path: Plan::AskBack(g.missing),
+    caller: g.caller,
+    release_id: g.release_id,
+    grants: g.grants
+  }
 }
 """.strip()
 
 
 def smoke_alpha8(binary: Path):
+    import shutil
     with tempfile.TemporaryDirectory(prefix="brix_alpha8_smoke_") as scratch_str:
         scratch = Path(scratch_str)
         world = scratch / "world_v8"
@@ -161,7 +186,9 @@ def smoke_alpha8(binary: Path):
                 {"op": "upsert", "relation": "atlas_v8::pages", "key": "p1",
                  "tuple": {"id": "p1", "domain": "finance", "title": "Revenue Overview"}},
                 {"op": "upsert", "relation": "atlas_v8::questions", "key": "q1",
-                 "tuple": {"parent": "q1"}},
+                 "tuple": {"parent": "q1", "caller": "service:atlas", "release_id": "atlas-2026.10"}},
+                {"op": "upsert", "relation": "atlas_v8::question_grants", "key": "g1",
+                 "tuple": {"id": "g1", "parent": "q1", "grant": "read:atlas", "ord": 1}},
                 {"op": "upsert", "relation": "atlas_v8::slots", "key": "s1",
                  "tuple": {"id": "s1", "parent": "q1", "slot": "volume", "ord": 1}},
                 {"op": "upsert", "relation": "atlas_v8::slots", "key": "s2",
@@ -174,26 +201,15 @@ def smoke_alpha8(binary: Path):
 
         settled1 = run("decide", world)["settlements"]["atlas_v8::plan"]["q1"]
         require(settled1["candidate_name"] == "ask", f"Expected ask candidate at rev 1: {settled1}")
-        require(settled1["value"]["variant"] == "AskBack", f"Expected AskBack variant: {settled1}")
-        require([x["value"] for x in settled1["value"]["args"][0]["items"]] == ["volume", "customer-grain"],
+        fields1 = {f["name"]: f["value"] for f in settled1["value"]["fields"]}
+        require(fields1["path"]["variant"] == "AskBack", f"Expected AskBack variant: {settled1}")
+        require([x["value"] for x in fields1["path"]["args"][0]["items"]] == ["volume", "customer-grain"],
                 f"Unexpected collected slots at rev 1: {settled1}")
 
         ev_file = isolated_dir / "evidence_rev1.json"
-        run("evidence", world, "q1", "--decide", "atlas_v8::plan", "--rev", 1,
-            "--caller", "service:atlas", "--grant", "read:atlas", "--out", ev_file)
-
-        # Fresh-process verification in isolated_dir without world path access
-        ver1 = run("verify-evidence", ev_file,
-                   "--expect-manifest", manifest_digest,
-                   "--expect-program", program_digest,
-                   "--expect-revision", 1,
-                   "--expect-revision-digest", rev1_digest,
-                   "--expect-decide", "atlas_v8::plan",
-                   "--expect-key", "q1",
-                   "--expect-caller", "service:atlas",
-                   "--expect-grant", "read:atlas",
-                   cwd=isolated_dir)
-        require(ver1["receipt"]["authority"] == "runtime_check", f"Expected runtime_check receipt: {ver1}")
+        ev1_out = run("evidence", world, "q1", "--decide", "atlas_v8::plan", "--rev", 1,
+                      "--caller", "service:atlas", "--grant", "read:atlas", "--out", ev_file)
+        val1_digest = ev1_out["target"]["value_digest"]
 
         # Typed revision-pinned surface query at rev 1
         pages1 = run("query", world, "atlas_v8::pages", "--rev", 1, "--expect-digest", rev1_digest, "--typed")
@@ -215,14 +231,38 @@ def smoke_alpha8(binary: Path):
 
         settled2 = run("decide", world)["settlements"]["atlas_v8::plan"]["q1"]
         require(settled2["candidate_name"] == "ask", f"Expected ask candidate at rev 2: {settled2}")
-        require(settled2["value"]["variant"] == "AskBack", f"Expected AskBack variant: {settled2}")
-        require(settled2["value"]["args"][0]["items"] == [],
+        fields2 = {f["name"]: f["value"] for f in settled2["value"]["fields"]}
+        require(fields2["path"]["variant"] == "AskBack", f"Expected AskBack variant: {settled2}")
+        require(fields2["path"]["args"][0]["items"] == [],
                 f"Expected empty list [] after final child retraction: {settled2}")
 
         # Historical evidence request at rev 1 after advancing to rev 2
         ev_hist_file = isolated_dir / "evidence_hist_rev1.json"
         run("evidence", world, "q1", "--decide", "atlas_v8::plan", "--rev", 1,
             "--caller", "service:atlas", "--grant", "read:atlas", "--out", ev_hist_file)
+
+        # Stale compilation check: querying rev 2 with rev 1 digest must fail
+        stale = run("query", world, "atlas_v8::pages", "--rev", 2, "--expect-digest", rev1_digest, expect_ok=False)
+        require(stale.get("status") == "revision-digest-mismatch", f"Expected revision-digest-mismatch: {stale}")
+
+        # Delete the producer world directory before running fresh-process verify-evidence
+        shutil.rmtree(world)
+
+        ver1 = run("verify-evidence", ev_file,
+                   "--expect-manifest", manifest_digest,
+                   "--expect-program", program_digest,
+                   "--expect-revision", 1,
+                   "--expect-revision-digest", rev1_digest,
+                   "--expect-decide", "atlas_v8::plan",
+                   "--expect-key", "q1",
+                   "--expect-candidate", "ask",
+                   "--expect-value-digest", val1_digest,
+                   "--expect-caller", "service:atlas",
+                   "--expect-release", "atlas-2026.10",
+                   "--expect-grant", "read:atlas",
+                   cwd=isolated_dir)
+        require(ver1["receipt"]["authority"] == "runtime_check", f"Expected runtime_check receipt: {ver1}")
+
         ver_hist = run("verify-evidence", ev_hist_file,
                        "--expect-manifest", manifest_digest,
                        "--expect-program", program_digest,
@@ -230,14 +270,13 @@ def smoke_alpha8(binary: Path):
                        "--expect-revision-digest", rev1_digest,
                        "--expect-decide", "atlas_v8::plan",
                        "--expect-key", "q1",
+                       "--expect-candidate", "ask",
+                       "--expect-value-digest", val1_digest,
                        "--expect-caller", "service:atlas",
+                       "--expect-release", "atlas-2026.10",
                        "--expect-grant", "read:atlas",
                        cwd=isolated_dir)
         require(ver_hist["receipt"]["authority"] == "runtime_check", f"Historical verify failed: {ver_hist}")
-
-        # Stale compilation check: querying rev 2 with rev 1 digest must fail
-        stale = run("query", world, "atlas_v8::pages", "--rev", 2, "--expect-digest", rev1_digest, expect_ok=False)
-        require(stale.get("status") == "revision-digest-mismatch", f"Expected revision-digest-mismatch: {stale}")
 
 
 

@@ -554,3 +554,194 @@ decide parent_plan for p in parent_slots per parent {
         "retracting parent removes settlement"
     );
 }
+
+#[test]
+fn test_grouped_collect_over_joined_and_derived_relations_with_reopen() {
+    let program = r#"
+rel input parents: { id: Str, region: Str } key id
+rel input children: { id: Str, parent: Str, tag: Str, ordinal: Int, note: Str } key id
+rel input mirrors: { id: Str, parent: Str, tag: Str, ordinal: Int } key id
+
+rel derived joined_tags = select {
+    parent: p.id,
+    tag: c.tag,
+    ordinal: c.ordinal
+} from p in parents, c in children
+where p.id == c.parent && c.ordinal >= 0
+
+rel derived joined_collected = select {
+    parent: p.id,
+    items: collect(c.tag, c.ordinal, 6)
+} from p in parents, c in children
+where p.id == c.parent
+group by p.id
+
+rel derived deduplicated_tags = select {
+    parent: m.parent,
+    tag: m.tag,
+    ordinal: m.ordinal
+} from m in mirrors
+
+rel derived derived_collected = select {
+    parent: d.parent,
+    items: collect(d.tag, d.ordinal, 6)
+} from d in deduplicated_tags
+group by d.parent
+
+decide joined_plan for j in joined_collected per parent {
+    propose p priority 1 when true = j.items
+}
+
+decide derived_plan for d in derived_collected per parent {
+    propose p priority 1 when true = d.items
+}
+"#;
+    let dir = TestDir::new("joined_and_derived_collect");
+    let sources = BTreeMap::from([("root".into(), program.into())]);
+    let mut session =
+        WorldSession::from_program_with_sources(&dir.0, "root", &sources).expect("create session");
+
+    let parent_op = |id: &str, region: &str| {
+        let mut r = TupleRecord::new();
+        r.set_str("id", id);
+        r.set_str("region", region);
+        WorldBatchOp::Upsert {
+            relation: "root::parents".into(),
+            key: WorldKey::from_str(id),
+            tuple: r.to_tuple(),
+        }
+    };
+    let child_op = |id: &str, parent: &str, tag: &str, ordinal: i64, note: &str| {
+        let mut r = TupleRecord::new();
+        r.set_str("id", id);
+        r.set_str("parent", parent);
+        r.set_str("tag", tag);
+        r.set_str("ordinal", &ordinal.to_string());
+        r.set_str("note", note);
+        WorldBatchOp::Upsert {
+            relation: "root::children".into(),
+            key: WorldKey::from_str(id),
+            tuple: r.to_tuple(),
+        }
+    };
+    let mirror_op = |id: &str, parent: &str, tag: &str, ordinal: i64| {
+        let mut r = TupleRecord::new();
+        r.set_str("id", id);
+        r.set_str("parent", parent);
+        r.set_str("tag", tag);
+        r.set_str("ordinal", &ordinal.to_string());
+        WorldBatchOp::Upsert {
+            relation: "root::mirrors".into(),
+            key: WorldKey::from_str(id),
+            tuple: r.to_tuple(),
+        }
+    };
+
+    // 1. Seed joined and derived (Distinct-projected) inputs with equal ordinals and multi-support
+    session
+        .apply_batch(WorldBatch::new(
+            0,
+            "seed joined and derived",
+            vec![
+                parent_op("p1", "eu"),
+                child_op("c1", "p1", "alpha", 10, "n1"),
+                child_op("c2", "p1", "beta", 10, "n2"),
+                // m1 and m2 project to identical deduplicated_tags row ("p1", "shared", 5)
+                mirror_op("m1", "p1", "shared", 5),
+                mirror_op("m2", "p1", "shared", 5),
+                mirror_op("m3", "p1", "unique", 5),
+            ],
+        ))
+        .expect("batch 0");
+
+    let expected_joined = Value::List(vec![Value::Str("alpha".into()), Value::Str("beta".into())]);
+    // Relational deduplication in `deduplicated_tags` collapses m1 & m2 into one derived row
+    let settlements = session.all_settlements().expect("settlements");
+    assert_eq!(
+        settlements["root::joined_plan"]["p1"].value,
+        expected_joined
+    );
+    let initial_derived = settlements["root::derived_plan"]["p1"].value.clone();
+    let Value::List(ref derived_items) = initial_derived else {
+        panic!("expected list for derived_plan");
+    };
+    assert_eq!(
+        derived_items.len(),
+        2,
+        "earlier relational deduplication must collapse m1 and m2 before collect"
+    );
+
+    // 2. Edit unrelated fields on both parent and child: joined collect order must remain stable
+    session
+        .apply_batch(WorldBatch::new(
+            1,
+            "unrelated edits on joined inputs",
+            vec![
+                parent_op("p1", "us-west"),
+                child_op("c1", "p1", "alpha", 10, "zzz-updated-note"),
+                child_op("c2", "p1", "beta", 10, "aaa-updated-note"),
+            ],
+        ))
+        .expect("batch 1");
+
+    assert_eq!(
+        session.all_settlements().unwrap()["root::joined_plan"]["p1"].value,
+        expected_joined,
+        "unrelated field edits on joined relations must not perturb collect tie-breaking"
+    );
+
+    // 3. Retract one of the two supporting base rows (`m1`) for the deduplicated derived row:
+    //    because `m2` still supports ("p1", "shared", 5), derived_plan must remain unchanged.
+    session
+        .apply_batch(WorldBatch::new(
+            2,
+            "retract redundant support m1",
+            vec![WorldBatchOp::Remove {
+                relation: "root::mirrors".into(),
+                key: WorldKey::from_str("m1"),
+            }],
+        ))
+        .expect("batch 2");
+
+    assert_eq!(
+        session.all_settlements().unwrap()["root::derived_plan"]["p1"].value,
+        initial_derived,
+        "retracting one of multiple supports must preserve derived row identity and collect ordering"
+    );
+
+    // 4. Cold reopen and audit verification (confirming reference evaluator equivalence)
+    drop(session);
+    let reopened = WorldSession::open(&dir.0).expect("reopen");
+    assert_eq!(
+        reopened.all_settlements().unwrap()["root::joined_plan"]["p1"].value,
+        expected_joined
+    );
+    assert_eq!(
+        reopened.all_settlements().unwrap()["root::derived_plan"]["p1"].value,
+        initial_derived
+    );
+    reopened.verify_state().expect("verify state");
+    reopened.verify_oracle().expect("verify oracle");
+
+    let closure = ProgramClosureV1 {
+        root_module: "root".into(),
+        sources: vec![("root".into(), program.into())],
+        program_manifest_digest: reopened.manifest().program_digest,
+    };
+    let bundle = build_genesis_bundle_from_session(&reopened, closure, ExecProfileV1::default())
+        .expect("bundle");
+    let limits = WorldAuditDecodeLimits::default();
+    let bytes = bundle.encode(&limits).expect("encode");
+    let decoded = decode_world_audit_bundle_v1(&bytes, &limits).expect("decode");
+    verify_world_audit_bundle(
+        &decoded,
+        &VerifyOptions {
+            expect_head: reopened.current_revision_digest().expect("head"),
+            expect_program: reopened.manifest().program_digest,
+            trust_checkpoint: None,
+            limits,
+            max_work: None,
+        },
+    )
+    .expect("reference verifier agrees on joined and derived collect");
+}

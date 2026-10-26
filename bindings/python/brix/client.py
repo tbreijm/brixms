@@ -684,6 +684,7 @@ class BrixClient:
         expect_decide: Optional[str] = None,
         expect_entity: Optional[str] = None,
         expect_candidate: Optional[str] = None,
+        expect_value_digest: Optional[str] = None,
         expect_grants: Optional[List[str]] = None,
         expect_caller: Optional[str] = None,
         expect_release: Optional[str] = None,
@@ -696,6 +697,7 @@ class BrixClient:
         decide_name: Optional[str] = None,
         entity_key: Optional[str] = None,
         candidate: Optional[str] = None,
+        value_digest: Optional[str] = None,
         grants: Optional[List[str]] = None,
         caller: Optional[str] = None,
         release: Optional[str] = None,
@@ -710,14 +712,15 @@ class BrixClient:
         actual_decide = expect_decide if expect_decide is not None else decide_name
         actual_entity = expect_entity if expect_entity is not None else entity_key
         actual_candidate = expect_candidate if expect_candidate is not None else candidate
+        actual_value_digest = (
+            expect_value_digest if expect_value_digest is not None else value_digest
+        )
         actual_grants = expect_grants if expect_grants is not None else grants
         actual_caller = expect_caller if expect_caller is not None else caller
         actual_release = expect_release if expect_release is not None else release
 
         temp_file = None
         if isinstance(evidence, dict):
-            if actual_candidate is None and "target" in evidence:
-                actual_candidate = evidence["target"].get("candidate")
             temp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
             json.dump(evidence, temp_file)
             temp_file.close()
@@ -739,6 +742,8 @@ class BrixClient:
             }
             if actual_candidate is not None:
                 params["expect_candidate"] = actual_candidate
+            if actual_value_digest is not None:
+                params["expect_value_digest"] = actual_value_digest
             if actual_caller is not None:
                 params["expect_caller"] = actual_caller
             if actual_release is not None:

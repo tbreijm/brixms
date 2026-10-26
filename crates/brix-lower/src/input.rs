@@ -330,6 +330,7 @@ pub struct InputSnapshot {
     values: BTreeMap<String, InputValue>,
     total_bytes: usize,
     shard_count: usize,
+    documentary_registry: std::sync::Arc<crate::l3_v2::DocumentaryRegistry>,
 }
 
 impl InputSnapshot {
@@ -339,6 +340,7 @@ impl InputSnapshot {
             values: BTreeMap::new(),
             total_bytes: 0,
             shard_count: 0,
+            documentary_registry: std::sync::Arc::new(crate::l3_v2::DocumentaryRegistry::new()),
         }
     }
 
@@ -358,7 +360,30 @@ impl InputSnapshot {
             values,
             total_bytes: 0,
             shard_count: 0,
+            documentary_registry: std::sync::Arc::new(crate::l3_v2::DocumentaryRegistry::new()),
         }
+    }
+
+    /// Access the verified documentary/runtime evidence environment attached to this snapshot.
+    pub fn documentary_registry(&self) -> &std::sync::Arc<crate::l3_v2::DocumentaryRegistry> {
+        &self.documentary_registry
+    }
+
+    /// Update the verified documentary/runtime evidence environment attached to this snapshot.
+    pub fn set_documentary_registry(
+        &mut self,
+        registry: std::sync::Arc<crate::l3_v2::DocumentaryRegistry>,
+    ) {
+        self.documentary_registry = registry;
+    }
+
+    /// Builder pattern to attach a verified documentary/runtime evidence environment to this snapshot.
+    pub fn with_documentary_registry(
+        mut self,
+        registry: std::sync::Arc<crate::l3_v2::DocumentaryRegistry>,
+    ) -> Self {
+        self.documentary_registry = registry;
+        self
     }
 
     /// The sorted values map.
@@ -1150,6 +1175,7 @@ pub fn canonicalize_input_shards(
         values,
         total_bytes,
         shard_count,
+        documentary_registry: std::sync::Arc::new(crate::l3_v2::DocumentaryRegistry::new()),
     })
 }
 

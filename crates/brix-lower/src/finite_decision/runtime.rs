@@ -639,6 +639,7 @@ pub struct FiniteDecisionRuntime {
     snapshot: InputSnapshot,
     bound_inputs: Vec<BoundInput>,
     functions: Arc<BTreeMap<String, L3FunctionDef>>,
+    documentary_registry: Arc<crate::l3_v2::DocumentaryRegistry>,
 }
 
 impl FiniteDecisionRuntime {
@@ -792,10 +793,21 @@ impl FiniteDecisionRuntime {
             );
         }
         let functions = Arc::new(functions_map);
+        let registry = snapshot.documentary_registry().clone();
+        let bound_context = match registry.environment_digest() {
+            Some(env_digest) => {
+                let mut w = CanonWriter::new();
+                w.write_tag("brix.l3.finite-decision.evidence-context@1");
+                w.write_bytes(context.digest().as_bytes());
+                w.write_bytes(env_digest.as_bytes());
+                ContextId::from_canon(&w.finish())
+            }
+            None => context,
+        };
 
         Ok(Self {
             program,
-            context,
+            context: bound_context,
             initial_world,
             policy,
             interner: std::cell::RefCell::new(interner),
@@ -806,7 +818,41 @@ impl FiniteDecisionRuntime {
             snapshot: snapshot.clone(),
             bound_inputs,
             functions,
+            documentary_registry: registry,
         })
+    }
+
+    /// Supply an immutable verified documentary/runtime evidence environment to this runtime,
+    /// binding its snapshot identity into `self.context` so rechecking cannot silently use
+    /// different evidence.
+    pub fn with_documentary_registry(
+        mut self,
+        registry: Arc<crate::l3_v2::DocumentaryRegistry>,
+    ) -> Self {
+        let base_context = context_id(
+            self.program,
+            self.initial_world,
+            self.policy,
+            Some(&self.snapshot),
+        );
+        self.context = match registry.environment_digest() {
+            Some(env_digest) => {
+                let mut w = CanonWriter::new();
+                w.write_tag("brix.l3.finite-decision.evidence-context@1");
+                w.write_bytes(base_context.digest().as_bytes());
+                w.write_bytes(env_digest.as_bytes());
+                ContextId::from_canon(&w.finish())
+            }
+            None => base_context,
+        };
+        self.documentary_registry = registry.clone();
+        self.snapshot.set_documentary_registry(registry);
+        self
+    }
+
+    /// The verified documentary/runtime evidence environment bound into this runtime.
+    pub fn documentary_registry(&self) -> &Arc<crate::l3_v2::DocumentaryRegistry> {
+        &self.documentary_registry
     }
 
     /// The validated input snapshot bound into this runtime.
@@ -887,6 +933,7 @@ impl FiniteDecisionRuntime {
         let mut env = EvalEnv::new()
             .with_functions(self.functions.clone())
             .with_schemas(Arc::new(self.plan.schemas.clone()))
+            .with_documentary_registry(self.documentary_registry.clone())
             .with_run_work(Arc::default());
         for input in &self.bound_inputs {
             env = env.with_input(input.name.clone(), input.value.clone());
@@ -1906,6 +1953,7 @@ impl FiniteDecisionRuntime {
         let mut env = EvalEnv::new()
             .with_functions(self.functions.clone())
             .with_schemas(Arc::new(self.plan.schemas.clone()))
+            .with_documentary_registry(self.documentary_registry.clone())
             .with_run_work(Arc::default());
         for input in &self.bound_inputs {
             env = env.with_input(input.name.clone(), input.value.clone());
@@ -2004,6 +2052,7 @@ impl FiniteDecisionRuntime {
         let mut env = EvalEnv::new()
             .with_functions(self.functions.clone())
             .with_schemas(Arc::new(self.plan.schemas.clone()))
+            .with_documentary_registry(self.documentary_registry.clone())
             .with_run_work(Arc::default());
         for input in &self.bound_inputs {
             env = env.with_input(input.name.clone(), input.value.clone());

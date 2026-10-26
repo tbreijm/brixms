@@ -175,6 +175,7 @@ pub enum WorldOp {
         expect_decide: String,
         expect_entity: String,
         expect_candidate: Option<String>,
+        expect_value_digest: Option<String>,
         expect_caller: Option<String>,
         expect_grants: Vec<String>,
         expect_release: Option<String>,
@@ -2347,6 +2348,7 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
     let mut expect_decide = None;
     let mut expect_entity = None;
     let mut expect_candidate = None;
+    let mut expect_value_digest = None;
     let mut expect_caller = None;
     let mut expect_grants = Vec::new();
     let mut expect_release = None;
@@ -2463,6 +2465,21 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
             expect_candidate = Some(args[i].clone());
         } else if let Some(val) = arg.strip_prefix("--expect-candidate=") {
             expect_candidate = Some(val.to_string());
+        } else if arg == "--expect-value-digest" || arg == "--expect-result" {
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    format!("missing value for '{arg}'"),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            expect_value_digest = Some(args[i].clone());
+        } else if let Some(val) = arg
+            .strip_prefix("--expect-value-digest=")
+            .or_else(|| arg.strip_prefix("--expect-result="))
+        {
+            expect_value_digest = Some(val.to_string());
         } else if arg == "--expect-caller" {
             i += 1;
             if i >= args.len() {
@@ -2576,6 +2593,7 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
         expect_decide,
         expect_entity,
         expect_candidate,
+        expect_value_digest,
         expect_caller,
         expect_grants,
         expect_release,

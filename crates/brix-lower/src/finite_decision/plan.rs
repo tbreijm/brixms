@@ -2098,37 +2098,7 @@ pub fn lower_finite_decision_plan(
         })
         .collect();
 
-    let mut schemas = collect_reachable_schemas(module)?;
-    schemas
-        .entry("ValidationOutcome".to_string())
-        .or_insert_with(|| L3Schema {
-            name: "ValidationOutcome".to_string(),
-            body: L3SchemaBody::Sum(vec![
-                ("Satisfied".to_string(), vec![]),
-                ("Violated".to_string(), vec![L3SchemaType::Str]),
-                ("Unknown".to_string(), vec![L3SchemaType::Str]),
-            ]),
-        });
-    schemas
-        .entry("DocumentedStep".to_string())
-        .or_insert_with(|| L3Schema {
-            name: "DocumentedStep".to_string(),
-            body: L3SchemaBody::Record(BTreeMap::from([
-                ("digest".to_string(), L3SchemaType::Str),
-                ("status".to_string(), L3SchemaType::Str),
-                ("uri".to_string(), L3SchemaType::Str),
-            ])),
-        });
-    schemas
-        .entry("RuntimeOutcome".to_string())
-        .or_insert_with(|| L3Schema {
-            name: "RuntimeOutcome".to_string(),
-            body: L3SchemaBody::Record(BTreeMap::from([
-                ("candidate".to_string(), L3SchemaType::Str),
-                ("decision_name".to_string(), L3SchemaType::Str),
-                ("status".to_string(), L3SchemaType::Str),
-            ])),
-        });
+    let schemas = collect_reachable_schemas(module)?;
     let bounded = has_functions || !schemas.is_empty();
 
     // Builtin Bool sum for exhaustiveness checking.
