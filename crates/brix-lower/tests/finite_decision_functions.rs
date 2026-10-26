@@ -599,7 +599,7 @@ fn test_reachable_schema_rejects_cycles_generics_and_graded_components() {
             "recursive",
         ),
         (
-            "config Box<T> = Value(T)\nconfig Decision = Done\ninput value: Box<Int>\npropose p() priority 1 when true = Done\ncommit c from (p)",
+            "config Box<T> = Value(T)\nconfig Decision = Done\ninput value: Box\npropose p() priority 1 when true = Done\ncommit c from (p)",
             "generic",
         ),
         (

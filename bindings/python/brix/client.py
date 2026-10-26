@@ -582,3 +582,179 @@ class BrixClient:
     ) -> Dict[str, Any]:
         """`brix kb verify` — verify the whole knowledge base end to end."""
         return self._kb_call("verify", kb_dir, package_paths, timeout=timeout)
+
+    def world_init(
+        self,
+        world_dir: Union[str, os.PathLike],
+        program: ProgramSpec,
+        package_paths: Optional[List[str]] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """`brix world init` via serve."""
+        params: Dict[str, Any] = {
+            "dir": str(world_dir),
+            "program": _normalize_spec(program),
+        }
+        if package_paths is not None:
+            params["package_paths"] = package_paths
+        return self.result("world.init", params, timeout=timeout)
+
+    def world_batch(
+        self,
+        world_dir: Union[str, os.PathLike],
+        batch: Union[str, os.PathLike, Dict[str, Any], List[Any]],
+        replay: bool = False,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """`brix world batch` via serve."""
+        params: Dict[str, Any] = {
+            "dir": str(world_dir),
+            "batch": batch if isinstance(batch, (dict, list)) else str(batch),
+            "replay": replay,
+        }
+        return self.result("world.batch", params, timeout=timeout)
+
+    def world_query(
+        self,
+        world_dir: Union[str, os.PathLike],
+        relation: str,
+        cursor: Optional[str] = None,
+        limit: Optional[int] = None,
+        rev: Optional[int] = None,
+        expect_digest: Optional[str] = None,
+        typed: bool = False,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """`brix world query` via serve."""
+        params: Dict[str, Any] = {
+            "dir": str(world_dir),
+            "relation": relation,
+        }
+        if cursor is not None:
+            params["cursor"] = cursor
+        if limit is not None:
+            params["limit"] = limit
+        if rev is not None:
+            params["rev"] = rev
+        if expect_digest is not None:
+            params["expect_digest"] = expect_digest
+        if typed:
+            params["typed"] = True
+        return self.result("world.query", params, timeout=timeout)
+
+    def world_evidence(
+        self,
+        world_dir: Union[str, os.PathLike],
+        rev: Optional[int] = None,
+        decide: str = "",
+        entity: Optional[str] = None,
+        grants: Optional[List[str]] = None,
+        out: Optional[Union[str, os.PathLike]] = None,
+        include_bundle: bool = True,
+        caller: Optional[str] = None,
+        timeout: Optional[float] = None,
+        *,
+        revision: Optional[int] = None,
+        key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """`brix world evidence` via serve."""
+        actual_rev = rev if rev is not None else revision
+        actual_entity = entity if entity is not None else key
+        params: Dict[str, Any] = {
+            "dir": str(world_dir),
+            "rev": actual_rev,
+            "decide": decide,
+            "entity": actual_entity,
+            "grants": grants or [],
+            "include_bundle": include_bundle,
+        }
+        if caller is not None:
+            params["caller"] = caller
+        if out is not None:
+            params["out"] = str(out)
+        return self.result("world.evidence", params, timeout=timeout)
+
+    def world_verify_evidence(
+        self,
+        evidence: Union[str, os.PathLike, Dict[str, Any]],
+        expect_world: Optional[str] = None,
+        expect_program: Optional[str] = None,
+        expect_rev: Optional[int] = None,
+        expect_rev_digest: Optional[str] = None,
+        expect_decide: Optional[str] = None,
+        expect_entity: Optional[str] = None,
+        expect_candidate: Optional[str] = None,
+        expect_value_digest: Optional[str] = None,
+        expect_grants: Optional[List[str]] = None,
+        expect_caller: Optional[str] = None,
+        expect_release: Optional[str] = None,
+        timeout: Optional[float] = None,
+        *,
+        world_manifest_digest: Optional[str] = None,
+        program_digest: Optional[str] = None,
+        revision: Optional[int] = None,
+        revision_digest: Optional[str] = None,
+        decide_name: Optional[str] = None,
+        entity_key: Optional[str] = None,
+        candidate: Optional[str] = None,
+        value_digest: Optional[str] = None,
+        grants: Optional[List[str]] = None,
+        caller: Optional[str] = None,
+        release: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """`brix world verify-evidence` via serve."""
+        import tempfile
+
+        actual_world = expect_world if expect_world is not None else world_manifest_digest
+        actual_prog = expect_program if expect_program is not None else program_digest
+        actual_rev = expect_rev if expect_rev is not None else revision
+        actual_rev_digest = expect_rev_digest if expect_rev_digest is not None else revision_digest
+        actual_decide = expect_decide if expect_decide is not None else decide_name
+        actual_entity = expect_entity if expect_entity is not None else entity_key
+        actual_candidate = expect_candidate if expect_candidate is not None else candidate
+        actual_value_digest = (
+            expect_value_digest if expect_value_digest is not None else value_digest
+        )
+        actual_grants = expect_grants if expect_grants is not None else grants
+        actual_caller = expect_caller if expect_caller is not None else caller
+        actual_release = expect_release if expect_release is not None else release
+
+        temp_file = None
+        if isinstance(evidence, dict):
+            temp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+            json.dump(evidence, temp_file)
+            temp_file.close()
+            evidence_path = temp_file.name
+        else:
+            evidence_path = str(evidence)
+
+        try:
+            params: Dict[str, Any] = {
+                "dir": ".",
+                "evidence": evidence_path,
+                "expect_world": actual_world,
+                "expect_program": actual_prog,
+                "expect_rev": actual_rev,
+                "expect_rev_digest": actual_rev_digest,
+                "expect_decide": actual_decide,
+                "expect_entity": actual_entity,
+                "expect_grants": actual_grants or [],
+            }
+            if actual_candidate is not None:
+                params["expect_candidate"] = actual_candidate
+            if actual_value_digest is not None:
+                params["expect_value_digest"] = actual_value_digest
+            if actual_caller is not None:
+                params["expect_caller"] = actual_caller
+            if actual_release is not None:
+                params["expect_release"] = actual_release
+            return self.result("world.verify-evidence", params, timeout=timeout)
+        finally:
+            if temp_file is not None:
+                try:
+                    os.unlink(temp_file.name)
+                except OSError:
+                    pass
+
+    get_decision_evidence = world_evidence
+    verify_decision_evidence = world_verify_evidence

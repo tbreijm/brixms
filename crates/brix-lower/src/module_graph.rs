@@ -1263,6 +1263,10 @@ fn trace_expr_deps(
             trace_ty_deps(ty, current_module, reachable, all_configs);
             trace_expr_deps(arg, current_module, reachable, all_configs);
         }
+        ast::Expr::Ascribe { expr, ty } => {
+            trace_ty_deps(ty, current_module, reachable, all_configs);
+            trace_expr_deps(expr, current_module, reachable, all_configs);
+        }
     }
 }
 
@@ -1499,6 +1503,10 @@ impl NominalResolver<'_> {
             Expr::Validate { ty, arg } => {
                 self.ty(ty)?;
                 self.expr(arg, bound)?;
+            }
+            Expr::Ascribe { expr, ty } => {
+                self.ty(ty)?;
+                self.expr(expr, bound)?;
             }
         }
         Ok(())

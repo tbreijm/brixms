@@ -128,14 +128,15 @@ fn division_is_refused_by_name() {
     }
 }
 
-/// A default arm is refused, so malformed input cannot be swallowed by a
-/// catch-all (ADR-0027 §5).
+/// A variable catch-all arm is refused (ADR-0027 §5), whereas a final
+/// wildcard `_` is admitted under R14.1.
 #[test]
-fn a_default_match_arm_is_refused() {
-    match lower("config Z = Hand | Field\nlet z = Hand\nrule r() = match z { Hand => 1  _ => 2 }\n")
-    {
+fn a_variable_catch_all_match_arm_is_refused() {
+    match lower(
+        "config Z = Hand | Field\nlet z = Hand\nrule r() = match z { Hand => 1  other => 2 }\n",
+    ) {
         Err(L3V2LowerError::DefaultArmNotAllowed) => {}
-        other => panic!("a default arm must be refused, got {other:?}"),
+        other => panic!("a variable default arm must be refused, got {other:?}"),
     }
 }
 

@@ -98,6 +98,29 @@ fn make_pair(src: &str) -> (WorldNetwork, reference::ReferenceProgram) {
     (network, refprog)
 }
 
+#[test]
+fn review_provenance_metadata_does_not_change_distinct_projection() {
+    let source = r#"
+rel input children: { id: Str, parent: Str } key id
+rel derived parents = select { parent: c.parent } from c in children
+rel derived parent_counts = select { parent: p.parent, n: count() }
+    from p in parents group by p.parent
+decide counted for c in parent_counts per parent {
+    propose count priority 1 when true = c.n
+}
+"#;
+    let (mut network, reference) = make_pair(source);
+    apply(
+        &mut network,
+        "duplicate projected parents",
+        vec![
+            upsert_op("root::children", 1, &[("id", "c1"), ("parent", "p1")]),
+            upsert_op("root::children", 2, &[("id", "c2"), ("parent", "p1")]),
+        ],
+    );
+    assert_agrees_with_reference(&network, &reference, "duplicate projected parents");
+}
+
 fn upsert_op(rel: &str, key_num: u64, fields: &[(&str, &str)]) -> WorldBatchOp {
     let mut rec = TupleRecord::new();
     for (k, v) in fields {

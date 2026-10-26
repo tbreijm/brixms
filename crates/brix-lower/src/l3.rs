@@ -875,6 +875,7 @@ fn normalize_static_value(expr: &ast::Expr, env: &NormEnv) -> Result<L3ValueV1, 
         ast::Expr::Comprehension { .. } => Err(L3LowerError::ListSyntaxNotAllowed("comprehension")),
         ast::Expr::AnonRecord(_) => Err(L3LowerError::AnonymousRecordLiteralNotAllowed),
         ast::Expr::Validate { .. } => Err(L3LowerError::FnItemNotAllowed("validate".to_string())),
+        ast::Expr::Ascribe { .. } => Err(L3LowerError::FnItemNotAllowed("ascription".to_string())),
     }
 }
 

@@ -192,7 +192,9 @@ fn check_type(
                 kind = body;
                 expected = result_prop;
             }
-            _ => break check_rule(state, gamma, kind, expected),
+            _ => {
+                break check_rule(state, gamma, kind, expected);
+            }
         }
     };
 
@@ -824,9 +826,13 @@ fn infer_pres(
 
 /// (RealizesComp) Realization Composition (Profile 1.1), synthesis mode.
 ///
-/// Its own frame because this is the rule the recursion actually gets deep in:
-/// a derivation's `Seq` spine elaborates to a right-nested `RealizesComp`
-/// chain as long as the derivation has leaves.
+/// Unrolls right-nested `RealizesComp` chains iteratively to prevent stack
+/// exhaustion on sequential expression chains (where `Seq` elaborates to a
+/// right-nested `RealizesComp` spine).
+///
+/// The step and depth accounting matches recursive descent exactly:
+/// each intermediate `Comp` node consumes one step and one depth unit during
+/// descent, which is restored after the chain completes.
 #[inline(never)]
 fn infer_realizes_comp(
     state: &mut CheckerState,
@@ -834,8 +840,9 @@ fn infer_realizes_comp(
     left: &TermKind,
     right: &TermKind,
 ) -> Result<Prop, Verdict> {
+    // 1. Infer the leftmost term.
     let left_type = infer_type(state, gamma, left)?;
-    let (g1, xl, y) = match left_type {
+    let (g_left, xl, mut y_curr) = match left_type {
         Prop::Realizes(g1, xl, y) => (g1, xl, y),
         other => {
             return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
@@ -845,29 +852,144 @@ fn infer_realizes_comp(
         }
     };
 
-    let right_type = infer_type(state, gamma, right)?;
-    let (g2, ys, z2) = match right_type {
-        Prop::Realizes(g2, ys, z2) => (g2, ys, z2),
-        other => {
-            return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
-                expected: "Realizes(g2, y, z)".into(),
-                found: format!("{other:?}"),
-            }));
+    // If `right` is not a `RealizesComp`, handle the base binary case directly.
+    let (next_left, next_right) = match right {
+        TermKind::RealizesComp {
+            left: nl,
+            right: nr,
+        } => (nl.as_ref(), nr.as_ref()),
+        _ => {
+            let right_type = infer_type(state, gamma, right)?;
+            let (g2, ys, z2) = match right_type {
+                Prop::Realizes(g2, ys, z2) => (g2, ys, z2),
+                other => {
+                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                        expected: "Realizes(g2, y, z)".into(),
+                        found: format!("{other:?}"),
+                    }));
+                }
+            };
+
+            if y_curr != ys {
+                return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                    expected: format!("Middle endpoint matching {y_curr:?}"),
+                    found: format!("{ys:?}"),
+                }));
+            }
+
+            return Ok(Prop::Realizes(
+                ObjectTerm::Compose(Box::new(g2), Box::new(g_left)),
+                xl,
+                z2,
+            ));
         }
     };
 
-    if y != ys {
-        return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
-            expected: format!("Middle endpoint matching {y:?}"),
-            found: format!("{ys:?}"),
-        }));
+    // Otherwise, unroll the right spine iteratively.
+    // Each step along the spine corresponds to one `infer_type(Comp)` call
+    // that would have occurred recursively.
+    let mut witnesses = vec![g_left];
+    let mut depth_taken = 0usize;
+
+    let mut curr_left = next_left;
+    let mut curr_right = next_right;
+
+    let (final_witness, final_z) = loop {
+        // Step and enter depth for this Comp node (matching infer_type(Comp)).
+        if let Err(v) = state.step() {
+            state.leave_depth(depth_taken);
+            return Err(v);
+        }
+        if let Err(v) = state.enter_depth() {
+            state.leave_depth(depth_taken);
+            return Err(v);
+        }
+        depth_taken += 1;
+
+        // Infer `curr_left`.
+        let l_type = match infer_type(state, gamma, curr_left) {
+            Ok(t) => t,
+            Err(e) => {
+                state.leave_depth(depth_taken);
+                return Err(e);
+            }
+        };
+        let (g_l, ys, y_next) = match l_type {
+            Prop::Realizes(g, ys, y2) => (g, ys, y2),
+            other => {
+                state.leave_depth(depth_taken);
+                return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                    expected: "Realizes(g, y, z)".into(),
+                    found: format!("{other:?}"),
+                }));
+            }
+        };
+
+        if y_curr != ys {
+            state.leave_depth(depth_taken);
+            return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                expected: format!("Middle endpoint matching {y_curr:?}"),
+                found: format!("{ys:?}"),
+            }));
+        }
+        y_curr = y_next;
+        witnesses.push(g_l);
+
+        // Check if `curr_right` continues the right-nested spine.
+        match curr_right {
+            TermKind::RealizesComp {
+                left: nl,
+                right: nr,
+            } => {
+                curr_left = nl.as_ref();
+                curr_right = nr.as_ref();
+            }
+            _ => {
+                // Leaf of the right spine: infer `curr_right`.
+                let r_type = match infer_type(state, gamma, curr_right) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        state.leave_depth(depth_taken);
+                        return Err(e);
+                    }
+                };
+                let (g_r, ys, z) = match r_type {
+                    Prop::Realizes(g, ys, z) => (g, ys, z),
+                    other => {
+                        state.leave_depth(depth_taken);
+                        return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                            expected: "Realizes(g, y, z)".into(),
+                            found: format!("{other:?}"),
+                        }));
+                    }
+                };
+
+                if y_curr != ys {
+                    state.leave_depth(depth_taken);
+                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                        expected: format!("Middle endpoint matching {y_curr:?}"),
+                        found: format!("{ys:?}"),
+                    }));
+                }
+
+                break (g_r, z);
+            }
+        }
+    };
+
+    // Restore all depth units taken for intermediate Comp nodes.
+    state.leave_depth(depth_taken);
+
+    // Reconstruct the right-nested witness:
+    // Comp(L_0, Comp(L_1, Comp(..., R))) has witness
+    // Compose(...Compose(Compose(g_R, g_k), ...), g_0).
+    // Starting with final_witness (g_R), fold backwards over witnesses.
+    let mut combined_witness = final_witness;
+    for w in witnesses.into_iter().rev() {
+        combined_witness = ObjectTerm::Compose(Box::new(combined_witness), Box::new(w));
     }
 
-    Ok(Prop::Realizes(
-        ObjectTerm::Compose(Box::new(g2), Box::new(g1)),
-        xl,
-        z2,
-    ))
+    Ok(Prop::Realizes(combined_witness, xl, final_z))
 }
 
 /// (RealizesTensor) Realization Tensor (Profile 1.2), synthesis mode.

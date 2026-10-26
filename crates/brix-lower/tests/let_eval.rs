@@ -204,7 +204,7 @@ fn test_prove_is_not_evaluated() {
 }
 
 #[test]
-fn test_wildcard_match_arm_is_not_evaluated() {
+fn test_wildcard_match_arm_evaluates() {
     let source = r#"
 config Decision = Approved | Rejected
 let d = Approved
@@ -212,12 +212,51 @@ let v = match d {
   Approved => 1
   _ => 0
 }
+let d2 = Rejected
+let v2 = match d2 {
+  Approved => 1
+  _ => 0
+}
+"#;
+    assert_eq!(value_of(source, "v"), L3ValueV2::Int(1));
+    assert_eq!(value_of(source, "v2"), L3ValueV2::Int(0));
+}
+
+#[test]
+fn test_variable_catch_all_is_not_evaluated() {
+    let source = r#"
+config Decision = Approved | Rejected
+let d = Approved
+let v = match d {
+  Approved => 1
+  other => 0
+}
 "#;
     let reason = not_evaluated_reason(source, "v");
-    assert!(
-        reason.contains("wildcard") || reason.contains("catch-all"),
-        "reason: {reason}"
+    assert!(reason.contains("variable catch-all"), "reason: {reason}");
+}
+
+#[test]
+fn test_only_form_evaluates_and_faults() {
+    let source_ok = "let x = only([42])";
+    assert_eq!(value_of(source_ok, "x"), L3ValueV2::Int(42));
+
+    let source_err = "let x = only([1, 2])";
+    let reason = not_evaluated_reason(source_err, "x");
+    assert!(reason.contains("evaluation fault"), "reason: {reason}");
+}
+
+#[test]
+fn test_ascribed_list_evaluates_and_checks() {
+    let source_ok = "let xs = [1]: List<Int>";
+    assert_eq!(
+        value_of(source_ok, "xs"),
+        L3ValueV2::List(vec![L3ValueV2::Int(1)].into())
     );
+
+    let source_bad = "let xs = [1]: List<Str>";
+    let reason = not_evaluated_reason(source_bad, "xs");
+    assert!(reason.contains("ascription mismatch"), "reason: {reason}");
 }
 
 #[test]

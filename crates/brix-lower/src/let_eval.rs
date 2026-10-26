@@ -207,9 +207,8 @@ fn describe_lower_error(e: &L3V2LowerError) -> String {
             format!("'{feature}' is outside the exact executable fragment")
         }
         L3V2LowerError::DefaultArmNotAllowed => {
-            "a wildcard or variable catch-all match arm is outside the exact executable fragment \
-             (it type-checks, but the evaluator requires an explicit constructor pattern for \
-             every reached arm)"
+            "a variable catch-all match arm is outside the exact executable fragment (only a \
+             final `_` arm is admitted)"
                 .to_string()
         }
         L3V2LowerError::NestedPatternNotAllowed => {

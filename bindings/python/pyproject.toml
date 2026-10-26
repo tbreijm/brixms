@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "brix-client"
-version = "0.1.0"
+version = "0.1.0a8"
 description = "Pure standard-library Python client for brix serve --stdio (ADR-0044)"
 readme = "README.md"
 requires-python = ">=3.9"

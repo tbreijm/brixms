@@ -486,10 +486,11 @@ fn the_relation_id_is_bound_into_the_term() {
 /// other row set.
 ///
 /// Retiring rather than retaining follows ⟨D-EXACTCOVERED⟩'s own reasoning: no
-/// certificate naming V1 exists or can exist yet, since `elaborate_tree` still
-/// emits every leaf as a `Hyp`, so retaining it would be trusted TCB data with
-/// nothing consulting it — and its rows spelled a generator family the lattice
-/// no longer declares.
+/// certificate naming V1 exists or can exist, since `elaborate_tree` emitted
+/// every leaf as a `Hyp` prior to Stage D and Stage D closes leaves with
+/// `TypingArithV2`, so retaining V1 would be trusted TCB data with nothing
+/// consulting it — and its rows spelled a generator family the lattice no
+/// longer declares.
 const RETIRED_TYPING_ARITH_V1: &str =
     "f285a12c39abc6a493938646ac06d063bbc8ed88df60c015805d5be2516db338";
 

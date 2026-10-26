@@ -104,6 +104,8 @@ const SUPPORTED_METHODS: &[&str] = &[
     "world.show",
     "world.audit",
     "world.verify",
+    "world.evidence",
+    "world.verify-evidence",
     "world.import-kb",
     "world.open-check",
     "world.gc",
@@ -468,6 +470,26 @@ fn string_array_field(params: &Value, field: &str) -> Result<Vec<PathBuf>, Dispa
     }
 }
 
+fn str_array_field(params: &Value, field: &str) -> Result<Vec<String>, DispatchError> {
+    match params.get(field) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => items
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                v.as_str().map(String::from).ok_or((
+                    "invalid-params",
+                    format!("'{field}[{i}]': expected a string"),
+                ))
+            })
+            .collect(),
+        Some(_) => Err((
+            "invalid-params",
+            format!("'{field}': expected an array of strings"),
+        )),
+    }
+}
+
 fn required_str_field<'a>(params: &'a Value, field: &str) -> Result<&'a str, DispatchError> {
     params.get(field).and_then(Value::as_str).ok_or((
         "invalid-params",
@@ -713,7 +735,11 @@ fn dispatch_kb(op_name: &str, params: &Value) -> Result<(u8, Value), DispatchErr
 
 fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), DispatchError> {
     let mut workspace: Option<TempWorkspace> = None;
-    let dir = PathBuf::from(required_str_field(params, "dir")?);
+    let dir = if op_name == "verify-evidence" || op_name == "verify_evidence" {
+        PathBuf::new()
+    } else {
+        PathBuf::from(required_str_field(params, "dir")?)
+    };
 
     let replay = params
         .get("replay")
@@ -821,11 +847,25 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
                 .and_then(Value::as_str)
                 .map(|s| s.to_string());
             let limit = optional_u64_field(params, "limit").and_then(|n| usize::try_from(n).ok());
+            let rev = optional_u64_field(params, "rev")
+                .or_else(|| optional_u64_field(params, "revision"));
+            let expect_digest = params
+                .get("expect_digest")
+                .or_else(|| params.get("expect_revision_digest"))
+                .and_then(Value::as_str)
+                .map(|s| s.to_string());
+            let typed = params
+                .get("typed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             WorldOp::Query {
                 dir,
                 relation,
                 cursor,
                 limit,
+                rev,
+                expect_digest,
+                typed,
                 replay,
             }
         }
@@ -921,6 +961,90 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
             };
             WorldOp::ImportKb { kb_dir, world_dir }
         }
+        "evidence" => {
+            let rev = required_u64_field(params, "rev")?;
+            let decide = required_str_field(params, "decide")?.to_string();
+            let entity = match params.get("entity").or_else(|| params.get("key")) {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Number(n)) => n.to_string(),
+                _ => {
+                    return Err((
+                        "invalid-params",
+                        "missing required field 'entity'".to_string(),
+                    ))
+                }
+            };
+            let caller = params
+                .get("caller")
+                .and_then(Value::as_str)
+                .map(String::from);
+            let grants = str_array_field(params, "grants")?;
+            let out = params.get("out").and_then(Value::as_str).map(PathBuf::from);
+            let include_bundle = params
+                .get("include_bundle")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            WorldOp::Evidence {
+                dir,
+                rev,
+                decide,
+                entity,
+                caller,
+                grants,
+                out,
+                include_bundle,
+            }
+        }
+        "verify-evidence" | "verify_evidence" => {
+            let evidence = PathBuf::from(required_str_field(params, "evidence")?);
+            let expect_world = required_str_field(params, "expect_world")?.to_string();
+            let expect_program = required_str_field(params, "expect_program")?.to_string();
+            let expect_rev = required_u64_field(params, "expect_rev")?;
+            let expect_rev_digest = required_str_field(params, "expect_rev_digest")?.to_string();
+            let expect_decide = required_str_field(params, "expect_decide")?.to_string();
+            let expect_entity = match params.get("expect_entity") {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Number(n)) => n.to_string(),
+                _ => {
+                    return Err((
+                        "invalid-params",
+                        "missing required field 'expect_entity'".to_string(),
+                    ))
+                }
+            };
+            let expect_candidate = params
+                .get("expect_candidate")
+                .and_then(Value::as_str)
+                .map(String::from);
+            let expect_value_digest = params
+                .get("expect_value_digest")
+                .or_else(|| params.get("expect_result"))
+                .and_then(Value::as_str)
+                .map(String::from);
+            let expect_caller = params
+                .get("expect_caller")
+                .and_then(Value::as_str)
+                .map(String::from);
+            let expect_grants = str_array_field(params, "expect_grants")?;
+            let expect_release = params
+                .get("expect_release")
+                .and_then(Value::as_str)
+                .map(String::from);
+            WorldOp::VerifyEvidence {
+                evidence,
+                expect_world,
+                expect_program,
+                expect_rev,
+                expect_rev_digest,
+                expect_decide,
+                expect_entity,
+                expect_candidate,
+                expect_value_digest,
+                expect_caller,
+                expect_grants,
+                expect_release,
+            }
+        }
         other => return Err(("unknown-method", format!("unknown method 'world.{other}'"))),
     };
 
@@ -967,6 +1091,14 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("world.verify")));
+        assert!(v["methods"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("world.evidence")));
+        assert!(v["methods"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("world.verify-evidence")));
         assert!(v["methods"]
             .as_array()
             .unwrap()

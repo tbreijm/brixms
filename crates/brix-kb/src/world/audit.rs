@@ -442,7 +442,7 @@ impl ExecProfileV1 {
             && self.module_loader_limits == default.module_loader_limits
             && (matches!(
                 self.crate_version.as_str(),
-                "0.1.0-alpha.5" | "0.1.0-alpha.6" | "0.1.0-alpha.7"
+                "0.1.0-alpha.5" | "0.1.0-alpha.6" | "0.1.0-alpha.7" | "0.1.0-alpha.8"
             ) || self.crate_version == env!("CARGO_PKG_VERSION"))
     }
 
@@ -1245,10 +1245,19 @@ pub fn build_genesis_bundle_from_session(
     program: ProgramClosureV1,
     exec_profile: ExecProfileV1,
 ) -> Result<WorldAuditBundleV1, WorldError> {
-    let head_seq = session.current_revision();
+    build_genesis_bundle_up_to_revision(session, program, exec_profile, session.current_revision())
+}
+
+/// Build a genesis bundle ending at `target_revision`.
+pub fn build_genesis_bundle_up_to_revision(
+    session: &WorldSession,
+    program: ProgramClosureV1,
+    exec_profile: ExecProfileV1,
+    target_revision: u64,
+) -> Result<WorldAuditBundleV1, WorldError> {
     let mut revisions = Vec::new();
 
-    for seq in 1..=head_seq {
+    for seq in 1..=target_revision {
         let prev_snapshot = session.pin_revision(seq - 1)?;
         let snapshot = session.pin_revision(seq)?;
         let record = snapshot.revision.clone();
@@ -1295,7 +1304,10 @@ pub fn build_genesis_bundle_from_session(
         });
     }
 
-    let head_revision_digest = session.pin_revision(head_seq)?.revision.revision_digest;
+    let head_revision_digest = session
+        .pin_revision(target_revision)?
+        .revision
+        .revision_digest;
 
     Ok(WorldAuditBundleV1 {
         world_manifest: session.manifest().clone(),
@@ -1304,7 +1316,7 @@ pub fn build_genesis_bundle_from_session(
         scope: ScopeV1::Genesis,
         revisions,
         head: HeadRefV1 {
-            seq: head_seq,
+            seq: target_revision,
             revision_digest: head_revision_digest,
         },
     })

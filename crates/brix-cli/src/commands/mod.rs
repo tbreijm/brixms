@@ -193,6 +193,20 @@ impl From<FiniteDecisionBuildError> for CliInputError {
     }
 }
 
+fn parse_strict_hex_digest(hex: &str) -> Option<brix_canon::Digest> {
+    if hex.len() != 64 || !hex.is_ascii() {
+        return None;
+    }
+    let bytes = hex.as_bytes();
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        let hi = (bytes[i * 2] as char).to_digit(16)?;
+        let lo = (bytes[i * 2 + 1] as char).to_digit(16)?;
+        *byte = ((hi << 4) | lo) as u8;
+    }
+    Some(brix_canon::Digest::from_bytes(out))
+}
+
 /// Centralized loader for external input snapshots in CLI commands (ADR-0031).
 ///
 /// Uses [`load_input_snapshot_from_paths`] with default [`InputLimits`].
@@ -200,8 +214,204 @@ impl From<FiniteDecisionBuildError> for CliInputError {
 /// decode, bounds, duplicate key, or schema failures (exit 1, "rejected").
 /// Never prints raw file contents in error output.
 pub fn load_cli_input_snapshot(input_paths: &[PathBuf]) -> Result<InputSnapshot, CliInputError> {
-    load_input_snapshot_from_paths(input_paths, &InputLimits::default())
-        .map_err(CliInputError::from)
+    use brix_kb::world::decision_evidence::{
+        verify_decision_evidence, DecisionEvidence, MAX_DECISION_ARTIFACT_BYTES,
+    };
+    use std::io::Read;
+    let rejected = |message: String| CliInputError {
+        code: "evidence-invalid",
+        message,
+        status: "rejected",
+        exit_code: crate::cli::EXIT_REJECTED_OR_UNKNOWN,
+    };
+    let mut shard_paths = Vec::new();
+    let mut documentary_entries = Vec::new();
+    let mut runtime_evidence = Vec::new();
+    // A target ID commits every claim component. These pins come from the host,
+    // never from the input envelope that supplies the certificate.
+    let runtime_pins = std::env::var("BRIX_EXPECT_RUNTIME_CLAIMS")
+        .unwrap_or_default()
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            parse_strict_hex_digest(s)
+                .ok_or_else(|| rejected("invalid BRIX_EXPECT_RUNTIME_CLAIMS digest".into()))
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    let mut configured_expected_doc_digest = None;
+    if input_paths.len() > brix_lower::input::MAX_INPUT_FILES {
+        return Err(CliInputError::from(InputError::TooManyFiles {
+            limit: brix_lower::input::MAX_INPUT_FILES,
+            found: input_paths.len(),
+        }));
+    }
+    let mut total_bytes = 0usize;
+
+    if let Ok(env_hex) = std::env::var("BRIX_EXPECT_EVIDENCE_DIGEST") {
+        if !env_hex.is_empty() {
+            let d = parse_strict_hex_digest(&env_hex).ok_or_else(|| CliInputError {
+                code: "evidence-invalid-digest",
+                message: format!(
+                    "malformed BRIX_EXPECT_EVIDENCE_DIGEST hex in environment: '{env_hex}'"
+                ),
+                status: "rejected",
+                exit_code: crate::cli::EXIT_REJECTED_OR_UNKNOWN,
+            })?;
+            configured_expected_doc_digest = Some(d);
+        }
+    }
+
+    for path in input_paths {
+        let mut bytes = Vec::new();
+        let read = std::fs::File::open(path).and_then(|f| {
+            f.take((MAX_DECISION_ARTIFACT_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+        });
+        if read.is_ok() {
+            total_bytes += bytes.len();
+            if bytes.len() > MAX_DECISION_ARTIFACT_BYTES
+                || total_bytes > 4 * MAX_DECISION_ARTIFACT_BYTES
+            {
+                return Err(rejected("input/evidence byte limit exceeded".into()));
+            }
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if val.get("schema").and_then(|s| s.as_str()) == Some("brix.evidence.env@1") {
+                    if let Some(runtime) = val.get("runtime") {
+                        let artifacts = runtime
+                            .as_array()
+                            .ok_or_else(|| rejected("runtime evidence must be an array".into()))?;
+                        if artifacts.len() > 64 || runtime_evidence.len() + artifacts.len() > 64 {
+                            return Err(rejected("too many runtime certificates".into()));
+                        }
+                        for artifact in artifacts {
+                            let encoded = serde_json::to_vec(artifact)
+                                .map_err(|e| rejected(e.to_string()))?;
+                            let evidence = DecisionEvidence::decode(&encoded)
+                                .map_err(|e| rejected(e.to_string()))?;
+                            if !runtime_pins.contains(&evidence.target.id()) {
+                                return Err(rejected("runtime evidence requires an independently configured matching BRIX_EXPECT_RUNTIME_CLAIMS target pin".into()));
+                            }
+                            runtime_evidence.push(
+                                verify_decision_evidence(&evidence, &evidence.target).map_err(
+                                    |e| rejected(format!("runtime evidence replay failed: {e}")),
+                                )?,
+                            );
+                        }
+                    }
+                    if let Some(doc) = val.get("documentary") {
+                        if let Some(exp_hex) = doc.get("expected_digest").and_then(|s| s.as_str()) {
+                            let d = parse_strict_hex_digest(exp_hex).ok_or_else(|| CliInputError {
+                                code: "evidence-invalid-digest",
+                                message: format!(
+                                    "malformed expected_digest hex in evidence environment: '{exp_hex}'"
+                                ),
+                                status: "rejected",
+                                exit_code: crate::cli::EXIT_REJECTED_OR_UNKNOWN,
+                            })?;
+                            if let Some(configured) = configured_expected_doc_digest {
+                                if configured != d {
+                                    return Err(CliInputError {
+                                        code: "evidence-mismatch",
+                                        message: format!(
+                                            "evidence environment expected_digest mismatch: configured {}, artifact {}",
+                                            configured.to_hex(),
+                                            d.to_hex()
+                                        ),
+                                        status: "rejected",
+                                        exit_code: crate::cli::EXIT_REJECTED_OR_UNKNOWN,
+                                    });
+                                }
+                            }
+                        }
+                        if let Some(entries) = doc.get("entries").and_then(|e| e.as_array()) {
+                            for e in entries {
+                                if let (Some(id), Some(cd_hex), Some(kind), Some(scope)) = (
+                                    e.get("evidence_id").and_then(|s| s.as_str()),
+                                    e.get("content_digest").and_then(|s| s.as_str()),
+                                    e.get("evidence_kind").and_then(|s| s.as_str()),
+                                    e.get("authority_scope").and_then(|s| s.as_str()),
+                                ) {
+                                    let cd = parse_strict_hex_digest(cd_hex).ok_or_else(|| {
+                                        CliInputError {
+                                            code: "evidence-invalid-digest",
+                                            message: format!(
+                                                "malformed content_digest hex in documentary evidence: '{cd_hex}'"
+                                            ),
+                                            status: "rejected",
+                                            exit_code: crate::cli::EXIT_REJECTED_OR_UNKNOWN,
+                                        }
+                                    })?;
+                                    let disp = match e.get("disposition").and_then(|s| s.as_str()) {
+                                        Some("Satisfied") => {
+                                            brix_lower::l3_v2::DocumentaryDisposition::Satisfied
+                                        }
+                                        Some("Violated") => {
+                                            brix_lower::l3_v2::DocumentaryDisposition::Violated(
+                                                e.get("reason")
+                                                    .and_then(|s| s.as_str())
+                                                    .unwrap_or("violated")
+                                                    .to_string(),
+                                            )
+                                        }
+                                        _ => brix_lower::l3_v2::DocumentaryDisposition::Unknown(
+                                            e.get("reason")
+                                                .and_then(|s| s.as_str())
+                                                .unwrap_or("unknown")
+                                                .to_string(),
+                                        ),
+                                    };
+                                    documentary_entries.push(brix_lower::l3_v2::DocumentaryEntry {
+                                        evidence_id: id.to_string(),
+                                        content_digest: cd,
+                                        evidence_kind: kind.to_string(),
+                                        authority_scope: scope.to_string(),
+                                        disposition: disp,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+        shard_paths.push(path.clone());
+    }
+
+    let mut snapshot = load_input_snapshot_from_paths(&shard_paths, &InputLimits::default())
+        .map_err(CliInputError::from)?;
+
+    let mut reg = brix_lower::l3_v2::DocumentaryRegistry::new();
+    if !documentary_entries.is_empty() || configured_expected_doc_digest.is_some() {
+        let Some(exp_digest) = configured_expected_doc_digest else {
+            return Err(CliInputError {
+                code: "evidence-missing-pin",
+                message:
+                    "documentary evidence requires an independently configured expected digest pin"
+                        .to_string(),
+                status: "rejected",
+                exit_code: crate::cli::EXIT_REJECTED_OR_UNKNOWN,
+            });
+        };
+        let mut doc_snap = brix_lower::l3_v2::DocumentarySnapshot::new();
+        for entry in documentary_entries {
+            doc_snap.insert(entry);
+        }
+        reg = brix_lower::l3_v2::DocumentaryRegistry::from_snapshot(doc_snap, exp_digest).map_err(
+            |e| CliInputError {
+                code: "evidence-mismatch",
+                message: format!("invalid documentary evidence snapshot: {e}"),
+                status: "rejected",
+                exit_code: crate::cli::EXIT_REJECTED_OR_UNKNOWN,
+            },
+        )?;
+    }
+    for evidence in runtime_evidence {
+        evidence.admit_into(&mut reg);
+    }
+    snapshot.set_documentary_registry(std::sync::Arc::new(reg));
+
+    Ok(snapshot)
 }
 
 /// Convert a runtime [`BoundInput`] into its canonical JSON representation.

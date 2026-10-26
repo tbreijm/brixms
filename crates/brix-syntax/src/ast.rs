@@ -426,6 +426,14 @@ pub enum Expr {
     /// (ADR-0048). The result is an outcome, not the refined value. Only the
     /// `Satisfied` arm binds that value, and the receipt is not a kernel proof.
     Validate { ty: Box<Ty>, arg: Box<Expr> },
+    /// `e: Ty` — a type ascription (checkpoint 3 / R14.3), written for example
+    /// `[]: List<Str>`. It is the loosest-binding expression form, so
+    /// `a + b: Int` ascribes the whole sum; parenthesize or use a call
+    /// argument/field position to scope it. Ascription is a *check*, never a
+    /// coercion: lowering verifies the annotation against the expression and
+    /// then erases it, so the value and its canonical identity are those of the
+    /// unannotated expression.
+    Ascribe { expr: Box<Expr>, ty: Box<Ty> },
 }
 
 /// Binary operators. Arithmetic ops are ordinary; `Then`/`And` are the witness

@@ -13,11 +13,13 @@
 //! | e | chain-shape invariant | ✅ [`TreeAuditError::MalformedTree`] |
 //!
 //! Row (d) is the one that matters and the one that is open: **no leaf's
-//! realization relation `ρ_g` is checked here.** `elaborate_tree` admits every
-//! leaf to the kernel as a *hypothesis*, and the kernel proves the composition
-//! without ever inspecting one. That is ADR-0007 §7's deferred tight direction
-//! and ADR-0015 ⟨D-PRIM⟩'s mechanism, and it is why the tag this checker
-//! issues is called `StructureVerified` rather than `ReplayVerified`.
+//! realization relation `ρ_g` is checked here.** `audit_tree` only verifies
+//! tree structure; tree elaboration (`elaborate_tree_certified`) is where leaf
+//! classification and proof construction happen. Historically, `elaborate_tree`
+//! admitted every leaf to the kernel as a *hypothesis*; under ADR-0015 Stage D,
+//! supported arithmetic leaves are closed via primitive instances while unclosed
+//! leaves remain hypotheses. That is why the tag this checker issues is called
+//! `StructureVerified` rather than `ReplayVerified`.
 //!
 //! Fails closed: every rejection is a typed [`TreeAuditError`] and no artifact
 //! is produced. There is no path here that returns a weaker artifact instead

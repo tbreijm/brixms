@@ -104,6 +104,10 @@ fn normalize_world_and(expr: &ast::Expr) -> ast::Expr {
             ty: ty.clone(),
             arg: Box::new(normalize_world_and(arg)),
         },
+        Expr::Ascribe { expr, ty } => Expr::Ascribe {
+            expr: Box::new(normalize_world_and(expr)),
+            ty: ty.clone(),
+        },
     }
 }
 
@@ -120,6 +124,22 @@ pub fn contract(ty: &ast::Ty) -> Result<L3SchemaType, String> {
         }),
         ast::Ty::App(name, args) if name == "List" && args.len() == 1 => {
             Ok(L3SchemaType::List(Box::new(contract(&args[0])?)))
+        }
+        ast::Ty::App(name, args) => {
+            let mut resolved = Vec::new();
+            for a in args {
+                resolved.push(contract(a)?);
+            }
+            let key = format!(
+                "{}<{}>",
+                name,
+                resolved
+                    .iter()
+                    .map(|t| t.display_name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            Ok(L3SchemaType::Named(key))
         }
         ast::Ty::Graded(_, _) => Err("graded helper contracts require grade evidence".into()),
         other => Err(format!("unsupported world helper contract: {other:?}")),

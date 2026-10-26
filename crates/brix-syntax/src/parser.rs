@@ -1238,7 +1238,20 @@ impl Parser {
     }
 
     fn parse_expr_inner(&mut self) -> Result<Expr, ParseError> {
-        self.parse_expr_bp()
+        let expr = self.parse_expr_bp()?;
+        // `e: Ty` — the loosest-binding form. Every context that can follow a
+        // complete expression with a `:` of its own consumes that `:` before
+        // calling here (record and anonymous-record fields, binders), so a
+        // `:` seen here is an ascription.
+        if self.check(&TokenKind::Colon) {
+            self.advance();
+            let ty = self.parse_ty()?;
+            return Ok(Expr::Ascribe {
+                expr: Box::new(expr),
+                ty: Box::new(ty),
+            });
+        }
+        Ok(expr)
     }
 
     /// One call argument: either an ordinary expression, or a hygienic

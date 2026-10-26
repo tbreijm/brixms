@@ -851,50 +851,167 @@ fn check_expr_bounds(
             Ok(())
         }
         ast::Expr::Validate { arg, .. } => check_expr_bounds(arg, depth + 1, node_count),
+        ast::Expr::Ascribe { expr, .. } => check_expr_bounds(expr, depth + 1, node_count),
     }
 }
 
-fn schema_root_name(ty: &ast::Ty) -> Option<&str> {
-    match ty {
-        ast::Ty::Named(name) => {
-            (!matches!(name.as_str(), "Int" | "Bool" | "Str" | "F64" | "Decimal")).then_some(name)
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct InstantiationKey {
+    pub decl: String,
+    pub args: Vec<L3SchemaType>,
+}
+
+impl InstantiationKey {
+    pub fn display_name(&self) -> String {
+        if self.args.is_empty() {
+            self.decl.clone()
+        } else {
+            format!(
+                "{}<{}>",
+                self.decl,
+                self.args
+                    .iter()
+                    .map(|a| a.display_name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         }
-        ast::Ty::Graded(inner, _) => schema_root_name(inner),
-        // `List<T>` (ADR-0037): the schema that must be reachable is `T`'s,
-        // not a (nonexistent) config named "List" — a list input's element
-        // schema still needs its record/sum shape collected for element
-        // validation, exactly as if `T` had been declared directly.
-        ast::Ty::App(name, args) if name == "List" => args.first().and_then(schema_root_name),
-        ast::Ty::App(name, _) => Some(name),
-        _ => None,
     }
 }
 
-fn schema_type_from_ast(
+fn has_config_reference(ty: &ast::Ty, configs: &BTreeMap<String, &ast::ConfigDecl>) -> bool {
+    match ty {
+        ast::Ty::Named(name) => configs.contains_key(name),
+        ast::Ty::App(name, args) if name == "List" => {
+            args.iter().any(|arg| has_config_reference(arg, configs))
+        }
+        ast::Ty::App(name, _) => configs.contains_key(name),
+        ast::Ty::Graded(inner, _) => has_config_reference(inner, configs),
+        _ => false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_schema_type(
     ty: &ast::Ty,
     owner: &str,
     configs: &BTreeMap<String, &ast::ConfigDecl>,
+    type_env: &BTreeMap<String, L3SchemaType>,
+    schemas: &mut BTreeMap<String, L3Schema>,
+    visiting: &mut BTreeSet<InstantiationKey>,
+    expansions: &mut usize,
+    edges: &mut usize,
+    depth: usize,
 ) -> Result<L3SchemaType, FiniteDecisionLowerError> {
+    if depth > MAX_SCHEMA_DEPTH {
+        return Err(FiniteDecisionLowerError::SchemaDepthExceeded {
+            limit: MAX_SCHEMA_DEPTH,
+        });
+    }
     match ty {
-        ast::Ty::Named(name) => match name.as_str() {
-            "Int" => Ok(L3SchemaType::Int),
-            "Bool" => Ok(L3SchemaType::Bool),
-            "Str" => Ok(L3SchemaType::Str),
-            "F64" => Ok(L3SchemaType::F64),
-            "Decimal" => Ok(L3SchemaType::Decimal),
-            other if configs.contains_key(other) => Ok(L3SchemaType::Named(other.to_string())),
-            other => Err(FiniteDecisionLowerError::InvalidSchema {
-                name: owner.to_string(),
-                detail: format!("unknown field or payload type '{other}'"),
-            }),
-        },
+        ast::Ty::Named(name) => {
+            if let Some(concrete) = type_env.get(name) {
+                return Ok(concrete.clone());
+            }
+            match name.as_str() {
+                "Int" => Ok(L3SchemaType::Int),
+                "Bool" => Ok(L3SchemaType::Bool),
+                "Str" => Ok(L3SchemaType::Str),
+                "F64" => Ok(L3SchemaType::F64),
+                "Decimal" => Ok(L3SchemaType::Decimal),
+                other => {
+                    let Some(config) = configs.get(other) else {
+                        return Err(FiniteDecisionLowerError::InvalidSchema {
+                            name: owner.to_string(),
+                            detail: format!("unknown field or payload type '{other}'"),
+                        });
+                    };
+                    if !config.params.is_empty() {
+                        return Err(FiniteDecisionLowerError::InvalidSchema {
+                            name: other.to_string(),
+                            detail: "a generic config (ADR-0042) may be used as an internal value, but cannot \
+                                     be validated as an input or helper-contract schema: type parameters are \
+                                     erased at evaluation, so there is nothing left to check a payload against"
+                                .to_string(),
+                        });
+                    }
+                    let key = InstantiationKey {
+                        decl: other.to_string(),
+                        args: Vec::new(),
+                    };
+                    let next_depth = depth + 1;
+                    if next_depth > MAX_SCHEMA_DEPTH {
+                        return Err(FiniteDecisionLowerError::SchemaDepthExceeded {
+                            limit: MAX_SCHEMA_DEPTH,
+                        });
+                    }
+                    if !schemas.contains_key(other) {
+                        instantiate_schema(
+                            &key, config, configs, schemas, visiting, expansions, edges, next_depth,
+                        )?;
+                    }
+                    Ok(L3SchemaType::Named(other.to_string()))
+                }
+            }
+        }
+        ast::Ty::App(name, args) => {
+            if name == "List" {
+                if args.len() != 1 {
+                    return Err(FiniteDecisionLowerError::InvalidSchema {
+                        name: owner.to_string(),
+                        detail: format!("List requires 1 type argument, found {}", args.len()),
+                    });
+                }
+                let elem = resolve_schema_type(
+                    &args[0], owner, configs, type_env, schemas, visiting, expansions, edges, depth,
+                )?;
+                Ok(L3SchemaType::List(Box::new(elem)))
+            } else {
+                let Some(config) = configs.get(name) else {
+                    return Err(FiniteDecisionLowerError::InvalidSchema {
+                        name: owner.to_string(),
+                        detail: format!("unknown generic config '{name}'"),
+                    });
+                };
+                if args.len() != config.params.len() {
+                    return Err(FiniteDecisionLowerError::InvalidSchema {
+                        name: owner.to_string(),
+                        detail: format!(
+                            "generic config '{name}' requires {} type argument(s), found {}",
+                            config.params.len(),
+                            args.len()
+                        ),
+                    });
+                }
+                let mut resolved_args = Vec::with_capacity(args.len());
+                for arg in args {
+                    let r = resolve_schema_type(
+                        arg, owner, configs, type_env, schemas, visiting, expansions, edges, depth,
+                    )?;
+                    resolved_args.push(r);
+                }
+                let key = InstantiationKey {
+                    decl: name.clone(),
+                    args: resolved_args,
+                };
+                let display_name = key.display_name();
+                let next_depth = depth + 1;
+                if next_depth > MAX_SCHEMA_DEPTH {
+                    return Err(FiniteDecisionLowerError::SchemaDepthExceeded {
+                        limit: MAX_SCHEMA_DEPTH,
+                    });
+                }
+                if !schemas.contains_key(&display_name) {
+                    instantiate_schema(
+                        &key, config, configs, schemas, visiting, expansions, edges, next_depth,
+                    )?;
+                }
+                Ok(L3SchemaType::Named(display_name))
+            }
+        }
         ast::Ty::Graded(_, grade) => Err(FiniteDecisionLowerError::InvalidSchema {
             name: owner.to_string(),
             detail: format!("graded schema component is unsupported ({grade:?})"),
-        }),
-        ast::Ty::App(name, _) => Err(FiniteDecisionLowerError::InvalidSchema {
-            name: owner.to_string(),
-            detail: format!("generic schema component '{name}<...>' is unsupported"),
         }),
         ast::Ty::Record(_) => Err(FiniteDecisionLowerError::InvalidSchema {
             name: owner.to_string(),
@@ -910,49 +1027,40 @@ fn schema_type_from_ast(
     }
 }
 
-fn collect_schema(
-    name: &str,
-    depth: usize,
+#[allow(clippy::too_many_arguments)]
+fn instantiate_schema(
+    key: &InstantiationKey,
+    config: &ast::ConfigDecl,
     configs: &BTreeMap<String, &ast::ConfigDecl>,
     schemas: &mut BTreeMap<String, L3Schema>,
-    heights: &mut BTreeMap<String, usize>,
-    visiting: &mut BTreeSet<String>,
+    visiting: &mut BTreeSet<InstantiationKey>,
+    expansions: &mut usize,
     edges: &mut usize,
+    depth: usize,
 ) -> Result<(), FiniteDecisionLowerError> {
     if depth > MAX_SCHEMA_DEPTH {
         return Err(FiniteDecisionLowerError::SchemaDepthExceeded {
             limit: MAX_SCHEMA_DEPTH,
         });
     }
-    if let Some(height) = heights.get(name) {
-        if depth.saturating_add(*height).saturating_sub(1) > MAX_SCHEMA_DEPTH {
-            return Err(FiniteDecisionLowerError::SchemaDepthExceeded {
-                limit: MAX_SCHEMA_DEPTH,
-            });
-        }
-        return Ok(());
-    }
-    let Some(config) = configs.get(name) else {
-        return Err(FiniteDecisionLowerError::InvalidSchema {
-            name: name.to_string(),
-            detail: "unknown config definition".to_string(),
+    *expansions = expansions.saturating_add(1);
+    if *expansions > MAX_SCHEMA_COUNT {
+        return Err(FiniteDecisionLowerError::SchemaLimitExceeded {
+            limit: MAX_SCHEMA_COUNT,
+            kind: "expansions",
         });
-    };
-    if !visiting.insert(name.to_string()) {
+    }
+    if !visiting.insert(key.clone()) {
         return Err(FiniteDecisionLowerError::InvalidSchema {
-            name: name.to_string(),
+            name: key.display_name(),
             detail: "recursive schemas are unsupported".to_string(),
         });
     }
-    if !config.params.is_empty() {
-        return Err(FiniteDecisionLowerError::InvalidSchema {
-            name: name.to_string(),
-            detail: "a generic config (ADR-0042) may be used as an internal value, but cannot \
-                     be validated as an input or helper-contract schema: type parameters are \
-                     erased at evaluation, so there is nothing left to check a payload against"
-                .to_string(),
-        });
+    let mut type_env = BTreeMap::new();
+    for (param_name, arg_ty) in config.params.iter().zip(&key.args) {
+        type_env.insert(param_name.clone(), arg_ty.clone());
     }
+
     let body = match &config.body {
         ast::ConfigBody::Sum(variants) => {
             let mut out = Vec::with_capacity(variants.len());
@@ -966,18 +1074,17 @@ fn collect_schema(
                             kind: "edges",
                         });
                     }
-                    let payload = schema_type_from_ast(ty, name, configs)?;
-                    if let L3SchemaType::Named(child) = &payload {
-                        collect_schema(
-                            child,
-                            depth + 1,
-                            configs,
-                            schemas,
-                            heights,
-                            visiting,
-                            edges,
-                        )?;
-                    }
+                    let payload = resolve_schema_type(
+                        ty,
+                        &key.display_name(),
+                        configs,
+                        &type_env,
+                        schemas,
+                        visiting,
+                        expansions,
+                        edges,
+                        depth,
+                    )?;
                     payloads.push(payload);
                 }
                 out.push((variant.name.clone(), payloads));
@@ -987,7 +1094,6 @@ fn collect_schema(
         ast::ConfigBody::Record(fields) => {
             let mut out = BTreeMap::new();
             for field in fields {
-                let field_type = schema_type_from_ast(&field.ty, name, configs)?;
                 *edges = edges.saturating_add(1);
                 if *edges > MAX_SCHEMA_EDGES {
                     return Err(FiniteDecisionLowerError::SchemaLimitExceeded {
@@ -995,54 +1101,148 @@ fn collect_schema(
                         kind: "edges",
                     });
                 }
+                let field_type = resolve_schema_type(
+                    &field.ty,
+                    &key.display_name(),
+                    configs,
+                    &type_env,
+                    schemas,
+                    visiting,
+                    expansions,
+                    edges,
+                    depth,
+                )?;
                 if out.insert(field.name.clone(), field_type).is_some() {
                     return Err(FiniteDecisionLowerError::InvalidSchema {
-                        name: name.to_string(),
+                        name: key.display_name(),
                         detail: format!("duplicate field '{}'", field.name),
                     });
-                }
-                if let L3SchemaType::Named(child) = out.get(&field.name).expect("inserted field") {
-                    collect_schema(child, depth + 1, configs, schemas, heights, visiting, edges)?;
                 }
             }
             L3SchemaBody::Record(out)
         }
     };
-    visiting.remove(name);
-    let height = match &body {
-        L3SchemaBody::Sum(variants) => variants
-            .iter()
-            .flat_map(|(_, payloads)| payloads)
-            .filter_map(|ty| match ty {
-                L3SchemaType::Named(child) => heights.get(child).copied(),
-                _ => None,
-            })
-            .map(|child_height| child_height.saturating_add(1))
-            .max()
-            .unwrap_or(1),
-        L3SchemaBody::Record(fields) => fields
-            .values()
-            .filter_map(|ty| match ty {
-                L3SchemaType::Named(child) => heights.get(child).copied(),
-                _ => None,
-            })
-            .map(|child_height| child_height.saturating_add(1))
-            .max()
-            .unwrap_or(1),
-    };
-    schemas.insert(
-        name.to_string(),
-        L3Schema {
-            name: name.to_string(),
-            body,
-        },
-    );
-    heights.insert(name.to_string(), height);
+    visiting.remove(key);
+    let name = key.display_name();
+    schemas.insert(name.clone(), L3Schema { name, body });
     if schemas.len() > MAX_SCHEMA_COUNT {
         return Err(FiniteDecisionLowerError::SchemaLimitExceeded {
             limit: MAX_SCHEMA_COUNT,
             kind: "count",
         });
+    }
+    Ok(())
+}
+
+fn collect_ascribe_schemas_from_expr(
+    expr: &ast::Expr,
+    configs: &BTreeMap<String, &ast::ConfigDecl>,
+    type_env: &BTreeMap<String, L3SchemaType>,
+    schemas: &mut BTreeMap<String, L3Schema>,
+    visiting: &mut BTreeSet<InstantiationKey>,
+    expansions: &mut usize,
+    edges: &mut usize,
+) -> Result<(), FiniteDecisionLowerError> {
+    match expr {
+        ast::Expr::Ascribe { expr, ty } => {
+            let _ = resolve_schema_type(
+                ty, "ascribe", configs, type_env, schemas, visiting, expansions, edges, 0,
+            )?;
+            collect_ascribe_schemas_from_expr(
+                expr, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
+        }
+        ast::Expr::Bin { lhs, rhs, .. } => {
+            collect_ascribe_schemas_from_expr(
+                lhs, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
+            collect_ascribe_schemas_from_expr(
+                rhs, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
+        }
+        ast::Expr::Not(expr)
+        | ast::Expr::Prove(expr)
+        | ast::Expr::Why(expr)
+        | ast::Expr::Audit(expr) => {
+            collect_ascribe_schemas_from_expr(
+                expr, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
+        }
+        ast::Expr::Validate { arg, .. } => {
+            collect_ascribe_schemas_from_expr(
+                arg, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
+        }
+        ast::Expr::Call { args, .. } => {
+            for a in args {
+                collect_ascribe_schemas_from_expr(
+                    a, configs, type_env, schemas, visiting, expansions, edges,
+                )?;
+            }
+        }
+        ast::Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_ascribe_schemas_from_expr(
+                scrutinee, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
+            for arm in arms {
+                collect_ascribe_schemas_from_expr(
+                    &arm.body, configs, type_env, schemas, visiting, expansions, edges,
+                )?;
+            }
+        }
+        ast::Expr::Record { fields, .. } => {
+            for (_, f_expr) in fields {
+                collect_ascribe_schemas_from_expr(
+                    f_expr, configs, type_env, schemas, visiting, expansions, edges,
+                )?;
+            }
+        }
+        ast::Expr::AnonRecord(fields) => {
+            for (_, f_expr) in fields {
+                collect_ascribe_schemas_from_expr(
+                    f_expr, configs, type_env, schemas, visiting, expansions, edges,
+                )?;
+            }
+        }
+        ast::Expr::Lambda { body, .. } => {
+            collect_ascribe_schemas_from_expr(
+                body, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
+        }
+        ast::Expr::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => {
+            for (_, g_expr) in generators {
+                collect_ascribe_schemas_from_expr(
+                    g_expr, configs, type_env, schemas, visiting, expansions, edges,
+                )?;
+            }
+            if let Some(w) = where_clause {
+                collect_ascribe_schemas_from_expr(
+                    w, configs, type_env, schemas, visiting, expansions, edges,
+                )?;
+            }
+            collect_ascribe_schemas_from_expr(
+                yield_expr, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
+        }
+        ast::Expr::ListLit(items) => {
+            for item in items {
+                collect_ascribe_schemas_from_expr(
+                    item, configs, type_env, schemas, visiting, expansions, edges,
+                )?;
+            }
+        }
+        ast::Expr::Field(base, _) => {
+            collect_ascribe_schemas_from_expr(
+                base, configs, type_env, schemas, visiting, expansions, edges,
+            )?;
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -1058,54 +1258,207 @@ fn collect_reachable_schemas(
             _ => None,
         })
         .collect();
-    let mut roots = BTreeSet::new();
+
+    let mut schemas = BTreeMap::new();
+    let mut visiting = BTreeSet::new();
+    let mut expansions = 0;
+    let mut edges = 0;
+    let type_env = BTreeMap::new();
+
     for item in &module.items {
         match item {
             ast::Item::Input(input) => {
-                if let Some(name) = schema_root_name(&input.ty) {
-                    if configs.contains_key(name) {
-                        roots.insert(name.to_string());
-                    }
+                if has_config_reference(&input.ty, &configs) {
+                    let _ = resolve_schema_type(
+                        &input.ty,
+                        &input.name,
+                        &configs,
+                        &type_env,
+                        &mut schemas,
+                        &mut visiting,
+                        &mut expansions,
+                        &mut edges,
+                        0,
+                    )?;
                 }
             }
             ast::Item::Fn(function) => {
                 for parameter in &function.params {
                     if let Some(ty) = &parameter.ty {
-                        if let Some(name) = schema_root_name(ty) {
-                            if configs.contains_key(name) {
-                                roots.insert(name.to_string());
-                            }
+                        if has_config_reference(ty, &configs) {
+                            let _ = resolve_schema_type(
+                                ty,
+                                &function.name,
+                                &configs,
+                                &type_env,
+                                &mut schemas,
+                                &mut visiting,
+                                &mut expansions,
+                                &mut edges,
+                                0,
+                            )?;
                         }
                     }
                 }
                 if let Some(ty) = &function.ret {
-                    if let Some(name) = schema_root_name(ty) {
-                        if configs.contains_key(name) {
-                            roots.insert(name.to_string());
-                        }
+                    if has_config_reference(ty, &configs) {
+                        let _ = resolve_schema_type(
+                            ty,
+                            &function.name,
+                            &configs,
+                            &type_env,
+                            &mut schemas,
+                            &mut visiting,
+                            &mut expansions,
+                            &mut edges,
+                            0,
+                        )?;
                     }
+                }
+                collect_ascribe_schemas_from_expr(
+                    &function.body,
+                    &configs,
+                    &type_env,
+                    &mut schemas,
+                    &mut visiting,
+                    &mut expansions,
+                    &mut edges,
+                )?;
+            }
+            ast::Item::Let(l) => {
+                collect_ascribe_schemas_from_expr(
+                    &l.value,
+                    &configs,
+                    &type_env,
+                    &mut schemas,
+                    &mut visiting,
+                    &mut expansions,
+                    &mut edges,
+                )?;
+            }
+            ast::Item::Rule(r) => {
+                collect_ascribe_schemas_from_expr(
+                    &r.body,
+                    &configs,
+                    &type_env,
+                    &mut schemas,
+                    &mut visiting,
+                    &mut expansions,
+                    &mut edges,
+                )?;
+            }
+            ast::Item::Propose(p) => {
+                collect_ascribe_schemas_from_expr(
+                    &p.guard,
+                    &configs,
+                    &type_env,
+                    &mut schemas,
+                    &mut visiting,
+                    &mut expansions,
+                    &mut edges,
+                )?;
+                collect_ascribe_schemas_from_expr(
+                    &p.value,
+                    &configs,
+                    &type_env,
+                    &mut schemas,
+                    &mut visiting,
+                    &mut expansions,
+                    &mut edges,
+                )?;
+            }
+            ast::Item::Decide(d) => {
+                collect_ascribe_schemas_from_expr(
+                    &d.list,
+                    &configs,
+                    &type_env,
+                    &mut schemas,
+                    &mut visiting,
+                    &mut expansions,
+                    &mut edges,
+                )?;
+                for p in &d.proposals {
+                    collect_ascribe_schemas_from_expr(
+                        &p.guard,
+                        &configs,
+                        &type_env,
+                        &mut schemas,
+                        &mut visiting,
+                        &mut expansions,
+                        &mut edges,
+                    )?;
+                    collect_ascribe_schemas_from_expr(
+                        &p.value,
+                        &configs,
+                        &type_env,
+                        &mut schemas,
+                        &mut visiting,
+                        &mut expansions,
+                        &mut edges,
+                    )?;
                 }
             }
             _ => {}
         }
     }
 
-    let mut schemas = BTreeMap::new();
-    let mut heights = BTreeMap::new();
-    let mut visiting = BTreeSet::new();
-    let mut edges = 0;
-    for root in roots {
-        collect_schema(
-            &root,
-            1,
-            &configs,
-            &mut schemas,
-            &mut heights,
-            &mut visiting,
-            &mut edges,
-        )?;
-    }
     Ok(schemas)
+}
+
+fn resolve_type_ast_simple(
+    ty: &ast::Ty,
+    schemas: &BTreeMap<String, L3Schema>,
+) -> Result<L3SchemaType, FiniteDecisionLowerError> {
+    match ty {
+        ast::Ty::Named(name) => match name.as_str() {
+            "Int" => Ok(L3SchemaType::Int),
+            "Bool" => Ok(L3SchemaType::Bool),
+            "Str" => Ok(L3SchemaType::Str),
+            "F64" => Ok(L3SchemaType::F64),
+            "Decimal" => Ok(L3SchemaType::Decimal),
+            other if schemas.contains_key(other) => Ok(L3SchemaType::Named(other.to_string())),
+            other => Err(FiniteDecisionLowerError::UnknownContractType {
+                name: other.to_string(),
+            }),
+        },
+        ast::Ty::App(name, args) if name == "List" => {
+            if args.len() != 1 {
+                return Err(FiniteDecisionLowerError::InvalidSchema {
+                    name: "List".to_string(),
+                    detail: "List requires 1 type argument".to_string(),
+                });
+            }
+            let elem = resolve_type_ast_simple(&args[0], schemas)?;
+            Ok(L3SchemaType::List(Box::new(elem)))
+        }
+        ast::Ty::App(name, args) => {
+            let mut resolved = Vec::with_capacity(args.len());
+            for a in args {
+                resolved.push(resolve_type_ast_simple(a, schemas)?);
+            }
+            let key = InstantiationKey {
+                decl: name.clone(),
+                args: resolved,
+            };
+            let display_name = key.display_name();
+            if !schemas.contains_key(&display_name) {
+                return Err(FiniteDecisionLowerError::UnsupportedContractType {
+                    ty: format!("{name}<...>"),
+                    detail: "a parameterized type cannot appear in a function contract or input \
+                             declaration (ADR-0042): type parameters are erased at evaluation, so \
+                             there is no payload shape left to check against — write the contract \
+                             without a return/parameter annotation instead, or use the type only \
+                             as an internal (uncontracted) value"
+                        .to_string(),
+                });
+            }
+            Ok(L3SchemaType::Named(display_name))
+        }
+        other => Err(FiniteDecisionLowerError::InvalidSchema {
+            name: "type".to_string(),
+            detail: format!("unsupported type expression: {other:?}"),
+        }),
+    }
 }
 
 /// Parse and validate a contract type and optional grade annotation (ADR-0032).
@@ -1128,29 +1481,37 @@ fn parse_contract(
         other => (other, None),
     };
 
-    let value_type = match inner_ty {
+    let (value_type, schema_ty) = match inner_ty {
         ast::Ty::Named(name) => match name.as_str() {
-            "Int" => L3ValueType::Int,
-            "Bool" => L3ValueType::Bool,
-            "Str" => L3ValueType::Str,
-            "F64" => L3ValueType::F64,
-            "Decimal" => L3ValueType::Decimal,
+            "Int" => (L3ValueType::Int, None),
+            "Bool" => (L3ValueType::Bool, None),
+            "Str" => (L3ValueType::Str, None),
+            "F64" => (L3ValueType::F64, None),
+            "Decimal" => (L3ValueType::Decimal, None),
             "Float" => {
                 return Err(FiniteDecisionLowerError::UnsupportedContractType {
                     ty: "Float".to_string(),
                     detail: "Float is not supported in finite-decision".to_string(),
                 });
             }
-            n if declared_sum_configs.contains(n) || declared_record_configs.contains(n) => {
-                if !schemas.contains_key(n) {
+            n if declared_sum_configs.contains(n)
+                || declared_record_configs.contains(n)
+                || schemas.contains_key(n) =>
+            {
+                let Some(schema) = schemas.get(n) else {
                     return Err(FiniteDecisionLowerError::UnknownContractType {
                         name: n.to_string(),
                     });
-                }
-                if declared_sum_configs.contains(n) {
-                    L3ValueType::Sum(n.to_string())
-                } else {
-                    L3ValueType::Record(n.to_string())
+                };
+                match &schema.body {
+                    L3SchemaBody::Sum(_) => (
+                        L3ValueType::Sum(n.to_string()),
+                        Some(L3SchemaType::Named(n.to_string())),
+                    ),
+                    L3SchemaBody::Record(_) => (
+                        L3ValueType::Record(n.to_string()),
+                        Some(L3SchemaType::Named(n.to_string())),
+                    ),
                 }
             }
             n => {
@@ -1166,16 +1527,46 @@ fn parse_contract(
                     .to_string(),
             });
         }
-        ast::Ty::App(name, _) => {
-            return Err(FiniteDecisionLowerError::UnsupportedContractType {
-                ty: format!("{name}<...>"),
-                detail: "a parameterized type cannot appear in a function contract or input \
-                         declaration (ADR-0042): type parameters are erased at evaluation, so \
-                         there is no payload shape left to check against — write the contract \
-                         without a return/parameter annotation instead, or use the type only \
-                         as an internal (uncontracted) value"
-                    .to_string(),
-            });
+        ast::Ty::App(name, args) if name == "List" => {
+            if args.len() != 1 {
+                return Err(FiniteDecisionLowerError::UnsupportedContractType {
+                    ty: format!("List<{} args>", args.len()),
+                    detail: "List requires exactly one type argument".to_string(),
+                });
+            }
+            let elem_schema = resolve_type_ast_simple(&args[0], schemas)?;
+            (
+                L3ValueType::List,
+                Some(L3SchemaType::List(Box::new(elem_schema))),
+            )
+        }
+        ast::Ty::App(name, args) => {
+            let mut resolved_args = Vec::with_capacity(args.len());
+            for arg in args {
+                let sub_schema = resolve_type_ast_simple(arg, schemas)?;
+                resolved_args.push(sub_schema);
+            }
+            let key = InstantiationKey {
+                decl: name.clone(),
+                args: resolved_args,
+            };
+            let display_name = key.display_name();
+            let Some(schema) = schemas.get(&display_name) else {
+                return Err(FiniteDecisionLowerError::UnsupportedContractType {
+                    ty: format!("{name}<...>"),
+                    detail: "a parameterized type cannot appear in a function contract or input \
+                             declaration (ADR-0042): type parameters are erased at evaluation, so \
+                             there is no payload shape left to check against — write the contract \
+                             without a return/parameter annotation instead, or use the type only \
+                             as an internal (uncontracted) value"
+                        .to_string(),
+                });
+            };
+            let val_ty = match &schema.body {
+                L3SchemaBody::Sum(_) => L3ValueType::Sum(display_name.clone()),
+                L3SchemaBody::Record(_) => L3ValueType::Record(display_name.clone()),
+            };
+            (val_ty, Some(L3SchemaType::Named(display_name)))
         }
         ast::Ty::Graded(_, _) => {
             return Err(FiniteDecisionLowerError::UnsupportedContractType {
@@ -1191,22 +1582,6 @@ fn parse_contract(
         }
     };
 
-    let schema_ty = match &value_type {
-        L3ValueType::Int => None,
-        L3ValueType::Bool => None,
-        L3ValueType::Str => None,
-        L3ValueType::F64 | L3ValueType::Decimal => None,
-        L3ValueType::Sum(name) | L3ValueType::Record(name) => {
-            Some(L3SchemaType::Named(name.clone()))
-        }
-        // `parse_contract` above never produces `List`: `ast::Ty::App` (which
-        // is how `List<T>` parses) is rejected a few lines up as an
-        // unsupported contract type, so a helper parameter or return
-        // contract never names a list (ADR-0037 §Scope, ADR-0040).
-        L3ValueType::List => {
-            unreachable!("parse_contract never returns a List value type")
-        }
-    };
     Ok(FiniteDecisionContract {
         ty: value_type,
         grade,
@@ -1291,7 +1666,11 @@ fn collect_rule_fact_reads(e: &L3ExprV2, out: &mut BTreeSet<String>) {
             collect_rule_fact_reads(a, out);
             collect_rule_fact_reads(b, out);
         }
-        L3ExprV2::Len(a) | L3ExprV2::Distinct(a) => collect_rule_fact_reads(a, out),
+        L3ExprV2::Len(a)
+        | L3ExprV2::Distinct(a)
+        | L3ExprV2::Only(a)
+        | L3ExprV2::Ascribe { expr: a, .. }
+        | L3ExprV2::Validate { arg: a, .. } => collect_rule_fact_reads(a, out),
     }
 }
 
@@ -1727,6 +2106,43 @@ pub fn lower_finite_decision_plan(
     sum_of_variant.insert("true".to_string(), "Bool".to_string());
     sum_of_variant.insert("false".to_string(), "Bool".to_string());
 
+    // Builtin ValidationOutcome sum for validate expressions (ADR-0048 R7).
+    variants_of_sum.insert(
+        "ValidationOutcome".to_string(),
+        vec!["Satisfied".into(), "Violated".into(), "Unknown".into()],
+    );
+    sum_of_variant.insert("Satisfied".to_string(), "ValidationOutcome".to_string());
+    sum_of_variant.insert("Violated".to_string(), "ValidationOutcome".to_string());
+    sum_of_variant.insert("Unknown".to_string(), "ValidationOutcome".to_string());
+    sum_of_variant.insert(
+        "ValidationOutcome::Satisfied".to_string(),
+        "ValidationOutcome".to_string(),
+    );
+    sum_of_variant.insert(
+        "ValidationOutcome::Violated".to_string(),
+        "ValidationOutcome".to_string(),
+    );
+    sum_of_variant.insert(
+        "ValidationOutcome::Unknown".to_string(),
+        "ValidationOutcome".to_string(),
+    );
+
+    variants_of.insert("Satisfied".to_string(), "ValidationOutcome".to_string());
+    variants_of.insert("Violated".to_string(), "ValidationOutcome".to_string());
+    variants_of.insert("Unknown".to_string(), "ValidationOutcome".to_string());
+    variants_of.insert(
+        "ValidationOutcome::Satisfied".to_string(),
+        "ValidationOutcome".to_string(),
+    );
+    variants_of.insert(
+        "ValidationOutcome::Violated".to_string(),
+        "ValidationOutcome".to_string(),
+    );
+    variants_of.insert(
+        "ValidationOutcome::Unknown".to_string(),
+        "ValidationOutcome".to_string(),
+    );
+
     // Pre-scan functions: validate parameters, contracts, arities, and uniqueness.
     let mut fn_names: BTreeSet<String> = BTreeSet::new();
     let mut function_arities: BTreeMap<String, usize> = BTreeMap::new();
@@ -1805,7 +2221,31 @@ pub fn lower_finite_decision_plan(
     if !has_functions {
         variants_of.clear();
         nullary.clear();
+        variants_of.insert("Satisfied".to_string(), "ValidationOutcome".to_string());
+        variants_of.insert("Violated".to_string(), "ValidationOutcome".to_string());
+        variants_of.insert("Unknown".to_string(), "ValidationOutcome".to_string());
+        variants_of.insert(
+            "ValidationOutcome::Satisfied".to_string(),
+            "ValidationOutcome".to_string(),
+        );
+        variants_of.insert(
+            "ValidationOutcome::Violated".to_string(),
+            "ValidationOutcome".to_string(),
+        );
+        variants_of.insert(
+            "ValidationOutcome::Unknown".to_string(),
+            "ValidationOutcome".to_string(),
+        );
     }
+
+    let generic_config_names: BTreeSet<String> = module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ast::Item::Config(c) if !c.params.is_empty() => Some(c.name.clone()),
+            _ => None,
+        })
+        .collect();
 
     // Lowering state.
     let mut input_names: BTreeSet<String> = BTreeSet::new();
@@ -1859,6 +2299,15 @@ pub fn lower_finite_decision_plan(
                     ));
                 }
                 let resolve_named = |name: &str| -> Result<L3ValueType, FiniteDecisionLowerError> {
+                    if generic_config_names.contains(name) {
+                        return Err(FiniteDecisionLowerError::InvalidSchema {
+                            name: name.to_string(),
+                            detail: "a generic config (ADR-0042) may be used as an internal value, but cannot \
+                                     be validated as an input or helper-contract schema: type parameters are \
+                                     erased at evaluation, so there is nothing left to check a payload against"
+                                .to_string(),
+                        });
+                    }
                     Ok(match name {
                         "Int" => L3ValueType::Int,
                         "Bool" => L3ValueType::Bool,
@@ -1913,6 +2362,7 @@ pub fn lower_finite_decision_plan(
                                     name: inp.name.clone(),
                                 });
                             }
+                            ast::Ty::App(_, _) => resolve_type_ast_simple(&args[0], &schemas)?,
                             other => {
                                 return Err(FiniteDecisionLowerError::UnsupportedListElementType {
                                     name: inp.name.clone(),
@@ -1937,6 +2387,26 @@ pub fn lower_finite_decision_plan(
                             L3ValueType::List,
                             Some(FiniteDecisionListDecl { element, max }),
                         )
+                    }
+                    ast::Ty::App(_, _) => {
+                        let schema_ty = resolve_type_ast_simple(&inp.ty, &schemas)?;
+                        let L3SchemaType::Named(display_name) = schema_ty else {
+                            return Err(FiniteDecisionLowerError::UnsupportedInputType {
+                                name: inp.name.clone(),
+                                ty: format!("{:?}", inp.ty),
+                            });
+                        };
+                        let Some(schema) = schemas.get(&display_name) else {
+                            return Err(FiniteDecisionLowerError::UnsupportedInputType {
+                                name: inp.name.clone(),
+                                ty: display_name,
+                            });
+                        };
+                        let val_ty = match &schema.body {
+                            L3SchemaBody::Sum(_) => L3ValueType::Sum(display_name),
+                            L3SchemaBody::Record(_) => L3ValueType::Record(display_name),
+                        };
+                        (val_ty, None)
                     }
                     ast::Ty::Named(n) => (resolve_named(n)?, None),
                     other => {
@@ -2083,10 +2553,8 @@ pub fn lower_finite_decision_plan(
                 )
                 .map_err(map_lower_err)?;
 
-                if bounded {
-                    check_exhaustive_expr(&value, &sum_of_variant, &variants_of_sum)
-                        .map_err(FiniteDecisionLowerError::ExprError)?;
-                }
+                check_exhaustive_expr(&value, &sum_of_variant, &variants_of_sum)
+                    .map_err(FiniteDecisionLowerError::ExprError)?;
 
                 let_names.insert(l.name.clone());
                 lets.push((l.name.clone(), value));
@@ -2184,10 +2652,8 @@ pub fn lower_finite_decision_plan(
                     other => FiniteDecisionLowerError::ExprError(other),
                 })?;
 
-                if bounded {
-                    check_exhaustive_expr(&body, &sum_of_variant, &variants_of_sum)
-                        .map_err(FiniteDecisionLowerError::ExprError)?;
-                }
+                check_exhaustive_expr(&body, &sum_of_variant, &variants_of_sum)
+                    .map_err(FiniteDecisionLowerError::ExprError)?;
 
                 let depends_on = if r.params_declared {
                     declared_deps
@@ -2292,10 +2758,8 @@ pub fn lower_finite_decision_plan(
                     other => FiniteDecisionLowerError::ExprError(other),
                 })?;
 
-                if bounded {
-                    check_exhaustive_expr(&guard, &sum_of_variant, &variants_of_sum)
-                        .map_err(FiniteDecisionLowerError::ExprError)?;
-                }
+                check_exhaustive_expr(&guard, &sum_of_variant, &variants_of_sum)
+                    .map_err(FiniteDecisionLowerError::ExprError)?;
 
                 let value = lower_expr_v2_with_ambiguous(
                     &p.value,
@@ -2340,10 +2804,8 @@ pub fn lower_finite_decision_plan(
                     other => FiniteDecisionLowerError::ExprError(other),
                 })?;
 
-                if bounded {
-                    check_exhaustive_expr(&value, &sum_of_variant, &variants_of_sum)
-                        .map_err(FiniteDecisionLowerError::ExprError)?;
-                }
+                check_exhaustive_expr(&value, &sum_of_variant, &variants_of_sum)
+                    .map_err(FiniteDecisionLowerError::ExprError)?;
 
                 let deps = if p.deps_declared {
                     declared_deps
@@ -2401,10 +2863,8 @@ pub fn lower_finite_decision_plan(
                 )
                 .map_err(map_lower_err)?;
 
-                if bounded {
-                    check_exhaustive_expr(&show, &sum_of_variant, &variants_of_sum)
-                        .map_err(FiniteDecisionLowerError::ExprError)?;
-                }
+                check_exhaustive_expr(&show, &sum_of_variant, &variants_of_sum)
+                    .map_err(FiniteDecisionLowerError::ExprError)?;
 
                 shows.push(show);
             }
@@ -2441,10 +2901,8 @@ pub fn lower_finite_decision_plan(
                 )
                 .map_err(map_lower_err)?;
 
-                if bounded {
-                    check_exhaustive_expr(&list, &sum_of_variant, &variants_of_sum)
-                        .map_err(FiniteDecisionLowerError::ExprError)?;
-                }
+                check_exhaustive_expr(&list, &sum_of_variant, &variants_of_sum)
+                    .map_err(FiniteDecisionLowerError::ExprError)?;
 
                 check_otherwise_decide(&d.name, &d.proposals)?;
 
@@ -2516,10 +2974,8 @@ pub fn lower_finite_decision_plan(
                         )
                     })?;
 
-                    if bounded {
-                        check_exhaustive_expr(&guard, &sum_of_variant, &variants_of_sum)
-                            .map_err(FiniteDecisionLowerError::ExprError)?;
-                    }
+                    check_exhaustive_expr(&guard, &sum_of_variant, &variants_of_sum)
+                        .map_err(FiniteDecisionLowerError::ExprError)?;
 
                     let value = lower_expr_v2_with_ambiguous(
                         &p.value,
@@ -2543,10 +2999,8 @@ pub fn lower_finite_decision_plan(
                         )
                     })?;
 
-                    if bounded {
-                        check_exhaustive_expr(&value, &sum_of_variant, &variants_of_sum)
-                            .map_err(FiniteDecisionLowerError::ExprError)?;
-                    }
+                    check_exhaustive_expr(&value, &sum_of_variant, &variants_of_sum)
+                        .map_err(FiniteDecisionLowerError::ExprError)?;
 
                     let deps = if p.deps_declared {
                         declared_deps
@@ -2704,7 +3158,9 @@ fn encode_config_body_v2(w: &mut CanonWriter, body: &L3ConfigBodyV2) {
 
 fn encode_pattern_v2(w: &mut CanonWriter, pat: &L3PatternV2) {
     match pat {
-        L3PatternV2::Ctor { variant, binders } => {
+        L3PatternV2::Ctor {
+            variant, binders, ..
+        } => {
             w.write_ident(variant);
             w.write_uint(binders.len() as u64);
             for b in binders {
@@ -2713,6 +3169,13 @@ fn encode_pattern_v2(w: &mut CanonWriter, pat: &L3PatternV2) {
                     Some(name) => w.write_enum(1, |w| w.write_ident(name)),
                 }
             }
+        }
+        // Append-only: patterns are untagged (a constructor name, then its
+        // binder count). `_` is not a legal constructor name, so the pair
+        // `("_", 0)` cannot collide with any existing pattern encoding.
+        L3PatternV2::Wildcard => {
+            w.write_ident("_");
+            w.write_uint(0);
         }
     }
 }
@@ -2863,6 +3326,18 @@ fn encode_expr_v2(w: &mut CanonWriter, e: &L3ExprV2) {
                 encode_expr_v2(w, arg);
             }
         }),
+        // Append-only: a new ordinal, so no existing expression's bytes move.
+        L3ExprV2::Only(a) => w.write_enum(26, |w| {
+            encode_expr_v2(w, a);
+        }),
+        L3ExprV2::Ascribe { expr, element } => w.write_enum(27, |w| {
+            encode_expr_v2(w, expr);
+            w.write_ident(&element.display_name());
+        }),
+        L3ExprV2::Validate { target_type, arg } => w.write_enum(28, |w| {
+            w.write_ident(target_type);
+            encode_expr_v2(w, arg);
+        }),
     }
 }
 
@@ -2933,11 +3408,7 @@ fn encode_value_type(w: &mut CanonWriter, ty: &L3ValueType) {
         L3ValueType::Decimal => w.write_enum(7, |_| {}),
         L3ValueType::Sum(nominal) => w.write_enum(3, |w| w.write_ident(nominal)),
         L3ValueType::Record(nominal) => w.write_enum(4, |w| w.write_ident(nominal)),
-        // Only used for function parameter/return contracts, which never
-        // carry `List` — see `parse_contract`'s handling of `ast::Ty::App`.
-        L3ValueType::List => {
-            unreachable!("function contracts never carry a List value type")
-        }
+        L3ValueType::List => w.write_enum(5, |_| {}),
     }
 }
 

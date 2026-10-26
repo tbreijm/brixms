@@ -109,6 +109,24 @@ impl Receipt {
     fn verified(self) -> Option<Self> {
         self.authentic().then_some(self)
     }
+
+    pub fn issue(
+        proposition: impl Into<String>,
+        subject: impl Into<String>,
+        context: impl Into<String>,
+        authority: Authority,
+        assumptions: Vec<String>,
+        kernel_certificate: Option<String>,
+    ) -> Self {
+        issue(
+            proposition,
+            subject,
+            context,
+            authority,
+            assumptions,
+            kernel_certificate,
+        )
+    }
 }
 
 fn seal_receipt(receipt: &Receipt) -> String {
@@ -140,6 +158,146 @@ fn issue(
     };
     receipt.seal = seal_receipt(&receipt);
     receipt
+}
+
+/// Complete target identity preserved inside a verifier-issued [`VerifiedDecisionEvidence`].
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct VerifiedDecisionClaim {
+    pub world: Digest,
+    pub program: Digest,
+    pub revision: u64,
+    pub revision_digest: Digest,
+    pub decide: String,
+    pub entity: String,
+    pub candidate: String,
+    pub value_digest: Digest,
+    pub caller: Option<String>,
+    pub grants: Vec<String>,
+    pub release: String,
+}
+
+/// Retired, untrusted prototype handle. All construction routes fail closed.
+/// The actual opaque verified handle lives beside the complete verifier in
+/// `brix_kb::world::decision_evidence`; lower cannot authenticate world replay.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedDecisionEvidence {
+    claim: VerifiedDecisionClaim,
+    receipt: Receipt,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Debug)]
+pub struct DecisionProofKey(pub Vec<u8>);
+
+impl brix_canon::Canonical for DecisionProofKey {
+    fn canon_write(&self, w: &mut brix_canon::CanonWriter) {
+        w.write_bytes(&self.0);
+    }
+}
+
+impl brix_canon::CanonDecode for DecisionProofKey {
+    fn canon_read(r: &mut brix_canon::CanonReader<'_>) -> Result<Self, brix_canon::CanonError> {
+        let b = r.read_bytes()?;
+        Ok(Self(b.to_vec()))
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Debug)]
+pub struct DecisionProofTuple(pub Vec<u8>);
+
+impl brix_canon::Canonical for DecisionProofTuple {
+    fn canon_write(&self, w: &mut brix_canon::CanonWriter) {
+        w.write_bytes(&self.0);
+    }
+}
+
+impl brix_canon::CanonDecode for DecisionProofTuple {
+    fn canon_read(r: &mut brix_canon::CanonReader<'_>) -> Result<Self, brix_canon::CanonError> {
+        let b = r.read_bytes()?;
+        Ok(Self(b.to_vec()))
+    }
+}
+
+/// Retired prototype token; conveys no authority.
+#[doc(hidden)]
+pub const WORLD_VERIFIER_WITNESS: [u8; 32] = [
+    0x57, 0x6f, 0x72, 0x6c, 0x64, 0x56, 0x65, 0x72, 0x69, 0x66, 0x69, 0x65, 0x72, 0x57, 0x69, 0x74,
+    0x6e, 0x65, 0x73, 0x73, 0x54, 0x6f, 0x6b, 0x65, 0x6e, 0x41, 0x75, 0x74, 0x68, 0x30, 0x38, 0x31,
+];
+
+/// Untrusted caller-supplied proof fragment. Never establishes independent replay.
+#[derive(Clone, Debug)]
+pub struct DecisionReplayProof<'a> {
+    pub decision_root: Digest,
+    pub proof_nodes: &'a BTreeMap<Digest, Vec<u8>>,
+    pub replayed_value_bytes: &'a [u8],
+}
+
+/// Refuse caller-supplied replay proof.
+///
+/// Runtime decision authority requires complete independent world replay through the
+/// trusted world verifier, not caller-supplied trie proofs.
+pub fn verify_runtime_decision_proof(
+    _claim: &VerifiedDecisionClaim,
+    _receipt: &Receipt,
+    _proof: &DecisionReplayProof,
+) -> Result<VerifiedDecisionEvidence, String> {
+    Err("caller-supplied DecisionReplayProof is untrusted; runtime authority requires complete independent world replay through the world verifier".to_string())
+}
+
+impl VerifiedDecisionEvidence {
+    /// Retired prototype constructor; returns an unauthenticated handle that admission refuses.
+    #[doc(hidden)]
+    pub fn __issue_authenticated_for_world_verifier(
+        claim: VerifiedDecisionClaim,
+        receipt: Receipt,
+        _witness: &[u8; 32],
+    ) -> Result<Self, String> {
+        Ok(Self { claim, receipt })
+    }
+
+    /// Retired prototype entry point. Rust type-name strings cannot authenticate a caller.
+    #[doc(hidden)]
+    pub fn __issue_from_world_verifier_private<T: 'static>(
+        _claim: VerifiedDecisionClaim,
+        _receipt: Receipt,
+        _witness: &T,
+    ) -> Result<Self, String> {
+        Err("world evidence must be constructed by the complete brix-kb verifier".into())
+    }
+
+    /// Construct an unverified decision evidence handle.
+    ///
+    /// External callers cannot mint verified authority through this constructor;
+    /// admission into [`crate::l3_v2::DocumentaryRegistry`] will refuse it.
+    #[doc(hidden)]
+    pub fn __issue_from_world_verifier(claim: VerifiedDecisionClaim, receipt: Receipt) -> Self {
+        Self { claim, receipt }
+    }
+
+    pub fn authentic(&self) -> bool {
+        false
+    }
+
+    pub fn claim(&self) -> &VerifiedDecisionClaim {
+        &self.claim
+    }
+
+    pub fn receipt(&self) -> &Receipt {
+        &self.receipt
+    }
+
+    pub fn into_receipt(self) -> Receipt {
+        self.receipt
+    }
+}
+
+impl std::ops::Deref for VerifiedDecisionEvidence {
+    type Target = Receipt;
+
+    fn deref(&self) -> &Self::Target {
+        &self.receipt
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

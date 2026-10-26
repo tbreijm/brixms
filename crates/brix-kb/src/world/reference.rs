@@ -464,6 +464,63 @@ impl Value {
         })
     }
 
+    /// Injective canonical storage encoding matching `state_codec::Value::state_write`.
+    fn state_write(&self, w: &mut CanonWriter) {
+        match self {
+            Value::List(items) => {
+                w.write_uint(8);
+                w.write_uint(items.len() as u64);
+                for item in items {
+                    item.state_write(w);
+                }
+            }
+            Value::Null => w.write_uint(0),
+            Value::Bool(b) => {
+                w.write_uint(1);
+                w.write_bool(*b);
+            }
+            Value::Int(i) => {
+                w.write_uint(2);
+                w.write_int(*i);
+            }
+            Value::Str(s) => {
+                w.write_uint(3);
+                w.write_str(s);
+            }
+            Value::F64(f) => {
+                w.write_uint(4);
+                w.write_uint(f.bits());
+            }
+            Value::Decimal(d) => {
+                w.write_uint(5);
+                w.write_int128(d.unscaled());
+                w.write_uint(u64::from(d.scale()));
+            }
+            Value::Record { nominal, fields } => {
+                w.write_uint(6);
+                w.write_str(nominal);
+                w.write_uint(fields.len() as u64);
+                for (name, value) in fields {
+                    w.write_str(name);
+                    value.state_write(w);
+                }
+            }
+            Value::Variant {
+                nominal,
+                variant,
+                args,
+            } => {
+                w.write_uint(7);
+                w.write_str(nominal);
+                w.write_str(variant);
+                w.write_uint(args.len() as u64);
+                for value in args {
+                    value.state_write(w);
+                }
+            }
+        }
+    }
+
     /// Canonical write, reproduced from `network.rs`'s `canon_write_value` byte-for-byte
     /// (see module docs point 6: the calendar tie-break formula is a shared spec contract).
     fn canon_write(&self, w: &mut CanonWriter) {
@@ -575,10 +632,64 @@ impl std::fmt::Display for Value {
     }
 }
 
-/// A row flowing between operators: a plain field-name -> value map, with no derivation or
-/// provenance tracking of any kind (contrast `network::IntermediateTuple`, which exists only
-/// as a vehicle for `network.rs`'s derivation ids).
+/// A row flowing between operators: a plain field-name -> value map.
 pub type Row = BTreeMap<String, Value>;
+
+/// Source and derivation provenance carried alongside a relational row's semantic values,
+/// kept separate from [`Row`] so relational deduplication (`Distinct`) compares only values.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+pub struct Provenance {
+    pub leaves: Vec<String>,
+}
+
+impl Provenance {
+    pub fn base(key: &WorldKey) -> Self {
+        Self {
+            leaves: vec![key.to_hex()],
+        }
+    }
+
+    pub fn join(&self, right: &Self) -> Self {
+        let mut leaves = Vec::with_capacity(self.leaves.len() + right.leaves.len());
+        leaves.extend_from_slice(&self.leaves);
+        leaves.extend_from_slice(&right.leaves);
+        Self { leaves }
+    }
+
+    pub fn distinct_row(values: &Row) -> Self {
+        let mut w = CanonWriter::new();
+        w.write_uint(values.len() as u64);
+        for (k, v) in values {
+            w.write_str(k);
+            v.state_write(&mut w);
+        }
+        Self {
+            leaves: vec![WorldKey::new(w.finish()).to_hex()],
+        }
+    }
+
+    pub fn group_key(key: &[Value]) -> Self {
+        let mut w = CanonWriter::new();
+        w.write_uint(key.len() as u64);
+        for v in key {
+            v.state_write(&mut w);
+        }
+        Self {
+            leaves: vec![WorldKey::new(w.finish()).to_hex()],
+        }
+    }
+
+    pub fn ordering_key(&self) -> Value {
+        Value::Str(self.leaves.join(":"))
+    }
+}
+
+/// An evaluated relational row pairing semantic values with provenance metadata.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct EvaluatedRow {
+    pub values: Row,
+    pub provenance: Provenance,
+}
 
 fn get_qualified<'a>(row: &'a Row, binding: &str, field: &str) -> Option<&'a Value> {
     row.get(&format!("{binding}.{field}"))
@@ -645,11 +756,13 @@ fn eval_expr(
     Value::from_scalar(compiled.eval(&bindings).map_err(WorldError::NetworkError)?)
 }
 
+type GroupEntry = (Vec<Option<Value>>, Vec<Option<Value>>, EvaluatedRow);
+
 fn build_grouped_row(
     projections: &[(String, GroupProjection)],
     key_vals: &[Value],
-    values: &[Vec<Option<Value>>],
-) -> Result<Row, WorldError> {
+    entries: &[GroupEntry],
+) -> Result<EvaluatedRow, WorldError> {
     let mut row = Row::new();
     for (idx, (name, proj)) in projections.iter().enumerate() {
         match proj {
@@ -658,21 +771,18 @@ fn build_grouped_row(
                 row.insert(name.clone(), v);
             }
             GroupProjection::Count => {
-                row.insert(name.clone(), Value::Int(values.len() as i64));
+                row.insert(name.clone(), Value::Int(entries.len() as i64));
             }
             GroupProjection::SumInt(_) => {
                 let mut sum = 0i128;
-                for value in values.iter().filter_map(|row| row[idx].as_ref()) {
-                    let Value::Int(value) = value else {
-                        return Err(WorldError::NetworkError(
-                            "reference Int sum received non-Int".into(),
-                        ));
-                    };
-                    sum = sum.checked_add(i128::from(*value)).ok_or_else(|| {
-                        WorldError::NetworkError(
-                            "reference grouped Int accumulator overflow".into(),
-                        )
-                    })?;
+                for (agg, _, _) in entries {
+                    if let Some(Value::Int(value)) = &agg[idx] {
+                        sum = sum.checked_add(i128::from(*value)).ok_or_else(|| {
+                            WorldError::NetworkError(
+                                "reference grouped Int accumulator overflow".into(),
+                            )
+                        })?;
+                    }
                 }
                 row.insert(
                     name.clone(),
@@ -684,19 +794,16 @@ fn build_grouped_row(
             GroupProjection::SumDecimal(_) => {
                 let mut sum = ReferenceWideDecimal::default();
                 let mut scale = 0u8;
-                for value in values.iter().filter_map(|row| row[idx].as_ref()) {
-                    let Value::Decimal(value) = value else {
-                        return Err(WorldError::NetworkError(
-                            "reference Decimal sum received non-Decimal".into(),
-                        ));
-                    };
-                    if value.scale() > scale {
-                        sum.mul_pow10(value.scale() - scale);
-                        scale = value.scale();
+                for (agg, _, _) in entries {
+                    if let Some(Value::Decimal(value)) = &agg[idx] {
+                        if value.scale() > scale {
+                            sum.mul_pow10(value.scale() - scale);
+                            scale = value.scale();
+                        }
+                        let mut addend = ReferenceWideDecimal::from_i128(value.unscaled());
+                        addend.mul_pow10(scale - value.scale());
+                        sum.add_assign(&addend);
                     }
-                    let mut addend = ReferenceWideDecimal::from_i128(value.unscaled());
-                    addend.mul_pow10(scale - value.scale());
-                    sum.add_assign(&addend);
                 }
                 row.insert(
                     name.clone(),
@@ -707,15 +814,52 @@ fn build_grouped_row(
             }
             GroupProjection::Min(_) | GroupProjection::Max(_) => {
                 let selected = if matches!(proj, GroupProjection::Min(_)) {
-                    values.iter().filter_map(|row| row[idx].as_ref()).min()
+                    entries
+                        .iter()
+                        .filter_map(|(agg, _, _)| agg[idx].as_ref())
+                        .min()
                 } else {
-                    values.iter().filter_map(|row| row[idx].as_ref()).max()
+                    entries
+                        .iter()
+                        .filter_map(|(agg, _, _)| agg[idx].as_ref())
+                        .max()
                 };
                 row.insert(name.clone(), selected.cloned().unwrap_or(Value::Null));
             }
+            GroupProjection::Collect { limit, .. } => {
+                if entries.len() > *limit {
+                    return Err(WorldError::NetworkError(format!(
+                        "grouped collect exceeded maximum cardinality limit of {limit}"
+                    )));
+                }
+                let mut items_with_order: Vec<(Value, Value, Value)> =
+                    Vec::with_capacity(entries.len());
+                for (agg, orders, child_row) in entries {
+                    let item_val = agg[idx].clone().unwrap_or(Value::Null);
+                    let order_val = orders
+                        .get(idx)
+                        .and_then(|v| v.clone())
+                        .unwrap_or_else(|| item_val.clone());
+                    let child_key = child_row.provenance.ordering_key();
+                    items_with_order.push((order_val, child_key, item_val));
+                }
+                items_with_order.sort_by(|a, b| {
+                    a.0.partial_cmp(&b.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                });
+                let collected_list: Vec<Value> = items_with_order
+                    .into_iter()
+                    .map(|(_, _, item)| item)
+                    .collect();
+                row.insert(name.clone(), Value::List(collected_list));
+            }
         }
     }
-    Ok(row)
+    Ok(EvaluatedRow {
+        values: row,
+        provenance: Provenance::group_key(key_vals),
+    })
 }
 
 #[derive(Default)]
@@ -960,6 +1104,7 @@ pub enum CompiledOperator {
     GroupedCount {
         compiled_group_keys: Vec<CompiledWorldExpr>,
         compiled_aggregates: Vec<Option<CompiledWorldExpr>>,
+        compiled_collect_orders: Vec<Option<CompiledWorldExpr>>,
     },
 }
 
@@ -1071,7 +1216,8 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                             GroupProjection::SumInt(expr)
                             | GroupProjection::SumDecimal(expr)
                             | GroupProjection::Min(expr)
-                            | GroupProjection::Max(expr) => Some(expr),
+                            | GroupProjection::Max(expr)
+                            | GroupProjection::Collect { expr, .. } => Some(expr),
                             GroupProjection::Key(_) | GroupProjection::Count => None,
                         };
                         expr.map(|e| program_env.compile_expr(e, &bindings))
@@ -1079,9 +1225,27 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                             .map_err(WorldError::NetworkError)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                let compiled_collect_orders = projections
+                    .iter()
+                    .map(|(_, projection)| {
+                        if let GroupProjection::Collect {
+                            order_by: Some(order_expr),
+                            ..
+                        } = projection
+                        {
+                            program_env
+                                .compile_expr(order_expr, &bindings)
+                                .map(Some)
+                                .map_err(WorldError::NetworkError)
+                        } else {
+                            Ok(None)
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 compiled_operators.push(CompiledOperator::GroupedCount {
                     compiled_group_keys,
                     compiled_aggregates,
+                    compiled_collect_orders,
                 });
             }
         }
@@ -1287,7 +1451,7 @@ fn evaluate_once_with_budget(
     work_offset: u64,
 ) -> Result<ReferenceState, WorldError> {
     let dag = &program.dag;
-    let mut operator_outputs: Vec<Vec<Row>> = Vec::with_capacity(dag.nodes.len());
+    let mut operator_outputs: Vec<Vec<EvaluatedRow>> = Vec::with_capacity(dag.nodes.len());
 
     for (idx, node) in dag.nodes.iter().enumerate() {
         let rows = match node {
@@ -1340,7 +1504,10 @@ fn evaluate_once_with_budget(
                                 })?,
                         );
                     }
-                    rows.push(row);
+                    rows.push(EvaluatedRow {
+                        values: row,
+                        provenance: Provenance::base(key),
+                    });
                 }
                 rows
             }
@@ -1350,11 +1517,14 @@ fn evaluate_once_with_budget(
                     meter.rows_evaluated += 1;
                     charge_work(meter, work_offset, max_work)?;
                     let mut bound = Row::new();
-                    for (k, v) in row {
+                    for (k, v) in &row.values {
                         bound.insert(format!("{alias}.{k}"), v.clone());
                         bound.insert(k.clone(), v.clone());
                     }
-                    bound_rows.push(bound);
+                    bound_rows.push(EvaluatedRow {
+                        values: bound,
+                        provenance: row.provenance.clone(),
+                    });
                 }
                 bound_rows
             }
@@ -1367,7 +1537,7 @@ fn evaluate_once_with_budget(
                 for row in &operator_outputs[input.0] {
                     meter.rows_evaluated += 1;
                     charge_work(meter, work_offset, max_work)?;
-                    let bindings = scalar_bindings(row)?;
+                    let bindings = scalar_bindings(&row.values)?;
                     let l3_val = eval_compiled_with_budget(
                         compiled_pred,
                         &bindings,
@@ -1399,7 +1569,7 @@ fn evaluate_once_with_budget(
                 let mut out = Vec::with_capacity(operator_outputs[input.0].len());
                 for row in &operator_outputs[input.0] {
                     meter.rows_evaluated += 1;
-                    let bindings = scalar_bindings(row)?;
+                    let bindings = scalar_bindings(&row.values)?;
                     let mut projected = Row::new();
                     for (name, compiled) in compiled_projs {
                         let l3_val = eval_compiled_with_budget(
@@ -1411,7 +1581,10 @@ fn evaluate_once_with_budget(
                         )?;
                         projected.insert(name.clone(), Value::from_scalar(l3_val)?);
                     }
-                    out.push(projected);
+                    out.push(EvaluatedRow {
+                        values: projected,
+                        provenance: row.provenance.clone(),
+                    });
                 }
                 out
             }
@@ -1424,12 +1597,12 @@ fn evaluate_once_with_budget(
                 let left_rows = &operator_outputs[left.0];
                 let right_rows = &operator_outputs[right.0];
 
-                let mut right_index: BTreeMap<Vec<Value>, Vec<&Row>> = BTreeMap::new();
+                let mut right_index: BTreeMap<Vec<Value>, Vec<&EvaluatedRow>> = BTreeMap::new();
                 for r in right_rows {
                     let rkey: Vec<Value> = right_keys
                         .iter()
                         .map(|k| {
-                            get_qualified(r, &k.binding, &k.field)
+                            get_qualified(&r.values, &k.binding, &k.field)
                                 .cloned()
                                 .ok_or_else(|| {
                                     WorldError::NetworkError(format!(
@@ -1447,7 +1620,7 @@ fn evaluate_once_with_budget(
                     let lkey: Vec<Value> = left_keys
                         .iter()
                         .map(|k| {
-                            get_qualified(l, &k.binding, &k.field)
+                            get_qualified(&l.values, &k.binding, &k.field)
                                 .cloned()
                                 .ok_or_else(|| {
                                     WorldError::NetworkError(format!(
@@ -1461,7 +1634,10 @@ fn evaluate_once_with_budget(
                         for r in matches {
                             meter.join_pairs_evaluated += 1;
                             charge_work(meter, work_offset, max_work)?;
-                            out.push(merge_rows(l, r));
+                            out.push(EvaluatedRow {
+                                values: merge_rows(&l.values, &r.values),
+                                provenance: l.provenance.join(&r.provenance),
+                            });
                         }
                     }
                 }
@@ -1478,7 +1654,7 @@ fn evaluate_once_with_budget(
                     let key = right_keys
                         .iter()
                         .map(|k| {
-                            get_qualified(row, &k.binding, &k.field)
+                            get_qualified(&row.values, &k.binding, &k.field)
                                 .cloned()
                                 .ok_or_else(|| {
                                     WorldError::NetworkError(format!(
@@ -1496,7 +1672,7 @@ fn evaluate_once_with_budget(
                         let key = left_keys
                             .iter()
                             .map(|k| {
-                                get_qualified(row, &k.binding, &k.field)
+                                get_qualified(&row.values, &k.binding, &k.field)
                                     .cloned()
                                     .ok_or_else(|| {
                                         WorldError::NetworkError(format!(
@@ -1530,7 +1706,7 @@ fn evaluate_once_with_budget(
                     let key: Vec<_> = key_fields
                         .iter()
                         .map(|name| {
-                            row.get(name).cloned().ok_or_else(|| {
+                            row.values.get(name).cloned().ok_or_else(|| {
                                 WorldError::NetworkError(format!("missing union key field {name}"))
                             })
                         })
@@ -1540,7 +1716,10 @@ fn evaluate_once_with_budget(
                             "duplicate key in disjoint union: {key:?}"
                         )));
                     }
-                    out.push(row.clone());
+                    out.push(EvaluatedRow {
+                        values: row.values.clone(),
+                        provenance: Provenance::group_key(&key),
+                    });
                 }
                 out
             }
@@ -1556,7 +1735,7 @@ fn evaluate_once_with_budget(
                 let right_rows = &operator_outputs[right.0];
                 let mut out = Vec::with_capacity(left_rows.len());
                 for parent in left_rows {
-                    let key = get_qualified(parent, &left_key.binding, &left_key.field)
+                    let key = get_qualified(&parent.values, &left_key.binding, &left_key.field)
                         .cloned()
                         .ok_or_else(|| {
                             WorldError::NetworkError(format!(
@@ -1568,7 +1747,8 @@ fn evaluate_once_with_budget(
                     for child in right_rows {
                         meter.rows_evaluated += 1;
                         charge_work(meter, work_offset, max_work)?;
-                        if get_qualified(child, &right_key.binding, &right_key.field) == Some(&key)
+                        if get_qualified(&child.values, &right_key.binding, &right_key.field)
+                            == Some(&key)
                         {
                             count = count.checked_add(1).ok_or_else(|| {
                                 WorldError::NetworkError("count_or_zero overflow".into())
@@ -1578,7 +1758,10 @@ fn evaluate_once_with_budget(
                     let mut row = Row::new();
                     row.insert(output_key.clone(), key);
                     row.insert(output_count.clone(), Value::Int(count));
-                    out.push(row);
+                    out.push(EvaluatedRow {
+                        values: row,
+                        provenance: parent.provenance.clone(),
+                    });
                 }
                 out
             }
@@ -1587,27 +1770,38 @@ fn evaluate_once_with_budget(
                 for row in &operator_outputs[input.0] {
                     meter.rows_evaluated += 1;
                     charge_work(meter, work_offset, max_work)?;
-                    set.insert(row.clone());
+                    set.insert(row.values.clone());
                 }
-                set.into_iter().collect()
+                set.into_iter()
+                    .map(|values| {
+                        let provenance = Provenance::distinct_row(&values);
+                        EvaluatedRow { values, provenance }
+                    })
+                    .collect()
             }
             OperatorNode::GroupedCount {
                 input,
                 group_keys: _,
                 projections,
             } => {
-                let (compiled_keys, compiled_aggregates) = match &program.compiled_operators[idx] {
-                    CompiledOperator::GroupedCount {
-                        compiled_group_keys,
-                        compiled_aggregates,
-                    } => (compiled_group_keys, compiled_aggregates),
-                    _ => unreachable!(),
-                };
-                let mut groups: BTreeMap<Vec<Value>, Vec<Vec<Option<Value>>>> = BTreeMap::new();
+                let (compiled_keys, compiled_aggregates, compiled_collect_orders) =
+                    match &program.compiled_operators[idx] {
+                        CompiledOperator::GroupedCount {
+                            compiled_group_keys,
+                            compiled_aggregates,
+                            compiled_collect_orders,
+                        } => (
+                            compiled_group_keys,
+                            compiled_aggregates,
+                            compiled_collect_orders,
+                        ),
+                        _ => unreachable!(),
+                    };
+                let mut groups: BTreeMap<Vec<Value>, Vec<GroupEntry>> = BTreeMap::new();
                 for row in &operator_outputs[input.0] {
                     meter.rows_evaluated += 1;
                     charge_work(meter, work_offset, max_work)?;
-                    let bindings = scalar_bindings(row)?;
+                    let bindings = scalar_bindings(&row.values)?;
                     let mut key = Vec::with_capacity(compiled_keys.len());
                     for compiled in compiled_keys {
                         let l3_val = eval_compiled_with_budget(
@@ -1635,11 +1829,30 @@ fn evaluate_once_with_budget(
                         };
                         aggregates.push(value);
                     }
-                    groups.entry(key).or_default().push(aggregates);
+                    let mut orders = Vec::with_capacity(compiled_collect_orders.len());
+                    for compiled in compiled_collect_orders {
+                        let value = if let Some(compiled) = compiled {
+                            let l3_val = eval_compiled_with_budget(
+                                compiled,
+                                &bindings,
+                                meter,
+                                work_offset,
+                                max_work,
+                            )?;
+                            Some(Value::from_scalar(l3_val)?)
+                        } else {
+                            None
+                        };
+                        orders.push(value);
+                    }
+                    groups
+                        .entry(key)
+                        .or_default()
+                        .push((aggregates, orders, row.clone()));
                 }
                 groups
                     .into_iter()
-                    .map(|(key, values)| build_grouped_row(projections, &key, &values))
+                    .map(|(key, entries)| build_grouped_row(projections, &key, &entries))
                     .collect::<Result<Vec<_>, _>>()?
             }
         };
@@ -1653,7 +1866,7 @@ fn evaluate_once_with_budget(
         }
         let set: BTreeSet<TupleRecord> = operator_outputs[op_id.0]
             .iter()
-            .map(row_to_tuple_record)
+            .map(|r| row_to_tuple_record(&r.values))
             .collect();
         derived_relations.insert(name.clone(), set);
     }
@@ -1679,8 +1892,8 @@ fn evaluate_once_with_budget(
         let mut entities: BTreeMap<String, BTreeMap<String, ReferenceCandidate>> = BTreeMap::new();
 
         for row in source_rows {
-            let mut eval_row = row.clone();
-            for (k, v) in row {
+            let mut eval_row = row.values.clone();
+            for (k, v) in &row.values {
                 eval_row.insert(format!("{}.{k}", decide.binder), v.clone());
             }
 

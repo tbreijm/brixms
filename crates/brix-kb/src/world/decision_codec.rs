@@ -2,7 +2,7 @@
 use super::error::WorldError;
 pub(super) const STRUCTURED_PREFIX: &[u8] = b"\0brix.world.value@1\0";
 use super::types::{WorldKey, WorldTuple};
-use brix_canon::{CanonReader, CanonWriter, Canonical, Digest};
+use brix_canon::{CanonReader, CanonWriter, Canonical, Digest, Domain};
 use brix_syntax::ast;
 use soc_core::calendar::Key;
 use soc_core::store::TrieMap;
@@ -116,6 +116,25 @@ impl Value {
         }
     }
 
+    /// JSON representation for typed world query projection.
+    ///
+    /// Scalars (Int, Bool, Str, F64) map to primitive JSON numbers, booleans, and strings.
+    /// Decimals, records, sums, and lists use the established tagged JSON representation.
+    pub fn to_query_json(&self) -> serde_json::Value {
+        match self {
+            Self::Null => serde_json::Value::Null,
+            Self::Bool(b) => serde_json::Value::Bool(*b),
+            Self::Int(n) => serde_json::Value::Number((*n).into()),
+            Self::Str(s) => serde_json::Value::String(s.clone()),
+            Self::F64(f) => serde_json::Number::from_f64(f64::from_bits(f.bits()))
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            Self::Decimal(_) | Self::Record { .. } | Self::Variant { .. } | Self::List(_) => {
+                self.to_tagged_json()
+            }
+        }
+    }
+
     fn to_tagged_json(&self) -> serde_json::Value {
         use serde_json::json;
         match self {
@@ -138,6 +157,24 @@ impl Value {
                 "variant":variant,"args":args.iter().map(Self::to_tagged_json).collect::<Vec<_>>()}),
         }
     }
+    pub fn to_canon_bytes(&self) -> Vec<u8> {
+        let mut w = CanonWriter::new();
+        canon_write_value(self, &mut w);
+        w.finish()
+    }
+
+    pub fn from_canon_bytes(bytes: &[u8]) -> Result<Self, WorldError> {
+        let mut r = CanonReader::new(bytes);
+        canon_read_value(&mut r)
+    }
+
+    pub fn compute_digest(&self) -> Digest {
+        let mut w = CanonWriter::new();
+        w.write_tag("brix.world.value@1");
+        canon_write_value(self, &mut w);
+        w.digest(Domain::Value)
+    }
+
     pub fn from_typed_bytes(bytes: &[u8], ty: &ast::Ty) -> Result<Self, WorldError> {
         Self::from_typed_bytes_with_schemas(bytes, ty, &BTreeMap::new())
     }

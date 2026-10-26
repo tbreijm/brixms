@@ -46,6 +46,11 @@ pub enum GroupProjection {
     SumDecimal(Expr),
     Min(Expr),
     Max(Expr),
+    Collect {
+        expr: Expr,
+        order_by: Option<Expr>,
+        limit: usize,
+    },
 }
 
 /// An operator node in the relational DAG.
@@ -121,6 +126,8 @@ pub struct RelationDag {
     pub nodes: Vec<OperatorNode>,
     /// Maps each relation name to the OperatorId that produces its tuples.
     pub relation_outputs: BTreeMap<String, OperatorId>,
+    /// Maps each relation name to its output field schemas.
+    pub relation_schemas: BTreeMap<String, BTreeMap<String, ast::Ty>>,
 }
 
 impl RelationDag {
@@ -128,6 +135,7 @@ impl RelationDag {
         Self {
             nodes: Vec::new(),
             relation_outputs: BTreeMap::new(),
+            relation_schemas: BTreeMap::new(),
         }
     }
 
@@ -450,6 +458,10 @@ pub fn lower_relations(program: &LinkedProgram) -> Result<RelationDag, Relationa
     // out of scope here — this is the same resolution rule `network.rs` and
     // `reference.rs` use to decide which `decide` blocks they instantiate.
     let schemas = decision_field_schemas(&dag, program);
+    for (rel_name, op) in &dag.relation_outputs {
+        dag.relation_schemas
+            .insert(rel_name.clone(), schemas[op.0].clone());
+    }
     for (qname, decl) in &program.decides {
         if let Some(source) =
             resolve_decide_source_relation(&decl.list, &qname.module, &dag.relation_outputs)
@@ -605,6 +617,12 @@ pub fn decision_field_schemas(
                     GroupProjection::Key(i) => {
                         crate::world_type::infer(&group_keys[*i], &schemas[input.0], "", program)
                             .map(|t| (k.clone(), t))
+                    }
+                    GroupProjection::Collect { expr, .. } => {
+                        let elem_ty =
+                            crate::world_type::infer(expr, &schemas[input.0], "", program)
+                                .unwrap_or_else(|| ast::Ty::Named("Str".into()));
+                        Some((k.clone(), ast::Ty::App("List".into(), vec![elem_ty])))
                     }
                 })
                 .collect(),
@@ -1217,6 +1235,78 @@ fn lower_derived_query(
                     validate_extremum_type(&args[0], dag, current_op, program)?;
                     GroupProjection::Max(args[0].clone())
                 }
+                Expr::Call { func, args } if func == "collect" => {
+                    if args.is_empty() || args.len() > 3 {
+                        return Err(RelationalLowerError::UnsupportedExpression(
+                            "collect() takes 1 to 3 arguments: collect(expr, [order_by], [limit])"
+                                .into(),
+                        ));
+                    }
+                    let expr = args[0].clone();
+                    let (order_by, limit) = if args.len() == 1 {
+                        (None, 64)
+                    } else if args.len() == 2 {
+                        if let Expr::Num(s) = &args[1] {
+                            let n = s.parse::<usize>().map_err(|_| {
+                                RelationalLowerError::UnsupportedExpression(
+                                    "collect() limit must be a positive integer literal".into(),
+                                )
+                            })?;
+                            if n == 0 {
+                                return Err(RelationalLowerError::UnsupportedExpression(
+                                    "collect() limit must be positive".into(),
+                                ));
+                            }
+                            (None, n)
+                        } else {
+                            (Some(args[1].clone()), 64)
+                        }
+                    } else {
+                        let limit = match &args[2] {
+                            Expr::Num(s) => {
+                                let n = s.parse::<usize>().map_err(|_| {
+                                    RelationalLowerError::UnsupportedExpression(
+                                        "collect() limit must be a positive integer literal".into(),
+                                    )
+                                })?;
+                                if n == 0 {
+                                    return Err(RelationalLowerError::UnsupportedExpression(
+                                        "collect() limit must be positive".into(),
+                                    ));
+                                }
+                                n
+                            }
+                            _ => {
+                                return Err(RelationalLowerError::UnsupportedExpression(
+                                    "collect() limit must be a positive integer literal".into(),
+                                ))
+                            }
+                        };
+                        (Some(args[1].clone()), limit)
+                    };
+
+                    let elem_ty = expr_ty_for_aggregate(
+                        &expr,
+                        &decision_field_schemas(dag, program)[current_op.0],
+                        program,
+                    );
+                    match elem_ty.as_ref() {
+                        Some(ast::Ty::Named(n))
+                            if matches!(n.as_str(), "Str" | "Int" | "Decimal" | "Bool") => {}
+                        Some(ast::Ty::Named(_)) => {}
+                        Some(ast::Ty::App(nominal, _)) if nominal != "List" => {}
+                        _ => {
+                            return Err(RelationalLowerError::UnsupportedExpression(format!(
+                                "collect() element type must be Str, Int, Decimal, Bool or Nominal; got {elem_ty:?}"
+                            )));
+                        }
+                    }
+                    GroupProjection::Collect {
+                        expr,
+                        order_by,
+                        limit,
+                    }
+                }
                 _ => match query.group_by.iter().position(|key| key == &expression) {
                     Some(index) => GroupProjection::Key(index),
                     None => {
@@ -1326,6 +1416,7 @@ fn qualify_query_expr(
         }
         Expr::Num(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Var(_) => {}
         Expr::Validate { arg, .. } => qualify_query_expr(arg, owner, program)?,
+        Expr::Ascribe { expr, .. } => qualify_query_expr(expr, owner, program)?,
     }
     Ok(())
 }
@@ -1494,7 +1585,11 @@ fn match_equijoin_predicate(
 
 fn expr_contains_aggregate(expr: &Expr) -> bool {
     match expr {
-        Expr::Call { func, .. } if ["count", "sum", "min", "max"].contains(&func.as_str()) => true,
+        Expr::Call { func, .. }
+            if ["count", "sum", "min", "max", "collect"].contains(&func.as_str()) =>
+        {
+            true
+        }
         Expr::AnonRecord(fields) => fields.iter().any(|(_, e)| expr_contains_aggregate(e)),
         Expr::Field(base, _) => expr_contains_aggregate(base),
         Expr::Bin { lhs, rhs, .. } => expr_contains_aggregate(lhs) || expr_contains_aggregate(rhs),

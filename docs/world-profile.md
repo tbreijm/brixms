@@ -210,3 +210,42 @@ absence/zero-count queries are refused rather than approximated.
 
 The complete [Atlas example](../examples/world-atlas/README.md) demonstrates
 these operators together across separate CLI processes.
+
+### Using a world certificate in a finite decision
+
+A portable world certificate proves a settlement at a named revision. It does
+not prove that the input observations were true. To consume it in a finite
+`validate<RuntimeOutcome>` call, pass an evidence environment alongside the
+ordinary `brix.input@5` input:
+
+```json
+{"schema":"brix.evidence.env@1","runtime":["<full decision-evidence JSON object>"]}
+```
+
+Replace the placeholder with the complete JSON object returned by `brix world
+evidence`. Independently configure `BRIX_EXPECT_RUNTIME_CLAIMS` with the expected
+`DecisionTarget::id().to_hex()` (comma-separated for multiple targets). A trusted
+`world evidence --json` issuance also returns this as `target_id`. The ID
+commits the world, program, revision and digest, decision, entity, candidate,
+value digest, caller, release and grants. Obtain this expectation from the
+consumer's chosen context, not from an untrusted certificate's assertion.
+The input file cannot supply its own trusted pin.
+
+`run`, `why`, `audit`, and `verify` use the shared input loader. Each invocation
+checks the target pin and performs complete bounded world replay before
+installing runtime authority. Supply the same environment and independent pins
+when verifying the finite audit bundle in a fresh process; a missing bundle or
+changed target is refused. The environment identity is included in `ContextId`.
+
+For documentary authority, use the environment's `documentary.entries` and
+configure `BRIX_EXPECT_EVIDENCE_DIGEST` independently with the documentary
+snapshot's canonical digest. An embedded `documentary.expected_digest` is only
+a consistency check. It cannot establish trust.
+
+Rust embedders should call `verify_decision_evidence`, then the resulting opaque
+`brix_kb::world::decision_evidence::VerifiedDecisionEvidence::admit_into` on their
+finite evidence registry. Construction of that handle is private to the complete
+verifier. The lower evaluator's `TrustedRuntimeEvidenceProvider` interface is an
+explicit host trust boundary: an embedding that implements its own provider is
+responsible for its authority checks. Untrusted Brix inputs cannot implement a
+provider. The retired lower-level prototype constructors always fail closed.

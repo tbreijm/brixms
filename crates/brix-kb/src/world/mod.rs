@@ -10,6 +10,7 @@ pub mod chunk_policy;
 pub mod codec;
 pub mod compact_deriv;
 pub mod decision_codec;
+pub mod decision_evidence;
 pub mod error;
 pub mod gc;
 pub mod idempotency;

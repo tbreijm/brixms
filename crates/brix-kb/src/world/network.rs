@@ -14,7 +14,7 @@
 
 #![deny(unsafe_code)]
 
-use super::compact_deriv::{leaf_counts, CompactDeriv, DRoot, Derivation};
+use super::compact_deriv::{leaf_counts, CompactDeriv, DRoot, Derivation, Leaf};
 use super::network_state::{NetworkStateHeader, OperatorRoots, ValidityKey};
 use super::persistent::{PMap, PSet};
 use super::state_codec::{
@@ -105,6 +105,25 @@ impl IntermediateTuple {
 /// [`StateCodec::state_from_bytes`].
 pub fn distinct_key(tuple: &IntermediateTuple) -> Vec<u8> {
     tuple.state_bytes()
+}
+
+fn derivation_provenance_key(leaves: &[Leaf]) -> Value {
+    let mut parts = Vec::with_capacity(leaves.len());
+    for leaf in leaves {
+        match leaf {
+            Leaf::Base(k) => parts.push(k.to_hex()),
+            Leaf::Distinct(k) => parts.push(WorldKey::new(k.clone()).to_hex()),
+            Leaf::Group(vs) => {
+                let mut w = CanonWriter::new();
+                w.write_uint(vs.len() as u64);
+                for v in vs {
+                    v.state_write(&mut w);
+                }
+                parts.push(WorldKey::new(w.finish()).to_hex());
+            }
+        }
+    }
+    Value::Str(parts.join(":"))
 }
 
 /// A derivation identifier uniquely tracking justifications for TMS truth maintenance.
@@ -1427,6 +1446,7 @@ pub struct GroupAccumulator {
     pub decimal_sums: Vec<WideSigned>,
     pub decimal_scales: Vec<u8>,
     pub extrema_roots: Vec<Option<Value>>,
+    pub collected: Vec<Vec<(Value, Value, Digest, Value)>>,
 }
 
 impl GroupAccumulator {
@@ -1437,14 +1457,19 @@ impl GroupAccumulator {
             decimal_sums: vec![WideSigned::default(); n],
             decimal_scales: vec![0; n],
             extrema_roots: vec![None; n],
+            collected: vec![Vec::new(); n],
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_delta(
         &mut self,
         is_ins: bool,
         projections: &[(String, GroupProjection)],
         aggregate_values: &[Option<Value>],
+        order_values: &[Option<Value>],
+        child_key: Value,
+        child_id: Digest,
         group: &ValueList,
         index: &mut AggregateIndex,
         store: &StateStore,
@@ -1452,6 +1477,32 @@ impl GroupAccumulator {
         let mut tree_work = 0u64;
         for (idx, ((_, projection), value)) in projections.iter().zip(aggregate_values).enumerate()
         {
+            if let GroupProjection::Collect { limit, .. } = projection {
+                if is_ins {
+                    let item_val = value.clone().unwrap_or(Value::Null);
+                    let order_val = order_values
+                        .get(idx)
+                        .and_then(|v| v.clone())
+                        .unwrap_or_else(|| item_val.clone());
+                    let key_val = child_key.clone();
+                    self.collected[idx].retain(|(_, _, id, _)| id != &child_id);
+                    if self.collected[idx].len() >= *limit {
+                        return Err(WorldError::NetworkError(format!(
+                            "grouped collect exceeded maximum cardinality limit of {limit}"
+                        )));
+                    }
+                    self.collected[idx].push((order_val, key_val, child_id, item_val));
+                    self.collected[idx].sort_by(|a, b| {
+                        a.0.partial_cmp(&b.0)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| a.1.cmp(&b.1))
+                            .then_with(|| a.2.cmp(&b.2))
+                    });
+                } else {
+                    self.collected[idx].retain(|(_, _, id, _)| id != &child_id);
+                }
+                continue;
+            }
             let Some(value) = value else { continue };
             match projection {
                 GroupProjection::SumInt(_) => {
@@ -1509,7 +1560,9 @@ impl GroupAccumulator {
                         )?
                     };
                 }
-                GroupProjection::Key(_) | GroupProjection::Count => {}
+                GroupProjection::Key(_)
+                | GroupProjection::Count
+                | GroupProjection::Collect { .. } => {}
             }
         }
         Ok(tree_work)
@@ -1536,6 +1589,21 @@ impl GroupAccumulator {
                 }
                 GroupProjection::Min(_) | GroupProjection::Max(_) => {
                     values.push(encode_extremum_root(self.extrema_roots[idx].as_ref()))
+                }
+                GroupProjection::Collect { .. } => {
+                    let items = self.collected[idx]
+                        .iter()
+                        .map(|(order, key_val, id, item)| Value::Record {
+                            nominal: "world::CollectedItem".into(),
+                            fields: BTreeMap::from([
+                                ("order".into(), order.clone()),
+                                ("key".into(), key_val.clone()),
+                                ("id".into(), Value::Str(id.to_hex())),
+                                ("item".into(), item.clone()),
+                            ]),
+                        })
+                        .collect();
+                    values.push(Value::List(items));
                 }
             }
         }
@@ -1597,6 +1665,49 @@ impl GroupAccumulator {
                 }
                 GroupProjection::Min(_) | GroupProjection::Max(_) => {
                     accum.extrema_roots[idx] = decode_extremum_root(val)?;
+                }
+                GroupProjection::Collect { .. } => {
+                    let Value::List(items) = val else {
+                        return Err(WorldError::NetworkError(
+                            "expected List for collected accumulator".into(),
+                        ));
+                    };
+                    let mut entries = Vec::with_capacity(items.len());
+                    for item in items {
+                        let Value::Record { fields, .. } = item else {
+                            return Err(WorldError::NetworkError(
+                                "expected Record for collected item".into(),
+                            ));
+                        };
+                        let order = fields.get("order").cloned().unwrap_or(Value::Null);
+                        let key_val = fields
+                            .get("key")
+                            .cloned()
+                            .or_else(|| fields.get("tuple").cloned())
+                            .unwrap_or(Value::Null);
+                        let id_str = match fields.get("id") {
+                            Some(Value::Str(s)) => s,
+                            _ => {
+                                return Err(WorldError::NetworkError(
+                                    "expected string id for collected item".into(),
+                                ))
+                            }
+                        };
+                        let key = WorldKey::from_hex(id_str).map_err(|e| {
+                            WorldError::NetworkError(format!("malformed collected item id: {e}"))
+                        })?;
+                        if key.0.len() != 32 {
+                            return Err(WorldError::NetworkError(
+                                "collected item id must be 32 bytes".into(),
+                            ));
+                        }
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&key.0);
+                        let id = Digest::from_bytes(arr);
+                        let item = fields.get("item").cloned().unwrap_or(Value::Null);
+                        entries.push((order, key_val, id, item));
+                    }
+                    accum.collected[idx] = entries;
                 }
             }
         }
@@ -2106,6 +2217,7 @@ pub enum OperatorState {
         compiled_group_keys: Vec<CompiledWorldExpr>,
         projections: Vec<(String, GroupProjection)>,
         compiled_aggregates: Vec<Option<CompiledWorldExpr>>,
+        compiled_collect_orders: Vec<Option<CompiledWorldExpr>>,
         groups: GroupSupports,
         aggregates: AggregateIndex,
     },
@@ -2404,6 +2516,7 @@ impl WorldNetwork {
                             compiled_group_keys: Vec::new(),
                             projections: projections.clone(),
                             compiled_aggregates: vec![None; projections.len()],
+                            compiled_collect_orders: vec![None; projections.len()],
                             groups: GroupSupports::default(),
                             aggregates: AggregateIndex::default(),
                         },
@@ -2644,6 +2757,7 @@ impl WorldNetwork {
                     compiled_group_keys,
                     projections,
                     compiled_aggregates,
+                    compiled_collect_orders,
                     groups,
                     aggregates,
                 } => {
@@ -2655,6 +2769,7 @@ impl WorldNetwork {
                             compiled_group_keys: compiled_group_keys.clone(),
                             projections: projections.clone(),
                             compiled_aggregates: compiled_aggregates.clone(),
+                            compiled_collect_orders: compiled_collect_orders.clone(),
                             groups: groups.dehydrated(&self.state)?,
                             aggregates: aggregates.dehydrated(&self.state)?,
                         },
@@ -3153,6 +3268,7 @@ impl WorldNetwork {
                     compiled_group_keys,
                     projections,
                     compiled_aggregates,
+                    compiled_collect_orders,
                     ..
                 } => OperatorState::GroupedCount {
                     input: *input,
@@ -3160,6 +3276,7 @@ impl WorldNetwork {
                     compiled_group_keys: compiled_group_keys.clone(),
                     projections: projections.clone(),
                     compiled_aggregates: compiled_aggregates.clone(),
+                    compiled_collect_orders: compiled_collect_orders.clone(),
                     groups: GroupSupports::default(),
                     aggregates: AggregateIndex::default(),
                 },
@@ -3259,7 +3376,8 @@ impl WorldNetwork {
                                 GroupProjection::SumInt(expr)
                                 | GroupProjection::SumDecimal(expr)
                                 | GroupProjection::Min(expr)
-                                | GroupProjection::Max(expr) => expr,
+                                | GroupProjection::Max(expr)
+                                | GroupProjection::Collect { expr, .. } => expr,
                                 GroupProjection::Key(_) | GroupProjection::Count => {
                                     return Ok(None);
                                 }
@@ -3270,14 +3388,33 @@ impl WorldNetwork {
                                 .map_err(WorldError::NetworkError)
                         })
                         .collect::<Result<Vec<_>, _>>()?;
+                    let compiled_collect_orders = projections
+                        .iter()
+                        .map(|(_, projection)| {
+                            if let GroupProjection::Collect {
+                                order_by: Some(order_expr),
+                                ..
+                            } = projection
+                            {
+                                program_env
+                                    .compile_expr(order_expr, &bindings)
+                                    .map(Some)
+                                    .map_err(WorldError::NetworkError)
+                            } else {
+                                Ok(None)
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     if let Some(OperatorState::GroupedCount {
                         compiled_group_keys: ref mut cgk,
                         compiled_aggregates: ref mut ca,
+                        compiled_collect_orders: ref mut cco,
                         ..
                     }) = network.operator_states.get_mut(&idx)
                     {
                         *cgk = compiled_group_keys;
                         *ca = compiled_aggregates;
+                        *cco = compiled_collect_orders;
                     }
                 }
                 _ => {}
@@ -4389,6 +4526,7 @@ impl WorldNetwork {
                         compiled_group_keys,
                         projections,
                         compiled_aggregates,
+                        compiled_collect_orders,
                         groups,
                         aggregates,
                         ..
@@ -4459,6 +4597,28 @@ impl WorldNetwork {
                                 }
                             }
 
+                            let mut order_values =
+                                Vec::with_capacity(compiled_collect_orders.len());
+                            for compiled in compiled_collect_orders {
+                                if let Some(compiled) = compiled {
+                                    diagnostics.expressions_evaluated += 1;
+                                    total_expressions += 1;
+                                    if limits
+                                        .max_expressions
+                                        .is_some_and(|max| total_expressions > max)
+                                    {
+                                        return Err(WorldError::BudgetExhausted);
+                                    }
+                                    order_values.push(Some(Value::from_scalar(
+                                        compiled
+                                            .eval(&bindings)
+                                            .map_err(WorldError::NetworkError)?,
+                                    )?));
+                                } else {
+                                    order_values.push(None);
+                                }
+                            }
+
                             let store = &self.state;
                             let gk = ValueList(key_vals.clone());
 
@@ -4522,10 +4682,14 @@ impl WorldNetwork {
                             };
 
                             if new_count != old_count {
+                                let child_key = derivation_provenance_key(&deriv.c.leaves);
                                 let tree_work = accum.apply_delta(
                                     is_ins,
                                     projections,
                                     &aggregate_values,
+                                    &order_values,
+                                    child_key,
+                                    deriv.c.digest(),
                                     &gk,
                                     aggregates,
                                     store,
@@ -5725,6 +5889,13 @@ fn build_grouped_tuple(
                     tree_work,
                 )?;
                 tuple.insert(name, value.unwrap_or(Value::Null));
+            }
+            GroupProjection::Collect { .. } => {
+                let items: Vec<Value> = state.collected[idx]
+                    .iter()
+                    .map(|(_, _, _, item)| item.clone())
+                    .collect();
+                tuple.insert(name, Value::List(items));
             }
         }
     }

@@ -360,6 +360,13 @@ fn render(e: &L3ExprV2) -> String {
         }
         L3ExprV2::Len(list) => format!("len({})", render(list)),
         L3ExprV2::Distinct(list) => format!("distinct({})", render(list)),
+        L3ExprV2::Only(list) => format!("only({})", render(list)),
+        L3ExprV2::Ascribe { expr, element } => {
+            format!("{}: List<{}>", render(expr), element.display_name())
+        }
+        L3ExprV2::Validate { target_type, arg } => {
+            format!("validate<{target_type}>({})", render(arg))
+        }
     }
 }
 
@@ -430,7 +437,12 @@ fn render_value(v: &L3ValueV2) -> String {
 }
 
 fn render_pattern(p: &L3PatternV2) -> String {
-    let L3PatternV2::Ctor { variant, binders } = p;
+    let L3PatternV2::Ctor {
+        variant, binders, ..
+    } = p
+    else {
+        return "_".to_string();
+    };
     if binders.is_empty() {
         variant.clone()
     } else {
@@ -724,7 +736,11 @@ impl TraceBuilder {
                     node_ref: None,
                 }
             }
-            L3ExprV2::Len(list) | L3ExprV2::Distinct(list) => {
+            L3ExprV2::Len(list)
+            | L3ExprV2::Distinct(list)
+            | L3ExprV2::Only(list)
+            | L3ExprV2::Ascribe { expr: list, .. }
+            | L3ExprV2::Validate { arg: list, .. } => {
                 let child = self.build(list, env, helper_depth);
                 TraceNode {
                     source: render(e),
@@ -880,27 +896,30 @@ impl TraceBuilder {
     ) -> TraceNode {
         let cscrutinee = self.build(scrutinee, env, helper_depth);
         // The exact arm-selection rule `eval_internal_body`'s `Match` case
-        // uses: the scrutinee's constructor variant name (or `true`/`false`
-        // for a Bool), first arm whose pattern names it wins. Owned, not
-        // borrowed, so `cscrutinee` can move into `children` below.
-        let (taken_variant, taken_args): (Option<String>, Vec<L3ValueV2>) =
-            match &cscrutinee.outcome {
-                TraceOutcome::Value(L3ValueV2::Ctor { variant, args, .. }) => {
-                    (Some(variant.clone()), args.clone())
-                }
-                TraceOutcome::Value(L3ValueV2::Bool(b)) => (
-                    Some(if *b { "true" } else { "false" }.to_string()),
-                    Vec::new(),
-                ),
-                _ => (None, Vec::new()),
-            };
+        // uses: matches_value against the scrutinee value, first matching arm wins.
+        let scrutinee_val = match &cscrutinee.outcome {
+            TraceOutcome::Value(v) => Some(v.clone()),
+            _ => None,
+        };
+        let taken_args: Vec<L3ValueV2> = match &scrutinee_val {
+            Some(L3ValueV2::Ctor { args, .. }) => args.clone(),
+            _ => Vec::new(),
+        };
 
         let mut children = vec![cscrutinee];
         let mut taken = false;
         for (pat, body) in arms {
-            let L3PatternV2::Ctor { variant, binders } = pat;
             let arm_source = format!("{} => {}", render_pattern(pat), render(body));
-            if !taken && taken_variant.as_deref() == Some(variant.as_str()) {
+            let selected = if let Some(v) = &scrutinee_val {
+                pat.matches_value(v)
+            } else {
+                false
+            };
+            let binders: &[Option<String>] = match pat {
+                L3PatternV2::Ctor { binders, .. } => binders.as_slice(),
+                L3PatternV2::Wildcard => &[],
+            };
+            if !taken && selected {
                 taken = true;
                 let mut arm_env = env.clone();
                 for (binder, val) in binders.iter().zip(taken_args.iter()) {
@@ -964,7 +983,8 @@ impl TraceBuilder {
                     // inputs leak in.
                     let mut fn_env = EvalEnv::new()
                         .with_functions(env.functions().clone())
-                        .with_schemas(def.schemas.clone());
+                        .with_schemas(def.schemas.clone())
+                        .with_documentary_registry(env.documentary_registry_arc());
                     for ((param_name, _), val) in def.params.iter().zip(arg_values) {
                         fn_env = fn_env.with_local(param_name.clone(), val);
                     }
@@ -1138,6 +1158,7 @@ mod render_tests {
             arms: vec![
                 (
                     L3PatternV2::Ctor {
+                        nominal_sum: Some("Bool".to_string()),
                         variant: "true".to_string(),
                         binders: vec![],
                     },
@@ -1145,6 +1166,7 @@ mod render_tests {
                 ),
                 (
                     L3PatternV2::Ctor {
+                        nominal_sum: Some("Bool".to_string()),
                         variant: "false".to_string(),
                         binders: vec![],
                     },
