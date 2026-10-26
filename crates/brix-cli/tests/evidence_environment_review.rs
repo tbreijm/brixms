@@ -139,7 +139,7 @@ decide plan for q in question per id {
         .into(),
     )]);
     let mut world =
-        WorldSession::from_program_with_sources(&dir.0.join("world"), "root", &sources).unwrap();
+        WorldSession::from_program_with_sources(dir.0.join("world"), "root", &sources).unwrap();
     let mut row = TupleRecord::new();
     row.set_str("id", "q1");
     world
@@ -188,7 +188,10 @@ commit d from (ship, hold)
         ("entity", text(&target.entity)),
         ("world", text(&target.world.to_hex())),
         ("program", text(&target.program.to_hex())),
-        ("revision", json!({"type":"int", "value":target.revision})),
+        (
+            "revision",
+            json!({"type":"int", "value":target.revision.to_string()}),
+        ),
         ("revision_digest", text(&target.revision_digest.to_hex())),
         ("candidate", text(&target.candidate)),
         ("result", text(&target.value_digest.to_hex())),
