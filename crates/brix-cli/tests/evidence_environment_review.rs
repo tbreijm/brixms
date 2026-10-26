@@ -5,6 +5,13 @@ use std::{
     process::{Command, Output},
 };
 
+fn brix_bin() -> std::path::PathBuf {
+    std::env::var_os("CARGO_BIN_EXE_brix")
+        .or_else(|| std::env::var_os("NEXTEST_BIN_EXE_brix"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_BIN_EXE_brix")))
+}
+
 struct Scratch(PathBuf);
 impl Drop for Scratch {
     fn drop(&mut self) {
@@ -53,7 +60,7 @@ commit d from (ship, hold)
     .unwrap();
     let env = dir.0.join("environment.json");
     fs::write(&env, environment.to_string()).unwrap();
-    Command::new(env!("CARGO_BIN_EXE_brix"))
+    Command::new(brix_bin())
         .arg("run")
         .arg(source)
         .arg("--input")
@@ -224,7 +231,7 @@ commit d from (ship, hold)
     };
     write_env(artifact.clone());
     let invoke = |args: &[&str], pinned: bool| {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_brix"));
+        let mut cmd = Command::new(brix_bin());
         cmd.current_dir(&dir.0)
             .args(args)
             .args([

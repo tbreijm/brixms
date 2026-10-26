@@ -2,11 +2,15 @@
 use serde_json::{json, Value};
 use std::{fs, path::Path, process::Command};
 
+fn brix_bin() -> std::path::PathBuf {
+    std::env::var_os("CARGO_BIN_EXE_brix")
+        .or_else(|| std::env::var_os("NEXTEST_BIN_EXE_brix"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_BIN_EXE_brix")))
+}
+
 fn run(args: &[&str]) -> Value {
-    let output = Command::new(env!("CARGO_BIN_EXE_brix"))
-        .args(args)
-        .output()
-        .unwrap();
+    let output = Command::new(brix_bin()).args(args).output().unwrap();
     assert!(
         output.status.success(),
         "{}",
