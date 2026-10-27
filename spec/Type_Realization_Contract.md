@@ -230,8 +230,10 @@ nothing to do with the composition. `T` is the tightness status for
 `application_rule_is_a_kernel_theorem`,
 `arithmetic_split_rule_is_a_kernel_primitive`,
 `claim_kind_typing_discharge_is_not_portable` (which derives the tight set from
-`minted_generators()` and so cannot silently omit a row). The faithfulness
-gates do **not** cover every ✓ row — see 3.4.2.]**
+`minted_generators()` and so cannot silently omit a row). `g_tensor`'s product
+introduction is covered in `structural_generators_are_faithful_kernel_rules`,
+and `g_tensor_split`, `g_tensor`, `g_then_split` have dedicated faithfulness and
+negative pins (3.4.2).]**
 
 **3.4.1 The table is the generator set.** §3.4's rows and `minted_generators()`
 SHALL name the same generators, and each row's `T` column SHALL equal
@@ -247,20 +249,17 @@ the enumeration §3.1 makes single-source. **[Pinned:
 > was watching. Verified to fail now: removing `g_tensor`'s row, or flipping
 > `g_fix`'s `T` cell to ✓, fails the test naming the generator.
 
-**3.4.2 Three ✓ rows do not yet meet §9.2.** `g_then_split`, `g_tensor_split`
-and `g_tensor` are discharged in `generator_is_tight`, and their grounds are
-stated — ⟨D-SPLIT⟩ for the two splits, product introduction for `g_tensor`.
-What they do not have is §9.2(2)'s **faithfulness pin** or §9.2(3)'s **negative
-pin**. `structural_generators_are_faithful_kernel_rules` covers `g_record`,
-`g_field`, `g_ctor` and `g_match`; `g_tensor` claims `g_record`'s ground and is
-absent from it. **[Partial: the discharge is declared and the ground is stated;
-the artifacts §9.2 requires do not exist]**
-
-> Recorded rather than repaired here, because repairing it either adds pins or
-> withdraws the discharges, and withdrawing them moves the grade of every `then`
-> and `and` composition. §9.2 is unambiguous that all four obligations are
-> required, so this is a gap and not a variant reading — but which way it closes
-> is a decision, not a documentation change.
+**3.4.2 Discharge evidence for `g_then_split`, `g_tensor_split`, and `g_tensor`.**
+`g_then_split`, `g_tensor_split` and `g_tensor` are discharged in
+`generator_is_tight`. Their grounds are: ⟨D-SPLIT⟩ (structural decomposition)
+for `g_then_split` and `g_tensor_split`; and binary product introduction
+(`A -> B -> A × B`) for `g_tensor`. Each satisfies all four obligations of §9.2:
+stated ground; faithfulness pin (`structural_generators_are_faithful_kernel_rules`,
+`g_tensor_and_g_tensor_split_faithfulness_and_negative_pins`); negative pin
+checking precondition enforcement and middle-match sensitivity
+(`g_then_split_faithfulness_and_negative_pins`, `then_on_values_is_refused_because_the_endpoints_cannot_meet`);
+and typing-scoped judgment tightness (`claim_kind_typing_discharge_is_not_portable`).
+**[Pinned: `structural_generators_are_faithful_kernel_rules`, `g_tensor_and_g_tensor_split_faithfulness_and_negative_pins`, `g_then_split_faithfulness_and_negative_pins`, `then_on_values_is_refused_because_the_endpoints_cannot_meet`]**
 
 **3.5** The coercion families are **data carried inside a source object**, not
 tree leaves. No coercion generator reaches a leaf, so `generator_is_tight` is
@@ -580,10 +579,8 @@ against `main` at the date above.
   typing but not a correspondence the kernel owns. Under ⟨D-JUDGE⟩ that scoping
   is the point — `fn loop(x: Int): Int = loop(x)` types correctly, because a
   typing judgement never claimed the function halts.
-- **Three discharges are declared without their §9.2 artifacts** —
-  `g_then_split`, `g_tensor_split`, `g_tensor` (§3.4.2). They are *not* capping
-  anything, which is precisely why this is worth stating: an undischarged
-  generator announces itself by capping the result, and these do not.
+- **`g_then_split`, `g_tensor_split`, and `g_tensor` meet §9.2** (§3.4.2) with
+  faithfulness and negative pins in `soc-regimes`. They do not cap the result.
 - **Catch-all matching is capped** by `g_match_catchall`, deliberately: ADR-0015
   §4 lists it as a non-goal until repeated branch premises are represented.
 - **Incremental invalidation does not exist** (§8).
