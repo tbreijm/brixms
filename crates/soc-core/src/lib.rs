@@ -130,6 +130,7 @@ pub mod history;
 pub mod intern;
 pub mod journal;
 pub mod oracle;
+pub mod resolution;
 pub mod saturate;
 pub mod store;
 pub mod witness_provider;
@@ -165,6 +166,13 @@ pub use history::History;
 pub use intern::{Handle, Interner};
 pub use journal::{CommittedStep, Journal};
 pub use oracle::{cand, cand_instrumented, succ};
+pub use resolution::{
+    classify_resolution, classify_resolution_with_reason,
+    classify_resolution_with_verified_evidence, CanonicalCandidate, CompletenessScope,
+    CompletenessVerificationError, ContextValidationError, ContextValidator, ResolutionOutcome,
+    ResolutionQuery, ResolutionUnknown, StubContextValidator, VerifiedCompleteness,
+    MAX_RESOLUTION_CANDIDATES,
+};
 pub use saturate::{adequacy, bisimulation, certificate, closure, driver};
 pub use saturate::{
     adequacy_of, check_closure, check_divergence_certificate, check_quiescence_certificate,
