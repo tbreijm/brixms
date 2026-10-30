@@ -29,10 +29,9 @@ use soc_core::resolution::{
     MAX_RESOLUTION_CANDIDATES,
 };
 use soc_core::saturate::{
-    check_divergence_certificate, check_quiescence_certificate, quiescence_certificate_id,
-    sat_step, CertificateCheck, CertificateCheckError, DeclaredAssumptions,
-    GeneratorPartitionProfile, ObservationProfile, PresentationIdV1, PresentationV1, SaturatedStep,
-    SaturationBudget,
+    check_divergence_certificate, check_quiescence_certificate, sat_step, CertificateCheck,
+    CertificateCheckError, DeclaredAssumptions, GeneratorPartitionProfile, ObservationProfile,
+    PresentationIdV1, PresentationV1, SaturatedStep, SaturationBudget,
 };
 use soc_core::witness_provider::{Candidate, WitnessProvider};
 
@@ -1133,7 +1132,8 @@ fn scenario_18_verified_query_bound_completeness_evidence() {
         budget: Some(32),
     };
 
-    // Construct genuine VerifiedCompleteness from valid QuiescenceCertificateV1
+    // Quiescence is valid execution evidence, but does not prove that the run enumerated
+    // solutions to this resolution goal.
     let verified = VerifiedCompleteness::<Candidate>::from_quiescence_certificate(
         &matching_query,
         &cert,
@@ -1141,12 +1141,8 @@ fn scenario_18_verified_query_bound_completeness_evidence() {
         &terminal_config,
         &consumed,
     )
-    .expect("Valid certificate matching query context and policy must verify");
-
-    assert_eq!(
-        verified.evidence_digest(),
-        quiescence_certificate_id(&cert).0
-    );
+    .expect_err("quiescence alone must not certify resolution completeness");
+    assert_eq!(verified, CompletenessVerificationError::UnsupportedEvidence);
 
     // 3. Query with mismatched context fails verification
     let mismatched_ctx_query = ResolutionQuery {
@@ -1191,15 +1187,18 @@ fn scenario_18_verified_query_bound_completeness_evidence() {
         Err(CompletenessVerificationError::InvalidCertificate)
     );
 
-    // 6. Classification with VerifiedCompleteness promotes 0 candidates to NoSolution
+    // 6. No currently supported evidence promotes empty results to NoSolution.
     let out_empty_verified = classify_resolution_with_verified_evidence::<Candidate>(
         &matching_query,
         BTreeSet::new(),
-        Some(&verified),
+        None,
         None,
         ResolutionUnknown::BudgetExhausted,
     );
-    assert_eq!(out_empty_verified, ResolutionOutcome::NoSolution);
+    assert_eq!(
+        out_empty_verified,
+        ResolutionOutcome::Unknown(ResolutionUnknown::BudgetExhausted)
+    );
 
     // 7. Closed finite domain verification:
     let (_i, _e, w1, w2, s0) = make_test_env();
@@ -1207,28 +1206,35 @@ fn scenario_18_verified_query_bound_completeness_evidence() {
         witness: w1,
         successor: s0,
     };
-    let verified_domain = VerifiedCompleteness::from_closed_domain(
+    let unsupported_domain = VerifiedCompleteness::from_closed_domain(
         &matching_query,
         BTreeSet::from([c1]),
         &BTreeSet::from([c1]),
     )
-    .expect("matching domain count must verify");
+    .expect_err("caller-authored finite domains are not independent completeness proofs");
+    assert_eq!(
+        unsupported_domain,
+        CompletenessVerificationError::UnsupportedEvidence
+    );
 
     let out_unique_domain = classify_resolution_with_verified_evidence(
         &matching_query,
         BTreeSet::from([c1]),
-        Some(&verified_domain),
+        None,
         Some(c1),
         ResolutionUnknown::BudgetExhausted,
     );
-    assert_eq!(out_unique_domain, ResolutionOutcome::Unique(c1));
+    assert_eq!(
+        out_unique_domain,
+        ResolutionOutcome::Unknown(ResolutionUnknown::IncompleteEnumeration)
+    );
 
     let c2 = Candidate {
         witness: w2,
         successor: s0,
     };
 
-    // Same-size but different values must be rejected (count alone is not completeness)
+    // Same-size arbitrary sets cannot be promoted to completeness evidence.
     let err_swap = VerifiedCompleteness::from_closed_domain(
         &matching_query,
         BTreeSet::from([c1]),
@@ -1236,10 +1242,10 @@ fn scenario_18_verified_query_bound_completeness_evidence() {
     );
     assert_eq!(
         err_swap,
-        Err(CompletenessVerificationError::IncompleteCount)
+        Err(CompletenessVerificationError::UnsupportedEvidence)
     );
 
-    // Evidence is bound to its query: reuse for another query fails closed
+    // Candidate substitution and query changes fail closed without verified evidence.
     let other_query = ResolutionQuery {
         goal: PropositionId::from_canon(b"other-goal"),
         ..matching_query
@@ -1247,7 +1253,7 @@ fn scenario_18_verified_query_bound_completeness_evidence() {
     let out_reused = classify_resolution_with_verified_evidence(
         &other_query,
         BTreeSet::from([c1]),
-        Some(&verified_domain),
+        None,
         Some(c1),
         ResolutionUnknown::BudgetExhausted,
     );
@@ -1256,11 +1262,11 @@ fn scenario_18_verified_query_bound_completeness_evidence() {
         ResolutionOutcome::Unknown(ResolutionUnknown::IncompleteEnumeration)
     );
 
-    // Admissible candidates outside the certified domain fail closed
+    // A different candidate set likewise remains incomplete.
     let out_outside = classify_resolution_with_verified_evidence(
         &matching_query,
         BTreeSet::from([c2]),
-        Some(&verified_domain),
+        None,
         Some(c2),
         ResolutionUnknown::BudgetExhausted,
     );
@@ -1269,7 +1275,7 @@ fn scenario_18_verified_query_bound_completeness_evidence() {
         ResolutionOutcome::Unknown(ResolutionUnknown::IncompleteEnumeration)
     );
 
-    // Incomplete closed domain count is rejected
+    // A caller-authored domain cannot certify a larger enumerated set either.
     let err_domain = VerifiedCompleteness::from_closed_domain(
         &matching_query,
         BTreeSet::from([c1, c2]), // certified 2, but only 1 enumerated
@@ -1277,7 +1283,7 @@ fn scenario_18_verified_query_bound_completeness_evidence() {
     );
     assert_eq!(
         err_domain,
-        Err(CompletenessVerificationError::IncompleteCount)
+        Err(CompletenessVerificationError::UnsupportedEvidence)
     );
 
     // 8. Missing evidence (None) defaults fail-closed to Incomplete:

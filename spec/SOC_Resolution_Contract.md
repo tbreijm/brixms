@@ -273,7 +273,7 @@ Any context validator used in #52 conformance tests is explicitly a test double 
 | **15. Candidate handle projection** | Projection from process-local `Candidate` to `CanonicalCandidate` round-trips | `scenario_15_canonical_candidate_projection_and_round_trip` | **[Pinned]** |
 | **16. Outcome canonical codecs** | Full serialization round-trip across all four resolution outcome states | `scenario_16_resolution_outcome_canonical_round_trip` | **[Pinned]** |
 | **17. Negative decode & invalid rejection** | Cardinality, ordering, duplicate, selected membership, and limit violations rejected fail-closed | `scenario_17_negative_decode_coverage_rejects_noncanonical_and_invalid_outcomes` | **[Pinned]** |
-| **18. Verified completeness evidence** | `VerifiedCompleteness` is bound to its `ResolutionQuery`; closed-domain evidence requires exact set equality (not count) and covers only its domain; reuse across queries, same-size forgeries and out-of-domain candidates fail closed | `scenario_18_verified_query_bound_completeness_evidence` | **[Pinned]** |
+| **18. Verified completeness evidence** | Current v1 quiescence certificates and caller-declared domains cannot certify goal-specific candidate completeness; empty/singleton results remain `Unknown` absent a supported proof | `scenario_18_verified_query_bound_completeness_evidence` | **[Pinned]** |
 | **19. Candidate limit enforcement** | Classifier rejects > 1024 candidates fail-closed as `BudgetExhausted`; output round-trips cleanly | `scenario_19_classifier_enforces_candidate_limit_and_round_trips` | **[Pinned]** |
 
 ### Residual Implementation Gaps
@@ -285,6 +285,6 @@ The following capabilities are specified by this contract but remain intentional
 2. **Centralized Retraction-Closure Engine:**
    Multi-support preservation and invalidation are verified locally in `resolution_contract.rs` and through `Dependency` edges, but a workspace-wide incremental invalidator traversing all dependency graphs is a subsequent engine stage (`Build_Plan_v3_SOC.md`).
 3. **General Completeness Checker:**
-   `CompletenessScope::Complete` is currently supported by finite domain fixtures and `QuiescenceCertificateV1` ($F_O$ v1). Arbitrary profile-specific completeness proofs remain domain-specific obligations.
+   No production proof currently connects a resolution goal to an exhaustive candidate set. Caller-declared finite domains and `QuiescenceCertificateV1` establish no such connection and are rejected by the verified-evidence constructors. `CompletenessScope::Complete` remains an operational classification input only; it carries no independent proof authority. A future proof must bind the query and exact candidate result set and establish that the supported search relation is exhaustive.
 4. **Concrete `DiscoveryRun` Telemetry Schema:**
    `DiscoveryRun` is normatively excluded from `JudgementId`, but its concrete serializable schema for studio diagnostics is not yet implemented in Ring 0.

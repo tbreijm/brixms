@@ -34,7 +34,7 @@
 
 use std::collections::BTreeSet;
 
-use brix_canon::{CanonDecode, CanonError, CanonReader, CanonWriter, Canonical, Digest, Domain};
+use brix_canon::{CanonDecode, CanonError, CanonReader, CanonWriter, Canonical, Digest};
 use brix_semantic::{ConfigId, ContextId, PropositionId, WitnessId};
 
 use crate::intern::Interner;
@@ -80,16 +80,16 @@ impl CanonDecode for CompletenessScope {
 
 /// Verified completeness evidence certifying exhaustive search over a scoped question.
 ///
-/// Unlike [`CompletenessScope`], which may be supplied as an operational assertion by a trusted caller,
-/// `VerifiedCompleteness` cannot be instantiated with arbitrary unverified digests. It must be
-/// produced by genuine verification of a certificate or closed domain bound to the [`ResolutionQuery`].
+/// `VerifiedCompleteness` is reserved for evidence that proves exhaustive candidate discovery for
+/// one exact query and one exact result set. The current v1 quiescence and caller-declared-domain
+/// inputs do not establish that relation, so their constructors fail closed.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct VerifiedCompleteness<C = Candidate> {
     /// The query this evidence was verified against; it cannot be reused for another query.
     query: ResolutionQuery,
     evidence_digest: Digest,
-    /// For closed-domain evidence: the exact certified domain. `None` for certificate evidence.
-    domain: Option<BTreeSet<C>>,
+    /// Exact classified candidate set, required to prevent evidence reuse with a substituted set.
+    candidates: BTreeSet<C>,
 }
 
 /// Errors occurring during completeness evidence verification.
@@ -107,6 +107,8 @@ pub enum CompletenessVerificationError {
     IncompleteCount,
     /// Evidence was verified for a different query than the one being classified.
     QueryMismatch,
+    /// Available evidence formats do not prove query-specific candidate completeness.
+    UnsupportedEvidence,
 }
 
 impl<C: Ord> VerifiedCompleteness<C> {
@@ -135,11 +137,11 @@ impl<C: Ord> VerifiedCompleteness<C> {
         {
             return Err(CompletenessVerificationError::InvalidCertificate);
         }
-        Ok(Self {
-            query: *query,
-            evidence_digest: crate::saturate::quiescence_certificate_id(cert).0,
-            domain: None,
-        })
+        // Quiescence proves termination of a saturation run, not that its transition relation
+        // enumerates the solutions to this resolution goal. Keep the certificate validation
+        // above, but do not elevate it into resolution completeness evidence.
+        let _ = (cert, terminal, consumed);
+        Err(CompletenessVerificationError::UnsupportedEvidence)
     }
 
     /// Construct verified completeness for an exhaustively checked closed finite domain.
@@ -152,20 +154,8 @@ impl<C: Ord> VerifiedCompleteness<C> {
         domain: BTreeSet<C>,
         enumerated: &BTreeSet<C>,
     ) -> Result<Self, CompletenessVerificationError> {
-        if domain.is_empty() {
-            return Err(CompletenessVerificationError::EmptyDomain);
-        }
-        if &domain != enumerated {
-            return Err(CompletenessVerificationError::IncompleteCount);
-        }
-        let mut w = CanonWriter::new();
-        query.canon_write(&mut w);
-        w.write_uint(domain.len() as u64);
-        Ok(Self {
-            query: *query,
-            evidence_digest: Digest::of(Domain::Value, &w.finish()),
-            domain: Some(domain),
-        })
+        let _ = (query, domain, enumerated);
+        Err(CompletenessVerificationError::UnsupportedEvidence)
     }
 
     /// Return the canonical digest of the verified evidence.
@@ -597,14 +587,7 @@ pub fn classify_resolution_with_verified_evidence<C: Clone + Ord>(
     fallback_reason: ResolutionUnknown,
 ) -> ResolutionOutcome<C> {
     let completeness = match evidence {
-        Some(e)
-            if e.query == *query
-                && e.domain
-                    .as_ref()
-                    .is_none_or(|d| admissible.iter().all(|c| d.contains(c))) =>
-        {
-            CompletenessScope::Complete
-        }
+        Some(e) if e.query == *query && e.candidates == admissible => CompletenessScope::Complete,
         _ => CompletenessScope::Incomplete,
     };
     classify_resolution_with_reason(admissible, completeness, selected, fallback_reason)
