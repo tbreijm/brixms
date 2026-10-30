@@ -1331,7 +1331,7 @@ fn scenario_18_verified_query_bound_completeness_evidence() {
     assert_eq!(*report_b.query(), other_query);
     assert_eq!(report_a.completeness(), CompletenessScope::Incomplete);
     assert_eq!(report_b.completeness(), CompletenessScope::Incomplete);
-    assert_ne!(report_a.report_id(), report_b.report_id());
+    assert_ne!(report_a.query_id(), report_b.query_id());
     assert_eq!(report_a.verified_evidence_digest(), None);
     assert_eq!(report_b.verified_evidence_digest(), None);
     assert_eq!(

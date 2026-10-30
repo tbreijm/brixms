@@ -618,7 +618,7 @@ pub struct ResolutionReport<C = Candidate> {
     completeness: CompletenessScope,
     outcome: ResolutionOutcome<C>,
     verified_evidence_digest: Option<Digest>,
-    report_id: Digest,
+    query_id: Digest,
 }
 
 impl<C: Clone + Ord> ResolutionReport<C> {
@@ -639,7 +639,7 @@ impl<C: Clone + Ord> ResolutionReport<C> {
         };
         let mut encoded_query = CanonWriter::new();
         query.canon_write(&mut encoded_query);
-        let report_id = Digest::of(Domain::Value, &encoded_query.finish());
+        let query_id = Digest::of(Domain::Value, &encoded_query.finish());
         let outcome =
             classify_resolution_with_reason(admissible, completeness, selected, fallback_reason);
         Self {
@@ -647,7 +647,7 @@ impl<C: Clone + Ord> ResolutionReport<C> {
             completeness,
             outcome,
             verified_evidence_digest,
-            report_id,
+            query_id,
         }
     }
 
@@ -671,9 +671,9 @@ impl<C: Clone + Ord> ResolutionReport<C> {
         self.verified_evidence_digest
     }
 
-    /// Stable query-scoped report identity, distinct for different query envelopes.
-    pub fn report_id(&self) -> Digest {
-        self.report_id
+    /// Stable identity of this query envelope. It does not identify the classified outcome.
+    pub fn query_id(&self) -> Digest {
+        self.query_id
     }
 }
 

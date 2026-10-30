@@ -204,10 +204,10 @@ Before resolving a question scoped to `ContextId`, the resolver SHALL validate c
    - `Unsupported`: Context features or version outside resolver capability.
    - `Exhausted`: Resource bounds in context have been exceeded.
 
-**[Partial: Consumer contract trait `ContextValidator` and error taxonomy are pinned via `StubContextValidator` in `scenario_6_mismatched_context_fails_validation_and_blocks_publication`; publication fence gating on context validation is owned normatively by #59.]**
+**[Partial: The production kernel adapter `brix-kernel::context_validation::acceptance_in_context` validates context-model-v2 inputs before proof checking. The SOC resolution consumer contract and error taxonomy are pinned with `StubContextValidator` in scenario 6; end-to-end publication-fence integration in this resolver remains untested.]**
 
 **9.3 Prohibition of Ambient Cross-Context Reuse:**
-A judgement or derivation valid under `ContextId` $C_1$ SHALL NOT be reused under `ContextId` $C_2$ without explicit context subsumption or transport evidence authorized by #59. **[Partial: Context validation rejection is demonstrated via `StubContextValidator` in scenario 6 and presentation binding checks in scenario 9; end-to-end transport gating across contexts is parked under #59.]**
+A judgement or derivation valid under `ContextId` $C_1$ SHALL NOT be reused under `ContextId` $C_2$ without explicit context subsumption or transport evidence authorized by #59. **[Partial: The kernel adapter validates expected context identity before proof checking; the SOC consumer fixture checks mismatch detection with `StubContextValidator` in scenario 6, and presentation binding checks are pinned in scenario 9. End-to-end transport gating across the resolver publication path remains untested.]**
 
 **9.4 Test Isolation:**
 Any context validator used in #52 conformance tests is explicitly a test double (`StubContextValidator`), not a production validation engine. **[Pinned: `crates/soc-core/tests/resolution_contract.rs`]**
@@ -261,7 +261,7 @@ Any context validator used in #52 conformance tests is explicitly a test double 
 | **3. Empty complete finite domain** | Empty candidates under complete scope yields `NoSolution` | `scenario_3_empty_complete_domain_yields_nosolution` | **[Pinned]** |
 | **4. Interrupted / bounded search** | Budget exhaustion yields `Unknown`, never `NoSolution`/`Refuted` | `scenario_4_bounded_incomplete_search_yields_unknown_never_nosolution_or_refuted` | **[Pinned]** |
 | **5. Cycle or repeated state** | Lasso yields declared cycle `Unknown`, never contradiction | `scenario_5_cycle_detection_yields_cycle_unknown_never_refuted` | **[Pinned]** |
-| **6. Rejected / wrong-context** | Context mismatch detected via `StubContextValidator`; publication gating halts | `scenario_6_mismatched_context_fails_validation_and_blocks_publication` | **[Partial: Gated on StubContextValidator check; end-to-end publication fence integration owned by #59]** |
+| **6. Rejected / wrong-context** | Stub validator detects context mismatch; an independent authority fence rejects an unauthorized `Proven` publication | `scenario_6_mismatched_context_fails_validation_and_blocks_publication` | **[Partial: The fixture checks these gates separately; resolver-level publication gating on context validation is not demonstrated]** |
 | **7. Multi-support removal** | Alternate derivations (`Judgement` + `Dependency`) preserve conclusion | `scenario_7_alternate_support_preserves_justified_conclusion` | **[Partial: Manual set removal on Dependency edges; centralized invalidation engine outstanding]** |
 | **8. Last support removal** | Live state invalidated; immutable journal history retained & replayable | `scenario_8_last_support_removal_invalidates_live_state_while_retaining_history` | **[Partial: Manual empty provider substitution; centralized invalidation engine outstanding]** |
 | **9. Binding change** | Policy/context change prohibits reusing old resolution | `scenario_9_binding_change_prevents_old_result_reuse` | **[Pinned]** |
@@ -280,8 +280,8 @@ Any context validator used in #52 conformance tests is explicitly a test double 
 
 The following capabilities are specified by this contract but remain intentionally unlanded or owned by adjacent issues:
 
-1. **Production Context Validation Seam (Issue #59):**
-   `ContextValidator` currently runs against a test double (`StubContextValidator`). Real context envelope parsing, transport across boundaries, and store validation will land under #59.
+1. **Resolver Context Validation Integration:**
+   A production kernel adapter validates materialized context-model-v2 bytes before proof checking (`brix-kernel::context_validation::acceptance_in_context`). The SOC resolution contract test still exercises its consumer seam with `StubContextValidator`; end-to-end resolver publication gating and cross-boundary transport are not pinned there.
 2. **Centralized Retraction-Closure Engine:**
    Multi-support preservation and invalidation are verified locally in `resolution_contract.rs` and through `Dependency` edges, but a workspace-wide incremental invalidator traversing all dependency graphs is a subsequent engine stage (`Build_Plan_v3_SOC.md`).
 3. **General Completeness Checker:**
