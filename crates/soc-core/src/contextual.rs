@@ -166,3 +166,58 @@ pub fn check_divergence_in_context(
         consumed,
     ))
 }
+
+/// Map #59's detailed [`ModelError`] onto #52's coarse context-validation taxonomy.
+///
+/// The mapping is total and lossy by design: #52 consumers distinguish only whether a
+/// context is unavailable, malformed, mismatched, unsupported or over budget.
+pub fn resolution_context_error(e: &ModelError) -> crate::resolution::ContextValidationError {
+    use crate::resolution::ContextValidationError as E;
+    match e {
+        ModelError::MissingParent(_) | ModelError::MissingArtifact(_) => E::Unavailable,
+        ModelError::IdentityMismatch
+        | ModelError::BindingMismatch
+        | ModelError::ParentDimensionMismatch
+        | ModelError::ModeMismatch
+        | ModelError::TransportMismatch
+        | ModelError::ArtifactMismatch(_) => E::Mismatched,
+        ModelError::AssumptionRejected(_) | ModelError::MissingUsedAssumption(_) => E::Unsupported,
+        ModelError::TooLarge
+        | ModelError::TooManyAssumptions
+        | ModelError::TooDeep
+        | ModelError::ArtifactBudgetExceeded => E::Exhausted,
+        ModelError::BadLength
+        | ModelError::Malformed
+        | ModelError::NonCanonicalOrder
+        | ModelError::DuplicateName
+        | ModelError::InvalidField => E::Malformed,
+    }
+}
+
+/// Production [`crate::resolution::ContextValidator`]: backed by an admitted
+/// [`ResolutionContextV2`], so a context is accepted only if it was fully validated by #59
+/// and both identities equal the admitted context's identity.
+pub struct AdmittedContextValidator<'a> {
+    context: &'a ResolutionContextV2,
+}
+
+impl<'a> AdmittedContextValidator<'a> {
+    pub fn new(context: &'a ResolutionContextV2) -> Self {
+        Self { context }
+    }
+}
+
+impl crate::resolution::ContextValidator for AdmittedContextValidator<'_> {
+    fn validate_context(
+        &self,
+        expected: ContextId,
+        actual: ContextId,
+    ) -> Result<(), crate::resolution::ContextValidationError> {
+        let id = self.context.checked().id();
+        if expected == id && actual == id {
+            Ok(())
+        } else {
+            Err(crate::resolution::ContextValidationError::Mismatched)
+        }
+    }
+}

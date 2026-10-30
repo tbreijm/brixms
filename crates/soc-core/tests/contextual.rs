@@ -238,3 +238,50 @@ fn discovery_rejects_a_different_world_policy_or_history_before_provider_call() 
     }
     assert_eq!(provider.0.get(), 1);
 }
+
+#[test]
+fn admitted_context_feeds_resolution_seam_and_maps_errors() {
+    use soc_core::contextual::{resolution_context_error, AdmittedContextValidator};
+    use soc_core::resolution::{ContextValidationError as E, ContextValidator};
+
+    let d = dimensions(None);
+    let model = ContextModelV2::new(d.clone(), vec![]).unwrap();
+    let bytes = encode_context_model_v2(&model);
+    let store = Store(vec![]);
+    let request = ResolutionContextV2::validate(
+        &bytes,
+        model.id(),
+        &d,
+        ModelLimits::default(),
+        &store,
+        &NoExternalAssumptions,
+    )
+    .unwrap();
+    let v = AdmittedContextValidator::new(&request);
+    assert_eq!(v.validate_context(model.id(), model.id()), Ok(()));
+    let other = ContextId::root().extend(b"other");
+    assert_eq!(v.validate_context(other, model.id()), Err(E::Mismatched));
+    assert_eq!(v.validate_context(model.id(), other), Err(E::Mismatched));
+
+    // Wrong expected identity is rejected by #59 and surfaces as Mismatched.
+    let err = ResolutionContextV2::validate(
+        &bytes,
+        other,
+        &d,
+        ModelLimits::default(),
+        &store,
+        &NoExternalAssumptions,
+    )
+    .err()
+    .expect("identity mismatch must fail");
+    assert_eq!(resolution_context_error(&err), E::Mismatched);
+    assert_eq!(resolution_context_error(&ModelError::TooDeep), E::Exhausted);
+    assert_eq!(
+        resolution_context_error(&ModelError::MissingParent(other)),
+        E::Unavailable
+    );
+    assert_eq!(
+        resolution_context_error(&ModelError::Malformed),
+        E::Malformed
+    );
+}
