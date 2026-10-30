@@ -3473,7 +3473,11 @@ impl WorldSession {
             if net.base_resident() {
                 net.verify_differential_correctness()?;
             } else {
+                // A cold-restored network keeps no base copy: confirm the persisted roots
+                // against a full replay, then run the same incremental-vs-recompute
+                // comparison on that replay so the oracle check is not just a root match.
                 self.verify_state()?;
+                self.replay_network()?.verify_differential_correctness()?;
             }
         }
         Ok(())

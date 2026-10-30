@@ -1274,6 +1274,12 @@ fn lower_derived_query(
                                         "collect() limit must be positive".into(),
                                     ));
                                 }
+                                if n > crate::input::MAX_COLLECTION_ELEMENTS {
+                                    return Err(RelationalLowerError::UnsupportedExpression(format!(
+                                        "collect() limit of {n} exceeds maximum supported cardinality limit of {}",
+                                        crate::input::MAX_COLLECTION_ELEMENTS
+                                    )));
+                                }
                                 n
                             }
                             _ => {

@@ -264,7 +264,7 @@ fn write_value(w: &mut CanonWriter, v: &Value) {
 }
 
 fn read_value(r: &mut CanonReader<'_>) -> Result<Value, WorldAuditBundleError> {
-    let mut remaining = brix_lower::input::MAX_INPUT_VALUE_NODES;
+    let mut remaining = brix_lower::input::MAX_WORLD_VALUE_NODES;
     read_value_bounded(r, 0, &mut remaining)
 }
 
@@ -351,7 +351,7 @@ fn read_value_bounded(
         8 => {
             let count = usize::try_from(r.read_uint()?)
                 .map_err(|_| WorldAuditBundleError::MalformedStructuredValue)?;
-            if count > brix_lower::input::MAX_INPUT_CONTAINER_WIDTH || count > *remaining {
+            if count > brix_lower::input::MAX_COLLECTION_ELEMENTS || count > *remaining {
                 return Err(WorldAuditBundleError::MalformedStructuredValue);
             }
             let mut items = Vec::with_capacity(count);

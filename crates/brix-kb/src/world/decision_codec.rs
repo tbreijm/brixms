@@ -436,7 +436,7 @@ fn canon_decode_err(e: brix_canon::CanonError) -> WorldError {
 }
 
 fn canon_read_value(r: &mut CanonReader<'_>) -> Result<Value, WorldError> {
-    let mut remaining = brix_lower::input::MAX_INPUT_VALUE_NODES;
+    let mut remaining = brix_lower::input::MAX_WORLD_VALUE_NODES;
     canon_read_value_bounded(r, 0, &mut remaining)
 }
 
@@ -537,7 +537,7 @@ fn canon_read_value_bounded(
         8 => {
             let count = usize::try_from(r.read_uint().map_err(canon_decode_err)?)
                 .map_err(|_| WorldError::NetworkError("invalid list length".into()))?;
-            if count > brix_lower::input::MAX_INPUT_CONTAINER_WIDTH || count > *remaining {
+            if count > brix_lower::input::MAX_COLLECTION_ELEMENTS || count > *remaining {
                 return Err(WorldError::NetworkError(
                     "list value exceeds container width or node limit".into(),
                 ));

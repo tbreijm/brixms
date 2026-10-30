@@ -439,8 +439,10 @@ fn list_node_and_depth_limits_hold_at_evaluation_and_decode() {
         }
     }
     // Readers refuse both budget violations and huge declared lengths before allocation.
+    // The state reader's cumulative budget is MAX_WORLD_VALUE_NODES (1,048,576): 17 lists of
+    // 65,536 elements (each within the width bound) exceed it in total.
     for nodes in [
-        Value::List(vec![Value::List(vec![Value::Int(1); 256]); 16]),
+        Value::List(vec![Value::List(vec![Value::Int(1); 65_536]); 17]),
         (0..32).fold(Value::Int(1), |v, _| Value::List(vec![v])),
     ] {
         assert!(Value::state_from_bytes(&nodes.state_bytes()).is_err());

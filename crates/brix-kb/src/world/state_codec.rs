@@ -147,8 +147,9 @@ const V_LIST: u64 = 8;
 // Match the structured settlement decoder's admission bounds. Charge depth on
 // entry and child counts before allocation or iteration, including nested values.
 const VALUE_MAX_DEPTH: usize = brix_lower::input::MAX_INPUT_VALUE_DEPTH;
-const VALUE_MAX_NODES: usize = brix_lower::input::MAX_INPUT_VALUE_NODES;
+const VALUE_MAX_NODES: usize = brix_lower::input::MAX_WORLD_VALUE_NODES;
 const VALUE_MAX_CHILDREN: usize = brix_lower::input::MAX_INPUT_CONTAINER_WIDTH;
+const VALUE_MAX_LIST_ELEMENTS: usize = brix_lower::input::MAX_COLLECTION_ELEMENTS;
 
 impl StateCodec for Value {
     fn state_write(&self, w: &mut CanonWriter) {
@@ -213,10 +214,10 @@ impl StateCodec for Value {
     }
 }
 
-fn value_child_count(r: &mut CanonReader<'_>, remaining: usize) -> Res<usize> {
+fn value_child_count(r: &mut CanonReader<'_>, max_children: usize, remaining: usize) -> Res<usize> {
     let count = usize::try_from(r.read_uint()?)
         .map_err(|_| StateCodecError::Canon(CanonError::BadLength))?;
-    if count > VALUE_MAX_CHILDREN || count > remaining {
+    if count > max_children || count > remaining {
         return noncanon("structured value child count exceeds its decode budget");
     }
     Ok(count)
@@ -229,7 +230,7 @@ fn read_value(r: &mut CanonReader<'_>, depth: usize, remaining: &mut usize) -> R
     *remaining -= 1;
     match r.read_uint()? {
         V_LIST => {
-            let count = value_child_count(r, *remaining)?;
+            let count = value_child_count(r, VALUE_MAX_LIST_ELEMENTS, *remaining)?;
             let mut items = Vec::with_capacity(count);
             for _ in 0..count {
                 items.push(read_value(r, depth + 1, remaining)?);
@@ -261,7 +262,7 @@ fn read_value(r: &mut CanonReader<'_>, depth: usize, remaining: &mut usize) -> R
         }
         V_RECORD => {
             let nominal = read_string(r)?;
-            let n = value_child_count(r, *remaining)?;
+            let n = value_child_count(r, VALUE_MAX_CHILDREN, *remaining)?;
             let mut fields = BTreeMap::new();
             let mut previous: Option<String> = None;
             for _ in 0..n {
@@ -277,7 +278,7 @@ fn read_value(r: &mut CanonReader<'_>, depth: usize, remaining: &mut usize) -> R
         V_VARIANT => {
             let nominal = read_string(r)?;
             let variant = read_string(r)?;
-            let n = value_child_count(r, *remaining)?;
+            let n = value_child_count(r, VALUE_MAX_CHILDREN, *remaining)?;
             let mut args = Vec::with_capacity(n);
             for _ in 0..n {
                 args.push(read_value(r, depth + 1, remaining)?);
@@ -913,14 +914,10 @@ mod tests {
         rt(&value);
         assert!(Value::state_from_bytes(&wrap(value).state_bytes()).is_err());
 
-        let branch = |children| Value::Variant {
-            nominal: "m::T".into(),
-            variant: "C".into(),
-            args: vec![Value::Null; children],
-        };
-        let mut branches = vec![branch(255); 16];
-        branches[0] = branch(254);
-        // 1 root + 16 branches + 4079 leaves = 4096 nodes.
+        let branch = |children| Value::List(vec![Value::Null; children]);
+        let mut branches = vec![branch(65535); 16];
+        branches[0] = branch(65534);
+        // 1 root + 16 lists + (15 * 65535 + 65534) leaves = 1,048,576 nodes (VALUE_MAX_NODES).
         rt(&Value::Variant {
             nominal: "m::T".into(),
             variant: "C".into(),
@@ -930,7 +927,7 @@ mod tests {
             &Value::Variant {
                 nominal: "m::T".into(),
                 variant: "C".into(),
-                args: vec![branch(255); 16],
+                args: vec![branch(65535); 16],
             }
             .state_bytes()
         )

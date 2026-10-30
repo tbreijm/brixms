@@ -640,10 +640,11 @@ pub fn validate_l3_value(
 ) -> Result<(), String> {
     match (value, expected) {
         (L3ValueV2::List(items), L3SchemaType::List(element)) => {
-            if items.len() > 256 {
+            if items.len() > crate::input::MAX_COLLECTION_ELEMENTS {
                 return Err(format!(
-                    "{path}: list has {} element(s), exceeding maximum of 256",
-                    items.len()
+                    "{path}: list has {} element(s), exceeding maximum of {}",
+                    items.len(),
+                    crate::input::MAX_COLLECTION_ELEMENTS,
                 ));
             }
             for (index, item) in items.iter().enumerate() {

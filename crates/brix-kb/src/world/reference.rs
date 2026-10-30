@@ -341,7 +341,7 @@ impl Value {
     }
 
     fn canon_read(r: &mut brix_canon::CanonReader<'_>) -> Result<Self, WorldError> {
-        let mut remaining = brix_lower::input::MAX_INPUT_VALUE_NODES;
+        let mut remaining = brix_lower::input::MAX_WORLD_VALUE_NODES;
         Self::canon_read_bounded(r, 0, &mut remaining)
     }
 
@@ -445,7 +445,7 @@ impl Value {
             8 => {
                 let count = usize::try_from(r.read_uint().map_err(canon_err)?)
                     .map_err(|_| WorldError::NetworkError("invalid list length".into()))?;
-                if count > brix_lower::input::MAX_INPUT_CONTAINER_WIDTH || count > *remaining {
+                if count > brix_lower::input::MAX_COLLECTION_ELEMENTS || count > *remaining {
                     return Err(WorldError::NetworkError(
                         "list value exceeds container width or node limit".into(),
                     ));

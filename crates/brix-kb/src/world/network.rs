@@ -4705,11 +4705,9 @@ impl WorldNetwork {
                                 if new_count == 0 {
                                     aggregates.remove(&gk, store)?;
                                 } else {
-                                    aggregates.set(
-                                        gk.clone(),
-                                        accum.to_value_list(projections),
-                                        store,
-                                    )?;
+                                    let encoded = accum.to_value_list(projections);
+                                    check_persistable_accumulator(&encoded)?;
+                                    aggregates.set(gk.clone(), encoded, store)?;
                                 }
                             }
                         }
@@ -5900,6 +5898,53 @@ fn build_grouped_tuple(
         }
     }
     Ok(tuple)
+}
+
+/// Refuse an accumulator the state decoder would later reject, before it is written. The
+/// reader's bounds (depth, child width, cumulative nodes) and the writer's must agree, or a
+/// batch could publish state that no later process can open.
+fn check_persistable_accumulator(list: &ValueList) -> Result<(), WorldError> {
+    use brix_lower::input::{
+        MAX_COLLECTION_ELEMENTS, MAX_INPUT_CONTAINER_WIDTH, MAX_INPUT_VALUE_DEPTH,
+        MAX_WORLD_VALUE_NODES,
+    };
+    fn walk(v: &Value, depth: usize, nodes: &mut usize) -> Result<(), WorldError> {
+        let over = |what: &str| {
+            WorldError::NetworkError(format!(
+                "grouped accumulator exceeds the persistable state bound ({what})"
+            ))
+        };
+        if depth >= MAX_INPUT_VALUE_DEPTH {
+            return Err(over("depth"));
+        }
+        *nodes += 1;
+        if *nodes > MAX_WORLD_VALUE_NODES {
+            return Err(over("nodes"));
+        }
+        match v {
+            Value::List(items) => {
+                if items.len() > MAX_COLLECTION_ELEMENTS {
+                    return Err(over("list width"));
+                }
+                items.iter().try_for_each(|i| walk(i, depth + 1, nodes))
+            }
+            Value::Record { fields, .. } => {
+                if fields.len() > MAX_INPUT_CONTAINER_WIDTH {
+                    return Err(over("record width"));
+                }
+                fields.values().try_for_each(|i| walk(i, depth + 1, nodes))
+            }
+            Value::Variant { args, .. } => {
+                if args.len() > MAX_INPUT_CONTAINER_WIDTH {
+                    return Err(over("variant width"));
+                }
+                args.iter().try_for_each(|i| walk(i, depth + 1, nodes))
+            }
+            _ => Ok(()),
+        }
+    }
+    // The stored accumulator is decoded value by value, each with a fresh node budget.
+    list.0.iter().try_for_each(|v| walk(v, 0, &mut 0))
 }
 
 fn charge_aggregate_tree_work(
