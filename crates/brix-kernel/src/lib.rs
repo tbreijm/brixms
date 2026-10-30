@@ -5,6 +5,7 @@
 
 mod certificate;
 mod check;
+mod context_validation;
 mod prim_pinned;
 mod prim_registry;
 mod prim_schema;
@@ -17,6 +18,10 @@ pub use certificate::{
     CERTIFICATE_FORMAT_V1, CERTIFICATE_MARKER, KERNEL_PROFILE_V1, NATIVE_VERIFIER_NAME,
 };
 pub use check::{acceptance, Budget};
+pub use context_validation::{
+    acceptance_in_context, ContextAcceptance, ContextAcceptanceError, KernelAssumptionValidator,
+    CONTEXT_VERIFIER_NAME_V1, KERNEL_PROP_SCHEMA_V1, NO_AXIOMS_PROFILE_V1, PROOF_REGIME_PROFILE_V1,
+};
 pub use prim_pinned::{
     PinnedArithOp, PinnedNumericTy, ARITH_OP_ADD, ARITH_OP_DIV, ARITH_OP_MUL, ARITH_OP_SUB,
     PINNED_ENDPOINT_MANIFEST_V1, PINNED_ENDPOINT_VERSION_V1, TY_CON_COMPLEX, TY_CON_FLOAT,

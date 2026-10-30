@@ -13,6 +13,15 @@ pub const EXIT_USAGE_OR_IO: u8 = 2;
 /// Parsed CLI subcommand invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// Inspect or validate a canonical context independently of world mutation.
+    Context {
+        file: PathBuf,
+        expect: Option<String>,
+        store: Option<PathBuf>,
+        profile: String,
+        simulation: bool,
+        json: bool,
+    },
     Check {
         file: PathBuf,
         input_paths: Vec<PathBuf>,
@@ -328,6 +337,7 @@ where
     let subcmd_args = &args[1..];
 
     match subcmd {
+        "context" => parse_context_args(subcmd_args, json_requested),
         "check" => parse_check_args(subcmd_args, json_requested),
         "run" => parse_run_args(subcmd_args, json_requested),
         "audit" => parse_audit_args(subcmd_args, json_requested),
@@ -344,6 +354,52 @@ where
             Some(subcmd.to_string()),
         )),
     }
+}
+
+fn parse_context_args(args: &[String], json: bool) -> Result<Command, CliUsageError> {
+    let error = |message: &str| CliUsageError::usage(message, json, Some("context".into()));
+    let mut file = None;
+    let mut expect = None;
+    let mut store = None;
+    let mut profile = "typing".to_string();
+    let mut simulation = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => {}
+            "--simulation" => simulation = true,
+            "--expect" | "--store" | "--profile" => {
+                let flag = args[i].as_str();
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| error("context option needs a value"))?;
+                match flag {
+                    "--expect" => expect = Some(value.clone()),
+                    "--store" => store = Some(PathBuf::from(value)),
+                    _ => profile = value.clone(),
+                }
+            }
+            value if value.starts_with('-') => return Err(error("unknown context option")),
+            value => {
+                if file.replace(PathBuf::from(value)).is_some() {
+                    return Err(error("context takes exactly one canonical envelope file"));
+                }
+            }
+        }
+        i += 1;
+    }
+    if profile != "typing" && profile != "kernel" {
+        return Err(error("context profile must be typing or kernel"));
+    }
+    Ok(Command::Context {
+        file: file.ok_or_else(|| error("context requires a canonical envelope file"))?,
+        expect,
+        store,
+        profile,
+        simulation,
+        json,
+    })
 }
 
 /// Parse an `--input` argument from `args` at index `*i`.
@@ -2741,6 +2797,11 @@ brix — the Brix toolchain command-line driver
 Usage: brix <command> [options] [operands]
 
 Commands:
+  context <canonical-file> [--expect <context-hex>] [--store <directory>]
+      [--profile <typing|kernel>] [--simulation] [--json]
+      Inspect context dimensions, or validate against an independent identity pin.
+      Inspection without --expect establishes no trust. Never publishes a theorem.
+
   check <file.brix> [--input <path>...] [--json] [--package-path <dir>...]
       Parse, resolve imports, and check a Brix module. Runs profile preflight for finite-decision.
 

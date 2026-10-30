@@ -37,6 +37,12 @@ below and ADR-0030 through ADR-0042).
 
 ## Foundation document
 
+[`Context_Contract.md`](./Context_Contract.md) specifies materialized contexts,
+typed assumption ownership, artifact validation, projection/transport and
+confinement. Its V2 consumers cover native typing, contextual kernel checking,
+SOC discovery/replay and `brix context` inspection; legacy identities remain
+unchanged.
+
 **SOC = Settlement-Oriented Computing.** Settlement is the organizing primitive
 the way objects are in OOP: `OOP : Java :: SOC : Brix`. SOC is the *paradigm*;
 **Brix** is the language, and `.brix` its files. Do not call it "the SOC

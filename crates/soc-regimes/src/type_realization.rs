@@ -1743,6 +1743,13 @@ pub struct TyCtx {
 }
 
 impl TyCtx {
+    /// Construct only from the checked semantic-context adapter. Keeping this
+    /// crate-private prevents callers from pairing arbitrary bindings with a
+    /// forged published `ContextId`.
+    pub(crate) fn from_validated(bindings: BTreeMap<String, Ty>, context: ContextId) -> Self {
+        Self { bindings, context }
+    }
+
     /// The empty context. Its identity is `ContextId::root()` — which
     /// ADR-0028 ⟨D-CTXPUBLISH⟩ reserves for a derivation that genuinely
     /// assumes nothing.

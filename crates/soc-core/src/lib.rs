@@ -121,6 +121,7 @@ pub mod audit_bundle;
 pub mod audit_receipt;
 pub mod calendar;
 pub mod commit;
+pub mod contextual;
 pub mod cost;
 pub mod delta;
 pub mod engine;

@@ -88,22 +88,44 @@ pub fn acceptance(
         };
     }
 
+    acceptance_with_gamma(
+        context,
+        proposition,
+        term,
+        budget,
+        Vec::new(),
+        native_verifier(),
+        || certificate_id_v1(&CertificateMaterialV1::new(context, proposition, term)),
+    )
+}
+
+/// Check a proof with kernel-validated external hypotheses already in Gamma.
+/// This is crate-private so callers cannot manufacture trusted assumptions.
+pub(crate) fn acceptance_with_gamma(
+    context: &ContextId,
+    proposition: &Prop,
+    term: &ExplicitTerm,
+    budget: Budget,
+    mut gamma: Vec<(Option<String>, Prop)>,
+    verifier: brix_semantic::VerifierId,
+    certificate_id: impl FnOnce() -> brix_semantic::CertificateId,
+) -> Verdict {
+    if term.context != *context {
+        return Verdict::ContextMismatch {
+            claimed: *context,
+            term_context: term.context,
+        };
+    }
     let mut state = CheckerState {
         steps: budget.max_steps,
         depth: budget.max_depth,
     };
 
-    let mut gamma: Gamma = Vec::new();
-
     // 2. Bidirectional type check of term against proposition
     match check_type(&mut state, &mut gamma, &term.kind, proposition) {
         Ok(()) => Verdict::Accepted(Certificate {
-            verifier: native_verifier(),
-            certificate_id: certificate_id_v1(&CertificateMaterialV1::new(
-                context,
-                proposition,
-                term,
-            )),
+            verifier,
+            certificate_id: certificate_id(),
         }),
         Err(verdict) => verdict,
     }
