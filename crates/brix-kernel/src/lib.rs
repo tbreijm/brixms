@@ -28,8 +28,9 @@ pub use prim_pinned::{
     TY_CON_INT, TY_CON_NAT, TY_CON_RAT, TY_CON_REAL,
 };
 pub use prim_registry::{
-    resolve as resolve_primitive_relation, typing_arith_v2, JudgmentKind, PrimitiveRelation,
-    PrimitiveRelationId, Row, PRIMITIVE_RELATION_MARKER_V1, PRIMITIVE_RELATION_VERSION_V1,
+    resolve as resolve_primitive_relation, typing_arith_input_v1, typing_arith_v2, typing_arith_v3,
+    JudgmentKind, PrimitiveRelation, PrimitiveRelationId, Row, PRIMITIVE_RELATION_MARKER_V1,
+    PRIMITIVE_RELATION_VERSION_V1,
 };
 pub use prim_schema::{
     arith_typing_input_schema_id, numeric_result_type_schema_id, ArithOperatorV1,

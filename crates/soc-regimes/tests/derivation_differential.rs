@@ -46,6 +46,8 @@ use soc_regimes::type_realization::*;
 /// proposition ids re-captured 2026-08-19 for ADR-0028 (see the module doc).
 /// `float`, `var`, `fix`, `nested_lam`, `deep_spine`: captured 2026-08-20
 /// against the recursive traversal, before the iterative rewrite.
+/// `deep_spine` and `arith` re-captured 2026-10-28 for ADR-0025 Stage E (operator
+/// projection via `Id(Op)` and retirement of `g_arith_result` emission).
 const EXPECTED: &[(&str, &str, &str)] = &[
     (
         "lit",
@@ -84,13 +86,13 @@ const EXPECTED: &[(&str, &str, &str)] = &[
     ),
     (
         "deep_spine",
-        "84aa9b0982273cca22166b294492a08734a53fd4cd60026aa3156d8a2914effd",
-        "6e9232fc02a1365b9503009c8b615f94b3577c795a548c9972e4cd74590d4f68",
+        "066f657a171742e3b23c61f6cf69768e1bcddd6f04b21a6c68a36c21c9420d51",
+        "ec1de8f3758302737e466ea24014b3d2b7eab35aacc999ade36a11a4f008b881",
     ),
     (
         "arith",
-        "49d159e8530bfb711e88a79f10239664bdc3a7ea147bab83cfc44ec832661544",
-        "848e923798854c93643a89429bca841d4829f1312cf2d3d0ce850ddc31fad846",
+        "cfcd958caf66bf6a40cfecdc97b3996a1c07dd41144d684e552d34c5175ef033",
+        "7d519bcd6167e4c0152236118d248efee20c47c3c4cec0f7cf6ba22a401d81f8",
     ),
     (
         "cmp",

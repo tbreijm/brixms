@@ -67,11 +67,13 @@ use std::sync::OnceLock;
 use brix_canon::{CanonWriter, Canonical, Digest, Domain};
 use brix_semantic::{GeneratorId, PropositionId};
 
+use crate::prim_pinned::{PinnedArithOp, PinnedNumericTy};
 use crate::prim_schema::{
     arith_typing_input_schema_id, numeric_result_type_schema_id, ArithOperatorV1,
     ArithTypingInputV1, CoercionEdgeV1, CoercionKind, NumericResultTypeV1, NumericTypeNameV1,
     SchemaId,
 };
+use crate::term::ObjectTerm;
 
 /// The fixed marker opening a [`PrimitiveRelationId`] preimage. Frozen v1 ABI.
 pub const PRIMITIVE_RELATION_MARKER_V1: &[u8] = b"brix.kernel.primitive-relation";
@@ -190,6 +192,41 @@ impl PrimitiveRelation {
     pub fn admits(&self, src: &PropositionId, dst: &PropositionId) -> bool {
         self.rows.contains(&(*src, *dst))
     }
+
+    /// Check the object representation required by the versioned endpoint schemas.
+    /// A product digest inside an atom is not the product itself. Unknown schemas
+    /// fail closed; row membership is checked separately after this bounded check.
+    pub fn accepts_endpoint_shapes(&self, src: &ObjectTerm, dst: &ObjectTerm) -> bool {
+        let source_ok = if self.source_schema == arith_typing_input_schema_id() {
+            matches!(src, ObjectTerm::Const(_))
+        } else if self.source_schema == arithmetic_operand_schema_id() {
+            matches!(src, ObjectTerm::Tensor(op, pair)
+                if matches!(op.as_ref(), ObjectTerm::Const(_))
+                && matches!(pair.as_ref(), ObjectTerm::Tensor(lhs, rhs)
+                    if matches!(lhs.as_ref(), ObjectTerm::Const(_))
+                    && matches!(rhs.as_ref(), ObjectTerm::Const(_))))
+        } else {
+            false
+        };
+        let destination_known = self.destination_schema == arith_typing_input_schema_id()
+            || self.destination_schema == numeric_result_type_schema_id()
+            || self.destination_schema == pinned_numeric_schema_id();
+        source_ok && destination_known && matches!(dst, ObjectTerm::Const(_))
+    }
+}
+
+fn arithmetic_operand_schema_id() -> SchemaId {
+    SchemaId(Digest::of(
+        Domain::Value,
+        b"brix.kernel.arith-input-source-v1",
+    ))
+}
+
+fn pinned_numeric_schema_id() -> SchemaId {
+    SchemaId(Digest::of(
+        Domain::Value,
+        crate::prim_pinned::PINNED_ENDPOINT_MANIFEST_V1,
+    ))
 }
 
 impl Canonical for PrimitiveRelation {
@@ -523,6 +560,153 @@ fn build_typing_arith_v2() -> PrimitiveRelation {
     build_arith_relation()
 }
 
+/// The Stage E direct-result relation (ADR-0025 §10.3 Option B):
+/// maps `ArithTypingInputV1` directly to pinned `Ty::Con` numeric identities.
+fn build_typing_arith_v3() -> PrimitiveRelation {
+    let mut rows = BTreeSet::new();
+    for op in OPERATORS {
+        for lhs in NODES {
+            for rhs in NODES {
+                let Some(base) = join(*lhs, *rhs) else {
+                    continue;
+                };
+                let result = if *op == ArithOperatorV1::Div {
+                    field_of(base)
+                } else {
+                    base
+                };
+                let (Some(lhs_path), Some(rhs_path)) =
+                    (promotion_path(*lhs, result), promotion_path(*rhs, result))
+                else {
+                    continue;
+                };
+                let src = ArithTypingInputV1 {
+                    operator: *op,
+                    lhs_type: *lhs,
+                    rhs_type: *rhs,
+                    lhs_promotion_path: lhs_path,
+                    rhs_promotion_path: rhs_path,
+                };
+                let pinned_result = match result {
+                    NumericTypeNameV1::Nat => PinnedNumericTy::Nat,
+                    NumericTypeNameV1::Int => PinnedNumericTy::Int,
+                    NumericTypeNameV1::Rat => PinnedNumericTy::Rat,
+                    NumericTypeNameV1::Real => PinnedNumericTy::Real,
+                    NumericTypeNameV1::Complex => PinnedNumericTy::Complex,
+                    NumericTypeNameV1::Float => PinnedNumericTy::Float,
+                };
+                rows.insert((
+                    PropositionId(src.config_id().digest()),
+                    pinned_result.proposition_id(),
+                ));
+            }
+        }
+    }
+
+    let mut seen: BTreeMap<PropositionId, PropositionId> = BTreeMap::new();
+    for (src, dst) in &rows {
+        if let Some(previous) = seen.insert(*src, *dst) {
+            assert_eq!(
+                previous, *dst,
+                "arithmetic v3 functionality invariant violated: one canonical \
+                 src maps to two distinct result types"
+            );
+        }
+    }
+
+    PrimitiveRelation {
+        judgment_kind: JudgmentKind::Typing,
+        generator: GeneratorId::named("type.rule.arith@1"),
+        source_schema: arith_typing_input_schema_id(),
+        destination_schema: pinned_numeric_schema_id(),
+        rows,
+    }
+}
+
+/// The operator projection input bridge relation (ADR-0025 §10.1 & §10.2):
+/// maps `Prod(Op(op), Prod(lhs_ty, rhs_ty))` to `ArithTypingInputV1`.
+fn build_typing_arith_input_v1() -> PrimitiveRelation {
+    let mut rows = BTreeSet::new();
+    for op in OPERATORS {
+        for lhs in NODES {
+            for rhs in NODES {
+                let Some(base) = join(*lhs, *rhs) else {
+                    continue;
+                };
+                let result = if *op == ArithOperatorV1::Div {
+                    field_of(base)
+                } else {
+                    base
+                };
+                let (Some(lhs_path), Some(rhs_path)) =
+                    (promotion_path(*lhs, result), promotion_path(*rhs, result))
+                else {
+                    continue;
+                };
+                let pinned_op = match op {
+                    ArithOperatorV1::Add => PinnedArithOp::Add,
+                    ArithOperatorV1::Sub => PinnedArithOp::Sub,
+                    ArithOperatorV1::Mul => PinnedArithOp::Mul,
+                    ArithOperatorV1::Div => PinnedArithOp::Div,
+                };
+                let pinned_lhs = match lhs {
+                    NumericTypeNameV1::Nat => PinnedNumericTy::Nat,
+                    NumericTypeNameV1::Int => PinnedNumericTy::Int,
+                    NumericTypeNameV1::Rat => PinnedNumericTy::Rat,
+                    NumericTypeNameV1::Real => PinnedNumericTy::Real,
+                    NumericTypeNameV1::Complex => PinnedNumericTy::Complex,
+                    NumericTypeNameV1::Float => PinnedNumericTy::Float,
+                };
+                let pinned_rhs = match rhs {
+                    NumericTypeNameV1::Nat => PinnedNumericTy::Nat,
+                    NumericTypeNameV1::Int => PinnedNumericTy::Int,
+                    NumericTypeNameV1::Rat => PinnedNumericTy::Rat,
+                    NumericTypeNameV1::Real => PinnedNumericTy::Real,
+                    NumericTypeNameV1::Complex => PinnedNumericTy::Complex,
+                    NumericTypeNameV1::Float => PinnedNumericTy::Float,
+                };
+                let prod = ObjectTerm::Tensor(
+                    Box::new(ObjectTerm::Const(pinned_op.proposition_id())),
+                    Box::new(ObjectTerm::Tensor(
+                        Box::new(ObjectTerm::Const(pinned_lhs.proposition_id())),
+                        Box::new(ObjectTerm::Const(pinned_rhs.proposition_id())),
+                    )),
+                );
+                let src_id = PropositionId::of(&prod);
+
+                let dst = ArithTypingInputV1 {
+                    operator: *op,
+                    lhs_type: *lhs,
+                    rhs_type: *rhs,
+                    lhs_promotion_path: lhs_path,
+                    rhs_promotion_path: rhs_path,
+                };
+                let dst_id = PropositionId(dst.config_id().digest());
+                rows.insert((src_id, dst_id));
+            }
+        }
+    }
+
+    let mut seen: BTreeMap<PropositionId, PropositionId> = BTreeMap::new();
+    for (src, dst) in &rows {
+        if let Some(previous) = seen.insert(*src, *dst) {
+            assert_eq!(
+                previous, *dst,
+                "arithmetic input v1 functionality invariant violated: one canonical \
+                 src maps to two distinct ArithTypingInputV1 values"
+            );
+        }
+    }
+
+    PrimitiveRelation {
+        judgment_kind: JudgmentKind::Typing,
+        generator: GeneratorId::named("type.rule.arith.input@1"),
+        source_schema: arithmetic_operand_schema_id(),
+        destination_schema: arith_typing_input_schema_id(),
+        rows,
+    }
+}
+
 /// The compiled-in registry, built once.
 ///
 /// One physical artifact is fine as packaging; the semantic partition is by
@@ -553,7 +737,11 @@ fn registry() -> &'static BTreeMap<PrimitiveRelationId, PrimitiveRelation> {
 /// longer declares. Its id now resolves to `None`, which per §7 means the
 /// kernel has not introduced the fact, never that its negation holds.
 fn compiled_in_relations() -> Vec<PrimitiveRelation> {
-    vec![build_typing_arith_v2()]
+    vec![
+        build_typing_arith_v2(),
+        build_typing_arith_v3(),
+        build_typing_arith_input_v1(),
+    ]
 }
 
 /// The identity of the current arithmetic **typing** relation (ADR-0015 §5
@@ -562,6 +750,16 @@ fn compiled_in_relations() -> Vec<PrimitiveRelation> {
 /// Pinned by `vectors/primitive_relation_typing_arith_v2.json`.
 pub fn typing_arith_v2() -> PrimitiveRelationId {
     build_typing_arith_v2().id()
+}
+
+/// The identity of the direct-result arithmetic **typing** relation (ADR-0025 §10.3).
+pub fn typing_arith_v3() -> PrimitiveRelationId {
+    build_typing_arith_v3().id()
+}
+
+/// The identity of the operator projection input bridge relation (ADR-0025 §10.1 & §10.2).
+pub fn typing_arith_input_v1() -> PrimitiveRelationId {
+    build_typing_arith_input_v1().id()
 }
 
 /// Resolve a relation id against the compiled-in registry.
@@ -824,10 +1022,12 @@ mod tests {
             "TypingArithV1 must not resolve after retirement"
         );
         assert!(resolve(&typing_arith_v2()).is_some());
+        assert!(resolve(&typing_arith_v3()).is_some());
+        assert!(resolve(&typing_arith_input_v1()).is_some());
         assert_eq!(
             compiled_in_relations().len(),
-            1,
-            "one arithmetic relation is compiled in"
+            3,
+            "three arithmetic relations are compiled in (v2, v3, input_v1)"
         );
     }
 

@@ -237,3 +237,72 @@ exactly the kind of thing ⟨D-JUDGE⟩ exists to keep honest.
   vocabulary (§2's narrow variant). Revisit if a second regime needs them; not blocking.
 - Which reading of ADR-0015 Stage D's gate is intended — `g_arith`'s leaf closed, or the whole
   derivation unconditional (§7). Needs an answer before Stage F, not before Stage A.
+
+---
+
+## 10. Amendment (2026-10-27) — Structural Identity Prerequisite and Direct Result Closure
+
+Records the implementation design for Stages B–F under Issue #53. It does not attribute a separate
+maintainer ruling beyond the decisions written here.
+
+### 10.1 Structural identity node and proof rule (amending §8 compatibility)
+
+Carrying an operator `Op(op)` untouched down a parallel wire beside operand derivations
+(`Tensor(derive(a), derive(b))`) requires an identity realization arrow:
+$$\text{id}_{Op}: \text{Atom}(Op) \to \text{Atom}(Op)$$
+Contract §4.3 strictly forbids padding leaves (`src == dst`), so this step SHALL NOT be represented
+as a generator leaf `g_id` or `g_op_wire`. Merely nesting binary tensors without an identity node
+fails to type-check.
+
+Therefore, this amendment specifies a **structural identity node and kernel proof rule**:
+1. **Derivation AST**: `brix_semantic::RealizesTree::Id(TreeObj)` (ordinal 3, append-only).
+   - Source and target: `src() == dst() == obj`.
+   - Well-formedness: unconditionally `true`.
+   - Leaves: empty (`leaves()` yields nothing; it carries no generator and introduces no open hypotheses).
+   - Witness identity: `witness_id()` computes the identity witness for each atom. For a product
+     object, it tensors the child identity witnesses recursively, preserving product shape.
+2. **Object Term**: `brix_kernel::ObjectTerm::Id(Box<ObjectTerm>)` (ordinal 4, append-only).
+   - Identity checking accepts endpoints composed only of `Const` and ordered `Tensor` nodes.
+     Composition and bound variables are rejected. A tensor endpoint's identity witness is the
+     tensor of its child identity witnesses.
+3. **Proof Term**: `brix_kernel::TermKind::RealizesId(ObjectTerm)` (ordinal 18, append-only).
+   - Synthesis rule: $\vdash \text{Realizes}(\text{id}(t), t, t)$.
+   - Check rule against $\text{Realizes}(w, x, z)$: checks $x = t \land z = t \land w.\text{witness\_digest}() = \text{id}(t).\text{witness\_digest}()$.
+   - Charges each visited object node against the step budget. Traversal and endpoint
+     comparison are iterative, with the caller depth limit and an independent 128-level
+     structural-object cap. Rejection diagnostics name only node kinds and never render
+     unchecked subtrees.
+4. **Compatibility impact**: Amends §8's original statement of "no new TermKind ordinal". Existing
+   ordinals 0..17 in `TermKind`, 0..3 in `ObjectTerm`, and 0..2 in `RealizesTree` remain frozen;
+   additions use the next ordinals. Existing serialized certificates and vectors remain valid and
+   unchanged.
+
+### 10.2 Bounded constant-only product endpoints (⟨D-PRODENDPOINT⟩ refinement)
+
+Arithmetic relation schemas remain narrow and versioned. `TypingArithV2` and `TypingArithV3`
+use atomic endpoints. `TypingArithInputV1` binds its source to exactly
+`Tensor(ConstOp, Tensor(ConstL, ConstR))`, with an atomic destination; the complete source product
+is matched by its canonical identity, without decomposition or normalization. Product identity is
+not a general license for product-shaped relation endpoints. Arbitrary tensor products,
+compositions, and bound variables are not admitted as arithmetic schema endpoints.
+
+### 10.3 Direct result relation (Stage E / Option B)
+
+For new derivations, close the result leaf without an intermediate result bridge:
+- A new primitive relation `TypingArithV3` is minted whose destination lands directly on the pinned
+  atomic `Ty::Con` endpoint; both relation endpoints are atomic.
+- New derivations use `TypingArithInputV1` to close the exact operator-and-operands source shape
+  and `TypingArithV3` to close the result. `g_arith_split` carries `Op(op)` beside operand
+  derivations as `Prod(Op(op), Prod(derive(a), derive(b)))`.
+- For new derivations, `g_arith_result` emission is retired.
+- `TypingArithV2` is retained in `brix-kernel` for legacy verification and existing frozen vectors.
+
+### 10.4 Occurrence-level discharge boundary
+
+Discharge of primitive bridge leaves is strictly occurrence-based:
+- Bridges are **not** marked globally tight in `generator_is_tight`.
+- A leaf is discharged only when the accepted proof contains an admitted `PrimRealizes` term for that
+  specific occurrence.
+- The global tightness whitelist is unchanged. `g_lit` and `g_arith_split` remain conditional
+  implication antecedents under their stated grounds; an empty typing-grounds obligations list is
+  not an unconditional certificate.

@@ -232,6 +232,7 @@ pub fn witness_object(tree: &RealizesTree) -> ObjectTerm {
             Box::new(witness_object(left)),
             Box::new(witness_object(right)),
         ),
+        RealizesTree::Id(obj) => ObjectTerm::Id(Box::new(tree_obj_to_object_term(obj))),
     }
 }
 
@@ -295,9 +296,10 @@ pub fn elaborate_tree(
 ///
 /// Each leaf occurrence is classified deterministically. A leaf whose
 /// generator, judgment kind and endpoints a compiled-in kernel primitive
-/// relation admits (today: `g_arith` under `TypingArithV2`) is emitted as a
+/// relation admits (`g_arith_input` under `TypingArithInputV1`, `g_arith` under
+/// `TypingArithV3`, or legacy `TypingArithV2`) is emitted as a
 /// closed [`brix_kernel::TermKind::PrimRealizes`]; every other leaf — including
-/// both arithmetic vocabulary bridges — stays a hypothesis. The implication
+/// literal and structural split grounds — stays a hypothesis. The implication
 /// proposition and the enclosing lambdas are built from the remaining
 /// hypotheses only, with de Bruijn indices recomputed from their positions in
 /// that list. The kernel remains the authority: classification only selects
@@ -321,7 +323,7 @@ pub fn elaborate_tree_certified(
             brix_kernel::RejectionReason::Custom("malformed Seq middle".into()),
         ));
     }
-    if tree.leaves().is_empty() {
+    if tree.leaves().is_empty() && !tree.contains_id() {
         return TreeElaboration::NotElaborated(brix_kernel::Verdict::Rejected(
             brix_kernel::RejectionReason::Custom("empty leaves".into()),
         ));

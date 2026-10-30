@@ -117,6 +117,6 @@ pub use tree::{
     TreeVerificationError,
 };
 pub use witness::{
-    compose, compose_chain, tensor, tensor_chain, Witness, WitnessId, WITNESS_COMPOSE_TAG,
-    WITNESS_TENSOR_TAG,
+    compose, compose_chain, id_witness, tensor, tensor_chain, Witness, WitnessId,
+    WITNESS_COMPOSE_TAG, WITNESS_ID_TAG, WITNESS_TENSOR_TAG,
 };

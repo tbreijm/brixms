@@ -216,10 +216,10 @@ nothing to do with the composition. `T` is the tightness status for
 | `g_tensor_split` | `Atom(Γ ⊢ And(a,b))` → `Prod(Atom(Γ ⊢ a), Atom(Γ ⊢ b))` | ✓ | ⟨D-SPLIT⟩ — see 3.4.2 |
 | `g_tensor` | `Prod(Atom(T tₐ), Atom(T t_b))` → `Atom(T Prod(tₐ,t_b))` | ✓ | product introduction — see 3.4.2 |
 | `g_fix` | `Atom(Γ ⊢ Fix(f,T,b))` → `Atom(Γ,f:T ⊢ b)` | ✗ | assumes what it establishes |
-| `g_arith_split` | `Atom(Γ ⊢ Arith(op,a,b))` → `Prod(Atom(Γ ⊢ a), Atom(Γ ⊢ b))` | ✓ | ⟨D-SPLIT⟩, conditional |
-| `g_arith_input` | `Prod(Atom(T a), Atom(T b))` → `Atom(ArithInput)` | ✗ | regime→kernel bridge |
-| `g_arith` | `Atom(ArithInput)` → `Atom(ArithResult)` | ✗ | kernel-checked, not yet closed |
-| `g_arith_result` | `Atom(ArithResult)` → `Atom(T result)` | ✗ | kernel→regime bridge |
+| `g_arith_split` | `Atom(Γ ⊢ Arith(op,a,b))` → `Prod(Atom(Op(op)), Prod(Atom(Γ ⊢ a), Atom(Γ ⊢ b)))` | ✓ | ⟨D-SPLIT⟩, conditional |
+| `g_arith_input` | `Prod(Atom(Op(op)), Prod(Atom(T a), Atom(T b)))` → `Atom(ArithInput)` | ✗ | regime→kernel bridge (`TypingArithInputV1`) |
+| `g_arith` | `Atom(ArithInput)` → `Atom(T result)` | ✗ | `TypingArithV3`, occurrence-closed; legacy V2 retains its `Atom(ArithResult)` target |
+| `g_arith_result` | `Atom(ArithResult)` → `Atom(T result)` | ✗ | legacy kernel→regime bridge; not emitted by new derivations |
 | `g_match_catchall` | `Prod(Atom(T armᵢ)…)` → `Atom(T result)` | ✗ | repeated branch premises unrepresented |
 | `NUMERIC` / `GRADE` edges | coercion-path data, **not leaves** | n/a | ⟨D-EXACTCOVERED⟩ |
 
@@ -520,12 +520,25 @@ document recording it SHALL say so. `g_record_empty` is such an interim: ADR-002
 **9.5 Kernel-closed leaves.** After ⟨D-PRIM⟩, a leaf is closed only when the
 certificate contains the `PrimRealizes` term for that leaf *and* the kernel
 accepted the resulting proof. Registry membership implies nothing about
-occurrences (ADR-0015 §8.7). Under ADR-0015 Stage D, supported arithmetic leaves
-(`g_arith` under `TypingArithV2`) are classified deterministically and emitted
-as closed `PrimRealizes` instances across tree elaboration. The two
-vocabulary-bridge leaves (`g_arith_input` and `g_arith_result`) remain
-hypotheses (`Hyp`), keeping the overall result `@Audited`. **[Implemented:
-ADR-0015 Stage D]**
+occurrences (ADR-0015 §8.7). New arithmetic derivations emit `g_arith_split`,
+then `Tensor(Id(Op(op)), Tensor(derive(a), derive(b)))`, then `g_arith_input`,
+then `g_arith`. The input bridge is closed by `TypingArithInputV1`; the result
+leaf is closed by `TypingArithV3`, whose destination is the pinned atomic
+`Ty::Con` endpoint. New derivations do not emit `g_arith_result`. Legacy
+`TypingArithV2` remains available to verify old arithmetic artifacts. These
+closures are occurrence-specific. **[Implemented:
+`exhaustive_arithmetic_matrix_through_production_elaboration`,
+`the_arith_input_bridge_is_minted_but_not_discharged`,
+`the_arith_result_bridge_is_minted_but_not_discharged`,
+`let_one_plus_two_emits_and_retains_an_independently_accepted_primitive_proof`]**
+
+An empty `typing_grounds(...).obligations` list is not an unconditional
+certificate. `g_lit` and structural split leaves remain implication
+antecedents in the kernel proof; the empty list says only that the typing
+grounds report found no undischarged occurrence under its policy. Literal and
+split discharges remain conditional on their stated grounds. `Proven` means the
+kernel accepted the resulting conditional theorem and the accepted primitive
+occurrences; it does not erase the antecedents.
 
 **9.6** The result grade is the composition outcome capped by the
 least-discharged leaf. **[Pinned: `honest_result_outcome`, and the standing
@@ -565,14 +578,16 @@ against `main` at the date above.
 > table drifts; nothing yet does that for this section, so it remains a
 > standing obligation under §12.3.
 
-- The λ-calculus core, the structural product/coproduct fragment, literals, and
-  the two zero-arity introductions reach genuine `Proven`.
-- **Arithmetic is capped.** `1 + 2` is `Int @Audited` and `7 / 2` is
-  `Float @Audited`, capped by `g_arith_input` and `g_arith_result`.
-  `g_arith`'s realization is closed by the kernel relation (`TypingArithV2`)
-  under ADR-0015 Stage D with an accepted `PrimRealizes` proof term, while the two
-  bridges remain open hypotheses because each connects to regime-encoded `Ty`
-  endpoints outside kernel vocabulary.
+- The λ-calculus core, structural product/coproduct fragment, literals, and
+  zero-arity introductions can reach `Proven` under their stated conditional
+  grounds; their kernel implications retain open antecedents where applicable.
+- New arithmetic derivations close `g_arith_input` and `g_arith` with
+  `TypingArithInputV1` and `TypingArithV3`; `g_arith_result` is not emitted.
+  `TypingArithV2` remains for legacy certificates. Arithmetic examples reach
+  `Proven` through accepted, occurrence-specific primitive proofs, while
+  literal and split antecedents remain conditional on their existing
+  discharge grounds. An empty typing-grounds obligation list does not make
+  those implications unconditional.
 - **Comparison is capped** by `g_cmp`.
 - **Recursion is capped** by `g_fix`, deliberately: it assumes the definition's
   own type in order to check the body, which is the standard and sound rule for

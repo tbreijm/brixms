@@ -89,6 +89,21 @@ fn shapes() -> Vec<(&'static str, RealizesTree)> {
                 }),
             },
         ),
+        ("id_atom", RealizesTree::Id(atom("x0"))),
+        (
+            "id_prod",
+            RealizesTree::Id(TreeObj::Prod(Box::new(atom("x0")), Box::new(atom("x1")))),
+        ),
+        (
+            "tensor_id_and_leaf",
+            RealizesTree::Tensor {
+                left: Box::new(RealizesTree::Id(atom("x0"))),
+                right: Box::new(RealizesTree::Tensor {
+                    left: Box::new(b.clone()),
+                    right: Box::new(c.clone()),
+                }),
+            },
+        ),
     ]
 }
 

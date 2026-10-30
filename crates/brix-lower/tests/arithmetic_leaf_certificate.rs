@@ -5,7 +5,8 @@
 
 use brix_elaborate::{LeafStatus, TreeProofError};
 use brix_kernel::{
-    acceptance, typing_arith_v2, Budget, ExplicitTerm, JudgmentKind, TermKind, Verdict,
+    acceptance, typing_arith_input_v1, typing_arith_v3, Budget, ExplicitTerm, JudgmentKind,
+    TermKind, Verdict,
 };
 use brix_lower::{check_module, CheckResult};
 use brix_semantic::{ContextId, Outcome};
@@ -42,12 +43,17 @@ fn let_one_plus_two_emits_and_retains_an_independently_accepted_primitive_proof(
     let r = check_one("let x = 1 + 2");
     let proof = &r.typing_proof;
 
-    // The actual emitted proof contains the arithmetic primitive.
-    assert_eq!(count_prims(&proof.term().kind), 1);
+    // The actual emitted proof contains both arithmetic primitives (input bridge and result).
+    assert_eq!(count_prims(&proof.term().kind), 2);
     let closed: Vec<_> = proof.closed_occurrences().collect();
-    assert_eq!(closed.len(), 1);
-    assert_eq!(*closed[0].generator(), g_arith());
-    assert_eq!(closed[0].status(), LeafStatus::Closed(typing_arith_v2()));
+    assert_eq!(closed.len(), 2);
+    assert_eq!(*closed[0].generator(), g_arith_input());
+    assert_eq!(
+        closed[0].status(),
+        LeafStatus::Closed(typing_arith_input_v1())
+    );
+    assert_eq!(*closed[1].generator(), g_arith());
+    assert_eq!(closed[1].status(), LeafStatus::Closed(typing_arith_v3()));
 
     // Independent kernel acceptance of the retained (context, proposition, term).
     match acceptance(proof.context(), proof.proposition(), proof.term(), budget()) {
@@ -68,20 +74,15 @@ fn let_one_plus_two_emits_and_retains_an_independently_accepted_primitive_proof(
 }
 
 #[test]
-fn the_result_stays_audited_and_both_bridges_are_exposed() {
+fn the_result_reaches_proven_and_both_bridges_are_resolved() {
     let r = check_one("let x = 1 + 2");
-    assert_eq!(r.outcome, Outcome::Audited);
+    assert_eq!(r.outcome, Outcome::Proven);
 
     let grounds = r.grounds().expect("proof binds its derivation");
-    assert_eq!(grounds.outcome, Outcome::Audited);
+    assert_eq!(grounds.outcome, Outcome::Proven);
     let closed: Vec<_> = grounds.closed.iter().map(|g| g.name.as_deref()).collect();
-    assert_eq!(closed, vec![Some("g_arith")]);
-    let remaining: Vec<_> = grounds
-        .obligations
-        .iter()
-        .map(|g| g.name.as_deref().unwrap())
-        .collect();
-    assert_eq!(remaining, vec!["g_arith_input", "g_arith_result"]);
+    assert_eq!(closed, vec![Some("g_arith_input"), Some("g_arith")]);
+    assert!(grounds.obligations.is_empty());
 
     // Tightness is a capability hint, untouched: closure came from the proof.
     for g in [g_arith(), g_arith_input(), g_arith_result()] {
@@ -91,17 +92,14 @@ fn the_result_stays_audited_and_both_bridges_are_exposed() {
 }
 
 #[test]
-fn nested_arithmetic_closes_every_occurrence_and_stays_audited() {
+fn nested_arithmetic_closes_every_occurrence_and_reaches_proven() {
     let r = check_one("let z = (1 + 2) * (3 + 4)");
-    assert_eq!(r.outcome, Outcome::Audited);
-    assert_eq!(count_prims(&r.typing_proof.term().kind), 3);
-    assert_eq!(r.typing_proof.closed_occurrences().count(), 3);
+    assert_eq!(r.outcome, Outcome::Proven);
+    assert_eq!(count_prims(&r.typing_proof.term().kind), 6);
+    assert_eq!(r.typing_proof.closed_occurrences().count(), 6);
     let g = r.grounds().unwrap();
-    assert_eq!(g.closed.len(), 3);
-    assert!(g
-        .obligations
-        .iter()
-        .all(|o| matches!(o.name.as_deref(), Some("g_arith_input" | "g_arith_result"))));
+    assert_eq!(g.closed.len(), 6);
+    assert!(g.obligations.is_empty());
     r.typing_proof
         .recheck(&r.tree_derivation, &r.context, budget())
         .unwrap();
@@ -111,8 +109,8 @@ fn nested_arithmetic_closes_every_occurrence_and_stays_audited() {
 fn division_and_mixed_float_arithmetic_close_with_the_same_relation() {
     for src in ["let q = 7 / 2", "let f = 1.5 + 2", "let m = 6 * 7 - 2"] {
         let r = check_one(src);
-        assert_eq!(r.outcome, Outcome::Audited, "{src}");
-        assert!(r.typing_proof.closed_occurrences().count() >= 1, "{src}");
+        assert_eq!(r.outcome, Outcome::Proven, "{src}");
+        assert!(r.typing_proof.closed_occurrences().count() >= 2, "{src}");
         r.typing_proof
             .recheck(&r.tree_derivation, &r.context, budget())
             .unwrap_or_else(|e| panic!("{src}: {e:?}"));
@@ -187,12 +185,12 @@ fn a_certificate_digest_alone_does_not_authorize_closure() {
 #[test]
 fn typing_publishes_no_evaluation_or_policy_authority() {
     let r = check_one("let x = 1 + 2");
-    // The relation that closed the leaf is a typing relation.
-    let relation = brix_kernel::resolve_primitive_relation(&typing_arith_v2()).unwrap();
+    // The relation that closed the arithmetic leaf is a typing relation.
+    let relation = brix_kernel::resolve_primitive_relation(&typing_arith_v3()).unwrap();
     assert_eq!(relation.judgment_kind, JudgmentKind::Typing);
     // The proposition is the composition `leaves ⇒ x : Int` shape over
     // `Realizes` only; no value, equality or evaluation proposition is held.
     assert!(!format!("{:?}", r.typing_proof.proposition()).contains("Eq("));
-    // The grade is Audited, not an evaluation or compliance claim.
-    assert_eq!(r.outcome, Outcome::Audited);
+    // The grade is Proven, not an evaluation or compliance claim.
+    assert_eq!(r.outcome, Outcome::Proven);
 }

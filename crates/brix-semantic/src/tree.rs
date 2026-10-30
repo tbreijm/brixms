@@ -54,6 +54,16 @@ impl TreeObj {
             TreeObj::Prod(_, _) => 1,
         }
     }
+
+    /// The witness identity of the identity realization arrow id_{TreeObj} (ADR-0025 §10.1).
+    pub fn id_witness(&self) -> WitnessId {
+        match self {
+            TreeObj::Atom(config) => crate::witness::id_witness(config.digest().as_bytes()),
+            TreeObj::Prod(left, right) => {
+                crate::witness::tensor(left.id_witness(), right.id_witness())
+            }
+        }
+    }
 }
 
 impl Canonical for TreeObj {
@@ -69,8 +79,9 @@ impl Canonical for TreeObj {
 }
 
 /// A tree-structured realization derivation (ADR-0007 §3). Leaves are single
-/// generators of `𝒢`; `Seq` composes, `Tensor` runs in parallel. Canonical
-/// ordinals are **ABI** — append-only, never reordered.
+/// generators of `𝒢`; `Seq` composes, `Tensor` runs in parallel; `Id` is the
+/// structural identity arrow (ADR-0025 §10.1). Canonical ordinals are **ABI** —
+/// append-only, never reordered.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RealizesTree {
     Leaf {
@@ -86,6 +97,9 @@ pub enum RealizesTree {
         left: Box<RealizesTree>,
         right: Box<RealizesTree>,
     },
+    /// A structural identity arrow id_A : A -> A (ADR-0025 §10.1).
+    /// Carries an object unchanged without being a generator leaf citing g_id.
+    Id(TreeObj),
 }
 
 impl RealizesTree {
@@ -97,6 +111,7 @@ impl RealizesTree {
             RealizesTree::Tensor { left, right } => {
                 TreeObj::Prod(Box::new(left.src()), Box::new(right.src()))
             }
+            RealizesTree::Id(obj) => obj.clone(),
         }
     }
 
@@ -108,6 +123,7 @@ impl RealizesTree {
             RealizesTree::Tensor { left, right } => {
                 TreeObj::Prod(Box::new(left.dst()), Box::new(right.dst()))
             }
+            RealizesTree::Id(obj) => obj.clone(),
         }
     }
 
@@ -118,6 +134,7 @@ impl RealizesTree {
                 left.collect_leaves(out);
                 right.collect_leaves(out);
             }
+            RealizesTree::Id(_) => {}
         }
     }
 
@@ -132,7 +149,7 @@ impl RealizesTree {
 
     /// Structural well-formedness: every `Seq` middle matches
     /// (`left.dst() == right.src()`). `Tensor` branches are independent and
-    /// carry no such constraint.
+    /// carry no such constraint. `Id` is unconditionally well-formed.
     ///
     /// This is exactly the check ADR-0007 §6 designates as the tree analogue
     /// of a replay, and exactly as far as it goes: it says nothing about
@@ -144,6 +161,18 @@ impl RealizesTree {
                 left.well_formed() && right.well_formed() && left.dst() == right.src()
             }
             RealizesTree::Tensor { left, right } => left.well_formed() && right.well_formed(),
+            RealizesTree::Id(_) => true,
+        }
+    }
+
+    /// Whether this derivation contains any structural identity (`Id`) node.
+    pub fn contains_id(&self) -> bool {
+        match self {
+            RealizesTree::Id(_) => true,
+            RealizesTree::Seq { left, right } | RealizesTree::Tensor { left, right } => {
+                left.contains_id() || right.contains_id()
+            }
+            RealizesTree::Leaf { .. } => false,
         }
     }
 
@@ -167,6 +196,7 @@ impl RealizesTree {
             // `ObjectTerm::Compose(right.witness_object(), left.witness_object())`.
             RealizesTree::Seq { left, right } => compose(right.witness_id(), left.witness_id()),
             RealizesTree::Tensor { left, right } => tensor(left.witness_id(), right.witness_id()),
+            RealizesTree::Id(obj) => obj.id_witness(),
         }
     }
 
@@ -176,6 +206,7 @@ impl RealizesTree {
             RealizesTree::Leaf { .. } => 0,
             RealizesTree::Seq { .. } => 1,
             RealizesTree::Tensor { .. } => 2,
+            RealizesTree::Id(_) => 3,
         }
     }
 }
@@ -196,6 +227,9 @@ impl Canonical for RealizesTree {
             RealizesTree::Seq { left, right } | RealizesTree::Tensor { left, right } => {
                 left.canon_write(w);
                 right.canon_write(w);
+            }
+            RealizesTree::Id(obj) => {
+                obj.canon_write(w);
             }
         });
     }

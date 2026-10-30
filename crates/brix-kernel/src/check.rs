@@ -142,6 +142,7 @@ fn obj_term_contains(term: &ObjectTerm, target: &ObjectTerm) -> bool {
         ObjectTerm::Tensor(left, right) => {
             obj_term_contains(left, target) || obj_term_contains(right, target)
         }
+        ObjectTerm::Id(inner) => obj_term_contains(inner, target),
         _ => false,
     }
 }
@@ -513,6 +514,23 @@ fn check_rule(
             Ok(())
         }
 
+        // (RealizesId) Structural identity realization (ADR-0025 §10.1)
+        (TermKind::RealizesId(t), Prop::Realizes(w, x, z)) => {
+            let expected_digest = validate_and_digest_endpoint(state, t)?;
+            check_endpoints_equal(state, x, t, "Source")?;
+            check_endpoints_equal(state, z, t, "Target")?;
+            let actual_digest = validate_and_digest_identity_witness(state, w)?;
+
+            if actual_digest != expected_digest {
+                return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                    expected: format!("Identity witness with digest {expected_digest:?}"),
+                    found: format!("Identity witness with digest {actual_digest:?}"),
+                }));
+            }
+
+            Ok(())
+        }
+
         // Out-of-slice unsupported construct placeholder
         (TermKind::Unsupported(msg), _) => Err(Verdict::Unsupported(
             UnsupportedConstruct::Construct(msg.clone()),
@@ -676,7 +694,12 @@ fn infer_rule(
         // ordinary synthesize-then-compare fallback above — there is no
         // expected-mode arm here, deliberately, because one would let the
         // caller's goal reconstruct a field the registry is supposed to decide.
-        TermKind::PrimRealizes { relation, src, dst } => infer_prim_realizes(relation, src, dst),
+        TermKind::PrimRealizes { relation, src, dst } => {
+            infer_prim_realizes(state, relation, src, dst)
+        }
+
+        // (RealizesId) Structural identity realization (ADR-0025 §10.1)
+        TermKind::RealizesId(t) => infer_realizes_id(state, t),
 
         // Out-of-slice unsupported construct placeholder
         TermKind::Unsupported(msg) => Err(Verdict::Unsupported(UnsupportedConstruct::Construct(
@@ -689,12 +712,79 @@ fn infer_rule(
 
 /// (PrimRealizes) Primitive realization introduction (ADR-0015 ⟨D-PRIM⟩).
 ///
-/// Takes no `CheckerState` and no `Gamma`, which is the rule's content rather
-/// than an omission: it has zero premises and consults no hypothesis context,
-/// so nothing the caller put in Γ can influence the result. The signature is
-/// the closedness claim, checkable by reading it.
+/// Validate and compute the single canonical PropositionId for a PrimRealizes endpoint.
+///
+/// Adopts ADR-0025 §4 & §10.2 (⟨D-PRODENDPOINT⟩):
+/// - `ObjectTerm::Const(id)`: returns `*id` directly. Costs 1 step.
+/// - `ObjectTerm::Tensor(left, right)`: strictly bounded constant-only product.
+///   Costs 1 step per node and 1 depth per branch level.
+///   Rejects `Compose`, `BoundVar`, and `Id` with `TypeMismatch`.
+///   Returns `PropositionId::of(term)`.
+fn endpoint_proposition_id(
+    state: &mut CheckerState,
+    term: &ObjectTerm,
+    endpoint_name: &str,
+) -> Result<PropositionId, Verdict> {
+    state.step()?;
+    match term {
+        ObjectTerm::Const(id) => Ok(*id),
+        ObjectTerm::Tensor(left, right) => {
+            state.enter_depth()?;
+            let l_res = validate_product_endpoint(state, left, endpoint_name);
+            state.leave_depth(1);
+            l_res?;
+
+            state.enter_depth()?;
+            let r_res = validate_product_endpoint(state, right, endpoint_name);
+            state.leave_depth(1);
+            r_res?;
+
+            Ok(PropositionId::of(term))
+        }
+        _ => Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+            expected: format!(
+                "{endpoint_name} endpoint as object constant or Tensor product of constants"
+            ),
+            found: object_shape(term).into(),
+        })),
+    }
+}
+
+fn validate_product_endpoint(
+    state: &mut CheckerState,
+    term: &ObjectTerm,
+    endpoint_name: &str,
+) -> Result<(), Verdict> {
+    state.step()?;
+    match term {
+        ObjectTerm::Const(_) => Ok(()),
+        ObjectTerm::Tensor(left, right) => {
+            state.enter_depth()?;
+            let l_res = validate_product_endpoint(state, left, endpoint_name);
+            state.leave_depth(1);
+            l_res?;
+
+            state.enter_depth()?;
+            let r_res = validate_product_endpoint(state, right, endpoint_name);
+            state.leave_depth(1);
+            r_res
+        }
+        _ => Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+            expected: format!("{endpoint_name} product containing only constants"),
+            found: object_shape(term).into(),
+        })),
+    }
+}
+
+/// (PrimRealizes) Primitive realization introduction (ADR-0015 ⟨D-PRIM⟩; ADR-0025 §4 & §10.2 ⟨D-PRODENDPOINT⟩).
+///
+/// Takes no `Gamma`, which is the rule's content rather than an omission: it has
+/// zero premises and consults no hypothesis context, so nothing the caller put
+/// in Γ can influence the result. Traversal and hashing of endpoints are strictly
+/// bounded by `CheckerState`.
 #[inline(never)]
 fn infer_prim_realizes(
+    state: &mut CheckerState,
     relation: &crate::prim_registry::PrimitiveRelationId,
     src: &ObjectTerm,
     dst: &ObjectTerm,
@@ -707,19 +797,16 @@ fn infer_prim_realizes(
         ));
     };
 
-    // Endpoints must be object constants. A composition, tensor, or
-    // bound variable in an endpoint position is not a canonical value
-    // under either schema, so it cannot be a row member; refusing it
-    // here keeps the failure legible rather than reporting a missing
-    // row for a term that could never have been one.
-    let (ObjectTerm::Const(src_id), ObjectTerm::Const(dst_id)) = (src, dst) else {
+    if !resolved.accepts_endpoint_shapes(src, dst) {
         return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
-            expected: "PrimRealizes endpoints as object constants".into(),
-            found: format!("({src:?}, {dst:?})"),
+            expected: "endpoint shapes required by the relation schemas".into(),
+            found: format!("({}, {})", object_shape(src), object_shape(dst)),
         }));
-    };
+    }
+    let src_id = endpoint_proposition_id(state, src, "Source")?;
+    let dst_id = endpoint_proposition_id(state, dst, "Destination")?;
 
-    if !resolved.admits(src_id, dst_id) {
+    if !resolved.admits(&src_id, &dst_id) {
         return Err(Verdict::Rejected(RejectionReason::PrimitiveRowNotFound {
             relation: relation.to_hex(),
             src: src_id.to_hex(),
@@ -1014,7 +1101,25 @@ fn infer_realizes_comp(
     Ok(Prop::Realizes(combined_witness, xl, final_z))
 }
 
+/// (RealizesId) Structural identity realization (ADR-0025 §10.1), synthesis mode.
+#[inline(never)]
+fn infer_realizes_id(state: &mut CheckerState, t: &ObjectTerm) -> Result<Prop, Verdict> {
+    validate_and_digest_endpoint(state, t)?;
+    Ok(Prop::Realizes(
+        ObjectTerm::Id(Box::new(t.clone())),
+        t.clone(),
+        t.clone(),
+    ))
+}
+
 /// (RealizesTensor) Realization Tensor (Profile 1.2), synthesis mode.
+///
+/// Unrolls right-nested `RealizesTensor` chains iteratively to prevent stack
+/// exhaustion on nested tensor structures (e.g. `Tensor(Id(Op), Tensor(da, db))`).
+///
+/// Step and depth accounting matches recursive descent exactly:
+/// each intermediate `Tensor` node on the right spine consumes one step and one depth unit
+/// during descent, which is restored after the chain completes.
 #[inline(never)]
 fn infer_realizes_tensor(
     state: &mut CheckerState,
@@ -1033,22 +1138,232 @@ fn infer_realizes_tensor(
         }
     };
 
-    let right_type = infer_type(state, gamma, right)?;
-    let (w2, x2, y2) = match right_type {
-        Prop::Realizes(w2, x2, y2) => (w2, x2, y2),
-        other => {
-            return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
-                expected: "Realizes(w2, x2, y2)".into(),
-                found: format!("{other:?}"),
-            }));
+    let (next_left, next_right) = match right {
+        TermKind::RealizesTensor {
+            left: nl,
+            right: nr,
+        } => (nl.as_ref(), nr.as_ref()),
+        _ => {
+            let right_type = infer_type(state, gamma, right)?;
+            let (w2, x2, y2) = match right_type {
+                Prop::Realizes(w2, x2, y2) => (w2, x2, y2),
+                other => {
+                    return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                        expected: "Realizes(w2, x2, y2)".into(),
+                        found: format!("{other:?}"),
+                    }));
+                }
+            };
+
+            return Ok(Prop::Realizes(
+                ObjectTerm::Tensor(Box::new(w1), Box::new(w2)),
+                ObjectTerm::Tensor(Box::new(x1), Box::new(x2)),
+                ObjectTerm::Tensor(Box::new(y1), Box::new(y2)),
+            ));
         }
     };
 
-    Ok(Prop::Realizes(
-        ObjectTerm::Tensor(Box::new(w1), Box::new(w2)),
-        ObjectTerm::Tensor(Box::new(x1), Box::new(x2)),
-        ObjectTerm::Tensor(Box::new(y1), Box::new(y2)),
-    ))
+    let mut elements = vec![(w1, x1, y1)];
+    let mut depth_taken = 0usize;
+    let mut curr_left = next_left;
+    let mut curr_right = next_right;
+
+    let (final_w, final_x, final_y) = loop {
+        if let Err(v) = state.step() {
+            state.leave_depth(depth_taken);
+            return Err(v);
+        }
+        if let Err(v) = state.enter_depth() {
+            state.leave_depth(depth_taken);
+            return Err(v);
+        }
+        depth_taken += 1;
+
+        let l_type = match infer_type(state, gamma, curr_left) {
+            Ok(t) => t,
+            Err(e) => {
+                state.leave_depth(depth_taken);
+                return Err(e);
+            }
+        };
+        let (w_l, x_l, y_l) = match l_type {
+            Prop::Realizes(w, x, y) => (w, x, y),
+            other => {
+                state.leave_depth(depth_taken);
+                return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                    expected: "Realizes(w, x, y)".into(),
+                    found: format!("{other:?}"),
+                }));
+            }
+        };
+        elements.push((w_l, x_l, y_l));
+
+        match curr_right {
+            TermKind::RealizesTensor {
+                left: nl,
+                right: nr,
+            } => {
+                curr_left = nl.as_ref();
+                curr_right = nr.as_ref();
+            }
+            _ => {
+                let r_type = match infer_type(state, gamma, curr_right) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        state.leave_depth(depth_taken);
+                        return Err(e);
+                    }
+                };
+                let (w_r, x_r, y_r) = match r_type {
+                    Prop::Realizes(w, x, y) => (w, x, y),
+                    other => {
+                        state.leave_depth(depth_taken);
+                        return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                            expected: "Realizes(w, x, y)".into(),
+                            found: format!("{other:?}"),
+                        }));
+                    }
+                };
+                break (w_r, x_r, y_r);
+            }
+        }
+    };
+
+    state.leave_depth(depth_taken);
+
+    let mut w_res = final_w;
+    let mut x_res = final_x;
+    let mut y_res = final_y;
+    for (w_i, x_i, y_i) in elements.into_iter().rev() {
+        w_res = ObjectTerm::Tensor(Box::new(w_i), Box::new(w_res));
+        x_res = ObjectTerm::Tensor(Box::new(x_i), Box::new(x_res));
+        y_res = ObjectTerm::Tensor(Box::new(y_i), Box::new(y_res));
+    }
+
+    Ok(Prop::Realizes(w_res, x_res, y_res))
+}
+
+/// Validate that an object term is an admissible structural endpoint (ADR-0025 §10.1 / ADR-0015 §2):
+/// only `Const` and finite `Tensor` products thereof (rejecting `Compose`, `BoundVar`, and `Id`).
+/// Traversal is strictly budget-bounded: every node costs one step, and product branches cost depth.
+/// Returns the canonical identity witness digest for this endpoint.
+// This bound also keeps subsequent cloning/canonical encoding of admitted objects
+// within a safe native-stack depth, independently of caller-supplied budgets.
+const MAX_STRUCTURAL_OBJECT_DEPTH: usize = 128;
+
+fn object_shape(term: &ObjectTerm) -> &'static str {
+    match term {
+        ObjectTerm::Const(_) => "Const",
+        ObjectTerm::BoundVar(_) => "BoundVar",
+        ObjectTerm::Compose(..) => "Compose",
+        ObjectTerm::Tensor(..) => "Tensor",
+        ObjectTerm::Id(_) => "Id",
+    }
+}
+
+fn structural_depth(state: &CheckerState, depth: usize) -> Result<(), Verdict> {
+    if depth > state.depth.min(MAX_STRUCTURAL_OBJECT_DEPTH) {
+        Err(Verdict::ResourceExhausted(
+            ResourceBudgetReason::DepthLimitExceeded,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_and_digest_endpoint(
+    state: &mut CheckerState,
+    term: &ObjectTerm,
+) -> Result<brix_semantic::WitnessId, Verdict> {
+    identity_digest(state, term, false)
+}
+
+/// Iterative, budgeted traversal of endpoints or identity witnesses. The two
+/// modes deliberately admit different constructors; neither hashes an unchecked
+/// subtree or renders it in an error message.
+fn identity_digest(
+    state: &mut CheckerState,
+    term: &ObjectTerm,
+    witness: bool,
+) -> Result<brix_semantic::WitnessId, Verdict> {
+    enum Frame<'a> {
+        Visit(&'a ObjectTerm, usize, bool),
+        Tensor,
+    }
+    let mut pending = vec![Frame::Visit(term, 0, witness)];
+    let mut values = Vec::new();
+    while let Some(frame) = pending.pop() {
+        match frame {
+            Frame::Tensor => {
+                let right = values.pop().expect("right identity digest");
+                let left = values.pop().expect("left identity digest");
+                values.push(brix_semantic::tensor(left, right));
+            }
+            Frame::Visit(term, depth, witness) => {
+                structural_depth(state, depth)?;
+                state.step()?;
+                match (term, witness) {
+                    (ObjectTerm::Const(id), false) => {
+                        values.push(brix_semantic::id_witness(id.digest().as_bytes()));
+                    }
+                    (ObjectTerm::Id(inner), true) => {
+                        pending.push(Frame::Visit(inner, depth, false));
+                    }
+                    (ObjectTerm::Tensor(left, right), _) => {
+                        pending.push(Frame::Tensor);
+                        pending.push(Frame::Visit(right, depth + 1, witness));
+                        pending.push(Frame::Visit(left, depth + 1, witness));
+                    }
+                    _ => {
+                        return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                            expected: if witness {
+                                "Id or Tensor of Id"
+                            } else {
+                                "Const or Tensor of Const"
+                            }
+                            .into(),
+                            found: object_shape(term).into(),
+                        }))
+                    }
+                }
+            }
+        }
+    }
+    Ok(values.pop().expect("root identity digest"))
+}
+
+fn check_endpoints_equal(
+    state: &mut CheckerState,
+    actual: &ObjectTerm,
+    expected: &ObjectTerm,
+    name: &str,
+) -> Result<(), Verdict> {
+    let mut pending = vec![(actual, expected, 0)];
+    while let Some((actual, expected, depth)) = pending.pop() {
+        structural_depth(state, depth)?;
+        state.step()?;
+        match (actual, expected) {
+            (ObjectTerm::Const(a), ObjectTerm::Const(e)) if a == e => {}
+            (ObjectTerm::Tensor(al, ar), ObjectTerm::Tensor(el, er)) => {
+                pending.push((ar, er, depth + 1));
+                pending.push((al, el, depth + 1));
+            }
+            _ => {
+                return Err(Verdict::Rejected(RejectionReason::TypeMismatch {
+                    expected: format!("{name} endpoint matching {}", object_shape(expected)),
+                    found: object_shape(actual).into(),
+                }))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_and_digest_identity_witness(
+    state: &mut CheckerState,
+    w: &ObjectTerm,
+) -> Result<brix_semantic::WitnessId, Verdict> {
+    identity_digest(state, w, true)
 }
 
 #[cfg(test)]
