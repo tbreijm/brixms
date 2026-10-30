@@ -25,8 +25,8 @@ use soc_core::resolution::{
     classify_resolution, classify_resolution_with_reason,
     classify_resolution_with_verified_evidence, CanonicalCandidate, CompletenessScope,
     CompletenessVerificationError, ContextValidationError, ContextValidator, ResolutionOutcome,
-    ResolutionQuery, ResolutionUnknown, StubContextValidator, VerifiedCompleteness,
-    MAX_RESOLUTION_CANDIDATES,
+    ResolutionQuery, ResolutionReport, ResolutionUnknown, StubContextValidator,
+    VerifiedCompleteness, MAX_RESOLUTION_CANDIDATES,
 };
 use soc_core::saturate::{
     check_divergence_certificate, check_quiescence_certificate, sat_step, CertificateCheck,
@@ -1309,6 +1309,38 @@ fn scenario_18_verified_query_bound_completeness_evidence() {
     assert_eq!(
         out_one_none,
         ResolutionOutcome::Unknown(ResolutionUnknown::IncompleteEnumeration)
+    );
+
+    // Reports retain query identity for the same candidate set. Unsupported or absent evidence
+    // cannot promote either result to complete.
+    let report_a = ResolutionReport::classify(
+        matching_query,
+        BTreeSet::from([c1]),
+        None,
+        Some(c1),
+        ResolutionUnknown::BudgetExhausted,
+    );
+    let report_b = ResolutionReport::classify(
+        other_query,
+        BTreeSet::from([c1]),
+        None,
+        Some(c1),
+        ResolutionUnknown::BudgetExhausted,
+    );
+    assert_eq!(*report_a.query(), matching_query);
+    assert_eq!(*report_b.query(), other_query);
+    assert_eq!(report_a.completeness(), CompletenessScope::Incomplete);
+    assert_eq!(report_b.completeness(), CompletenessScope::Incomplete);
+    assert_ne!(report_a.report_id(), report_b.report_id());
+    assert_eq!(report_a.verified_evidence_digest(), None);
+    assert_eq!(report_b.verified_evidence_digest(), None);
+    assert_eq!(
+        report_a.outcome(),
+        &ResolutionOutcome::Unknown(ResolutionUnknown::IncompleteEnumeration)
+    );
+    assert_eq!(
+        report_b.outcome(),
+        &ResolutionOutcome::Unknown(ResolutionUnknown::IncompleteEnumeration)
     );
 }
 

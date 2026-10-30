@@ -16,10 +16,12 @@
 //!    selection ([`crate::calendar::Key`], `select_K`) commits the least-key
 //!    candidate to ensure forward progress, but committing a winner does *not*
 //!    establish logical uniqueness when multiple admissible candidates exist.
-//! 3. **Complete Fragment vs Incomplete Search.** An empty candidate set yields
-//!    [`ResolutionOutcome::NoSolution`] *only* when the enumeration is certified
-//!    complete ([`CompletenessScope::Complete`]). Incomplete or bounded searches
-//!    yield [`ResolutionOutcome::Unknown`], never `NoSolution` or `Refuted`.
+//! 3. **Operational Completeness vs Proof.** [`CompletenessScope::Complete`]
+//!    may drive legacy operational classification, but it is not verified evidence.
+//!    The current evidence constructors reject v1 quiescence certificates and
+//!    caller-declared domains because neither proves goal-specific exhaustiveness.
+//!    Query-scoped consumers should retain a [`ResolutionReport`] rather than
+//!    treating the outcome as an epistemic grade.
 //! 4. **Logical Uniqueness Requires Complete Enumeration.** A candidate can only
 //!    be classified as [`ResolutionOutcome::Unique`] if enumeration is certified
 //!    complete. Under incomplete or bounded enumeration, finding one candidate
@@ -30,11 +32,12 @@
 //!    classification helper** under trusted-caller authority. It does NOT constitute
 //!    independent certification. A decided negative (`NoSolution` / `Quiescent`)
 //!    only becomes an authoritative epistemic judgement when supported by an
-//!    independently checked certificate (e.g. [`crate::saturate::QuiescenceCertificateV1`]).
+//!    independently checked proof that connects the resolution goal to an exhaustive
+//!    candidate search; quiescence alone does not establish that connection.
 
 use std::collections::BTreeSet;
 
-use brix_canon::{CanonDecode, CanonError, CanonReader, CanonWriter, Canonical, Digest};
+use brix_canon::{CanonDecode, CanonError, CanonReader, CanonWriter, Canonical, Digest, Domain};
 use brix_semantic::{ConfigId, ContextId, PropositionId, WitnessId};
 
 use crate::intern::Interner;
@@ -44,10 +47,10 @@ use crate::witness_provider::Candidate;
 /// Protects against unbounded allocation on hostile input.
 pub const MAX_RESOLUTION_CANDIDATES: usize = 1024;
 
-/// Scope of completeness for candidate discovery.
+/// Operational scope of completeness for candidate discovery.
 ///
 /// # Epistemic Authority Note (Issue #52)
-/// When supplied directly by a caller without an attached [`CompletenessEvidence`],
+/// When supplied directly by a caller without an attached [`VerifiedCompleteness`],
 /// `CompletenessScope::Complete` is an **unverified caller assertion**. It enables
 /// operational classification, but cannot be published as proof evidence.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -78,7 +81,7 @@ impl CanonDecode for CompletenessScope {
     }
 }
 
-/// Verified completeness evidence certifying exhaustive search over a scoped question.
+/// Reserved evidence token for a proof of exhaustive search over a scoped question.
 ///
 /// `VerifiedCompleteness` is reserved for evidence that proves exhaustive candidate discovery for
 /// one exact query and one exact result set. The current v1 quiescence and caller-declared-domain
@@ -112,13 +115,17 @@ pub enum CompletenessVerificationError {
 }
 
 impl<C: Ord> VerifiedCompleteness<C> {
-    /// Verify a [`crate::saturate::QuiescenceCertificateV1`] against the active resolution query.
+    /// Check a [`crate::saturate::QuiescenceCertificateV1`] against the active query's bindings.
     ///
     /// Requires that:
     /// 1. `pres.context == query.context` (bound to the query's assumption context).
     /// 2. `pres.adm_id == query.policy` (bound to the query's governance policy).
     /// 3. The certificate is cryptographically valid and replays over `consumed` steps via
     ///    [`crate::saturate::check_quiescence_certificate`].
+    ///
+    /// Even a valid quiescence certificate proves termination of saturation, not that the
+    /// saturation relation exhausts solutions to `query.goal`. Therefore this constructor
+    /// returns [`CompletenessVerificationError::UnsupportedEvidence`] after validation.
     pub fn from_quiescence_certificate(
         query: &ResolutionQuery,
         cert: &crate::saturate::QuiescenceCertificateV1,
@@ -144,11 +151,11 @@ impl<C: Ord> VerifiedCompleteness<C> {
         Err(CompletenessVerificationError::UnsupportedEvidence)
     }
 
-    /// Construct verified completeness for an exhaustively checked closed finite domain.
+    /// Attempt to construct verified completeness from a declared finite domain.
     ///
-    /// The enumerated set must equal the certified `domain` exactly (not merely in size), and the
-    /// resulting evidence is bound to `query` and to that domain: it cannot classify a different
-    /// query, nor candidates outside the domain.
+    /// The caller-authored `domain` and `enumerated` sets do not independently prove that the
+    /// domain contains every solution to `query`. This constructor always returns
+    /// [`CompletenessVerificationError::UnsupportedEvidence`].
     pub fn from_closed_domain(
         query: &ResolutionQuery,
         domain: BTreeSet<C>,
@@ -586,11 +593,88 @@ pub fn classify_resolution_with_verified_evidence<C: Clone + Ord>(
     selected: Option<C>,
     fallback_reason: ResolutionUnknown,
 ) -> ResolutionOutcome<C> {
-    let completeness = match evidence {
-        Some(e) if e.query == *query && e.candidates == admissible => CompletenessScope::Complete,
-        _ => CompletenessScope::Incomplete,
-    };
+    let completeness = verified_scope(query, &admissible, evidence);
     classify_resolution_with_reason(admissible, completeness, selected, fallback_reason)
+}
+
+fn verified_scope<C: Ord>(
+    query: &ResolutionQuery,
+    admissible: &BTreeSet<C>,
+    evidence: Option<&VerifiedCompleteness<C>>,
+) -> CompletenessScope {
+    match evidence {
+        Some(e) if e.query == *query && e.candidates == *admissible => CompletenessScope::Complete,
+        _ => CompletenessScope::Incomplete,
+    }
+}
+
+/// Query-scoped resolution result retaining the question, classification, and verified evidence.
+///
+/// This report records resolution only. It does not confer `Derived`, `Proven`, or any other
+/// epistemic grade. The fields are private so callers cannot forge query/evidence associations.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ResolutionReport<C = Candidate> {
+    query: ResolutionQuery,
+    completeness: CompletenessScope,
+    outcome: ResolutionOutcome<C>,
+    verified_evidence_digest: Option<Digest>,
+    report_id: Digest,
+}
+
+impl<C: Clone + Ord> ResolutionReport<C> {
+    /// Classify candidates and retain the exact query and any applicable evidence identity.
+    pub fn classify(
+        query: ResolutionQuery,
+        admissible: BTreeSet<C>,
+        evidence: Option<&VerifiedCompleteness<C>>,
+        selected: Option<C>,
+        fallback_reason: ResolutionUnknown,
+    ) -> Self {
+        let completeness = verified_scope(&query, &admissible, evidence);
+        let verified = matches!(completeness, CompletenessScope::Complete);
+        let verified_evidence_digest = if verified {
+            evidence.map(VerifiedCompleteness::evidence_digest)
+        } else {
+            None
+        };
+        let mut encoded_query = CanonWriter::new();
+        query.canon_write(&mut encoded_query);
+        let report_id = Digest::of(Domain::Value, &encoded_query.finish());
+        let outcome =
+            classify_resolution_with_reason(admissible, completeness, selected, fallback_reason);
+        Self {
+            query,
+            completeness,
+            outcome,
+            verified_evidence_digest,
+            report_id,
+        }
+    }
+
+    /// The exact query, including context, goal, policy, and budget.
+    pub fn query(&self) -> &ResolutionQuery {
+        &self.query
+    }
+
+    /// Completeness scope used to classify this report, including when the outcome is unknown.
+    pub fn completeness(&self) -> CompletenessScope {
+        self.completeness
+    }
+
+    /// The operational resolution result. This is not an epistemic grade.
+    pub fn outcome(&self) -> &ResolutionOutcome<C> {
+        &self.outcome
+    }
+
+    /// Digest of evidence only when it matched both the report query and candidate set.
+    pub fn verified_evidence_digest(&self) -> Option<Digest> {
+        self.verified_evidence_digest
+    }
+
+    /// Stable query-scoped report identity, distinct for different query envelopes.
+    pub fn report_id(&self) -> Digest {
+        self.report_id
+    }
 }
 
 /// Resolution query envelope binding the question's scope and policy.
