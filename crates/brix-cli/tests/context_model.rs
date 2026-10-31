@@ -45,10 +45,13 @@ impl Drop for Scratch {
     }
 }
 fn call(args: &[&str]) -> (bool, Value) {
-    let o = Command::new(env!("CARGO_BIN_EXE_brix"))
-        .args(args)
-        .output()
-        .unwrap();
+    // Nextest archives are extracted on another runner: the build-time path
+    // is not valid there. Prefer the runner's relocated executable path.
+    let binary = std::env::var_os("CARGO_BIN_EXE_brix")
+        .or_else(|| std::env::var_os("NEXTEST_BIN_EXE_brix"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_brix")));
+    let o = Command::new(binary).args(args).output().unwrap();
     (
         o.status.success(),
         serde_json::from_slice(&o.stdout)

@@ -107,12 +107,12 @@ fn ordinary_match_has_no_coverage_claim() {
 
 #[test]
 fn grade_assertion_satisfied_and_downgrade_ok() {
-    // @Proven on a discharged literal is satisfied; @Derived on an Audited
-    // value is a free downgrade (still checks; the earned grade is reported).
+    // Arithmetic bridge closure is occurrence-based; both assertions are
+    // satisfied at Proven, and @Derived remains a free downgrade.
     for (src, name, grade) in [
         ("let a: Int @Proven = 42", "a", Outcome::Proven),
-        ("let b: Int @Audited = 1 + 2", "b", Outcome::Audited),
-        ("let c: Int @Derived = 1 + 2", "c", Outcome::Audited),
+        ("let b: Int @Audited = 1 + 2", "b", Outcome::Proven),
+        ("let c: Int @Derived = 1 + 2", "c", Outcome::Proven),
     ] {
         let module = parse(src).expect("parse");
         let results = check_module(&module);
@@ -126,8 +126,9 @@ fn grade_assertion_satisfied_and_downgrade_ok() {
 
 #[test]
 fn grade_over_claim_is_epistemic_erasure() {
-    // Asserting @Proven on an Audited (arithmetic) value over-claims → erasure.
-    let module = parse("let d: Int @Proven = 1 + 2").expect("parse");
+    // Comparisons still have an open primitive obligation, so claiming Proven
+    // remains an epistemic over-claim and is erased.
+    let module = parse("let d: Bool @Proven = 1 < 2").expect("parse");
     let (name, err) = check_module(&module)
         .into_iter()
         .next()
@@ -193,10 +194,10 @@ fn test_record_and_field_proven() {
 }
 
 #[test]
-fn arithmetic_int_float_and_mixed_promotion_typecheck_audited() {
+fn arithmetic_int_float_and_mixed_promotion_typecheck_proven() {
     // Int+Int→Int, Float+Float→Float, and mixed Int+Float→Float (via the
-    // Int↪Float promotion witness) all type-check (Audited — g_arith is not
-    // discharged) with the expected type.
+    // Int↪Float promotion witness) all type-check through accepted arithmetic
+    // bridge proofs with the expected type.
     let cases = [
         ("let a = 1 + 2", "a", TrTy::Con("Int")),
         ("let b = 1.5 + 2.5", "b", TrTy::Con("Float")),
@@ -215,22 +216,22 @@ fn arithmetic_int_float_and_mixed_promotion_typecheck_audited() {
             .as_ref()
             .unwrap_or_else(|(n, e)| panic!("{src}: {n}: {e:?}"));
         assert_eq!(cr.name, name, "{src}");
-        assert_eq!(cr.outcome, Outcome::Audited, "{src} wrong grade");
+        assert_eq!(cr.outcome, Outcome::Proven, "{src} wrong grade");
         assert_eq!(cr.ty, Some(want), "{src} wrong type");
     }
 }
 
 #[test]
-fn function_using_arithmetic_reaches_audited() {
+fn function_using_arithmetic_reaches_proven() {
     // `n + n` defaults the parameter to Int, so `double : Int → Int` and the
-    // applied result types as Int (Audited — g_arith not discharged).
+    // applied result types as Int with both arithmetic bridge occurrences closed.
     let src = "fn double(n) = n + n\nlet r = double(21)";
     let module = parse(src).expect("parse");
     let results = check_module(&module);
     assert_eq!(results.len(), 1);
     let cr = results[0].as_ref().expect("double(21) should type-check");
     assert_eq!(cr.name, "r");
-    assert_eq!(cr.outcome, Outcome::Audited);
+    assert_eq!(cr.outcome, Outcome::Proven);
     assert_eq!(cr.ty, Some(TrTy::Con("Int")));
 }
 

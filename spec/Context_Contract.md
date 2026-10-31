@@ -536,22 +536,43 @@ remote host remain explicit embedding obligations, not inferred from names.
 
 ## 12. Verification ledger
 
-Combined-worktree checks on 2026-10-30:
+Combined-worktree checks on 2026-10-31:
 
 - Workspace clippy with `--all-targets -- -D warnings`: passed.
 - `cargo test --workspace --no-run --offline`: all workspace test targets built.
 - Canonical Python cross-check: all 69 frozen canon/1 vectors reproduced.
 - TCB dependency inventory/policy: passed; no new dependency edges.
 - Formatting and diff whitespace: checked after final edits.
-- V2 model integration tests: all 11 passed, including the independent encoding
-  vector, inherited-binding transport and changed-binding rejection.
-- SOC context integration tests: both passed, including refusal to certify an
-  unscanned frontier and validation of a provider-scanned empty frontier.
-- `python3 scripts/test_workspace.py`: **2,116 tests passed**, 28 existing ignored
-  tests skipped; all **13 workspace doctests passed**. Total time: 152.68 seconds.
-  The earlier macOS `_dyld_start` launch stall is resolved.
+- Combined V2 model and context integration tests passed, including the
+  independent encoding vector, inherited-binding transport, changed-binding
+  rejection, and arithmetic bridge closure under the materialized context.
+- `python3 scripts/test_workspace.py`: **2,157 tests passed**, 28 existing ignored
+  tests skipped; all workspace doctests passed. Total time: 158.88 seconds.
+  The earlier macOS `_dyld_start` launch stall and relocated CLI binary path
+  issue are resolved.
 
 This validates the combined context foundation against the workspace's standard
 test gate. Ignored scale/release workloads have not been release-qualified here.
 The finite execution/Python integration described in §10 remains alpha.9 A9-4
 work; the shared foundation alone does not close every integration item in #59.
+
+## 13. Combined #52 / #53 / #59 foundation
+
+The resolution adapter uses `AdmittedContextValidator` to compare request
+identities against a V2 context already admitted by the common validator.
+`ResolutionReport` retains the exact query and operational outcome; it does not
+publish an epistemic grade. A caller-authored finite domain and a v1 saturation
+quiescence certificate cannot establish resolution-goal completeness and are
+refused as unsupported evidence.
+
+Native arithmetic can close its two primitive occurrences while retaining the
+materialized typing context. `arithmetic_bridge_closure_retains_the_materialized_context`
+checks real inference, elaboration, occurrence closure and wrong-context replay
+rejection together. Literal and structural split antecedents remain in the
+accepted conditional proposition.
+
+The kernel context decoder admits the appended structural identity object
+ordinal under its existing byte/depth limits. The
+`identity_propositions_roundtrip_through_materialized_contexts` test checks
+this path with independent kernel acceptance. Existing encodings and identity
+vectors are preserved.

@@ -54,6 +54,46 @@ impl ContextResolverV2 for Resolver {
 }
 
 #[test]
+fn arithmetic_bridge_closure_retains_the_materialized_context() {
+    let d = dimensions(None);
+    let model =
+        ContextModelV2::new(d.clone(), vec![typed_assumption("x", &Ty::Con("Int"))]).unwrap();
+    let expr = Expr::Arith(
+        soc_regimes::type_realization::ArithOp::Add,
+        Box::new(Expr::Var("x".into())),
+        Box::new(Expr::Lit(2)),
+    );
+    let (source, tree) = audited_type_check_tree_in_context_v2(
+        &expr,
+        &encode_context_model_v2(&model),
+        model.id(),
+        &d,
+        ModelLimits::default(),
+        &Resolver::default(),
+    )
+    .unwrap();
+    let budget = brix_kernel::Budget::new(10_000, 256);
+    let brix_elaborate::TreeElaboration::Proven { proof, .. } =
+        brix_elaborate::elaborate_tree_certified(&source, &tree, budget)
+    else {
+        panic!("arithmetic must elaborate in the admitted context")
+    };
+    assert_eq!(*proof.context(), model.id());
+    assert_eq!(proof.closed_occurrences().count(), 2);
+    let grounds = soc_regimes::type_realization::typing_grounds(
+        brix_semantic::Outcome::Proven,
+        &tree,
+        &proof,
+    )
+    .unwrap();
+    assert!(grounds.obligations.is_empty());
+    // Structural grounds remain antecedents; this is not an unconditional theorem.
+    assert!(proof.remaining_occurrences().count() > 0);
+    proof.recheck(&tree, &model.id(), budget).unwrap();
+    assert!(proof.recheck(&tree, &ContextId::root(), budget).is_err());
+}
+
+#[test]
 fn checked_context_adapter_preserves_identity_and_shadowing_for_real_inference() {
     let parent = ContextModelV2::new(
         dimensions(None),

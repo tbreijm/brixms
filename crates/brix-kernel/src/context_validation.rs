@@ -201,6 +201,7 @@ fn read_obj(r: &mut CanonReader<'_>, depth: usize, binders: usize) -> Option<Obj
             Box::new(read_obj(r, depth + 1, binders)?),
             Box::new(read_obj(r, depth + 1, binders)?),
         ),
+        4 => ObjectTerm::Id(Box::new(read_obj(r, depth + 1, binders)?)),
         _ => return None,
     })
 }

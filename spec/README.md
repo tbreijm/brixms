@@ -37,6 +37,10 @@ below and ADR-0030 through ADR-0042).
 
 ## Foundation document
 
+[`SOC_Resolution_Contract.md`](./SOC_Resolution_Contract.md) defines query-scoped
+discovery and resolution outcomes. Operational completeness assertions do not
+confer proof authority; unsupported completeness evidence fails closed.
+
 [`Context_Contract.md`](./Context_Contract.md) specifies materialized contexts,
 typed assumption ownership, artifact validation, projection/transport and
 confinement. Its V2 consumers cover native typing, contextual kernel checking,

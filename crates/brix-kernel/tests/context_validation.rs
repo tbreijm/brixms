@@ -109,6 +109,17 @@ fn named_hypothesis_is_accepted_only_after_context_assumption_validation() {
 }
 
 #[test]
+fn identity_propositions_roundtrip_through_materialized_contexts() {
+    let t = ObjectTerm::Const(PropositionId::from_canon(b"identity-object"));
+    let prop = Prop::Realizes(ObjectTerm::Id(Box::new(t.clone())), t.clone(), t.clone());
+    let m = model(dims(), vec![assumption("identity", &prop)]);
+    let term = ExplicitTerm::new(m.id(), TermKind::RealizesId(t));
+    let accepted = call(&m, &Store::default(), &prop, &term, ModelLimits::default()).unwrap();
+    assert!(matches!(accepted.verdict(), Verdict::Accepted(_)));
+    assert_eq!(accepted.checked_context().id(), m.id());
+}
+
+#[test]
 fn identity_binding_schema_profile_and_budget_are_checked_before_proof_work() {
     let a = Prop::Atom(PropositionId::from_canon(b"A"));
     let mut d = dims();
