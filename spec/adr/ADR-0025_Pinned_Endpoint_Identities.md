@@ -185,7 +185,9 @@ ADR-0015 §8's ten boundaries stand unchanged. Three additions specific to pinni
 
 ## 6. Staged implementation
 
-Each stage is separately mergeable and moves no grade until the last.
+The original plan treated each stage as separately mergeable and moved no grade
+until the last. Implementation has since completed Stages B–F; see §10 for the
+current evidence boundary and the accepted theorem's remaining hypotheses.
 
 - **Stage A — pin the endpoint identities.** The six numeric `Ty::Con` atoms and the four regime
   `ArithOp` atoms, with their frozen readable manifest and their re-derivation tests in
@@ -205,22 +207,22 @@ Each stage is separately mergeable and moves no grade until the last.
   Allocates a new relation identity per ⟨D-RELID⟩ if the destination schema changes.
 - **Stage F — close the leaves.** The grade moves here and nowhere earlier.
 
-## 7. What still caps the grade after all six stages
+## 7. What capped the grade before leaf closure
 
 Stated plainly so no one reads Stage F as automatic.
 
-`elaborate_tree` emits every leaf as a hypothesis (`crates/brix-elaborate/src/lib.rs:259`), so
-shipping relations closes nothing on its own. ADR-0015 §5 Stage D already requires the mechanism
-change — "`honest_result_outcome` must stop asking 'is this generator in a set?' and start asking
-'was this leaf actually closed by an accepted primitive instance?'" — and that is the work that
-cashes everything above.
+At the time this section was written, `elaborate_tree` emitted every leaf as a hypothesis
+(`crates/brix-elaborate/src/lib.rs:259`), so shipping relations closed nothing on their own.
+Stage D has since added occurrence-bound evidence grading: the kernel-accepted `PrimRealizes`
+proof closes only the exact arithmetic bridge occurrence it binds. New arithmetic derivations
+close `g_arith_input` and `g_arith`; they no longer emit `g_arith_result`.
 
-Beyond it, a strict reading of Stage D's gate implicates `g_lit` and `g_arith_split` too: both
-leaves remain hypotheses backed by prose discharges, so until they have kernel-checkable closure the
-certificate proves a *conditional* composition theorem rather than unconditional
-`HasType(1 + 2, Int)`. This ADR does not expand Stage D to cover them. It does require Stage D's
-gate to state which reading it means, because the two are not the same claim and the difference is
-exactly the kind of thing ⟨D-JUDGE⟩ exists to keep honest.
+The accepted certificate proves a *conditional* composition theorem: the literal and arithmetic
+split antecedents remain in the kernel proposition under their stated grounds. The policy may
+report `Proven` for the typing judgement when those grounds are satisfied, but that does not erase
+the antecedents or establish an unconditional `HasType(1 + 2, Int)` theorem. This is the scope
+already recorded by ADR-0015's Stage D gate-1 re-scope and ADR-0023 §4; it does not expand Stage D
+to discharge literal or split leaves.
 
 ## 8. Compatibility
 
@@ -235,5 +237,91 @@ exactly the kind of thing ⟨D-JUDGE⟩ exists to keep honest.
 
 - Whether the numeric and operator atoms are later consolidated into `brix-semantic` as shared
   vocabulary (§2's narrow variant). Revisit if a second regime needs them; not blocking.
-- Which reading of ADR-0015 Stage D's gate is intended — `g_arith`'s leaf closed, or the whole
-  derivation unconditional (§7). Needs an answer before Stage F, not before Stage A.
+- ADR-0015 §5 and ADR-0023 §4 scope the accepted Stage D gate to the arithmetic primitive
+  occurrence. The current implementation follows the conditional reading in §10.4, retaining
+  literal/split antecedents. Ratification of this proposed ADR's broader endpoint and Stage F
+  design remains distinct from that earlier ruling; the implementation does not establish an
+  unconditional theorem or imply new maintainer approval.
+
+---
+
+## 10. Amendment (2026-10-27) — Structural Identity Prerequisite and Direct Result Closure
+
+Records the implementation design for Stages B–F under Issue #53. It does not attribute a separate
+maintainer ruling beyond the decisions written here.
+
+### 10.1 Structural identity node and proof rule (amending §8 compatibility)
+
+Carrying an operator `Op(op)` untouched down a parallel wire beside operand derivations
+(`Tensor(derive(a), derive(b))`) requires an identity realization arrow:
+$$\text{id}_{Op}: \text{Atom}(Op) \to \text{Atom}(Op)$$
+Contract §4.3 strictly forbids padding leaves (`src == dst`), so this step SHALL NOT be represented
+as a generator leaf `g_id` or `g_op_wire`. Merely nesting binary tensors without an identity node
+fails to type-check.
+
+Therefore, this amendment specifies a **structural identity node and kernel proof rule**:
+1. **Derivation AST**: `brix_semantic::RealizesTree::Id(TreeObj)` (ordinal 3, append-only).
+   - Source and target: `src() == dst() == obj`.
+   - Well-formedness: unconditionally `true`.
+   - Leaves: empty (`leaves()` yields nothing; it carries no generator and introduces no open hypotheses).
+   - Witness identity: `witness_id()` computes the identity witness for each atom. For a product
+     object, it tensors the child identity witnesses recursively, preserving product shape.
+2. **Object Term**: `brix_kernel::ObjectTerm::Id(Box<ObjectTerm>)` (ordinal 4, append-only).
+   - Identity checking accepts endpoints composed only of `Const` and ordered `Tensor` nodes.
+     Composition and bound variables are rejected. A tensor endpoint's identity witness is the
+     tensor of its child identity witnesses.
+3. **Proof Term**: `brix_kernel::TermKind::RealizesId(ObjectTerm)` (ordinal 18, append-only).
+   - Synthesis rule: $\vdash \text{Realizes}(\text{id}(t), t, t)$.
+   - Check rule against $\text{Realizes}(w, x, z)$: checks $x = t \land z = t \land w.\text{witness\_digest}() = \text{id}(t).\text{witness\_digest}()$.
+   - Charges each visited object node against the step budget. Traversal and endpoint
+     comparison are iterative, with the caller depth limit and an independent 128-level
+     structural-object cap. Rejection diagnostics name only node kinds and never render
+     unchecked subtrees.
+4. **Compatibility impact**: Amends §8's original statement of "no new TermKind ordinal". Existing
+   ordinals 0..17 in `TermKind`, 0..3 in `ObjectTerm`, and 0..2 in `RealizesTree` remain frozen;
+   additions use the next ordinals. Existing serialized certificates and vectors remain valid and
+   unchanged.
+
+### 10.2 Bounded constant-only product endpoints (⟨D-PRODENDPOINT⟩ refinement)
+
+Arithmetic relation schemas remain narrow and versioned. `TypingArithV2` and `TypingArithV3`
+use atomic endpoints. `TypingArithInputV1` binds its source to exactly
+`Tensor(ConstOp, Tensor(ConstL, ConstR))`, with an atomic destination; the complete source product
+is matched by its canonical identity, without decomposition or normalization. Product identity is
+not a general license for product-shaped relation endpoints. Arbitrary tensor products,
+compositions, and bound variables are not admitted as arithmetic schema endpoints.
+
+### 10.3 Direct result relation (Stage E / Option B)
+
+For new derivations, close the result leaf without an intermediate result bridge:
+- A new primitive relation `TypingArithV3` is minted whose destination lands directly on the pinned
+  atomic `Ty::Con` endpoint; both relation endpoints are atomic.
+- New derivations use `TypingArithInputV1` to close the exact operator-and-operands source shape
+  and `TypingArithV3` to close the result. `g_arith_split` carries `Op(op)` beside operand
+  derivations as `Prod(Op(op), Prod(derive(a), derive(b)))`.
+- For new derivations, `g_arith_result` emission is retired.
+- `TypingArithV2` is retained in `brix-kernel` for legacy verification and existing frozen vectors.
+
+### 10.4 Occurrence-level discharge boundary
+
+Discharge of primitive bridge leaves is strictly occurrence-based:
+- Bridges are **not** marked globally tight in `generator_is_tight`.
+- A leaf is discharged only when the accepted proof contains an admitted `PrimRealizes` term for that
+  specific occurrence.
+- The global tightness whitelist is unchanged. `g_lit` and `g_arith_split` remain conditional
+  implication antecedents under their stated grounds; an empty typing-grounds obligations list is
+  not an unconditional certificate.
+
+### 10.5 Current Stage D/F result
+
+Stages D–F are implemented for the arithmetic slice described above. For an arithmetic derivation,
+the accepted kernel proof contains occurrence-specific primitive instances for `g_arith_input`
+and `g_arith`; the old `g_arith_result` bridge is not emitted. The checked theorem still has the
+literal and structural split assumptions in its antecedents. `Proven` therefore means that the
+kernel accepted this conditional typing theorem and that the arithmetic occurrences were closed;
+it does not mean those antecedents were proved by the kernel or that the expression evaluates.
+
+This records implementation evidence without changing this ADR's proposed status or supplying
+maintainer approval. The earlier ADR-0015/ADR-0023 ruling governs the primitive-leaf gate. A
+stronger unconditional theorem would require separate evidence for the remaining antecedents
+and is outside this ADR's implemented claim.

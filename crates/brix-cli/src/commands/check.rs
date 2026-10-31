@@ -474,6 +474,7 @@ fn typing_closure_report(cr: &brix_lower::CheckResult) -> (Vec<String>, Option<T
     for g in &grounds.closed {
         let label = match g.name.as_deref() {
             Some("g_arith") => "arithmetic typing leaf".to_string(),
+            Some("g_arith_input") => "arithmetic input leaf".to_string(),
             _ => format!("typing leaf {}", name(g)),
         };
         if !kinds.contains(&label) {
@@ -486,6 +487,7 @@ fn typing_closure_report(cr: &brix_lower::CheckResult) -> (Vec<String>, Option<T
             .iter()
             .filter(|g| match g.name.as_deref() {
                 Some("g_arith") => label == "arithmetic typing leaf",
+                Some("g_arith_input") => label == "arithmetic input leaf",
                 _ => label == format!("typing leaf {}", name(g)),
             })
             .count();

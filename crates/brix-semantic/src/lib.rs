@@ -58,6 +58,8 @@
 
 mod config;
 mod context;
+pub mod context_contract;
+pub mod context_model;
 mod decomposition;
 mod dependency;
 mod evidence;
@@ -76,6 +78,20 @@ mod witness;
 
 pub use config::ConfigId;
 pub use context::ContextId;
+pub use context_contract::{
+    authenticate_context_envelope_v1, context_id_of_payload_v1, decode_context_envelope_v1,
+    encode_context_envelope_v1, validate_context_v1, validate_context_with_parent_resolver,
+    validate_root_context_v1, AuthenticatedContextEnvelopeV1, ContextAssumptionV1, ContextBudget,
+    ContextPayloadV1, ContextValidationError, ExecutionMode, MaterializedCoreContextV1,
+    ValidatedContextV1, CONTEXT_FORMAT_V1, CONTEXT_MARKER, CONTEXT_PROFILE_CORE_V1,
+    SUPPORTED_REGIME_PROFILES,
+};
+pub use context_model::{
+    decode_context_model_v2, encode_context_model_v2, validate_context_model_v2, ArtifactRefV2,
+    AssumptionValidatorV2, CheckedContextV2, ContextDimensionsV2, ContextModelV2,
+    ContextResolverV2, ContextTransportReceiptV2, ModelError, ModelLimits, ScenarioModeV2,
+    TypedAssumptionV2, CONTEXT_MODEL_MARKER_V2, CONTEXT_MODEL_VERSION_V2,
+};
 pub use decomposition::{
     DecompVerification, Decomposition, DecompositionError, DecompositionId, ReplayVerificationError,
 };
@@ -101,6 +117,6 @@ pub use tree::{
     TreeVerificationError,
 };
 pub use witness::{
-    compose, compose_chain, tensor, tensor_chain, Witness, WitnessId, WITNESS_COMPOSE_TAG,
-    WITNESS_TENSOR_TAG,
+    compose, compose_chain, id_witness, tensor, tensor_chain, Witness, WitnessId,
+    WITNESS_COMPOSE_TAG, WITNESS_ID_TAG, WITNESS_TENSOR_TAG,
 };

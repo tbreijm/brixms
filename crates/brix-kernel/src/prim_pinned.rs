@@ -36,9 +36,9 @@
 //! non-re-derivable element in the system, and ADR-0022 declined the first on
 //! exactly that ground.
 //!
-//! **Nothing here is consulted yet.** Stage A pins the identities; Stages B–F
-//! use them. No relation contains a pinned endpoint today, so this module moves
-//! no grade and changes no verdict.
+//! `TypingArithV3` uses these result identities and `TypingArithInputV1` uses
+//! the operator and operand identities in its ordered source product. Legacy
+//! `TypingArithV2` retains its original endpoints and identity.
 
 use brix_canon::Digest;
 use brix_semantic::PropositionId;
@@ -230,24 +230,36 @@ mod tests {
         );
     }
 
-    /// **Nothing consults a pinned identity yet.** Stage A pins; Stages B–F
-    /// use. If a relation ever contains one, this test should be replaced by
-    /// one that says which relation and why — not deleted.
+    /// Under ADR-0025 §10, `TypingArithV3` and `TypingArithInputV1` consult pinned identities,
+    /// while the legacy `TypingArithV2` relation retains its unpinned endpoints.
     #[test]
-    fn no_relation_contains_a_pinned_endpoint_yet() {
+    fn pinned_endpoints_reach_v3_and_input_v1_relations() {
         let pinned: BTreeSet<PropositionId> = PinnedNumericTy::ALL
             .iter()
             .map(|t| t.proposition_id())
             .chain(PinnedArithOp::ALL.iter().map(|o| o.proposition_id()))
             .collect();
 
-        let relation = crate::resolve_primitive_relation(&crate::typing_arith_v2())
-            .expect("the arithmetic relation resolves");
-        for (src, dst) in &relation.rows {
+        let v2 = crate::resolve_primitive_relation(&crate::typing_arith_v2())
+            .expect("TypingArithV2 resolves");
+        for (src, dst) in &v2.rows {
             assert!(
                 !pinned.contains(src) && !pinned.contains(dst),
-                "a pinned endpoint reached a relation before Stage B"
+                "TypingArithV2 must retain unpinned endpoints"
             );
         }
+
+        let v3 = crate::resolve_primitive_relation(&crate::typing_arith_v3())
+            .expect("TypingArithV3 resolves");
+        for (_src, dst) in &v3.rows {
+            assert!(
+                pinned.contains(dst),
+                "TypingArithV3 destination must be a pinned numeric type"
+            );
+        }
+
+        let input_v1 = crate::resolve_primitive_relation(&crate::typing_arith_input_v1())
+            .expect("TypingArithInputV1 resolves");
+        assert_eq!(input_v1.rows.len(), 120);
     }
 }

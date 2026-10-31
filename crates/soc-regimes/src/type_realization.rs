@@ -829,104 +829,24 @@ pub fn g_arith_split() -> GeneratorId {
     GeneratorId::named("type.rule.arith.split@1")
 }
 
-/// Typing-rule generator packaging an arithmetic node's operand types into the
-/// [`ArithTypingInputV1`] source object (`"type.rule.arith.input@1"`,
-/// ADR-0015 §5 Stage B0).
+/// Typing-rule generator packaging the operator and operand types into the
+/// [`ArithTypingInputV1`] object (`"type.rule.arith.input@1"`, ADR-0025 §10.2).
 ///
-/// **Why this leaf exists.** Stage B0 requires `g_arith`'s source object to be
-/// the single `ArithTypingInputV1` atom carrying the operator, the original
-/// operand types, and the promotion paths. A `TreeObj::Atom` can never equal a
-/// `TreeObj::Prod`, and the node feeding `g_arith` is the operand `Tensor`,
-/// whose `dst` is structurally always a `Prod` — so without a bridge the `Seq`
-/// middle no longer matches and `TreeDerivation::verify_structure` rejects the
-/// tree as malformed.
-///
-/// The bridge could not be folded into `g_arith_split`: ADR-0015 ⟨D-SPLIT⟩
-/// discharges the split on the grounds that it is *purely structural*, and
-/// states that "if `g_arith_split` ever selects a promotion, synthesises a
-/// result type, or filters operations by unchecked host logic, those parts
-/// inherit `g_arith`'s evidence burden and the discharge lapses." Stage C's
-/// discharge depends on that staying true, so the promotion selection lives
-/// here instead.
-///
-/// **Not discharged**, and deliberately so: this leaf asserts that the
-/// operator and promotion paths the host chose for this node are the right
-/// ones, which is exactly the kind of host-computed normalization ADR-0015 §8.5
-/// says is not trusted.
-///
-/// **Nor is it dischargeable by Stage B's mechanism, and that is the finding
-/// Stage B surfaced.** Its `src` is `Prod(Atom(Type(a)), Atom(Type(b)))` — a
-/// product of *this crate's* `Ty` atoms. A registry row is matched by canonical
-/// bytes, so authoring a row for it would require the kernel to reproduce `Ty`'s
-/// encoding: a second semantic encoder for a type the TCB does not own. So the
-/// earlier note here — that this is "dischargeable as its own kernel primitive,
-/// so Stage D needs two relations rather than one" — was too optimistic. A
-/// second relation is necessary but not sufficient; what is actually needed is
-/// a ruling on **who owns the canonical encoding of a realization endpoint that
-/// both the TCB and a regime must name**. See [`g_arith_result`], the bridge on
-/// the way out, which shares that obstruction and nothing else.
-///
-/// **And a shared encoder would still not be enough here — this leaf carries a
-/// second obstruction that [`g_arith_result`] does not.** `g_arith_result` is a
-/// total injective renaming; give both sides one encoder and it dissolves. This
-/// leaf is not a renaming. It also selects the promotion paths and asserts the
-/// operator — and *nothing kernel-binds the operator to the expression being
-/// typed*. [`g_arith_split`]'s `src` is `Atom(Expr(e))`, with the operator right
-/// there inside the expression, but its `dst` is `Prod(Atom(Expr a),
-/// Atom(Expr b))` and the operator is gone. This leaf's `src` then carries two
-/// types and no operator, while its `dst` carries `op`. The `Seq` chain matches
-/// on endpoints, so the operator enters the derivation only *here*, through an
-/// undischarged leaf.
-///
-/// The consequence is concrete: a relation keyed on this `src` would be
-/// **non-functional in the operator** — one canonical `src`, four distinct
-/// `dst`s — which violates the build-time invariant ADR-0015 §5 Stage B requires
-/// of every relation. The kernel could check the promotion paths are right for
-/// *some* operator; it could never check the operator is the right one for this
-/// node. Carrying the operator forward through the split in kernel-owned
-/// vocabulary is what ADR-0025 must settle alongside the encoder; ADR-0023 §4.4
-/// records the ruling and why no work builds on that line yet.
+/// Its source has the exact shape `Tensor(ConstOp, Tensor(ConstL, ConstR))`;
+/// the whole product identity is canonically bound in the relation row, and its
+/// destination is the atomic `ArithInput` identity. The operator is projected
+/// unchanged by `g_arith_split`, so this relation binds the chosen promotion
+/// data to the operator already present in the expression. It is closed per
+/// leaf occurrence by `TypingArithInputV1`; it is not added to the global
+/// tightness whitelist.
 pub fn g_arith_input() -> GeneratorId {
     GeneratorId::named("type.rule.arith.input@1")
 }
 
-/// Typing-rule generator bridging the kernel's arithmetic result object back to
-/// this crate's own type vocabulary (`"type.rule.arith.result@1"`,
-/// ADR-0015 §5 Stage B).
-///
-/// **Why this leaf exists.** Stage B makes `g_arith` a kernel-checked primitive,
-/// which requires the kernel to author both endpoints of every registry row.
-/// It can only do that for schemas it owns, so `g_arith`'s `dst` became
-/// [`NumericResultTypeV1`]. But the enclosing derivation — a `let` binding, a
-/// function body, an annotation check — speaks in `Ty`, so something must carry
-/// `NumericResultTypeV1(Int)` back to `Ty::Con("Int")`. That is this leaf.
-///
-/// **Not discharged.** The rename is faithful, but "the host renamed it
-/// faithfully" is precisely the kind of claim §8.5 declines to trust, and the
-/// kernel cannot check it for the same reason as [`g_arith_input`]: one endpoint
-/// — here the `dst` — is a `Ty` atom this crate encodes.
-///
-/// That shared encoding obstruction is *all* the two bridges have in common,
-/// and an earlier version of this doc's "mirror image" framing overstated it.
-/// This leaf is a total injective renaming over a closed finite vocabulary, so
-/// a single shared encoder dissolves it outright — the relation's destination
-/// would simply *be* the `Ty` atom and this leaf would stop existing. Nothing
-/// else is wrong with it. [`g_arith_input`] additionally selects the promotion
-/// paths and asserts an operator the derivation never bound, so the same
-/// encoder is necessary and not sufficient there. See its doc, and ADR-0023 §4.
-///
-/// **What that means for the arithmetic cap, stated without spin.** Before
-/// Stage B, `1 + 2` was capped by two undischarged leaves (`g_arith_input`,
-/// `g_arith`). After it, it is capped by two undischarged leaves
-/// (`g_arith_input`, `g_arith_result`). No grade moves. What changed is
-/// *which* claims are outstanding: the semantic one — that `Div`'s result rule
-/// differs from the other three operators' — is now a fact the kernel decides
-/// by exact membership, and the residue is two vocabulary renamings that assert
-/// nothing about arithmetic. ADR-0015 §5 Stage D's headline gate
-/// (`let x = 1 + 2` reaching `@Proven`) is therefore **not reachable by
-/// discharging `g_arith` alone**, and that is a gap in the ADR rather than in
-/// this implementation: the ADR was written before Stage B0 introduced the
-/// first of these bridges. Reported in full, with options, in ADR-0023 §4.
+/// Legacy result bridge (`"type.rule.arith.result@1"`). New derivations do not
+/// emit this leaf: `TypingArithV3` closes `g_arith` directly at the pinned,
+/// atomic `Ty::Con` endpoint. It remains minted for compatibility with legacy
+/// derivations and is not globally tight.
 pub fn g_arith_result() -> GeneratorId {
     GeneratorId::named("type.rule.arith.result@1")
 }
@@ -1152,6 +1072,7 @@ fn all_generators_tight(tree: &RealizesTree) -> bool {
         RealizesTree::Seq { left, right } | RealizesTree::Tensor { left, right } => {
             all_generators_tight(left) && all_generators_tight(right)
         }
+        RealizesTree::Id(_) => true,
     }
 }
 
@@ -1220,8 +1141,9 @@ pub enum TypingGroundsError {
 /// whose `g_arith` leaf is still a hypothesis gains nothing here.
 ///
 /// Refuses ([`TypingGroundsError`]) a proof that does not bind `derivation`.
-/// `1 + 2` stays [`Outcome::Audited`]: `g_arith_input` and `g_arith_result`
-/// are still undischarged and appear in `obligations`.
+/// New arithmetic derivations close the input and arithmetic occurrences through
+/// accepted primitives. Literal and split antecedents remain in the conditional
+/// kernel proposition even when this policy reports no remaining obligations.
 pub fn typing_grounds(
     composition: Outcome,
     derivation: &TreeDerivation,
@@ -1743,6 +1665,13 @@ pub struct TyCtx {
 }
 
 impl TyCtx {
+    /// Construct only from the checked semantic-context adapter. Keeping this
+    /// crate-private prevents callers from pairing arbitrary bindings with a
+    /// forged published `ContextId`.
+    pub(crate) fn from_validated(bindings: BTreeMap<String, Ty>, context: ContextId) -> Self {
+        Self { bindings, context }
+    }
+
     /// The empty context. Its identity is `ContextId::root()` — which
     /// ADR-0028 ⟨D-CTXPUBLISH⟩ reserves for a derivation that genuinely
     /// assumes nothing.
@@ -2304,6 +2233,8 @@ pub enum CfgAtom {
         /// The expression being typed.
         expr: Expr,
     },
+    /// An arithmetic operator (ADR-0025 ⟨D-OPPROJECT⟩), append-only after the five above.
+    Operator(ArithOp),
 }
 
 /// Deferred-materialization tree object (ADR-0008).
@@ -2345,6 +2276,8 @@ pub enum TyTree {
         /// The second component.
         right: Box<TyTree>,
     },
+    /// Structural identity arrow id_A : A -> A (ADR-0025 §10.1).
+    Id(TyObj),
 }
 
 /// The content-addressed identity of a `(Γ, e)` pair.
@@ -2372,6 +2305,7 @@ fn materialize_obj(obj: &TyObj, subst: &BTreeMap<u32, Ty>) -> TreeObj {
         TyObj::Atom(CfgAtom::Judged { context, expr }) => {
             TreeObj::Atom(judged_config_id(*context, expr))
         }
+        TyObj::Atom(CfgAtom::Operator(op)) => TreeObj::Atom(op.config_id()),
         TyObj::Prod(a, b) => TreeObj::Prod(
             Box::new(materialize_obj(a, subst)),
             Box::new(materialize_obj(b, subst)),
@@ -2399,6 +2333,7 @@ pub fn materialize(tree: &TyTree, subst: &BTreeMap<u32, Ty>) -> RealizesTree {
             left: Box::new(materialize(left, subst)),
             right: Box::new(materialize(right, subst)),
         },
+        TyTree::Id(obj) => RealizesTree::Id(materialize_obj(obj, subst)),
     }
 }
 
@@ -2411,6 +2346,7 @@ impl TyTree {
             TyTree::Tensor { left, right } => {
                 TyObj::Prod(Box::new(left.src()), Box::new(right.src()))
             }
+            TyTree::Id(obj) => obj.clone(),
         }
     }
 
@@ -2422,6 +2358,7 @@ impl TyTree {
             TyTree::Tensor { left, right } => {
                 TyObj::Prod(Box::new(left.dst()), Box::new(right.dst()))
             }
+            TyTree::Id(obj) => obj.clone(),
         }
     }
 }
@@ -3041,63 +2978,50 @@ fn finish(node: Pending<'_>, st: &mut Infer) -> Result<(Ty, TyTree), TypeError> 
             // why `1.0 + 2.0` and `7 / 2` emitted the identical leaf
             // `Prod(Float, Float) → Float`. The promotion paths are now
             // ordered data inside `ArithTypingInputV1`.
+            let op_obj = TyObj::Atom(CfgAtom::Operator(op));
+            let split_dst = TyObj::Prod(
+                Box::new(op_obj.clone()),
+                Box::new(TyObj::Prod(
+                    Box::new(judged(&ctx, a)),
+                    Box::new(judged(&ctx, b)),
+                )),
+            );
             let split = TyTree::Leaf {
                 generator: g_arith_split(),
                 src,
-                dst: TyObj::Prod(Box::new(judged(&ctx, a)), Box::new(judged(&ctx, b))),
+                dst: split_dst,
             };
-            let tensor = TyTree::Tensor {
+            let operand_tensor = TyTree::Tensor {
                 left: Box::new(da),
                 right: Box::new(db),
             };
-            // The operand types the `Tensor` actually lands on. For an operand
-            // that was an unbound var, `eff` is `plan.base` and the operand's
-            // own `Var(n)` endpoint zonks to exactly that under the
-            // substitution unified above — so the `Seq` middle matches either
-            // way.
+            let operands_step = TyTree::Tensor {
+                left: Box::new(TyTree::Id(op_obj.clone())),
+                right: Box::new(operand_tensor),
+            };
             let operand_types = TyObj::Prod(
-                Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con(plan.eff_a)))),
-                Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con(plan.eff_b)))),
+                Box::new(op_obj),
+                Box::new(TyObj::Prod(
+                    Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con(plan.eff_a)))),
+                    Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con(plan.eff_b)))),
+                )),
             );
             let input = TyObj::Atom(CfgAtom::ArithInput(plan.typing_input(op)?));
-            // The bridge. `TreeObj::Atom` can never equal a `TreeObj::Prod`,
-            // and a `Tensor`'s `dst` is structurally always a `Prod`, so the
-            // packaging of two operand types into one source object has to be
-            // its own leaf. It is deliberately not folded into `g_arith_split`
-            // — ⟨D-SPLIT⟩ discharges the split only while it stays purely
-            // structural. See `g_arith_input`.
             let input_leaf = TyTree::Leaf {
                 generator: g_arith_input(),
                 src: operand_types,
                 dst: input.clone(),
             };
-            // ADR-0015 §5 Stage B. `g_arith`'s `dst` is the kernel's own
-            // `NumericResultTypeV1`, not a `Ty` atom: a registry row is matched
-            // by canonical bytes, and the kernel may not reproduce this crate's
-            // `Ty` encoding to author one (§8.5; DEPS.md, "never a second
-            // semantic encoder"). The rename back into `Ty` is the separate,
-            // explicitly undischarged `g_arith_result` bridge below.
-            let arith_result = NumericResultTypeV1 {
-                name: NumericTypeNameV1::from_lattice_node(plan.result)
-                    .ok_or(TypeError::Mismatch)?,
-            };
-            let result_obj = TyObj::Atom(CfgAtom::ArithResult(arith_result));
+            // ADR-0025 §10.3 (Stage E / Option B): direct result relation TypingArithV3.
+            // g_arith lands directly on the pinned Ty::Con endpoint without an intermediate bridge.
             let arith_leaf = TyTree::Leaf {
                 generator: g_arith(),
                 src: input,
-                dst: result_obj.clone(),
-            };
-            let result_leaf = TyTree::Leaf {
-                generator: g_arith_result(),
-                src: result_obj,
                 dst: TyObj::Atom(CfgAtom::Type(result_ty.clone())),
             };
             Ok((
                 result_ty,
-                seq(
-                    split,
-                    seq(tensor, seq(input_leaf, seq(arith_leaf, result_leaf))),
-                ),
+                seq(split, seq(operands_step, seq(input_leaf, arith_leaf))),
             ))
         }
 
@@ -3575,6 +3499,11 @@ mod tests {
             (
                 "arithmetic",
                 Expr::Arith(ArithOp::Add, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2))),
+                TyCtx::new(),
+            ),
+            (
+                "tensor (and)",
+                Expr::And(Box::new(Expr::Lit(1)), Box::new(Expr::StrLit("s".into()))),
                 TyCtx::new(),
             ),
         ];
@@ -4099,6 +4028,7 @@ mod tests {
                     walk(left, want, out);
                     walk(right, want, out);
                 }
+                TyTree::Id(_) => {}
             }
         }
         let mut found = Vec::new();
@@ -4165,22 +4095,10 @@ mod tests {
             // in the kernel's own destination schema (Stage B), because the
             // kernel must be able to author both endpoints of a registry row
             // and may not reproduce this crate's `Ty` encoding to do it.
-            let want_result_name =
-                NumericTypeNameV1::from_lattice_node(want_result).expect("numeric");
+            // dst is the exact result type, per ADR-0025 §10.3 (TypingArithV3):
+            // lands directly on Ty::Con(want_result) without an intermediate g_arith_result bridge.
             assert_eq!(
                 dst,
-                TyObj::Atom(CfgAtom::ArithResult(NumericResultTypeV1 {
-                    name: want_result_name,
-                })),
-                "{op:?} {lhs} {rhs}"
-            );
-
-            // …and the bridge back into this crate's `Ty` vocabulary lands on
-            // exactly that type, so the chain is still pinned end to end.
-            let (bridge_src, bridge_dst) = leaf_endpoints(&tree, &g_arith_result());
-            assert_eq!(bridge_src, dst, "the bridge starts where g_arith ends");
-            assert_eq!(
-                bridge_dst,
                 TyObj::Atom(CfgAtom::Type(Ty::Con(want_result))),
                 "{op:?} {lhs} {rhs}"
             );
@@ -4410,10 +4328,13 @@ mod tests {
         assert_eq!(
             bridge_src,
             TyObj::Prod(
-                Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con("Int")))),
-                Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con("Int")))),
+                Box::new(TyObj::Atom(CfgAtom::Operator(ArithOp::Add))),
+                Box::new(TyObj::Prod(
+                    Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con("Int")))),
+                    Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con("Int")))),
+                )),
             ),
-            "the bridge consumes the operands' own types"
+            "the bridge consumes the operator and operands' own types"
         );
         assert_eq!(
             bridge_dst,
@@ -4424,13 +4345,12 @@ mod tests {
 
     #[test]
     fn the_arith_result_bridge_is_minted_but_not_discharged() {
-        // Stage B's mirror of the input bridge. `g_arith`'s `dst` is now the
-        // kernel's own `NumericResultTypeV1`, so something has to carry it back
-        // into this crate's `Ty` vocabulary for the enclosing derivation. That
-        // rename is faithful, but "the host renamed it faithfully" is a
-        // host-computed claim (ADR-0015 §8.5), and the kernel cannot check it:
-        // the `dst` is a `Ty` atom this crate encodes, and reproducing that
-        // encoding in the TCB would be a second semantic encoder.
+        // Stage B's mirror of the input bridge. `g_arith`'s `dst` was the
+        // kernel's own `NumericResultTypeV1`, so g_arith_result carried it back
+        // into this crate's `Ty` vocabulary.
+        // Under ADR-0025 Stage E, new derivations retire `g_arith_result` emission
+        // because `TypingArithV3` lands directly on pinned `Ty::Con` destinations.
+        // The generator remains minted and un-tight for historical/legacy artifacts.
         assert!(crate::tree_audit::is_minted_generator(&g_arith_result()));
         assert_eq!(
             generator_name(&g_arith_result()).as_deref(),
@@ -4449,16 +4369,27 @@ mod tests {
         let (ty, tree, _) = infer_tree(&expr, &TyCtx::new(), Infer::new()).expect("infers");
         assert_eq!(ty, Ty::Con("Float"));
 
-        let (bridge_src, bridge_dst) = leaf_endpoints(&tree, &g_arith_result());
-        assert_eq!(
-            bridge_src,
-            leaf_endpoints(&tree, &g_arith()).1,
-            "the bridge's src is exactly g_arith's dst — this is the Seq middle"
+        // New derivations do not emit g_arith_result; g_arith lands directly on Float.
+        let has_result_leaf = {
+            fn has_gen(tree: &TyTree, want: &GeneratorId) -> bool {
+                match tree {
+                    TyTree::Leaf { generator, .. } => generator == want,
+                    TyTree::Seq { left, right } | TyTree::Tensor { left, right } => {
+                        has_gen(left, want) || has_gen(right, want)
+                    }
+                    TyTree::Id(_) => false,
+                }
+            }
+            has_gen(&tree, &g_arith_result())
+        };
+        assert!(
+            !has_result_leaf,
+            "g_arith_result retired for new derivations"
         );
         assert_eq!(
-            bridge_dst,
+            leaf_endpoints(&tree, &g_arith()).1,
             TyObj::Atom(CfgAtom::Type(Ty::Con("Float"))),
-            "the bridge lands on this crate's own type vocabulary"
+            "g_arith lands directly on Float"
         );
     }
 
@@ -4516,18 +4447,16 @@ mod tests {
     #[test]
     fn arithmetic_rule_is_a_kernel_primitive() {
         use brix_kernel::{
-            acceptance, resolve_primitive_relation, typing_arith_v2, Budget, CoercionEdgeV1,
-            ExplicitTerm, NumericResultTypeV1, ObjectTerm, Prop, TermKind, Verdict,
+            acceptance, resolve_primitive_relation, typing_arith_input_v1, typing_arith_v3, Budget,
+            CoercionEdgeV1, ExplicitTerm, ObjectTerm, Prop, TermKind, Verdict,
         };
         use brix_semantic::PropositionId;
 
         // Stage E: the emission names the lossy edge under the conversion
-        // family, so the live relation is V2. The superseded V1 was retired
-        // (ADR-0024 §3), so instead of resolving it, each relocated row is
-        // re-spelled below under the *legacy* naming and the current relation
-        // is required to reject it — the immutability discipline visibly
-        // working rather than merely asserted, and without a second row table.
-        let relation = resolve_primitive_relation(&typing_arith_v2()).expect("TypingArithV2");
+        // family, and uses TypingArithV3 landing directly on Ty::Con.
+        let relation = resolve_primitive_relation(&typing_arith_v3()).expect("TypingArithV3");
+        let input_rel =
+            resolve_primitive_relation(&typing_arith_input_v1()).expect("TypingArithInputV1");
         let mut relocated = 0;
         let ops = [ArithOp::Add, ArithOp::Sub, ArithOp::Mul, ArithOp::Div];
 
@@ -4553,8 +4482,8 @@ mod tests {
                     other => panic!("g_arith's src must be an ArithInput atom, got {other:?}"),
                 };
                 let dst_cfg = match &dst_obj {
-                    TyObj::Atom(CfgAtom::ArithResult(r)) => r.config_id(),
-                    other => panic!("g_arith's dst must be an ArithResult atom, got {other:?}"),
+                    TyObj::Atom(CfgAtom::Type(t)) => t.config_id(),
+                    other => panic!("g_arith's dst must be a Type atom, got {other:?}"),
                 };
                 let src = PropositionId(src_cfg.digest());
                 let dst = PropositionId(dst_cfg.digest());
@@ -4572,7 +4501,7 @@ mod tests {
                 let term = ExplicitTerm::new(
                     ctx_id,
                     TermKind::PrimRealizes {
-                        relation: typing_arith_v2(),
+                        relation: typing_arith_v3(),
                         src: ObjectTerm::Const(src),
                         dst: ObjectTerm::Const(dst),
                     },
@@ -4582,6 +4511,19 @@ mod tests {
                 assert!(
                     matches!(verdict, Verdict::Accepted(_)),
                     "{op:?} {lhs} {rhs}: the real leaf must be a kernel primitive, got {verdict:?}"
+                );
+
+                // Check the input bridge leaf against TypingArithInputV1 as well
+                let (input_src_obj, input_dst_obj) = leaf_endpoints(&tree, &g_arith_input());
+                assert_eq!(input_dst_obj, src_obj);
+                let input_tree_src = brix_elaborate::tree_obj_to_object_term(&materialize_obj(
+                    &input_src_obj,
+                    &BTreeMap::new(),
+                ));
+                let input_src_prop = PropositionId::of(&input_tree_src);
+                assert!(
+                    input_rel.admits(&input_src_prop, &src),
+                    "{op:?} {lhs} {rhs}: TypingArithInputV1 must admit the input bridge leaf"
                 );
 
                 // The relation's generator is `g_arith`'s — the relation
@@ -4604,9 +4546,7 @@ mod tests {
                 let admitted: Vec<&str> = ["Nat", "Int", "Rat", "Real", "Complex", "Float"]
                     .into_iter()
                     .filter(|name| {
-                        let candidate = NumericResultTypeV1 {
-                            name: NumericTypeNameV1::from_lattice_node(name).expect("numeric"),
-                        };
+                        let candidate = Ty::Con(name);
                         relation.admits(&src, &PropositionId(candidate.config_id().digest()))
                     })
                     .collect();
@@ -4714,24 +4654,27 @@ mod tests {
                 };
                 let proof = *proof;
 
-                // The g_arith leaf is closed.
-                assert_eq!(proof.closed_occurrences().count(), 1, "{op:?} {lhs} {rhs}");
-                let closed = proof.closed_occurrences().next().unwrap();
-                assert_eq!(*closed.generator(), g_arith());
+                // Both g_arith and g_arith_input leaves are closed under TypingArithV3 and TypingArithInputV1.
+                assert_eq!(proof.closed_occurrences().count(), 2, "{op:?} {lhs} {rhs}");
+                let closed_gens: Vec<_> =
+                    proof.closed_occurrences().map(|o| *o.generator()).collect();
+                assert!(closed_gens.contains(&g_arith()));
+                assert!(closed_gens.contains(&g_arith_input()));
 
-                // The evidence-aware grounds report the leaf closed, the two bridges open,
-                // and the overall outcome capped at Audited.
+                // The evidence-aware grounds report both leaves closed, no open bridges,
+                // and the overall outcome Proven.
                 let grounds = typing_grounds(Outcome::Proven, &derivation, &proof)
                     .expect("proof binds derivation");
-                assert_eq!(grounds.outcome, Outcome::Audited);
-                assert_eq!(grounds.closed.len(), 1);
-                assert_eq!(grounds.closed[0].name.as_deref(), Some("g_arith"));
-                let rem_names: Vec<_> = grounds
-                    .obligations
+                assert_eq!(grounds.outcome, Outcome::Proven);
+                assert_eq!(grounds.closed.len(), 2);
+                let closed_names: Vec<_> = grounds
+                    .closed
                     .iter()
                     .map(|o| o.name.as_deref().unwrap())
                     .collect();
-                assert_eq!(rem_names, vec!["g_arith_input", "g_arith_result"]);
+                assert!(closed_names.contains(&"g_arith"));
+                assert!(closed_names.contains(&"g_arith_input"));
+                assert!(grounds.obligations.is_empty());
 
                 // Independent re-verification succeeds.
                 proof
@@ -5114,7 +5057,10 @@ mod tests {
             )
         };
 
-        // g_record: A -> B -> A × B (product introduction).
+        // g_record / g_tensor: A -> B -> A × B (product introduction).
+        // `g_tensor` claims the exact same product-introduction ground for the
+        // binary case: pairing two already-derived types into their product
+        // (Contract §3.4.2 & §9.2).
         let product_intro = Prop::Impl(
             Box::new(a.clone()),
             Box::new(Prop::Impl(
@@ -5123,7 +5069,7 @@ mod tests {
             )),
         );
         assert!(accepts(
-            product_intro,
+            product_intro.clone(),
             TermKind::Lam {
                 var_name: Some("a".into()),
                 body: Box::new(TermKind::Lam {
@@ -5133,6 +5079,15 @@ mod tests {
                         snd: Box::new(TermKind::Hyp(Var::Named("b".into()))),
                     }),
                 }),
+            },
+        ));
+        // A forged term (e.g. projecting instead of introducing, or mismatching)
+        // must be rejected by the kernel.
+        assert!(!accepts(
+            product_intro,
+            TermKind::Lam {
+                var_name: Some("a".into()),
+                body: Box::new(TermKind::Hyp(Var::Named("a".into()))),
             },
         ));
 
@@ -5222,6 +5177,7 @@ mod tests {
                 RealizesTree::Seq { left, right } | RealizesTree::Tensor { left, right } => {
                     has_leaf(left, want) || has_leaf(right, want)
                 }
+                RealizesTree::Id(_) => false,
             }
         }
 
@@ -5328,16 +5284,19 @@ mod tests {
         assert_eq!(
             dst,
             TyObj::Prod(
-                Box::new(TyObj::Atom(CfgAtom::Judged {
-                    context: root,
-                    expr: Expr::Lit(1)
-                })),
-                Box::new(TyObj::Atom(CfgAtom::Judged {
-                    context: root,
-                    expr: Expr::Lit(2)
-                })),
+                Box::new(TyObj::Atom(CfgAtom::Operator(ArithOp::Add))),
+                Box::new(TyObj::Prod(
+                    Box::new(TyObj::Atom(CfgAtom::Judged {
+                        context: root,
+                        expr: Expr::Lit(1)
+                    })),
+                    Box::new(TyObj::Atom(CfgAtom::Judged {
+                        context: root,
+                        expr: Expr::Lit(2)
+                    })),
+                )),
             ),
-            "exactly two children, in source order"
+            "operator and exactly two children, in source order"
         );
 
         // (ii) The operator is preserved — it is bound because `src` is the
@@ -5351,6 +5310,11 @@ mod tests {
             split_of(&one_plus_two, &TyCtx::new()).0,
             split_of(&one_minus_two, &TyCtx::new()).0,
             "a different operator must be a different split source"
+        );
+        assert_ne!(
+            split_of(&one_plus_two, &TyCtx::new()).1,
+            split_of(&one_minus_two, &TyCtx::new()).1,
+            "a different operator must be a different split destination (⟨D-OPPROJECT⟩)"
         );
         assert_ne!(
             split_of(&one_minus_two, &TyCtx::new()).1,
@@ -5433,17 +5397,19 @@ mod tests {
         // Structurally: neither endpoint mentions a type or an arithmetic
         // input at all. A `Type` or `ArithInput` atom anywhere in the split
         // would be a representation claim it is not entitled to make.
-        fn only_expressions(obj: &TyObj) -> bool {
+        fn only_expressions_or_ops(obj: &TyObj) -> bool {
             match obj {
-                TyObj::Atom(CfgAtom::Judged { .. }) | TyObj::Atom(CfgAtom::Expr(_)) => true,
+                TyObj::Atom(CfgAtom::Judged { .. })
+                | TyObj::Atom(CfgAtom::Expr(_))
+                | TyObj::Atom(CfgAtom::Operator(_)) => true,
                 TyObj::Atom(CfgAtom::Type(_))
                 | TyObj::Atom(CfgAtom::ArithInput(_))
                 | TyObj::Atom(CfgAtom::ArithResult(_)) => false,
-                TyObj::Prod(l, r) => only_expressions(l) && only_expressions(r),
+                TyObj::Prod(l, r) => only_expressions_or_ops(l) && only_expressions_or_ops(r),
             }
         }
         let (src, dst) = split_of(&x_plus_y, &rat_ctx);
-        assert!(only_expressions(&src) && only_expressions(&dst));
+        assert!(only_expressions_or_ops(&src) && only_expressions_or_ops(&dst));
 
         // (iv) A forged child is rejected. Substituting a different
         //      subexpression into the split's target breaks the `Seq` middle
@@ -5493,7 +5459,7 @@ mod tests {
                     dst: forged_dst,
                 }
             }
-            RealizesTree::Leaf { .. } => tree.clone(),
+            RealizesTree::Leaf { .. } | RealizesTree::Id(_) => tree.clone(),
             RealizesTree::Seq { left, right } => RealizesTree::Seq {
                 left: Box::new(forge_split_child(left, impostor)),
                 right: Box::new(forge_split_child(right, impostor)),
@@ -5533,6 +5499,10 @@ mod tests {
         assert_endpoints(Expr::Record(vec![("x".into(), Expr::Lit(1))]), TyCtx::new());
         assert_endpoints(
             Expr::Record(vec![("x".into(), Expr::Lit(1)), ("y".into(), Expr::Lit(2))]),
+            TyCtx::new(),
+        );
+        assert_endpoints(
+            Expr::And(Box::new(Expr::Lit(1)), Box::new(Expr::StrLit("x".into()))),
             TyCtx::new(),
         );
         assert_endpoints(
@@ -6072,5 +6042,578 @@ mod tests {
 
         let res = infer_tree(&expr, &ctx, Infer::new());
         assert_eq!(res.unwrap_err(), TypeError::Unsupported);
+    }
+
+    /// Contract §3.4.2 & §9.2: Faithfulness and negative pins for `g_tensor` and
+    /// `g_tensor_split`.
+    ///
+    /// 1. Stated ground:
+    ///    - `g_tensor_split`: ⟨D-SPLIT⟩ (structural binary product decomposition).
+    ///    - `g_tensor`: binary product introduction (`A -> B -> A × B`).
+    /// 2. Faithfulness pin:
+    ///    - Real emitted tree for `Expr::And(a, b)` decomposes via `g_tensor_split`
+    ///      into `Prod(Atom(Judged(ctx, a)), Atom(Judged(ctx, b)))`.
+    ///    - Real closing leaf has `g_tensor` pairing `Prod(Atom(Type(ta)), Atom(Type(tb)))`
+    ///      into `Atom(Type(Prod(ta, tb)))`.
+    ///    - Evaluates to `Proven` under `honest_result_outcome` and `elaborate_tree`.
+    /// 3. Negative pin:
+    ///    - Neither `g_tensor_split` nor `g_tensor` is emitted for any non-`And` expression.
+    ///    - Middle-match / endpoint sensitivity: altering `g_tensor_split` destination or
+    ///      `g_tensor` source fails `audit_tree` with `MalformedTree`.
+    /// 4. Judgment scoping:
+    ///    - Tight for `ClaimKind::Typing`, not tight for `ClaimKind::Empty`.
+    #[test]
+    fn g_tensor_and_g_tensor_split_faithfulness_and_negative_pins() {
+        let e = Expr::And(Box::new(Expr::Lit(1)), Box::new(Expr::StrLit("s".into())));
+        let ctx = TyCtx::new();
+        let (ty, tree, _state) = infer_tree(&e, &ctx, Infer::new()).expect("infer");
+        let expected_ty = Ty::Prod(Box::new(Ty::Con("Int")), Box::new(Ty::Con("Str")));
+        assert_eq!(ty, expected_ty);
+
+        let root = ctx.context();
+        let (split_src, split_dst) = leaf_endpoints(&tree, &g_tensor_split());
+        assert_eq!(
+            split_src,
+            TyObj::Atom(CfgAtom::Judged {
+                context: root,
+                expr: e.clone(),
+            }),
+            "g_tensor_split source must be the judged And expression"
+        );
+        assert_eq!(
+            split_dst,
+            TyObj::Prod(
+                Box::new(TyObj::Atom(CfgAtom::Judged {
+                    context: root,
+                    expr: Expr::Lit(1),
+                })),
+                Box::new(TyObj::Atom(CfgAtom::Judged {
+                    context: root,
+                    expr: Expr::StrLit("s".into()),
+                })),
+            ),
+            "g_tensor_split destination must be the binary product of judged subexpressions"
+        );
+        assert_ne!(
+            split_src, split_dst,
+            "g_tensor_split must never have src == dst (Contract §4.3 no padding)"
+        );
+
+        let (close_src, close_dst) = leaf_endpoints(&tree, &g_tensor());
+        assert_eq!(
+            close_src,
+            TyObj::Prod(
+                Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con("Int")))),
+                Box::new(TyObj::Atom(CfgAtom::Type(Ty::Con("Str")))),
+            ),
+            "g_tensor source must be the binary product of the two operand types"
+        );
+        assert_eq!(
+            close_dst,
+            TyObj::Atom(CfgAtom::Type(expected_ty.clone())),
+            "g_tensor destination must be the compound product type"
+        );
+        assert_ne!(
+            close_src, close_dst,
+            "g_tensor must never have src == dst (Contract §4.3 no padding)"
+        );
+
+        // Verification and elaboration
+        let (judgement, audited) = audited_type_check_tree(&e, &ctx).expect("audited");
+        assert_eq!(judgement.outcome, Outcome::Audited);
+        assert_eq!(
+            honest_result_outcome(Outcome::Proven, audited.tree()),
+            Outcome::Proven,
+            "both g_tensor_split and g_tensor are tight, so the composition is Proven"
+        );
+        assert!(audited.tree().well_formed());
+
+        let res = brix_elaborate::elaborate_tree(&judgement, &audited, Budget::new(1000, 1000));
+        match res {
+            ElaborationResult::Proven { judgement, .. } => {
+                assert_eq!(judgement.outcome, Outcome::Proven);
+            }
+            other => panic!("Expected Proven elaboration for And, got {:?}", other),
+        }
+
+        // Certified elaboration & typing grounds: verify 0 remaining obligations
+        let cert =
+            brix_elaborate::elaborate_tree_certified(&judgement, &audited, Budget::new(1000, 1000));
+        match cert {
+            brix_elaborate::TreeElaboration::Proven { proof, .. } => {
+                let grounds =
+                    typing_grounds(Outcome::Proven, &audited, &proof).expect("typing grounds");
+                assert_eq!(grounds.outcome, Outcome::Proven);
+                assert!(
+                    grounds.obligations.is_empty(),
+                    "all leaves in And derivation are tight, so obligations must be empty"
+                );
+            }
+            other => panic!(
+                "Expected Proven certified elaboration for And, got {:?}",
+                other
+            ),
+        }
+
+        // Extended assumption context test (ADR-0028 ⟨D-CTXENDPOINT⟩):
+        // Verify that under a non-root context, g_tensor_split preserves the exact
+        // assumption scope in its judged endpoints.
+        let ext_ctx = TyCtx::new()
+            .extend("a", Ty::Con("Int"))
+            .extend("b", Ty::Con("Str"));
+        let ext_e = Expr::And(
+            Box::new(Expr::Var("a".into())),
+            Box::new(Expr::Var("b".into())),
+        );
+        let (ext_ty, ext_tree, _) =
+            infer_tree(&ext_e, &ext_ctx, Infer::new()).expect("infer under ext_ctx");
+        assert_eq!(ext_ty, expected_ty);
+        let ext_scope = ext_ctx.context();
+        let (ext_split_src, ext_split_dst) = leaf_endpoints(&ext_tree, &g_tensor_split());
+        assert_eq!(
+            ext_split_src,
+            TyObj::Atom(CfgAtom::Judged {
+                context: ext_scope,
+                expr: ext_e.clone(),
+            }),
+            "g_tensor_split source must carry the non-root assumption scope"
+        );
+        assert_eq!(
+            ext_split_dst,
+            TyObj::Prod(
+                Box::new(TyObj::Atom(CfgAtom::Judged {
+                    context: ext_scope,
+                    expr: Expr::Var("a".into()),
+                })),
+                Box::new(TyObj::Atom(CfgAtom::Judged {
+                    context: ext_scope,
+                    expr: Expr::Var("b".into()),
+                })),
+            ),
+            "g_tensor_split destination must preserve the non-root assumption scope on children"
+        );
+
+        // Nested product tests: both right-associative and left-associative trees
+        let nested_right = Expr::And(
+            Box::new(Expr::Lit(1)),
+            Box::new(Expr::And(Box::new(Expr::Lit(2)), Box::new(Expr::Lit(3)))),
+        );
+        let (nested_right_ty, _, _) =
+            infer_tree(&nested_right, &TyCtx::new(), Infer::new()).expect("nested right infer");
+        assert_eq!(
+            nested_right_ty,
+            Ty::Prod(
+                Box::new(Ty::Con("Int")),
+                Box::new(Ty::Prod(Box::new(Ty::Con("Int")), Box::new(Ty::Con("Int")))),
+            ),
+            "right-associated And expressions must produce right-nested compound product types"
+        );
+        let (right_j, right_d) =
+            audited_type_check_tree(&nested_right, &TyCtx::new()).expect("check right");
+        assert_eq!(
+            honest_result_outcome(Outcome::Proven, right_d.tree()),
+            Outcome::Proven
+        );
+        assert!(matches!(
+            brix_elaborate::elaborate_tree(&right_j, &right_d, Budget::new(1000, 1000)),
+            ElaborationResult::Proven { .. }
+        ));
+
+        let nested_left = Expr::And(
+            Box::new(Expr::And(Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2)))),
+            Box::new(Expr::Lit(3)),
+        );
+        let (nested_left_ty, _, _) =
+            infer_tree(&nested_left, &TyCtx::new(), Infer::new()).expect("nested left infer");
+        assert_eq!(
+            nested_left_ty,
+            Ty::Prod(
+                Box::new(Ty::Prod(Box::new(Ty::Con("Int")), Box::new(Ty::Con("Int")))),
+                Box::new(Ty::Con("Int")),
+            ),
+            "left-associated And expressions must produce left-nested compound product types"
+        );
+        let (left_j, left_d) =
+            audited_type_check_tree(&nested_left, &TyCtx::new()).expect("check left");
+        assert_eq!(
+            honest_result_outcome(Outcome::Proven, left_d.tree()),
+            Outcome::Proven
+        );
+        assert!(matches!(
+            brix_elaborate::elaborate_tree(&left_j, &left_d, Budget::new(1000, 1000)),
+            ElaborationResult::Proven { .. }
+        ));
+
+        // Negative pin 1: Tampered split destination fails audit_tree with MalformedTree
+        fn replace_leaf_dst(
+            tree: &RealizesTree,
+            gen: &GeneratorId,
+            new_dst: &TreeObj,
+        ) -> RealizesTree {
+            match tree {
+                RealizesTree::Leaf {
+                    generator,
+                    src,
+                    dst,
+                } if generator == gen => RealizesTree::Leaf {
+                    generator: *generator,
+                    src: src.clone(),
+                    dst: new_dst.clone(),
+                },
+                RealizesTree::Seq { left, right } => RealizesTree::Seq {
+                    left: Box::new(replace_leaf_dst(left, gen, new_dst)),
+                    right: Box::new(replace_leaf_dst(right, gen, new_dst)),
+                },
+                RealizesTree::Tensor { left, right } => RealizesTree::Tensor {
+                    left: Box::new(replace_leaf_dst(left, gen, new_dst)),
+                    right: Box::new(replace_leaf_dst(right, gen, new_dst)),
+                },
+                leaf => leaf.clone(),
+            }
+        }
+        let forged_split_dst = TreeObj::Atom(judged_config_id(root, &Expr::Lit(99)));
+        let corrupted_split_tree =
+            replace_leaf_dst(audited.tree(), &g_tensor_split(), &forged_split_dst);
+        assert_eq!(
+            audit_tree(
+                &corrupted_split_tree,
+                judged_config_id(root, &e),
+                expected_ty.config_id(),
+            ),
+            Err(crate::tree_audit::TreeAuditError::MalformedTree),
+            "tampered g_tensor_split destination must fail middle-match check"
+        );
+
+        // Negative pin 2: Swapped close source fails audit_tree with MalformedTree
+        fn replace_leaf_src(
+            tree: &RealizesTree,
+            gen: &GeneratorId,
+            new_src: &TreeObj,
+        ) -> RealizesTree {
+            match tree {
+                RealizesTree::Leaf {
+                    generator,
+                    src,
+                    dst,
+                } if generator == gen => RealizesTree::Leaf {
+                    generator: *generator,
+                    src: new_src.clone(),
+                    dst: dst.clone(),
+                },
+                RealizesTree::Seq { left, right } => RealizesTree::Seq {
+                    left: Box::new(replace_leaf_src(left, gen, new_src)),
+                    right: Box::new(replace_leaf_src(right, gen, new_src)),
+                },
+                RealizesTree::Tensor { left, right } => RealizesTree::Tensor {
+                    left: Box::new(replace_leaf_src(left, gen, new_src)),
+                    right: Box::new(replace_leaf_src(right, gen, new_src)),
+                },
+                leaf => leaf.clone(),
+            }
+        }
+        let swapped_close_src = TreeObj::Prod(
+            Box::new(TreeObj::Atom(Ty::Con("Str").config_id())),
+            Box::new(TreeObj::Atom(Ty::Con("Int").config_id())),
+        );
+        let corrupted_close_tree =
+            replace_leaf_src(audited.tree(), &g_tensor(), &swapped_close_src);
+        assert_eq!(
+            audit_tree(
+                &corrupted_close_tree,
+                judged_config_id(root, &e),
+                expected_ty.config_id(),
+            ),
+            Err(crate::tree_audit::TreeAuditError::MalformedTree),
+            "swapped g_tensor source must fail middle-match check against operand Tensor"
+        );
+
+        // Negative pin 3: Tampered root source on g_tensor_split fails audit_tree with EndpointMismatch
+        let forged_split_src = TreeObj::Atom(judged_config_id(root, &Expr::Lit(999)));
+        let corrupted_root_src_tree =
+            replace_leaf_src(audited.tree(), &g_tensor_split(), &forged_split_src);
+        assert_eq!(
+            audit_tree(
+                &corrupted_root_src_tree,
+                judged_config_id(root, &e),
+                expected_ty.config_id(),
+            ),
+            Err(crate::tree_audit::TreeAuditError::EndpointMismatch),
+            "forged g_tensor_split root source must fail overall tree endpoint check"
+        );
+
+        // Negative pin 4: Tampered closing destination on g_tensor fails audit_tree with EndpointMismatch
+        let forged_close_dst = TreeObj::Atom(Ty::Con("Int").config_id());
+        let corrupted_close_dst_tree =
+            replace_leaf_dst(audited.tree(), &g_tensor(), &forged_close_dst);
+        assert_eq!(
+            audit_tree(
+                &corrupted_close_dst_tree,
+                judged_config_id(root, &e),
+                expected_ty.config_id(),
+            ),
+            Err(crate::tree_audit::TreeAuditError::EndpointMismatch),
+            "forged g_tensor closing destination must fail overall tree endpoint check"
+        );
+
+        // Negative pin 5: Non-And expressions do not emit g_tensor_split or g_tensor
+        fn tree_contains_gen(tree: &TyTree, want: &GeneratorId) -> bool {
+            match tree {
+                TyTree::Leaf { generator, .. } => generator == want,
+                TyTree::Seq { left, right } | TyTree::Tensor { left, right } => {
+                    tree_contains_gen(left, want) || tree_contains_gen(right, want)
+                }
+                TyTree::Id(_) => false,
+            }
+        }
+        let non_and_expressions: Vec<Expr> = vec![
+            Expr::Lit(42),
+            Expr::StrLit("hello".into()),
+            Expr::BoolLit(true),
+            Expr::Var("x".into()),
+            Expr::Record(vec![("a".into(), Expr::Lit(1))]),
+            Expr::Field(Box::new(Expr::Var("r".into())), "a".into()),
+            Expr::App(
+                Box::new(Expr::Lam("x".into(), Box::new(Expr::Var("x".into())))),
+                Box::new(Expr::Lit(1)),
+            ),
+            Expr::Arith(ArithOp::Add, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2))),
+        ];
+        let test_ctx = TyCtx::new()
+            .extend("x", Ty::Con("Int"))
+            .extend("r", Ty::Record(vec![("a".into(), Ty::Con("Int"))]));
+        for non_and in &non_and_expressions {
+            if let Ok((_, t, _)) = infer_tree(non_and, &test_ctx, Infer::new()) {
+                assert!(
+                    !tree_contains_gen(&t, &g_tensor_split()),
+                    "non-And expression {non_and:?} must not emit g_tensor_split"
+                );
+                assert!(
+                    !tree_contains_gen(&t, &g_tensor()),
+                    "non-And expression {non_and:?} must not emit g_tensor"
+                );
+            }
+        }
+
+        // Judgment scoping (ADR-0015 ⟨D-JUDGE⟩)
+        assert!(generator_is_tight(ClaimKind::Typing, &g_tensor_split()));
+        assert!(!generator_is_tight(ClaimKind::Empty, &g_tensor_split()));
+        assert!(generator_is_tight(ClaimKind::Typing, &g_tensor()));
+        assert!(!generator_is_tight(ClaimKind::Empty, &g_tensor()));
+    }
+
+    /// Contract §3.4.2 & §9.2: Faithfulness and negative pins for `g_then_split`.
+    ///
+    /// 1. Stated ground: ⟨D-SPLIT⟩ (structural decomposition landing on wherever
+    ///    the left derivation actually starts, `da.src()`).
+    /// 2. Precondition & Negative pin:
+    ///    - `Expr::Then(a, b)` requires `da.dst() == db.src()`.
+    ///    - Value expressions derive `Judged(Γ, e) -> Type(t)`. The left ends on
+    ///      a type and the right starts at a judgement — they cannot meet.
+    ///    - `infer_tree` fails closed with `TypeError::CompositionEndpointMismatch`
+    ///      and `g_then_split` is never emitted.
+    /// 3. Sensitivity check:
+    ///    - In a structural composition tree, if `g_then_split`'s destination does
+    ///      not match `da.src()`, or if `da.dst() != db.src()`, `well_formed` and
+    ///      `audit_tree` fail with `MalformedTree`.
+    /// 4. Judgment scoping:
+    ///    - Tight for `ClaimKind::Typing`, not tight for `ClaimKind::Empty`.
+    #[test]
+    fn g_then_split_faithfulness_and_negative_pins() {
+        let e = Expr::Then(
+            Box::new(Expr::Var("n".into())),
+            Box::new(Expr::Var("s".into())),
+        );
+        let ctx = TyCtx::new()
+            .extend("n", Ty::Con("Int"))
+            .extend("s", Ty::Con("Str"));
+
+        // Negative pin 1: Precondition failure on value expressions refuses composition
+        let err = infer_tree(&e, &ctx, Infer::new()).unwrap_err();
+        assert_eq!(
+            err,
+            TypeError::CompositionEndpointMismatch,
+            "then on value expressions where da.dst() != db.src() must fail with CompositionEndpointMismatch"
+        );
+
+        // Negative pin 2: Non-Then expressions do not emit g_then_split
+        fn tree_contains_gen(tree: &TyTree, want: &GeneratorId) -> bool {
+            match tree {
+                TyTree::Leaf { generator, .. } => generator == want,
+                TyTree::Seq { left, right } | TyTree::Tensor { left, right } => {
+                    tree_contains_gen(left, want) || tree_contains_gen(right, want)
+                }
+                TyTree::Id(_) => false,
+            }
+        }
+        let non_then_expressions: Vec<Expr> = vec![
+            Expr::Lit(42),
+            Expr::StrLit("hello".into()),
+            Expr::BoolLit(true),
+            Expr::Var("n".into()),
+            Expr::Record(vec![("a".into(), Expr::Lit(1))]),
+            Expr::Field(Box::new(Expr::Var("r".into())), "a".into()),
+            Expr::And(Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2))),
+            Expr::Arith(ArithOp::Add, Box::new(Expr::Lit(1)), Box::new(Expr::Lit(2))),
+        ];
+        let test_ctx = ctx.extend("r", Ty::Record(vec![("a".into(), Ty::Con("Int"))]));
+        for non_then in &non_then_expressions {
+            if let Ok((_, t, _)) = infer_tree(non_then, &test_ctx, Infer::new()) {
+                assert!(
+                    !tree_contains_gen(&t, &g_then_split()),
+                    "non-Then expression {non_then:?} must not emit g_then_split"
+                );
+            }
+        }
+
+        // Structural sensitivity checks on a valid synthetic composition tree
+        let root = ctx.context();
+        let e_a = Expr::Lit(1);
+        let e_b = Expr::Lit(2);
+        let e_then = Expr::Then(Box::new(e_a.clone()), Box::new(e_b.clone()));
+        let src_then = TreeObj::Atom(judged_config_id(root, &e_then));
+        let src_a = TreeObj::Atom(judged_config_id(root, &e_a));
+        let mid_obj = TreeObj::Atom(Ty::Con("Int").config_id());
+        let dst_b = TreeObj::Atom(Ty::Con("Int").config_id());
+
+        let da = RealizesTree::Leaf {
+            generator: g_lit(),
+            src: src_a.clone(),
+            dst: mid_obj.clone(),
+        };
+        let db = RealizesTree::Leaf {
+            generator: g_var(),
+            src: mid_obj.clone(),
+            dst: dst_b.clone(),
+        };
+        let valid_split = RealizesTree::Leaf {
+            generator: g_then_split(),
+            src: src_then.clone(),
+            dst: src_a.clone(),
+        };
+        assert_ne!(
+            valid_split.src(),
+            valid_split.dst(),
+            "g_then_split must never have src == dst (Contract §4.3 no padding)"
+        );
+        let valid_tree = RealizesTree::Seq {
+            left: Box::new(valid_split.clone()),
+            right: Box::new(RealizesTree::Seq {
+                left: Box::new(da.clone()),
+                right: Box::new(db.clone()),
+            }),
+        };
+        assert!(valid_tree.well_formed());
+        assert_eq!(valid_tree.src(), src_then);
+        assert_eq!(valid_tree.dst(), dst_b);
+        assert!(audit_tree(
+            &valid_tree,
+            judged_config_id(root, &e_then),
+            Ty::Con("Int").config_id(),
+        )
+        .is_ok());
+
+        // Sensitivity 1: split.dst != da.src() violates Seq middle-match
+        let bad_split = RealizesTree::Leaf {
+            generator: g_then_split(),
+            src: src_then.clone(),
+            dst: TreeObj::Atom(judged_config_id(root, &Expr::Lit(999))),
+        };
+        let bad_split_tree = RealizesTree::Seq {
+            left: Box::new(bad_split),
+            right: Box::new(RealizesTree::Seq {
+                left: Box::new(da.clone()),
+                right: Box::new(db.clone()),
+            }),
+        };
+        assert!(
+            !bad_split_tree.well_formed(),
+            "split.dst != da.src() must violate Seq middle-match"
+        );
+        assert_eq!(
+            audit_tree(
+                &bad_split_tree,
+                judged_config_id(root, &e_then),
+                Ty::Con("Int").config_id(),
+            ),
+            Err(crate::tree_audit::TreeAuditError::MalformedTree)
+        );
+
+        // Sensitivity 2: da.dst() != db.src() inside Seq(da, db)
+        let bad_db = RealizesTree::Leaf {
+            generator: g_var(),
+            src: TreeObj::Atom(Ty::Con("Str").config_id()),
+            dst: dst_b.clone(),
+        };
+        let bad_inner_tree = RealizesTree::Seq {
+            left: Box::new(valid_split.clone()),
+            right: Box::new(RealizesTree::Seq {
+                left: Box::new(da.clone()),
+                right: Box::new(bad_db),
+            }),
+        };
+        assert!(
+            !bad_inner_tree.well_formed(),
+            "da.dst() != db.src() inside Seq(da, db) must violate Seq middle-match"
+        );
+        assert_eq!(
+            audit_tree(
+                &bad_inner_tree,
+                judged_config_id(root, &e_then),
+                Ty::Con("Int").config_id(),
+            ),
+            Err(crate::tree_audit::TreeAuditError::MalformedTree)
+        );
+
+        // Sensitivity 3: Tampered root source on g_then_split fails audit_tree with EndpointMismatch
+        let forged_then_src = TreeObj::Atom(judged_config_id(root, &Expr::Lit(888)));
+        let bad_root_split = RealizesTree::Leaf {
+            generator: g_then_split(),
+            src: forged_then_src,
+            dst: src_a,
+        };
+        let bad_root_tree = RealizesTree::Seq {
+            left: Box::new(bad_root_split),
+            right: Box::new(RealizesTree::Seq {
+                left: Box::new(da.clone()),
+                right: Box::new(db.clone()),
+            }),
+        };
+        assert_eq!(
+            audit_tree(
+                &bad_root_tree,
+                judged_config_id(root, &e_then),
+                Ty::Con("Int").config_id(),
+            ),
+            Err(crate::tree_audit::TreeAuditError::EndpointMismatch),
+            "forged g_then_split root source must fail overall tree endpoint check"
+        );
+
+        // Sensitivity 4: Tampered right destination on db fails audit_tree with EndpointMismatch
+        let forged_then_dst = TreeObj::Atom(Ty::Con("Str").config_id());
+        let bad_dst_db = RealizesTree::Leaf {
+            generator: g_var(),
+            src: mid_obj,
+            dst: forged_then_dst,
+        };
+        let bad_dst_tree = RealizesTree::Seq {
+            left: Box::new(valid_split),
+            right: Box::new(RealizesTree::Seq {
+                left: Box::new(da),
+                right: Box::new(bad_dst_db),
+            }),
+        };
+        assert_eq!(
+            audit_tree(
+                &bad_dst_tree,
+                judged_config_id(root, &e_then),
+                Ty::Con("Int").config_id(),
+            ),
+            Err(crate::tree_audit::TreeAuditError::EndpointMismatch),
+            "forged Seq right destination must fail overall tree endpoint check"
+        );
+
+        // Judgment scoping (ADR-0015 ⟨D-JUDGE⟩)
+        assert!(generator_is_tight(ClaimKind::Typing, &g_then_split()));
+        assert!(!generator_is_tight(ClaimKind::Empty, &g_then_split()));
     }
 }

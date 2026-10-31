@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod check;
+pub mod context;
 pub mod explain_render;
 pub mod kb;
 pub mod run;
