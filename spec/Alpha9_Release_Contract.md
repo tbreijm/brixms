@@ -461,9 +461,9 @@ language and authority changes in §11.
 
 | Slice | Available work | Integration status / next gate |
 |---|---|---|
-| F | PR #346, `work/foundation-52-59`; `4d60674` passed all CI jobs | Follow-up context-report binding and additive record identity coverage are being integrated. Use the reviewed foundation branch as the source of shared context and typing APIs. |
+| F | PR #346, `work/foundation-52-59`; follow-up `2cdeebc` | All 2,158 workspace tests and doctests passed locally; workspace clippy, formatting, canon and dependency/traceability checks passed. Context-report binding and additive record identity coverage are included; CI on this follow-up is tracked in the PR. |
 | A9-1 | `5b28a8f`, `work/a9-1-collect-corruption` | Implemented repair and regression matrix; qualify together with F before release. |
-| A9-2 | `work/a9-2-unions-and-keys` currently starts at `5b28a8f` | No union/key implementation is present at this recorded head. Bring in the qualified F integration before relying on its APIs; §11 rulings remain required. |
+| A9-2 | `work/a9-2-unions-and-keys` starts at `5b28a8f` with active uncommitted work | Union schema propagation and `union distinct` implementation are in progress. Composite keys and nested join indexes remain incomplete. Bring in the qualified F integration before relying on its APIs; §11 rulings remain required. |
 | A9-3/4 | Scoped queries and request evidence | Consume the same V2 context validator. Add an explicit supported host-scope/evidence profile and actual request-path tests; the foundation adapter does not supply these features. |
 | A9-5–7 | String admission, collection semantics and benchmarks | Retain the order and acceptance gates in §§7–9. |
 
@@ -484,3 +484,28 @@ Keep Gemini's active worktrees intact. Prepare and qualify a separate
 `work/alpha9-base` branch containing F plus A9-1, then integrate that branch into
 the feature branches when their owners are ready. Record any conflict
 resolution and the exact tested commit before publishing release evidence.
+
+The combined code is available at `69dae9c` in `/private/tmp/brix-alpha9-base`.
+It contains foundation `2cdeebc` and A9-1's `5b28a8f` patch with no merge
+conflicts. The combined collection qualification is recorded separately below;
+neither an integrated branch nor a successful foundation test run qualifies the
+remaining A9-2–7 features.
+
+At that combined code revision, 2,144 remaining workspace tests and all doctests
+passed, with the three collection binaries exercised separately. Grouped collect
+(6 tests), list values (9 tests) and 14 scale cases passed in debug mode.
+`collect_size_5000` passed its full lifecycle in release mode in 469.01 seconds;
+the debug attempt was interrupted after roughly 30 minutes without a result.
+Together these runs cover all 2,174 non-ignored tests, with the upper-size case
+qualified only in release mode. The complete 5,000-member run used the original
+test harness and production code at `1748a6a` (unchanged from `69dae9c`).
+Workspace clippy, formatting, the 69-vector
+canon cross-check, TCB dependency inventory and semantic-law traceability passed.
+
+The actual CLI 257-member reproduction passed separate-process
+`world open-check --verify-store` and typed reads. An overflowing batch including
+an unrelated write left HEAD and query output unchanged, and a subsequent
+retraction plus cold read succeeded. These smaller checks do not replace the
+5,000-member release gate. Keep the A9-1 integration PR in draft until the
+required CI checks and review complete. The long debug runtime remains a
+qualification cost to address before adding this matrix to an ordinary CI run.
