@@ -216,7 +216,7 @@ fn discovery_rejects_a_different_world_policy_or_history_before_provider_call() 
         model.id(),
         &d,
         ModelLimits::default(),
-        &Store(raw),
+        &Store(raw.clone()),
         &NoExternalAssumptions,
     )
     .unwrap();
@@ -224,8 +224,100 @@ fn discovery_rejects_a_different_world_policy_or_history_before_provider_call() 
     let result = request
         .candidates(&[&provider], &AdmAll, &exec, &interner)
         .unwrap();
-    assert_eq!(result.context, model.id());
+    assert_eq!(result.context(), model.id());
+    // The goal is supplied by the caller and retained verbatim. Providers only
+    // see ExecConfig, so this test does not claim goal-to-candidate proof or
+    // exhaustive goal resolution.
+    let query = soc_core::resolution::ResolutionQuery::new(
+        model.id(),
+        PropositionId::from_canon(b"catalogue-goal"),
+        Digest::of(Domain::Value, b"policy"),
+    );
+    let report = request
+        .resolution_report(
+            query,
+            result.clone(),
+            None,
+            None,
+            soc_core::resolution::ResolutionUnknown::IncompleteEnumeration,
+        )
+        .unwrap();
+    assert_eq!(report.query(), &query);
+    assert_eq!(
+        report.completeness(),
+        soc_core::resolution::CompletenessScope::Incomplete
+    );
+    assert!(report.verified_evidence_digest().is_none());
+    assert!(matches!(
+        report.outcome(),
+        soc_core::resolution::ResolutionOutcome::Unknown(
+            soc_core::resolution::ResolutionUnknown::IncompleteEnumeration
+        )
+    ));
+    let wrong_query = soc_core::resolution::ResolutionQuery::new(
+        ContextId::root().extend(b"wrong-context"),
+        query.goal,
+        query.policy,
+    );
+    assert!(matches!(
+        request.resolution_report(
+            wrong_query,
+            result,
+            None,
+            None,
+            soc_core::resolution::ResolutionUnknown::IncompleteEnumeration,
+        ),
+        Err(ModelError::BindingMismatch)
+    ));
     assert_eq!(provider.0.get(), 1);
+
+    // A candidate set produced by a separately admitted context cannot be
+    // rebound to this request, even when its world and policy bindings match.
+    let mut other_dimensions = d.clone();
+    other_dimensions.tenant = "other-tenant".into();
+    let other_model = ContextModelV2::new(other_dimensions.clone(), vec![]).unwrap();
+    let other_request = ResolutionContextV2::validate(
+        &encode_context_model_v2(&other_model),
+        other_model.id(),
+        &other_dimensions,
+        ModelLimits::default(),
+        &Store(raw.clone()),
+        &NoExternalAssumptions,
+    )
+    .unwrap();
+    let foreign_discovery = other_request
+        .candidates(&[&provider], &AdmAll, &exec, &interner)
+        .unwrap();
+    assert!(matches!(
+        request.resolution_report(
+            query,
+            foreign_discovery,
+            None,
+            None,
+            soc_core::resolution::ResolutionUnknown::IncompleteEnumeration,
+        ),
+        Err(ModelError::BindingMismatch)
+    ));
+    assert_eq!(provider.0.get(), 2);
+
+    let wrong_policy_query = soc_core::resolution::ResolutionQuery::new(
+        model.id(),
+        query.goal,
+        Digest::of(Domain::Value, b"other-policy"),
+    );
+    assert!(matches!(
+        request.resolution_report(
+            wrong_policy_query,
+            request
+                .candidates(&[&provider], &AdmAll, &exec, &interner)
+                .unwrap(),
+            None,
+            None,
+            soc_core::resolution::ResolutionUnknown::IncompleteEnumeration,
+        ),
+        Err(ModelError::BindingMismatch)
+    ));
+    assert_eq!(provider.0.get(), 3);
     for wrong in [
         ExecConfig::new(other, policy, exec.history),
         ExecConfig::new(world, other, exec.history),
@@ -236,7 +328,7 @@ fn discovery_rejects_a_different_world_policy_or_history_before_provider_call() 
             Err(ModelError::BindingMismatch)
         ));
     }
-    assert_eq!(provider.0.get(), 1);
+    assert_eq!(provider.0.get(), 3);
 }
 
 #[test]

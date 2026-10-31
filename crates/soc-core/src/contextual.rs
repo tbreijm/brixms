@@ -12,7 +12,10 @@ use brix_semantic::{
     ContextId, ContextResolverV2, ModelError, ModelLimits,
 };
 
-use crate::{Adm, Candidate, ExecConfig, Interner, WitnessProvider};
+use crate::{
+    resolution::{ResolutionQuery, ResolutionReport, ResolutionUnknown, VerifiedCompleteness},
+    Adm, Candidate, ExecConfig, Interner, WitnessProvider,
+};
 
 /// Canonical snapshot artifact binding portable world/policy identities and history.
 /// Store these bytes under the `soc.exec@1` artifact kind in `dimensions.world`.
@@ -37,8 +40,26 @@ pub fn execution_context_preimage(
 /// Exact context retained with discovered candidates, independently of selection.
 #[derive(Clone, Debug)]
 pub struct ContextualCandidates {
-    pub context: ContextId,
-    pub candidates: BTreeSet<Candidate>,
+    context: ContextId,
+    policy: Digest,
+    candidates: BTreeSet<Candidate>,
+}
+
+impl ContextualCandidates {
+    /// The exact admitted context under which provider discovery ran.
+    pub fn context(&self) -> ContextId {
+        self.context
+    }
+
+    /// Policy identity used during candidate discovery.
+    pub fn policy(&self) -> Digest {
+        self.policy
+    }
+
+    /// Discovered candidates, before resolution admissibility and selection.
+    pub fn candidates(&self) -> &BTreeSet<Candidate> {
+        &self.candidates
+    }
 }
 
 /// An admitted request. There is no constructor from an unvalidated ID.
@@ -91,8 +112,43 @@ impl ResolutionContextV2 {
         }
         Ok(ContextualCandidates {
             context: self.checked.id(),
+            policy: interner
+                .try_resolve(exec.policy)
+                .ok_or(ModelError::BindingMismatch)?,
             candidates: crate::oracle::cand(providers, adm, exec),
         })
+    }
+
+    /// Classify candidates discovered under this admitted context and retain the exact query.
+    ///
+    /// This is the production #52/#59 bridge: a report cannot be created from a candidate
+    /// set discovered under another context, nor from a query scoped to another context.
+    /// Completeness evidence remains independently checked and query-bound by
+    /// `ResolutionReport::classify`. The current `WitnessProvider` API discovers from an
+    /// `ExecConfig`, not a goal, so this method does not establish that candidates solve
+    /// `query.goal`; callers must not interpret the report as a goal-aware resolution result.
+    pub fn resolution_report(
+        &self,
+        query: ResolutionQuery,
+        discovered: ContextualCandidates,
+        evidence: Option<&VerifiedCompleteness<Candidate>>,
+        selected: Option<Candidate>,
+        fallback_reason: ResolutionUnknown,
+    ) -> Result<ResolutionReport<Candidate>, ModelError> {
+        let admitted = self.checked.id();
+        if query.context != admitted
+            || discovered.context != admitted
+            || query.policy != discovered.policy
+        {
+            return Err(ModelError::BindingMismatch);
+        }
+        Ok(ResolutionReport::classify(
+            query,
+            discovered.candidates,
+            evidence,
+            selected,
+            fallback_reason,
+        ))
     }
 }
 

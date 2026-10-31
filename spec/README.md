@@ -37,6 +37,9 @@ below and ADR-0030 through ADR-0042).
 
 ## Foundation document
 
+[`Alpha9_Release_Contract.md`](./Alpha9_Release_Contract.md) records the proposed
+alpha.9 delivery order, acceptance gates and foundation integration ledger.
+
 [`SOC_Resolution_Contract.md`](./SOC_Resolution_Contract.md) defines query-scoped
 discovery and resolution outcomes. Operational completeness assertions do not
 confer proof authority; unsupported completeness evidence fails closed.

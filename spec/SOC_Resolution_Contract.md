@@ -204,10 +204,10 @@ Before resolving a question scoped to `ContextId`, the resolver SHALL validate c
    - `Unsupported`: Context features or version outside resolver capability.
    - `Exhausted`: Resource bounds in context have been exceeded.
 
-**[Partial: The production kernel adapter `brix-kernel::context_validation::acceptance_in_context` validates context-model-v2 inputs before proof checking. The SOC resolution consumer contract and error taxonomy are pinned with `StubContextValidator` in scenario 6; end-to-end publication-fence integration in this resolver remains untested.]**
+**[Partial: `ResolutionContextV2::resolution_report` is the production #52/#59 context bridge: it accepts only candidates returned by admitted discovery and rejects a query whose context or policy differs from that discovery. This is pinned by `discovery_rejects_a_different_world_policy_or_history_before_provider_call`. The current provider API is still keyed by `ExecConfig`, not the query goal, so this is not goal-aware resolution. The kernel adapter separately validates context-model-v2 inputs before proof checking. The scenario-6 `StubContextValidator` remains a taxonomy fixture; end-to-end host request and authority-publication integration is still outstanding.]**
 
 **9.3 Prohibition of Ambient Cross-Context Reuse:**
-A judgement or derivation valid under `ContextId` $C_1$ SHALL NOT be reused under `ContextId` $C_2$ without explicit context subsumption or transport evidence authorized by #59. **[Partial: The kernel adapter validates expected context identity before proof checking; the SOC consumer fixture checks mismatch detection with `StubContextValidator` in scenario 6, and presentation binding checks are pinned in scenario 9. End-to-end transport gating across the resolver publication path remains untested.]**
+A judgement or derivation valid under `ContextId` $C_1$ SHALL NOT be reused under `ContextId` $C_2$ without explicit context subsumption or transport evidence authorized by #59. **[Partial: The kernel adapter validates expected context identity before proof checking; `ResolutionContextV2::resolution_report` rejects a mismatched report scope and the production-context integration is pinned in `discovery_rejects_a_different_world_policy_or_history_before_provider_call`. Presentation binding checks are pinned in scenario 9. End-to-end host request transport and publication gating remain outstanding.]**
 
 **9.4 Test Isolation:**
 Any context validator used in #52 conformance tests is explicitly a test double (`StubContextValidator`), not a production validation engine. **[Pinned: `crates/soc-core/tests/resolution_contract.rs`]**
@@ -280,8 +280,8 @@ Any context validator used in #52 conformance tests is explicitly a test double 
 
 The following capabilities are specified by this contract but remain intentionally unlanded or owned by adjacent issues:
 
-1. **Resolver Context Validation Integration:**
-   A production kernel adapter validates materialized context-model-v2 bytes before proof checking (`brix-kernel::context_validation::acceptance_in_context`). The SOC resolution contract test still exercises its consumer seam with `StubContextValidator`; end-to-end resolver publication gating and cross-boundary transport are not pinned there.
+1. **Host Resolver Context Integration:**
+   `ResolutionContextV2::resolution_report` is a production #52/#59 context bridge: it binds the query to admitted discovery and rejects candidates discovered under another admitted context. This is pinned by `discovery_rejects_a_different_world_policy_or_history_before_provider_call`; the resolution-contract scenario still uses `StubContextValidator` for its taxonomy fixture. The current `WitnessProvider` API discovers from `ExecConfig`, not the query goal, and no production goal-to-candidate proof or end-to-end host authority-publication gate is implemented. A production kernel adapter separately validates materialized context-model-v2 bytes before proof checking (`brix-kernel::context_validation::acceptance_in_context`).
 2. **Centralized Retraction-Closure Engine:**
    Multi-support preservation and invalidation are verified locally in `resolution_contract.rs` and through `Dependency` edges, but a workspace-wide incremental invalidator traversing all dependency graphs is a subsequent engine stage (`Build_Plan_v3_SOC.md`).
 3. **General Completeness Checker:**

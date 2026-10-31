@@ -308,7 +308,7 @@ cases live inside `src/context_contract.rs`):
 | Ancestry cycles and every-edge mode checking | Pinned: crate-local fabricated-ancestry unit tests; not publicly constructible handles |
 | Depth checked before legacy parent lookup; exact core/legacy/mixed boundary | Pinned: `legacy_extension_checks_zero_depth_before_resolving_parent`, `exact_depth_boundary_passes_for_core_legacy_and_mixed_chains` |
 | Caller budgets cannot raise hard decoder/ancestry maxima | Pinned: `loose_budgets_cannot_exceed_hard_caps` |
-| Fixture consumer rejects identity/parent/profile/mode failures before consumption | Pinned: `fixture_consumer_requires_identity_parent_profile_and_mode`; not production #52 wiring |
+| V1 fixture consumer rejects identity/parent/profile/mode failures before consumption | Pinned: `fixture_consumer_requires_identity_parent_profile_and_mode`; this V1 test is not production #52 wiring (the V2 production seam is described in §10) |
 | Typed assumptions, binder semantics and discharge | Specified: primitive framing and distinct IDs do not implement these |
 | Program/world artifact availability and semantic compatibility | Specified: only digest fields are bound today |
 | Principal confinement, redaction, observation profile and validity range | Specified: absent from the first wire profile |
@@ -560,6 +560,11 @@ work; the shared foundation alone does not close every integration item in #59.
 
 The resolution adapter uses `AdmittedContextValidator` to compare request
 identities against a V2 context already admitted by the common validator.
+`ResolutionContextV2::resolution_report` only accepts candidates returned by
+that admitted context's discovery method, then checks the report's context and
+policy against discovery before classifying the exact query. The current
+provider API is keyed by `ExecConfig`, not the query goal, so this seam does not
+establish that candidates solve the goal or complete a host request path.
 `ResolutionReport` retains the exact query and operational outcome; it does not
 publish an epistemic grade. A caller-authored finite domain and a v1 saturation
 quiescence certificate cannot establish resolution-goal completeness and are
