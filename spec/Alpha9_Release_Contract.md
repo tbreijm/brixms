@@ -473,7 +473,7 @@ language and authority changes in §11.
 |---|---|---|
 | F | PR #346, `work/foundation-52-59`; follow-up `2cdeebc` | All 2,158 workspace tests and doctests passed locally; workspace clippy, formatting, canon and dependency/traceability checks passed. Context-report binding and additive record identity coverage are included; CI on this follow-up is tracked in the PR. |
 | A9-1 | `5b28a8f`, `work/a9-1-collect-corruption` | Implemented repair and regression matrix; qualify together with F before release. |
-| A9-2 | Reviewed integration `f579d40`, built from Gemini's implementation and Luna corrections | Union schemas/distinct union, composite keys, nested indexes and key transport fixes are integrated onto F + A9-1. Combined verification passed; see §14. §11 rulings remain explicit. |
+| A9-2 | Published source `f18a730`, built from Gemini's implementation and Luna corrections | Union schemas/distinct union, composite keys, nested indexes and key transport fixes are integrated onto F + A9-1. Combined verification passed; see §14. §11 rulings remain explicit. |
 | A9-3/4 | Scoped queries and request evidence | Consume the same V2 context validator. Add an explicit supported host-scope/evidence profile and actual request-path tests; the foundation adapter does not supply these features. |
 | A9-5–7 | String admission, collection semantics and benchmarks | Retain the order and acceptance gates in §§7–9. |
 
@@ -523,8 +523,10 @@ qualification cost to address before adding this matrix to an ordinary CI run.
 ## 14. Reviewed basis through A9-2 — 2026-11-01
 
 `work/alpha9-base` combines the #52/#53/#59 foundation, A9-1 and reviewed A9-2
-implementation. The tested code revision is `f579d40`; PR #347 tracks this
-incremental basis, stacked on foundation PR #346. This is not the final alpha.9
+implementation. Published source `f18a730` has identical production code to the
+locally tested revision `f579d40`; only the workflow optimization/test-ignore
+attribute was withheld and this ledger updated. PR #347 tracks this incremental
+basis, stacked on foundation PR #346. This is not the final alpha.9
 release: A9-3–7 and final release qualification remain outstanding.
 
 The reviewed fixes preserve JSON-looking scalar IDs byte-for-byte and use
@@ -541,8 +543,8 @@ frozen semantic/history tests pass with unchanged expected hashes.
 Verification evidence:
 
 - At `f579d40`, all **2,192 ordinary debug workspace tests** and doctests passed.
-  The 5,000-member lifecycle was qualified separately in release mode, alongside
-  the 28 existing ignored cases. The published tree restores that lifecycle as
+  That run skipped the 5,000-member lifecycle and the 28 existing ignored cases.
+  The large lifecycle was qualified separately in release mode. The published tree restores it as
   an ordinary runnable test; its production code is unchanged from the tested
   revision. The published workflow is unchanged.
 - All **21 Python SDK tests**, workspace clippy, formatting, whitespace checks,
