@@ -3,7 +3,10 @@
 use std::collections::BTreeMap;
 
 use brix_lower::module_graph::{ModuleGraph, ModuleLoaderLimits};
-use brix_lower::relation_dag::{lower_relations, OperatorNode, RelationalLowerError};
+use brix_lower::relation_dag::{
+    admit_named_queries_v1, lower_named_query_v1, lower_relations, OperatorNode,
+    RelationalLowerError,
+};
 
 #[test]
 fn test_adr0046_fulfillment_lowering_to_operator_dag() {
@@ -76,6 +79,74 @@ rel derived fulfillment =
         }
         _ => unreachable!(),
     }
+}
+
+#[test]
+fn named_query_admission_resolves_schema_and_rejects_unsupported_param_type() {
+    let source = r#"
+rel input catalogue_entries: { id: Str, kind: Str } key id
+query catalogue(kind: Str) = select { id: c.id, kind: c.kind }
+  from c in catalogue_entries where c.kind == kind
+"#;
+    let sources = BTreeMap::from([("root".to_string(), source.to_string())]);
+    let loader = |name: &str| sources.get(name).cloned();
+    let linked = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default())
+        .unwrap()
+        .link()
+        .unwrap();
+    let schema = admit_named_queries_v1(&linked).unwrap();
+    assert_eq!(schema["catalogue"].result_fields.len(), 2);
+    assert_eq!(schema["catalogue"].params[0].name, "kind");
+
+    let bad = source.replace("kind: Str", "kind: Float");
+    let sources = BTreeMap::from([("root".to_string(), bad)]);
+    let loader = |name: &str| sources.get(name).cloned();
+    let linked = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default())
+        .unwrap()
+        .link()
+        .unwrap();
+    assert!(admit_named_queries_v1(&linked).is_err());
+}
+
+#[test]
+fn named_query_lowering_prunes_unrelated_relations_and_decisions() {
+    let source = r#"
+rel input catalogue_entries: { id: Str } key id
+rel input unrelated_rows: { id: Str } key id
+rel derived unused_branch = select { id: u.id } from u in unrelated_rows
+decide unrelated_decision for u in unrelated_rows per id {
+  propose keep priority 1 when true = "yes"
+}
+query catalogue() = select { id: c.id } from c in catalogue_entries
+"#;
+    let sources = BTreeMap::from([("root".to_string(), source.to_string())]);
+    let loader = |name: &str| sources.get(name).cloned();
+    let linked = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default())
+        .unwrap()
+        .link()
+        .unwrap();
+    let query = linked
+        .root_items
+        .iter()
+        .find_map(|item| match item {
+            brix_syntax::ast::Item::Query(query) => Some(query),
+            _ => None,
+        })
+        .unwrap();
+    let lowered = lower_named_query_v1(&linked, query, &BTreeMap::new()).unwrap();
+    assert_eq!(lowered.program.rel_inputs.len(), 1);
+    assert!(lowered
+        .program
+        .rel_inputs
+        .keys()
+        .all(|name| name.name == "catalogue_entries"));
+    assert_eq!(lowered.program.rel_derived.len(), 1);
+    assert!(lowered.program.decides.is_empty());
+    assert!(lowered
+        .dag
+        .relation_outputs
+        .keys()
+        .all(|name| !name.contains("unrelated") && !name.contains("unused_branch")));
 }
 
 #[test]

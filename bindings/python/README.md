@@ -59,9 +59,53 @@ client.run(
 
 ## API
 
-`BrixClient(brix_bin=None, cwd=None, timeout=30.0, extra_args=None)` — spawns the server. Use as
+`BrixClient(brix_bin=None, cwd=None, timeout=30.0, extra_args=None, host_query_policy=None)` — spawns the server. Use as
 a context manager (`with BrixClient() as client:`) or call `client.close()` yourself; both close
 the child's stdin (clean EOF) and wait for it to exit, killing it if it does not exit promptly.
+
+For named scoped reads, construct an immutable `HostQueryPolicy` from the policy selected by your
+trusted application, then pass it at client construction. This opts into the explicit trusted
+stdio mode and fixes the policy for the client's lifetime:
+
+```python
+from brix import BrixClient, HostQueryPolicy
+
+policy = HostQueryPolicy({
+    "schema": "brix.host-query-policy@1",
+    "profile": {
+        "profile_id": "brix.host-scope.partition@1",
+        "partition_fields": {"catalogue::entries": "tenant_id"},
+        "global_relations": [],
+    },
+    "namespace": "catalogue",
+    "tenant": "tenant-a",
+    "principal": "catalogue-service",
+    "valid_time_start": 0,
+    "valid_time_end": 4102444800,
+    "validity_start": 0,
+    "validity_end": 4102444800,
+    "step_budget": 1000000,
+    "depth_budget": 1000,
+    "limits": {"bytes": 65536, "assumptions": 256, "depth": 128, "artifact_bytes": 65536},
+    "query_limits": {
+        "page_rows": 128, "max_input_rows": 100000, "max_input_bytes": 16777216,
+        "max_eval_work": 1000000, "max_eval_matches": 100000, "max_output_rows": 10000,
+    },
+})
+
+with BrixClient(host_query_policy=policy) as client:
+    page = client.world_query_named(
+        "./world", "catalogue", arguments={"kind": "open"}, rev=12, limit=50
+    )
+```
+
+`HostQueryPolicy` copies and validates the exact versioned shape, stores canonical JSON, and returns
+fresh copies when sending requests. It cannot be changed per query. Query arguments are ordinary
+untrusted values; the policy is sent in the separate `host_policy` field by `world_query_named`.
+The application embedding Brix must authenticate callers and select the policy, world, and allowed
+query. `--trusted-host` means the stdio writer is that trusted host; do not expose this process's
+stdin to raw untrusted users or hand an unrestricted client object to them. A default `BrixClient`
+does not enable trusted-host mode and refuses `world_query_named` locally.
 
 Typed methods, each returning the command's result `dict` and accepting an optional
 per-call `timeout=` override:
@@ -83,6 +127,7 @@ per-call `timeout=` override:
 - `client.kb_diff(kb_dir, rev_a, rev_b, package_paths=None)`
 - `client.kb_audit(kb_dir, rev, bundle_out, force=False, package_paths=None)`
 - `client.kb_verify(kb_dir, package_paths=None)`
+- `client.world_query_named(world_dir, name, arguments=None, rev=None, limit=None, cursor=None)` — requires `host_query_policy=` on `BrixClient`
 
 Lower-level: `client.call(method, params, request_id=None, timeout=None)` returns the full
 response envelope (`{"schema", "id", "ok", "exit_code", "result"}`); `client.result(method,

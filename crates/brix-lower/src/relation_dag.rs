@@ -133,6 +133,380 @@ pub struct RelationDag {
     pub relation_schemas: BTreeMap<String, BTreeMap<String, ast::Ty>>,
 }
 
+/// Typed data supplied to a named query. This is intentionally a scalar-only
+/// alpha.9 profile; it is converted directly to literal AST nodes after type
+/// validation and is never parsed or interpolated from source text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QueryScalarV1 {
+    Str(String),
+    Int(i64),
+    Bool(bool),
+}
+
+#[derive(Clone, Debug)]
+pub struct LoweredNamedQueryV1 {
+    pub program: LinkedProgram,
+    pub dag: RelationDag,
+    pub output_relation: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedQuerySchemaV1 {
+    pub name: String,
+    pub params: Vec<ast::QueryParam>,
+    pub result_fields: BTreeMap<String, ast::Ty>,
+}
+
+/// Admit every root-module named query against its bound linked program and
+/// resolve parameter/result schemas without changing the persisted program
+/// identity. Placeholder values are typed literals and do not change schema.
+pub fn admit_named_queries_v1(
+    program: &LinkedProgram,
+) -> Result<BTreeMap<String, NamedQuerySchemaV1>, RelationalLowerError> {
+    let mut admitted = BTreeMap::new();
+    for item in &program.root_items {
+        let item = match item {
+            ast::Item::Export(inner) => inner.as_ref(),
+            other => other,
+        };
+        let ast::Item::Query(query) = item else {
+            continue;
+        };
+        let args = query
+            .params
+            .iter()
+            .map(|param| {
+                let value = match &param.ty {
+                    ast::Ty::Named(name) if name == "Str" => QueryScalarV1::Str(String::new()),
+                    ast::Ty::Named(name) if name == "Int" => QueryScalarV1::Int(0),
+                    ast::Ty::Named(name) if name == "Bool" => QueryScalarV1::Bool(false),
+                    _ => {
+                        return Err(RelationalLowerError::UnsupportedExpression(format!(
+                            "named query parameter '{}' has unsupported type {:?}",
+                            param.name, param.ty
+                        )))
+                    }
+                };
+                Ok((param.name.clone(), value))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let lowered = lower_named_query_v1(program, query, &args)?;
+        let result_fields = lowered
+            .dag
+            .relation_schemas
+            .get(&lowered.output_relation)
+            .cloned()
+            .ok_or_else(|| {
+                RelationalLowerError::UnsupportedExpression(format!(
+                    "named query '{}' has no resolved result schema",
+                    query.name
+                ))
+            })?;
+        if admitted
+            .insert(
+                query.name.clone(),
+                NamedQuerySchemaV1 {
+                    name: query.name.clone(),
+                    params: query.params.clone(),
+                    result_fields,
+                },
+            )
+            .is_some()
+        {
+            return Err(RelationalLowerError::DuplicateRelation(format!(
+                "query {}",
+                query.name
+            )));
+        }
+    }
+    Ok(admitted)
+}
+
+/// Bind exact typed scalar arguments and lower one named query through the
+/// existing relational DAG path. The temporary query relation belongs only to
+/// the returned ephemeral program and is not added to source identities.
+pub fn lower_named_query_v1(
+    program: &LinkedProgram,
+    declaration: &ast::QueryDecl,
+    arguments: &BTreeMap<String, QueryScalarV1>,
+) -> Result<LoweredNamedQueryV1, RelationalLowerError> {
+    if arguments.len() != declaration.params.len() {
+        return Err(RelationalLowerError::UnsupportedExpression(
+            "named query argument names do not match declaration".into(),
+        ));
+    }
+    for param in &declaration.params {
+        let value = arguments.get(&param.name).ok_or_else(|| {
+            RelationalLowerError::UnsupportedExpression(format!(
+                "missing named query argument '{}'",
+                param.name
+            ))
+        })?;
+        let valid = matches!((&param.ty, value), (ast::Ty::Named(n), QueryScalarV1::Str(_)) if n == "Str")
+            || matches!((&param.ty, value), (ast::Ty::Named(n), QueryScalarV1::Int(_)) if n == "Int")
+            || matches!((&param.ty, value), (ast::Ty::Named(n), QueryScalarV1::Bool(_)) if n == "Bool");
+        if !valid {
+            return Err(RelationalLowerError::UnsupportedExpression(format!(
+                "named query argument '{}' has wrong or unsupported type",
+                param.name
+            )));
+        }
+    }
+    let param_names: BTreeSet<String> = declaration.params.iter().map(|p| p.name.clone()).collect();
+    if declaration
+        .query
+        .from
+        .iter()
+        .any(|binding| param_names.contains(&binding.var))
+        || declaration
+            .query
+            .not_exists
+            .as_ref()
+            .is_some_and(|anti| param_names.contains(&anti.binding.var))
+    {
+        return Err(RelationalLowerError::UnsupportedExpression(
+            "named query parameter shadows a relation binding".into(),
+        ));
+    }
+    if declaration
+        .params
+        .iter()
+        .any(|param| ast::is_reserved_context_dimension_name(&param.name))
+    {
+        return Err(RelationalLowerError::UnsupportedExpression(
+            "named query parameter uses a reserved host name".into(),
+        ));
+    }
+    let mut query = declaration.query.clone();
+    substitute_query_parameters(&mut query, arguments);
+    let mut ephemeral = prune_query_relations(program, &query)?;
+    let local = format!("__a9_query_{}", declaration.name);
+    let qname = crate::module_graph::QualifiedName::new(&ephemeral.root_module, &local);
+    if ephemeral.rel_inputs.contains_key(&qname)
+        || ephemeral.rel_derived.contains_key(&qname)
+        || ephemeral.decides.contains_key(&qname)
+    {
+        return Err(RelationalLowerError::DuplicateRelation(qname.to_string()));
+    }
+    ephemeral
+        .rel_derived
+        .insert(qname.clone(), ast::RelDerivedDecl { name: local, query });
+    let dag = lower_relations(&ephemeral)?;
+    Ok(LoweredNamedQueryV1 {
+        program: ephemeral,
+        dag,
+        output_relation: qname.to_string(),
+    })
+}
+
+/// Keep only the relational producer closure reachable from this query. In
+/// particular, unrelated decisions and relational branches must not be
+/// lowered or evaluated as part of a scoped read.
+fn prune_query_relations(
+    program: &LinkedProgram,
+    query: &ast::RelQuery,
+) -> Result<LinkedProgram, RelationalLowerError> {
+    fn visit(
+        program: &LinkedProgram,
+        relation: &str,
+        owner: &str,
+        inputs: &mut BTreeSet<crate::module_graph::QualifiedName>,
+        derived: &mut BTreeSet<crate::module_graph::QualifiedName>,
+        visiting: &mut BTreeSet<crate::module_graph::QualifiedName>,
+    ) -> Result<(), RelationalLowerError> {
+        let qname = if let Some((module, local)) = relation.rsplit_once("::") {
+            crate::module_graph::QualifiedName::new(module, local)
+        } else {
+            crate::module_graph::QualifiedName::new(owner, relation)
+        };
+        if inputs.contains(&qname) || derived.contains(&qname) {
+            return Ok(());
+        }
+        if program.decides.contains_key(&qname) {
+            return Err(RelationalLowerError::UnsupportedExpression(format!(
+                "named queries cannot depend on decision relation '{qname}' in the initial scope profile"
+            )));
+        }
+        if program.rel_inputs.contains_key(&qname) {
+            inputs.insert(qname);
+            return Ok(());
+        }
+        let Some(source) = program.rel_derived.get(&qname) else {
+            return Err(RelationalLowerError::UnknownRelation(qname.to_string()));
+        };
+        if !visiting.insert(qname.clone()) {
+            // Retain the cycle for the normal DAG validator to diagnose.
+            derived.insert(qname);
+            return Ok(());
+        }
+        derived.insert(qname.clone());
+        for binding in &source.query.from {
+            visit(
+                program,
+                &binding.relation,
+                &qname.module,
+                inputs,
+                derived,
+                visiting,
+            )?;
+        }
+        if let Some(anti) = &source.query.not_exists {
+            visit(
+                program,
+                &anti.binding.relation,
+                &qname.module,
+                inputs,
+                derived,
+                visiting,
+            )?;
+        }
+        visiting.remove(&qname);
+        Ok(())
+    }
+
+    let mut inputs = BTreeSet::new();
+    let mut derived = BTreeSet::new();
+    let mut visiting = BTreeSet::new();
+    for binding in &query.from {
+        visit(
+            program,
+            &binding.relation,
+            &program.root_module,
+            &mut inputs,
+            &mut derived,
+            &mut visiting,
+        )?;
+    }
+    if let Some(anti) = &query.not_exists {
+        visit(
+            program,
+            &anti.binding.relation,
+            &program.root_module,
+            &mut inputs,
+            &mut derived,
+            &mut visiting,
+        )?;
+    }
+
+    let mut pruned = program.clone();
+    pruned.rel_inputs.retain(|name, _| inputs.contains(name));
+    pruned.rel_derived.retain(|name, _| derived.contains(name));
+    pruned.decides.clear();
+    Ok(pruned)
+}
+
+fn substitute_query_parameters(query: &mut ast::RelQuery, args: &BTreeMap<String, QueryScalarV1>) {
+    let mut scope = BTreeSet::new();
+    substitute_expr(&mut query.select, args, &mut scope);
+    if let Some(expr) = &mut query.where_clause {
+        substitute_expr(expr, args, &mut scope);
+    }
+    if let Some(anti) = &mut query.not_exists {
+        substitute_expr(&mut anti.predicate, args, &mut scope);
+    }
+    for expr in &mut query.group_by {
+        substitute_expr(expr, args, &mut scope);
+    }
+}
+
+fn substitute_expr(
+    expr: &mut Expr,
+    args: &BTreeMap<String, QueryScalarV1>,
+    scope: &mut BTreeSet<String>,
+) {
+    match expr {
+        Expr::Var(name) if !scope.contains(name) => {
+            if let Some(value) = args.get(name) {
+                *expr = match value {
+                    QueryScalarV1::Str(v) => Expr::Str(v.clone()),
+                    QueryScalarV1::Int(v) => Expr::Num(v.to_string()),
+                    QueryScalarV1::Bool(v) => Expr::Bool(*v),
+                };
+            }
+        }
+        Expr::Record { fields, .. } | Expr::AnonRecord(fields) => {
+            for (_, value) in fields {
+                substitute_expr(value, args, scope);
+            }
+        }
+        Expr::Field(base, _)
+        | Expr::Prove(base)
+        | Expr::Why(base)
+        | Expr::Audit(base)
+        | Expr::Not(base) => substitute_expr(base, args, scope),
+        Expr::Call { args: values, .. } | Expr::ListLit(values) => {
+            for value in values {
+                substitute_expr(value, args, scope);
+            }
+        }
+        Expr::Bin { lhs, rhs, .. } => {
+            substitute_expr(lhs, args, scope);
+            substitute_expr(rhs, args, scope);
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            substitute_expr(scrutinee, args, scope);
+            for arm in arms {
+                let mut shadowed = BTreeSet::new();
+                collect_pattern_names(&arm.pattern, &mut shadowed);
+                let added: Vec<String> = shadowed
+                    .into_iter()
+                    .filter(|n| scope.insert(n.clone()))
+                    .collect();
+                substitute_expr(&mut arm.body, args, scope);
+                for name in added {
+                    scope.remove(&name);
+                }
+            }
+        }
+        Expr::Lambda { param, body } => {
+            let fresh = scope.insert(param.clone());
+            substitute_expr(body, args, scope);
+            if fresh {
+                scope.remove(param);
+            }
+        }
+        Expr::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => {
+            let mut added = Vec::new();
+            for (name, value) in generators {
+                substitute_expr(value, args, scope);
+                if scope.insert(name.clone()) {
+                    added.push(name.clone());
+                }
+            }
+            if let Some(value) = where_clause {
+                substitute_expr(value, args, scope);
+            }
+            substitute_expr(yield_expr, args, scope);
+            for name in added {
+                scope.remove(&name);
+            }
+        }
+        Expr::Validate { arg, .. } => substitute_expr(arg, args, scope),
+        Expr::Ascribe { expr, .. } => substitute_expr(expr, args, scope),
+        Expr::Var(_) | Expr::Num(_) | Expr::Str(_) | Expr::Bool(_) => {}
+    }
+}
+
+fn collect_pattern_names(pattern: &ast::Pattern, names: &mut BTreeSet<String>) {
+    match pattern {
+        ast::Pattern::Var(name) => {
+            names.insert(name.clone());
+        }
+        ast::Pattern::Ctor { args, .. } => {
+            for arg in args {
+                collect_pattern_names(arg, names);
+            }
+        }
+        ast::Pattern::Wildcard => {}
+    }
+}
+
 impl RelationDag {
     pub fn new() -> Self {
         Self {

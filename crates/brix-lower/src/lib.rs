@@ -107,8 +107,9 @@ pub use module_graph::{
     ModuleLinkError, ModuleLoaderLimits, ModuleManifestEntry, ProgramGraphManifest, QualifiedName,
 };
 pub use relation_dag::{
-    decision_field_schemas, derive_binding_names, derive_decide_binding_names, lower_relations,
-    OperatorId, OperatorNode, RelationDag, RelationalLowerError,
+    decision_field_schemas, derive_binding_names, derive_decide_binding_names,
+    lower_named_query_v1, lower_relations, LoweredNamedQueryV1, OperatorId, OperatorNode,
+    QueryScalarV1, RelationDag, RelationalLowerError,
 };
 pub use soc_core::{
     decode_audit_input_bundle_v1, encode_audit_input_bundle_v1, AuditDecodeLimits,

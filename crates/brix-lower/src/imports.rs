@@ -214,6 +214,7 @@ fn declared_name(item: &Item) -> Option<String> {
         Item::Export(inner) => declared_name(inner),
         Item::RelInput(r) => Some(r.name.clone()),
         Item::RelDerived(r) => Some(r.name.clone()),
+        Item::Query(q) => Some(q.name.clone()),
         Item::Newtype(n) => Some(n.name.clone()),
         Item::TypeDef(t) => Some(t.name.clone()),
         Item::Assume(_) | Item::Show(_) | Item::Use(_) => None,

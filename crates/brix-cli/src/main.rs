@@ -23,7 +23,9 @@ use std::process::ExitCode;
 
 pub mod cli;
 pub mod commands;
+pub mod host_context;
 pub mod json;
+pub mod named_query;
 pub mod packages;
 pub mod pipeline;
 pub mod serve;
@@ -151,6 +153,7 @@ where
         Ok(cli::Command::Kb { op, json }) => commands::kb::execute_kb(&op, json),
         Ok(cli::Command::World { op, json }) => commands::world::execute_world(&op, json),
         Ok(cli::Command::Serve) => serve::run_stdio(),
+        Ok(cli::Command::ServeHost) => serve::run_stdio_with_host(true),
         Err(err) => {
             if err.is_json {
                 let cmd_name = err.command.unwrap_or_else(|| "brix".to_string());

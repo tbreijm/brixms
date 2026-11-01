@@ -1912,6 +1912,12 @@ pub fn lower_finite_decision_plan(
                     r.name
                 )));
             }
+            ast::Item::Query(q) => {
+                return Err(FiniteDecisionLowerError::ItemNotAllowed(format!(
+                    "query {}",
+                    q.name
+                )));
+            }
             ast::Item::Newtype(n) => {
                 return Err(FiniteDecisionLowerError::ItemNotAllowed(format!(
                     "newtype {}",

@@ -17,7 +17,7 @@ import subprocess
 import threading
 import time
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Union
 
 # A program or input source: either a filesystem path (resolved relative to
 # the server process's own working directory) or inline text. Both forms
@@ -83,6 +83,131 @@ def _normalize_expected_entity(entity: Any) -> Any:
             items.append(item)
     return {"type": "brix.entity-key@1", "items": items}
 
+
+class HostQueryPolicy:
+    """Immutable policy selected by a trusted embedding host for named reads.
+
+    The containing application must authenticate the caller and choose this
+    policy. It is sent separately from query arguments and is never accepted
+    as a per-call override. Canonical JSON is retained internally so changes
+    to the caller's input dictionary cannot alter later requests.
+    """
+
+    __slots__ = ("_canonical_json",)
+
+    def __init__(self, value: Union["HostQueryPolicy", Mapping[str, Any]]):
+        if isinstance(value, HostQueryPolicy):
+            value = value.to_json_value()
+        if not isinstance(value, Mapping):
+            raise TypeError("host_query_policy must be a mapping or HostQueryPolicy")
+        try:
+            copied = json.loads(json.dumps(value, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"host query policy must contain JSON values: {exc}") from exc
+        _validate_host_query_policy(copied)
+        canonical = json.dumps(
+            copied, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        )
+        object.__setattr__(self, "_canonical_json", canonical)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("HostQueryPolicy is immutable")
+
+    def to_json_value(self) -> Dict[str, Any]:
+        """Return a fresh JSON value; mutating it does not change this policy."""
+        return json.loads(self._canonical_json)
+
+    def _canonical(self) -> str:
+        return self._canonical_json
+
+
+_HOST_QUERY_POLICY_KEYS = {
+    "schema", "profile", "namespace", "tenant", "principal",
+    "valid_time_start", "valid_time_end", "validity_start", "validity_end",
+    "step_budget", "depth_budget", "limits", "query_limits",
+}
+_PROFILE_KEYS = {"profile_id", "partition_fields", "global_relations"}
+_MODEL_LIMITS = {"bytes": 65536, "assumptions": 256, "depth": 128, "artifact_bytes": 65536}
+_QUERY_LIMITS = {
+    "page_rows": 1024,
+    "max_input_rows": 100000,
+    "max_input_bytes": 64 * 1024 * 1024,
+    "max_eval_work": 10000000,
+    "max_eval_matches": 1000000,
+    "max_output_rows": 100000,
+}
+
+
+def _require_exact_keys(value: Any, keys: set, where: str) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{where} must be an object")
+    if set(value) != keys:
+        missing = sorted(keys - set(value))
+        extra = sorted(set(value) - keys)
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if extra:
+            details.append("unknown " + ", ".join(extra))
+        raise ValueError(f"{where} fields are invalid ({'; '.join(details)})")
+    return value
+
+
+def _positive_int(value: Any, name: str, maximum: Optional[int] = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} may not exceed {maximum}")
+    return value
+
+
+def _nonnegative_int(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a nonnegative integer")
+    return value
+
+
+def _validate_host_query_policy(value: Any) -> None:
+    policy = _require_exact_keys(value, _HOST_QUERY_POLICY_KEYS, "host query policy")
+    if policy["schema"] != "brix.host-query-policy@1":
+        raise ValueError("unsupported host query policy schema")
+
+    profile = _require_exact_keys(policy["profile"], _PROFILE_KEYS, "profile")
+    if profile["profile_id"] != "brix.host-scope.partition@1":
+        raise ValueError("unsupported host-scope profile version")
+    fields = profile["partition_fields"]
+    if not isinstance(fields, dict):
+        raise ValueError("profile.partition_fields must be an object")
+    for relation, field in fields.items():
+        if not isinstance(relation, str) or not relation or not isinstance(field, str) or not field:
+            raise ValueError("partition relation and field names must be nonempty strings")
+    globals_ = profile["global_relations"]
+    if not isinstance(globals_, list) or any(not isinstance(r, str) or not r for r in globals_):
+        raise ValueError("profile.global_relations must be an array of nonempty strings")
+    if len(set(globals_)) != len(globals_):
+        raise ValueError("profile.global_relations contains duplicate entries")
+    if set(fields).intersection(globals_):
+        raise ValueError("a relation cannot be both partitioned and global")
+
+    for name in ("namespace", "tenant", "principal"):
+        if not isinstance(policy[name], str) or not policy[name]:
+            raise ValueError(f"{name} must be a nonempty string")
+    for name in ("valid_time_start", "valid_time_end", "validity_start", "validity_end"):
+        _nonnegative_int(policy[name], name)
+    if policy["valid_time_start"] > policy["valid_time_end"]:
+        raise ValueError("valid_time_start must not exceed valid_time_end")
+    if policy["validity_start"] > policy["validity_end"]:
+        raise ValueError("validity_start must not exceed validity_end")
+    _positive_int(policy["step_budget"], "step_budget", 1_000_000_000)
+    _positive_int(policy["depth_budget"], "depth_budget", 100_000)
+
+    model_limits = _require_exact_keys(policy["limits"], set(_MODEL_LIMITS), "limits")
+    for name, maximum in _MODEL_LIMITS.items():
+        _positive_int(model_limits[name], f"limits.{name}", maximum)
+    query_limits = _require_exact_keys(policy["query_limits"], set(_QUERY_LIMITS), "query_limits")
+    for name, maximum in _QUERY_LIMITS.items():
+        _positive_int(query_limits[name], f"query_limits.{name}", maximum)
+
 class BrixError(Exception):
     """Base class for every error this client raises."""
 
@@ -145,6 +270,7 @@ class BrixClient:
         cwd: Optional[Union[str, os.PathLike]] = None,
         timeout: Optional[float] = 30.0,
         extra_args: Optional[List[str]] = None,
+        host_query_policy: Optional[Union[HostQueryPolicy, Mapping[str, Any]]] = None,
     ):
         """Spawn `brix serve --stdio`.
 
@@ -157,9 +283,15 @@ class BrixClient:
                 override it. `None` means wait indefinitely.
             extra_args: extra arguments appended after `serve --stdio`
                 (reserved for future use; unused by the protocol today).
+            host_query_policy: immutable host-selected policy for named reads.
+                Supplying it opts into `serve --stdio --trusted-host`; without
+                it, named scoped queries are refused locally.
         """
         self._bin = brix_bin or _default_brix_bin()
         self._default_timeout = timeout
+        self._host_query_policy = (
+            HostQueryPolicy(host_query_policy) if host_query_policy is not None else None
+        )
         self._id_counter = itertools.count(1)
         self._closed = False
         self._lock = threading.Lock()
@@ -168,7 +300,14 @@ class BrixClient:
         # request's; it is discarded when read.
         self._abandoned: set = set()
 
-        args = [self._bin, "serve", "--stdio"] + (extra_args or [])
+        extra = list(extra_args or [])
+        if "--trusted-host" in extra:
+            if self._host_query_policy is None:
+                raise ValueError("--trusted-host requires host_query_policy")
+            raise ValueError("--trusted-host is selected automatically by host_query_policy")
+        args = [self._bin, "serve", "--stdio"] + extra
+        if self._host_query_policy is not None:
+            args.append("--trusted-host")
         try:
             self._proc = subprocess.Popen(
                 args,
@@ -662,6 +801,43 @@ class BrixClient:
         if typed:
             params["typed"] = True
         return self.result("world.query", params, timeout=timeout)
+
+    def world_query_named(
+        self,
+        world_dir: Union[str, os.PathLike],
+        name: str,
+        arguments: Optional[Mapping[str, Any]] = None,
+        rev: Optional[int] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Run a typed named query under this client's trusted host policy.
+
+        The host policy is fixed when the client is constructed and cannot be
+        overridden per call. Query arguments remain ordinary untrusted data.
+        """
+        if self._host_query_policy is None:
+            raise BrixError(
+                "world_query_named requires BrixClient(host_query_policy=...)"
+            )
+        if not isinstance(name, str) or not name:
+            raise ValueError("name must be a nonempty string")
+        if arguments is not None and not isinstance(arguments, Mapping):
+            raise TypeError("arguments must be a mapping of parameter names to values")
+        params: Dict[str, Any] = {
+            "dir": str(world_dir),
+            "name": name,
+            "args": dict(arguments) if arguments is not None else {},
+            "host_policy": self._host_query_policy.to_json_value(),
+        }
+        if rev is not None:
+            params["rev"] = rev
+        if limit is not None:
+            params["limit"] = limit
+        if cursor is not None:
+            params["cursor"] = cursor
+        return self.result("world.query-named", params, timeout=timeout)
 
     def world_decisions(
         self,

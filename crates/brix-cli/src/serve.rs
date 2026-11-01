@@ -99,6 +99,7 @@ const SUPPORTED_METHODS: &[&str] = &[
     "world.init",
     "world.batch",
     "world.query",
+    "world.query-named",
     "world.decisions",
     "world.explain",
     "world.show",
@@ -115,6 +116,11 @@ const SUPPORTED_METHODS: &[&str] = &[
 /// process exit code (`0` on clean EOF; nonzero only for an unrecoverable
 /// local I/O failure writing a response, which is otherwise never expected).
 pub fn run_stdio() -> u8 {
+    run_stdio_with_host(false)
+}
+
+/// Opt-in for a trusted embedding host that owns the stdio channel.
+pub fn run_stdio_with_host(trusted_host: bool) -> u8 {
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let stdout = std::io::stdout();
@@ -130,7 +136,11 @@ pub fn run_stdio() -> u8 {
                     // caller writes lines with a trailing newline convention.
                     continue;
                 }
-                let response = handle_line(&line);
+                let response = if trusted_host {
+                    handle_line_with_host(&line, true)
+                } else {
+                    handle_line(&line)
+                };
                 if write_response(&mut out, &response).is_err() {
                     return crate::cli::EXIT_USAGE_OR_IO;
                 }
@@ -263,7 +273,13 @@ fn error_response(id: Value, code: &str, message: String) -> Value {
 }
 
 fn handle_line(line: &str) -> Value {
-    let request: Request = match serde_json::from_str(line) {
+    handle_line_with_host(line, false)
+}
+
+fn handle_line_with_host(line: &str, trusted_host: bool) -> Value {
+    let request: Request = match crate::host_context::parse_unique_json(line)
+        .and_then(|value| serde_json::from_value(value).map_err(|e| e.to_string()))
+    {
         Ok(r) => r,
         Err(err) => {
             return error_response(
@@ -274,6 +290,20 @@ fn handle_line(line: &str) -> Value {
         }
     };
     let id = request.id.clone();
+    if request.method == "world.query-named" {
+        if !trusted_host {
+            return error_response(
+                id,
+                "host-channel-required",
+                "named queries require a trusted host channel (serve --stdio --trusted-host)"
+                    .into(),
+            );
+        }
+        return match crate::named_query::dispatch_host_json(&request.params) {
+            Ok((code, result)) => ok_response(id, code, result),
+            Err(message) => error_response(id, "invalid-params", message),
+        };
+    }
     match dispatch(&request) {
         Ok((exit_code, result)) => ok_response(id, exit_code, result),
         Err((code, message)) => error_response(id, code, message),
@@ -1202,5 +1232,23 @@ mod tests {
         let response = handle_line("{not json");
         assert_eq!(response["ok"], false);
         assert_eq!(response["error"]["code"], "malformed-request");
+    }
+    #[test]
+    fn named_queries_require_explicit_host_channel() {
+        let line = r#"{"id":1,"method":"world.query-named","params":{}}"#;
+        let default = handle_line(line);
+        assert_eq!(default["error"]["code"], "host-channel-required");
+        let host = handle_line_with_host(line, true);
+        assert_eq!(host["error"]["code"], "invalid-params");
+    }
+
+    #[test]
+    fn duplicate_nested_arguments_fail_before_dispatch() {
+        let line =
+            r#"{"id":1,"method":"world.query-named","params":{"args":{"kind":"a","kind":"b"}}}"#;
+        assert_eq!(
+            handle_line_with_host(line, true)["error"]["code"],
+            "malformed-request"
+        );
     }
 }

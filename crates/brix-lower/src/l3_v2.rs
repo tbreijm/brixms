@@ -1301,6 +1301,9 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
                     r.name
                 )))
             }
+            ast::Item::Query(q) => {
+                return Err(L3V2LowerError::ItemNotAllowed(format!("query {}", q.name)))
+            }
             ast::Item::Newtype(n) => {
                 return Err(L3V2LowerError::ItemNotAllowed(format!(
                     "newtype {}",

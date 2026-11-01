@@ -323,8 +323,11 @@ pub fn execute_check(
     let mut bindings_json = Vec::new();
 
     let has_world_relational_items = parsed.module.items.iter().any(|item| match item {
-        Item::RelInput(_) | Item::RelDerived(_) => true,
-        Item::Export(inner) => matches!(inner.as_ref(), Item::RelInput(_) | Item::RelDerived(_)),
+        Item::RelInput(_) | Item::RelDerived(_) | Item::Query(_) => true,
+        Item::Export(inner) => matches!(
+            inner.as_ref(),
+            Item::RelInput(_) | Item::RelDerived(_) | Item::Query(_)
+        ),
         _ => false,
     });
     if has_world_relational_items {
@@ -340,6 +343,8 @@ pub fn execute_check(
             )
             .map_err(|e| e.to_string())?;
             let linked = graph.link().map_err(|e| e.to_string())?;
+            brix_lower::relation_dag::admit_named_queries_v1(&linked)
+                .map_err(|e| format!("named query admission failed: {e}"))?;
             brix_kb::world::network::WorldNetwork::from_program(&linked)
                 .map(|_| ())
                 .map_err(|e| e.to_string())

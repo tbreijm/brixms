@@ -438,6 +438,9 @@ pub fn lower_l3_plan(
                     r.name
                 )));
             }
+            ast::Item::Query(q) => {
+                return Err(L3LowerError::FnItemNotAllowed(format!("query {}", q.name)))
+            }
             ast::Item::Newtype(n) => {
                 return Err(L3LowerError::FnItemNotAllowed(format!(
                     "newtype {}",

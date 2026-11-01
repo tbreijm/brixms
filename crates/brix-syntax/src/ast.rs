@@ -63,6 +63,8 @@ pub enum Item {
     RelInput(RelInputDecl),
     /// `rel derived name = select ... from ...` — relational derived declaration (ADR-0046).
     RelDerived(RelDerivedDecl),
+    /// Versioned alpha.9 read-only named query declaration.
+    Query(QueryDecl),
     /// `newtype Name[<Index>] = Repr` — a nominal type with an underlying
     /// representation (ADR-0048). Contextual at item position; `newtype` is
     /// not a reserved word.
@@ -88,6 +90,53 @@ pub struct RelInputDecl {
 pub struct RelDerivedDecl {
     pub name: String,
     pub query: RelQuery,
+}
+
+/// Read-only named query. This additive declaration has its own identity and
+/// does not participate in persisted relational program identities.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryDecl {
+    pub name: String,
+    pub params: Vec<QueryParam>,
+    pub query: RelQuery,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryParam {
+    pub name: String,
+    pub ty: Ty,
+}
+
+/// Names reserved for dimensions in the shared V2 context contract. Query
+/// parameters cannot bind these names, so caller data cannot shadow host
+/// context fields in language or admission APIs.
+pub fn is_reserved_context_dimension_name(name: &str) -> bool {
+    matches!(
+        name,
+        "parent"
+            | "program"
+            | "world"
+            | "namespace"
+            | "tenant"
+            | "principal"
+            | "capability_view"
+            | "scenario_mode"
+            | "branch"
+            | "valid_time_start"
+            | "valid_time_end"
+            | "transaction_time"
+            | "correction_time"
+            | "simulation_time"
+            | "observation_profile"
+            | "redaction_profile"
+            | "kernel_profile"
+            | "regime_profile"
+            | "axiom_profile"
+            | "validity_start"
+            | "validity_end"
+            | "step_budget"
+            | "depth_budget"
+    )
 }
 
 /// A relational query in a `rel derived` declaration.

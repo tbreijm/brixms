@@ -568,3 +568,32 @@ Gemini's A9-3 worktree is `/private/tmp/brix-a9-3` on
 the owner's next safe checkpoint; the earlier basis lacks these review fixes.
 Retain the shared V2 context validator and the host-scope-before-operators rules
 in §5. Active feature worktrees are preserved during release-basis integration.
+
+## 15. A9-3 implementation checkpoint (2026-11-01)
+
+Codex and Luna continued from the reviewed `b1f65e1` A9-1/A9-2 foundation.
+The initial supported named-query profile now has source declarations, inferred
+result schemas, exact `Str`/`Int`/`Bool` arguments, host-owned partition/global
+policy, real V2 context validation against saved program and pinned revision
+artifacts, bound continuation cursors, and an ephemeral scoped query network.
+Both read-only open and query evaluation avoid global network replay; unrelated
+relations and decisions are pruned before execution. Decision dependencies are
+explicitly rejected by this initial profile rather than reusing global winners.
+
+The CLI surface is `world query-named ... --host-scope FILE`; stdio requires
+explicit trusted-host startup. Python supplies an immutable host policy from
+its client constructor separately from ordinary query parameters. The host owns
+that channel and authenticates external callers. See
+[`a9-scoped-queries.md`](../docs/planning/a9-scoped-queries.md) and the proposed
+[profile ruling](errata/0006-a9-3-host-scoped-query-profile.md) for exact supported
+behavior and limits. Physical scan budgets count all scanned source rows; one
+storage node may be decoded before the tuple-byte budget is checked.
+
+Qualification covered the entire workspace (2,212 ordinary unit/integration
+checks plus 13 doctests), with the expensive 5,000-child lifecycle run separately
+in release mode (passed). Workspace Clippy with warnings denied, TCB inventory,
+SOC law-map checks and 29 Python tests passed. Final pruning/reserved-name and
+actual read-only-filesystem changes received affected syntax/lowering, CLI,
+scoped-world and SDK reruns. Existing frozen vectors and histories were not
+updated. This checkpoint is A9-3 work, not the alpha.9 release: A9-4 through
+A9-7 and final series qualification remain outstanding.

@@ -42,6 +42,24 @@ pub const WORLD_JSON_SCHEMA: &str = "brix.cli.world-result@1";
 /// Main entry point for `brix world` subcommand execution.
 pub fn execute_world(op: &WorldOp, json_out: bool) -> u8 {
     match op {
+        WorldOp::NamedQuery {
+            dir,
+            name,
+            arguments,
+            host_scope,
+            rev,
+            limit,
+            cursor,
+        } => crate::named_query::execute_cli(
+            dir,
+            name,
+            arguments,
+            host_scope,
+            *rev,
+            *limit,
+            cursor.as_deref(),
+            json_out,
+        ),
         WorldOp::Init {
             dir,
             program,

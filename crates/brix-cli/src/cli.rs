@@ -87,6 +87,8 @@ pub enum Command {
     },
     /// `brix serve --stdio` — the embeddable JSON-lines protocol (ADR-0044).
     Serve,
+    /// Explicitly host-owned stdio channel for scoped queries/request contexts.
+    ServeHost,
     Help,
     Version,
 }
@@ -94,6 +96,15 @@ pub enum Command {
 /// A `brix world` sub-operation and its arguments (ADR-0046 P5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorldOp {
+    NamedQuery {
+        dir: PathBuf,
+        name: String,
+        arguments: String,
+        host_scope: PathBuf,
+        rev: Option<u64>,
+        limit: Option<usize>,
+        cursor: Option<String>,
+    },
     Init {
         dir: PathBuf,
         program: PathBuf,
@@ -961,6 +972,9 @@ fn parse_test_args(args: &[String], json: bool) -> Result<Command, CliUsageError
 /// accepted; `--json` has no effect on `serve` (every response is already
 /// JSON), so it is deliberately not recognized here.
 fn parse_serve_args(args: &[String]) -> Result<Command, CliUsageError> {
+    if args == ["--stdio", "--trusted-host"] || args == ["--trusted-host", "--stdio"] {
+        return Ok(Command::ServeHost);
+    }
     if args == ["--stdio"] {
         return Ok(Command::Serve);
     }
@@ -1531,7 +1545,7 @@ fn parse_rev(raw: &str, cmd_name: &str, json: bool) -> Result<u64, CliUsageError
 pub fn parse_world_args(args: &[String], json: bool) -> Result<Command, CliUsageError> {
     if args.is_empty() {
         return Err(CliUsageError::usage(
-            "missing sub-command for 'brix world'\nUsage: brix world <init|batch|query|decide|show|explain|audit|verify|import-kb|open-check|gc> ...".to_string(),
+            "missing sub-command for 'brix world'\nUsage: brix world <init|batch|query|query-named|decide|show|explain|audit|verify|import-kb|open-check|gc> ...".to_string(),
             json,
             Some("world".to_string()),
         ));
@@ -1542,6 +1556,7 @@ pub fn parse_world_args(args: &[String], json: bool) -> Result<Command, CliUsage
         "init" => parse_world_init_args(rest, json)?,
         "batch" => parse_world_batch_args(rest, json)?,
         "query" => parse_world_query_args(rest, json)?,
+        "query-named" => parse_world_named_query_args(rest, json)?,
         "decide" => parse_world_decide_args(rest, json)?,
         "show" => parse_world_show_args(rest, json)?,
         "explain" => parse_world_explain_args(rest, json)?,
@@ -1555,7 +1570,7 @@ pub fn parse_world_args(args: &[String], json: bool) -> Result<Command, CliUsage
         other => {
             return Err(CliUsageError::usage(
                 format!(
-                    "unknown 'brix world' sub-command: '{other}'\nUsage: brix world <init|batch|query|decide|show|explain|audit|verify|evidence|verify-evidence|import-kb|open-check|gc> ..."
+                    "unknown 'brix world' sub-command: '{other}'\nUsage: brix world <init|batch|query|query-named|decide|show|explain|audit|verify|evidence|verify-evidence|import-kb|open-check|gc> ..."
                 ),
                 json,
                 Some("world".to_string()),
@@ -1652,6 +1667,72 @@ fn parse_world_batch_args(args: &[String], json: bool) -> Result<WorldOp, CliUsa
         dir,
         batch_file,
         replay,
+    })
+}
+
+fn parse_world_named_query_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
+    let command = "world query-named";
+    let fail = |message: String| CliUsageError::usage(message, json, Some(command.into()));
+    let mut positionals = Vec::new();
+    let mut options = std::collections::BTreeMap::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" {
+            index += 1;
+            continue;
+        }
+        if arg.starts_with("--") {
+            let (name, value) = if let Some((name, value)) = arg.split_once('=') {
+                (name, value.to_string())
+            } else {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| fail(format!("missing value for '{arg}'")))?;
+                (arg.as_str(), value.clone())
+            };
+            if !["--args", "--host-scope", "--rev", "--limit", "--cursor"].contains(&name) {
+                return Err(fail(format!("unknown option for '{command}': '{name}'")));
+            }
+            if options.insert(name.to_string(), value).is_some() {
+                return Err(fail(format!("duplicate option '{name}'")));
+            }
+        } else if arg.starts_with('-') {
+            return Err(fail(format!("unknown option '{arg}'")));
+        } else {
+            positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+    if positionals.len() != 2 {
+        return Err(fail("usage: brix world query-named DIR NAME --host-scope FILE [--args JSON] [--rev N] [--limit N] [--cursor TOKEN]".into()));
+    }
+    let host_scope = options
+        .remove("--host-scope")
+        .ok_or_else(|| fail("missing required '--host-scope FILE'".into()))?;
+    let rev = options
+        .remove("--rev")
+        .map(|v| {
+            v.parse::<u64>()
+                .map_err(|_| fail("--rev must be a non-negative integer".into()))
+        })
+        .transpose()?;
+    let limit = options
+        .remove("--limit")
+        .map(|v| {
+            v.parse::<usize>()
+                .map_err(|_| fail("--limit must be a non-negative integer".into()))
+        })
+        .transpose()?;
+    Ok(WorldOp::NamedQuery {
+        dir: PathBuf::from(&positionals[0]),
+        name: positionals[1].clone(),
+        arguments: options.remove("--args").unwrap_or_else(|| "{}".into()),
+        host_scope: PathBuf::from(host_scope),
+        rev,
+        limit,
+        cursor: options.remove("--cursor"),
     })
 }
 
@@ -2899,7 +2980,7 @@ Commands:
       Verify the whole knowledge base: every revision's digest, parent chain,
       recomputed program/snapshot identities, and a fresh replay of its result.
 
-  world <init|batch|query|decide|show|explain|audit|verify|import-kb|open-check|gc> <dir> ... [--json]
+  world <init|batch|query|query-named|decide|show|explain|audit|verify|import-kb|open-check|gc> <dir> ... [--json]
       The persistent world runtime (ADR-0046): facts, operator state and decisions in a
       content-addressed store; opening restores state without replaying facts and a
       commit costs time proportional to the change. 'open-check' reports how a world
@@ -2907,11 +2988,18 @@ Commands:
       reclaims storage no retained revision references; 'import-kb' converts a 'brix kb'.
       See the README for a walkthrough.
 
-  serve --stdio
+  world query-named <dir> <name> --host-scope <host-policy.json>
+      [--args <JSON-object>] [--rev <N>] [--limit <N>] [--cursor <token>] [--json]
+      Run a declared read with typed parameters, a pinned revision and host-owned scope.
+      Supports Str, Int and Bool parameters in the initial query profile.
+
+  serve --stdio [--trusted-host]
       Run a long-running JSON-lines protocol (schema 'brix.serve@1') over
       stdin/stdout: one request per line, one response per line, for
       embedding the engine in another process instead of spawning a CLI
-      invocation per call. See spec/adr/ADR-0044_Serve_Protocol.md.
+      invocation per call. --trusted-host enables host-supplied query policy;
+      the embedding host must own this channel and authenticate its callers.
+      See spec/adr/ADR-0044_Serve_Protocol.md.
 
 Input Format:
   External inputs are supplied via repeatable '--input <path>' files conforming to
@@ -2932,6 +3020,41 @@ pub fn print_version() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_query_requires_host_policy_and_unambiguous_options() {
+        assert!(parse_args(["world", "query-named", "world", "catalogue"]).is_err());
+        assert!(parse_args([
+            "world",
+            "query-named",
+            "world",
+            "catalogue",
+            "--host-scope",
+            "p.json",
+            "--limit",
+            "1",
+            "--limit",
+            "2"
+        ])
+        .is_err());
+        assert!(parse_args([
+            "world",
+            "query-named",
+            "world",
+            "catalogue",
+            "--host-scope=p.json",
+            "--args={}",
+            "--rev=0",
+            "--json"
+        ])
+        .is_ok());
+        assert_eq!(parse_args(["serve", "--stdio"]).unwrap(), Command::Serve);
+        assert_eq!(
+            parse_args(["serve", "--stdio", "--trusted-host"]).unwrap(),
+            Command::ServeHost
+        );
+        assert!(parse_args(["serve", "--trusted-host"]).is_err());
+    }
 
     const VALID_PIN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
