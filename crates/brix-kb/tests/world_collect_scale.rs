@@ -102,7 +102,9 @@ fn a9_fresh_child() {
     // `world open-check --verify-store`: audit every pack before opening.
     brix_kb::world::gc::verify_store(&dir).expect("verify_store");
     let session = WorldSession::open(&dir).expect("open");
-    session.verify_state().expect("verify_state");
+    // On a cold-restored session verify_oracle first checks verify_state, then
+    // compares a fresh replay with the restored network. Avoid replaying the
+    // same state a second time here for the large-size lifecycle matrix.
     // The oracle comparison is a harness call, not a CLI flag.
     session.verify_oracle().expect("verify_oracle");
 
@@ -572,15 +574,15 @@ decide parent_plan for p in parent_slots per parent {
     );
     drop(s1);
 
-    // 2. Add 5 children
-    let mut session = WorldSession::open(&dir.0).expect("open for children");
+    // 2. Add 300 children (crossing 257 boundary)
+    let mut session = WorldSession::open(&dir.0).expect("open for 300 children");
     let base = session.current_revision();
-    let ops: Vec<_> = (0..5)
+    let ops: Vec<_> = (0..300)
         .map(|i| slot_upsert(&format!("s{i:03}"), "p1", &format!("slot_{i:03}"), i as i64))
         .collect();
     session
-        .apply_batch(WorldBatch::new(base, "add slots", ops))
-        .expect("batch 5");
+        .apply_batch(WorldBatch::new(base, "add 300 slots", ops))
+        .expect("batch 300");
     drop(session);
 
     // Fresh audit & cold reopen:
@@ -591,19 +593,19 @@ decide parent_plan for p in parent_slots per parent {
     let settlements = s2.all_settlements().expect("settlements 2");
     match &settlements["root::parent_plan"]["p1"].value {
         Value::Variant { args, .. } => match &args[0] {
-            Value::List(items) => assert_eq!(items.len(), 5),
+            Value::List(items) => assert_eq!(items.len(), 300),
             other => panic!("expected list: {other:?}"),
         },
         other => panic!("expected AskBack: {other:?}"),
     }
     drop(s2);
 
-    // 3. Retract all 5 children: parent settlement is retained with []
+    // 3. Retract all 300 children: parent settlement is retained with []
     let mut session = WorldSession::open(&dir.0).expect("open for retract");
     let base = session.current_revision();
-    let ops: Vec<_> = (0..5).map(|i| slot_remove(&format!("s{i:03}"))).collect();
+    let ops: Vec<_> = (0..300).map(|i| slot_remove(&format!("s{i:03}"))).collect();
     session
-        .apply_batch(WorldBatch::new(base, "retract slots", ops))
+        .apply_batch(WorldBatch::new(base, "retract 300 slots", ops))
         .expect("retract batch");
     drop(session);
 
@@ -637,5 +639,94 @@ fn declared_limit_above_persistable_bound_is_refused_up_front() {
     assert!(
         err.contains("exceeds maximum supported cardinality limit"),
         "{err}"
+    );
+}
+
+/// Damaged pack nodes on a 257-member collect world fail closed as `CorruptState`, are never
+/// reinterpreted as an empty group, and leave the damaged world untouched. Verified journal
+/// revision deltas can be replayed into a separate destination directory to recover the state.
+#[test]
+fn damaged_world_fails_closed_and_verified_journal_replays_into_separate_destination() {
+    let mut d = Driver::new("damage-and-replay", 500, None);
+    d.insert_members("g", 0..257, 50);
+    let expected = d.check("before-damage");
+
+    // 1. Reconstruct and replay verified revision deltas from the source world into a separate
+    //    destination directory before damaging the pack file, proving separate-destination
+    //    journal recovery works.
+    let src_session = WorldSession::open(&d.dir.0).expect("open source");
+    let head_seq = src_session.current_revision();
+    let mut replay_batches = Vec::new();
+    for seq in 1..=head_seq {
+        let prev = src_session.pin_revision(seq - 1).expect("pin prev");
+        let curr = src_session.pin_revision(seq).expect("pin curr");
+        let mut ops = Vec::new();
+        for (relation, keys) in &curr.revision.changed_keys {
+            for key in keys {
+                match curr.get(relation, key).expect("get curr") {
+                    Some(tuple) => ops.push(WorldBatchOp::Upsert {
+                        relation: relation.clone(),
+                        key: key.clone(),
+                        tuple,
+                    }),
+                    None => {
+                        if prev.get(relation, key).expect("get prev").is_some() {
+                            ops.push(WorldBatchOp::Remove {
+                                relation: relation.clone(),
+                                key: key.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        replay_batches.push(WorldBatch::new(
+            seq - 1,
+            curr.revision.idempotency_key.clone(),
+            ops,
+        ));
+    }
+    drop(src_session);
+
+    let replay_dir = TestDir::new("replay-dest");
+    let sources = BTreeMap::from([("root".into(), program(500))]);
+    let mut dst_session = WorldSession::from_program_with_sources(&replay_dir.0, "root", &sources)
+        .expect("create replay destination");
+    for batch in replay_batches {
+        dst_session.apply_batch(batch).expect("replay batch");
+    }
+    drop(dst_session);
+
+    brix_kb::world::gc::verify_store(&replay_dir.0).expect("verify replayed store");
+    let replayed = WorldSession::open(&replay_dir.0).expect("open replayed");
+    replayed.verify_state().expect("verify replayed state");
+    replayed.verify_oracle().expect("verify replayed oracle");
+    assert_eq!(replayed.current_revision(), expected.seq);
+    drop(replayed);
+
+    // 2. Corrupt a pack body byte in the original world. Verify that `verify_store` fails
+    //    closed as `CorruptState` without silently rewriting the damaged world or returning
+    //    an empty group.
+    let objects_dir = brix_kb::world::WorldPaths::new(&d.dir.0).objects_dir();
+    let pack = std::fs::read_dir(&objects_dir)
+        .expect("read objects dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| p.extension().and_then(|s| s.to_str()) == Some("pack"))
+        .expect("at least one pack file");
+    let mut bytes = std::fs::read(&pack).expect("read pack");
+    bytes[8 + 3] ^= 0x40;
+    std::fs::write(&pack, &bytes).expect("write damaged pack");
+
+    let err = brix_kb::world::gc::verify_store(&d.dir.0)
+        .expect_err("damaged pack must fail verify_store");
+    assert!(
+        matches!(err, brix_kb::world::WorldError::CorruptState(_)),
+        "expected CorruptState, got: {err:?}"
+    );
+    // Damaged pack bytes on disk remain untouched (no silent rewrite).
+    assert_eq!(
+        std::fs::read(&pack).expect("re-read damaged pack"),
+        bytes,
+        "damaged world must never be silently rewritten"
     );
 }

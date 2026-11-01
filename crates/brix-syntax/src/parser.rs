@@ -484,35 +484,63 @@ impl Parser {
         self.consume(TokenKind::Equals, "rel derived '='")?;
         if matches!(self.peek(), TokenKind::Ident(s) if s == "union") {
             self.advance();
-            let left = self.parse_qualified_name("union left relation")?;
-            self.consume(TokenKind::Comma, "union ','")?;
-            let right = self.parse_qualified_name("union right relation")?;
-            self.consume(TokenKind::Key, "union 'key'")?;
-            let keys = if self.check(&TokenKind::OpenParen) {
+            let union_distinct = if matches!(self.peek(), TokenKind::Ident(s) if s == "distinct") {
                 self.advance();
-                let keys = self.parse_comma_separated(TokenKind::CloseParen, |p| {
-                    p.expect_ident("union key field").map(|(s, _)| s)
-                })?;
-                self.consume(TokenKind::CloseParen, "union key ')'")?;
-                keys
+                true
             } else {
-                vec![self.expect_ident("union key field")?.0]
+                false
             };
+            let first = self.parse_qualified_name("union left relation")?;
+            self.consume(TokenKind::Comma, "union ','")?;
+            let second = self.parse_qualified_name("union right relation")?;
+            let mut sources = vec![first, second];
+            while self.check(&TokenKind::Comma) {
+                self.advance();
+                sources.push(self.parse_qualified_name("union source relation")?);
+            }
+            let union_keys = if union_distinct {
+                if self.check(&TokenKind::Key) {
+                    return Err(self.error(
+                        "'union distinct' deduplicates over whole row values and does not accept a 'key' clause",
+                    ));
+                }
+                None
+            } else {
+                self.consume(TokenKind::Key, "union 'key'")?;
+                let keys = if self.check(&TokenKind::OpenParen) {
+                    self.advance();
+                    let keys = self.parse_comma_separated(TokenKind::CloseParen, |p| {
+                        p.expect_ident("union key field").map(|(s, _)| s)
+                    })?;
+                    self.consume(TokenKind::CloseParen, "union key ')'")?;
+                    keys
+                } else {
+                    vec![self.expect_ident("union key field")?.0]
+                };
+                if keys.is_empty() {
+                    return Err(self.error("union key list cannot be empty"));
+                }
+                Some(keys)
+            };
+            let from = sources
+                .into_iter()
+                .enumerate()
+                .map(|(idx, relation)| RelBinding {
+                    var: match idx {
+                        0 => "left".into(),
+                        1 => "right".into(),
+                        _ => format!("src_{idx}"),
+                    },
+                    relation,
+                })
+                .collect();
             return Ok(RelDerivedDecl {
                 name,
                 query: RelQuery {
-                    union_keys: Some(keys),
+                    union_keys,
+                    union_distinct,
                     select: Expr::AnonRecord(Vec::new()),
-                    from: vec![
-                        RelBinding {
-                            var: "left".into(),
-                            relation: left,
-                        },
-                        RelBinding {
-                            var: "right".into(),
-                            relation: right,
-                        },
-                    ],
+                    from,
                     where_clause: None,
                     not_exists: None,
                     group_by: Vec::new(),
@@ -594,6 +622,7 @@ impl Parser {
             name,
             query: RelQuery {
                 union_keys: None,
+                union_distinct: false,
                 select,
                 from,
                 where_clause,
@@ -1060,12 +1089,27 @@ impl Parser {
         let binder = self.expect_ident("decide declaration binder")?.0;
         self.consume(TokenKind::In, "decide declaration 'in'")?;
         let list = self.parse_expr()?;
-        let per = if self.check(&TokenKind::Per) {
+        let per_fields = if self.check(&TokenKind::Per) {
             self.advance();
-            Some(self.expect_ident("decide declaration 'per' field")?.0)
+            let fields = if self.check(&TokenKind::OpenParen) {
+                self.advance();
+                let fields = self.parse_comma_separated(TokenKind::CloseParen, |p| {
+                    p.expect_ident("decide declaration 'per' field")
+                        .map(|(s, _)| s)
+                })?;
+                self.consume(TokenKind::CloseParen, "decide 'per' field list ')'")?;
+                fields
+            } else {
+                vec![self.expect_ident("decide declaration 'per' field")?.0]
+            };
+            if fields.is_empty() {
+                return Err(self.error("decide 'per' field list cannot be empty"));
+            }
+            fields
         } else {
-            None
+            Vec::new()
         };
+        let per = (per_fields.len() == 1).then(|| per_fields[0].clone());
         self.consume(TokenKind::OpenBrace, "decide block '{'")?;
         let mut proposals = Vec::new();
         while !self.check(&TokenKind::CloseBrace) && !self.is_at_end() {
@@ -1078,6 +1122,7 @@ impl Parser {
             binder,
             list,
             per,
+            per_fields,
             proposals,
         })
     }

@@ -146,6 +146,17 @@ const V_LIST: u64 = 8;
 
 // Match the structured settlement decoder's admission bounds. Charge depth on
 // entry and child counts before allocation or iteration, including nested values.
+//
+// Alpha.8 recovery note (A9-1 / ADR-0047):
+// In alpha.8, `state_write` already wrote valid `brix.world.state-value@3` canonical
+// encodings for `collect` groups with > 256 members; cold open failed solely because
+// `state_read` capped `Value::List` at `MAX_INPUT_CONTAINER_WIDTH` (256). Raising
+// `VALUE_MAX_LIST_ELEMENTS` to `MAX_COLLECTION_ELEMENTS` (65,536) allows existing
+// alpha.8 worlds within the admitted bound to open directly without rewriting state.
+// Genuinely damaged state or worlds whose persisted derived cache is unreadable are
+// never silently rewritten in place; they fail closed with `WorldError::CorruptState`
+// and can be recovered into a separate destination directory by replaying verified
+// journal batches (`WorldSession::replay_batches` / fresh `apply_batch`).
 const VALUE_MAX_DEPTH: usize = brix_lower::input::MAX_INPUT_VALUE_DEPTH;
 const VALUE_MAX_NODES: usize = brix_lower::input::MAX_WORLD_VALUE_NODES;
 const VALUE_MAX_CHILDREN: usize = brix_lower::input::MAX_INPUT_CONTAINER_WIDTH;

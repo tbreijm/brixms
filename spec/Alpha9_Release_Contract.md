@@ -165,6 +165,16 @@ winner relations, RPC/CLI/Python transport, explanations, history and evidence.
 Test collisions such as `("a", "bc")` versus `("ab", "c")` and equal local IDs
 belonging to different tenants.
 
+The implementation preserves literal string expectations with
+`--expect-entity`; JSON-looking scalar string IDs are never inferred to be
+tuples. Use `--expect-entity-key-json <JSON-array>` for composite CLI evidence
+expectations. The SDK accepts a list/tuple and sends a distinct
+`brix.entity-key@1` object containing typed components; `Decimal` components carry
+an explicit decimal tag. Verification canonicalizes that caller-supplied shape
+without adopting the evidence bundle's claimed identity. Wrong key values or
+component types fail verification. Evidence files and response metadata use the
+declared key schema to preserve scalar versus composite presentation.
+
 Equality joins on statically resolved paths such as `f.value.b` use maintained
 indexes over that path, including when `f` is a decision relation. Validate the
 entire path and terminal type. A path through a variant requires a supported
@@ -463,7 +473,7 @@ language and authority changes in §11.
 |---|---|---|
 | F | PR #346, `work/foundation-52-59`; follow-up `2cdeebc` | All 2,158 workspace tests and doctests passed locally; workspace clippy, formatting, canon and dependency/traceability checks passed. Context-report binding and additive record identity coverage are included; CI on this follow-up is tracked in the PR. |
 | A9-1 | `5b28a8f`, `work/a9-1-collect-corruption` | Implemented repair and regression matrix; qualify together with F before release. |
-| A9-2 | `work/a9-2-unions-and-keys` starts at `5b28a8f` with active uncommitted work | Union schema propagation and `union distinct` implementation are in progress. Composite keys and nested join indexes remain incomplete. Bring in the qualified F integration before relying on its APIs; §11 rulings remain required. |
+| A9-2 | Reviewed integration `f579d40`, built from Gemini's implementation and Luna corrections | Union schemas/distinct union, composite keys, nested indexes and key transport fixes are integrated onto F + A9-1. Combined verification passed; see §14. §11 rulings remain explicit. |
 | A9-3/4 | Scoped queries and request evidence | Consume the same V2 context validator. Add an explicit supported host-scope/evidence profile and actual request-path tests; the foundation adapter does not supply these features. |
 | A9-5–7 | String admission, collection semantics and benchmarks | Retain the order and acceptance gates in §§7–9. |
 
@@ -509,3 +519,50 @@ retraction plus cold read succeeded. These smaller checks do not replace the
 5,000-member release gate. Keep the A9-1 integration PR in draft until the
 required CI checks and review complete. The long debug runtime remains a
 qualification cost to address before adding this matrix to an ordinary CI run.
+
+## 14. Reviewed basis through A9-2 — 2026-11-01
+
+`work/alpha9-base` combines the #52/#53/#59 foundation, A9-1 and reviewed A9-2
+implementation. The tested code revision is `f579d40`; PR #347 tracks this
+incremental basis, stacked on foundation PR #346. This is not the final alpha.9
+release: A9-3–7 and final release qualification remain outstanding.
+
+The reviewed fixes preserve JSON-looking scalar IDs byte-for-byte and use
+caller-explicit typed transport for composite evidence expectations. Wrong key
+values and component types remain rejected. Direct Rust JSON, saved portable
+evidence, CLI/stdio responses and nested upstream links retain the declared key
+shape. Presentation metadata is excluded from canonical encodings, proof
+identities, logical equality and legacy debug layouts. Numeric type tags remain
+explicit, distinguishing F64, Decimal and Str components.
+
+Single-key decision fingerprints retain their exact alpha.8 encoding. The six
+frozen semantic/history tests pass with unchanged expected hashes.
+
+Verification evidence:
+
+- At `f579d40`, all **2,192 ordinary debug workspace tests** and doctests passed.
+  The 5,000-member lifecycle was qualified separately in release mode, alongside
+  the 28 existing ignored cases. The published tree restores that lifecycle as
+  an ordinary runnable test; its production code is unchanged from the tested
+  revision. The published workflow is unchanged.
+- All **21 Python SDK tests**, workspace clippy, formatting, whitespace checks,
+  the 69-vector independent canon cross-check, TCB dependency inventory and
+  semantic-law traceability passed.
+- The complete **16-case release collection matrix** passed at `2f82bf8` in
+  391.39 seconds. Subsequent changes concern presentation metadata and JSON type
+  tags; decision, restore and frozen-history coverage was rerun in the final
+  workspace gate. A proposed dedicated release-mode CI job is saved separately
+  at `/private/tmp/brix-a9-release-scale-ci.patch`: the current GitHub OAuth token
+  lacks workflow-write scope and the SSH signing agent refused publication.
+  The optimization was withheld from the published tree, preserving the current
+  workflow and its default collection coverage. Debug execution of the 5,000-row
+  lifecycle remains slow; release qualification is the recorded completed gate.
+- An A9-1-created world successfully cold-opened, verified its store and retained
+  derived rows and single-key settlements under the A9-2 CLI.
+
+Gemini's A9-3 worktree is `/private/tmp/brix-a9-3` on
+`work/a9-3-scoped-queries`, initially at `171df1d` (Gemini A9-2 plus the earlier
+`dae5c72` basis). Bring the updated `work/alpha9-base` into that feature branch at
+the owner's next safe checkpoint; the earlier basis lacks these review fixes.
+Retain the shared V2 context validator and the host-scope-before-operators rules
+in §5. Active feature worktrees are preserved during release-basis integration.

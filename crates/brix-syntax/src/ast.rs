@@ -93,9 +93,11 @@ pub struct RelDerivedDecl {
 /// A relational query in a `rel derived` declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelQuery {
-    /// `union a, b key ...`: the two sources in `from` are merged without a
+    /// `union a, b key ...`: the sources in `from` are merged without a
     /// projection. Keys must be disjoint at each committed batch boundary.
     pub union_keys: Option<Vec<String>>,
+    /// `union distinct a, b[, c ...]`: set union over canonical typed row values.
+    pub union_distinct: bool,
     pub select: Expr,
     pub from: Vec<RelBinding>,
     pub where_clause: Option<Expr>,
@@ -138,6 +140,7 @@ pub struct DecideDecl {
     pub binder: String,
     pub list: Expr,
     pub per: Option<String>,
+    pub per_fields: Vec<String>,
     pub proposals: Vec<ProposeDecl>,
 }
 

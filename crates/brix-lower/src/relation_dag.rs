@@ -110,6 +110,9 @@ pub enum OperatorNode {
         right: OperatorId,
         key_fields: Vec<String>,
     },
+    /// Set union over two or more schema-compatible sources; deduplicates
+    /// strictly over canonical typed row values.
+    UnionDistinct { sources: Vec<OperatorId> },
     /// Distinct / set semantics.
     Distinct { input: OperatorId },
     /// Grouped count aggregation.
@@ -401,47 +404,60 @@ pub fn lower_relations(program: &LinkedProgram) -> Result<RelationDag, Relationa
                 };
                 let source_op = dag.relation_outputs[&source_rel];
                 let source_fields = decision_field_schemas(&dag, program)[source_op.0].clone();
-                let per_field = decide.per.as_ref().ok_or_else(|| {
-                    RelationalLowerError::DecideMissingEntityField {
+                let per_fields: Vec<String> = if !decide.per_fields.is_empty() {
+                    decide.per_fields.clone()
+                } else if let Some(per) = &decide.per {
+                    vec![per.clone()]
+                } else {
+                    return Err(RelationalLowerError::DecideMissingEntityField {
                         decide: rel_name.clone(),
-                    }
-                })?;
-                let key_ty = source_fields
-                    .get(&format!("{}.{}", decide.binder, per_field))
-                    .or_else(|| source_fields.get(per_field))
-                    .cloned()
-                    .ok_or_else(|| {
-                        RelationalLowerError::UnsupportedExpression(format!(
-                            "decide '{}' per field '{}' does not exist in source relation",
+                    });
+                };
+                let mut seen_per = BTreeSet::new();
+                let mut schema_fields = Vec::with_capacity(per_fields.len() + 3);
+                for per_field in &per_fields {
+                    if !seen_per.insert(per_field.as_str()) {
+                        return Err(RelationalLowerError::UnsupportedExpression(format!(
+                            "decide '{}' has duplicate per field '{}'",
                             rel_name, per_field
-                        ))
-                    })?;
-                if ["candidate", "priority", "value"].contains(&per_field.as_str()) {
-                    return Err(RelationalLowerError::UnsupportedExpression(format!(
-                        "decide '{}' per field '{}' collides with a reserved winner-row field",
-                        rel_name, per_field
-                    )));
+                        )));
+                    }
+                    let key_ty = source_fields
+                        .get(&format!("{}.{}", decide.binder, per_field))
+                        .or_else(|| source_fields.get(per_field))
+                        .cloned()
+                        .ok_or_else(|| {
+                            RelationalLowerError::UnsupportedExpression(format!(
+                                "decide '{}' per field '{}' does not exist in source relation",
+                                rel_name, per_field
+                            ))
+                        })?;
+                    if ["candidate", "priority", "value"].contains(&per_field.as_str()) {
+                        return Err(RelationalLowerError::UnsupportedExpression(format!(
+                            "decide '{}' per field '{}' collides with a reserved winner-row field",
+                            rel_name, per_field
+                        )));
+                    }
+                    schema_fields.push(ast::FieldDecl {
+                        name: per_field.clone(),
+                        ty: key_ty,
+                    });
                 }
                 let value_ty =
                     infer_decision_value_type(decide, &source_fields, program, &rel_name)?;
-                let schema = ast::Ty::Record(vec![
-                    ast::FieldDecl {
-                        name: per_field.clone(),
-                        ty: key_ty,
-                    },
-                    ast::FieldDecl {
-                        name: "candidate".into(),
-                        ty: ast::Ty::Named("Str".into()),
-                    },
-                    ast::FieldDecl {
-                        name: "priority".into(),
-                        ty: ast::Ty::Named("Int".into()),
-                    },
-                    ast::FieldDecl {
-                        name: "value".into(),
-                        ty: value_ty,
-                    },
-                ]);
+                schema_fields.push(ast::FieldDecl {
+                    name: "candidate".into(),
+                    ty: ast::Ty::Named("Str".into()),
+                });
+                schema_fields.push(ast::FieldDecl {
+                    name: "priority".into(),
+                    ty: ast::Ty::Named("Int".into()),
+                });
+                schema_fields.push(ast::FieldDecl {
+                    name: "value".into(),
+                    ty: value_ty,
+                });
+                let schema = ast::Ty::Record(schema_fields);
                 let op = dag.add_node(OperatorNode::DecisionRows {
                     decide: rel_name.clone(),
                     schema,
@@ -453,10 +469,11 @@ pub fn lower_relations(program: &LinkedProgram) -> Result<RelationDag, Relationa
 
     // Entity identity (ADR-0046, decided 2026-10-04): any `decide` block whose
     // `list` names a relation in this DAG is a world-profile decide and must
-    // declare `per <field>` explicitly. A `decide` whose `list` is not a known
-    // relation belongs to the legacy finite-decision profile (ADR-0043) and is
-    // out of scope here — this is the same resolution rule `network.rs` and
-    // `reference.rs` use to decide which `decide` blocks they instantiate.
+    // declare `per <field>` or `per (<f1>, <f2>, ...)` explicitly. A `decide`
+    // whose `list` is not a known relation belongs to the legacy
+    // finite-decision profile (ADR-0043) and is out of scope here — this is
+    // the same resolution rule `network.rs` and `reference.rs` use to decide
+    // which `decide` blocks they instantiate.
     let schemas = decision_field_schemas(&dag, program);
     for (rel_name, op) in &dag.relation_outputs {
         dag.relation_schemas
@@ -466,17 +483,26 @@ pub fn lower_relations(program: &LinkedProgram) -> Result<RelationDag, Relationa
         if let Some(source) =
             resolve_decide_source_relation(&decl.list, &qname.module, &dag.relation_outputs)
         {
-            let per = decl.per.as_ref().ok_or_else(|| {
-                RelationalLowerError::DecideMissingEntityField {
+            let per_fields: Vec<String> = if !decl.per_fields.is_empty() {
+                decl.per_fields.clone()
+            } else if let Some(per) = &decl.per {
+                vec![per.clone()]
+            } else {
+                return Err(RelationalLowerError::DecideMissingEntityField {
                     decide: qname.to_string(),
-                }
-            })?;
+                });
+            };
             let fields = &schemas[dag.relation_outputs[&source].0];
-            match fields.get(per) {
-                Some(ast::Ty::Named(t)) if matches!(t.as_str(), "Str" | "Int" | "Bool" | "F64" | "Decimal") => {},
-                other => return Err(RelationalLowerError::UnsupportedExpression(format!(
-                    "decide '{qname}' per field '{per}' must exist and have a scalar type; got {other:?}"
-                ))),
+            for per in &per_fields {
+                match fields.get(per) {
+                    Some(ast::Ty::Named(t))
+                        if matches!(t.as_str(), "Str" | "Int" | "Bool" | "F64" | "Decimal") => {}
+                    other => {
+                        return Err(RelationalLowerError::UnsupportedExpression(format!(
+                            "decide '{qname}' per field '{per}' must exist and have a scalar type; got {other:?}"
+                        )))
+                    }
+                }
             }
         }
     }
@@ -525,25 +551,29 @@ pub fn decision_field_schemas(
             OperatorNode::Scan {
                 relation, schema, ..
             } => {
-                let fields = match schema {
-                    ast::Ty::Record(f) => Some(f),
+                let owner = owner_module(relation);
+                let (cfg_module, fields) = match schema {
+                    ast::Ty::Record(f) => (owner, Some(f)),
                     ast::Ty::Named(name) => {
-                        let owner = owner_module(relation);
-                        let (module, local) = name.rsplit_once("::").unwrap_or((owner, name));
-                        program
-                            .configs
-                            .get(&crate::module_graph::QualifiedName::new(module, local))
-                            .and_then(|c| match &c.body {
-                                ast::ConfigBody::Record(f) => Some(f),
-                                _ => None,
-                            })
+                        match crate::world_type::lookup_config(name, owner, program) {
+                            Some((cfg_module, c)) => match &c.body {
+                                ast::ConfigBody::Record(f) => (cfg_module, Some(f)),
+                                _ => (owner, None),
+                            },
+                            None => (owner, None),
+                        }
                     }
-                    _ => None,
+                    _ => (owner, None),
                 };
                 fields
                     .into_iter()
                     .flatten()
-                    .map(|f| (f.name.clone(), f.ty.clone()))
+                    .map(|f| {
+                        (
+                            f.name.clone(),
+                            crate::world_type::qualify_ty(&f.ty, cfg_module, program),
+                        )
+                    })
                     .collect()
             }
             OperatorNode::DecisionRows { schema, .. } => match schema {
@@ -572,6 +602,7 @@ pub fn decision_field_schemas(
             OperatorNode::AntiJoin { left, .. } | OperatorNode::DisjointUnion { left, .. } => {
                 schemas[left.0].clone()
             }
+            OperatorNode::UnionDistinct { sources } => schemas[sources[0].0].clone(),
             OperatorNode::ParentCount {
                 left,
                 left_key,
@@ -879,50 +910,60 @@ fn lower_derived_query(
         ));
     }
 
-    if let Some(keys) = &query.union_keys {
-        if query.from.len() != 2
-            || keys.is_empty()
-            || keys.iter().collect::<BTreeSet<_>>().len() != keys.len()
-        {
+    if query.union_distinct || query.union_keys.is_some() {
+        if query.from.len() < 2 {
             return Err(RelationalLowerError::UnsupportedExpression(
-                "union requires two sources and nonempty, unique key fields".into(),
+                "union requires at least two source relations".into(),
             ));
         }
-        let left_name = resolve_binding_relation(
-            &query.from[0].relation,
-            owner_module(rel_name),
-            all_relations,
-        )?;
-        let right_name = resolve_binding_relation(
-            &query.from[1].relation,
-            owner_module(rel_name),
-            all_relations,
-        )?;
-        let left = dag.relation_outputs[&left_name];
-        let right = dag.relation_outputs[&right_name];
-        let schemas = decision_field_schemas(dag, program);
-        if schemas[left.0] != schemas[right.0]
-            || schemas[left.0].is_empty()
-            || schemas[left.0]
-                .values()
-                .any(|ty| matches!(ty, ast::Ty::Named(name) if name == "Any"))
-        {
-            return Err(RelationalLowerError::UnsupportedExpression(format!(
-                "union '{rel_name}' requires identical, fully typed source schemas"
-            )));
+        let owner = owner_module(rel_name);
+        let mut sources = Vec::with_capacity(query.from.len());
+        for binding in &query.from {
+            let src_name = resolve_binding_relation(&binding.relation, owner, all_relations)?;
+            let src_op = *dag
+                .relation_outputs
+                .get(&src_name)
+                .ok_or_else(|| RelationalLowerError::UnknownRelation(src_name.clone()))?;
+            sources.push((src_name, src_op));
         }
+        let schemas = decision_field_schemas(dag, program);
+        validate_union_source_schemas(rel_name, &sources, &schemas)?;
+
+        if query.union_distinct {
+            let mut unique_ops = Vec::with_capacity(sources.len());
+            for (_, op) in sources {
+                if !unique_ops.contains(&op) {
+                    unique_ops.push(op);
+                }
+            }
+            return Ok(dag.add_node(OperatorNode::UnionDistinct {
+                sources: unique_ops,
+            }));
+        }
+
+        let keys = query.union_keys.as_ref().expect("checked above");
+        if keys.is_empty() || keys.iter().collect::<BTreeSet<_>>().len() != keys.len() {
+            return Err(RelationalLowerError::UnsupportedExpression(
+                "union requires nonempty, unique key fields".into(),
+            ));
+        }
+        let first_op = sources[0].1;
         for key in keys {
-            if !schemas[left.0].contains_key(key) {
+            if !schemas[first_op.0].contains_key(key) {
                 return Err(RelationalLowerError::UnsupportedExpression(format!(
                     "union '{rel_name}' key field '{key}' is missing"
                 )));
             }
         }
-        return Ok(dag.add_node(OperatorNode::DisjointUnion {
-            left,
-            right,
-            key_fields: keys.clone(),
-        }));
+        let mut current = sources[0].1;
+        for (_, next_op) in &sources[1..] {
+            current = dag.add_node(OperatorNode::DisjointUnion {
+                left: current,
+                right: *next_op,
+                key_fields: keys.clone(),
+            });
+        }
+        return Ok(current);
     }
 
     let owner = owner_module(rel_name);
@@ -954,16 +995,33 @@ fn lower_derived_query(
     for key in &mut query.group_by {
         qualify_query_expr(key, owner, program)?;
     }
+    let schemas = decision_field_schemas(dag, program);
     for expression in std::iter::once(&query.select)
         .chain(query.where_clause.iter())
         .chain(query.group_by.iter())
     {
-        validate_binding_fields(expression, &query.from, owner, all_relations, program)?;
+        validate_binding_fields(
+            expression,
+            &query.from,
+            owner,
+            all_relations,
+            dag,
+            &schemas,
+            program,
+        )?;
     }
     if let Some(anti) = &query.not_exists {
         let mut bindings = query.from.clone();
         bindings.push(anti.binding.clone());
-        validate_binding_fields(&anti.predicate, &bindings, owner, all_relations, program)?;
+        validate_binding_fields(
+            &anti.predicate,
+            &bindings,
+            owner,
+            all_relations,
+            dag,
+            &schemas,
+            program,
+        )?;
     }
     if expr_contains_count_or_zero(&query.select) {
         if query.from.len() != 2 || query.group_by.len() != 1 || query.not_exists.is_some() {
@@ -1115,10 +1173,22 @@ fn lower_derived_query(
         let mut right_keys = Vec::new();
         let mut remaining_predicates = Vec::new();
 
+        let mut join_bindings = var_to_relation.clone();
+        join_bindings.insert(binding.var.clone(), next_rel.clone());
+
         for pred in split_predicates {
             if let Some((l_key, r_key)) =
                 match_equijoin_predicate(&pred, &var_to_relation, &binding.var)
             {
+                validate_equijoin_key_pair(
+                    rel_name,
+                    &l_key,
+                    &r_key,
+                    &join_bindings,
+                    dag,
+                    &schemas,
+                    program,
+                )?;
                 left_keys.push(l_key);
                 right_keys.push(r_key);
             } else {
@@ -1164,6 +1234,9 @@ fn lower_derived_query(
                     )
                 },
             )?;
+        validate_equijoin_key_pair(
+            rel_name, &left_key, &right_key, &bindings, dag, &schemas, program,
+        )?;
         current_op = dag.add_node(OperatorNode::AntiJoin {
             left: current_op,
             right: right_op,
@@ -1184,8 +1257,13 @@ fn lower_derived_query(
     // 4. Compile aggregate projections explicitly. The downstream evaluator
     // never receives a raw count() call or a dangling pre-group row binding.
     let projections = match &query.select {
-        Expr::AnonRecord(fields) => fields.clone(),
-        single => vec![("value".to_string(), single.clone())],
+        Expr::AnonRecord(fields) if !fields.is_empty() => fields.clone(),
+        Expr::AnonRecord(_) => {
+            return Err(RelationalLowerError::UnsupportedExpression(format!(
+                "rel derived '{rel_name}' select clause must not be an empty record projection"
+            )));
+        }
+        other => vec![("value".to_string(), other.clone())],
     };
     let mut projection_names = BTreeSet::new();
     for (name, _) in &projections {
@@ -1427,87 +1505,269 @@ fn qualify_query_expr(
     Ok(())
 }
 
+fn type_contains_any(ty: &ast::Ty) -> bool {
+    match ty {
+        ast::Ty::Named(name) => name == "Any",
+        ast::Ty::Record(fields) => fields.iter().any(|f| type_contains_any(&f.ty)),
+        ast::Ty::App(_, args) => args.iter().any(type_contains_any),
+        ast::Ty::Graded(inner, _) => type_contains_any(inner),
+        _ => false,
+    }
+}
+
+fn check_type_compatibility(
+    path: &str,
+    expected: &ast::Ty,
+    actual: &ast::Ty,
+) -> Result<(), String> {
+    match (expected, actual) {
+        (ast::Ty::Record(exp_fields), ast::Ty::Record(act_fields)) => {
+            let exp_map: BTreeMap<&str, &ast::Ty> = exp_fields
+                .iter()
+                .map(|f| (f.name.as_str(), &f.ty))
+                .collect();
+            let act_map: BTreeMap<&str, &ast::Ty> = act_fields
+                .iter()
+                .map(|f| (f.name.as_str(), &f.ty))
+                .collect();
+            for name in exp_map.keys() {
+                if !act_map.contains_key(name) {
+                    return Err(format!("missing nested field '{path}.{name}'"));
+                }
+            }
+            for name in act_map.keys() {
+                if !exp_map.contains_key(name) {
+                    return Err(format!("unexpected nested field '{path}.{name}'"));
+                }
+            }
+            for (name, exp_ty) in &exp_map {
+                let act_ty = act_map[name];
+                check_type_compatibility(&format!("{path}.{name}"), exp_ty, act_ty)?;
+            }
+            Ok(())
+        }
+        (ast::Ty::App(exp_name, exp_args), ast::Ty::App(act_name, act_args))
+            if exp_name == act_name && exp_args.len() == act_args.len() =>
+        {
+            for (exp_arg, act_arg) in exp_args.iter().zip(act_args.iter()) {
+                check_type_compatibility(path, exp_arg, act_arg)?;
+            }
+            Ok(())
+        }
+        _ if expected == actual => Ok(()),
+        _ => Err(format!(
+            "field '{path}' has type {actual:?}, expected {expected:?}"
+        )),
+    }
+}
+
+fn validate_union_source_schemas(
+    rel_name: &str,
+    sources: &[(String, OperatorId)],
+    schemas: &[BTreeMap<String, ast::Ty>],
+) -> Result<(), RelationalLowerError> {
+    let (base_name, base_op) = &sources[0];
+    let base_schema = &schemas[base_op.0];
+    if base_schema.is_empty() || base_schema.values().any(type_contains_any) {
+        return Err(RelationalLowerError::UnsupportedExpression(format!(
+            "union '{rel_name}' source '{base_name}' does not have a fully resolved record schema"
+        )));
+    }
+    for (src_name, src_op) in &sources[1..] {
+        let src_schema = &schemas[src_op.0];
+        if src_schema.is_empty() || src_schema.values().any(type_contains_any) {
+            return Err(RelationalLowerError::UnsupportedExpression(format!(
+                "union '{rel_name}' source '{src_name}' does not have a fully resolved record schema"
+            )));
+        }
+        for field in base_schema.keys() {
+            if !src_schema.contains_key(field) {
+                return Err(RelationalLowerError::UnsupportedExpression(format!(
+                    "union '{rel_name}' source '{src_name}' has incompatible schema with '{base_name}': missing field '{field}'"
+                )));
+            }
+        }
+        for field in src_schema.keys() {
+            if !base_schema.contains_key(field) {
+                return Err(RelationalLowerError::UnsupportedExpression(format!(
+                    "union '{rel_name}' source '{src_name}' has incompatible schema with '{base_name}': unexpected field '{field}'"
+                )));
+            }
+        }
+        for (field, exp_ty) in base_schema {
+            let act_ty = &src_schema[field];
+            if let Err(detail) = check_type_compatibility(field, exp_ty, act_ty) {
+                return Err(RelationalLowerError::UnsupportedExpression(format!(
+                    "union '{rel_name}' source '{src_name}' has incompatible schema with '{base_name}': {detail}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn extract_binding_field_chain(expr: &Expr) -> Option<(&str, Vec<&str>)> {
+    if let Expr::Field(base, field) = expr {
+        if let Expr::Var(alias) = base.as_ref() {
+            return Some((alias.as_str(), vec![field.as_str()]));
+        }
+        if let Some((alias, mut chain)) = extract_binding_field_chain(base) {
+            chain.push(field.as_str());
+            return Some((alias, chain));
+        }
+    }
+    None
+}
+
+fn collect_pattern_vars(pattern: &ast::Pattern, out: &mut BTreeSet<String>) {
+    match pattern {
+        ast::Pattern::Var(name) => {
+            out.insert(name.clone());
+        }
+        ast::Pattern::Ctor { args, .. } => {
+            for arg in args {
+                collect_pattern_vars(arg, out);
+            }
+        }
+        ast::Pattern::Wildcard => {}
+    }
+}
+
+pub(crate) fn resolve_field_chain_type(
+    alias: &str,
+    relation: &str,
+    rel_schema: &BTreeMap<String, ast::Ty>,
+    chain: &[&str],
+    program: &LinkedProgram,
+) -> Result<ast::Ty, RelationalLowerError> {
+    let first = chain[0];
+    let mut current_ty = rel_schema.get(first).cloned().ok_or_else(|| {
+        RelationalLowerError::UnsupportedExpression(format!(
+            "unknown field '{alias}.{first}' on relation '{relation}'"
+        ))
+    })?;
+    let mut current_module = owner_module(relation);
+    for (idx, seg) in chain.iter().enumerate().skip(1) {
+        let path = format!("{alias}.{}", chain[..=idx].join("."));
+        match &current_ty {
+            ast::Ty::Record(fields) => {
+                let field_decl = fields.iter().find(|f| f.name == *seg).ok_or_else(|| {
+                    RelationalLowerError::UnsupportedExpression(format!(
+                        "unknown field '{path}' on relation '{relation}'"
+                    ))
+                })?;
+                current_ty = crate::world_type::qualify_ty(&field_decl.ty, current_module, program);
+            }
+            ast::Ty::Named(name) => {
+                match crate::world_type::lookup_config(name, current_module, program) {
+                    Some((cfg_module, cfg)) => match &cfg.body {
+                        ast::ConfigBody::Record(fields) => {
+                            let field_decl =
+                                fields.iter().find(|f| f.name == *seg).ok_or_else(|| {
+                                    RelationalLowerError::UnsupportedExpression(format!(
+                                        "unknown field '{path}' on record '{name}'"
+                                    ))
+                                })?;
+                            current_module = cfg_module;
+                            current_ty = crate::world_type::qualify_ty(
+                                &field_decl.ty,
+                                current_module,
+                                program,
+                            );
+                        }
+                        ast::ConfigBody::Sum(_) => {
+                            return Err(RelationalLowerError::UnsupportedExpression(format!(
+                                "cannot project field '{path}' through sum/variant type '{name}' without pattern matching"
+                            )));
+                        }
+                    },
+                    None => {
+                        return Err(RelationalLowerError::UnsupportedExpression(format!(
+                            "cannot project field '{path}' from non-record type '{name}'"
+                        )));
+                    }
+                }
+            }
+            other => {
+                return Err(RelationalLowerError::UnsupportedExpression(format!(
+                    "cannot project field '{path}' from non-record type {other:?}"
+                )));
+            }
+        }
+    }
+    Ok(current_ty)
+}
+
 fn validate_binding_fields(
     expr: &Expr,
     bindings: &[ast::RelBinding],
     owner: &str,
     relations: &BTreeMap<String, RelationSource>,
+    dag: &RelationDag,
+    schemas: &[BTreeMap<String, ast::Ty>],
     program: &LinkedProgram,
 ) -> Result<(), RelationalLowerError> {
-    if let Expr::Field(base, field) = expr {
-        if let Expr::Var(alias) = base.as_ref() {
-            let binding = bindings
-                .iter()
-                .find(|binding| &binding.var == alias)
-                .ok_or_else(|| {
-                    RelationalLowerError::UnsupportedExpression(format!(
-                        "unknown query binding '{alias}'"
-                    ))
-                })?;
-            let relation = resolve_binding_relation(&binding.relation, owner, relations)?;
-            let fields = match &relations[&relation] {
-                RelationSource::Input(input) => match &input.ty {
-                    ast::Ty::Record(fields) => {
-                        Some(fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>())
-                    }
-                    ast::Ty::Named(name) => {
-                        let module = owner_module(&relation);
-                        let q = if let Some((module, name)) = name.rsplit_once("::") {
-                            crate::module_graph::QualifiedName::new(module, name)
-                        } else {
-                            crate::module_graph::QualifiedName::new(module, name)
-                        };
-                        match program.configs.get(&q).map(|config| &config.body) {
-                            Some(ast::ConfigBody::Record(fields)) => {
-                                Some(fields.iter().map(|f| f.name.as_str()).collect())
-                            }
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                },
-                RelationSource::Derived(derived) => match &derived.query.select {
-                    Expr::AnonRecord(fields) => {
-                        Some(fields.iter().map(|(name, _)| name.as_str()).collect())
-                    }
-                    _ => Some(vec!["value"]),
-                },
-                RelationSource::Decision(decide) => Some(vec![
-                    decide.per.as_deref().unwrap_or(""),
-                    "candidate",
-                    "priority",
-                    "value",
-                ]),
-            };
-            if let Some(fields) = fields {
-                if !fields.contains(&field.as_str()) {
-                    return Err(RelationalLowerError::UnsupportedExpression(format!(
-                        "unknown field '{alias}.{field}'"
-                    )));
-                }
-            }
-            return Ok(());
-        }
+    if let Some((alias, chain)) = extract_binding_field_chain(expr) {
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.var == alias)
+            .ok_or_else(|| {
+                RelationalLowerError::UnsupportedExpression(format!(
+                    "unknown query binding '{alias}'"
+                ))
+            })?;
+        let relation = resolve_binding_relation(&binding.relation, owner, relations)?;
+        let op = *dag
+            .relation_outputs
+            .get(&relation)
+            .ok_or_else(|| RelationalLowerError::UnknownRelation(relation.clone()))?;
+        resolve_field_chain_type(alias, &relation, &schemas[op.0], &chain, program)?;
+        return Ok(());
     }
     match expr {
         Expr::Call { args, .. } | Expr::ListLit(args) => {
             for arg in args {
-                validate_binding_fields(arg, bindings, owner, relations, program)?;
+                validate_binding_fields(arg, bindings, owner, relations, dag, schemas, program)?;
             }
         }
         Expr::Record { fields, .. } | Expr::AnonRecord(fields) => {
             for (_, value) in fields {
-                validate_binding_fields(value, bindings, owner, relations, program)?;
+                validate_binding_fields(value, bindings, owner, relations, dag, schemas, program)?;
             }
         }
         Expr::Field(base, _)
         | Expr::Not(base)
         | Expr::Prove(base)
         | Expr::Why(base)
-        | Expr::Audit(base) => validate_binding_fields(base, bindings, owner, relations, program)?,
+        | Expr::Audit(base) => {
+            validate_binding_fields(base, bindings, owner, relations, dag, schemas, program)?;
+        }
         Expr::Bin { lhs, rhs, .. } => {
-            validate_binding_fields(lhs, bindings, owner, relations, program)?;
-            validate_binding_fields(rhs, bindings, owner, relations, program)?;
+            validate_binding_fields(lhs, bindings, owner, relations, dag, schemas, program)?;
+            validate_binding_fields(rhs, bindings, owner, relations, dag, schemas, program)?;
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            validate_binding_fields(scrutinee, bindings, owner, relations, dag, schemas, program)?;
+            for arm in arms {
+                let mut pat_vars = BTreeSet::new();
+                collect_pattern_vars(&arm.pattern, &mut pat_vars);
+                let arm_bindings: Vec<ast::RelBinding> = bindings
+                    .iter()
+                    .filter(|b| !pat_vars.contains(&b.var))
+                    .cloned()
+                    .collect();
+                validate_binding_fields(
+                    &arm.body,
+                    &arm_bindings,
+                    owner,
+                    relations,
+                    dag,
+                    schemas,
+                    program,
+                )?;
+            }
         }
         // Complex lexical binders are validated by scalar lowering, which knows
         // their local scope. The DAG does not reinterpret those binders.
@@ -1544,6 +1804,56 @@ fn combine_predicates(mut preds: Vec<Expr>) -> Expr {
     out
 }
 
+fn validate_equijoin_key_pair(
+    rel_name: &str,
+    l_key: &FieldRef,
+    r_key: &FieldRef,
+    var_to_rel: &BTreeMap<String, String>,
+    dag: &RelationDag,
+    schemas: &[BTreeMap<String, ast::Ty>],
+    program: &LinkedProgram,
+) -> Result<(), RelationalLowerError> {
+    let l_rel = var_to_rel.get(&l_key.binding).ok_or_else(|| {
+        RelationalLowerError::UnsupportedExpression(format!(
+            "unknown join binding '{}'",
+            l_key.binding
+        ))
+    })?;
+    let r_rel = var_to_rel.get(&r_key.binding).ok_or_else(|| {
+        RelationalLowerError::UnsupportedExpression(format!(
+            "unknown join binding '{}'",
+            r_key.binding
+        ))
+    })?;
+    let l_op = *dag
+        .relation_outputs
+        .get(l_rel)
+        .ok_or_else(|| RelationalLowerError::UnknownRelation(l_rel.clone()))?;
+    let r_op = *dag
+        .relation_outputs
+        .get(r_rel)
+        .ok_or_else(|| RelationalLowerError::UnknownRelation(r_rel.clone()))?;
+    let l_chain: Vec<&str> = l_key.field.split('.').collect();
+    let r_chain: Vec<&str> = r_key.field.split('.').collect();
+    let l_ty =
+        resolve_field_chain_type(&l_key.binding, l_rel, &schemas[l_op.0], &l_chain, program)?;
+    let r_ty =
+        resolve_field_chain_type(&r_key.binding, r_rel, &schemas[r_op.0], &r_chain, program)?;
+    check_type_compatibility(
+        &format!(
+            "{}.{} == {}.{}",
+            l_key.binding, l_key.field, r_key.binding, r_key.field
+        ),
+        &l_ty,
+        &r_ty,
+    )
+    .map_err(|reason| {
+        RelationalLowerError::UnsupportedExpression(format!(
+            "join in '{rel_name}' between '{l_rel}' and '{r_rel}': {reason}"
+        ))
+    })
+}
+
 fn match_equijoin_predicate(
     expr: &Expr,
     var_to_rel: &BTreeMap<String, String>,
@@ -1555,34 +1865,32 @@ fn match_equijoin_predicate(
         rhs,
     } = expr
     {
-        if let (Expr::Field(l_base, l_field), Expr::Field(r_base, r_field)) =
-            (lhs.as_ref(), rhs.as_ref())
-        {
-            if let (Expr::Var(l_var), Expr::Var(r_var)) = (l_base.as_ref(), r_base.as_ref()) {
-                if r_var == right_var && l_var != right_var && var_to_rel.contains_key(l_var) {
-                    return Some((
-                        FieldRef {
-                            binding: l_var.clone(),
-                            field: l_field.clone(),
-                        },
-                        FieldRef {
-                            binding: r_var.clone(),
-                            field: r_field.clone(),
-                        },
-                    ));
-                } else if l_var == right_var && r_var != right_var && var_to_rel.contains_key(r_var)
-                {
-                    return Some((
-                        FieldRef {
-                            binding: r_var.clone(),
-                            field: r_field.clone(),
-                        },
-                        FieldRef {
-                            binding: l_var.clone(),
-                            field: l_field.clone(),
-                        },
-                    ));
-                }
+        if let (Some((l_var, l_chain)), Some((r_var, r_chain))) = (
+            extract_binding_field_chain(lhs),
+            extract_binding_field_chain(rhs),
+        ) {
+            if r_var == right_var && l_var != right_var && var_to_rel.contains_key(l_var) {
+                return Some((
+                    FieldRef {
+                        binding: l_var.to_string(),
+                        field: l_chain.join("."),
+                    },
+                    FieldRef {
+                        binding: r_var.to_string(),
+                        field: r_chain.join("."),
+                    },
+                ));
+            } else if l_var == right_var && r_var != right_var && var_to_rel.contains_key(r_var) {
+                return Some((
+                    FieldRef {
+                        binding: r_var.to_string(),
+                        field: r_chain.join("."),
+                    },
+                    FieldRef {
+                        binding: l_var.to_string(),
+                        field: l_chain.join("."),
+                    },
+                ));
             }
         }
     }

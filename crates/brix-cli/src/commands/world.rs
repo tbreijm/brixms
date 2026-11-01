@@ -19,6 +19,23 @@ use serde_json::json;
 use crate::cli::WorldOp;
 use crate::cli::{EXIT_REJECTED_OR_UNKNOWN, EXIT_SUCCESS, EXIT_USAGE_OR_IO};
 
+fn entity_key_json(
+    entity_id: &str,
+    per_types: Option<&[brix_syntax::ast::Ty]>,
+) -> serde_json::Value {
+    if let Some([single_type]) = per_types {
+        if let Ok(values) = brix_kb::world::decision_codec::decode_entity_id(
+            entity_id,
+            std::slice::from_ref(single_type),
+        ) {
+            if let Some(value) = values.first() {
+                return value.to_query_json();
+            }
+        }
+    }
+    brix_kb::world::decision_codec::entity_id_to_json_key(entity_id)
+}
+
 /// The JSON schema tag for `brix world` output (ADR-0046 P5).
 pub const WORLD_JSON_SCHEMA: &str = "brix.cli.world-result@1";
 
@@ -130,6 +147,7 @@ pub fn execute_world(op: &WorldOp, json_out: bool) -> u8 {
             expect_rev_digest,
             expect_decide,
             expect_entity,
+            expect_entity_composite,
             expect_candidate,
             expect_value_digest,
             expect_caller,
@@ -143,6 +161,7 @@ pub fn execute_world(op: &WorldOp, json_out: bool) -> u8 {
             expect_rev_digest,
             expect_decide,
             expect_entity,
+            *expect_entity_composite,
             expect_candidate.as_deref(),
             expect_value_digest.as_deref(),
             expect_caller.as_deref(),
@@ -640,8 +659,14 @@ fn execute_decide(
         settlements.retain(|k, _| k == dec || k.ends_with(&format!("::{dec}")));
     }
     if let Some(ent) = entity_filter {
-        for entity_map in settlements.values_mut() {
-            entity_map.retain(|k, _| k == ent);
+        for (dec_name, entity_map) in &mut settlements {
+            let norm_ent = session
+                .network
+                .as_ref()
+                .and_then(|n| n.decides.get(dec_name))
+                .map(|b| brix_kb::world::decision_codec::normalize_entity_id(ent, &b.per_types))
+                .unwrap_or_else(|| ent.to_string());
+            entity_map.retain(|k, _| k == ent || k == &norm_ent);
         }
         settlements.retain(|_, map| !map.is_empty());
     }
@@ -651,7 +676,21 @@ fn execute_decide(
         for (dec_name, entity_map) in settlements {
             let mut emap = serde_json::Map::new();
             for (eid, s) in entity_map {
-                emap.insert(eid, s.to_json());
+                let mut decision = s.to_json();
+                if let Some(object) = decision.as_object_mut() {
+                    object.insert(
+                        "entity_key".into(),
+                        entity_key_json(
+                            &s.entity_id,
+                            session
+                                .network
+                                .as_ref()
+                                .and_then(|network| network.decides.get(&dec_name))
+                                .map(|block| block.per_types.as_slice()),
+                        ),
+                    );
+                }
+                emap.insert(eid, decision);
             }
             settlements_json.insert(dec_name, serde_json::Value::Object(emap));
         }
@@ -754,6 +793,14 @@ fn execute_explain(
                 return print_world_error("world explain", &err, json_out);
             };
             if json_out {
+                let key = entity_key_json(
+                    &settlement.entity_id,
+                    session
+                        .network
+                        .as_ref()
+                        .and_then(|network| network.decides.get(&decide_name))
+                        .map(|block| block.per_types.as_slice()),
+                );
                 let mut res = json!({
                     "schema": WORLD_JSON_SCHEMA,
                     "command": "world explain",
@@ -762,6 +809,7 @@ fn execute_explain(
                     "revision": seq,
                     "explanation": {
                         "entity_id": settlement.entity_id,
+                        "entity_key": key,
                         "decide_name": decide_name,
                         "winning_candidate": settlement.candidate_name,
                         "value": settlement.value.to_json(),
@@ -835,11 +883,25 @@ fn execute_explain(
     };
 
     if json_out {
+        let mut explanation_json = explanation.to_json();
+        if let Some(object) = explanation_json.as_object_mut() {
+            object.insert(
+                "entity_key".into(),
+                entity_key_json(
+                    &explanation.entity_id,
+                    session
+                        .network
+                        .as_ref()
+                        .and_then(|network| network.decides.get(&explanation.decide_name))
+                        .map(|block| block.per_types.as_slice()),
+                ),
+            );
+        }
         let mut res = json!({
             "schema": WORLD_JSON_SCHEMA,
             "command": "world explain",
             "ok": true,
-            "explanation": explanation.to_json(),
+            "explanation": explanation_json,
         });
         add_open_info(&mut res, &session);
         crate::json::emit_result_json(&res);
@@ -1579,24 +1641,52 @@ fn execute_evidence(
         }
     };
 
+    let default_path = session.decision_evidence_path(&evidence.target);
+    let mut evidence_json: serde_json::Value =
+        serde_json::from_slice(&encoded).unwrap_or(serde_json::Value::Null);
+    let types = session
+        .network
+        .as_ref()
+        .and_then(|network| network.decides.get(&evidence.target.decide))
+        .map(|block| block.per_types.as_slice());
+    let key = entity_key_json(&evidence.target.entity, types);
+    if let Some(object) = evidence_json.as_object_mut() {
+        if let Some(target) = object
+            .get_mut("target")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            target.insert("entity_key".into(), key.clone());
+        }
+        if let Some(settlement) = object
+            .get_mut("settlement")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            settlement.insert("entity_key".into(), key.clone());
+        }
+    }
+    let file_bytes = serde_json::to_vec(&evidence_json).unwrap_or(encoded);
     if let Some(out_path) = out {
-        if let Err(e) = std::fs::write(out_path, &encoded) {
+        if let Err(e) = std::fs::write(out_path, &file_bytes) {
             return print_world_error("world evidence", &WorldError::Io(e), json_out);
         }
     }
-
-    let default_path = session.decision_evidence_path(&evidence.target);
-    let evidence_json: serde_json::Value =
-        serde_json::from_slice(&encoded).unwrap_or(serde_json::Value::Null);
     if json_out {
+        let mut target_json = evidence.target.to_json();
+        if let Some(object) = target_json.as_object_mut() {
+            object.insert("entity_key".into(), key.clone());
+        }
+        let mut settlement_json = evidence.settlement.to_json();
+        if let Some(object) = settlement_json.as_object_mut() {
+            object.insert("entity_key".into(), key.clone());
+        }
         let res = json!({
             "schema": WORLD_JSON_SCHEMA,
             "command": "world evidence",
             "ok": true,
-            "target": evidence.target.to_json(),
+            "target": target_json,
             "target_id": evidence.target.id().to_hex(),
             "path": default_path.display().to_string(),
-            "settlement": evidence.settlement.to_json(),
+            "settlement": settlement_json,
             "evidence": evidence_json,
         });
         crate::json::emit_result_json(&res);
@@ -1608,6 +1698,77 @@ fn execute_evidence(
     EXIT_SUCCESS
 }
 
+/// Preserve ordinary string IDs byte-for-byte. Composite keys use an explicit
+/// transport shape, so a Str ID that happens to contain JSON is never guessed
+/// to be a tuple.
+fn normalize_expected_entity_transport(entity: &str, composite: bool) -> Result<String, String> {
+    if !composite {
+        return Ok(entity.to_string());
+    }
+    let value: serde_json::Value = serde_json::from_str(entity)
+        .map_err(|e| format!("invalid expected entity key transport: {e}"))?;
+    let Some(items) = value.as_array() else {
+        return Err("expected entity key transport must contain a JSON array".into());
+    };
+    let mut components = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let value = match item {
+            serde_json::Value::String(s) => brix_kb::world::decision_codec::Value::Str(s.clone()),
+            serde_json::Value::Bool(b) => brix_kb::world::decision_codec::Value::Bool(*b),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    brix_kb::world::decision_codec::Value::Int(i)
+                } else if let Some(f) = n.as_f64() {
+                    let f = brix_canon::FiniteF64::from_bits(f.to_bits()).map_err(|_| {
+                        format!("expected entity key component #{index} is not finite")
+                    })?;
+                    brix_kb::world::decision_codec::Value::F64(f)
+                } else {
+                    return Err(format!(
+                        "unsupported expected entity key number at component #{index}"
+                    ));
+                }
+            }
+            serde_json::Value::Object(tag)
+                if tag.get("type").and_then(|v| v.as_str()) == Some("f64") =>
+            {
+                let text = tag
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| format!("invalid F64 entity key component #{index}"))?;
+                let f = text
+                    .parse::<brix_canon::FiniteF64>()
+                    .map_err(|_| format!("invalid F64 entity key component #{index}"))?;
+                brix_kb::world::decision_codec::Value::F64(f)
+            }
+            serde_json::Value::Object(tag)
+                if tag.get("type").and_then(|v| v.as_str()) == Some("decimal") =>
+            {
+                let text = tag
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| format!("invalid Decimal entity key component #{index}"))?;
+                let decimal = brix_canon::decimal_parse(text)
+                    .map_err(|_| format!("invalid Decimal entity key component #{index}"))?;
+                brix_kb::world::decision_codec::Value::Decimal(decimal)
+            }
+            _ => {
+                return Err(format!(
+                    "unsupported expected entity key component #{index}: {item}"
+                ))
+            }
+        };
+        components.push(value);
+    }
+    if components.len() < 2 {
+        return Err("expected entity key transport must contain at least two components".into());
+    }
+    Ok(brix_kb::world::decision_codec::encode_entity_id(
+        &components,
+    ))
+}
+
+/// Verify against caller-pinned identity and claim fields.
 #[allow(clippy::too_many_arguments)]
 fn execute_verify_evidence(
     evidence_path: &Path,
@@ -1617,6 +1778,7 @@ fn execute_verify_evidence(
     expect_rev_digest: &str,
     expect_decide: &str,
     expect_entity: &str,
+    expect_entity_composite: bool,
     expect_candidate: Option<&str>,
     expect_value_digest: Option<&str>,
     expect_caller: Option<&str>,
@@ -1715,18 +1877,31 @@ fn execute_verify_evidence(
         }
     };
 
+    let expected_entity =
+        match normalize_expected_entity_transport(expect_entity, expect_entity_composite) {
+            Ok(entity) => entity,
+            Err(message) => {
+                return print_world_error(
+                    "world verify-evidence",
+                    &WorldError::InvalidSchema(message),
+                    json_out,
+                );
+            }
+        };
+
     let expected = brix_kb::world::decision_evidence::DecisionTarget {
         world: world_digest,
         program: program_digest,
         revision: expect_rev,
         revision_digest: rev_digest,
         decide: expect_decide.to_string(),
-        entity: expect_entity.to_string(),
+        entity: expected_entity,
         candidate: candidate.to_string(),
         value_digest,
         caller: expect_caller.map(String::from),
         grants: expect_grants.to_vec(),
         release: expect_release.map(String::from).unwrap_or_default(),
+        is_composite: expect_entity_composite,
     };
 
     let receipt =

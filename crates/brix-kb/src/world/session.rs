@@ -2658,6 +2658,26 @@ impl WorldSession {
         }
     }
 
+    fn get_derived_entries(
+        &self,
+        relation: &str,
+    ) -> Result<Option<Vec<(WorldKey, TupleRecord)>>, WorldError> {
+        let Some(net) = self.network.as_ref() else {
+            return Ok(None);
+        };
+        if let Some(rows) = net.get_derived_entries(relation)? {
+            return Ok(Some(rows));
+        }
+        match net
+            .derived_relations
+            .keys()
+            .find(|k| k.ends_with(&format!("::{relation}")))
+        {
+            Some(k) => net.get_derived_entries(k),
+            None => Ok(None),
+        }
+    }
+
     /// Query a paged slice of derived tuples from the active operator network.
     pub fn query_derived_page(
         &self,
@@ -2674,7 +2694,7 @@ impl WorldSession {
             ));
         }
         let records = self
-            .get_derived(relation)?
+            .get_derived_entries(relation)?
             .ok_or_else(|| WorldError::UnknownRelation(relation.to_string()))?;
 
         let offset = match cursor {
@@ -2705,14 +2725,10 @@ impl WorldSession {
 
         let total = records.len();
         let entries: Vec<(WorldKey, WorldTuple)> = records
-            .iter()
+            .into_iter()
             .skip(offset)
             .take(limit)
-            .enumerate()
-            .map(|(i, r)| {
-                let key = WorldKey::from_str(&format!("{}", offset + i));
-                (key, r.to_tuple())
-            })
+            .map(|(key, r)| (key, r.to_tuple()))
             .collect();
 
         let next_offset = offset + entries.len();
@@ -2785,6 +2801,51 @@ impl WorldSession {
         }
     }
 
+    fn get_derived_entries_at(
+        &self,
+        seq: u64,
+        relation: &str,
+    ) -> Result<Option<Vec<(WorldKey, TupleRecord)>>, WorldError> {
+        if seq == self.current_revision {
+            return self.get_derived_entries(relation);
+        }
+        let snapshot = self.pin_revision(seq)?;
+        let Some(network) = self.network.as_ref() else {
+            return Ok(None);
+        };
+        let mut historical = network.clear_data();
+        let mut ops = Vec::new();
+        for (rel, trie) in &snapshot.relations {
+            if !network.base_relations.contains_key(rel) {
+                continue;
+            }
+            let (entries, _) = trie.iter_page_with_store(None, usize::MAX, &snapshot.node_store)?;
+            ops.extend(
+                entries
+                    .into_iter()
+                    .map(|(key, tuple)| WorldBatchOp::Upsert {
+                        relation: rel.clone(),
+                        key,
+                        tuple,
+                    }),
+            );
+        }
+        historical.apply_ops(&ops)?;
+        if let Some(rows) = historical.get_derived_entries(relation)? {
+            return Ok(Some(rows));
+        }
+        let qualified = historical
+            .derived_relations
+            .keys()
+            .find(|k| k.ends_with(&format!("::{relation}")))
+            .cloned();
+        if let Some(k) = qualified {
+            historical.get_derived_entries(&k)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Query a paged slice of derived tuples at a specific historical revision `seq`.
     pub fn query_derived_page_at(
         &self,
@@ -2801,7 +2862,7 @@ impl WorldSession {
             ));
         }
         let records = self
-            .get_derived_at(seq, relation)?
+            .get_derived_entries_at(seq, relation)?
             .ok_or_else(|| WorldError::UnknownRelation(relation.to_string()))?;
 
         let offset = match cursor {
@@ -2836,14 +2897,10 @@ impl WorldSession {
 
         let total = records.len();
         let entries: Vec<(WorldKey, WorldTuple)> = records
-            .iter()
+            .into_iter()
             .skip(offset)
             .take(limit)
-            .enumerate()
-            .map(|(i, r)| {
-                let key = WorldKey::from_str(&format!("{}", offset + i));
-                (key, r.to_tuple())
-            })
+            .map(|(key, r)| (key, r.to_tuple()))
             .collect();
 
         let next_offset = offset + entries.len();
@@ -3272,9 +3329,19 @@ impl WorldSession {
 
         let tree = TrieMap::<WorldKey, WorldTuple>::from_root_digest(decision_root, 0);
         for decide_name in candidates {
-            let key = super::network::decision_key(&decide_name, entity_id);
+            let block = self
+                .network
+                .as_ref()
+                .and_then(|n| n.decides.get(&decide_name));
+            let is_composite = block.is_some_and(|b| b.per_types.len() > 1);
+            let norm_entity = block
+                .map(|b| super::decision_codec::normalize_entity_id(entity_id, &b.per_types))
+                .unwrap_or_else(|| super::decision_codec::normalize_untyped_entity_id(entity_id));
+            let key = super::network::decision_key(&decide_name, &norm_entity);
             if let Some(tuple) = tree.get_with_store(&key, &self.node_store)? {
-                let settled = super::network::decode_settled_decision(entity_id, tuple.as_bytes())?;
+                let mut settled =
+                    super::network::decode_settled_decision(&norm_entity, tuple.as_bytes())?;
+                settled.is_composite = is_composite;
                 return Ok(Some((decide_name, settled)));
             }
         }

@@ -373,7 +373,7 @@ impl fmt::Display for Value {
 }
 
 /// A deterministic settled decision chosen by canonical settlement discipline.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone)]
 pub struct SettledDecision {
     pub entity_id: String,
     pub candidate_name: String,
@@ -381,12 +381,41 @@ pub struct SettledDecision {
     pub phase: u64,
     pub value: Value,
     pub calendar_key: Key,
+    /// Presentation metadata derived from the loaded decide declaration.
+    /// It is deliberately excluded from the canonical settlement encoding.
+    pub is_composite: bool,
+}
+
+impl PartialEq for SettledDecision {
+    fn eq(&self, other: &Self) -> bool {
+        self.entity_id == other.entity_id
+            && self.candidate_name == other.candidate_name
+            && self.priority == other.priority
+            && self.phase == other.phase
+            && self.value == other.value
+            && self.calendar_key == other.calendar_key
+    }
+}
+impl Eq for SettledDecision {}
+
+impl std::fmt::Debug for SettledDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SettledDecision")
+            .field("entity_id", &self.entity_id)
+            .field("candidate_name", &self.candidate_name)
+            .field("priority", &self.priority)
+            .field("phase", &self.phase)
+            .field("value", &self.value)
+            .field("calendar_key", &self.calendar_key)
+            .finish()
+    }
 }
 
 impl SettledDecision {
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "entity_id": self.entity_id,
+            "entity_key": entity_id_to_json_key_with_shape(&self.entity_id, self.is_composite),
             "candidate_name": self.candidate_name,
             "priority": self.priority,
             "phase": self.phase,
@@ -394,6 +423,228 @@ impl SettledDecision {
             "calendar_key": format!("phase={},priority={},tiebreak={}", self.calendar_key.phase, self.calendar_key.priority, self.calendar_key.tiebreak.to_hex()),
         })
     }
+}
+
+/// Render an identity using type-derived shape metadata. `entity_id` alone cannot
+/// distinguish a scalar Str such as `["a", "b"]` from a composite key.
+pub fn entity_id_to_json_key_with_shape(entity_id: &str, is_composite: bool) -> serde_json::Value {
+    if is_composite {
+        entity_id_to_composite_json_key(entity_id)
+    } else {
+        serde_json::Value::String(entity_id.to_string())
+    }
+}
+
+fn entity_component_to_json(val: &Value) -> serde_json::Value {
+    match val {
+        Value::Str(s) => serde_json::Value::String(s.clone()),
+        Value::Int(n) => serde_json::Value::Number((*n).into()),
+        Value::Bool(b) => serde_json::Value::Bool(*b),
+        Value::F64(f) => serde_json::json!({"type": "f64", "value": f.to_string()}),
+        Value::Decimal(d) => {
+            serde_json::json!({"type": "decimal", "value": brix_canon::decimal_format(*d)})
+        }
+        other => other.to_tagged_json(),
+    }
+}
+
+/// Encode one or more entity key field values into the canonical `entity_id` string.
+///
+/// Single-field `per id` retains its existing scalar display identity; composite
+/// `per (k1, k2, ...)` uses an injective canonical JSON array of typed scalar values
+/// so `("a", "bc")` and `("ab", "c")` never collide.
+pub fn encode_entity_id(values: &[Value]) -> String {
+    if values.len() == 1 {
+        values[0].to_string()
+    } else {
+        let items: Vec<serde_json::Value> = values.iter().map(entity_component_to_json).collect();
+        serde_json::to_string(&items).expect("canonical JSON array of scalar values")
+    }
+}
+
+/// Decode an `entity_id` string back into its ordered, typed key values according to `per_types`.
+pub fn decode_entity_id(entity_id: &str, per_types: &[ast::Ty]) -> Result<Vec<Value>, WorldError> {
+    if per_types.len() == 1 {
+        return Ok(vec![Value::from_typed_bytes(
+            entity_id.as_bytes(),
+            &per_types[0],
+        )?]);
+    }
+    let parsed: serde_json::Value = serde_json::from_str(entity_id).map_err(|e| {
+        WorldError::NetworkError(format!(
+            "invalid composite entity key '{entity_id}': expected JSON array of {} elements ({e})",
+            per_types.len()
+        ))
+    })?;
+    let Some(items) = parsed.as_array() else {
+        return Err(WorldError::NetworkError(format!(
+            "invalid composite entity key '{entity_id}': expected JSON array of {} elements",
+            per_types.len()
+        )));
+    };
+    if items.len() != per_types.len() {
+        return Err(WorldError::NetworkError(format!(
+            "composite entity key arity mismatch: expected {} elements, found {}",
+            per_types.len(),
+            items.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(per_types.len());
+    for (idx, (item, ty)) in items.iter().zip(per_types.iter()).enumerate() {
+        let expected = brix_lower::world_expr::contract(ty).map_err(WorldError::NetworkError)?;
+        let type_name = expected.display_name();
+        let val = match type_name.as_str() {
+            "Str" => {
+                let s = item.as_str().ok_or_else(|| {
+                    WorldError::NetworkError(format!(
+                        "composite entity key component #{idx} must be Str, got {item}"
+                    ))
+                })?;
+                Value::Str(s.to_owned())
+            }
+            "Int" => {
+                let n = if let Some(n) = item.as_i64() {
+                    n
+                } else if item.get("type").and_then(|v| v.as_str()) == Some("int") {
+                    item.get("value")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .ok_or_else(|| {
+                            WorldError::NetworkError(format!(
+                                "composite entity key component #{idx} has invalid Int value {item}"
+                            ))
+                        })?
+                } else {
+                    return Err(WorldError::NetworkError(format!(
+                        "composite entity key component #{idx} must be Int, got {item}"
+                    )));
+                };
+                Value::Int(n)
+            }
+            "Bool" => {
+                let b = item.as_bool().ok_or_else(|| {
+                    WorldError::NetworkError(format!(
+                        "composite entity key component #{idx} must be Bool, got {item}"
+                    ))
+                })?;
+                Value::Bool(b)
+            }
+            "F64" => {
+                let f = if let Some(s) = item
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .filter(|t| *t == "f64")
+                    .and_then(|_| item.get("value"))
+                    .and_then(|v| v.as_str())
+                {
+                    s.parse::<brix_canon::FiniteF64>().map_err(|_| {
+                        WorldError::NetworkError(format!(
+                            "composite entity key component #{idx} has invalid F64 value {item}"
+                        ))
+                    })?
+                } else if let Some(n) = item.as_f64() {
+                    brix_canon::FiniteF64::from_bits(n.to_bits()).map_err(|_| {
+                        WorldError::NetworkError(format!(
+                            "composite entity key component #{idx} has non-finite F64 value {item}"
+                        ))
+                    })?
+                } else if let Some(s) = item.as_str() {
+                    s.parse::<brix_canon::FiniteF64>().map_err(|_| {
+                        WorldError::NetworkError(format!(
+                            "composite entity key component #{idx} has invalid F64 value {item}"
+                        ))
+                    })?
+                } else {
+                    return Err(WorldError::NetworkError(format!(
+                        "composite entity key component #{idx} must be F64, got {item}"
+                    )));
+                };
+                Value::F64(f)
+            }
+            "Decimal" => {
+                let s = if let Some(s) = item
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .filter(|t| *t == "decimal")
+                    .and_then(|_| item.get("value"))
+                    .and_then(|v| v.as_str())
+                {
+                    s
+                } else if let Some(s) = item.as_str() {
+                    s
+                } else {
+                    return Err(WorldError::NetworkError(format!(
+                        "composite entity key component #{idx} must be Decimal, got {item}"
+                    )));
+                };
+                let d = brix_canon::decimal_parse(s).map_err(|_| {
+                    WorldError::NetworkError(format!(
+                        "composite entity key component #{idx} has invalid Decimal value {item}"
+                    ))
+                })?;
+                Value::Decimal(d)
+            }
+            other => {
+                return Err(WorldError::NetworkError(format!(
+                    "unsupported entity key component type '{other}'"
+                )))
+            }
+        };
+        out.push(val);
+    }
+    Ok(out)
+}
+
+/// Normalize a caller-supplied `entity_id` against `per_types` (canonicalizing JSON array
+/// formatting for composite keys while preserving single-field keys unchanged).
+pub fn normalize_entity_id(entity_id: &str, per_types: &[ast::Ty]) -> String {
+    if per_types.len() > 1 {
+        if let Ok(vals) = decode_entity_id(entity_id, per_types) {
+            return encode_entity_id(&vals);
+        }
+    }
+    entity_id.to_string()
+}
+
+/// Normalize a caller-supplied `entity_id` when the decide block is not specified:
+/// if `entity_id` is a JSON array string (e.g. `["t1", "o1"]`), compact its JSON formatting.
+pub fn normalize_untyped_entity_id(entity_id: &str) -> String {
+    let trimmed = entity_id.trim();
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        if let Ok(serde_json::Value::Array(arr)) =
+            serde_json::from_str::<serde_json::Value>(trimmed)
+        {
+            if let Ok(compact) = serde_json::to_string(&arr) {
+                return compact;
+            }
+        }
+    }
+    entity_id.to_string()
+}
+
+/// Structured JSON representation of `entity_id`: a JSON array for composite keys,
+/// or a JSON string for single-field keys.
+pub fn entity_id_to_json_key(entity_id: &str) -> serde_json::Value {
+    // Compatibility helper for callers without declaration/type context. New typed
+    // presentation paths should call `entity_id_to_json_key_with_shape` instead.
+    if entity_id.starts_with('[') && entity_id.ends_with(']') {
+        if let Ok(arr @ serde_json::Value::Array(_)) =
+            serde_json::from_str::<serde_json::Value>(entity_id)
+        {
+            return arr;
+        }
+    }
+    serde_json::Value::String(entity_id.to_string())
+}
+
+/// Structured JSON representation for a known composite entity ID.
+pub fn entity_id_to_composite_json_key(entity_id: &str) -> serde_json::Value {
+    if let Ok(value @ serde_json::Value::Array(_)) = serde_json::from_str(entity_id) {
+        // Keep numeric tags: Decimal("0.5"), Str("0.5") and F64(0.5)
+        // must remain distinguishable when this key is passed back to the host.
+        return value;
+    }
+    serde_json::Value::String(entity_id.to_string())
 }
 
 /// Compute a deterministic canonical Blake3 digest across all settled decisions.
@@ -597,6 +848,7 @@ pub fn decode_settled_decision(
         phase,
         value,
         calendar_key: Key::new(phase, priority, Digest::from_bytes(tb)),
+        is_composite: false,
     };
     if decision_tuple(&decision).as_bytes() != bytes {
         return Err(WorldError::NetworkError(

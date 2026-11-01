@@ -1068,7 +1068,7 @@ fn extract_exported_symbol(item: &Item) -> Option<ExportedSymbol> {
             kind: ExportKind::RelDerived,
             // Until output types are inferred, conservatively invalidate the
             // interface when the expression changes; never miss schema edits.
-            signature: format!("rel derived {} {:?}", r.name, r.query.select),
+            signature: format!("rel derived {} {:?}", r.name, r.query),
         }),
         Item::Rule(r) => Some(ExportedSymbol {
             name: r.name.clone(),

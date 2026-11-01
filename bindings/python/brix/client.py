@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import threading
 import time
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Union
 
 # A program or input source: either a filesystem path (resolved relative to
@@ -61,6 +62,26 @@ def _explain_params(candidate: str, entity: Optional[int]) -> Dict[str, Any]:
     if entity is not None:
         params["entity"] = entity
     return params
+
+
+def _normalize_entity(entity: Any) -> Any:
+    if isinstance(entity, (list, tuple)):
+        items = [format(item, "f") if isinstance(item, Decimal) else item for item in entity]
+        return json.dumps(items, separators=(",", ":"))
+    return entity
+
+
+def _normalize_expected_entity(entity: Any) -> Any:
+    """Carry composite key shape and numeric types without guessing from strings."""
+    if not isinstance(entity, (list, tuple)):
+        return entity
+    items = []
+    for item in entity:
+        if isinstance(item, Decimal):
+            items.append({"type": "decimal", "value": format(item, "f")})
+        else:
+            items.append(item)
+    return {"type": "brix.entity-key@1", "items": items}
 
 class BrixError(Exception):
     """Base class for every error this client raises."""
@@ -642,12 +663,52 @@ class BrixClient:
             params["typed"] = True
         return self.result("world.query", params, timeout=timeout)
 
+    def world_decisions(
+        self,
+        world_dir: Union[str, os.PathLike],
+        decide: Optional[str] = None,
+        entity: Optional[Any] = None,
+        replay: bool = False,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """`brix world decide` via serve."""
+        params: Dict[str, Any] = {
+            "dir": str(world_dir),
+            "replay": replay,
+        }
+        if decide is not None:
+            params["decide"] = decide
+        if entity is not None:
+            params["entity"] = _normalize_entity(entity)
+        return self.result("world.decisions", params, timeout=timeout)
+
+    def world_explain(
+        self,
+        world_dir: Union[str, os.PathLike],
+        entity: Any,
+        decide: Optional[str] = None,
+        rev: Optional[int] = None,
+        replay: bool = False,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """`brix world explain` via serve."""
+        params: Dict[str, Any] = {
+            "dir": str(world_dir),
+            "entity": _normalize_entity(entity),
+            "replay": replay,
+        }
+        if decide is not None:
+            params["decide"] = decide
+        if rev is not None:
+            params["rev"] = rev
+        return self.result("world.explain", params, timeout=timeout)
+
     def world_evidence(
         self,
         world_dir: Union[str, os.PathLike],
         rev: Optional[int] = None,
         decide: str = "",
-        entity: Optional[str] = None,
+        entity: Optional[Any] = None,
         grants: Optional[List[str]] = None,
         out: Optional[Union[str, os.PathLike]] = None,
         include_bundle: bool = True,
@@ -655,11 +716,11 @@ class BrixClient:
         timeout: Optional[float] = None,
         *,
         revision: Optional[int] = None,
-        key: Optional[str] = None,
+        key: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """`brix world evidence` via serve."""
         actual_rev = rev if rev is not None else revision
-        actual_entity = entity if entity is not None else key
+        actual_entity = _normalize_entity(entity if entity is not None else key)
         params: Dict[str, Any] = {
             "dir": str(world_dir),
             "rev": actual_rev,
@@ -682,7 +743,7 @@ class BrixClient:
         expect_rev: Optional[int] = None,
         expect_rev_digest: Optional[str] = None,
         expect_decide: Optional[str] = None,
-        expect_entity: Optional[str] = None,
+        expect_entity: Optional[Any] = None,
         expect_candidate: Optional[str] = None,
         expect_value_digest: Optional[str] = None,
         expect_grants: Optional[List[str]] = None,
@@ -695,7 +756,7 @@ class BrixClient:
         revision: Optional[int] = None,
         revision_digest: Optional[str] = None,
         decide_name: Optional[str] = None,
-        entity_key: Optional[str] = None,
+        entity_key: Optional[Any] = None,
         candidate: Optional[str] = None,
         value_digest: Optional[str] = None,
         grants: Optional[List[str]] = None,
@@ -710,7 +771,9 @@ class BrixClient:
         actual_rev = expect_rev if expect_rev is not None else revision
         actual_rev_digest = expect_rev_digest if expect_rev_digest is not None else revision_digest
         actual_decide = expect_decide if expect_decide is not None else decide_name
-        actual_entity = expect_entity if expect_entity is not None else entity_key
+        actual_entity = _normalize_expected_entity(
+            expect_entity if expect_entity is not None else entity_key
+        )
         actual_candidate = expect_candidate if expect_candidate is not None else candidate
         actual_value_digest = (
             expect_value_digest if expect_value_digest is not None else value_digest

@@ -183,6 +183,7 @@ pub enum WorldOp {
         expect_rev_digest: String,
         expect_decide: String,
         expect_entity: String,
+        expect_entity_composite: bool,
         expect_candidate: Option<String>,
         expect_value_digest: Option<String>,
         expect_caller: Option<String>,
@@ -2393,6 +2394,24 @@ fn parse_world_evidence_args(args: &[String], json: bool) -> Result<WorldOp, Cli
     })
 }
 
+fn record_expect_entity_kind(
+    selected: &mut Option<bool>,
+    composite: bool,
+    option: &str,
+    json: bool,
+    cmd_name: &str,
+) -> Result<(), CliUsageError> {
+    if selected.is_some_and(|previous| previous != composite) {
+        return Err(CliUsageError::usage(
+            format!("conflicting entity expectation options near '{option}'"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    *selected = Some(composite);
+    Ok(())
+}
+
 fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
     let cmd_name = "world verify-evidence";
     let mut positionals = Vec::new();
@@ -2403,6 +2422,8 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
     let mut expect_rev_digest = None;
     let mut expect_decide = None;
     let mut expect_entity = None;
+    let mut expect_entity_composite = false;
+    let mut expect_entity_kind = None;
     let mut expect_candidate = None;
     let mut expect_value_digest = None;
     let mut expect_caller = None;
@@ -2494,7 +2515,25 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
             expect_decide = Some(args[i].clone());
         } else if let Some(val) = arg.strip_prefix("--expect-decide=") {
             expect_decide = Some(val.to_string());
+        } else if let Some(val) = arg.strip_prefix("--expect-entity-key-json=") {
+            record_expect_entity_kind(&mut expect_entity_kind, true, arg, json, cmd_name)?;
+            expect_entity_composite = true;
+            expect_entity = Some(val.to_string());
+        } else if arg == "--expect-entity-key-json" {
+            record_expect_entity_kind(&mut expect_entity_kind, true, arg, json, cmd_name)?;
+            expect_entity_composite = true;
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--expect-entity-key-json'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            expect_entity = Some(args[i].clone());
         } else if arg == "--expect-entity" || arg == "--expect-key" {
+            record_expect_entity_kind(&mut expect_entity_kind, false, arg, json, cmd_name)?;
+            expect_entity_composite = false;
             i += 1;
             if i >= args.len() {
                 return Err(CliUsageError::usage(
@@ -2508,6 +2547,8 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
             .strip_prefix("--expect-entity=")
             .or_else(|| arg.strip_prefix("--expect-key="))
         {
+            record_expect_entity_kind(&mut expect_entity_kind, false, arg, json, cmd_name)?;
+            expect_entity_composite = false;
             expect_entity = Some(val.to_string());
         } else if arg == "--expect-candidate" {
             i += 1;
@@ -2648,6 +2689,7 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
         expect_rev_digest,
         expect_decide,
         expect_entity,
+        expect_entity_composite,
         expect_candidate,
         expect_value_digest,
         expect_caller,
@@ -3594,5 +3636,55 @@ mod tests {
 
         let err3 = parse_args(["--json"]).unwrap_err();
         assert!(err3.is_json);
+    }
+
+    #[test]
+    fn verify_evidence_rejects_conflicting_entity_transport_options() {
+        let err = parse_args([
+            "world",
+            "verify-evidence",
+            "--evidence=evidence.json",
+            "--expect-world=w",
+            "--expect-program=p",
+            "--expect-rev=1",
+            "--expect-rev-digest=r",
+            "--expect-decide=d",
+            "--expect-entity=literal",
+            "--expect-entity-key-json=[\"a\",\"b\"]",
+        ])
+        .unwrap_err();
+        assert!(err
+            .message
+            .contains("conflicting entity expectation options"));
+    }
+
+    #[test]
+    fn verify_evidence_accepts_equals_form_for_composite_entity_transport() {
+        let parsed = parse_args([
+            "world",
+            "verify-evidence",
+            "--evidence=evidence.json",
+            "--expect-world=w",
+            "--expect-program=p",
+            "--expect-rev=1",
+            "--expect-rev-digest=r",
+            "--expect-decide=d",
+            "--expect-entity-key-json=[\"a\",\"b\"]",
+        ])
+        .unwrap();
+        let Command::World {
+            op:
+                WorldOp::VerifyEvidence {
+                    expect_entity,
+                    expect_entity_composite,
+                    ..
+                },
+            ..
+        } = parsed
+        else {
+            panic!("expected world verify-evidence command");
+        };
+        assert_eq!(expect_entity, "[\"a\",\"b\"]");
+        assert!(expect_entity_composite);
     }
 }

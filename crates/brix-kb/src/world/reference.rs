@@ -692,8 +692,20 @@ pub struct EvaluatedRow {
 }
 
 fn get_qualified<'a>(row: &'a Row, binding: &str, field: &str) -> Option<&'a Value> {
-    row.get(&format!("{binding}.{field}"))
-        .or_else(|| row.get(field))
+    let mut parts = field.split('.');
+    let first = parts.next()?;
+    let mut current = row
+        .get(&format!("{binding}.{first}"))
+        .or_else(|| row.get(first))?;
+    for seg in parts {
+        match current {
+            Value::Record { fields, .. } => {
+                current = fields.get(seg)?;
+            }
+            _ => return None,
+        }
+    }
+    Some(current)
 }
 
 fn merge_rows(left: &Row, right: &Row) -> Row {
@@ -986,20 +998,128 @@ impl ReferenceWideDecimal {
     }
 }
 
-/// Extract a row's entity identity from its declared `per <field>`
-/// (ADR-0046, decided 2026-10-04), independently re-derived from `network.rs`'s
-/// `entity_id_for` by reading the same declared field, not by calling its
-/// code (see module docs). A row missing the declared field is a typed error,
-/// never a silent default.
-fn extract_entity_id(eval_row: &Row, binder: &str, per_field: &str) -> Result<String, WorldError> {
-    get_qualified(eval_row, binder, per_field)
-        .map(|v| v.to_string())
-        .ok_or_else(|| {
+/// Extract a row's entity identity from its declared `per` field(s)
+/// (ADR-0046, decided 2026-10-04; composite keys added in Alpha.9), independently
+/// re-derived from `network.rs`'s `entity_id_for` by reading the same declared
+/// field(s), not by calling its code (see module docs). A row missing any declared
+/// field is a typed error, never a silent default.
+fn extract_entity_id(
+    eval_row: &Row,
+    binder: &str,
+    per_fields: &[String],
+) -> Result<String, WorldError> {
+    let mut values = Vec::with_capacity(per_fields.len());
+    for per_field in per_fields {
+        let val = get_qualified(eval_row, binder, per_field).ok_or_else(|| {
             WorldError::NetworkError(format!(
                 "reference evaluator: decide entity field '{per_field}' missing from bound row \
                  (binder '{binder}')"
             ))
-        })
+        })?;
+        values.push(val.clone());
+    }
+    Ok(encode_reference_entity_id(&values))
+}
+
+fn encode_reference_entity_id(values: &[Value]) -> String {
+    if values.len() == 1 {
+        values[0].to_string()
+    } else {
+        let items: Vec<serde_json::Value> = values
+            .iter()
+            .map(|val| match val {
+                Value::Str(s) => serde_json::Value::String(s.clone()),
+                Value::Int(n) => serde_json::Value::Number((*n).into()),
+                Value::Bool(b) => serde_json::Value::Bool(*b),
+                Value::F64(f) => serde_json::json!({"type": "f64", "value": f.to_string()}),
+                Value::Decimal(d) => {
+                    serde_json::json!({"type": "decimal", "value": brix_canon::decimal_format(*d)})
+                }
+                _ => serde_json::Value::Null,
+            })
+            .collect();
+        serde_json::to_string(&items).expect("canonical JSON array of scalar values")
+    }
+}
+
+fn decode_reference_entity_id(
+    entity_id: &str,
+    per_types: &[ast::Ty],
+) -> Result<Vec<Value>, WorldError> {
+    if per_types.len() == 1 {
+        return Ok(vec![Value::from_typed_bytes(
+            entity_id.as_bytes(),
+            &per_types[0],
+        )?]);
+    }
+    let parsed: serde_json::Value = serde_json::from_str(entity_id).map_err(|e| {
+        WorldError::NetworkError(format!(
+            "reference evaluator: invalid composite entity key '{entity_id}': {e}"
+        ))
+    })?;
+    let Some(items) = parsed.as_array() else {
+        return Err(WorldError::NetworkError(format!(
+            "reference evaluator: composite entity key '{entity_id}' is not a JSON array"
+        )));
+    };
+    if items.len() != per_types.len() {
+        return Err(WorldError::NetworkError(format!(
+            "reference evaluator: composite entity key arity mismatch ({} vs {})",
+            items.len(),
+            per_types.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(per_types.len());
+    for (item, ty) in items.iter().zip(per_types.iter()) {
+        let expected = brix_lower::world_expr::contract(ty).map_err(WorldError::NetworkError)?;
+        let val = match expected.display_name().as_str() {
+            "Str" => Value::Str(
+                item.as_str()
+                    .ok_or_else(|| WorldError::NetworkError("expected Str key component".into()))?
+                    .to_owned(),
+            ),
+            "Int" => Value::Int(
+                item.as_i64()
+                    .ok_or_else(|| WorldError::NetworkError("expected Int key component".into()))?,
+            ),
+            "Bool" => {
+                Value::Bool(item.as_bool().ok_or_else(|| {
+                    WorldError::NetworkError("expected Bool key component".into())
+                })?)
+            }
+            "F64" => {
+                let s = item
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| item.as_str())
+                    .ok_or_else(|| WorldError::NetworkError("expected F64 key component".into()))?;
+                Value::F64(
+                    s.parse::<brix_canon::FiniteF64>().map_err(|_| {
+                        WorldError::NetworkError("invalid F64 key component".into())
+                    })?,
+                )
+            }
+            "Decimal" => {
+                let s = item
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| item.as_str())
+                    .ok_or_else(|| {
+                        WorldError::NetworkError("expected Decimal key component".into())
+                    })?;
+                Value::Decimal(brix_canon::decimal_parse(s).map_err(|_| {
+                    WorldError::NetworkError("invalid Decimal key component".into())
+                })?)
+            }
+            other => {
+                return Err(WorldError::NetworkError(format!(
+                    "reference evaluator: unsupported key component type '{other}'"
+                )))
+            }
+        };
+        out.push(val);
+    }
+    Ok(out)
 }
 
 /// Calendar tie-break digest, reproduced byte-for-byte from `network.rs`'s
@@ -1037,10 +1157,12 @@ pub struct DecideSpec {
     pub name: String,
     pub binder: String,
     pub source_relation: String,
-    /// Declared entity-identity field (ADR-0046, decided 2026-10-04); see
-    /// `network::DecideBlock::per_field`.
+    /// Declared entity-identity field(s) (ADR-0046, decided 2026-10-04; composite
+    /// keys added in Alpha.9); see `network::DecideBlock::per_fields`.
     pub per_field: String,
     pub per_type: ast::Ty,
+    pub per_fields: Vec<String>,
+    pub per_types: Vec<ast::Ty>,
     pub proposals: Vec<ast::ProposeDecl>,
     pub compiled_proposals: Vec<CompiledReferencePropose>,
 }
@@ -1141,9 +1263,13 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                     .unwrap_or(&program.root_module);
                 let (module, local) = name.rsplit_once("::").unwrap_or((owner, name));
                 let qname = QualifiedName::new(module, local);
-                let config = program.configs.get(&qname).ok_or_else(|| {
-                    WorldError::NetworkError(format!("unknown row schema {qname}"))
-                })?;
+                let config = program
+                    .configs
+                    .get(&qname)
+                    .or_else(|| program.available_configs.get(&qname))
+                    .ok_or_else(|| {
+                        WorldError::NetworkError(format!("unknown row schema {qname}"))
+                    })?;
                 match &config.body {
                     ast::ConfigBody::Record(fields) => *schema = ast::Ty::Record(fields.clone()),
                     _ => {
@@ -1194,7 +1320,9 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
             OperatorNode::ParentCount { .. } => {
                 compiled_operators.push(CompiledOperator::ParentCount)
             }
-            OperatorNode::Distinct { .. } => compiled_operators.push(CompiledOperator::Distinct),
+            OperatorNode::Distinct { .. } | OperatorNode::UnionDistinct { .. } => {
+                compiled_operators.push(CompiledOperator::Distinct)
+            }
             OperatorNode::GroupedCount {
                 input,
                 group_keys,
@@ -1259,26 +1387,36 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
         if let Some(src) = source_relation {
             // `lower_relations` above already refused a relational decide with
             // no declared `per` field; this is defensive, not reachable.
-            let per_field = decl.per.clone().ok_or_else(|| {
-                WorldError::NetworkError(format!(
+            let per_fields: Vec<String> = if !decl.per_fields.is_empty() {
+                decl.per_fields.clone()
+            } else if let Some(per) = &decl.per {
+                vec![per.clone()]
+            } else {
+                return Err(WorldError::NetworkError(format!(
                     "reference evaluator: decide '{qname}' resolved to relation '{src}' with no \
                      'per' field (expected lower_relations to have refused this)"
-                ))
-            })?;
+                )));
+            };
             let op_id = dag.relation_outputs.get(&src).ok_or_else(|| {
                 WorldError::NetworkError(format!(
                     "decide '{qname}' unknown source relation '{src}'"
                 ))
             })?;
-            let per_type = op_schemas[op_id.0]
-                .get(&format!("{}.{per_field}", decl.binder))
-                .or_else(|| op_schemas[op_id.0].get(&per_field))
-                .cloned()
-                .ok_or_else(|| {
-                    WorldError::NetworkError(format!(
-                        "reference decide '{qname}' per field '{per_field}' has no resolved type"
-                    ))
-                })?;
+            let mut per_types = Vec::with_capacity(per_fields.len());
+            for pf in &per_fields {
+                let pt = op_schemas[op_id.0]
+                    .get(&format!("{}.{pf}", decl.binder))
+                    .or_else(|| op_schemas[op_id.0].get(pf))
+                    .cloned()
+                    .ok_or_else(|| {
+                        WorldError::NetworkError(format!(
+                            "reference decide '{qname}' per field '{pf}' has no resolved type"
+                        ))
+                    })?;
+                per_types.push(pt);
+            }
+            let per_field = per_fields[0].clone();
+            let per_type = per_types[0].clone();
             let bindings = derive_decide_binding_names(&op_schemas[op_id.0], &decl.binder);
             let mut compiled_proposals = Vec::with_capacity(decl.proposals.len());
             for prop in &decl.proposals {
@@ -1301,6 +1439,8 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                 source_relation: src,
                 per_field,
                 per_type,
+                per_fields,
+                per_types,
                 proposals: decl.proposals.clone(),
                 compiled_proposals,
             });
@@ -1407,16 +1547,14 @@ pub fn evaluate_with_budget(
             let mut rows = BTreeMap::new();
             if let Some(entities) = state.settlements.get(&decide.name) {
                 for (entity_id, winner) in entities {
-                    let entity_value =
-                        Value::from_typed_bytes(entity_id.as_bytes(), &decide.per_type)?;
+                    let entity_values = decode_reference_entity_id(entity_id, &decide.per_types)?;
                     let priority = i64::try_from(winner.priority).map_err(|_| {
                         WorldError::NetworkError(format!(
                             "reference winner priority for '{}' exceeds the winner row Int range",
                             decide.name
                         ))
                     })?;
-                    let row = BTreeMap::from([
-                        (decide.per_field.clone(), entity_value),
+                    let mut row = BTreeMap::from([
                         (
                             "candidate".into(),
                             Value::Str(winner.candidate_name.clone()),
@@ -1424,10 +1562,15 @@ pub fn evaluate_with_budget(
                         ("priority".into(), Value::Int(priority)),
                         ("value".into(), winner.value.clone()),
                     ]);
-                    rows.insert(
-                        WorldKey::new(row[&decide.per_field].to_bytes()),
-                        row_to_tuple_record(&row).to_tuple(),
-                    );
+                    for (pf, val) in decide.per_fields.iter().zip(entity_values.iter()) {
+                        row.insert(pf.clone(), val.clone());
+                    }
+                    let row_key = if entity_values.len() == 1 {
+                        WorldKey::new(entity_values[0].to_bytes())
+                    } else {
+                        WorldKey::new(encode_reference_entity_id(&entity_values).into_bytes())
+                    };
+                    rows.insert(row_key, row_to_tuple_record(&row).to_tuple());
                 }
             }
             next_relations.insert(decide.name.clone(), rows);
@@ -1779,6 +1922,22 @@ fn evaluate_once_with_budget(
                     })
                     .collect()
             }
+            OperatorNode::UnionDistinct { sources } => {
+                let mut set: BTreeSet<Row> = BTreeSet::new();
+                for src in sources {
+                    for row in &operator_outputs[src.0] {
+                        meter.rows_evaluated += 1;
+                        charge_work(meter, work_offset, max_work)?;
+                        set.insert(row.values.clone());
+                    }
+                }
+                set.into_iter()
+                    .map(|values| {
+                        let provenance = Provenance::distinct_row(&values);
+                        EvaluatedRow { values, provenance }
+                    })
+                    .collect()
+            }
             OperatorNode::GroupedCount {
                 input,
                 group_keys: _,
@@ -1901,7 +2060,7 @@ fn evaluate_once_with_budget(
                 let compiled_prop = &decide.compiled_proposals[p_idx];
                 meter.candidates_evaluated += 1;
                 charge_work(meter, work_offset, max_work)?;
-                let entity_id = extract_entity_id(&eval_row, &decide.binder, &decide.per_field)?;
+                let entity_id = extract_entity_id(&eval_row, &decide.binder, &decide.per_fields)?;
                 let bindings = scalar_bindings(&eval_row)?;
                 let guard_l3 = eval_compiled_with_budget(
                     &compiled_prop.guard,
@@ -2043,11 +2202,14 @@ mod tests {
             ("id", Value::Str("I1".into())),
         ]);
         assert_eq!(
-            extract_entity_id(&eval_row, "f", "order_id").unwrap(),
+            extract_entity_id(&eval_row, "f", &["order_id".to_string()]).unwrap(),
             "O1",
             "declared field wins regardless of naming-convention precedence"
         );
-        assert_eq!(extract_entity_id(&eval_row, "f", "id").unwrap(), "I1");
+        assert_eq!(
+            extract_entity_id(&eval_row, "f", &["id".to_string()]).unwrap(),
+            "I1"
+        );
     }
 
     /// The declared field may be read either bare or binder-qualified
@@ -2057,7 +2219,7 @@ mod tests {
     fn entity_id_reads_binder_qualified_field() {
         let eval_row = row(&[("f.entity_id", Value::Str("E1".into()))]);
         assert_eq!(
-            extract_entity_id(&eval_row, "f", "entity_id").unwrap(),
+            extract_entity_id(&eval_row, "f", &["entity_id".to_string()]).unwrap(),
             "E1"
         );
     }
@@ -2067,7 +2229,7 @@ mod tests {
     #[test]
     fn entity_id_missing_declared_field_is_a_typed_error() {
         let eval_row = row(&[("other_field", Value::Str("zz".into()))]);
-        let err = extract_entity_id(&eval_row, "f", "entity_id").unwrap_err();
+        let err = extract_entity_id(&eval_row, "f", &["entity_id".to_string()]).unwrap_err();
         assert!(
             matches!(err, WorldError::NetworkError(_)),
             "missing declared entity field must be a typed WorldError, not a default: {err:?}"

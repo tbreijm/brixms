@@ -877,6 +877,8 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
             let entity = match params.get("entity") {
                 Some(Value::String(s)) => Some(s.clone()),
                 Some(Value::Number(n)) => Some(n.to_string()),
+                Some(Value::Bool(b)) => Some(b.to_string()),
+                Some(Value::Array(arr)) => serde_json::to_string(arr).ok(),
                 _ => None,
             };
             WorldOp::Decide {
@@ -894,6 +896,9 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
             let entity = match params.get("entity") {
                 Some(Value::String(s)) => s.clone(),
                 Some(Value::Number(n)) => n.to_string(),
+                Some(Value::Bool(b)) => b.to_string(),
+                Some(Value::Array(arr)) => serde_json::to_string(arr)
+                    .map_err(|e| ("invalid-params", format!("invalid composite 'entity': {e}")))?,
                 _ => {
                     return Err((
                         "invalid-params",
@@ -967,6 +972,9 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
             let entity = match params.get("entity").or_else(|| params.get("key")) {
                 Some(Value::String(s)) => s.clone(),
                 Some(Value::Number(n)) => n.to_string(),
+                Some(Value::Bool(b)) => b.to_string(),
+                Some(Value::Array(arr)) => serde_json::to_string(arr)
+                    .map_err(|e| ("invalid-params", format!("invalid composite 'entity': {e}")))?,
                 _ => {
                     return Err((
                         "invalid-params",
@@ -1002,9 +1010,38 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
             let expect_rev = required_u64_field(params, "expect_rev")?;
             let expect_rev_digest = required_str_field(params, "expect_rev_digest")?.to_string();
             let expect_decide = required_str_field(params, "expect_decide")?.to_string();
-            let expect_entity = match params.get("expect_entity") {
-                Some(Value::String(s)) => s.clone(),
-                Some(Value::Number(n)) => n.to_string(),
+            let (expect_entity, expect_entity_composite) = match params.get("expect_entity") {
+                Some(Value::String(s)) => (s.clone(), false),
+                Some(Value::Number(n)) => (n.to_string(), false),
+                Some(Value::Bool(b)) => (b.to_string(), false),
+                Some(Value::Array(arr)) => (
+                    serde_json::to_string(arr).map_err(|e| {
+                        (
+                            "invalid-params",
+                            format!("invalid composite 'expect_entity': {e}"),
+                        )
+                    })?,
+                    true,
+                ),
+                Some(Value::Object(obj))
+                    if obj.get("type").and_then(Value::as_str) == Some("brix.entity-key@1") =>
+                {
+                    let items = obj.get("items").and_then(Value::as_array).ok_or_else(|| {
+                        (
+                            "invalid-params",
+                            "'expect_entity.items' must be an array".to_string(),
+                        )
+                    })?;
+                    (
+                        serde_json::to_string(items).map_err(|e| {
+                            (
+                                "invalid-params",
+                                format!("invalid composite 'expect_entity': {e}"),
+                            )
+                        })?,
+                        true,
+                    )
+                }
                 _ => {
                     return Err((
                         "invalid-params",
@@ -1038,6 +1075,7 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
                 expect_rev_digest,
                 expect_decide,
                 expect_entity,
+                expect_entity_composite,
                 expect_candidate,
                 expect_value_digest,
                 expect_caller,
