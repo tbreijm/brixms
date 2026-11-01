@@ -637,3 +637,26 @@ Real SDK tests cover contradictory contexts on one client, concurrent callers,
 missing/cross-context evidence, timeout recovery, wrong-program recovery, and
 portable replay with wrong or forged context rejection. L3-v1 and world evidence
 retain their separate profiles; the finite-decision policy cannot replace them.
+
+## 17. A9-5 minimum string admission checkpoint (2026-11-01)
+
+Unsupported `Str + Str` and `Str < Str` now fail during finite-decision and
+world admission, including call-site-typed helpers, imported helpers, nested
+matches/lambdas, decision values and named relational queries. Ambiguous untyped
+helpers are checked with their actual argument shapes; known literal string
+operations are still rejected in unused helper bodies. Recursive helpers are
+revisited when argument shapes change, under bounded analysis.
+
+Integer arithmetic/order and string equality/inequality remain supported.
+Call-site inference is local to admission checks and does not strengthen
+persisted world result schemas. Shared schema/helper DAGs are checked without
+exponential expansion. The optional bounded string library remains deferred;
+this checkpoint satisfies the required rejection path, not lexical search.
+
+The combined A9-1 through A9-5 foundation passed 2,243 ordinary workspace tests
+and 13 doctests in one clean run (300.21 seconds), workspace Clippy with warnings
+denied, formatting, TCB inventory and SOC law-map checks. The 5,000-child test
+remains covered by the separate preceding release lifecycle; the debug gate
+skipped only that case and the 28 existing ignored cases. Frozen histories and
+canonical expectations were not updated. A9-6 ordering/truncation and A9-7
+qualification remain required before an alpha.9 release.
