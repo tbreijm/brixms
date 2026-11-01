@@ -82,6 +82,11 @@ pub const MAX_INPUT_VALUE_NODES: usize = 4096;
 /// Maximum fields or positional arguments in one composite value.
 pub const MAX_INPUT_CONTAINER_WIDTH: usize = 256;
 
+/// Maximum elements in a world collection list (65,536).
+pub const MAX_COLLECTION_ELEMENTS: usize = 65536;
+/// Maximum total value nodes in a world structured state graph (1,048,576).
+pub const MAX_WORLD_VALUE_NODES: usize = 1_048_576;
+
 /// Resource limits governing external input artifact decoding and shard aggregation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InputLimits {

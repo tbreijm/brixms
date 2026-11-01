@@ -20,6 +20,26 @@ const MAX_ANALYSIS_WORK: usize = 100_000;
 type Shape = Arc<Type>;
 type Env = BTreeMap<String, Shape>;
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ShapeKey {
+    Unknown,
+    Known(L3ValueType),
+    Record(Vec<(String, ShapeKey)>),
+    Sum {
+        nominal: String,
+        variant: String,
+        args: Vec<ShapeKey>,
+    },
+    Either(Vec<ShapeKey>),
+    List(Box<ShapeKey>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct HelperCallKey {
+    function: String,
+    args: Vec<ShapeKey>,
+}
+
 enum Type {
     // An unannotated parameter in a declaration, or an expression that cannot
     // produce a value (for example, a missing field). Runtime faults still apply.
@@ -76,6 +96,26 @@ fn unknown() -> Shape {
     Arc::new(Type::Unknown)
 }
 
+fn may_be_str(shape: &Type) -> bool {
+    match shape {
+        // Unknown is deliberately deferred until a helper is reached with a
+        // concrete call-site shape. Treating it as possibly Str here makes a
+        // dead untyped helper such as `fn unused(x) = x + "!"` fail admission.
+        Type::Unknown => false,
+        Type::Known(L3ValueType::Str) => true,
+        Type::Either(options) => options.iter().any(|option| may_be_str(option)),
+        Type::Record(_) | Type::Sum { .. } | Type::List(_) | Type::Known(_) => false,
+    }
+}
+
+fn definitely_may_be_str(shape: &Type) -> bool {
+    match shape {
+        Type::Known(L3ValueType::Str) => true,
+        Type::Either(options) => options.iter().any(|option| definitely_may_be_str(option)),
+        _ => false,
+    }
+}
+
 fn type_name(t: &Type) -> String {
     match t {
         Type::Known(ty) => ty.to_string(),
@@ -126,17 +166,11 @@ struct Checker<'a> {
     plan: &'a FiniteDecisionPlan,
     configs: BTreeMap<&'a str, &'a ast::ConfigBody>,
     remaining: usize,
-    /// Helper names whose body is currently being expanded on this path
-    /// (ADR-0042). A helper may now recurse, directly or mutually, so
-    /// expanding `Expr::Call` by re-walking the callee's body — as this
-    /// static pass does — would otherwise unfold a genuinely recursive
-    /// helper forever (bounded only by the depth/work charge, and only after
-    /// wastefully re-deriving the same shape at every level). A call back
-    /// into a helper already on this stack is resolved from its declared
-    /// return contract (or `Unknown`) instead of re-entered: this pass is a
-    /// static shape approximation, not the evaluator, and termination of the
-    /// *program* is the evaluator's call-depth/work budget, not this one.
-    active: BTreeSet<String>,
+    /// Helper function/argument-shape pairs currently being expanded on this
+    /// path. A repeated equal-shape recursive call resolves from its declared
+    /// return contract (or Unknown); a call that changes argument shape is
+    /// analyzed separately, subject to the ordinary depth/work bounds.
+    active: BTreeSet<HelperCallKey>,
 }
 
 impl Checker<'_> {
@@ -146,6 +180,48 @@ impl Checker<'_> {
         }
         self.remaining -= 1;
         Ok(())
+    }
+
+    /// Build an exact, bounded recursion key from the argument shapes. Equal
+    /// function/shape cycles stop at Unknown; a recursive call that changes
+    /// Int to Str is analyzed as a distinct state and can expose an excluded
+    /// string operation.
+    fn shape_key(&mut self, shape: &Shape, depth: usize) -> Result<ShapeKey, Error> {
+        self.charge(depth)?;
+        Ok(match shape.as_ref() {
+            Type::Unknown => ShapeKey::Unknown,
+            Type::Known(ty) => ShapeKey::Known(ty.clone()),
+            Type::Record(fields) => {
+                let mut keyed = Vec::with_capacity(fields.len());
+                for (name, child) in fields {
+                    keyed.push((name.clone(), self.shape_key(child, depth + 1)?));
+                }
+                ShapeKey::Record(keyed)
+            }
+            Type::Sum {
+                nominal,
+                variant,
+                args,
+            } => {
+                let mut keyed = Vec::with_capacity(args.len());
+                for child in args {
+                    keyed.push(self.shape_key(child, depth + 1)?);
+                }
+                ShapeKey::Sum {
+                    nominal: nominal.clone(),
+                    variant: variant.clone(),
+                    args: keyed,
+                }
+            }
+            Type::Either(options) => {
+                let mut keyed = Vec::with_capacity(options.len());
+                for child in options {
+                    keyed.push(self.shape_key(child, depth + 1)?);
+                }
+                ShapeKey::Either(keyed)
+            }
+            Type::List(element) => ShapeKey::List(Box::new(self.shape_key(element, depth + 1)?)),
+        })
     }
 
     fn declared_shape(&self, ty: &ast::Ty) -> Shape {
@@ -416,6 +492,12 @@ impl Checker<'_> {
             Expr::Arith(op, a, b) => {
                 let lhs = self.expr(a, env, next)?;
                 let rhs = self.expr(b, env, next)?;
+                if *op == ArithOpV2::Add
+                    && ((definitely_may_be_str(lhs.as_ref()) && may_be_str(rhs.as_ref()))
+                        || (definitely_may_be_str(rhs.as_ref()) && may_be_str(lhs.as_ref())))
+                {
+                    return Err(Error::UnsupportedStringOperator { operator: "+" });
+                }
                 if *op == ArithOpV2::Div
                     && matches!(lhs.as_ref(), Type::Known(L3ValueType::Int))
                     && matches!(rhs.as_ref(), Type::Known(L3ValueType::Int))
@@ -442,8 +524,14 @@ impl Checker<'_> {
                 }
             }
             Expr::IntDivMod(_, a, b) | Expr::Cmp(_, a, b) => {
-                self.expr(a, env, next)?;
-                self.expr(b, env, next)?;
+                let lhs = self.expr(a, env, next)?;
+                let rhs = self.expr(b, env, next)?;
+                if matches!(expr, Expr::Cmp(crate::l3_v2::CmpOpV2::Lt, ..))
+                    && ((definitely_may_be_str(lhs.as_ref()) && may_be_str(rhs.as_ref()))
+                        || (definitely_may_be_str(rhs.as_ref()) && may_be_str(lhs.as_ref())))
+                {
+                    return Err(Error::UnsupportedStringOperator { operator: "<" });
+                }
                 known(if matches!(expr, Expr::Cmp(..)) {
                     L3ValueType::Bool
                 } else {
@@ -536,11 +624,20 @@ impl Checker<'_> {
                             .unwrap_or(shape),
                     );
                 }
+                let mut arg_shapes = Vec::with_capacity(function.params.len());
+                for param in &function.params {
+                    let shape = locals.get(&param.name).cloned().unwrap_or_else(unknown);
+                    arg_shapes.push(self.shape_key(&shape, next)?);
+                }
+                let call_key = HelperCallKey {
+                    function: func.clone(),
+                    args: arg_shapes,
+                };
                 // A call back into a helper already being expanded on this
                 // path: recursion terminates at runtime (or fails closed to
                 // `Unknown` at the evaluator's depth/work bound), not in this
                 // static approximation, so it is not re-entered here.
-                if !self.active.insert(func.clone()) {
+                if !self.active.insert(call_key.clone()) {
                     return Ok(function
                         .ret_contract
                         .as_ref()
@@ -548,7 +645,7 @@ impl Checker<'_> {
                         .unwrap_or_else(unknown));
                 }
                 let body = self.expr(&function.body, &locals, next);
-                self.active.remove(func);
+                self.active.remove(&call_key);
                 function
                     .ret_contract
                     .as_ref()
@@ -732,9 +829,33 @@ pub(super) fn check(plan: &FiniteDecisionPlan, module: &ast::Module) -> Result<(
         .chain(plan.decides.iter().flat_map(|d| {
             std::iter::once(&d.list).chain(d.proposals.iter().flat_map(|p| [&p.guard, &p.value]))
         }));
-    // Preserve the existing acceptance of programs without Boolean operators
-    // or list/relational forms.
-    if !needs_shape_check(roots.collect()) {
+    let roots = roots.collect::<Vec<_>>();
+    let string_possible = plan.inputs.iter().any(|input| {
+        input.ty == L3ValueType::Str
+            || input
+                .list
+                .as_ref()
+                .is_some_and(|list| schema_type_has_str(&list.element))
+    }) || plan
+        .schemas
+        .values()
+        .any(|schema| schema_body_has_str(&schema.body))
+        || plan.functions.iter().any(|function| {
+            function
+                .params
+                .iter()
+                .filter_map(|param| param.contract.as_ref())
+                .chain(function.ret_contract.iter())
+                .any(|contract| {
+                    contract.ty == L3ValueType::Str
+                        || contract.schema_ty.as_ref().is_some_and(schema_type_has_str)
+                })
+        })
+        || roots.iter().any(|expr| ast_expr_has_str(expr));
+    // Keep the existing bounded analysis dormant for programs that cannot
+    // produce strings; this preserves large numeric helper chains that rely
+    // on runtime work limits while still checking every possible Str path.
+    if !needs_shape_check(roots, string_possible) {
         return Ok(());
     }
     let configs = module
@@ -752,6 +873,10 @@ pub(super) fn check(plan: &FiniteDecisionPlan, module: &ast::Module) -> Result<(
         active: BTreeSet::new(),
     };
     for function in &plan.functions {
+        // Unknown operands are not considered Str by the rejection predicate,
+        // so this declaration pass still catches literal Str+Str expressions
+        // inside unused helpers without rejecting ambiguous `x + "!"` bodies.
+        // A concrete Checker::Call revisits untyped bodies with caller shapes.
         let locals = function
             .params
             .iter()
@@ -808,12 +933,74 @@ pub(super) fn check(plan: &FiniteDecisionPlan, module: &ast::Module) -> Result<(
     Ok(())
 }
 
+// All instantiated named schemas are scanned by the caller. Follow only
+// inline list types here: revisiting a shared named child can expand a small
+// schema DAG exponentially even though its declared size is bounded.
+fn schema_type_has_str(ty: &crate::l3_v2::L3SchemaType) -> bool {
+    match ty {
+        crate::l3_v2::L3SchemaType::Str => true,
+        crate::l3_v2::L3SchemaType::List(element) => schema_type_has_str(element),
+        _ => false,
+    }
+}
+
+fn schema_body_has_str(body: &crate::l3_v2::L3SchemaBody) -> bool {
+    match body {
+        crate::l3_v2::L3SchemaBody::Record(fields) => fields.values().any(schema_type_has_str),
+        crate::l3_v2::L3SchemaBody::Sum(variants) => variants
+            .iter()
+            .flat_map(|(_, args)| args)
+            .any(schema_type_has_str),
+    }
+}
+
+fn ast_expr_has_str(expr: &Expr) -> bool {
+    match expr {
+        Expr::Str(_) => true,
+        Expr::Field(base, _)
+        | Expr::Not(base)
+        | Expr::Len(base)
+        | Expr::Distinct(base)
+        | Expr::Only(base) => ast_expr_has_str(base),
+        Expr::Arith(_, left, right)
+        | Expr::IntDivMod(_, left, right)
+        | Expr::Cmp(_, left, right)
+        | Expr::And(left, right)
+        | Expr::Or(left, right)
+        | Expr::In(left, right) => ast_expr_has_str(left) || ast_expr_has_str(right),
+        Expr::Ctor { args, .. } | Expr::Call { args, .. } | Expr::ListLit(args) => {
+            args.iter().any(ast_expr_has_str)
+        }
+        Expr::Record { fields, .. } => fields.iter().any(|(_, expr)| ast_expr_has_str(expr)),
+        Expr::Match { scrutinee, arms } => {
+            ast_expr_has_str(scrutinee) || arms.iter().any(|(_, body)| ast_expr_has_str(body))
+        }
+        Expr::Fold { list, body, .. } => ast_expr_has_str(list) || ast_expr_has_str(body),
+        Expr::Filter { list, cond, .. } => ast_expr_has_str(list) || ast_expr_has_str(cond),
+        Expr::Map { list, body, .. } => ast_expr_has_str(list) || ast_expr_has_str(body),
+        Expr::Comprehension {
+            generators,
+            where_clause,
+            yield_expr,
+        } => {
+            generators
+                .iter()
+                .any(|(_, source)| ast_expr_has_str(source))
+                || where_clause.as_deref().is_some_and(ast_expr_has_str)
+                || ast_expr_has_str(yield_expr)
+        }
+        Expr::Ascribe { expr, .. } | Expr::Validate { arg: expr, .. } => ast_expr_has_str(expr),
+        Expr::NumericBuiltin(_, args) => args.iter().any(ast_expr_has_str),
+        _ => false,
+    }
+}
+
 /// Whether any reachable expression needs this module's shape analysis:
 /// a Boolean operator (ADR-0034) or a list/relational form whose body has a
 /// required type (ADR-0037, ADR-0040: `fold`/`filter`/`map`/comprehension —
 /// `distinct`/`len`/`in`/a list literal impose no requirement of their own,
 /// but are still walked so a form nested inside one is found).
-fn needs_shape_check(mut pending: Vec<&Expr>) -> bool {
+fn needs_shape_check(mut pending: Vec<&Expr>, string_possible: bool) -> bool {
     while let Some(expr) = pending.pop() {
         match expr {
             Expr::And(..)
@@ -821,6 +1008,11 @@ fn needs_shape_check(mut pending: Vec<&Expr>) -> bool {
             | Expr::Not(..)
             | Expr::NumericBuiltin(..)
             | Expr::Arith(ArithOpV2::Div, ..) => return true,
+            Expr::Arith(ArithOpV2::Add, ..) | Expr::Cmp(crate::l3_v2::CmpOpV2::Lt, ..)
+                if string_possible =>
+            {
+                return true
+            }
             Expr::Fold { .. } | Expr::Filter { .. } | Expr::Map { .. } | Expr::Ascribe { .. } => {
                 return true
             }

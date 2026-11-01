@@ -72,8 +72,8 @@ pub use input::{
     input_snapshot_id, load_input_snapshot_from_paths, validate_against_declarations,
     validate_completeness, InputDecodeError, InputError, InputLimits, InputScalarValue, InputShard,
     InputSnapshot, InputSnapshotId, InputValidationError, InputValue, INPUT_SCHEMA_V1,
-    INPUT_SCHEMA_V2, MAX_INPUT_CONTAINER_WIDTH, MAX_INPUT_NAME_BYTES, MAX_INPUT_VALUE_DEPTH,
-    MAX_INPUT_VALUE_NODES,
+    INPUT_SCHEMA_V2, MAX_COLLECTION_ELEMENTS, MAX_INPUT_CONTAINER_WIDTH, MAX_INPUT_NAME_BYTES,
+    MAX_INPUT_VALUE_DEPTH, MAX_INPUT_VALUE_NODES, MAX_WORLD_VALUE_NODES,
 };
 pub use l3::{
     lower_l3_plan, L3ConfigBody, L3ConfigDecl, L3LowerError, L3PlanItem, L3PlanV1, L3TypeRef,
@@ -107,8 +107,9 @@ pub use module_graph::{
     ModuleLinkError, ModuleLoaderLimits, ModuleManifestEntry, ProgramGraphManifest, QualifiedName,
 };
 pub use relation_dag::{
-    decision_field_schemas, derive_binding_names, derive_decide_binding_names, lower_relations,
-    OperatorId, OperatorNode, RelationDag, RelationalLowerError,
+    decision_field_schemas, derive_binding_names, derive_decide_binding_names,
+    lower_named_query_v1, lower_relations, LoweredNamedQueryV1, OperatorId, OperatorNode,
+    QueryScalarV1, RelationDag, RelationalLowerError,
 };
 pub use soc_core::{
     decode_audit_input_bundle_v1, encode_audit_input_bundle_v1, AuditDecodeLimits,

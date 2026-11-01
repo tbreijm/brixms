@@ -85,6 +85,7 @@ impl fmt::Display for CrashPoint {
 /// Errors originating from the persistent world runtime.
 #[derive(Debug)]
 pub enum WorldError {
+    ReadOnlySession,
     /// Filesystem I/O error.
     Io(std::io::Error),
     /// World manifest `world.json` was not found.
@@ -92,7 +93,10 @@ pub enum WorldError {
     /// World directory already exists when attempting `create`.
     WorldAlreadyExists,
     /// The expected base revision does not match the world's current HEAD.
-    StaleBaseRevision { expected: u64, current: u64 },
+    StaleBaseRevision {
+        expected: u64,
+        current: u64,
+    },
     /// Contradictory operations within the same proposed batch.
     BatchConflict {
         relation: String,
@@ -144,7 +148,10 @@ pub enum WorldError {
     /// Invalid upload id for staging.
     InvalidUploadId(String),
     /// Idempotency key reused with mismatched batch payload.
-    IdempotencyConflict { key: String, reason: String },
+    IdempotencyConflict {
+        key: String,
+        reason: String,
+    },
     /// Target secondary index is not declared.
     UnknownSecondaryIndex(String),
     /// Missing or unextractable indexed field in tuple.
@@ -179,6 +186,7 @@ pub enum WorldError {
 impl fmt::Display for WorldError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ReadOnlySession => write!(f, "world session is read-only"),
             Self::Io(e) => write!(f, "world I/O error: {e}"),
             Self::ManifestNotFound => write!(f, "world manifest 'world.json' not found"),
             Self::WorldAlreadyExists => write!(f, "world directory already exists"),

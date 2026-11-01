@@ -25,6 +25,7 @@ pub mod policy_evidence;
 pub mod policy_trace;
 pub mod reference;
 pub mod revision;
+pub mod scoped_query;
 pub mod session;
 pub mod settlement_checkpoint;
 pub mod staging;
@@ -56,6 +57,16 @@ pub use oracle::{DiffEvent, WorldOracle};
 pub use paths::WorldPaths;
 pub use revision::{
     SettlementStatus, WorldRevision, REVISION_SCHEMA, REVISION_SCHEMA_V2, REVISION_SCHEMA_V3,
+};
+pub use scoped_query::{
+    named_query_identity_v1, world_revision_artifact_digest_v1,
+    world_revision_artifact_preimage_v1, AuthorizedHostScope, HostContextExpectationV2,
+    HostQueryLimitsV1, HostScopeProfileV1, NamedQueryArgsV1, QueryValueV1, ScopeError,
+    ScopedCursorBindingsV1, ScopedQueryCursorV1, ScopedQueryPageRequestV1, ScopedQueryPageV1,
+    HOST_SCOPE_PROFILE_PARTITION_V1, MAX_SCOPED_QUERY_CURSOR_TOKEN_BYTES,
+    MAX_SCOPED_QUERY_EVAL_MATCHES, MAX_SCOPED_QUERY_EVAL_WORK, MAX_SCOPED_QUERY_INPUT_BYTES,
+    MAX_SCOPED_QUERY_INPUT_ROWS, MAX_SCOPED_QUERY_OUTPUT_ROWS, MAX_SCOPED_QUERY_PAGE_ROWS,
+    QUERY_PROGRAM_ARTIFACT_V1, QUERY_WORLD_ARTIFACT_V1, SCOPED_QUERY_ORDERING_V1,
 };
 pub use session::{
     CommitProfile, DiffPage, ExecModuleLoaderLimits, ExecProfileV1, OpenMode, OpenPolicy,

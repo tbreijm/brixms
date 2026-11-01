@@ -99,7 +99,7 @@ pub fn read_decision_evidence_file(
 }
 
 /// Consumer's independently selected decision claim.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct DecisionTarget {
     pub world: Digest,
     pub program: Digest,
@@ -112,7 +112,45 @@ pub struct DecisionTarget {
     pub caller: Option<String>,
     pub grants: Vec<String>,
     pub release: String,
+    /// Presentation metadata only; expected-key normalization must come from the
+    /// caller's typed program context, never from serialized evidence.
+    pub is_composite: bool,
 }
+
+impl std::fmt::Debug for DecisionTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecisionTarget")
+            .field("world", &self.world)
+            .field("program", &self.program)
+            .field("revision", &self.revision)
+            .field("revision_digest", &self.revision_digest)
+            .field("decide", &self.decide)
+            .field("entity", &self.entity)
+            .field("candidate", &self.candidate)
+            .field("value_digest", &self.value_digest)
+            .field("caller", &self.caller)
+            .field("grants", &self.grants)
+            .field("release", &self.release)
+            .finish()
+    }
+}
+
+impl PartialEq for DecisionTarget {
+    fn eq(&self, other: &Self) -> bool {
+        self.world == other.world
+            && self.program == other.program
+            && self.revision == other.revision
+            && self.revision_digest == other.revision_digest
+            && self.decide == other.decide
+            && self.entity == other.entity
+            && self.candidate == other.candidate
+            && self.value_digest == other.value_digest
+            && self.caller == other.caller
+            && self.grants == other.grants
+            && self.release == other.release
+    }
+}
+impl Eq for DecisionTarget {}
 
 impl DecisionTarget {
     pub fn to_json(&self) -> Json {
@@ -123,6 +161,10 @@ impl DecisionTarget {
             "revision_digest": self.revision_digest.to_hex(),
             "decide": self.decide,
             "entity": self.entity,
+            "entity_key": super::decision_codec::entity_id_to_json_key_with_shape(
+                &self.entity,
+                self.is_composite,
+            ),
             "candidate": self.candidate,
             "value_digest": self.value_digest.to_hex(),
             "caller": self.caller,
@@ -230,6 +272,10 @@ impl DecisionEvidence {
         let val_bytes = self.settlement.value.to_canon_bytes();
         let settlement_json = json!({
             "entity_id": self.settlement.entity_id,
+            "entity_key": super::decision_codec::entity_id_to_json_key_with_shape(
+                &self.settlement.entity_id,
+                self.target.is_composite,
+            ),
             "candidate_name": self.settlement.candidate_name,
             "priority": self.settlement.priority,
             "phase": self.settlement.phase,
@@ -329,6 +375,10 @@ impl DecisionEvidence {
             limits,
         )?;
 
+        let is_composite = target_json
+            .get("is_composite")
+            .and_then(Json::as_bool)
+            .unwrap_or_else(|| target_json.get("entity_key").is_some_and(Json::is_array));
         let target = DecisionTarget {
             world: digest_from_hex(
                 target_json["world"]
@@ -359,6 +409,7 @@ impl DecisionEvidence {
             caller,
             grants,
             release,
+            is_composite,
         };
 
         let sett_json = &val["settlement"];
@@ -418,6 +469,7 @@ impl DecisionEvidence {
                 priority: cal_prio,
                 tiebreak,
             },
+            is_composite,
         };
 
         let entries = val["nodes"]
@@ -1093,18 +1145,25 @@ impl WorldSession {
 
         let value_digest = settlement.value.compute_digest();
 
+        let is_composite = self
+            .network
+            .as_ref()
+            .and_then(|n| n.decides.get(decide))
+            .is_some_and(|block| block.per_types.len() > 1);
+
         Ok(DecisionTarget {
             world: self.manifest.digest(),
             program: self.manifest.program_digest,
             revision,
             revision_digest: snapshot.revision.revision_digest,
             decide: decide.to_string(),
-            entity: entity.to_string(),
+            entity: settlement.entity_id,
             candidate: settlement.candidate_name,
             value_digest,
             caller: resolved_caller,
             grants: resolved_grants,
             release: resolved_release,
+            is_composite,
         })
     }
 
@@ -1200,13 +1259,19 @@ impl WorldSession {
             .ok_or_else(|| malformed("missing decision root in revision"))?;
 
         let trie = TrieMap::<WorldKey, WorldTuple>::from_root_digest(decision_root, 1);
-        let key = decision_key(decide, entity);
+        let key = decision_key(decide, &target.entity);
         let tuple = trie
             .get_with_store(&key, &store)
             .map_err(WorldError::from)?
-            .ok_or_else(|| malformed(format!("decision key not found: {decide}:{entity}")))?;
+            .ok_or_else(|| {
+                malformed(format!(
+                    "decision key not found: {decide}:{}",
+                    target.entity
+                ))
+            })?;
 
-        let settlement = decode_settled_decision(entity, tuple.as_bytes())?;
+        let mut settlement = decode_settled_decision(&target.entity, tuple.as_bytes())?;
+        settlement.is_composite = target.is_composite;
 
         let bundle_bytes = if include_bundle {
             if let Ok(closure) = self.program_closure() {

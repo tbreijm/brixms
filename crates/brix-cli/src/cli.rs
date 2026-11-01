@@ -87,6 +87,8 @@ pub enum Command {
     },
     /// `brix serve --stdio` — the embeddable JSON-lines protocol (ADR-0044).
     Serve,
+    /// Explicitly host-owned stdio channel for scoped queries/request contexts.
+    ServeHost,
     Help,
     Version,
 }
@@ -94,6 +96,15 @@ pub enum Command {
 /// A `brix world` sub-operation and its arguments (ADR-0046 P5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorldOp {
+    NamedQuery {
+        dir: PathBuf,
+        name: String,
+        arguments: String,
+        host_scope: PathBuf,
+        rev: Option<u64>,
+        limit: Option<usize>,
+        cursor: Option<String>,
+    },
     Init {
         dir: PathBuf,
         program: PathBuf,
@@ -183,6 +194,7 @@ pub enum WorldOp {
         expect_rev_digest: String,
         expect_decide: String,
         expect_entity: String,
+        expect_entity_composite: bool,
         expect_candidate: Option<String>,
         expect_value_digest: Option<String>,
         expect_caller: Option<String>,
@@ -960,6 +972,9 @@ fn parse_test_args(args: &[String], json: bool) -> Result<Command, CliUsageError
 /// accepted; `--json` has no effect on `serve` (every response is already
 /// JSON), so it is deliberately not recognized here.
 fn parse_serve_args(args: &[String]) -> Result<Command, CliUsageError> {
+    if args == ["--stdio", "--trusted-host"] || args == ["--trusted-host", "--stdio"] {
+        return Ok(Command::ServeHost);
+    }
     if args == ["--stdio"] {
         return Ok(Command::Serve);
     }
@@ -1530,7 +1545,7 @@ fn parse_rev(raw: &str, cmd_name: &str, json: bool) -> Result<u64, CliUsageError
 pub fn parse_world_args(args: &[String], json: bool) -> Result<Command, CliUsageError> {
     if args.is_empty() {
         return Err(CliUsageError::usage(
-            "missing sub-command for 'brix world'\nUsage: brix world <init|batch|query|decide|show|explain|audit|verify|import-kb|open-check|gc> ...".to_string(),
+            "missing sub-command for 'brix world'\nUsage: brix world <init|batch|query|query-named|decide|show|explain|audit|verify|import-kb|open-check|gc> ...".to_string(),
             json,
             Some("world".to_string()),
         ));
@@ -1541,6 +1556,7 @@ pub fn parse_world_args(args: &[String], json: bool) -> Result<Command, CliUsage
         "init" => parse_world_init_args(rest, json)?,
         "batch" => parse_world_batch_args(rest, json)?,
         "query" => parse_world_query_args(rest, json)?,
+        "query-named" => parse_world_named_query_args(rest, json)?,
         "decide" => parse_world_decide_args(rest, json)?,
         "show" => parse_world_show_args(rest, json)?,
         "explain" => parse_world_explain_args(rest, json)?,
@@ -1554,7 +1570,7 @@ pub fn parse_world_args(args: &[String], json: bool) -> Result<Command, CliUsage
         other => {
             return Err(CliUsageError::usage(
                 format!(
-                    "unknown 'brix world' sub-command: '{other}'\nUsage: brix world <init|batch|query|decide|show|explain|audit|verify|evidence|verify-evidence|import-kb|open-check|gc> ..."
+                    "unknown 'brix world' sub-command: '{other}'\nUsage: brix world <init|batch|query|query-named|decide|show|explain|audit|verify|evidence|verify-evidence|import-kb|open-check|gc> ..."
                 ),
                 json,
                 Some("world".to_string()),
@@ -1651,6 +1667,72 @@ fn parse_world_batch_args(args: &[String], json: bool) -> Result<WorldOp, CliUsa
         dir,
         batch_file,
         replay,
+    })
+}
+
+fn parse_world_named_query_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
+    let command = "world query-named";
+    let fail = |message: String| CliUsageError::usage(message, json, Some(command.into()));
+    let mut positionals = Vec::new();
+    let mut options = std::collections::BTreeMap::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--json" {
+            index += 1;
+            continue;
+        }
+        if arg.starts_with("--") {
+            let (name, value) = if let Some((name, value)) = arg.split_once('=') {
+                (name, value.to_string())
+            } else {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| fail(format!("missing value for '{arg}'")))?;
+                (arg.as_str(), value.clone())
+            };
+            if !["--args", "--host-scope", "--rev", "--limit", "--cursor"].contains(&name) {
+                return Err(fail(format!("unknown option for '{command}': '{name}'")));
+            }
+            if options.insert(name.to_string(), value).is_some() {
+                return Err(fail(format!("duplicate option '{name}'")));
+            }
+        } else if arg.starts_with('-') {
+            return Err(fail(format!("unknown option '{arg}'")));
+        } else {
+            positionals.push(arg.clone());
+        }
+        index += 1;
+    }
+    if positionals.len() != 2 {
+        return Err(fail("usage: brix world query-named DIR NAME --host-scope FILE [--args JSON] [--rev N] [--limit N] [--cursor TOKEN]".into()));
+    }
+    let host_scope = options
+        .remove("--host-scope")
+        .ok_or_else(|| fail("missing required '--host-scope FILE'".into()))?;
+    let rev = options
+        .remove("--rev")
+        .map(|v| {
+            v.parse::<u64>()
+                .map_err(|_| fail("--rev must be a non-negative integer".into()))
+        })
+        .transpose()?;
+    let limit = options
+        .remove("--limit")
+        .map(|v| {
+            v.parse::<usize>()
+                .map_err(|_| fail("--limit must be a non-negative integer".into()))
+        })
+        .transpose()?;
+    Ok(WorldOp::NamedQuery {
+        dir: PathBuf::from(&positionals[0]),
+        name: positionals[1].clone(),
+        arguments: options.remove("--args").unwrap_or_else(|| "{}".into()),
+        host_scope: PathBuf::from(host_scope),
+        rev,
+        limit,
+        cursor: options.remove("--cursor"),
     })
 }
 
@@ -2393,6 +2475,24 @@ fn parse_world_evidence_args(args: &[String], json: bool) -> Result<WorldOp, Cli
     })
 }
 
+fn record_expect_entity_kind(
+    selected: &mut Option<bool>,
+    composite: bool,
+    option: &str,
+    json: bool,
+    cmd_name: &str,
+) -> Result<(), CliUsageError> {
+    if selected.is_some_and(|previous| previous != composite) {
+        return Err(CliUsageError::usage(
+            format!("conflicting entity expectation options near '{option}'"),
+            json,
+            Some(cmd_name.to_string()),
+        ));
+    }
+    *selected = Some(composite);
+    Ok(())
+}
+
 fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<WorldOp, CliUsageError> {
     let cmd_name = "world verify-evidence";
     let mut positionals = Vec::new();
@@ -2403,6 +2503,8 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
     let mut expect_rev_digest = None;
     let mut expect_decide = None;
     let mut expect_entity = None;
+    let mut expect_entity_composite = false;
+    let mut expect_entity_kind = None;
     let mut expect_candidate = None;
     let mut expect_value_digest = None;
     let mut expect_caller = None;
@@ -2494,7 +2596,25 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
             expect_decide = Some(args[i].clone());
         } else if let Some(val) = arg.strip_prefix("--expect-decide=") {
             expect_decide = Some(val.to_string());
+        } else if let Some(val) = arg.strip_prefix("--expect-entity-key-json=") {
+            record_expect_entity_kind(&mut expect_entity_kind, true, arg, json, cmd_name)?;
+            expect_entity_composite = true;
+            expect_entity = Some(val.to_string());
+        } else if arg == "--expect-entity-key-json" {
+            record_expect_entity_kind(&mut expect_entity_kind, true, arg, json, cmd_name)?;
+            expect_entity_composite = true;
+            i += 1;
+            if i >= args.len() {
+                return Err(CliUsageError::usage(
+                    "missing value for '--expect-entity-key-json'".to_string(),
+                    json,
+                    Some(cmd_name.to_string()),
+                ));
+            }
+            expect_entity = Some(args[i].clone());
         } else if arg == "--expect-entity" || arg == "--expect-key" {
+            record_expect_entity_kind(&mut expect_entity_kind, false, arg, json, cmd_name)?;
+            expect_entity_composite = false;
             i += 1;
             if i >= args.len() {
                 return Err(CliUsageError::usage(
@@ -2508,6 +2628,8 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
             .strip_prefix("--expect-entity=")
             .or_else(|| arg.strip_prefix("--expect-key="))
         {
+            record_expect_entity_kind(&mut expect_entity_kind, false, arg, json, cmd_name)?;
+            expect_entity_composite = false;
             expect_entity = Some(val.to_string());
         } else if arg == "--expect-candidate" {
             i += 1;
@@ -2648,6 +2770,7 @@ fn parse_world_verify_evidence_args(args: &[String], json: bool) -> Result<World
         expect_rev_digest,
         expect_decide,
         expect_entity,
+        expect_entity_composite,
         expect_candidate,
         expect_value_digest,
         expect_caller,
@@ -2857,7 +2980,7 @@ Commands:
       Verify the whole knowledge base: every revision's digest, parent chain,
       recomputed program/snapshot identities, and a fresh replay of its result.
 
-  world <init|batch|query|decide|show|explain|audit|verify|import-kb|open-check|gc> <dir> ... [--json]
+  world <init|batch|query|query-named|decide|show|explain|audit|verify|import-kb|open-check|gc> <dir> ... [--json]
       The persistent world runtime (ADR-0046): facts, operator state and decisions in a
       content-addressed store; opening restores state without replaying facts and a
       commit costs time proportional to the change. 'open-check' reports how a world
@@ -2865,11 +2988,18 @@ Commands:
       reclaims storage no retained revision references; 'import-kb' converts a 'brix kb'.
       See the README for a walkthrough.
 
-  serve --stdio
+  world query-named <dir> <name> --host-scope <host-policy.json>
+      [--args <JSON-object>] [--rev <N>] [--limit <N>] [--cursor <token>] [--json]
+      Run a declared read with typed parameters, a pinned revision and host-owned scope.
+      Supports Str, Int and Bool parameters in the initial query profile.
+
+  serve --stdio [--trusted-host]
       Run a long-running JSON-lines protocol (schema 'brix.serve@1') over
       stdin/stdout: one request per line, one response per line, for
       embedding the engine in another process instead of spawning a CLI
-      invocation per call. See spec/adr/ADR-0044_Serve_Protocol.md.
+      invocation per call. --trusted-host enables host-supplied query policy;
+      the embedding host must own this channel and authenticate its callers.
+      See spec/adr/ADR-0044_Serve_Protocol.md.
 
 Input Format:
   External inputs are supplied via repeatable '--input <path>' files conforming to
@@ -2879,6 +3009,8 @@ Input Format:
 Global Options:
   --help       Print help information
   --version    Print version information
+  --request-context <host-policy.json>
+               Immutable host evidence policy for run/why/whynot/audit/verify
 "
     );
 }
@@ -2890,6 +3022,41 @@ pub fn print_version() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_query_requires_host_policy_and_unambiguous_options() {
+        assert!(parse_args(["world", "query-named", "world", "catalogue"]).is_err());
+        assert!(parse_args([
+            "world",
+            "query-named",
+            "world",
+            "catalogue",
+            "--host-scope",
+            "p.json",
+            "--limit",
+            "1",
+            "--limit",
+            "2"
+        ])
+        .is_err());
+        assert!(parse_args([
+            "world",
+            "query-named",
+            "world",
+            "catalogue",
+            "--host-scope=p.json",
+            "--args={}",
+            "--rev=0",
+            "--json"
+        ])
+        .is_ok());
+        assert_eq!(parse_args(["serve", "--stdio"]).unwrap(), Command::Serve);
+        assert_eq!(
+            parse_args(["serve", "--stdio", "--trusted-host"]).unwrap(),
+            Command::ServeHost
+        );
+        assert!(parse_args(["serve", "--trusted-host"]).is_err());
+    }
 
     const VALID_PIN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -3594,5 +3761,55 @@ mod tests {
 
         let err3 = parse_args(["--json"]).unwrap_err();
         assert!(err3.is_json);
+    }
+
+    #[test]
+    fn verify_evidence_rejects_conflicting_entity_transport_options() {
+        let err = parse_args([
+            "world",
+            "verify-evidence",
+            "--evidence=evidence.json",
+            "--expect-world=w",
+            "--expect-program=p",
+            "--expect-rev=1",
+            "--expect-rev-digest=r",
+            "--expect-decide=d",
+            "--expect-entity=literal",
+            "--expect-entity-key-json=[\"a\",\"b\"]",
+        ])
+        .unwrap_err();
+        assert!(err
+            .message
+            .contains("conflicting entity expectation options"));
+    }
+
+    #[test]
+    fn verify_evidence_accepts_equals_form_for_composite_entity_transport() {
+        let parsed = parse_args([
+            "world",
+            "verify-evidence",
+            "--evidence=evidence.json",
+            "--expect-world=w",
+            "--expect-program=p",
+            "--expect-rev=1",
+            "--expect-rev-digest=r",
+            "--expect-decide=d",
+            "--expect-entity-key-json=[\"a\",\"b\"]",
+        ])
+        .unwrap();
+        let Command::World {
+            op:
+                WorldOp::VerifyEvidence {
+                    expect_entity,
+                    expect_entity_composite,
+                    ..
+                },
+            ..
+        } = parsed
+        else {
+            panic!("expected world verify-evidence command");
+        };
+        assert_eq!(expect_entity, "[\"a\",\"b\"]");
+        assert!(expect_entity_composite);
     }
 }

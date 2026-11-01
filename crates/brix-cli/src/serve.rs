@@ -99,6 +99,7 @@ const SUPPORTED_METHODS: &[&str] = &[
     "world.init",
     "world.batch",
     "world.query",
+    "world.query-named",
     "world.decisions",
     "world.explain",
     "world.show",
@@ -115,6 +116,11 @@ const SUPPORTED_METHODS: &[&str] = &[
 /// process exit code (`0` on clean EOF; nonzero only for an unrecoverable
 /// local I/O failure writing a response, which is otherwise never expected).
 pub fn run_stdio() -> u8 {
+    run_stdio_with_host(false)
+}
+
+/// Opt-in for a trusted embedding host that owns the stdio channel.
+pub fn run_stdio_with_host(trusted_host: bool) -> u8 {
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
     let stdout = std::io::stdout();
@@ -130,7 +136,11 @@ pub fn run_stdio() -> u8 {
                     // caller writes lines with a trailing newline convention.
                     continue;
                 }
-                let response = handle_line(&line);
+                let response = if trusted_host {
+                    handle_line_with_host(&line, true)
+                } else {
+                    handle_line(&line)
+                };
                 if write_response(&mut out, &response).is_err() {
                     return crate::cli::EXIT_USAGE_OR_IO;
                 }
@@ -263,7 +273,13 @@ fn error_response(id: Value, code: &str, message: String) -> Value {
 }
 
 fn handle_line(line: &str) -> Value {
-    let request: Request = match serde_json::from_str(line) {
+    handle_line_with_host(line, false)
+}
+
+fn handle_line_with_host(line: &str, trusted_host: bool) -> Value {
+    let request: Request = match crate::host_context::parse_unique_json(line)
+        .and_then(|value| serde_json::from_value(value).map_err(|e| e.to_string()))
+    {
         Ok(r) => r,
         Err(err) => {
             return error_response(
@@ -274,7 +290,53 @@ fn handle_line(line: &str) -> Value {
         }
     };
     let id = request.id.clone();
-    match dispatch(&request) {
+    if request.method == "world.query-named" {
+        if request.params.get("request_context").is_some() {
+            return error_response(
+                id,
+                "invalid-params",
+                "named queries use their host_policy context profile".into(),
+            );
+        }
+        if !trusted_host {
+            return error_response(
+                id,
+                "host-channel-required",
+                "named queries require a trusted host channel (serve --stdio --trusted-host)"
+                    .into(),
+            );
+        }
+        return match crate::named_query::dispatch_host_json(&request.params) {
+            Ok((code, result)) => ok_response(id, code, result),
+            Err(message) => error_response(id, "invalid-params", message),
+        };
+    }
+    let invocation = if let Some(policy) = request.params.get("request_context") {
+        if !trusted_host {
+            return error_response(
+                id,
+                "host-channel-required",
+                "request evidence contexts require a trusted host channel".into(),
+            );
+        }
+        if !matches!(
+            request.method.as_str(),
+            "run" | "why" | "whynot" | "audit" | "verify"
+        ) {
+            return error_response(
+                id,
+                "invalid-params",
+                "request_context is unsupported for this method".into(),
+            );
+        }
+        match crate::request_evidence::InvocationEvidenceContext::from_host_policy_json(policy) {
+            Ok(context) => context,
+            Err(message) => return error_response(id, "invalid-params", message),
+        }
+    } else {
+        crate::request_evidence::InvocationEvidenceContext::empty()
+    };
+    match dispatch_with_context(&request, &invocation) {
         Ok((exit_code, result)) => ok_response(id, exit_code, result),
         Err((code, message)) => error_response(id, code, message),
     }
@@ -282,11 +344,22 @@ fn handle_line(line: &str) -> Value {
 
 type DispatchError = (&'static str, String);
 
+#[cfg(test)]
 fn dispatch(request: &Request) -> Result<(u8, Value), DispatchError> {
+    dispatch_with_context(
+        request,
+        &crate::request_evidence::InvocationEvidenceContext::empty(),
+    )
+}
+
+fn dispatch_with_context(
+    request: &Request,
+    invocation: &crate::request_evidence::InvocationEvidenceContext,
+) -> Result<(u8, Value), DispatchError> {
     match request.method.as_str() {
         "hello" => Ok((crate::cli::EXIT_SUCCESS, hello_result())),
         "check" | "run" | "why" | "whynot" | "audit" | "verify" => {
-            dispatch_program_method(&request.method, &request.params)
+            dispatch_program_method(&request.method, &request.params, invocation)
         }
         "test" => dispatch_test(&request.params),
         m if m.starts_with("kb.") => dispatch_kb(&m["kb.".len()..], &request.params),
@@ -332,7 +405,13 @@ impl TempWorkspace {
         let n = WORKSPACE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir =
             std::env::temp_dir().join(format!("brix-serve-{}-{}-{}", std::process::id(), nanos, n));
-        std::fs::create_dir_all(&dir).map_err(|e| {
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&dir).map_err(|e| {
             (
                 "workspace-io-error",
                 format!("failed to create temporary workspace: {e}"),
@@ -343,12 +422,22 @@ impl TempWorkspace {
 
     fn write(&self, name: &str, contents: &str) -> Result<PathBuf, DispatchError> {
         let path = self.dir.join(name);
-        std::fs::write(&path, contents.as_bytes()).map_err(|e| {
-            (
-                "workspace-io-error",
-                format!("failed to write temporary file: {e}"),
-            )
-        })?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
+            .open(&path)
+            .and_then(|mut file| file.write_all(contents.as_bytes()))
+            .map_err(|e| {
+                (
+                    "workspace-io-error",
+                    format!("failed to write temporary file: {e}"),
+                )
+            })?;
         Ok(path)
     }
 }
@@ -532,7 +621,11 @@ fn optional_u64_field(params: &Value, field: &str) -> Option<u64> {
 // check / run / why / whynot / audit / verify
 // ---------------------------------------------------------------------------
 
-fn dispatch_program_method(method: &str, params: &Value) -> Result<(u8, Value), DispatchError> {
+fn dispatch_program_method(
+    method: &str,
+    params: &Value,
+    invocation: &crate::request_evidence::InvocationEvidenceContext,
+) -> Result<(u8, Value), DispatchError> {
     let mut workspace: Option<TempWorkspace> = None;
     let program_spec = params.get("program").cloned().unwrap_or(Value::Null);
     let file = resolve_program_path(&mut workspace, &program_spec, "program")?;
@@ -542,17 +635,29 @@ fn dispatch_program_method(method: &str, params: &Value) -> Result<(u8, Value), 
 
     let (result, exit_code) = match method {
         "check" => with_captured_result(|| {
-            crate::commands::check::execute_check(&file, true, &package_paths, &input_paths)
+            crate::commands::check::execute_check_with_context(
+                &file,
+                true,
+                &package_paths,
+                &input_paths,
+                invocation,
+            )
         }),
         "run" => with_captured_result(|| {
-            crate::commands::run::execute_run(&file, true, &package_paths, &input_paths)
+            crate::commands::run::execute_run_with_context(
+                &file,
+                true,
+                &package_paths,
+                &input_paths,
+                invocation,
+            )
         }),
         "why" | "whynot" => {
             let candidate = required_str_field(params, "candidate")?.to_string();
             let is_whynot = method == "whynot";
             let entity = optional_entity_field(params)?;
             with_captured_result(|| {
-                crate::commands::why::execute_why_or_whynot(
+                crate::commands::why::execute_why_or_whynot_with_context(
                     &file,
                     &candidate,
                     entity,
@@ -560,6 +665,7 @@ fn dispatch_program_method(method: &str, params: &Value) -> Result<(u8, Value), 
                     &package_paths,
                     &input_paths,
                     is_whynot,
+                    invocation,
                 )
             })
         }
@@ -567,13 +673,14 @@ fn dispatch_program_method(method: &str, params: &Value) -> Result<(u8, Value), 
             let bundle_out = PathBuf::from(required_str_field(params, "bundle_out")?);
             let force = optional_bool_field(params, "force");
             with_captured_result(|| {
-                crate::commands::audit::execute_audit(
+                crate::commands::audit::execute_audit_with_context(
                     &file,
                     &bundle_out,
                     force,
                     true,
                     &package_paths,
                     &input_paths,
+                    invocation,
                 )
             })
         }
@@ -593,7 +700,7 @@ fn dispatch_program_method(method: &str, params: &Value) -> Result<(u8, Value), 
                 }
             };
             with_captured_result(|| {
-                crate::commands::verify::execute_verify(
+                crate::commands::verify::execute_verify_with_context(
                     &expect_program,
                     &file,
                     &bundle,
@@ -601,6 +708,7 @@ fn dispatch_program_method(method: &str, params: &Value) -> Result<(u8, Value), 
                     true,
                     &package_paths,
                     &input_paths,
+                    invocation,
                 )
             })
         }
@@ -621,8 +729,13 @@ fn dispatch_test(params: &Value) -> Result<(u8, Value), DispatchError> {
             "'files': at least one suite file path is required".to_string(),
         ));
     }
-    let (result, exit_code) =
-        with_captured_result(|| crate::commands::test::execute_test(&files, true));
+    let (result, exit_code) = with_captured_result(|| {
+        crate::commands::test::execute_test_with_context(
+            &files,
+            true,
+            &crate::request_evidence::InvocationEvidenceContext::empty(),
+        )
+    });
     Ok((exit_code, result))
 }
 
@@ -877,6 +990,8 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
             let entity = match params.get("entity") {
                 Some(Value::String(s)) => Some(s.clone()),
                 Some(Value::Number(n)) => Some(n.to_string()),
+                Some(Value::Bool(b)) => Some(b.to_string()),
+                Some(Value::Array(arr)) => serde_json::to_string(arr).ok(),
                 _ => None,
             };
             WorldOp::Decide {
@@ -894,6 +1009,9 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
             let entity = match params.get("entity") {
                 Some(Value::String(s)) => s.clone(),
                 Some(Value::Number(n)) => n.to_string(),
+                Some(Value::Bool(b)) => b.to_string(),
+                Some(Value::Array(arr)) => serde_json::to_string(arr)
+                    .map_err(|e| ("invalid-params", format!("invalid composite 'entity': {e}")))?,
                 _ => {
                     return Err((
                         "invalid-params",
@@ -967,6 +1085,9 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
             let entity = match params.get("entity").or_else(|| params.get("key")) {
                 Some(Value::String(s)) => s.clone(),
                 Some(Value::Number(n)) => n.to_string(),
+                Some(Value::Bool(b)) => b.to_string(),
+                Some(Value::Array(arr)) => serde_json::to_string(arr)
+                    .map_err(|e| ("invalid-params", format!("invalid composite 'entity': {e}")))?,
                 _ => {
                     return Err((
                         "invalid-params",
@@ -1002,9 +1123,38 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
             let expect_rev = required_u64_field(params, "expect_rev")?;
             let expect_rev_digest = required_str_field(params, "expect_rev_digest")?.to_string();
             let expect_decide = required_str_field(params, "expect_decide")?.to_string();
-            let expect_entity = match params.get("expect_entity") {
-                Some(Value::String(s)) => s.clone(),
-                Some(Value::Number(n)) => n.to_string(),
+            let (expect_entity, expect_entity_composite) = match params.get("expect_entity") {
+                Some(Value::String(s)) => (s.clone(), false),
+                Some(Value::Number(n)) => (n.to_string(), false),
+                Some(Value::Bool(b)) => (b.to_string(), false),
+                Some(Value::Array(arr)) => (
+                    serde_json::to_string(arr).map_err(|e| {
+                        (
+                            "invalid-params",
+                            format!("invalid composite 'expect_entity': {e}"),
+                        )
+                    })?,
+                    true,
+                ),
+                Some(Value::Object(obj))
+                    if obj.get("type").and_then(Value::as_str) == Some("brix.entity-key@1") =>
+                {
+                    let items = obj.get("items").and_then(Value::as_array).ok_or_else(|| {
+                        (
+                            "invalid-params",
+                            "'expect_entity.items' must be an array".to_string(),
+                        )
+                    })?;
+                    (
+                        serde_json::to_string(items).map_err(|e| {
+                            (
+                                "invalid-params",
+                                format!("invalid composite 'expect_entity': {e}"),
+                            )
+                        })?,
+                        true,
+                    )
+                }
                 _ => {
                     return Err((
                         "invalid-params",
@@ -1038,6 +1188,7 @@ fn dispatch_world(op_name: &str, params: &Value) -> Result<(u8, Value), Dispatch
                 expect_rev_digest,
                 expect_decide,
                 expect_entity,
+                expect_entity_composite,
                 expect_candidate,
                 expect_value_digest,
                 expect_caller,
@@ -1164,5 +1315,56 @@ mod tests {
         let response = handle_line("{not json");
         assert_eq!(response["ok"], false);
         assert_eq!(response["error"]["code"], "malformed-request");
+    }
+    #[test]
+    fn named_queries_require_explicit_host_channel() {
+        let line = r#"{"id":1,"method":"world.query-named","params":{}}"#;
+        let default = handle_line(line);
+        assert_eq!(default["error"]["code"], "host-channel-required");
+        let host = handle_line_with_host(line, true);
+        assert_eq!(host["error"]["code"], "invalid-params");
+    }
+
+    #[test]
+    fn duplicate_nested_arguments_fail_before_dispatch() {
+        let line =
+            r#"{"id":1,"method":"world.query-named","params":{"args":{"kind":"a","kind":"b"}}}"#;
+        assert_eq!(
+            handle_line_with_host(line, true)["error"]["code"],
+            "malformed-request"
+        );
+    }
+    #[test]
+    fn request_evidence_policy_requires_host_channel_and_supported_method() {
+        let line = r#"{"id":1,"method":"run","params":{"request_context":{}}}"#;
+        assert_eq!(handle_line(line)["error"]["code"], "host-channel-required");
+        assert_eq!(
+            handle_line_with_host(line, true)["error"]["code"],
+            "invalid-params"
+        );
+        let unsupported = r#"{"id":2,"method":"world.query","params":{"request_context":{}}}"#;
+        assert_eq!(
+            handle_line_with_host(unsupported, true)["error"]["code"],
+            "invalid-params"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn inline_request_material_has_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let workspace = TempWorkspace::create().unwrap();
+        assert_eq!(
+            std::fs::metadata(&workspace.dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let path = workspace.write("input.json", "{}").unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

@@ -165,6 +165,16 @@ winner relations, RPC/CLI/Python transport, explanations, history and evidence.
 Test collisions such as `("a", "bc")` versus `("ab", "c")` and equal local IDs
 belonging to different tenants.
 
+The implementation preserves literal string expectations with
+`--expect-entity`; JSON-looking scalar string IDs are never inferred to be
+tuples. Use `--expect-entity-key-json <JSON-array>` for composite CLI evidence
+expectations. The SDK accepts a list/tuple and sends a distinct
+`brix.entity-key@1` object containing typed components; `Decimal` components carry
+an explicit decimal tag. Verification canonicalizes that caller-supplied shape
+without adopting the evidence bundle's claimed identity. Wrong key values or
+component types fail verification. Evidence files and response metadata use the
+declared key schema to preserve scalar versus composite presentation.
+
 Equality joins on statically resolved paths such as `f.value.b` use maintained
 indexes over that path, including when `f` is a decision relation. Validate the
 entire path and terminal type. A path through a variant requires a supported
@@ -461,9 +471,9 @@ language and authority changes in §11.
 
 | Slice | Available work | Integration status / next gate |
 |---|---|---|
-| F | PR #346, `work/foundation-52-59`; `4d60674` passed all CI jobs | Follow-up context-report binding and additive record identity coverage are being integrated. Use the reviewed foundation branch as the source of shared context and typing APIs. |
+| F | PR #346, `work/foundation-52-59`; follow-up `2cdeebc` | All 2,158 workspace tests and doctests passed locally; workspace clippy, formatting, canon and dependency/traceability checks passed. Context-report binding and additive record identity coverage are included; CI on this follow-up is tracked in the PR. |
 | A9-1 | `5b28a8f`, `work/a9-1-collect-corruption` | Implemented repair and regression matrix; qualify together with F before release. |
-| A9-2 | `work/a9-2-unions-and-keys` currently starts at `5b28a8f` | No union/key implementation is present at this recorded head. Bring in the qualified F integration before relying on its APIs; §11 rulings remain required. |
+| A9-2 | Published source `f18a730`, built from Gemini's implementation and Luna corrections | Union schemas/distinct union, composite keys, nested indexes and key transport fixes are integrated onto F + A9-1. Combined verification passed; see §14. §11 rulings remain explicit. |
 | A9-3/4 | Scoped queries and request evidence | Consume the same V2 context validator. Add an explicit supported host-scope/evidence profile and actual request-path tests; the foundation adapter does not supply these features. |
 | A9-5–7 | String admission, collection semantics and benchmarks | Retain the order and acceptance gates in §§7–9. |
 
@@ -484,3 +494,169 @@ Keep Gemini's active worktrees intact. Prepare and qualify a separate
 `work/alpha9-base` branch containing F plus A9-1, then integrate that branch into
 the feature branches when their owners are ready. Record any conflict
 resolution and the exact tested commit before publishing release evidence.
+
+The combined code is available at `69dae9c` in `/private/tmp/brix-alpha9-base`.
+It contains foundation `2cdeebc` and A9-1's `5b28a8f` patch with no merge
+conflicts. The combined collection qualification is recorded separately below;
+neither an integrated branch nor a successful foundation test run qualifies the
+remaining A9-2–7 features.
+
+At that combined code revision, 2,144 remaining workspace tests and all doctests
+passed, with the three collection binaries exercised separately. Grouped collect
+(6 tests), list values (9 tests) and 14 scale cases passed in debug mode.
+`collect_size_5000` passed its full lifecycle in release mode in 469.01 seconds;
+the debug attempt was interrupted after roughly 30 minutes without a result.
+Together these runs cover all 2,174 non-ignored tests, with the upper-size case
+qualified only in release mode. The complete 5,000-member run used the original
+test harness and production code at `1748a6a` (unchanged from `69dae9c`).
+Workspace clippy, formatting, the 69-vector
+canon cross-check, TCB dependency inventory and semantic-law traceability passed.
+
+The actual CLI 257-member reproduction passed separate-process
+`world open-check --verify-store` and typed reads. An overflowing batch including
+an unrelated write left HEAD and query output unchanged, and a subsequent
+retraction plus cold read succeeded. These smaller checks do not replace the
+5,000-member release gate. Keep the A9-1 integration PR in draft until the
+required CI checks and review complete. The long debug runtime remains a
+qualification cost to address before adding this matrix to an ordinary CI run.
+
+## 14. Reviewed basis through A9-2 — 2026-11-01
+
+`work/alpha9-base` combines the #52/#53/#59 foundation, A9-1 and reviewed A9-2
+implementation. Published source `f18a730` has identical production code to the
+locally tested revision `f579d40`; only the workflow optimization/test-ignore
+attribute was withheld and this ledger updated. PR #347 tracks this incremental
+basis, stacked on foundation PR #346. This is not the final alpha.9
+release: A9-3–7 and final release qualification remain outstanding.
+
+The reviewed fixes preserve JSON-looking scalar IDs byte-for-byte and use
+caller-explicit typed transport for composite evidence expectations. Wrong key
+values and component types remain rejected. Direct Rust JSON, saved portable
+evidence, CLI/stdio responses and nested upstream links retain the declared key
+shape. Presentation metadata is excluded from canonical encodings, proof
+identities, logical equality and legacy debug layouts. Numeric type tags remain
+explicit, distinguishing F64, Decimal and Str components.
+
+Single-key decision fingerprints retain their exact alpha.8 encoding. The six
+frozen semantic/history tests pass with unchanged expected hashes.
+
+Verification evidence:
+
+- At `f579d40`, all **2,192 ordinary debug workspace tests** and doctests passed.
+  That run skipped the 5,000-member lifecycle and the 28 existing ignored cases.
+  The large lifecycle was qualified separately in release mode. The published tree restores it as
+  an ordinary runnable test; its production code is unchanged from the tested
+  revision. The published workflow is unchanged.
+- All **21 Python SDK tests**, workspace clippy, formatting, whitespace checks,
+  the 69-vector independent canon cross-check, TCB dependency inventory and
+  semantic-law traceability passed.
+- The complete **16-case release collection matrix** passed at `2f82bf8` in
+  391.39 seconds. Subsequent changes concern presentation metadata and JSON type
+  tags; decision, restore and frozen-history coverage was rerun in the final
+  workspace gate. A proposed dedicated release-mode CI job is saved separately
+  at `/private/tmp/brix-a9-release-scale-ci.patch`: the current GitHub OAuth token
+  lacks workflow-write scope and the SSH signing agent refused publication.
+  The optimization was withheld from the published tree, preserving the current
+  workflow and its default collection coverage. Debug execution of the 5,000-row
+  lifecycle remains slow; release qualification is the recorded completed gate.
+- An A9-1-created world successfully cold-opened, verified its store and retained
+  derived rows and single-key settlements under the A9-2 CLI.
+
+Gemini's A9-3 worktree is `/private/tmp/brix-a9-3` on
+`work/a9-3-scoped-queries`, initially at `171df1d` (Gemini A9-2 plus the earlier
+`dae5c72` basis). Bring the updated `work/alpha9-base` into that feature branch at
+the owner's next safe checkpoint; the earlier basis lacks these review fixes.
+Retain the shared V2 context validator and the host-scope-before-operators rules
+in §5. Active feature worktrees are preserved during release-basis integration.
+
+## 15. A9-3 implementation checkpoint (2026-11-01)
+
+Codex and Luna continued from the reviewed `b1f65e1` A9-1/A9-2 foundation.
+The initial supported named-query profile now has source declarations, inferred
+result schemas, exact `Str`/`Int`/`Bool` arguments, host-owned partition/global
+policy, real V2 context validation against saved program and pinned revision
+artifacts, bound continuation cursors, and an ephemeral scoped query network.
+Both read-only open and query evaluation avoid global network replay; unrelated
+relations and decisions are pruned before execution. Decision dependencies are
+explicitly rejected by this initial profile rather than reusing global winners.
+
+The CLI surface is `world query-named ... --host-scope FILE`; stdio requires
+explicit trusted-host startup. Python supplies an immutable host policy from
+its client constructor separately from ordinary query parameters. The host owns
+that channel and authenticates external callers. See
+[`a9-scoped-queries.md`](../docs/planning/a9-scoped-queries.md) and the proposed
+[profile ruling](errata/0006-a9-3-host-scoped-query-profile.md) for exact supported
+behavior and limits. Physical scan budgets count all scanned source rows; one
+storage node may be decoded before the tuple-byte budget is checked.
+
+Qualification covered the entire workspace (2,212 ordinary unit/integration
+checks plus 13 doctests), with the expensive 5,000-child lifecycle run separately
+in release mode (passed). Workspace Clippy with warnings denied, TCB inventory,
+SOC law-map checks and 29 Python tests passed. Final pruning/reserved-name and
+actual read-only-filesystem changes received affected syntax/lowering, CLI,
+scoped-world and SDK reruns. Existing frozen vectors and histories were not
+updated. This checkpoint is A9-3 work, not the alpha.9 release: A9-4 through
+A9-7 and final series qualification remain outstanding.
+
+## 16. A9-4 implementation checkpoint (2026-11-01)
+
+The finite-decision request evidence consumer now uses an immutable,
+host-selected `brix.request-evidence-policy@1`. It pins the actual program,
+complete runtime claim identities, optional documentary snapshot, supported
+profile/verifier, authorization dimensions and read/replay caps. The actual
+source-derived plan is checked against the expected program before constructing
+and validating a V2 context against its canonical program preimage. Evidence
+bytes are a separate input and must pass bounded replay or pinned documentary
+snapshot validation; required missing evidence is rejected.
+
+`run`, `why`/`whynot`, `audit` and `verify` receive this context explicitly.
+Standalone CLI uses `--request-context FILE`; Python passes immutable policies
+per call on an explicitly trusted-host client. Default stdio is evidence-free
+and never reads ambient pins. Legacy standalone CLI environment pins are
+snapshotted once; `check` and `test` preserve their CLI behavior while their
+server paths receive explicit empty contexts. No request authority is stored in
+a mutable global or thread-local default.
+
+An additive `brix.audit-request-evidence@1` wrapper carries unchanged V1 audit
+bytes, checked context material and exact ordered input/evidence contents.
+Verification independently authorizes the source and expected policy, compares
+context identity and bytes before loading embedded inputs, replays evidence,
+and invokes the frozen V1 checker. Portable replay succeeds after original
+input files are removed. Legacy V1 artifacts retain their identity and are
+rejected when a strict host-context guarantee is requested. See
+[`a9-request-evidence.md`](../docs/planning/a9-request-evidence.md).
+
+Qualification covered 2,033 non-CLI workspace cases plus all 193 final CLI
+cases and 13 doctests, along with 44 Python tests. The initial full workspace
+run caught a legacy JSON field-order regression in the new annotation helper;
+the implementation was corrected and the entire CLI suite rerun successfully.
+Workspace Clippy with warnings denied, formatting, TCB inventory and SOC law
+mapping passed. The expensive 5,000-child release lifecycle remains qualified
+at the preceding A9-3 checkpoint; A9-4 changes only CLI/SDK request handling.
+Real SDK tests cover contradictory contexts on one client, concurrent callers,
+missing/cross-context evidence, timeout recovery, wrong-program recovery, and
+portable replay with wrong or forged context rejection. L3-v1 and world evidence
+retain their separate profiles; the finite-decision policy cannot replace them.
+
+## 17. A9-5 minimum string admission checkpoint (2026-11-01)
+
+Unsupported `Str + Str` and `Str < Str` now fail during finite-decision and
+world admission, including call-site-typed helpers, imported helpers, nested
+matches/lambdas, decision values and named relational queries. Ambiguous untyped
+helpers are checked with their actual argument shapes; known literal string
+operations are still rejected in unused helper bodies. Recursive helpers are
+revisited when argument shapes change, under bounded analysis.
+
+Integer arithmetic/order and string equality/inequality remain supported.
+Call-site inference is local to admission checks and does not strengthen
+persisted world result schemas. Shared schema/helper DAGs are checked without
+exponential expansion. The optional bounded string library remains deferred;
+this checkpoint satisfies the required rejection path, not lexical search.
+
+The combined A9-1 through A9-5 foundation passed 2,243 ordinary workspace tests
+and 13 doctests in one clean run (300.21 seconds), workspace Clippy with warnings
+denied, formatting, TCB inventory and SOC law-map checks. The 5,000-child test
+remains covered by the separate preceding release lifecycle; the debug gate
+skipped only that case and the 28 existing ignored cases. Frozen histories and
+canonical expectations were not updated. A9-6 ordering/truncation and A9-7
+qualification remain required before an alpha.9 release.

@@ -101,6 +101,20 @@ pub fn execute_run(
     package_paths: &[PathBuf],
     input_paths: &[PathBuf],
 ) -> u8 {
+    let invocation = match crate::request_evidence::InvocationEvidenceContext::from_environment() {
+        Ok(context) => context,
+        Err(message) => return pipeline::invocation_evidence_error("run", message, json),
+    };
+    execute_run_with_context(file, json, package_paths, input_paths, &invocation)
+}
+
+pub fn execute_run_with_context(
+    file: &Path,
+    json: bool,
+    package_paths: &[PathBuf],
+    input_paths: &[PathBuf],
+    invocation: &crate::request_evidence::InvocationEvidenceContext,
+) -> u8 {
     let file_display = file.display().to_string();
 
     let source = match pipeline::stage_read_source("run", file, json) {
@@ -140,12 +154,26 @@ pub fn execute_run(
     let program_hex = pipeline::program_id_hex(&plan);
     let profile = Some(FINITE_DECISION_PROFILE.to_string());
 
-    let snapshot = match pipeline::stage_load_snapshot(
+    let evidence_context = match pipeline::stage_authorize_evidence(
+        "run",
+        profile.clone(),
+        Some(program_hex.clone()),
+        &plan,
+        invocation,
+        json,
+    ) {
+        Ok(context) => context,
+        Err(code) => return code,
+    };
+    let request_context = evidence_context.id();
+
+    let snapshot = match pipeline::stage_load_snapshot_with_context(
         "run",
         profile.clone(),
         Some(program_hex.clone()),
         input_paths,
         json,
+        &evidence_context,
     ) {
         Ok(s) => s,
         Err(code) => return code,
@@ -248,7 +276,7 @@ pub fn execute_run(
             commits: commits_json,
             entity_decisions,
         };
-        crate::json::emit_result_json(&res);
+        crate::json::emit_result_json_with_request_context(&res, request_context);
     } else {
         print!("{human}");
     }

@@ -22,7 +22,9 @@ from .client import (
     BrixProcessError,
     BrixProtocolError,
     BrixTimeoutError,
+    HostQueryPolicy,
     ProgramSpec,
+    RequestEvidencePolicy,
     path,
     source,
 )
@@ -33,7 +35,9 @@ __all__ = [
     "BrixProcessError",
     "BrixProtocolError",
     "BrixTimeoutError",
+    "HostQueryPolicy",
     "ProgramSpec",
+    "RequestEvidencePolicy",
     "path",
     "source",
 ]

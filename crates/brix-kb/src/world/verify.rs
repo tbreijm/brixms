@@ -301,6 +301,7 @@ fn convert_reference_settlement(s: &ReferenceSettlement) -> SettledDecision {
         phase: s.phase,
         value: convert_reference_value(&s.value),
         calendar_key: s.calendar_key,
+        is_composite: false,
     }
 }
 
@@ -658,6 +659,7 @@ pub fn verify_world_audit_bundle(
                         priority: dt.priority,
                         tiebreak: dt.tiebreak,
                     },
+                    is_composite: false,
                 };
                 prev_settlements
                     .entry(decide.clone())
@@ -1012,6 +1014,7 @@ pub fn verify_world_audit_bundle(
                             phase: dt.phase,
                             value: dt.value.clone(),
                             calendar_key: Key::new(dt.phase, dt.priority, dt.tiebreak),
+                            is_composite: false,
                         };
                         added
                             .entry(decide.clone())

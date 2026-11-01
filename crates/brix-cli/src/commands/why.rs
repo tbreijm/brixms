@@ -24,6 +24,39 @@ pub fn execute_why_or_whynot(
     input_paths: &[PathBuf],
     is_whynot: bool,
 ) -> u8 {
+    let invocation = match crate::request_evidence::InvocationEvidenceContext::from_environment() {
+        Ok(context) => context,
+        Err(message) => {
+            return pipeline::invocation_evidence_error(
+                if is_whynot { "whynot" } else { "why" },
+                message,
+                json,
+            )
+        }
+    };
+    execute_why_or_whynot_with_context(
+        file,
+        candidate,
+        entity,
+        json,
+        package_paths,
+        input_paths,
+        is_whynot,
+        &invocation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_why_or_whynot_with_context(
+    file: &Path,
+    candidate: &str,
+    entity: Option<usize>,
+    json: bool,
+    package_paths: &[PathBuf],
+    input_paths: &[PathBuf],
+    is_whynot: bool,
+    invocation: &crate::request_evidence::InvocationEvidenceContext,
+) -> u8 {
     let cmd_name = if is_whynot { "whynot" } else { "why" };
     let file_display = file.display().to_string();
 
@@ -59,12 +92,26 @@ pub fn execute_why_or_whynot(
     let program_hex = pipeline::program_id_hex(&plan);
     let profile = Some(FINITE_DECISION_PROFILE.to_string());
 
-    let snapshot = match pipeline::stage_load_snapshot(
+    let evidence_context = match pipeline::stage_authorize_evidence(
+        cmd_name,
+        profile.clone(),
+        Some(program_hex.clone()),
+        &plan,
+        invocation,
+        json,
+    ) {
+        Ok(context) => context,
+        Err(code) => return code,
+    };
+    let request_context = evidence_context.id();
+
+    let snapshot = match pipeline::stage_load_snapshot_with_context(
         cmd_name,
         profile.clone(),
         Some(program_hex.clone()),
         input_paths,
         json,
+        &evidence_context,
     ) {
         Ok(s) => s,
         Err(code) => return code,
@@ -115,6 +162,7 @@ pub fn execute_why_or_whynot(
             inputs_json,
             json,
             is_whynot,
+            request_context,
         );
     }
     if entity.is_some() {
@@ -131,7 +179,7 @@ pub fn execute_why_or_whynot(
                 vec![msg],
             )
             .with_inputs(input_snapshot, inputs_json);
-            crate::json::emit_result_json(&res);
+            crate::json::emit_result_json_with_request_context(&res, request_context);
         } else {
             eprintln!("brix {cmd_name}: {msg}");
         }
@@ -165,7 +213,7 @@ pub fn execute_why_or_whynot(
                 vec![diag],
             )
             .with_inputs(input_snapshot, inputs_json);
-            crate::json::emit_result_json(&res);
+            crate::json::emit_result_json_with_request_context(&res, request_context);
         } else {
             eprintln!("brix {cmd_name}: deliberation resulted in Unknown: {diag}");
         }
@@ -205,7 +253,7 @@ pub fn execute_why_or_whynot(
                         vec![msg],
                     )
                     .with_inputs(input_snapshot, inputs_json);
-                    crate::json::emit_result_json(&res);
+                    crate::json::emit_result_json_with_request_context(&res, request_context);
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
                 }
@@ -223,7 +271,7 @@ pub fn execute_why_or_whynot(
                         vec![msg],
                     )
                     .with_inputs(input_snapshot, inputs_json);
-                    crate::json::emit_result_json(&res);
+                    crate::json::emit_result_json_with_request_context(&res, request_context);
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
                 }
@@ -244,7 +292,7 @@ pub fn execute_why_or_whynot(
                         vec![msg],
                     )
                     .with_inputs(input_snapshot, inputs_json);
-                    crate::json::emit_result_json(&res);
+                    crate::json::emit_result_json_with_request_context(&res, request_context);
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
                 }
@@ -284,7 +332,7 @@ pub fn execute_why_or_whynot(
                         vec![msg],
                     )
                     .with_inputs(input_snapshot, inputs_json);
-                    crate::json::emit_result_json(&res);
+                    crate::json::emit_result_json_with_request_context(&res, request_context);
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
                 }
@@ -302,7 +350,7 @@ pub fn execute_why_or_whynot(
                         vec![msg],
                     )
                     .with_inputs(input_snapshot, inputs_json);
-                    crate::json::emit_result_json(&res);
+                    crate::json::emit_result_json_with_request_context(&res, request_context);
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
                 }
@@ -323,7 +371,7 @@ pub fn execute_why_or_whynot(
                         vec![msg],
                     )
                     .with_inputs(input_snapshot, inputs_json);
-                    crate::json::emit_result_json(&res);
+                    crate::json::emit_result_json_with_request_context(&res, request_context);
                 } else {
                     eprintln!("brix {cmd_name}: {msg}");
                 }
@@ -380,7 +428,7 @@ pub fn execute_why_or_whynot(
             commits: None,
             entity_decisions: None,
         };
-        crate::json::emit_result_json(&res);
+        crate::json::emit_result_json_with_request_context(&res, request_context);
     } else {
         println!("{explanation_text}");
         let human =
@@ -422,6 +470,7 @@ fn explain_entity(
     inputs_json: Option<Vec<crate::json::InputJson>>,
     json: bool,
     is_whynot: bool,
+    request_context: Option<brix_semantic::ContextId>,
 ) -> u8 {
     let fail = |status: &str, msg: String| -> u8 {
         if json {
@@ -434,7 +483,7 @@ fn explain_entity(
                 vec![msg],
             )
             .with_inputs(input_snapshot.clone(), inputs_json.clone());
-            crate::json::emit_result_json(&res);
+            crate::json::emit_result_json_with_request_context(&res, request_context);
         } else {
             eprintln!("brix {cmd_name}: {msg}");
         }
@@ -545,7 +594,7 @@ fn explain_entity(
             entity_decisions: Some(vec![crate::commands::decide_run_to_json(decide_run)]),
             bindings: None,
         };
-        crate::json::emit_result_json(&res);
+        crate::json::emit_result_json_with_request_context(&res, request_context);
     } else {
         println!("{explanation_text}");
         println!("binder: {}", crate::commands::fmt_value_human(&inst.binder));

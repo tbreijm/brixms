@@ -452,6 +452,10 @@ impl Parser {
                 let name = self.expect_ident("assume name")?.0;
                 Ok(Item::Assume(name))
             }
+            TokenKind::Ident(s) if s == "query" => {
+                self.advance();
+                self.parse_query_decl().map(Item::Query)
+            }
             other => Err(self.error(format!("Unexpected token {:?} at top-level item", other))),
         }
     }
@@ -484,35 +488,63 @@ impl Parser {
         self.consume(TokenKind::Equals, "rel derived '='")?;
         if matches!(self.peek(), TokenKind::Ident(s) if s == "union") {
             self.advance();
-            let left = self.parse_qualified_name("union left relation")?;
-            self.consume(TokenKind::Comma, "union ','")?;
-            let right = self.parse_qualified_name("union right relation")?;
-            self.consume(TokenKind::Key, "union 'key'")?;
-            let keys = if self.check(&TokenKind::OpenParen) {
+            let union_distinct = if matches!(self.peek(), TokenKind::Ident(s) if s == "distinct") {
                 self.advance();
-                let keys = self.parse_comma_separated(TokenKind::CloseParen, |p| {
-                    p.expect_ident("union key field").map(|(s, _)| s)
-                })?;
-                self.consume(TokenKind::CloseParen, "union key ')'")?;
-                keys
+                true
             } else {
-                vec![self.expect_ident("union key field")?.0]
+                false
             };
+            let first = self.parse_qualified_name("union left relation")?;
+            self.consume(TokenKind::Comma, "union ','")?;
+            let second = self.parse_qualified_name("union right relation")?;
+            let mut sources = vec![first, second];
+            while self.check(&TokenKind::Comma) {
+                self.advance();
+                sources.push(self.parse_qualified_name("union source relation")?);
+            }
+            let union_keys = if union_distinct {
+                if self.check(&TokenKind::Key) {
+                    return Err(self.error(
+                        "'union distinct' deduplicates over whole row values and does not accept a 'key' clause",
+                    ));
+                }
+                None
+            } else {
+                self.consume(TokenKind::Key, "union 'key'")?;
+                let keys = if self.check(&TokenKind::OpenParen) {
+                    self.advance();
+                    let keys = self.parse_comma_separated(TokenKind::CloseParen, |p| {
+                        p.expect_ident("union key field").map(|(s, _)| s)
+                    })?;
+                    self.consume(TokenKind::CloseParen, "union key ')'")?;
+                    keys
+                } else {
+                    vec![self.expect_ident("union key field")?.0]
+                };
+                if keys.is_empty() {
+                    return Err(self.error("union key list cannot be empty"));
+                }
+                Some(keys)
+            };
+            let from = sources
+                .into_iter()
+                .enumerate()
+                .map(|(idx, relation)| RelBinding {
+                    var: match idx {
+                        0 => "left".into(),
+                        1 => "right".into(),
+                        _ => format!("src_{idx}"),
+                    },
+                    relation,
+                })
+                .collect();
             return Ok(RelDerivedDecl {
                 name,
                 query: RelQuery {
-                    union_keys: Some(keys),
+                    union_keys,
+                    union_distinct,
                     select: Expr::AnonRecord(Vec::new()),
-                    from: vec![
-                        RelBinding {
-                            var: "left".into(),
-                            relation: left,
-                        },
-                        RelBinding {
-                            var: "right".into(),
-                            relation: right,
-                        },
-                    ],
+                    from,
                     where_clause: None,
                     not_exists: None,
                     group_by: Vec::new(),
@@ -594,6 +626,132 @@ impl Parser {
             name,
             query: RelQuery {
                 union_keys: None,
+                union_distinct: false,
+                select,
+                from,
+                where_clause,
+                not_exists,
+                group_by,
+            },
+        })
+    }
+
+    fn parse_query_decl(&mut self) -> Result<QueryDecl, ParseError> {
+        let name = self.expect_ident("query declaration name")?.0;
+        self.consume(TokenKind::OpenParen, "query parameter list '('")?;
+        let params = self.parse_comma_separated(TokenKind::CloseParen, |p| {
+            let name = p.expect_ident("query parameter name")?.0;
+            p.consume(TokenKind::Colon, "query parameter ':'")?;
+            let ty = p.parse_ty()?;
+            Ok(QueryParam { name, ty })
+        })?;
+        self.consume(TokenKind::CloseParen, "query parameter list ')'")?;
+        let mut seen = std::collections::BTreeSet::new();
+        if !seen.insert(name.clone()) {
+            return Err(self.error("duplicate query name"));
+        }
+        for param in &params {
+            if !seen.insert(param.name.clone()) {
+                return Err(self.error(format!("duplicate query parameter '{}'", param.name)));
+            }
+        }
+        self.consume(TokenKind::Equals, "query declaration '='")?;
+        self.consume(TokenKind::Select, "named query 'select'")?;
+        let select = self.parse_expr()?;
+        self.consume(TokenKind::From, "named query 'from'")?;
+        let mut from = Vec::new();
+        loop {
+            let var = self.expect_ident("relation binding variable")?.0;
+            let relation = if self.check(&TokenKind::In) {
+                self.advance();
+                self.parse_qualified_name("relation name")?
+            } else {
+                var.clone()
+            };
+            from.push(RelBinding { var, relation });
+            if self.check(&TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        let mut not_exists = None;
+        let where_clause = if self.check(&TokenKind::Where) {
+            self.advance();
+            let filter = if self.check(&TokenKind::Not) {
+                None
+            } else {
+                self.enter()?;
+                let filter = self.parse_expr_bp_before_absence(true);
+                self.leave();
+                Some(filter?)
+            };
+            if self.check(&TokenKind::AmpAmp)
+                && self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|t| t.kind == TokenKind::Not)
+            {
+                self.advance();
+            }
+            if self.check(&TokenKind::Not) {
+                self.advance();
+                self.consume(TokenKind::Exists, "not exists")?;
+                let var = self.expect_ident("not-exists binding variable")?.0;
+                self.consume(TokenKind::In, "not-exists 'in'")?;
+                let relation = self.parse_qualified_name("not-exists relation name")?;
+                self.consume(TokenKind::Where, "not-exists 'where'")?;
+                let predicate = self.parse_expr()?;
+                not_exists = Some(RelNotExists {
+                    binding: RelBinding { var, relation },
+                    predicate,
+                });
+            }
+            filter
+        } else {
+            None
+        };
+        let group_by = if self.check(&TokenKind::Group) {
+            self.advance();
+            self.consume(TokenKind::By, "group 'by'")?;
+            let mut exprs = Vec::new();
+            loop {
+                exprs.push(self.parse_expr()?);
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            exprs
+        } else {
+            Vec::new()
+        };
+        let relation_bindings: std::collections::BTreeSet<&str> = from
+            .iter()
+            .map(|binding| binding.var.as_str())
+            .chain(not_exists.iter().map(|anti| anti.binding.var.as_str()))
+            .collect();
+        for param in &params {
+            if relation_bindings.contains(param.name.as_str()) {
+                return Err(self.error(format!(
+                    "query parameter '{}' shadows a relation binding",
+                    param.name
+                )));
+            }
+            if crate::ast::is_reserved_context_dimension_name(&param.name) {
+                return Err(self.error(format!(
+                    "query parameter '{}' uses a reserved host name",
+                    param.name
+                )));
+            }
+        }
+        Ok(QueryDecl {
+            name,
+            params,
+            query: RelQuery {
+                union_keys: None,
+                union_distinct: false,
                 select,
                 from,
                 where_clause,
@@ -1060,12 +1218,27 @@ impl Parser {
         let binder = self.expect_ident("decide declaration binder")?.0;
         self.consume(TokenKind::In, "decide declaration 'in'")?;
         let list = self.parse_expr()?;
-        let per = if self.check(&TokenKind::Per) {
+        let per_fields = if self.check(&TokenKind::Per) {
             self.advance();
-            Some(self.expect_ident("decide declaration 'per' field")?.0)
+            let fields = if self.check(&TokenKind::OpenParen) {
+                self.advance();
+                let fields = self.parse_comma_separated(TokenKind::CloseParen, |p| {
+                    p.expect_ident("decide declaration 'per' field")
+                        .map(|(s, _)| s)
+                })?;
+                self.consume(TokenKind::CloseParen, "decide 'per' field list ')'")?;
+                fields
+            } else {
+                vec![self.expect_ident("decide declaration 'per' field")?.0]
+            };
+            if fields.is_empty() {
+                return Err(self.error("decide 'per' field list cannot be empty"));
+            }
+            fields
         } else {
-            None
+            Vec::new()
         };
+        let per = (per_fields.len() == 1).then(|| per_fields[0].clone());
         self.consume(TokenKind::OpenBrace, "decide block '{'")?;
         let mut proposals = Vec::new();
         while !self.check(&TokenKind::CloseBrace) && !self.is_at_end() {
@@ -1078,6 +1251,7 @@ impl Parser {
             binder,
             list,
             per,
+            per_fields,
             proposals,
         })
     }

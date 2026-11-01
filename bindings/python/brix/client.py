@@ -16,7 +16,8 @@ import shutil
 import subprocess
 import threading
 import time
-from typing import Any, Dict, List, Optional, Union
+from decimal import Decimal
+from typing import Any, Dict, List, Mapping, Optional, Union
 
 # A program or input source: either a filesystem path (resolved relative to
 # the server process's own working directory) or inline text. Both forms
@@ -61,6 +62,271 @@ def _explain_params(candidate: str, entity: Optional[int]) -> Dict[str, Any]:
     if entity is not None:
         params["entity"] = entity
     return params
+
+
+def _normalize_entity(entity: Any) -> Any:
+    if isinstance(entity, (list, tuple)):
+        items = [format(item, "f") if isinstance(item, Decimal) else item for item in entity]
+        return json.dumps(items, separators=(",", ":"))
+    return entity
+
+
+def _normalize_expected_entity(entity: Any) -> Any:
+    """Carry composite key shape and numeric types without guessing from strings."""
+    if not isinstance(entity, (list, tuple)):
+        return entity
+    items = []
+    for item in entity:
+        if isinstance(item, Decimal):
+            items.append({"type": "decimal", "value": format(item, "f")})
+        else:
+            items.append(item)
+    return {"type": "brix.entity-key@1", "items": items}
+
+
+class HostQueryPolicy:
+    """Immutable policy selected by a trusted embedding host for named reads.
+
+    The containing application must authenticate the caller and choose this
+    policy. It is sent separately from query arguments and is never accepted
+    as a per-call override. Canonical JSON is retained internally so changes
+    to the caller's input dictionary cannot alter later requests.
+    """
+
+    __slots__ = ("_canonical_json",)
+
+    def __init__(self, value: Union["HostQueryPolicy", Mapping[str, Any]]):
+        if isinstance(value, HostQueryPolicy):
+            value = value.to_json_value()
+        if not isinstance(value, Mapping):
+            raise TypeError("host_query_policy must be a mapping or HostQueryPolicy")
+        try:
+            copied = json.loads(json.dumps(value, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"host query policy must contain JSON values: {exc}") from exc
+        _validate_host_query_policy(copied)
+        canonical = json.dumps(
+            copied, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        )
+        object.__setattr__(self, "_canonical_json", canonical)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("HostQueryPolicy is immutable")
+
+    def to_json_value(self) -> Dict[str, Any]:
+        """Return a fresh JSON value; mutating it does not change this policy."""
+        return json.loads(self._canonical_json)
+
+    def _canonical(self) -> str:
+        return self._canonical_json
+
+
+class RequestEvidencePolicy:
+    """Immutable, per-operation host expectations for finite-decision evidence.
+
+    Construct this only after the embedding host has authenticated its caller
+    and selected the expected program, evidence pins, scope, profile and
+    resource ceilings. Evidence bytes are carried separately in ``inputs`` or
+    the audit companion and cannot supply these expectations.
+
+    The policy is not stored on :class:`BrixClient`: pass it to each
+    ``run``, ``why``, ``whynot``, ``audit`` or ``verify`` call. This keeps two
+    callers with different expectations isolated when they share a client.
+    """
+
+    __slots__ = ("_canonical_json",)
+
+    def __init__(self, value: Union["RequestEvidencePolicy", Mapping[str, Any]]):
+        if isinstance(value, RequestEvidencePolicy):
+            value = value.to_json_value()
+        if not isinstance(value, Mapping):
+            raise TypeError("request_context must be a mapping or RequestEvidencePolicy")
+        try:
+            copied = json.loads(json.dumps(value, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"request evidence policy must contain JSON values: {exc}") from exc
+        _validate_request_evidence_policy(copied)
+        object.__setattr__(
+            self,
+            "_canonical_json",
+            json.dumps(
+                copied, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+            ),
+        )
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("RequestEvidencePolicy is immutable")
+
+    def to_json_value(self) -> Dict[str, Any]:
+        """Return a fresh object; mutation cannot change the stored policy."""
+        return json.loads(self._canonical_json)
+
+    def _canonical(self) -> str:
+        return self._canonical_json
+
+
+_REQUEST_EVIDENCE_POLICY_KEYS = {
+    "schema", "expected_program", "runtime_claim_ids", "documentary_digest",
+    "verifier", "profile", "namespace", "tenant", "principal", "limits",
+}
+_REQUEST_EVIDENCE_LIMITS = {
+    "max_input_files": 16,
+    "max_input_file_bytes": 1_048_576,
+    "max_input_aggregate_bytes": 4_194_304,
+    "max_runtime_claims": 64,
+    "max_evidence_artifact_bytes": 16_777_216,
+    "max_evidence_aggregate_bytes": 67_108_864,
+    "max_evidence_bundle_bytes": 8_388_608,
+    "max_evidence_proof_nodes": 512,
+    "max_evidence_node_bytes": 65_536,
+    "max_replay_work": 500_000,
+    "context_bytes": 65_536,
+    "context_artifact_bytes": 65_536,
+    "context_depth": 128,
+}
+
+
+def _strict_digest(value: Any, name: str, allow_none: bool = False) -> None:
+    if allow_none and value is None:
+        return
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(ch not in "0123456789abcdef" for ch in value)
+    ):
+        raise ValueError(f"{name} must be a lowercase 64-character hex digest")
+
+
+def _validate_request_evidence_policy(value: Any) -> None:
+    policy = _require_exact_keys(value, _REQUEST_EVIDENCE_POLICY_KEYS, "request evidence policy")
+    if policy["schema"] != "brix.request-evidence-policy@1":
+        raise ValueError("unsupported request evidence policy schema")
+    _strict_digest(policy["expected_program"], "expected_program")
+    claims = policy["runtime_claim_ids"]
+    if not isinstance(claims, list):
+        raise ValueError("runtime_claim_ids must be an array")
+    if len(claims) > _REQUEST_EVIDENCE_LIMITS["max_runtime_claims"]:
+        raise ValueError("runtime_claim_ids may not contain more than 64 entries")
+    for index, claim in enumerate(claims):
+        _strict_digest(claim, f"runtime_claim_ids[{index}]")
+    if len(set(claims)) != len(claims):
+        raise ValueError("runtime_claim_ids contains duplicate entries")
+    _strict_digest(policy["documentary_digest"], "documentary_digest", allow_none=True)
+    if policy["verifier"] != "brix.world.decision-evidence-replay@1":
+        raise ValueError("unsupported request evidence verifier")
+    if policy["profile"] != "brix.l3.finite-decision@1":
+        raise ValueError("unsupported request evidence profile")
+    for name in ("namespace", "tenant", "principal"):
+        item = policy[name]
+        if (
+            not isinstance(item, str)
+            or not item
+            or len(item) > 256
+            or not item.isascii()
+            or any(ord(char) < 33 or ord(char) > 126 for char in item)
+        ):
+            raise ValueError(f"{name} must be nonempty bounded printable ASCII")
+
+    limits = _require_exact_keys(
+        policy["limits"], set(_REQUEST_EVIDENCE_LIMITS), "request evidence limits"
+    )
+    for name, maximum in _REQUEST_EVIDENCE_LIMITS.items():
+        minimum = 0 if name == "max_runtime_claims" else 1
+        value = limits[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ValueError(f"limits.{name} must be an integer >= {minimum}")
+        if value > maximum:
+            raise ValueError(f"limits.{name} may not exceed {maximum}")
+    if len(claims) > limits["max_runtime_claims"]:
+        raise ValueError("runtime_claim_ids exceeds limits.max_runtime_claims")
+
+
+_HOST_QUERY_POLICY_KEYS = {
+    "schema", "profile", "namespace", "tenant", "principal",
+    "valid_time_start", "valid_time_end", "validity_start", "validity_end",
+    "step_budget", "depth_budget", "limits", "query_limits",
+}
+_PROFILE_KEYS = {"profile_id", "partition_fields", "global_relations"}
+_MODEL_LIMITS = {"bytes": 65536, "assumptions": 256, "depth": 128, "artifact_bytes": 65536}
+_QUERY_LIMITS = {
+    "page_rows": 1024,
+    "max_input_rows": 100000,
+    "max_input_bytes": 64 * 1024 * 1024,
+    "max_eval_work": 10000000,
+    "max_eval_matches": 1000000,
+    "max_output_rows": 100000,
+}
+
+
+def _require_exact_keys(value: Any, keys: set, where: str) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{where} must be an object")
+    if set(value) != keys:
+        missing = sorted(keys - set(value))
+        extra = sorted(set(value) - keys)
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if extra:
+            details.append("unknown " + ", ".join(extra))
+        raise ValueError(f"{where} fields are invalid ({'; '.join(details)})")
+    return value
+
+
+def _positive_int(value: Any, name: str, maximum: Optional[int] = None) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} may not exceed {maximum}")
+    return value
+
+
+def _nonnegative_int(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a nonnegative integer")
+    return value
+
+
+def _validate_host_query_policy(value: Any) -> None:
+    policy = _require_exact_keys(value, _HOST_QUERY_POLICY_KEYS, "host query policy")
+    if policy["schema"] != "brix.host-query-policy@1":
+        raise ValueError("unsupported host query policy schema")
+
+    profile = _require_exact_keys(policy["profile"], _PROFILE_KEYS, "profile")
+    if profile["profile_id"] != "brix.host-scope.partition@1":
+        raise ValueError("unsupported host-scope profile version")
+    fields = profile["partition_fields"]
+    if not isinstance(fields, dict):
+        raise ValueError("profile.partition_fields must be an object")
+    for relation, field in fields.items():
+        if not isinstance(relation, str) or not relation or not isinstance(field, str) or not field:
+            raise ValueError("partition relation and field names must be nonempty strings")
+    globals_ = profile["global_relations"]
+    if not isinstance(globals_, list) or any(not isinstance(r, str) or not r for r in globals_):
+        raise ValueError("profile.global_relations must be an array of nonempty strings")
+    if len(set(globals_)) != len(globals_):
+        raise ValueError("profile.global_relations contains duplicate entries")
+    if set(fields).intersection(globals_):
+        raise ValueError("a relation cannot be both partitioned and global")
+
+    for name in ("namespace", "tenant", "principal"):
+        if not isinstance(policy[name], str) or not policy[name]:
+            raise ValueError(f"{name} must be a nonempty string")
+    for name in ("valid_time_start", "valid_time_end", "validity_start", "validity_end"):
+        _nonnegative_int(policy[name], name)
+    if policy["valid_time_start"] > policy["valid_time_end"]:
+        raise ValueError("valid_time_start must not exceed valid_time_end")
+    if policy["validity_start"] > policy["validity_end"]:
+        raise ValueError("validity_start must not exceed validity_end")
+    _positive_int(policy["step_budget"], "step_budget", 1_000_000_000)
+    _positive_int(policy["depth_budget"], "depth_budget", 100_000)
+
+    model_limits = _require_exact_keys(policy["limits"], set(_MODEL_LIMITS), "limits")
+    for name, maximum in _MODEL_LIMITS.items():
+        _positive_int(model_limits[name], f"limits.{name}", maximum)
+    query_limits = _require_exact_keys(policy["query_limits"], set(_QUERY_LIMITS), "query_limits")
+    for name, maximum in _QUERY_LIMITS.items():
+        _positive_int(query_limits[name], f"query_limits.{name}", maximum)
 
 class BrixError(Exception):
     """Base class for every error this client raises."""
@@ -124,6 +390,8 @@ class BrixClient:
         cwd: Optional[Union[str, os.PathLike]] = None,
         timeout: Optional[float] = 30.0,
         extra_args: Optional[List[str]] = None,
+        host_query_policy: Optional[Union[HostQueryPolicy, Mapping[str, Any]]] = None,
+        trusted_host: bool = False,
     ):
         """Spawn `brix serve --stdio`.
 
@@ -136,9 +404,25 @@ class BrixClient:
                 override it. `None` means wait indefinitely.
             extra_args: extra arguments appended after `serve --stdio`
                 (reserved for future use; unused by the protocol today).
+            host_query_policy: immutable host-selected policy for named reads.
+                Supplying it opts into `serve --stdio --trusted-host`; without
+                it, named scoped queries are refused locally.
+            trusted_host: opt into the host-owned stdio channel for explicit
+                per-request `RequestEvidencePolicy` and other host-selected
+                context. The embedding application must authenticate callers
+                and select each policy. This does not create a fixed client
+                policy; each operation receives its own context.
         """
         self._bin = brix_bin or _default_brix_bin()
         self._default_timeout = timeout
+        self._host_query_policy = (
+            HostQueryPolicy(host_query_policy) if host_query_policy is not None else None
+        )
+        if not isinstance(trusted_host, bool):
+            raise TypeError("trusted_host must be bool")
+        # Preserve the earlier explicit HostQueryPolicy opt-in while allowing
+        # independent per-request evidence policies on a client.
+        self._trusted_host = trusted_host or self._host_query_policy is not None
         self._id_counter = itertools.count(1)
         self._closed = False
         self._lock = threading.Lock()
@@ -147,7 +431,12 @@ class BrixClient:
         # request's; it is discarded when read.
         self._abandoned: set = set()
 
-        args = [self._bin, "serve", "--stdio"] + (extra_args or [])
+        extra = list(extra_args or [])
+        if "--trusted-host" in extra:
+            raise ValueError("--trusted-host is selected with trusted_host=True")
+        args = [self._bin, "serve", "--stdio"] + extra
+        if self._trusted_host:
+            args.append("--trusted-host")
         try:
             self._proc = subprocess.Popen(
                 args,
@@ -243,9 +532,20 @@ class BrixClient:
         """
         if self.closed:
             raise BrixProcessError("brix serve --stdio process is not running")
+        wire_params = dict(params or {})
+        if "request_context" in wire_params:
+            if not self._trusted_host:
+                raise BrixError(
+                    "request_context requires BrixClient(trusted_host=True)"
+                )
+            # Validate even low-level calls so they cannot bypass the typed
+            # per-request policy shape. The actual object remains request-local.
+            wire_params["request_context"] = RequestEvidencePolicy(
+                wire_params["request_context"]
+            ).to_json_value()
         if request_id is None:
             request_id = self._next_id()
-        request = {"id": request_id, "method": method, "params": params or {}}
+        request = {"id": request_id, "method": method, "params": wire_params}
         line = json.dumps(request)
 
         with self._lock:
@@ -328,6 +628,7 @@ class BrixClient:
         package_paths: Optional[List[str]] = None,
         extra: Optional[Dict[str, Any]] = None,
         timeout: Optional[float] = None,
+        request_context: Optional[Union[RequestEvidencePolicy, Mapping[str, Any]]] = None,
     ) -> Dict[str, Any]:
         params: Dict[str, Any] = {"program": _normalize_spec(program)}
         normalized_inputs = _normalize_inputs(inputs)
@@ -337,6 +638,12 @@ class BrixClient:
             params["package_paths"] = list(package_paths)
         if extra:
             params.update(extra)
+        if request_context is not None:
+            if not self._trusted_host:
+                raise BrixError(
+                    "request_context requires BrixClient(trusted_host=True)"
+                )
+            params["request_context"] = RequestEvidencePolicy(request_context).to_json_value()
         return self.result(method, params, timeout=timeout)
 
     def check(
@@ -355,9 +662,13 @@ class BrixClient:
         inputs: Optional[List[ProgramSpec]] = None,
         package_paths: Optional[List[str]] = None,
         timeout: Optional[float] = None,
+        request_context: Optional[Union[RequestEvidencePolicy, Mapping[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """`brix run` — execute a finite-decision deliberation plan to completion."""
-        return self._program_call("run", program, inputs, package_paths, timeout=timeout)
+        return self._program_call(
+            "run", program, inputs, package_paths, timeout=timeout,
+            request_context=request_context,
+        )
 
     def why(
         self,
@@ -367,10 +678,12 @@ class BrixClient:
         package_paths: Optional[List[str]] = None,
         timeout: Optional[float] = None,
         entity: Optional[int] = None,
+        request_context: Optional[Union[RequestEvidencePolicy, Mapping[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """`brix why` — explain why `candidate` was admitted or selected."""
         return self._program_call(
-            "why", program, inputs, package_paths, extra=_explain_params(candidate, entity), timeout=timeout
+            "why", program, inputs, package_paths, extra=_explain_params(candidate, entity),
+            timeout=timeout, request_context=request_context,
         )
 
     def whynot(
@@ -381,6 +694,7 @@ class BrixClient:
         package_paths: Optional[List[str]] = None,
         timeout: Optional[float] = None,
         entity: Optional[int] = None,
+        request_context: Optional[Union[RequestEvidencePolicy, Mapping[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """`brix whynot` — explain why `candidate` was not admitted or not selected."""
         return self._program_call(
@@ -390,6 +704,7 @@ class BrixClient:
             package_paths,
             extra=_explain_params(candidate, entity),
             timeout=timeout,
+            request_context=request_context,
         )
 
     def audit(
@@ -400,6 +715,7 @@ class BrixClient:
         package_paths: Optional[List[str]] = None,
         force: bool = False,
         timeout: Optional[float] = None,
+        request_context: Optional[Union[RequestEvidencePolicy, Mapping[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """`brix audit` — run and audit a plan, writing a bundle to `bundle_out`
         on the *server's* filesystem (a local path if the server is local)."""
@@ -410,6 +726,7 @@ class BrixClient:
             package_paths,
             extra={"bundle_out": str(bundle_out), "force": force},
             timeout=timeout,
+            request_context=request_context,
         )
 
     def verify(
@@ -421,10 +738,20 @@ class BrixClient:
         inputs: Optional[List[ProgramSpec]] = None,
         package_paths: Optional[List[str]] = None,
         timeout: Optional[float] = None,
+        request_context: Optional[Union[RequestEvidencePolicy, Mapping[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """`brix verify` — verify an audit bundle against source and the
         externally pinned `expect_program` hex id. `profile` is
         `"finite-decision"` (default) or `"l3-v1"`."""
+        context = (
+            RequestEvidencePolicy(request_context)
+            if request_context is not None
+            else None
+        )
+        if context is not None and profile != "finite-decision":
+            raise BrixError("request_context supports only profile='finite-decision'")
+        if context is not None and context.to_json_value()["expected_program"] != expect_program:
+            raise ValueError("request_context.expected_program must equal expect_program")
         return self._program_call(
             "verify",
             program,
@@ -436,6 +763,7 @@ class BrixClient:
                 "profile": profile,
             },
             timeout=timeout,
+            request_context=context,
         )
 
     def test(
@@ -642,12 +970,89 @@ class BrixClient:
             params["typed"] = True
         return self.result("world.query", params, timeout=timeout)
 
+    def world_query_named(
+        self,
+        world_dir: Union[str, os.PathLike],
+        name: str,
+        arguments: Optional[Mapping[str, Any]] = None,
+        rev: Optional[int] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Run a typed named query under this client's trusted host policy.
+
+        The host policy is fixed when the client is constructed and cannot be
+        overridden per call. Query arguments remain ordinary untrusted data.
+        """
+        if self._host_query_policy is None:
+            raise BrixError(
+                "world_query_named requires BrixClient(host_query_policy=...)"
+            )
+        if not isinstance(name, str) or not name:
+            raise ValueError("name must be a nonempty string")
+        if arguments is not None and not isinstance(arguments, Mapping):
+            raise TypeError("arguments must be a mapping of parameter names to values")
+        params: Dict[str, Any] = {
+            "dir": str(world_dir),
+            "name": name,
+            "args": dict(arguments) if arguments is not None else {},
+            "host_policy": self._host_query_policy.to_json_value(),
+        }
+        if rev is not None:
+            params["rev"] = rev
+        if limit is not None:
+            params["limit"] = limit
+        if cursor is not None:
+            params["cursor"] = cursor
+        return self.result("world.query-named", params, timeout=timeout)
+
+    def world_decisions(
+        self,
+        world_dir: Union[str, os.PathLike],
+        decide: Optional[str] = None,
+        entity: Optional[Any] = None,
+        replay: bool = False,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """`brix world decide` via serve."""
+        params: Dict[str, Any] = {
+            "dir": str(world_dir),
+            "replay": replay,
+        }
+        if decide is not None:
+            params["decide"] = decide
+        if entity is not None:
+            params["entity"] = _normalize_entity(entity)
+        return self.result("world.decisions", params, timeout=timeout)
+
+    def world_explain(
+        self,
+        world_dir: Union[str, os.PathLike],
+        entity: Any,
+        decide: Optional[str] = None,
+        rev: Optional[int] = None,
+        replay: bool = False,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """`brix world explain` via serve."""
+        params: Dict[str, Any] = {
+            "dir": str(world_dir),
+            "entity": _normalize_entity(entity),
+            "replay": replay,
+        }
+        if decide is not None:
+            params["decide"] = decide
+        if rev is not None:
+            params["rev"] = rev
+        return self.result("world.explain", params, timeout=timeout)
+
     def world_evidence(
         self,
         world_dir: Union[str, os.PathLike],
         rev: Optional[int] = None,
         decide: str = "",
-        entity: Optional[str] = None,
+        entity: Optional[Any] = None,
         grants: Optional[List[str]] = None,
         out: Optional[Union[str, os.PathLike]] = None,
         include_bundle: bool = True,
@@ -655,11 +1060,11 @@ class BrixClient:
         timeout: Optional[float] = None,
         *,
         revision: Optional[int] = None,
-        key: Optional[str] = None,
+        key: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """`brix world evidence` via serve."""
         actual_rev = rev if rev is not None else revision
-        actual_entity = entity if entity is not None else key
+        actual_entity = _normalize_entity(entity if entity is not None else key)
         params: Dict[str, Any] = {
             "dir": str(world_dir),
             "rev": actual_rev,
@@ -682,7 +1087,7 @@ class BrixClient:
         expect_rev: Optional[int] = None,
         expect_rev_digest: Optional[str] = None,
         expect_decide: Optional[str] = None,
-        expect_entity: Optional[str] = None,
+        expect_entity: Optional[Any] = None,
         expect_candidate: Optional[str] = None,
         expect_value_digest: Optional[str] = None,
         expect_grants: Optional[List[str]] = None,
@@ -695,7 +1100,7 @@ class BrixClient:
         revision: Optional[int] = None,
         revision_digest: Optional[str] = None,
         decide_name: Optional[str] = None,
-        entity_key: Optional[str] = None,
+        entity_key: Optional[Any] = None,
         candidate: Optional[str] = None,
         value_digest: Optional[str] = None,
         grants: Optional[List[str]] = None,
@@ -710,7 +1115,9 @@ class BrixClient:
         actual_rev = expect_rev if expect_rev is not None else revision
         actual_rev_digest = expect_rev_digest if expect_rev_digest is not None else revision_digest
         actual_decide = expect_decide if expect_decide is not None else decide_name
-        actual_entity = expect_entity if expect_entity is not None else entity_key
+        actual_entity = _normalize_expected_entity(
+            expect_entity if expect_entity is not None else entity_key
+        )
         actual_candidate = expect_candidate if expect_candidate is not None else candidate
         actual_value_digest = (
             expect_value_digest if expect_value_digest is not None else value_digest

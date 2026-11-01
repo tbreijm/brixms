@@ -234,6 +234,23 @@ pub struct ProgramGraphManifest {
     pub transitive_manifest_digest: Digest,
 }
 
+impl ProgramGraphManifest {
+    /// Exact canonical preimage committed by `transitive_manifest_digest`.
+    pub fn canonical_preimage(&self) -> Vec<u8> {
+        let mut w = CanonWriter::new();
+        w.write_ident(&self.profile);
+        w.write_ident(&self.root_module);
+        for (name, entry) in &self.modules {
+            w.write_ident(name);
+            w.write_bytes(entry.source_digest.as_bytes());
+            w.write_bytes(entry.interface_digest.as_bytes());
+            w.write_uint(entry.source_bytes as u64);
+            w.write_list(entry.direct_imports.iter().map(|d| d.as_bytes().to_vec()));
+        }
+        w.finish()
+    }
+}
+
 /// In-memory representation of a single loaded module.
 #[derive(Clone, Debug)]
 pub struct LoadedModule {
@@ -477,10 +494,6 @@ impl ModuleGraph {
     /// Produce an immutable pinned [`ProgramGraphManifest`].
     pub fn manifest(&self, profile: &str) -> ProgramGraphManifest {
         let mut manifest_entries = BTreeMap::new();
-        let mut w = CanonWriter::new();
-        w.write_ident(profile);
-        w.write_ident(&self.root_module);
-
         for (name, module) in &self.modules {
             let entry = ModuleManifestEntry {
                 module_name: name.clone(),
@@ -491,23 +504,17 @@ impl ModuleGraph {
                 exported_symbols: module.exported_symbols.clone(),
             };
 
-            w.write_ident(name);
-            w.write_bytes(module.source_digest.as_bytes());
-            w.write_bytes(module.interface_digest.as_bytes());
-            w.write_uint(module.source.len() as u64);
-            w.write_list(module.direct_imports.iter().map(|d| d.as_bytes().to_vec()));
-
             manifest_entries.insert(name.clone(), entry);
         }
-
-        let transitive_manifest_digest = w.digest(Domain::Value);
-
-        ProgramGraphManifest {
+        let mut manifest = ProgramGraphManifest {
             profile: profile.to_string(),
             root_module: self.root_module.clone(),
             modules: manifest_entries,
-            transitive_manifest_digest,
-        }
+            transitive_manifest_digest: Digest::from_bytes([0; 32]),
+        };
+        manifest.transitive_manifest_digest =
+            Digest::of(Domain::Value, &manifest.canonical_preimage());
+        manifest
     }
 
     /// Link the modules into a [`LinkedProgram`] with qualified symbols and dead-code reachability pruning.
@@ -1068,7 +1075,7 @@ fn extract_exported_symbol(item: &Item) -> Option<ExportedSymbol> {
             kind: ExportKind::RelDerived,
             // Until output types are inferred, conservatively invalidate the
             // interface when the expression changes; never miss schema edits.
-            signature: format!("rel derived {} {:?}", r.name, r.query.select),
+            signature: format!("rel derived {} {:?}", r.name, r.query),
         }),
         Item::Rule(r) => Some(ExportedSymbol {
             name: r.name.clone(),
@@ -1555,6 +1562,27 @@ impl NominalResolver<'_> {
                     self.expr(value, &bound)?;
                 }
             }
+            Item::Query(query) => {
+                let mut bound: BTreeSet<String> =
+                    query.params.iter().map(|p| p.name.clone()).collect();
+                bound.extend(query.query.from.iter().map(|b| b.var.clone()));
+                if let Some(anti) = &query.query.not_exists {
+                    bound.insert(anti.binding.var.clone());
+                }
+                for param in &mut query.params {
+                    self.ty(&mut param.ty)?;
+                }
+                self.expr(&mut query.query.select, &bound)?;
+                if let Some(value) = &mut query.query.where_clause {
+                    self.expr(value, &bound)?;
+                }
+                if let Some(anti) = &mut query.query.not_exists {
+                    self.expr(&mut anti.predicate, &bound)?;
+                }
+                for value in &mut query.query.group_by {
+                    self.expr(value, &bound)?;
+                }
+            }
             Item::Decide(decide) => {
                 self.expr(&mut decide.list, &BTreeSet::new())?;
                 let bound = BTreeSet::from([decide.binder.clone()]);
@@ -1588,6 +1616,7 @@ fn declaration_name(item: &Item) -> Option<&str> {
         Item::Fn(x) | Item::Rule(x) => Some(&x.name),
         Item::RelInput(x) => Some(&x.name),
         Item::RelDerived(x) => Some(&x.name),
+        Item::Query(x) => Some(&x.name),
         Item::Decide(x) => Some(&x.name),
         Item::Let(x) => Some(&x.name),
         _ => None,
@@ -1625,6 +1654,12 @@ fn trace_item_deps(
         Item::RelInput(input) => trace_ty_deps(&input.ty, module, deps, all_configs),
         Item::RelDerived(derived) => {
             trace_rel_query_deps(&derived.query, module, deps, all_configs)
+        }
+        Item::Query(query) => {
+            for param in &query.params {
+                trace_ty_deps(&param.ty, module, deps, all_configs);
+            }
+            trace_rel_query_deps(&query.query, module, deps, all_configs)
         }
         Item::Let(binding) => {
             trace_expr_deps(&binding.value, module, deps, all_configs);

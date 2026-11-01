@@ -220,6 +220,81 @@ pub fn stage_load_snapshot(
     }
 }
 
+/// Bind independently supplied request expectations to the actual admitted plan.
+pub fn stage_authorize_evidence(
+    cmd: &str,
+    profile: Option<String>,
+    program: Option<String>,
+    plan: &FiniteDecisionPlan,
+    invocation: &crate::request_evidence::InvocationEvidenceContext,
+    json: bool,
+) -> Result<crate::request_evidence::RequestEvidenceContext, u8> {
+    invocation.authorize_program(plan).map_err(|message| {
+        let payload = CliResultJson::failure(
+            cmd,
+            profile,
+            program,
+            None,
+            "rejected",
+            vec![format!("request-context-invalid: {message}")],
+        );
+        emit_failure(
+            json,
+            payload,
+            &format!("brix {cmd}: request context rejected: {message}"),
+        );
+        EXIT_REJECTED_OR_UNKNOWN
+    })
+}
+
+/// Load inputs under this operation's sealed, immutable evidence context.
+pub fn stage_load_snapshot_with_context(
+    cmd: &str,
+    profile: Option<String>,
+    program: Option<String>,
+    input_paths: &[PathBuf],
+    json: bool,
+    context: &crate::request_evidence::RequestEvidenceContext,
+) -> Result<InputSnapshot, u8> {
+    match crate::commands::load_cli_input_snapshot_with_context(input_paths, context) {
+        Ok(snapshot) => Ok(snapshot),
+        Err(err) => {
+            let payload = CliResultJson::failure(
+                cmd,
+                profile,
+                program,
+                None,
+                err.status(),
+                vec![err.diagnostic()],
+            );
+            if json {
+                crate::json::emit_result_json_with_request_context(&payload, context.id());
+            } else {
+                eprintln!("{}", err.render_human(cmd));
+            }
+            Err(err.exit_code())
+        }
+    }
+}
+
+/// Report invalid invocation policy before reading any evidence.
+pub fn invocation_evidence_error(cmd: &str, message: String, json: bool) -> u8 {
+    let payload = CliResultJson::failure(
+        cmd,
+        None,
+        None,
+        None,
+        "rejected",
+        vec![format!("request-context-invalid: {message}")],
+    );
+    emit_failure(
+        json,
+        payload,
+        &format!("brix {cmd}: request context rejected: {message}"),
+    );
+    EXIT_REJECTED_OR_UNKNOWN
+}
+
 /// Stage: build the finite-decision runtime against the plan and bound
 /// inputs.
 ///

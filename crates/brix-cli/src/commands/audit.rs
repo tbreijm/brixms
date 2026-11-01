@@ -25,6 +25,33 @@ pub fn execute_audit(
     package_paths: &[PathBuf],
     input_paths: &[PathBuf],
 ) -> u8 {
+    let invocation = match crate::request_evidence::InvocationEvidenceContext::from_environment() {
+        Ok(context) => context,
+        Err(message) => return pipeline::invocation_evidence_error("audit", message, json),
+    };
+    execute_audit_with_context(
+        file,
+        bundle_out,
+        force,
+        json,
+        package_paths,
+        input_paths,
+        &invocation,
+    )
+}
+
+/// Execute audit under an explicitly snapshotted evidence policy. Server
+/// callers pass `Empty` or a host policy; only the legacy CLI wrapper above
+/// reads environment variables.
+pub fn execute_audit_with_context(
+    file: &Path,
+    bundle_out: &Path,
+    force: bool,
+    json: bool,
+    package_paths: &[PathBuf],
+    input_paths: &[PathBuf],
+    invocation: &crate::request_evidence::InvocationEvidenceContext,
+) -> u8 {
     // Refusal: if bundle destination already exists and force was not specified, refuse immediately.
     if bundle_out.exists() && !force {
         let msg = format!(
@@ -74,12 +101,73 @@ pub fn execute_audit(
     let program_hex = pipeline::program_id_hex(&plan);
     let profile = Some(FINITE_DECISION_PROFILE.to_string());
 
-    let snapshot = match pipeline::stage_load_snapshot(
+    let evidence_context = match pipeline::stage_authorize_evidence(
         "audit",
         profile.clone(),
         Some(program_hex.clone()),
-        input_paths,
+        &plan,
+        invocation,
         json,
+    ) {
+        Ok(context) => context,
+        Err(code) => return code,
+    };
+
+    // Capture once, then feed those same bytes to the existing bounded loader
+    // and to the portable wrapper. No caller path is reopened for the snapshot.
+    let portable_inputs = match crate::request_audit::capture_input_files(input_paths) {
+        Ok(inputs) => inputs,
+        Err(err) => {
+            let msg = format!("audit input capture failed: {err}");
+            if json {
+                crate::json::emit_result_json_with_request_context(
+                    &CliResultJson::failure(
+                        "audit",
+                        profile.clone(),
+                        Some(program_hex.clone()),
+                        None,
+                        "io-error",
+                        vec![msg],
+                    ),
+                    evidence_context.id(),
+                );
+            } else {
+                eprintln!("brix audit: IO error: {msg}");
+            }
+            return EXIT_USAGE_OR_IO;
+        }
+    };
+    let materialized = match crate::request_audit::MaterializedAuditInputs::create(&portable_inputs)
+    {
+        Ok(inputs) => inputs,
+        Err(err) => {
+            let msg = format!("audit input materialization failed: {err}");
+            if json {
+                crate::json::emit_result_json_with_request_context(
+                    &CliResultJson::failure(
+                        "audit",
+                        profile.clone(),
+                        Some(program_hex.clone()),
+                        None,
+                        "io-error",
+                        vec![msg],
+                    ),
+                    evidence_context.id(),
+                );
+            } else {
+                eprintln!("brix audit: IO error: {msg}");
+            }
+            return EXIT_USAGE_OR_IO;
+        }
+    };
+
+    let snapshot = match pipeline::stage_load_snapshot_with_context(
+        "audit",
+        profile.clone(),
+        Some(program_hex.clone()),
+        materialized.paths(),
+        json,
+        &evidence_context,
     ) {
         Ok(s) => s,
         Err(code) => return code,
@@ -125,7 +213,7 @@ pub fn execute_audit(
                 vec![format!("{code}: {detail}")],
             )
             .with_inputs(input_snapshot, inputs_json);
-            crate::json::emit_result_json(&res);
+            crate::json::emit_result_json_with_request_context(&res, evidence_context.id());
         } else {
             let human =
                 format_finite_decision_human(&run, Some(&context_hex), input_snapshot.as_deref());
@@ -165,7 +253,7 @@ pub fn execute_audit(
                 audit_lines,
             )
             .with_inputs(input_snapshot, inputs_json);
-            crate::json::emit_result_json(&res);
+            crate::json::emit_result_json_with_request_context(&res, evidence_context.id());
         } else {
             let mut human =
                 format_finite_decision_human(&run, Some(&context_hex), input_snapshot.as_deref());
@@ -193,7 +281,7 @@ pub fn execute_audit(
                     vec![msg],
                 )
                 .with_inputs(input_snapshot, inputs_json);
-                crate::json::emit_result_json(&res);
+                crate::json::emit_result_json_with_request_context(&res, evidence_context.id());
             } else {
                 eprintln!("brix audit: {msg}");
             }
@@ -201,7 +289,7 @@ pub fn execute_audit(
         }
     };
 
-    let bundle_bytes = match bundle.encode(&AuditDecodeLimits::strict()) {
+    let v1_bundle_bytes = match bundle.encode(&AuditDecodeLimits::strict()) {
         Ok(bytes) => bytes,
         Err(err) => {
             let msg = format!("bundle encoding error: {err:?}");
@@ -215,11 +303,65 @@ pub fn execute_audit(
                     vec![msg],
                 )
                 .with_inputs(input_snapshot, inputs_json);
-                crate::json::emit_result_json(&res);
+                crate::json::emit_result_json_with_request_context(&res, evidence_context.id());
             } else {
                 eprintln!("brix audit: {msg}");
             }
             return EXIT_REJECTED_OR_UNKNOWN;
+        }
+    };
+
+    let bundle_bytes = if !evidence_context.is_host() {
+        // Keep evidence-free and legacy CLI artifacts byte-for-byte V1
+        // compatible. Host-bound invocations need the additive wrapper.
+        v1_bundle_bytes
+    } else {
+        if v1_bundle_bytes.len() > evidence_context.read_limits().max_evidence_bundle_bytes() {
+            let msg = "audit V1 bundle exceeds request-context evidence bundle budget";
+            if json {
+                crate::json::emit_result_json_with_request_context(
+                    &CliResultJson::failure(
+                        "audit",
+                        Some(FINITE_DECISION_PROFILE.to_string()),
+                        Some(run.program.0.to_hex()),
+                        Some(context_hex),
+                        "rejected",
+                        vec![msg.into()],
+                    ),
+                    evidence_context.id(),
+                );
+            } else {
+                eprintln!("brix audit: rejected: {msg}");
+            }
+            return EXIT_REJECTED_OR_UNKNOWN;
+        }
+        let request_evidence = crate::request_audit::RequestAuditEvidenceV1 {
+            v1_bundle: v1_bundle_bytes,
+            context_id: evidence_context.id().map(|id| id.digest().to_hex()),
+            context_bytes: evidence_context.canonical_bytes().map(ToOwned::to_owned),
+            inputs: portable_inputs,
+        };
+        match request_evidence.encode() {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                let msg = format!("request audit wrapper error: {err}");
+                if json {
+                    crate::json::emit_result_json_with_request_context(
+                        &CliResultJson::failure(
+                            "audit",
+                            Some(FINITE_DECISION_PROFILE.to_string()),
+                            Some(run.program.0.to_hex()),
+                            Some(context_hex),
+                            "unknown",
+                            vec![msg],
+                        ),
+                        evidence_context.id(),
+                    );
+                } else {
+                    eprintln!("brix audit: {msg}");
+                }
+                return EXIT_REJECTED_OR_UNKNOWN;
+            }
         }
     };
 
@@ -229,7 +371,7 @@ pub fn execute_audit(
         let msg = format!("parent directory '{}' does not exist", parent.display());
         if json {
             let res = CliResultJson::failure("audit", None, None, None, "io-error", vec![msg]);
-            crate::json::emit_result_json(&res);
+            crate::json::emit_result_json_with_request_context(&res, evidence_context.id());
         } else {
             eprintln!("brix audit: IO error: {msg}");
         }
@@ -276,7 +418,7 @@ pub fn execute_audit(
                 if json {
                     let res =
                         CliResultJson::failure("audit", None, None, None, "io-error", vec![msg]);
-                    crate::json::emit_result_json(&res);
+                    crate::json::emit_result_json_with_request_context(&res, evidence_context.id());
                 } else {
                     eprintln!("brix audit: IO error: {msg}");
                 }
@@ -291,7 +433,7 @@ pub fn execute_audit(
             let msg = "failed to create unique temporary file after 1000 attempts".to_string();
             if json {
                 let res = CliResultJson::failure("audit", None, None, None, "io-error", vec![msg]);
-                crate::json::emit_result_json(&res);
+                crate::json::emit_result_json_with_request_context(&res, evidence_context.id());
             } else {
                 eprintln!("brix audit: IO error: {msg}");
             }
@@ -332,7 +474,7 @@ pub fn execute_audit(
         );
         if json {
             let res = CliResultJson::failure("audit", None, None, None, "io-error", vec![msg]);
-            crate::json::emit_result_json(&res);
+            crate::json::emit_result_json_with_request_context(&res, evidence_context.id());
         } else {
             eprintln!("brix audit: IO error: {msg}");
         }
@@ -393,7 +535,7 @@ pub fn execute_audit(
             commits: None,
             entity_decisions: None,
         };
-        crate::json::emit_result_json(&res);
+        crate::json::emit_result_json_with_request_context(&res, evidence_context.id());
     } else {
         let mut human =
             format_finite_decision_human(&run, Some(&context_hex), input_snapshot.as_deref());

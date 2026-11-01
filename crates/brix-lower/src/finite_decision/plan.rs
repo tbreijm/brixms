@@ -245,6 +245,12 @@ pub enum FiniteDecisionLowerError {
         expected: &'static str,
         found: String,
     },
+    /// String concatenation and lexical less-than are outside the released
+    /// expression profile. They are rejected during lowering rather than at
+    /// the first runtime evaluation.
+    UnsupportedStringOperator {
+        operator: &'static str,
+    },
     BooleanTypeAnalysisLimit,
     ProfileMismatch {
         expected: String,
@@ -478,6 +484,10 @@ impl fmt::Display for FiniteDecisionLowerError {
                     "resource limit exceeded during Boolean operand type analysis"
                 )
             }
+            Self::UnsupportedStringOperator { operator } => write!(
+                f,
+                "operator '{operator}' is unsupported for Str operands in this profile"
+            ),
             Self::ProfileMismatch { expected, found } => {
                 write!(
                     f,
@@ -1910,6 +1920,12 @@ pub fn lower_finite_decision_plan(
                 return Err(FiniteDecisionLowerError::ItemNotAllowed(format!(
                     "rel derived {}",
                     r.name
+                )));
+            }
+            ast::Item::Query(q) => {
+                return Err(FiniteDecisionLowerError::ItemNotAllowed(format!(
+                    "query {}",
+                    q.name
                 )));
             }
             ast::Item::Newtype(n) => {

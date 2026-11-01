@@ -69,10 +69,22 @@ impl IntermediateTuple {
     }
 
     pub fn get_qualified(&self, binding: &str, field: &str) -> Option<&Value> {
-        let qualified = format!("{binding}.{field}");
-        self.fields
+        let mut parts = field.split('.');
+        let first = parts.next()?;
+        let qualified = format!("{binding}.{first}");
+        let mut current = self
+            .fields
             .get(&qualified)
-            .or_else(|| self.fields.get(field))
+            .or_else(|| self.fields.get(first))?;
+        for seg in parts {
+            match current {
+                Value::Record { fields, .. } => {
+                    current = fields.get(seg)?;
+                }
+                _ => return None,
+            }
+        }
+        Some(current)
     }
 
     pub fn from_tuple_record(rec: &TupleRecord) -> Self {
@@ -105,6 +117,22 @@ impl IntermediateTuple {
 /// [`StateCodec::state_from_bytes`].
 pub fn distinct_key(tuple: &IntermediateTuple) -> Vec<u8> {
     tuple.state_bytes()
+}
+
+/// Version tag for the stable output key of a distinct derived row.
+pub const DISTINCT_ROW_KEY_VERSION: &str = "brix.world.distinct-row@1";
+
+/// Compute the versioned, stable output [`WorldKey`] for a canonical typed derived row value.
+/// Determined strictly by the canonical typed row value (`IntermediateTuple::state_bytes`),
+/// independent of which source(s) supported the row or pagination offset.
+pub fn distinct_row_output_key(tuple: &IntermediateTuple) -> WorldKey {
+    let bytes = tuple.state_bytes();
+    let mut payload = Vec::with_capacity(DISTINCT_ROW_KEY_VERSION.len() + 1 + bytes.len());
+    payload.extend_from_slice(DISTINCT_ROW_KEY_VERSION.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(&bytes);
+    let digest = Digest::of(Domain::Value, &payload);
+    WorldKey::from_str(&format!("{DISTINCT_ROW_KEY_VERSION}:{}", digest.to_hex()))
 }
 
 fn derivation_provenance_key(leaves: &[Leaf]) -> Value {
@@ -358,16 +386,59 @@ impl CandidateExplanation {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Clone)]
 pub struct UpstreamSettlementLink {
     pub decide: String,
     pub entity_id: String,
     pub candidate: String,
     pub revision: u64,
+    pub is_composite: bool,
+}
+
+impl std::fmt::Debug for UpstreamSettlementLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpstreamSettlementLink")
+            .field("decide", &self.decide)
+            .field("entity_id", &self.entity_id)
+            .field("candidate", &self.candidate)
+            .field("revision", &self.revision)
+            .finish()
+    }
+}
+
+impl PartialEq for UpstreamSettlementLink {
+    fn eq(&self, other: &Self) -> bool {
+        self.decide == other.decide
+            && self.entity_id == other.entity_id
+            && self.candidate == other.candidate
+            && self.revision == other.revision
+    }
+}
+impl Eq for UpstreamSettlementLink {}
+impl PartialOrd for UpstreamSettlementLink {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for UpstreamSettlementLink {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (
+            &self.decide,
+            &self.entity_id,
+            &self.candidate,
+            self.revision,
+        )
+            .cmp(&(
+                &other.decide,
+                &other.entity_id,
+                &other.candidate,
+                other.revision,
+            ))
+    }
 }
 
 /// Comprehensive explanation of the candidate deliberation and winning settlement for an entity.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone)]
 pub struct DecisionExplanation {
     pub entity_id: String,
     pub decide_name: String,
@@ -379,12 +450,50 @@ pub struct DecisionExplanation {
     pub candidates: Vec<CandidateExplanation>,
     pub contributing_facts: Vec<(String, WorldKey)>,
     pub upstream_settlements: Vec<UpstreamSettlementLink>,
+    pub is_composite: bool,
 }
+
+impl std::fmt::Debug for DecisionExplanation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecisionExplanation")
+            .field("entity_id", &self.entity_id)
+            .field("decide_name", &self.decide_name)
+            .field("winning_candidate", &self.winning_candidate)
+            .field("value", &self.value)
+            .field("priority", &self.priority)
+            .field("phase", &self.phase)
+            .field("calendar_key", &self.calendar_key)
+            .field("candidates", &self.candidates)
+            .field("contributing_facts", &self.contributing_facts)
+            .field("upstream_settlements", &self.upstream_settlements)
+            .finish()
+    }
+}
+
+impl PartialEq for DecisionExplanation {
+    fn eq(&self, other: &Self) -> bool {
+        self.entity_id == other.entity_id
+            && self.decide_name == other.decide_name
+            && self.winning_candidate == other.winning_candidate
+            && self.value == other.value
+            && self.priority == other.priority
+            && self.phase == other.phase
+            && self.calendar_key == other.calendar_key
+            && self.candidates == other.candidates
+            && self.contributing_facts == other.contributing_facts
+            && self.upstream_settlements == other.upstream_settlements
+    }
+}
+impl Eq for DecisionExplanation {}
 
 impl DecisionExplanation {
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "entity_id": self.entity_id,
+            "entity_key": super::decision_codec::entity_id_to_json_key_with_shape(
+                &self.entity_id,
+                self.is_composite,
+            ),
             "decide_name": self.decide_name,
             "winning_candidate": self.winning_candidate,
             "value": self.value.as_ref().map(|v| v.to_json()),
@@ -402,6 +511,10 @@ impl DecisionExplanation {
             "upstream_settlements": self.upstream_settlements.iter().map(|s| serde_json::json!({
                 "decide": s.decide,
                 "entity_id": s.entity_id,
+                "entity_key": super::decision_codec::entity_id_to_json_key_with_shape(
+                    &s.entity_id,
+                    s.is_composite,
+                ),
                 "candidate": s.candidate,
                 "revision": s.revision,
             })).collect::<Vec<_>>(),
@@ -424,13 +537,13 @@ pub struct DecideBlock {
     pub name: String,
     pub binder: String,
     pub source_relation: String,
-    /// Declared entity-identity field (ADR-0046, decided 2026-10-04): the
-    /// field of the bound row (qualified `binder.field` or bare `field`)
-    /// whose value names the entity this instance of the block decides about.
-    /// `lower_relations` refuses any world-profile `decide` lacking this, so
-    /// by the time a `DecideBlock` exists it is always present.
+    /// Declared entity-identity field(s) (ADR-0046, decided 2026-10-04; composite
+    /// keys added in Alpha.9): the field(s) of the bound row whose ordered tuple
+    /// of values names the entity this instance of the block decides about.
     pub per_field: String,
     pub per_type: ast::Ty,
+    pub per_fields: Vec<String>,
+    pub per_types: Vec<ast::Ty>,
     pub proposals: Vec<ast::ProposeDecl>,
     pub compiled_proposals: Vec<CompiledPropose>,
 }
@@ -2136,7 +2249,7 @@ fn verify_bucket(key: &FrontierKey, bucket: &FrontierBucket) -> Result<(), World
 }
 
 /// The settled decision of one entity: the live candidate with the least calendar key.
-fn settle(entity: &str, bucket: &FrontierBucket) -> Option<SettledDecision> {
+fn settle(entity: &str, bucket: &FrontierBucket, is_composite: bool) -> Option<SettledDecision> {
     let mut frontier: Frontier<(&String, &CandidateHead)> = Frontier::new();
     for (name, rec) in &bucket.0 {
         let _ = frontier.insert(rec.head.calendar_key, (name, &rec.head));
@@ -2149,6 +2262,7 @@ fn settle(entity: &str, bucket: &FrontierBucket) -> Option<SettledDecision> {
         phase: head.phase,
         value: head.value.clone(),
         calendar_key: key,
+        is_composite,
     })
 }
 
@@ -2209,6 +2323,10 @@ pub enum OperatorState {
     },
     Distinct {
         input: OperatorId,
+        supports: DistinctSupports,
+    },
+    UnionDistinct {
+        sources: Vec<OperatorId>,
         supports: DistinctSupports,
     },
     GroupedCount {
@@ -2502,6 +2620,18 @@ impl WorldNetwork {
                         },
                     );
                 }
+                OperatorNode::UnionDistinct { sources } => {
+                    for src in sources {
+                        downstream.entry(*src).or_default().push(op_id);
+                    }
+                    operator_states.insert(
+                        idx,
+                        OperatorState::UnionDistinct {
+                            sources: sources.clone(),
+                            supports: DistinctSupports::default(),
+                        },
+                    );
+                }
                 OperatorNode::GroupedCount {
                     input,
                     group_keys,
@@ -2529,7 +2659,7 @@ impl WorldNetwork {
         for (name, &op_id) in &dag.relation_outputs {
             match dag.nodes[op_id.0] {
                 OperatorNode::Scan { .. } => {}
-                OperatorNode::Distinct { .. } => {
+                OperatorNode::Distinct { .. } | OperatorNode::UnionDistinct { .. } => {
                     derived_relations.insert(name.clone(), DerivedRel::DistinctOutput(op_id));
                 }
                 _ => {
@@ -2619,7 +2749,10 @@ impl WorldNetwork {
                     n += left_side.persist(&self.state);
                     n += right_side.persist(&self.state);
                 }
-                OperatorState::Distinct { supports, .. } => n += supports.persist(&self.state),
+                OperatorState::Distinct { supports, .. }
+                | OperatorState::UnionDistinct { supports, .. } => {
+                    n += supports.persist(&self.state)
+                }
                 OperatorState::GroupedCount {
                     groups, aggregates, ..
                 } => {
@@ -2751,6 +2884,15 @@ impl WorldNetwork {
                         },
                     );
                 }
+                OperatorState::UnionDistinct { sources, supports } => {
+                    out.operator_states.insert(
+                        *idx,
+                        OperatorState::UnionDistinct {
+                            sources: sources.clone(),
+                            supports: supports.dehydrated(&self.state)?,
+                        },
+                    );
+                }
                 OperatorState::GroupedCount {
                     input,
                     group_keys,
@@ -2800,11 +2942,13 @@ impl WorldNetwork {
         out
     }
 
-    /// Per Distinct operator, the outer support index root.
+    /// Per Distinct / UnionDistinct operator, the outer support index root.
     pub fn distinct_roots(&self) -> BTreeMap<OperatorId, SubRoot> {
         let mut out = BTreeMap::new();
         for (idx, state) in self.operator_states.iter() {
-            if let OperatorState::Distinct { supports, .. } = state {
+            if let OperatorState::Distinct { supports, .. }
+            | OperatorState::UnionDistinct { supports, .. } = state
+            {
                 out.insert(OperatorId(*idx), supports.outer.sub_root());
             }
         }
@@ -2862,11 +3006,20 @@ impl WorldNetwork {
         let _ = writeln!(s, "{:?}", self.dag.relation_outputs);
         let decides: BTreeMap<_, _> = self.decides.iter().collect();
         for (name, d) in decides {
-            let _ = writeln!(
-                s,
-                "{name}|{}|{}|{}|{:?}",
-                d.binder, d.source_relation, d.per_field, d.proposals
-            );
+            if d.per_fields.len() == 1 {
+                // Keep the alpha.8 fingerprint bytes for the legacy single-key ABI.
+                let _ = writeln!(
+                    s,
+                    "{name}|{}|{}|{}|{:?}",
+                    d.binder, d.source_relation, d.per_fields[0], d.proposals
+                );
+            } else {
+                let _ = writeln!(
+                    s,
+                    "{name}|{}|{}|{:?}|{:?}",
+                    d.binder, d.source_relation, d.per_fields, d.proposals
+                );
+            }
         }
         let _ = writeln!(s, "{:?}", self.functions);
         Digest::of(Domain::State, s.as_bytes())
@@ -2921,7 +3074,8 @@ impl WorldNetwork {
                     left: left_side.outer.sub_root(),
                     right: right_side.outer.sub_root(),
                 },
-                OperatorState::Distinct { supports, .. } => {
+                OperatorState::Distinct { supports, .. }
+                | OperatorState::UnionDistinct { supports, .. } => {
                     OperatorRoots::Distinct(supports.outer.sub_root())
                 }
                 OperatorState::GroupedCount {
@@ -2962,7 +3116,7 @@ impl WorldNetwork {
                 OperatorState::ParentCount { .. } => {
                     expect.insert(OperatorId(*idx), "parent-count");
                 }
-                OperatorState::Distinct { .. } => {
+                OperatorState::Distinct { .. } | OperatorState::UnionDistinct { .. } => {
                     expect.insert(OperatorId(*idx), "distinct");
                 }
                 OperatorState::GroupedCount { .. } => {
@@ -3043,7 +3197,13 @@ impl WorldNetwork {
                     right_side.outer = SMap::from_sub_root(*right);
                     right_side.hot = PMap::new();
                 }
-                (Some(OperatorState::Distinct { supports, .. }), OperatorRoots::Distinct(r)) => {
+                (
+                    Some(
+                        OperatorState::Distinct { supports, .. }
+                        | OperatorState::UnionDistinct { supports, .. },
+                    ),
+                    OperatorRoots::Distinct(r),
+                ) => {
                     supports.outer = SMap::from_sub_root(*r);
                     supports.hot = PMap::new();
                 }
@@ -3103,7 +3263,8 @@ impl WorldNetwork {
                     left_side.outer.page(None, 1, store)?;
                     right_side.outer.page(None, 1, store)?;
                 }
-                OperatorState::Distinct { supports, .. } => {
+                OperatorState::Distinct { supports, .. }
+                | OperatorState::UnionDistinct { supports, .. } => {
                     supports.outer.page(None, 1, store)?;
                 }
                 OperatorState::GroupedCount {
@@ -3262,6 +3423,10 @@ impl WorldNetwork {
                     input: *input,
                     supports: DistinctSupports::default(),
                 },
+                OperatorState::UnionDistinct { sources, .. } => OperatorState::UnionDistinct {
+                    sources: sources.clone(),
+                    supports: DistinctSupports::default(),
+                },
                 OperatorState::GroupedCount {
                     input,
                     group_keys,
@@ -3302,9 +3467,13 @@ impl WorldNetwork {
                         .unwrap_or(&program.root_module);
                     let (module, local) = name.rsplit_once("::").unwrap_or((owner, name));
                     let qname = brix_lower::module_graph::QualifiedName::new(module, local);
-                    let config = program.configs.get(&qname).ok_or_else(|| {
-                        WorldError::NetworkError(format!("unknown row schema {qname}"))
-                    })?;
+                    let config = program
+                        .configs
+                        .get(&qname)
+                        .or_else(|| program.available_configs.get(&qname))
+                        .ok_or_else(|| {
+                            WorldError::NetworkError(format!("unknown row schema {qname}"))
+                        })?;
                     match &config.body {
                         ast::ConfigBody::Record(fields) => {
                             *schema = ast::Ty::Record(fields.clone())
@@ -3430,26 +3599,36 @@ impl WorldNetwork {
             );
 
             if let Some(src) = source_relation {
-                let per_field = decl.per.clone().ok_or_else(|| {
-                    WorldError::NetworkError(format!(
+                let per_fields: Vec<String> = if !decl.per_fields.is_empty() {
+                    decl.per_fields.clone()
+                } else if let Some(per) = &decl.per {
+                    vec![per.clone()]
+                } else {
+                    return Err(WorldError::NetworkError(format!(
                         "decide '{qname}' resolved to relation '{src}' with no 'per' field \
                          (expected lower_relations to have refused this)"
-                    ))
-                })?;
+                    )));
+                };
                 let op_id = network.dag.relation_outputs.get(&src).ok_or_else(|| {
                     WorldError::NetworkError(format!(
                         "decide '{qname}' unknown source relation '{src}'"
                     ))
                 })?;
-                let per_type = op_schemas[op_id.0]
-                    .get(&format!("{}.{per_field}", decl.binder))
-                    .or_else(|| op_schemas[op_id.0].get(&per_field))
-                    .cloned()
-                    .ok_or_else(|| {
-                        WorldError::NetworkError(format!(
-                            "decide '{qname}' per field '{per_field}' has no resolved type"
-                        ))
-                    })?;
+                let mut per_types = Vec::with_capacity(per_fields.len());
+                for pf in &per_fields {
+                    let pt = op_schemas[op_id.0]
+                        .get(&format!("{}.{pf}", decl.binder))
+                        .or_else(|| op_schemas[op_id.0].get(pf))
+                        .cloned()
+                        .ok_or_else(|| {
+                            WorldError::NetworkError(format!(
+                                "decide '{qname}' per field '{pf}' has no resolved type"
+                            ))
+                        })?;
+                    per_types.push(pt);
+                }
+                let per_field = per_fields[0].clone();
+                let per_type = per_types[0].clone();
                 let bindings = derive_decide_binding_names(&op_schemas[op_id.0], &decl.binder);
                 let mut compiled_proposals = Vec::with_capacity(decl.proposals.len());
                 for prop in &decl.proposals {
@@ -3472,6 +3651,8 @@ impl WorldNetwork {
                     source_relation: src,
                     per_field,
                     per_type,
+                    per_fields,
+                    per_types,
                     proposals: decl.proposals.clone(),
                     compiled_proposals,
                 });
@@ -3625,13 +3806,14 @@ impl WorldNetwork {
                 continue;
             };
             for entity_id in entities {
-                let entity_value = Value::from_typed_bytes(entity_id.as_bytes(), &decide.per_type)?;
-                let key = WorldKey::new(entity_value.to_bytes());
+                let entity_values =
+                    super::decision_codec::decode_entity_id(&entity_id, &decide.per_types)?;
+                let key = winner_row_key(&entity_values);
                 if let Some(winner) = self.get_settlement(&name, &entity_id)? {
                     ops.push(WorldBatchOp::Upsert {
                         relation: name.clone(),
                         key,
-                        tuple: winner_row_tuple(&name, decide, &entity_value, &winner)?,
+                        tuple: winner_row_tuple(&name, decide, &entity_values, &winner)?,
                     });
                 } else {
                     ops.push(WorldBatchOp::Remove {
@@ -3666,9 +3848,9 @@ impl WorldNetwork {
                 continue;
             };
             let old = decode_settled_decision(entity, prior.as_bytes())?;
-            let entity_value = Value::from_typed_bytes(entity.as_bytes(), &block.per_type)?;
-            let key = WorldKey::new(entity_value.to_bytes());
-            let tuple = winner_row_tuple(decide, block, &entity_value, &old)?;
+            let entity_values = super::decision_codec::decode_entity_id(entity, &block.per_types)?;
+            let key = winner_row_key(&entity_values);
+            let tuple = winner_row_tuple(decide, block, &entity_values, &old)?;
             let scans = self
                 .relation_subscribers
                 .get(decide)
@@ -4487,7 +4669,8 @@ impl WorldNetwork {
                             }
                         }
                     }
-                    OperatorState::Distinct { supports, .. } => match item {
+                    OperatorState::Distinct { supports, .. }
+                    | OperatorState::UnionDistinct { supports, .. } => match item {
                         OperatorWorkItem::Delta(delta) => {
                             let is_ins = delta.is_insert();
                             let (tuple, deriv) = match delta {
@@ -4705,11 +4888,9 @@ impl WorldNetwork {
                                 if new_count == 0 {
                                     aggregates.remove(&gk, store)?;
                                 } else {
-                                    aggregates.set(
-                                        gk.clone(),
-                                        accum.to_value_list(projections),
-                                        store,
-                                    )?;
+                                    let encoded = accum.to_value_list(projections);
+                                    check_persistable_accumulator(&encoded)?;
+                                    aggregates.set(gk.clone(), encoded, store)?;
                                 }
                             }
                         }
@@ -4982,7 +5163,7 @@ impl WorldNetwork {
             }
 
             for (p_idx, propose) in decide.proposals.iter().enumerate() {
-                let entity_id = entity_id_for(&eval_tuple, &decide.binder, &decide.per_field)?;
+                let entity_id = entity_id_for(&eval_tuple, &decide.binder, &decide.per_fields)?;
                 touched_entities.insert((decide.name.clone(), entity_id.clone()));
 
                 if is_ins {
@@ -5143,7 +5324,13 @@ impl WorldNetwork {
         for (decide, entity) in touched_entities {
             let key = decision_key(&decide, &entity);
             let settlement = match staged_buckets.get(&FrontierKey::new(&decide, &entity)) {
-                Some(Some(bucket)) => settle(&entity, bucket),
+                Some(Some(bucket)) => settle(
+                    &entity,
+                    bucket,
+                    self.decides
+                        .get(&decide)
+                        .is_some_and(|block| block.per_types.len() > 1),
+                ),
                 Some(None) => None,
                 None => self.settlement_of(&decide, &entity)?,
             };
@@ -5275,12 +5462,38 @@ impl WorldNetwork {
         Ok(Some(records.into_iter().collect()))
     }
 
+    /// Retrieve all derived entries `(distinct_row_output_key, TupleRecord)` for a relation,
+    /// in deterministic `TupleRecord` order.
+    pub fn get_derived_entries(
+        &self,
+        relation: &str,
+    ) -> Result<Option<Vec<(WorldKey, TupleRecord)>>, WorldError> {
+        let _scope = self.state.trace_scope("query");
+        let Some(rel) = self.derived_relations.get(relation) else {
+            return Ok(None);
+        };
+        let mut by_record: BTreeMap<TupleRecord, WorldKey> = BTreeMap::new();
+        for tuple in self.derived_tuples(rel)? {
+            let key = distinct_row_output_key(&tuple);
+            by_record.insert(tuple.to_tuple_record(), key);
+        }
+        Ok(Some(
+            by_record
+                .into_iter()
+                .map(|(record, key)| (key, record))
+                .collect(),
+        ))
+    }
+
     /// The typed tuples of one derived relation.
     fn derived_tuples(&self, rel: &DerivedRel) -> Result<Vec<IntermediateTuple>, WorldError> {
         match rel {
             DerivedRel::Counted(supports) => supports.keys(&self.state),
             DerivedRel::DistinctOutput(op) => match self.operator_states.get(&op.0) {
-                Some(OperatorState::Distinct { supports, .. }) => supports.keys(&self.state),
+                Some(
+                    OperatorState::Distinct { supports, .. }
+                    | OperatorState::UnionDistinct { supports, .. },
+                ) => supports.keys(&self.state),
                 _ => Err(WorldError::NetworkError(format!(
                     "derived relation refers to operator {} which is not a Distinct",
                     op.0
@@ -5296,13 +5509,26 @@ impl WorldNetwork {
         entity_id: &str,
     ) -> Result<Option<BTreeMap<String, CandidateEntry>>, WorldError> {
         let _scope = self.state.trace_scope("query");
+        let norm_entity = self.normalize_entity_for(decide, entity_id);
         let Some(bucket) = self
             .candidate_frontier
-            .bucket(&FrontierKey::new(decide, entity_id), &self.state)?
+            .bucket(&FrontierKey::new(decide, &norm_entity), &self.state)?
         else {
             return Ok(None);
         };
-        Ok(Some(self.candidate_entries(decide, entity_id, &bucket)?))
+        Ok(Some(self.candidate_entries(
+            decide,
+            &norm_entity,
+            &bucket,
+        )?))
+    }
+
+    fn normalize_entity_for(&self, decide: &str, entity_id: &str) -> String {
+        if let Some(block) = self.decides.get(decide) {
+            super::decision_codec::normalize_entity_id(entity_id, &block.per_types)
+        } else {
+            super::decision_codec::normalize_untyped_entity_id(entity_id)
+        }
     }
 
     fn candidate_entries(
@@ -5353,10 +5579,19 @@ impl WorldNetwork {
         decide: &str,
         entity_id: &str,
     ) -> Result<Option<SettledDecision>, WorldError> {
+        let norm_entity = self.normalize_entity_for(decide, entity_id);
         Ok(self
             .candidate_frontier
-            .bucket(&FrontierKey::new(decide, entity_id), &self.state)?
-            .and_then(|bucket| settle(entity_id, &bucket)))
+            .bucket(&FrontierKey::new(decide, &norm_entity), &self.state)?
+            .and_then(|bucket| {
+                settle(
+                    &norm_entity,
+                    &bucket,
+                    self.decides
+                        .get(decide)
+                        .is_some_and(|block| block.per_types.len() > 1),
+                )
+            }))
     }
 
     /// Settle decisions across all entities in all decide blocks.
@@ -5369,7 +5604,13 @@ impl WorldNetwork {
         // the settlements themselves rather than every decoded bucket besides.
         self.candidate_frontier
             .for_each_bucket(&self.state, |key, bucket| {
-                if let Some(decision) = settle(&key.entity, &bucket) {
+                if let Some(decision) = settle(
+                    &key.entity,
+                    &bucket,
+                    self.decides
+                        .get(&key.decide)
+                        .is_some_and(|block| block.per_types.len() > 1),
+                ) {
                     out.entry(key.decide)
                         .or_default()
                         .insert(key.entity, decision);
@@ -5402,7 +5643,13 @@ impl WorldNetwork {
         let mut out = Vec::with_capacity(rows.len());
         for (key, bucket) in rows {
             verify_bucket(&key, &bucket)?;
-            if let Some(decision) = settle(&key.entity, &bucket) {
+            if let Some(decision) = settle(
+                &key.entity,
+                &bucket,
+                self.decides
+                    .get(&key.decide)
+                    .is_some_and(|block| block.per_types.len() > 1),
+            ) {
                 out.push((key.decide, key.entity, decision));
             }
         }
@@ -5414,7 +5661,9 @@ impl WorldNetwork {
         let _scope = self.state.trace_scope("query");
         let mut distinct_supports = BTreeMap::new();
         for (idx, state) in self.operator_states.iter() {
-            if let OperatorState::Distinct { supports, .. } = state {
+            if let OperatorState::Distinct { supports, .. }
+            | OperatorState::UnionDistinct { supports, .. } = state
+            {
                 let mut map = BTreeMap::new();
                 for (it, items) in supports.entries(&self.state)? {
                     map.insert(it.to_tuple_record(), self.expand_supports(&items)?);
@@ -5440,7 +5689,13 @@ impl WorldNetwork {
         > = BTreeMap::new();
         let mut settlements: BTreeMap<String, BTreeMap<String, SettledDecision>> = BTreeMap::new();
         for (key, bucket) in self.candidate_frontier.all_buckets(&self.state)? {
-            if let Some(decision) = settle(&key.entity, &bucket) {
+            if let Some(decision) = settle(
+                &key.entity,
+                &bucket,
+                self.decides
+                    .get(&key.decide)
+                    .is_some_and(|block| block.per_types.len() > 1),
+            ) {
                 settlements
                     .entry(key.decide.clone())
                     .or_default()
@@ -5550,9 +5805,14 @@ impl WorldNetwork {
         match deriv {
             DerivationId::Base { relation, key } => {
                 if let Some(decide) = self.decides.get(relation) {
-                    let entity_id = Value::from_typed_bytes(key.as_bytes(), &decide.per_type)
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|_| {
+                    let entity_id = std::str::from_utf8(key.as_bytes())
+                        .ok()
+                        .and_then(|s| {
+                            super::decision_codec::decode_entity_id(s, &decide.per_types)
+                                .ok()
+                                .map(|vals| super::decision_codec::encode_entity_id(&vals))
+                        })
+                        .unwrap_or_else(|| {
                             std::str::from_utf8(key.as_bytes())
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|_| key.to_hex())
@@ -5586,8 +5846,10 @@ impl WorldNetwork {
                 self.collect_base_facts_for_derivation(right, out)?;
             }
             DerivationId::Distinct { op, tuple_key } => {
-                if let Some(OperatorState::Distinct { supports, .. }) =
-                    self.operator_states.get(&op.0)
+                if let Some(
+                    OperatorState::Distinct { supports, .. }
+                    | OperatorState::UnionDistinct { supports, .. },
+                ) = self.operator_states.get(&op.0)
                 {
                     let tuple = IntermediateTuple::state_from_bytes(tuple_key)
                         .map_err(|e| WorldError::from(StateError::from(e)))?;
@@ -5610,9 +5872,14 @@ impl WorldNetwork {
         match deriv {
             DerivationId::Base { relation, key } => {
                 if let Some(decide) = self.decides.get(relation) {
-                    let entity_id = Value::from_typed_bytes(key.as_bytes(), &decide.per_type)
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|_| {
+                    let entity_id = std::str::from_utf8(key.as_bytes())
+                        .ok()
+                        .and_then(|s| {
+                            super::decision_codec::decode_entity_id(s, &decide.per_types)
+                                .ok()
+                                .map(|vals| super::decision_codec::encode_entity_id(&vals))
+                        })
+                        .unwrap_or_else(|| {
                             std::str::from_utf8(key.as_bytes())
                                 .map(|s| s.to_string())
                                 .unwrap_or_else(|_| key.to_hex())
@@ -5623,6 +5890,7 @@ impl WorldNetwork {
                             entity_id: entity_id.clone(),
                             candidate: settlement.candidate_name.clone(),
                             revision: self.current_revision,
+                            is_composite: decide.per_types.len() > 1,
                         });
                         if let Some(bucket) = self
                             .candidate_frontier
@@ -5650,8 +5918,10 @@ impl WorldNetwork {
                 self.collect_upstream_settlements_for_derivation(right, out)?;
             }
             DerivationId::Distinct { op, tuple_key } => {
-                if let Some(OperatorState::Distinct { supports, .. }) =
-                    self.operator_states.get(&op.0)
+                if let Some(
+                    OperatorState::Distinct { supports, .. }
+                    | OperatorState::UnionDistinct { supports, .. },
+                ) = self.operator_states.get(&op.0)
                 {
                     let tuple = IntermediateTuple::state_from_bytes(tuple_key)
                         .map_err(|e| WorldError::from(StateError::from(e)))?;
@@ -5686,6 +5956,8 @@ impl WorldNetwork {
         entity_id: &str,
     ) -> Result<Option<DecisionExplanation>, WorldError> {
         let _scope = self.state.trace_scope("query");
+        let norm_entity = self.normalize_entity_for(decide_name, entity_id);
+        let entity_id = norm_entity.as_str();
         let Some(bucket) = self
             .candidate_frontier
             .bucket(&FrontierKey::new(decide_name, entity_id), &self.state)?
@@ -5693,7 +5965,11 @@ impl WorldNetwork {
             return Ok(None);
         };
 
-        let settlement = settle(entity_id, &bucket);
+        let is_composite = self
+            .decides
+            .get(decide_name)
+            .is_some_and(|block| block.per_types.len() > 1);
+        let settlement = settle(entity_id, &bucket, is_composite);
         let winning_name = settlement.as_ref().map(|s| &s.candidate_name);
 
         let mut candidates = Vec::new();
@@ -5750,6 +6026,7 @@ impl WorldNetwork {
             candidates,
             contributing_facts: contributing_base.into_iter().collect(),
             upstream_settlements: upstream_settlements.into_iter().collect(),
+            is_composite,
         }))
     }
 }
@@ -5761,10 +6038,18 @@ fn corrupt_derivation() -> WorldError {
     .into()
 }
 
+fn winner_row_key(entity_values: &[Value]) -> WorldKey {
+    if entity_values.len() == 1 {
+        WorldKey::new(entity_values[0].to_bytes())
+    } else {
+        WorldKey::new(super::decision_codec::encode_entity_id(entity_values).into_bytes())
+    }
+}
+
 fn winner_row_tuple(
     name: &str,
     decide: &DecideBlock,
-    entity_value: &Value,
+    entity_values: &[Value],
     winner: &SettledDecision,
 ) -> Result<WorldTuple, WorldError> {
     let priority = i64::try_from(winner.priority).map_err(|_| {
@@ -5773,7 +6058,9 @@ fn winner_row_tuple(
         ))
     })?;
     let mut row = TupleRecord::new();
-    row.set(&decide.per_field, entity_value.to_bytes());
+    for (per_field, entity_val) in decide.per_fields.iter().zip(entity_values.iter()) {
+        row.set(per_field, entity_val.to_bytes());
+    }
     row.set(
         "candidate",
         Value::Str(winner.candidate_name.clone()).to_bytes(),
@@ -5802,6 +6089,9 @@ fn has_pending_ancestor(
             pending.push(*left);
             pending.push(*right);
         }
+        OperatorNode::UnionDistinct { sources } => {
+            pending.extend(sources.iter().copied());
+        }
         OperatorNode::Scan { .. } | OperatorNode::DecisionRows { .. } => return false,
     }
     let mut visited = BTreeSet::new();
@@ -5824,6 +6114,9 @@ fn has_pending_ancestor(
             | OperatorNode::ParentCount { left, right, .. } => {
                 pending.push(*left);
                 pending.push(*right);
+            }
+            OperatorNode::UnionDistinct { sources } => {
+                pending.extend(sources.iter().copied());
             }
             OperatorNode::Scan { .. } | OperatorNode::DecisionRows { .. } => {}
         }
@@ -5902,6 +6195,53 @@ fn build_grouped_tuple(
     Ok(tuple)
 }
 
+/// Refuse an accumulator the state decoder would later reject, before it is written. The
+/// reader's bounds (depth, child width, cumulative nodes) and the writer's must agree, or a
+/// batch could publish state that no later process can open.
+fn check_persistable_accumulator(list: &ValueList) -> Result<(), WorldError> {
+    use brix_lower::input::{
+        MAX_COLLECTION_ELEMENTS, MAX_INPUT_CONTAINER_WIDTH, MAX_INPUT_VALUE_DEPTH,
+        MAX_WORLD_VALUE_NODES,
+    };
+    fn walk(v: &Value, depth: usize, nodes: &mut usize) -> Result<(), WorldError> {
+        let over = |what: &str| {
+            WorldError::NetworkError(format!(
+                "grouped accumulator exceeds the persistable state bound ({what})"
+            ))
+        };
+        if depth >= MAX_INPUT_VALUE_DEPTH {
+            return Err(over("depth"));
+        }
+        *nodes += 1;
+        if *nodes > MAX_WORLD_VALUE_NODES {
+            return Err(over("nodes"));
+        }
+        match v {
+            Value::List(items) => {
+                if items.len() > MAX_COLLECTION_ELEMENTS {
+                    return Err(over("list width"));
+                }
+                items.iter().try_for_each(|i| walk(i, depth + 1, nodes))
+            }
+            Value::Record { fields, .. } => {
+                if fields.len() > MAX_INPUT_CONTAINER_WIDTH {
+                    return Err(over("record width"));
+                }
+                fields.values().try_for_each(|i| walk(i, depth + 1, nodes))
+            }
+            Value::Variant { args, .. } => {
+                if args.len() > MAX_INPUT_CONTAINER_WIDTH {
+                    return Err(over("variant width"));
+                }
+                args.iter().try_for_each(|i| walk(i, depth + 1, nodes))
+            }
+            _ => Ok(()),
+        }
+    }
+    // The stored accumulator is decoded value by value, each with a fresh node budget.
+    list.0.iter().try_for_each(|v| walk(v, 0, &mut 0))
+}
+
 fn charge_aggregate_tree_work(
     op_id: OperatorId,
     work: u64,
@@ -5970,16 +6310,18 @@ fn merge_stage_report(into: &mut NetworkDeltaReport, next: NetworkDeltaReport) {
 fn entity_id_for(
     tuple: &IntermediateTuple,
     binder: &str,
-    per_field: &str,
+    per_fields: &[String],
 ) -> Result<String, WorldError> {
-    tuple
-        .get_qualified(binder, per_field)
-        .map(|v| v.to_string())
-        .ok_or_else(|| {
+    let mut values = Vec::with_capacity(per_fields.len());
+    for per_field in per_fields {
+        let val = tuple.get_qualified(binder, per_field).ok_or_else(|| {
             WorldError::NetworkError(format!(
                 "decide entity field '{per_field}' missing from bound row (binder '{binder}')"
             ))
-        })
+        })?;
+        values.push(val.clone());
+    }
+    Ok(super::decision_codec::encode_entity_id(&values))
 }
 
 /// Evaluate a base row into the typed intermediate tuple the Scan operator emits.
