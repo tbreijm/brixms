@@ -778,6 +778,32 @@ pub fn lower_relations(program: &LinkedProgram) -> Result<RelationDag, Relationa
                 };
                 let source_op = dag.relation_outputs[&source_rel];
                 let source_fields = decision_field_schemas(&dag, program)[source_op.0].clone();
+                let mut decide_types = source_fields.clone();
+                let binder_fields = source_fields
+                    .iter()
+                    .filter(|(name, _)| !name.contains('.'))
+                    .map(|(name, ty)| ast::FieldDecl {
+                        name: name.clone(),
+                        ty: ty.clone(),
+                    })
+                    .collect();
+                decide_types.insert(decide.binder.clone(), ast::Ty::Record(binder_fields));
+                for proposal in &decide.proposals {
+                    crate::world_type::validate_string_ops(
+                        &proposal.guard,
+                        &decide_types,
+                        owner_module(&rel_name),
+                        program,
+                    )
+                    .map_err(RelationalLowerError::UnsupportedExpression)?;
+                    crate::world_type::validate_string_ops(
+                        &proposal.value,
+                        &decide_types,
+                        owner_module(&rel_name),
+                        program,
+                    )
+                    .map_err(RelationalLowerError::UnsupportedExpression)?;
+                }
                 let per_fields: Vec<String> = if !decide.per_fields.is_empty() {
                     decide.per_fields.clone()
                 } else if let Some(per) = &decide.per {
@@ -1370,10 +1396,13 @@ fn lower_derived_query(
         qualify_query_expr(key, owner, program)?;
     }
     let schemas = decision_field_schemas(dag, program);
+    let query_types = query_binding_types(&query.from, owner, all_relations, dag, program)?;
     for expression in std::iter::once(&query.select)
         .chain(query.where_clause.iter())
         .chain(query.group_by.iter())
     {
+        crate::world_type::validate_string_ops(expression, &query_types, owner, program)
+            .map_err(RelationalLowerError::UnsupportedExpression)?;
         validate_binding_fields(
             expression,
             &query.from,
@@ -1387,6 +1416,9 @@ fn lower_derived_query(
     if let Some(anti) = &query.not_exists {
         let mut bindings = query.from.clone();
         bindings.push(anti.binding.clone());
+        let anti_types = query_binding_types(&bindings, owner, all_relations, dag, program)?;
+        crate::world_type::validate_string_ops(&anti.predicate, &anti_types, owner, program)
+            .map_err(RelationalLowerError::UnsupportedExpression)?;
         validate_binding_fields(
             &anti.predicate,
             &bindings,
@@ -2070,6 +2102,47 @@ pub(crate) fn resolve_field_chain_type(
         }
     }
     Ok(current_ty)
+}
+
+fn query_binding_types(
+    bindings: &[ast::RelBinding],
+    owner: &str,
+    relations: &BTreeMap<String, RelationSource>,
+    dag: &RelationDag,
+    program: &LinkedProgram,
+) -> Result<BTreeMap<String, ast::Ty>, RelationalLowerError> {
+    let mut fields = BTreeMap::new();
+    let mut unqualified = BTreeMap::<String, Option<ast::Ty>>::new();
+    for binding in bindings {
+        let relation = resolve_binding_relation(&binding.relation, owner, relations)?;
+        let op = dag
+            .relation_outputs
+            .get(&relation)
+            .ok_or_else(|| RelationalLowerError::UnknownRelation(relation.clone()))?;
+        let schemas = decision_field_schemas(dag, program);
+        let schema = &schemas[op.0];
+        let owner = owner_module(&relation);
+        let mut record_fields = Vec::new();
+        for (field, ty) in schema {
+            let ty = crate::world_type::qualify_ty(ty, owner, program);
+            fields.insert(format!("{}.{}", binding.var, field), ty.clone());
+            record_fields.push(ast::FieldDecl {
+                name: field.clone(),
+                ty: ty.clone(),
+            });
+            unqualified
+                .entry(field.clone())
+                .and_modify(|existing| *existing = None)
+                .or_insert(Some(ty));
+        }
+        fields.insert(binding.var.clone(), ast::Ty::Record(record_fields));
+    }
+    fields.extend(
+        unqualified
+            .into_iter()
+            .filter_map(|(name, ty)| ty.map(|ty| (name, ty))),
+    );
+    Ok(fields)
 }
 
 fn validate_binding_fields(
