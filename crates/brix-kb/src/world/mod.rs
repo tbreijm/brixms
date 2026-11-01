@@ -28,6 +28,7 @@ pub mod revision;
 pub mod scoped_query;
 pub mod session;
 pub mod settlement_checkpoint;
+pub mod stable_child_key;
 pub mod staging;
 pub mod state_cache;
 pub mod state_codec;
@@ -73,4 +74,5 @@ pub use session::{
     QueryPage, RevisionReceipt, SecondaryIndexCursor, SecondaryIndexPage, WorldSession,
     WorldSnapshot, EXEC_PROFILE_SCHEMA,
 };
+pub use stable_child_key::CollectOrdering;
 pub use types::{WorldCursor, WorldKey, WorldTuple};

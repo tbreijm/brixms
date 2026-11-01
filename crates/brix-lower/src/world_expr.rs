@@ -40,6 +40,10 @@ fn normalize_world_and(expr: &ast::Expr) -> ast::Expr {
                 .collect(),
         },
         Expr::Field(base, field) => Expr::Field(Box::new(normalize_world_and(base)), field.clone()),
+        Expr::CollectTake { collection, limit } => Expr::CollectTake {
+            collection: Box::new(normalize_world_and(collection)),
+            limit: Box::new(normalize_world_and(limit)),
+        },
         Expr::Call { func, args } => Expr::Call {
             func: func.clone(),
             args: args.iter().map(normalize_world_and).collect(),

@@ -429,6 +429,13 @@ pub enum Expr {
     },
     /// Field / role projection: `e.field`.
     Field(Box<Expr>, String),
+    /// Bounded grouped collection projection: `collect(value[, sort]).take(n)`.
+    /// This is distinct from the legacy `collect(...)` call so its truncation
+    /// semantics and versioned identity remain explicit.
+    CollectTake {
+        collection: Box<Expr>,
+        limit: Box<Expr>,
+    },
     /// Application: `f(args)` — a call, a generator/rule invocation, or a
     /// constructor application (`Succ(k)`); disambiguated at lowering.
     Call { func: String, args: Vec<Expr> },

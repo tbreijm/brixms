@@ -17,6 +17,10 @@
 use super::compact_deriv::{leaf_counts, CompactDeriv, DRoot, Derivation, Leaf};
 use super::network_state::{NetworkStateHeader, OperatorRoots, ValidityKey};
 use super::persistent::{PMap, PSet};
+use super::stable_child_key::{
+    compare_stable_keys, compare_typed_values, stable_child_key_value, validate_stable_child_key,
+    validate_stable_identity_path, CollectOrdering,
+};
 use super::state_codec::{
     CandKey, CandidateHead, CandidateRec, FrontierBucket, FrontierKey, JoinEntry, StateCodec,
     StateCodecError, SubRoot, SupportItem, SupportRef, ValueList,
@@ -152,6 +156,67 @@ fn derivation_provenance_key(leaves: &[Leaf]) -> Value {
         }
     }
     Value::Str(parts.join(":"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn typed_declared_source_key(
+    dag: &RelationDag,
+    decides: &PMap<String, DecideBlock>,
+    schemas: &BTreeMap<String, brix_lower::l3_v2::L3Schema>,
+    batch_rows: &BTreeMap<(String, WorldKey), WorldTuple>,
+    resident_rows: &PMap<String, PMap<WorldKey, WorldTuple>>,
+    base: Option<&BaseLookup<'_>>,
+    relation: &str,
+    key: &WorldKey,
+) -> Result<Vec<Value>, String> {
+    let (key_fields, schema) = dag
+        .nodes
+        .iter()
+        .find_map(|node| match node {
+            OperatorNode::Scan {
+                relation: scan_relation,
+                key_fields,
+                schema,
+            } if scan_relation == relation => Some((key_fields.clone(), schema.clone())),
+            OperatorNode::DecisionRows { decide, schema } if decide == relation => {
+                let key_fields = decides.get(decide)?.per_fields.clone();
+                Some((key_fields, schema.clone()))
+            }
+            _ => None,
+        })
+        .ok_or_else(|| format!("relation '{relation}' has no declared source key schema"))?;
+    if key_fields.is_empty() {
+        return Err(format!("relation '{relation}' has no declared child key"));
+    }
+    let tuple = batch_rows
+        .get(&(relation.to_string(), key.clone()))
+        .cloned()
+        .or_else(|| {
+            resident_rows
+                .get(relation)
+                .and_then(|rows| rows.get(key))
+                .cloned()
+        });
+    let tuple = match tuple {
+        Some(tuple) => tuple,
+        None => base
+            .map(|lookup| lookup(relation, key))
+            .transpose()
+            .map_err(|err| format!("cannot load child source '{relation}': {err}"))?
+            .flatten()
+            .ok_or_else(|| format!("missing source tuple for child key in '{relation}'"))?,
+    };
+    let intermediate = scan_intermediate(relation, Some(key), &schema, &tuple, schemas)
+        .map_err(|err| format!("cannot decode child source '{relation}': {err}"))?;
+    key_fields
+        .iter()
+        .map(|field| {
+            intermediate
+                .get(field)
+                .cloned()
+                .ok_or_else(|| format!("missing declared child key field '{relation}.{field}'"))
+        })
+        .collect()
 }
 
 /// A derivation identifier uniquely tracking justifications for TMS truth maintenance.
@@ -1583,6 +1648,7 @@ impl GroupAccumulator {
         order_values: &[Option<Value>],
         child_key: Value,
         child_id: Digest,
+        collect_ordering: CollectOrdering,
         group: &ValueList,
         index: &mut AggregateIndex,
         store: &StateStore,
@@ -1590,7 +1656,15 @@ impl GroupAccumulator {
         let mut tree_work = 0u64;
         for (idx, ((_, projection), value)) in projections.iter().zip(aggregate_values).enumerate()
         {
-            if let GroupProjection::Collect { limit, .. } = projection {
+            if let GroupProjection::Collect { limit, .. }
+            | GroupProjection::CollectTake { limit, .. } = projection
+            {
+                let bounded_output = matches!(projection, GroupProjection::CollectTake { .. });
+                if bounded_output && collect_ordering != CollectOrdering::TypedKeyV1 {
+                    return Err(WorldError::NetworkError(
+                        "bounded collect requires typed collect ordering profile".into(),
+                    ));
+                }
                 if is_ins {
                     let item_val = value.clone().unwrap_or(Value::Null);
                     let order_val = order_values
@@ -1598,18 +1672,44 @@ impl GroupAccumulator {
                         .and_then(|v| v.clone())
                         .unwrap_or_else(|| item_val.clone());
                     let key_val = child_key.clone();
+                    if collect_ordering == CollectOrdering::TypedKeyV1 {
+                        validate_stable_child_key(&key_val).map_err(WorldError::NetworkError)?;
+                    }
                     self.collected[idx].retain(|(_, _, id, _)| id != &child_id);
-                    if self.collected[idx].len() >= *limit {
+                    let support_limit = if bounded_output {
+                        brix_lower::input::MAX_COLLECTION_ELEMENTS
+                    } else {
+                        *limit
+                    };
+                    if self.collected[idx].len() >= support_limit {
                         return Err(WorldError::NetworkError(format!(
-                            "grouped collect exceeded maximum cardinality limit of {limit}"
+                            "grouped collect exceeded maximum {} limit of {support_limit}",
+                            if bounded_output {
+                                "support cardinality"
+                            } else {
+                                "cardinality"
+                            }
                         )));
                     }
+                    if collect_ordering == CollectOrdering::TypedKeyV1
+                        && self.collected[idx]
+                            .iter()
+                            .any(|(_, prior_key, _, _)| prior_key == &key_val)
+                    {
+                        return Err(WorldError::NetworkError(
+                            "typed collect child key is not unique within its group".into(),
+                        ));
+                    }
                     self.collected[idx].push((order_val, key_val, child_id, item_val));
-                    self.collected[idx].sort_by(|a, b| {
-                        a.0.partial_cmp(&b.0)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                            .then_with(|| a.1.cmp(&b.1))
-                            .then_with(|| a.2.cmp(&b.2))
+                    self.collected[idx].sort_by(|a, b| match collect_ordering {
+                        CollectOrdering::LegacyV1 => {
+                            a.0.partial_cmp(&b.0)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then_with(|| a.1.cmp(&b.1))
+                                .then_with(|| a.2.cmp(&b.2))
+                        }
+                        CollectOrdering::TypedKeyV1 => compare_typed_values(&a.0, &b.0)
+                            .then_with(|| compare_stable_keys(&a.1, &b.1)),
                     });
                 } else {
                     self.collected[idx].retain(|(_, _, id, _)| id != &child_id);
@@ -1675,7 +1775,8 @@ impl GroupAccumulator {
                 }
                 GroupProjection::Key(_)
                 | GroupProjection::Count
-                | GroupProjection::Collect { .. } => {}
+                | GroupProjection::Collect { .. }
+                | GroupProjection::CollectTake { .. } => {}
             }
         }
         Ok(tree_work)
@@ -1703,7 +1804,7 @@ impl GroupAccumulator {
                 GroupProjection::Min(_) | GroupProjection::Max(_) => {
                     values.push(encode_extremum_root(self.extrema_roots[idx].as_ref()))
                 }
-                GroupProjection::Collect { .. } => {
+                GroupProjection::Collect { .. } | GroupProjection::CollectTake { .. } => {
                     let items = self.collected[idx]
                         .iter()
                         .map(|(order, key_val, id, item)| Value::Record {
@@ -1726,6 +1827,14 @@ impl GroupAccumulator {
     pub fn from_value_list(
         list: &ValueList,
         projections: &[(String, GroupProjection)],
+    ) -> Result<Self, WorldError> {
+        Self::from_value_list_for_ordering(list, projections, CollectOrdering::LegacyV1)
+    }
+
+    fn from_value_list_for_ordering(
+        list: &ValueList,
+        projections: &[(String, GroupProjection)],
+        collect_ordering: CollectOrdering,
     ) -> Result<Self, WorldError> {
         if list.0.len() != projections.len() {
             return Err(WorldError::NetworkError(
@@ -1779,25 +1888,71 @@ impl GroupAccumulator {
                 GroupProjection::Min(_) | GroupProjection::Max(_) => {
                     accum.extrema_roots[idx] = decode_extremum_root(val)?;
                 }
-                GroupProjection::Collect { .. } => {
+                GroupProjection::Collect { .. } | GroupProjection::CollectTake { .. } => {
                     let Value::List(items) = val else {
                         return Err(WorldError::NetworkError(
                             "expected List for collected accumulator".into(),
                         ));
                     };
+                    let support_limit = match proj {
+                        GroupProjection::Collect { limit, .. } => *limit,
+                        GroupProjection::CollectTake { .. } => {
+                            brix_lower::input::MAX_COLLECTION_ELEMENTS
+                        }
+                        _ => unreachable!(),
+                    };
+                    if items.len() > support_limit {
+                        return Err(WorldError::NetworkError(format!(
+                            "collected accumulator exceeds maximum support cardinality {support_limit}"
+                        )));
+                    }
                     let mut entries = Vec::with_capacity(items.len());
+                    let mut ids = BTreeSet::new();
+                    let mut typed_keys = BTreeSet::new();
                     for item in items {
-                        let Value::Record { fields, .. } = item else {
+                        let Value::Record { nominal, fields } = item else {
                             return Err(WorldError::NetworkError(
                                 "expected Record for collected item".into(),
                             ));
                         };
-                        let order = fields.get("order").cloned().unwrap_or(Value::Null);
-                        let key_val = fields
-                            .get("key")
-                            .cloned()
-                            .or_else(|| fields.get("tuple").cloned())
-                            .unwrap_or(Value::Null);
+                        let typed = collect_ordering == CollectOrdering::TypedKeyV1;
+                        if typed
+                            && (nominal != "world::CollectedItem"
+                                || fields.len() != 4
+                                || ["id", "item", "key", "order"]
+                                    .iter()
+                                    .any(|field| !fields.contains_key(*field)))
+                        {
+                            return Err(WorldError::NetworkError(
+                                "malformed typed collected item fields".into(),
+                            ));
+                        }
+                        let order = if typed {
+                            fields.get("order").cloned().ok_or_else(|| {
+                                WorldError::NetworkError(
+                                    "typed collected item has no order value".into(),
+                                )
+                            })?
+                        } else {
+                            fields.get("order").cloned().unwrap_or(Value::Null)
+                        };
+                        let key_val = if typed {
+                            fields.get("key").cloned().ok_or_else(|| {
+                                WorldError::NetworkError(
+                                    "typed collected item has no child key".into(),
+                                )
+                            })?
+                        } else {
+                            fields
+                                .get("key")
+                                .cloned()
+                                .or_else(|| fields.get("tuple").cloned())
+                                .unwrap_or(Value::Null)
+                        };
+                        if typed {
+                            validate_stable_child_key(&key_val)
+                                .map_err(WorldError::NetworkError)?;
+                        }
                         let id_str = match fields.get("id") {
                             Some(Value::Str(s)) => s,
                             _ => {
@@ -1814,11 +1969,48 @@ impl GroupAccumulator {
                                 "collected item id must be 32 bytes".into(),
                             ));
                         }
+                        if typed && key.to_hex() != *id_str {
+                            return Err(WorldError::NetworkError(
+                                "typed collected item id is not canonical lowercase hex".into(),
+                            ));
+                        }
                         let mut arr = [0u8; 32];
                         arr.copy_from_slice(&key.0);
                         let id = Digest::from_bytes(arr);
-                        let item = fields.get("item").cloned().unwrap_or(Value::Null);
+                        let item = if typed {
+                            fields.get("item").cloned().ok_or_else(|| {
+                                WorldError::NetworkError(
+                                    "typed collected item has no item value".into(),
+                                )
+                            })?
+                        } else {
+                            fields.get("item").cloned().unwrap_or(Value::Null)
+                        };
+                        if typed {
+                            if !ids.insert(id) {
+                                return Err(WorldError::NetworkError(
+                                    "duplicate typed collected item id".into(),
+                                ));
+                            }
+                            if !typed_keys.insert(key_val.clone()) {
+                                return Err(WorldError::NetworkError(
+                                    "duplicate typed collect child key".into(),
+                                ));
+                            }
+                        }
                         entries.push((order, key_val, id, item));
+                    }
+                    if collect_ordering == CollectOrdering::TypedKeyV1 {
+                        for pair in entries.windows(2) {
+                            if compare_typed_values(&pair[0].0, &pair[1].0)
+                                .then_with(|| compare_stable_keys(&pair[0].1, &pair[1].1))
+                                != std::cmp::Ordering::Less
+                            {
+                                return Err(WorldError::NetworkError(
+                                    "typed collect accumulator is not strictly ordered".into(),
+                                ));
+                            }
+                        }
                     }
                     accum.collected[idx] = entries;
                 }
@@ -2420,6 +2612,8 @@ pub struct WorldNetwork {
     pub program_env: Option<Arc<CompiledProgramEnv>>,
     pub current_revision: u64,
     pub scheduling_quantum: usize,
+    /// Collect tie ordering pinned by the world's execution profile.
+    collect_ordering: CollectOrdering,
     /// Node store backing persisted operator state (join and support indexes).
     state: StateStore,
     /// Leaves each operator's derivations carry (index = operator id).
@@ -2693,6 +2887,7 @@ impl WorldNetwork {
             program_env: None,
             current_revision: 0,
             scheduling_quantum: DEFAULT_SCHEDULING_QUANTUM,
+            collect_ordering: CollectOrdering::LegacyV1,
             state: StateStore::memory(DEFAULT_NODE_CACHE_BYTES),
             leaf_counts: Arc::new(counts),
             base_resident: true,
@@ -3004,6 +3199,18 @@ impl WorldNetwork {
         let mut s = String::from("brix.world.net-fingerprint@1\n");
         let _ = writeln!(s, "{:?}", self.dag.nodes);
         let _ = writeln!(s, "{:?}", self.dag.relation_outputs);
+        let has_collect = self.dag.nodes.iter().any(|node| {
+            matches!(node, OperatorNode::GroupedCount { projections, .. }
+            if projections.iter().any(|(_, projection)| matches!(
+                projection,
+                GroupProjection::Collect { .. } | GroupProjection::CollectTake { .. }
+            )))
+        });
+        if has_collect && self.collect_ordering == CollectOrdering::TypedKeyV1 {
+            // Commit the selected comparator semantics without changing legacy alpha.8
+            // fingerprints or fingerprints for networks that contain no collect projection.
+            let _ = writeln!(s, "brix.world.collect-ordering.typed-key@1");
+        }
         let decides: BTreeMap<_, _> = self.decides.iter().collect();
         for (name, d) in decides {
             if d.per_fields.len() == 1 {
@@ -3292,6 +3499,11 @@ impl WorldNetwork {
         self
     }
 
+    /// Collect ordering pinned by the world's execution profile.
+    pub fn collect_ordering(&self) -> CollectOrdering {
+        self.collect_ordering
+    }
+
     /// Set scheduling quantum in place.
     pub fn set_scheduling_quantum(&mut self, quantum: usize) {
         self.scheduling_quantum = quantum.max(1);
@@ -3300,6 +3512,15 @@ impl WorldNetwork {
     /// Attach decide blocks to this network.
     pub fn with_decides(mut self, decides: Vec<DecideBlock>) -> Self {
         for d in decides {
+            for (idx, node) in self.dag.nodes.iter().enumerate() {
+                if matches!(node, OperatorNode::DecisionRows { decide, .. } if decide == &d.name) {
+                    if let Some(OperatorState::Scan { key_fields, .. }) =
+                        self.operator_states.get_mut(&idx)
+                    {
+                        *key_fields = d.per_fields.clone();
+                    }
+                }
+            }
             self.decision_subscribers
                 .entry(d.source_relation.clone())
                 .or_default()
@@ -3454,6 +3675,16 @@ impl WorldNetwork {
 
     /// Construct a network directly from a linked program.
     pub fn from_program(program: &LinkedProgram) -> Result<Self, WorldError> {
+        Self::from_program_with_collect_ordering(program, CollectOrdering::LegacyV1)
+    }
+
+    /// Construct a network using the collect ordering selected by the world's recorded
+    /// execution profile. Existing worlds use `LegacyV1`; new alpha.9 worlds use
+    /// `TypedKeyV1`.
+    pub fn from_program_with_collect_ordering(
+        program: &LinkedProgram,
+        ordering: CollectOrdering,
+    ) -> Result<Self, WorldError> {
         let mut dag = lower_relations(program)?;
         for node in &mut dag.nodes {
             if let OperatorNode::Scan {
@@ -3492,7 +3723,35 @@ impl WorldNetwork {
             CompiledProgramEnv::from_linked_program(program).map_err(WorldError::NetworkError)?;
         let op_schemas = decision_field_schemas(&dag, program);
 
+        for node in &dag.nodes {
+            if let OperatorNode::GroupedCount {
+                input, projections, ..
+            } = node
+            {
+                let has_collect = projections.iter().any(|(_, projection)| {
+                    matches!(
+                        projection,
+                        GroupProjection::Collect { .. } | GroupProjection::CollectTake { .. }
+                    )
+                });
+                if has_collect && ordering == CollectOrdering::TypedKeyV1 {
+                    validate_stable_identity_path(&dag, *input)
+                        .map_err(WorldError::NetworkError)?;
+                }
+                if ordering == CollectOrdering::LegacyV1
+                    && projections.iter().any(|(_, projection)| {
+                        matches!(projection, GroupProjection::CollectTake { .. })
+                    })
+                {
+                    return Err(WorldError::NetworkError(
+                        "bounded collect requires typed collect ordering profile".into(),
+                    ));
+                }
+            }
+        }
+
         let mut network = Self::new(dag);
+        network.collect_ordering = ordering;
         for (idx, node) in network.dag.nodes.iter().enumerate() {
             match node {
                 OperatorNode::Filter { input, predicate } => {
@@ -3546,7 +3805,8 @@ impl WorldNetwork {
                                 | GroupProjection::SumDecimal(expr)
                                 | GroupProjection::Min(expr)
                                 | GroupProjection::Max(expr)
-                                | GroupProjection::Collect { expr, .. } => expr,
+                                | GroupProjection::Collect { expr, .. }
+                                | GroupProjection::CollectTake { expr, .. } => expr,
                                 GroupProjection::Key(_) | GroupProjection::Count => {
                                     return Ok(None);
                                 }
@@ -3560,11 +3820,14 @@ impl WorldNetwork {
                     let compiled_collect_orders = projections
                         .iter()
                         .map(|(_, projection)| {
-                            if let GroupProjection::Collect {
-                                order_by: Some(order_expr),
-                                ..
-                            } = projection
-                            {
+                            let order_expr = match projection {
+                                GroupProjection::Collect { order_by, .. }
+                                | GroupProjection::CollectTake { order_by, .. } => {
+                                    order_by.as_ref()
+                                }
+                                _ => None,
+                            };
+                            if let Some(order_expr) = order_expr {
                                 program_env
                                     .compile_expr(order_expr, &bindings)
                                     .map(Some)
@@ -3946,6 +4209,20 @@ impl WorldNetwork {
             .as_ref()
             .map(|pe| pe.schemas.as_ref())
             .unwrap_or(&empty_schemas);
+        // The restored network's BaseLookup is a pre-batch view. Keep this chunk's
+        // upserts as well so typed child-key extraction can see newly inserted source
+        // tuples before they have a persistent base root.
+        let batch_source_rows: BTreeMap<(String, WorldKey), WorldTuple> = ops
+            .iter()
+            .filter_map(|op| match op {
+                WorldBatchOp::Upsert {
+                    relation,
+                    key,
+                    tuple,
+                } => Some(((relation.clone(), key.clone()), tuple.clone())),
+                WorldBatchOp::Remove { .. } => None,
+            })
+            .collect();
         for op in ops {
             let rel_name = op.relation();
             let is_winner_relation = self.virtual_relations.contains(rel_name);
@@ -4809,10 +5086,13 @@ impl WorldNetwork {
                                 let existing_count = groups.read(&gk, store)?.len();
                                 let existing_tuple = if existing_count > 0 {
                                     let existing_accum = match aggregates.get(&gk, store)? {
-                                        Some(stored_list) => GroupAccumulator::from_value_list(
-                                            &stored_list,
-                                            projections,
-                                        )?,
+                                        Some(stored_list) => {
+                                            GroupAccumulator::from_value_list_for_ordering(
+                                                &stored_list,
+                                                projections,
+                                                self.collect_ordering,
+                                            )?
+                                        }
                                         None => {
                                             return Err(WorldError::NetworkError(
                                                 "missing persisted aggregate accumulator".into(),
@@ -4846,7 +5126,11 @@ impl WorldNetwork {
 
                             let mut accum = match aggregates.get(&gk, store)? {
                                 Some(stored_list) => {
-                                    GroupAccumulator::from_value_list(&stored_list, projections)?
+                                    GroupAccumulator::from_value_list_for_ordering(
+                                        &stored_list,
+                                        projections,
+                                        self.collect_ordering,
+                                    )?
                                 }
                                 None if groups.read(&gk, store)?.len() == 0 => {
                                     GroupAccumulator::empty(projections)
@@ -4865,7 +5149,30 @@ impl WorldNetwork {
                             };
 
                             if new_count != old_count {
-                                let child_key = derivation_provenance_key(&deriv.c.leaves);
+                                let child_key = if is_ins
+                                    && self.collect_ordering == CollectOrdering::TypedKeyV1
+                                {
+                                    stable_child_key_value(&self.dag, &deriv.c, &|relation, key| {
+                                        typed_declared_source_key(
+                                            &self.dag,
+                                            &self.decides,
+                                            schemas,
+                                            &batch_source_rows,
+                                            &self.base_relations,
+                                            base,
+                                            relation,
+                                            key,
+                                        )
+                                    })
+                                    .map_err(WorldError::NetworkError)?
+                                } else if is_ins {
+                                    derivation_provenance_key(&deriv.c.leaves)
+                                } else {
+                                    // Retractions identify their persisted accumulator row by
+                                    // child id; no source tuple lookup is needed or reliable
+                                    // after a delete.
+                                    Value::Null
+                                };
                                 let tree_work = accum.apply_delta(
                                     is_ins,
                                     projections,
@@ -4873,6 +5180,7 @@ impl WorldNetwork {
                                     &order_values,
                                     child_key,
                                     deriv.c.digest(),
+                                    self.collect_ordering,
                                     &gk,
                                     aggregates,
                                     store,
@@ -4914,7 +5222,11 @@ impl WorldNetwork {
                         let new_tuple = if current_count > 0 {
                             let accum = match aggregates.get(&gk, store)? {
                                 Some(stored_list) => {
-                                    GroupAccumulator::from_value_list(&stored_list, projections)?
+                                    GroupAccumulator::from_value_list_for_ordering(
+                                        &stored_list,
+                                        projections,
+                                        self.collect_ordering,
+                                    )?
                                 }
                                 None => {
                                     return Err(WorldError::NetworkError(
@@ -6190,6 +6502,24 @@ fn build_grouped_tuple(
                     .collect();
                 tuple.insert(name, Value::List(items));
             }
+            GroupProjection::CollectTake { limit, .. } => {
+                let children = &state.collected[idx];
+                let items = children
+                    .iter()
+                    .take(*limit)
+                    .map(|(_, _, _, item)| item.clone())
+                    .collect();
+                tuple.insert(
+                    name,
+                    Value::Record {
+                        nominal: String::new(),
+                        fields: BTreeMap::from([
+                            ("items".into(), Value::List(items)),
+                            ("truncated".into(), Value::Bool(children.len() > *limit)),
+                        ]),
+                    },
+                );
+            }
         }
     }
     Ok(tuple)
@@ -6415,4 +6745,157 @@ pub fn eval_expr(
     )
     .map_err(WorldError::NetworkError)?;
     Value::from_scalar(compiled.eval(&bindings).map_err(WorldError::NetworkError)?)
+}
+
+#[cfg(test)]
+mod collect_accumulator_tests {
+    use super::{CollectOrdering, GroupAccumulator, GroupProjection, Value, ValueList};
+    use crate::world::stable_child_key::StableChildKey;
+    use crate::world::WorldNetwork;
+    use brix_canon::Digest;
+    use brix_lower::relation_dag::{OperatorNode, RelationDag};
+    use brix_syntax::ast::Expr;
+    use std::collections::BTreeMap;
+
+    fn projection() -> Vec<(String, GroupProjection)> {
+        vec![(
+            "page".into(),
+            GroupProjection::CollectTake {
+                expr: Expr::Var("value".into()),
+                order_by: None,
+                limit: 1,
+            },
+        )]
+    }
+
+    fn valid_entry() -> Value {
+        let child_key = StableChildKey::Source {
+            relation: "root::rows".into(),
+            key: vec![Value::Str("r1".into())],
+        }
+        .to_value();
+        let id = Digest::from_bytes([7; 32]);
+        Value::Record {
+            nominal: "world::CollectedItem".into(),
+            fields: BTreeMap::from([
+                ("id".into(), Value::Str(id.to_hex())),
+                ("item".into(), Value::Str("row".into())),
+                ("key".into(), child_key),
+                ("order".into(), Value::Int(1)),
+            ]),
+        }
+    }
+
+    #[test]
+    fn typed_restore_requires_order_item_key_id_and_exact_item_fields() {
+        let projections = projection();
+        let valid = ValueList(vec![Value::List(vec![valid_entry()])]);
+        assert!(GroupAccumulator::from_value_list_for_ordering(
+            &valid,
+            &projections,
+            CollectOrdering::TypedKeyV1
+        )
+        .is_ok());
+
+        for missing in ["order", "item", "key", "id"] {
+            let mut entry = valid_entry();
+            if let Value::Record { fields, .. } = &mut entry {
+                fields.remove(missing);
+            }
+            let list = ValueList(vec![Value::List(vec![entry])]);
+            assert!(
+                GroupAccumulator::from_value_list_for_ordering(
+                    &list,
+                    &projections,
+                    CollectOrdering::TypedKeyV1
+                )
+                .is_err(),
+                "missing {missing} must be rejected"
+            );
+        }
+
+        let mut entry = valid_entry();
+        if let Value::Record { fields, .. } = &mut entry {
+            fields.insert("unexpected".into(), Value::Bool(true));
+        }
+        let list = ValueList(vec![Value::List(vec![entry])]);
+        assert!(GroupAccumulator::from_value_list_for_ordering(
+            &list,
+            &projections,
+            CollectOrdering::TypedKeyV1
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn legacy_restore_keeps_historical_missing_field_defaults() {
+        let entry = Value::Record {
+            nominal: "legacy::CollectedItem".into(),
+            fields: BTreeMap::from([(
+                "id".into(),
+                Value::Str(Digest::from_bytes([3; 32]).to_hex()),
+            )]),
+        };
+        let list = ValueList(vec![Value::List(vec![entry])]);
+        assert!(GroupAccumulator::from_value_list_for_ordering(
+            &list,
+            &projection(),
+            CollectOrdering::LegacyV1
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn typed_ordering_fingerprint_is_scoped_to_collect_networks() {
+        let mut no_collect_dag = RelationDag::new();
+        no_collect_dag.add_node(OperatorNode::Scan {
+            relation: "root::rows".into(),
+            schema: brix_syntax::ast::Ty::Record(vec![brix_syntax::ast::FieldDecl {
+                name: "id".into(),
+                ty: brix_syntax::ast::Ty::Named("Str".into()),
+            }]),
+            key_fields: vec!["id".into()],
+        });
+        let legacy_no_collect = WorldNetwork::new(no_collect_dag.clone());
+        let mut typed_no_collect = WorldNetwork::new(no_collect_dag);
+        typed_no_collect.collect_ordering = CollectOrdering::TypedKeyV1;
+        assert_eq!(
+            legacy_no_collect.fingerprint(),
+            typed_no_collect.fingerprint(),
+            "typed mode must not perturb networks with no collect projection"
+        );
+
+        let mut collect_dag = RelationDag::new();
+        let input = collect_dag.add_node(OperatorNode::Scan {
+            relation: "root::rows".into(),
+            schema: brix_syntax::ast::Ty::Record(vec![brix_syntax::ast::FieldDecl {
+                name: "id".into(),
+                ty: brix_syntax::ast::Ty::Named("Str".into()),
+            }]),
+            key_fields: vec!["id".into()],
+        });
+        let grouped = collect_dag.add_node(OperatorNode::GroupedCount {
+            input,
+            group_keys: vec![],
+            projections: vec![(
+                "items".into(),
+                GroupProjection::Collect {
+                    expr: Expr::Field(Box::new(Expr::Var("r".into())), "id".into()),
+                    order_by: None,
+                    limit: 4,
+                },
+            )],
+        });
+        collect_dag
+            .relation_outputs
+            .insert("root::collected".into(), grouped);
+        let legacy_collect = WorldNetwork::new(collect_dag.clone());
+        let mut typed_collect = WorldNetwork::new(collect_dag);
+        typed_collect.collect_ordering = CollectOrdering::TypedKeyV1;
+        assert_ne!(
+            legacy_collect.fingerprint(),
+            typed_collect.fingerprint(),
+            "collect comparator mode must be committed in the network identity"
+        );
+    }
 }

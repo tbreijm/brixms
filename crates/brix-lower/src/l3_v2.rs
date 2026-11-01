@@ -2302,6 +2302,9 @@ fn lower_expr_v2_impl(
                 })
             }
         }
+        ast::Expr::CollectTake { .. } => Err(L3V2LowerError::Unsupported(
+            "grouped collect take".to_string(),
+        )),
     }
 }
 

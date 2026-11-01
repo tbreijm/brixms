@@ -17,6 +17,8 @@ pub const HOST_SCOPE_PROFILE_PARTITION_V1: &str = "brix.host-scope.partition@1";
 pub const QUERY_WORLD_ARTIFACT_V1: &str = "world.revision@1";
 pub const QUERY_PROGRAM_ARTIFACT_V1: &str = "program";
 pub const SCOPED_QUERY_ORDERING_V1: u64 = 1;
+/// Named reads after typed collection ordering was introduced.
+pub const SCOPED_QUERY_ORDERING_V2: u64 = 2;
 pub const MAX_SCOPED_QUERY_PAGE_ROWS: usize = 1024;
 pub const MAX_SCOPED_QUERY_INPUT_ROWS: usize = 100_000;
 pub const MAX_SCOPED_QUERY_INPUT_BYTES: usize = 64 * 1024 * 1024;

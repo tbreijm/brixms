@@ -37,6 +37,8 @@ pub const NETWORK_STATE_SCHEMA: &str = "brix.world.network-state@2";
 /// to the lowering, the expression compiler or an operator could change persisted state for
 /// the same program; worlds written under another version replay on open.
 pub const NETWORK_LOWERING_VERSION: &str = "brix.world.net-lowering@2";
+/// Selected only by the explicitly versioned typed-collection evaluator.
+pub const NETWORK_LOWERING_TYPED_COLLECT_VERSION: &str = "brix.world.net-lowering@3";
 
 /// Everything that must be identical for persisted network state to be reusable.
 #[derive(Clone, PartialEq, Eq, Debug)]

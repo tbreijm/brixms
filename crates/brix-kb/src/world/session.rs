@@ -36,9 +36,10 @@ use super::scoped_query::{
     ScopedQueryCursorV1, ScopedQueryPageRequestV1, ScopedQueryPageV1,
     MAX_SCOPED_QUERY_EVAL_MATCHES, MAX_SCOPED_QUERY_EVAL_WORK, MAX_SCOPED_QUERY_INPUT_BYTES,
     MAX_SCOPED_QUERY_INPUT_ROWS, MAX_SCOPED_QUERY_OUTPUT_ROWS, MAX_SCOPED_QUERY_PAGE_ROWS,
-    SCOPED_QUERY_ORDERING_V1,
+    SCOPED_QUERY_ORDERING_V2,
 };
 use super::settlement_checkpoint::{apply_delta, SettlementCheckpoint};
+use super::stable_child_key::CollectOrdering;
 use super::staging::StagingManager;
 use super::state_cache::StateCache;
 use super::types::{
@@ -371,6 +372,27 @@ fn validate_program_relations(
         )));
     }
     Ok(())
+}
+
+fn default_collect_ordering(program: &LinkedProgram) -> Result<CollectOrdering, WorldError> {
+    use brix_lower::relation_dag::GroupProjection;
+    let dag = lower_relations(program)?;
+    let has_collect = dag.nodes.iter().any(|node| match node {
+        OperatorNode::GroupedCount { projections, .. } => {
+            projections.iter().any(|(_, projection)| {
+                matches!(
+                    projection,
+                    GroupProjection::Collect { .. } | GroupProjection::CollectTake { .. }
+                )
+            })
+        }
+        _ => false,
+    });
+    Ok(if has_collect {
+        CollectOrdering::TypedKeyV1
+    } else {
+        CollectOrdering::LegacyV1
+    })
 }
 
 fn scope_world_error(error: ScopeError) -> WorldError {
@@ -983,11 +1005,32 @@ impl ExecProfileV1 {
         }
     }
 
+    /// Explicit collection semantics; the V1 profile remains reproducible.
+    pub fn for_collect_ordering(ordering: CollectOrdering) -> Self {
+        let mut profile = Self::current_for_network();
+        if ordering == CollectOrdering::TypedKeyV1 {
+            profile.evaluator = "brix-world-net@2".into();
+        }
+        profile
+    }
+
+    pub fn collect_ordering(&self) -> Result<CollectOrdering, WorldError> {
+        match self.evaluator.as_str() {
+            "brix-world-net@1" => Ok(CollectOrdering::LegacyV1),
+            "brix-world-net@2" => Ok(CollectOrdering::TypedKeyV1),
+            _ => Err(WorldError::InvalidSchema(
+                "unsupported collection execution profile".into(),
+            )),
+        }
+    }
+
     /// Whether this execution profile is supported by the current runtime evaluator.
     pub fn is_supported(&self) -> bool {
         let current = Self::current_for_network();
-        self.evaluator == current.evaluator
-            && self.numeric_semantics == current.numeric_semantics
+        matches!(
+            self.evaluator.as_str(),
+            "brix-world-net@1" | "brix-world-net@2"
+        ) && self.numeric_semantics == current.numeric_semantics
             && self.settlement == current.settlement
             && self.module_loader_limits == current.module_loader_limits
             && Self::is_supported_version(&self.crate_version)
@@ -1537,11 +1580,6 @@ impl WorldSession {
             brix_lower::relation_dag::admit_named_queries_v1(&linked).map_err(|error| {
                 WorldError::InvalidSchema(format!("named query admission failed: {error}"))
             })?;
-            if !read_only {
-                let network = WorldNetwork::from_program(&linked)?;
-                validate_program_relations(&session.manifest, &network)?;
-                pending_network = Some(network);
-            }
 
             // Additive field (ADR-0046 P6 §1.1, decided 2026-10-04): a
             // `program.json` written before `exec_profile` existed simply
@@ -1549,6 +1587,17 @@ impl WorldSession {
             // profile — the file still opens either way.
             if let Some(profile_val) = val.get("exec_profile") {
                 session.exec_profile = Some(ExecProfileV1::from_json(profile_val)?);
+            }
+            if !read_only {
+                let ordering = session
+                    .exec_profile
+                    .as_ref()
+                    .map(ExecProfileV1::collect_ordering)
+                    .transpose()?
+                    .unwrap_or(CollectOrdering::LegacyV1);
+                let network = WorldNetwork::from_program_with_collect_ordering(&linked, ordering)?;
+                validate_program_relations(&session.manifest, &network)?;
+                pending_network = Some(network);
             }
         }
 
@@ -1560,6 +1609,12 @@ impl WorldSession {
             }
         }
         if let Some(profile) = &session.exec_profile {
+            if profile.evaluator == "brix-world-net@2" && current_rev.exec_profile_digest.is_none()
+            {
+                return Err(WorldError::InvalidSchema(
+                    "typed collection semantics require a revision-bound execution profile".into(),
+                ));
+            }
             if !profile.is_supported() {
                 return Err(WorldError::InvalidSchema(
                     "unsupported execution profile".into(),
@@ -1806,11 +1861,17 @@ impl WorldSession {
     /// `network` in this world. The network contributes its own structural fingerprint, so
     /// state is never filed under a program other than the one that computed it.
     pub fn validity_key_for(&self, network: &WorldNetwork) -> ValidityKey {
-        ValidityKey::current(
+        let mut key = ValidityKey::current(
             self.manifest.program_digest,
             self.exec_profile.as_ref().map(ExecProfileV1::digest),
             network.fingerprint(),
-        )
+        );
+        if network.collect_ordering() == CollectOrdering::TypedKeyV1 {
+            key.lowering_version =
+                super::network_state::NETWORK_LOWERING_TYPED_COLLECT_VERSION.into();
+            key.evaluator = "brix-world-net@2".into();
+        }
+        key
     }
 
     /// Install the state `root` names into `network`, the single restore path for both a
@@ -3638,14 +3699,15 @@ impl WorldSession {
         brix_lower::relation_dag::admit_named_queries_v1(&linked).map_err(|error| {
             WorldError::InvalidSchema(format!("named query admission failed: {error}"))
         })?;
-        let network = WorldNetwork::from_program(&linked)?;
+        let ordering = self.selected_collect_ordering(&linked)?;
+        let network = WorldNetwork::from_program_with_collect_ordering(&linked, ordering)?;
         validate_program_relations(&self.manifest, &network)?;
         if self.current_revision > 0 && self.manifest.program_digest != closure_digest {
             return Err(WorldError::InvalidSchema(
                 "cannot change executable program after world revisions exist".into(),
             ));
         }
-        let exec_profile = ExecProfileV1::current_for_network();
+        let exec_profile = ExecProfileV1::for_collect_ordering(ordering);
         let val = serde_json::json!({
             "schema": "brix.world.program@1",
             "root_module": root_module,
@@ -3887,7 +3949,7 @@ impl WorldSession {
             world_identity: snapshot.world_id.clone(),
             revision_seq,
             revision_digest: snapshot.revision_digest(),
-            ordering_version: SCOPED_QUERY_ORDERING_V1,
+            ordering_version: SCOPED_QUERY_ORDERING_V2,
         };
         let position = match request.cursor.as_deref() {
             Some(token) => ScopedQueryCursorV1::from_token(token, &bindings)
@@ -3992,7 +4054,10 @@ impl WorldSession {
                 }
             }
         }
-        let mut network = WorldNetwork::from_program(&lowered.program)?;
+        let mut network = WorldNetwork::from_program_with_collect_ordering(
+            &lowered.program,
+            CollectOrdering::TypedKeyV1,
+        )?;
         network.apply_ops_bounded(
             &ops,
             Some(&NetworkLimits {
@@ -4053,15 +4118,52 @@ impl WorldSession {
         })
     }
 
+    fn selected_collect_ordering(
+        &self,
+        program: &LinkedProgram,
+    ) -> Result<CollectOrdering, WorldError> {
+        if let Some(profile) = &self.exec_profile {
+            return profile.collect_ordering();
+        }
+        if let Some(network) = &self.network {
+            return Ok(network.collect_ordering());
+        }
+        default_collect_ordering(program)
+    }
+
     /// Initialize or open a world session bound to a linked program.
     pub fn from_program(
         root: impl AsRef<Path>,
         program: &LinkedProgram,
     ) -> Result<Self, WorldError> {
+        Self::from_program_ordering(root, program, None)
+    }
+
+    /// Create a world under an explicit supported semantic profile. Existing
+    /// worlds cannot switch their historical semantics through this API.
+    pub fn from_program_with_collect_ordering(
+        root: impl AsRef<Path>,
+        program: &LinkedProgram,
+        ordering: CollectOrdering,
+    ) -> Result<Self, WorldError> {
+        Self::from_program_ordering(root, program, Some(ordering))
+    }
+
+    fn from_program_ordering(
+        root: impl AsRef<Path>,
+        program: &LinkedProgram,
+        requested: Option<CollectOrdering>,
+    ) -> Result<Self, WorldError> {
         let root = root.as_ref().to_path_buf();
         if root.exists() && (root.join("world.json").exists() || root.join("HEAD").exists()) {
             let mut session = Self::open(&root)?;
-            let network = WorldNetwork::from_program(program)?;
+            let ordering = session.selected_collect_ordering(program)?;
+            if requested.is_some_and(|requested| requested != ordering) {
+                return Err(WorldError::InvalidSchema(
+                    "cannot change an existing world's collection execution profile".into(),
+                ));
+            }
+            let network = WorldNetwork::from_program_with_collect_ordering(program, ordering)?;
             validate_program_relations(&session.manifest, &network)?;
             match &session.network {
                 // `open` already installed the world's own program (restored or replayed).
@@ -4116,11 +4218,15 @@ impl WorldSession {
         );
         let mut manifest = manifest;
         manifest.program_required = true;
-        let mut session = Self::create(&root, manifest)?;
         brix_lower::relation_dag::admit_named_queries_v1(program).map_err(|error| {
             WorldError::InvalidSchema(format!("named query admission failed: {error}"))
         })?;
-        let network = WorldNetwork::from_program(program)?;
+        let ordering = match requested {
+            Some(ordering) => ordering,
+            None => default_collect_ordering(program)?,
+        };
+        let network = WorldNetwork::from_program_with_collect_ordering(program, ordering)?;
+        let mut session = Self::create(&root, manifest)?;
         session.set_network(network)?;
         Ok(session)
     }

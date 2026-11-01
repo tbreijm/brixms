@@ -809,6 +809,10 @@ fn check_expr_bounds(
         | ast::Expr::Why(base)
         | ast::Expr::Audit(base)
         | ast::Expr::Not(base) => check_expr_bounds(base, depth + 1, node_count),
+        ast::Expr::CollectTake { collection, limit } => {
+            check_expr_bounds(collection, depth + 1, node_count)?;
+            check_expr_bounds(limit, depth + 1, node_count)
+        }
         ast::Expr::Record { fields, .. } => {
             for (_, val) in fields {
                 check_expr_bounds(val, depth + 1, node_count)?;

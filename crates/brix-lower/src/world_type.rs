@@ -154,6 +154,10 @@ fn validate_string_ops_inner(
         | Expr::Prove(base)
         | Expr::Why(base)
         | Expr::Audit(base) => check(base, fields, analysis, next)?,
+        Expr::CollectTake { collection, limit } => {
+            check(collection, fields, analysis, next)?;
+            check(limit, fields, analysis, next)?;
+        }
         Expr::Match {
             scrutinee, arms, ..
         } => {

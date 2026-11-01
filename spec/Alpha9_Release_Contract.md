@@ -660,3 +660,33 @@ remains covered by the separate preceding release lifecycle; the debug gate
 skipped only that case and the 28 existing ignored cases. Frozen histories and
 canonical expectations were not updated. A9-6 ordering/truncation and A9-7
 qualification remain required before an alpha.9 release.
+
+## 18. A9-6 consolidation checkpoint (2026-11-01)
+
+The collection implementation now distinguishes legacy full collection from
+`collect(value[, sort_key]).take(n)`, whose structural result is
+`{ items: List<T>, truncated: Bool }`. It retains complete child support for
+promotion on retraction, preserves multiplicity of different identities, and
+uses declared typed source keys rather than opaque key bytes or provenance
+hashes. Typed identity derivation and persisted-key validation are bounded and
+fail closed for missing, malformed, ambiguous or duplicate keys.
+
+New collection worlds use evaluator `brix-world-net@2` and lowering validity
+`brix.world.net-lowering@3`. Legacy evaluator/profile identities are preserved;
+existing worlds do not silently migrate. The supported producing profile is
+bound to revision identities and portable replay. Named query continuations use
+ordering version 2. See
+[`a9-collect-order-and-take.md`](../docs/planning/a9-collect-order-and-take.md).
+
+Targeted validation passed all eight collection integration cases, including
+cold restore/oracle comparison, nested grouped children, composite decision keys,
+insertion permutations, replacement and final-child retraction. Typed record
+codec tests and portable CLI tests passed, including an independently pinned
+frozen legacy audit whose winner order differs from typed ordering. The full
+workspace and 16-case release collection matrix are running at this checkpoint;
+they are not yet recorded as passed. Workspace Clippy, TCB inventory and SOC
+law-map checks passed, and all 44 Python tests passed.
+
+This consolidation branch includes the reviewed #52/#53/#59 foundation and
+A9-1 through A9-6 implementation. A9-7's unfinished harness/runner remain local
+in a separate checkout and are excluded. No alpha.9 release is created here.

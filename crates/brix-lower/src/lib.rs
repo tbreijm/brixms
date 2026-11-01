@@ -866,6 +866,9 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
             Box::new(lower_expr(base, ctx)?),
             name.clone(),
         )),
+        ast::Expr::CollectTake { .. } => Err(LowerError::Unsupported(
+            "grouped collect take is not in the L2-first fragment".to_string(),
+        )),
         // `then` / `and` — the category's own composition operators, lowered
         // onto the kernel's `RealizesComp` / `RealizesTensor`. These were the
         // only binary operators in the language with no lowering at all, which
@@ -1418,6 +1421,10 @@ fn check_declared_field_types(
             Ok(())
         }
         ast::Expr::Field(base, _) => check_declared_field_types(base, ctx, ty_ctx),
+        ast::Expr::CollectTake { collection, limit } => {
+            check_declared_field_types(collection, ctx, ty_ctx)?;
+            check_declared_field_types(limit, ctx, ty_ctx)
+        }
         ast::Expr::Bin { lhs, rhs, .. } => {
             check_declared_field_types(lhs, ctx, ty_ctx)?;
             check_declared_field_types(rhs, ctx, ty_ctx)

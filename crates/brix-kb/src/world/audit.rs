@@ -436,7 +436,10 @@ impl ExecProfileV1 {
     pub fn is_supported(&self) -> bool {
         let default = Self::default();
         self.profile == default.profile
-            && self.evaluator == default.evaluator
+            && matches!(
+                self.evaluator.as_str(),
+                "brix-world-net@1" | "brix-world-net@2"
+            )
             && self.numeric_semantics == default.numeric_semantics
             && self.settlement == default.settlement
             && self.module_loader_limits == default.module_loader_limits

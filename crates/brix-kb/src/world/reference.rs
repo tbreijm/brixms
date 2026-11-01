@@ -105,6 +105,7 @@ use soc_core::calendar::Key;
 use super::codec::TupleRecord;
 use super::decision_codec::STRUCTURED_PREFIX;
 use super::error::WorldError;
+pub use super::stable_child_key::CollectOrdering;
 use super::types::{WorldKey, WorldTuple};
 
 /// A scalar value, independently defined from `network::Value` (see module docs §"what is
@@ -186,15 +187,16 @@ impl Value {
         ty: &ast::Ty,
         schemas: &BTreeMap<String, brix_lower::l3_v2::L3Schema>,
     ) -> Result<Self, WorldError> {
-        use brix_lower::l3_v2::validate_l3_value;
-        let expected = brix_lower::world_expr::contract(ty).map_err(WorldError::NetworkError)?;
-        let name = expected.display_name();
+        let name = match ty {
+            ast::Ty::Named(name) => name.as_str(),
+            _ => "structured value",
+        };
         let text = || {
             std::str::from_utf8(bytes)
                 .map_err(|e| WorldError::NetworkError(format!("invalid scalar UTF-8: {e}")))
         };
         let invalid = || WorldError::NetworkError(format!("invalid {name} scalar"));
-        match name.as_str() {
+        match name {
             "Str" => return Ok(Self::Str(text()?.to_owned())),
             "Int" => return text()?.parse().map(Self::Int).map_err(|_| invalid()),
             "Bool" => {
@@ -226,7 +228,7 @@ impl Value {
                 .map_err(|e| WorldError::NetworkError(format!("invalid structured value: {e}")))?
                 .to_l3_value()
         };
-        validate_l3_value(&value, &expected, schemas, "world input")
+        validate_reference_l3_value(&value, ty, schemas, "world input")
             .map_err(|e| WorldError::NetworkError(format!("type validation error: {e}")))?;
         Self::from_scalar(value)
     }
@@ -581,6 +583,104 @@ impl Value {
     }
 }
 
+/// Independently validate reference values against the syntax-level schema.
+/// The production L3 helper contract intentionally only covers scalar and
+/// nominal types, while relational `collect(...).take()` introduces anonymous
+/// record and nested list shapes. Keep the oracle's structural checks local.
+fn validate_reference_l3_value(
+    value: &brix_lower::l3_v2::L3ValueV2,
+    expected: &ast::Ty,
+    schemas: &BTreeMap<String, brix_lower::l3_v2::L3Schema>,
+    path: &str,
+) -> Result<(), String> {
+    use brix_lower::l3_v2::{validate_l3_value, L3SchemaType, L3ValueV2};
+    match (value, expected) {
+        (L3ValueV2::List(items), ast::Ty::App(name, args)) if name == "List" && args.len() == 1 => {
+            if items.len() > brix_lower::input::MAX_COLLECTION_ELEMENTS {
+                return Err(format!(
+                    "{path}: list has {} element(s), exceeding maximum of {}",
+                    items.len(),
+                    brix_lower::input::MAX_COLLECTION_ELEMENTS,
+                ));
+            }
+            for (index, item) in items.iter().enumerate() {
+                validate_reference_l3_value(item, &args[0], schemas, &format!("{path}[{index}]"))?;
+            }
+            Ok(())
+        }
+        (
+            L3ValueV2::Record {
+                nominal_config,
+                fields,
+            },
+            ast::Ty::Record(expected_fields),
+        ) => {
+            if !nominal_config.is_empty() {
+                return Err(format!(
+                    "{path}: expected anonymous record, found nominal '{nominal_config}'"
+                ));
+            }
+            if fields.len() != expected_fields.len() {
+                return Err(format!(
+                    "{path}: record expects {} field(s), found {}",
+                    expected_fields.len(),
+                    fields.len()
+                ));
+            }
+            let mut seen = BTreeSet::new();
+            for (name, actual) in fields {
+                if !seen.insert(name.as_str()) {
+                    return Err(format!("{path}.{name}: duplicate field"));
+                }
+                let Some(declaration) = expected_fields.iter().find(|field| field.name == *name)
+                else {
+                    return Err(format!("{path}.{name}: unknown field"));
+                };
+                validate_reference_l3_value(
+                    actual,
+                    &declaration.ty,
+                    schemas,
+                    &format!("{path}.{name}"),
+                )?;
+            }
+            Ok(())
+        }
+        (_, ast::Ty::Record(_)) => Err(format!("{path}: expected anonymous record")),
+        (_, ast::Ty::App(name, args)) if name == "List" && args.len() == 1 => {
+            Err(format!("{path}: expected {expected:?}, found non-list"))
+        }
+        _ => {
+            let contract = match expected {
+                ast::Ty::Named(name) => match name.as_str() {
+                    "Int" => L3SchemaType::Int,
+                    "Bool" => L3SchemaType::Bool,
+                    "Str" => L3SchemaType::Str,
+                    "F64" => L3SchemaType::F64,
+                    "Decimal" => L3SchemaType::Decimal,
+                    other => L3SchemaType::Named(other.to_owned()),
+                },
+                ast::Ty::App(name, args) => {
+                    let mut parts = Vec::with_capacity(args.len());
+                    for arg in args {
+                        parts.push(brix_lower::world_expr::contract(arg)?);
+                    }
+                    L3SchemaType::Named(format!(
+                        "{}<{}>",
+                        name,
+                        parts
+                            .iter()
+                            .map(L3SchemaType::display_name)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                }
+                other => return Err(format!("{path}: unsupported structural type {other:?}")),
+            };
+            validate_l3_value(value, &contract, schemas, path)
+        }
+    }
+}
+
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -640,12 +740,166 @@ pub type Row = BTreeMap<String, Value>;
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 pub struct Provenance {
     pub leaves: Vec<String>,
+    pub stable_key: StableRowKey,
+}
+
+/// Typed source identity carried independently of production derivation
+/// digests. The collect-take oracle orders by declared typed keys and then
+/// these structural origins, never by hashed tuple IDs.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+pub enum StableRowKey {
+    #[default]
+    Unknown,
+    Source {
+        relation: String,
+        key: Vec<Value>,
+    },
+    Join(Box<StableRowKey>, Box<StableRowKey>),
+    Derived {
+        relation: String,
+        key: Vec<(String, Value)>,
+    },
+}
+
+impl StableRowKey {
+    fn compare(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        let kind = |key: &Self| match key {
+            Self::Unknown => "unknown",
+            Self::Source { .. } => "source",
+            Self::Join(..) => "join",
+            Self::Derived { .. } => "derived",
+        };
+        match kind(self).cmp(kind(other)) {
+            Ordering::Equal => match (self, other) {
+                (
+                    Self::Source {
+                        relation: ar,
+                        key: ak,
+                    },
+                    Self::Source {
+                        relation: br,
+                        key: bk,
+                    },
+                ) => compare_value_slices(ak, bk).then_with(|| ar.as_bytes().cmp(br.as_bytes())),
+                (Self::Join(al, ar), Self::Join(bl, br)) => {
+                    al.compare(bl).then_with(|| ar.compare(br))
+                }
+                (
+                    Self::Derived {
+                        relation: ar,
+                        key: ak,
+                    },
+                    Self::Derived {
+                        relation: br,
+                        key: bk,
+                    },
+                ) => compare_named_values(ak, bk).then_with(|| ar.as_bytes().cmp(br.as_bytes())),
+                (Self::Unknown, Self::Unknown) => Ordering::Equal,
+                _ => Ordering::Equal,
+            },
+            other => other,
+        }
+    }
+}
+
+fn reference_value_rank(value: &Value) -> u8 {
+    match value {
+        Value::Null => 0,
+        Value::Bool(_) => 1,
+        Value::Int(_) => 2,
+        Value::Decimal(_) => 3,
+        Value::F64(_) => 4,
+        Value::Str(_) => 5,
+        Value::Record { .. } => 6,
+        Value::Variant { .. } => 7,
+        Value::List(_) => 8,
+    }
+}
+
+fn compare_reference_values(left: &Value, right: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match reference_value_rank(left).cmp(&reference_value_rank(right)) {
+        Ordering::Equal => match (left, right) {
+            (Value::Null, Value::Null) => Ordering::Equal,
+            (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+            (Value::Int(a), Value::Int(b)) => a.cmp(b),
+            (Value::Decimal(a), Value::Decimal(b)) => a.cmp(b),
+            (Value::F64(a), Value::F64(b)) => a.partial_cmp(b).unwrap_or(Ordering::Equal),
+            (Value::Str(a), Value::Str(b)) => a.as_bytes().cmp(b.as_bytes()),
+            (
+                Value::Record {
+                    nominal: an,
+                    fields: af,
+                },
+                Value::Record {
+                    nominal: bn,
+                    fields: bf,
+                },
+            ) => an.as_bytes().cmp(bn.as_bytes()).then_with(|| {
+                compare_named_values(
+                    &af.iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect::<Vec<_>>(),
+                    &bf.iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect::<Vec<_>>(),
+                )
+            }),
+            (
+                Value::Variant {
+                    nominal: an,
+                    variant: av,
+                    args: aa,
+                },
+                Value::Variant {
+                    nominal: bn,
+                    variant: bv,
+                    args: ba,
+                },
+            ) => an
+                .as_bytes()
+                .cmp(bn.as_bytes())
+                .then_with(|| av.as_bytes().cmp(bv.as_bytes()))
+                .then_with(|| compare_value_slices(aa, ba)),
+            (Value::List(a), Value::List(b)) => compare_value_slices(a, b),
+            _ => Ordering::Equal,
+        },
+        other => other,
+    }
+}
+
+fn compare_value_slices(left: &[Value], right: &[Value]) -> std::cmp::Ordering {
+    for (left_value, right_value) in left.iter().zip(right) {
+        let order = compare_reference_values(left_value, right_value);
+        if order != std::cmp::Ordering::Equal {
+            return order;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+fn compare_named_values(left: &[(String, Value)], right: &[(String, Value)]) -> std::cmp::Ordering {
+    for ((left_name, left_value), (right_name, right_value)) in left.iter().zip(right) {
+        let order = left_name
+            .as_bytes()
+            .cmp(right_name.as_bytes())
+            .then_with(|| compare_reference_values(left_value, right_value));
+        if order != std::cmp::Ordering::Equal {
+            return order;
+        }
+    }
+    left.len().cmp(&right.len())
 }
 
 impl Provenance {
-    pub fn base(key: &WorldKey) -> Self {
+    pub fn base(relation: &str, key: &WorldKey, declared_key: Vec<Value>) -> Self {
         Self {
             leaves: vec![key.to_hex()],
+            stable_key: StableRowKey::Source {
+                relation: relation.to_string(),
+                key: declared_key,
+            },
         }
     }
 
@@ -653,10 +907,16 @@ impl Provenance {
         let mut leaves = Vec::with_capacity(self.leaves.len() + right.leaves.len());
         leaves.extend_from_slice(&self.leaves);
         leaves.extend_from_slice(&right.leaves);
-        Self { leaves }
+        Self {
+            leaves,
+            stable_key: StableRowKey::Join(
+                Box::new(self.stable_key.clone()),
+                Box::new(right.stable_key.clone()),
+            ),
+        }
     }
 
-    pub fn distinct_row(values: &Row) -> Self {
+    pub fn distinct_row(relation: &str, values: &Row) -> Self {
         let mut w = CanonWriter::new();
         w.write_uint(values.len() as u64);
         for (k, v) in values {
@@ -665,10 +925,17 @@ impl Provenance {
         }
         Self {
             leaves: vec![WorldKey::new(w.finish()).to_hex()],
+            stable_key: StableRowKey::Derived {
+                relation: relation.into(),
+                key: values
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect(),
+            },
         }
     }
 
-    pub fn group_key(key: &[Value]) -> Self {
+    pub fn group_key(relation: &str, key: &[Value]) -> Self {
         let mut w = CanonWriter::new();
         w.write_uint(key.len() as u64);
         for v in key {
@@ -676,7 +943,21 @@ impl Provenance {
         }
         Self {
             leaves: vec![WorldKey::new(w.finish()).to_hex()],
+            stable_key: StableRowKey::Derived {
+                relation: relation.into(),
+                key: key
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| (format!("group_{index}"), value.clone()))
+                    .collect(),
+            },
         }
+    }
+
+    fn union_key(key: &[Value], source: &Self) -> Self {
+        let mut legacy = Self::group_key("", key);
+        legacy.stable_key = source.stable_key.clone();
+        legacy
     }
 
     pub fn ordering_key(&self) -> Value {
@@ -706,6 +987,52 @@ fn get_qualified<'a>(row: &'a Row, binding: &str, field: &str) -> Option<&'a Val
         }
     }
     Some(current)
+}
+
+fn output_relation_for_operator(dag: &RelationDag, op_index: usize) -> Result<&str, WorldError> {
+    fn unary_ancestor(dag: &RelationDag, current: usize, target: usize) -> bool {
+        if current == target {
+            return true;
+        }
+        match dag.nodes.get(current) {
+            Some(
+                OperatorNode::Bind { input, .. }
+                | OperatorNode::Filter { input, .. }
+                | OperatorNode::Project { input, .. }
+                | OperatorNode::Distinct { input },
+            ) => unary_ancestor(dag, input.0, target),
+            _ => false,
+        }
+    }
+
+    if let Some((relation, _)) = dag
+        .relation_outputs
+        .iter()
+        .find(|(_, output)| output.0 == op_index)
+    {
+        return Ok(relation.as_str());
+    }
+
+    // Internal nodes such as GroupedCount can contribute stable identity to
+    // a relation after the lowering pass has added set semantics and unary
+    // binding/filter/project wrappers. Match the production identity resolver
+    // while keeping this oracle's typed comparison implementation independent.
+    let mut candidates = dag
+        .relation_outputs
+        .iter()
+        .filter(|(_, output)| unary_ancestor(dag, output.0, op_index))
+        .map(|(relation, _)| relation.as_str());
+    let relation = candidates.next().ok_or_else(|| {
+        WorldError::NetworkError(format!(
+            "reference evaluator: operator {op_index} has no qualified relation output"
+        ))
+    })?;
+    if candidates.next().is_some() {
+        return Err(WorldError::NetworkError(format!(
+            "reference evaluator: operator {op_index} has ambiguous qualified relation outputs"
+        )));
+    }
+    Ok(relation)
 }
 
 fn merge_rows(left: &Row, right: &Row) -> Row {
@@ -771,9 +1098,11 @@ fn eval_expr(
 type GroupEntry = (Vec<Option<Value>>, Vec<Option<Value>>, EvaluatedRow);
 
 fn build_grouped_row(
+    relation: &str,
     projections: &[(String, GroupProjection)],
     key_vals: &[Value],
     entries: &[GroupEntry],
+    collect_ordering: CollectOrdering,
 ) -> Result<EvaluatedRow, WorldError> {
     let mut row = Row::new();
     for (idx, (name, proj)) in projections.iter().enumerate() {
@@ -844,34 +1173,84 @@ fn build_grouped_row(
                         "grouped collect exceeded maximum cardinality limit of {limit}"
                     )));
                 }
-                let mut items_with_order: Vec<(Value, Value, Value)> =
-                    Vec::with_capacity(entries.len());
-                for (agg, orders, child_row) in entries {
-                    let item_val = agg[idx].clone().unwrap_or(Value::Null);
-                    let order_val = orders
-                        .get(idx)
-                        .and_then(|v| v.clone())
-                        .unwrap_or_else(|| item_val.clone());
-                    let child_key = child_row.provenance.ordering_key();
-                    items_with_order.push((order_val, child_key, item_val));
-                }
-                items_with_order.sort_by(|a, b| {
-                    a.0.partial_cmp(&b.0)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                });
-                let collected_list: Vec<Value> = items_with_order
-                    .into_iter()
-                    .map(|(_, _, item)| item)
-                    .collect();
+                let collected_list = ordered_collect_items(entries, idx, collect_ordering);
                 row.insert(name.clone(), Value::List(collected_list));
+            }
+            GroupProjection::CollectTake { limit, .. } => {
+                let all_items = ordered_collect_items(entries, idx, collect_ordering);
+                let truncated = all_items.len() > *limit;
+                let items = all_items.into_iter().take(*limit).collect();
+                row.insert(
+                    name.clone(),
+                    Value::Record {
+                        nominal: String::new(),
+                        fields: BTreeMap::from([
+                            ("items".into(), Value::List(items)),
+                            ("truncated".into(), Value::Bool(truncated)),
+                        ]),
+                    },
+                );
             }
         }
     }
     Ok(EvaluatedRow {
         values: row,
-        provenance: Provenance::group_key(key_vals),
+        provenance: Provenance::group_key(relation, key_vals),
     })
+}
+
+fn ordered_collect_items(
+    entries: &[GroupEntry],
+    projection_index: usize,
+    collect_ordering: CollectOrdering,
+) -> Vec<Value> {
+    let mut items_with_order: Vec<(Value, StableRowKey, Row, Value, Value)> =
+        Vec::with_capacity(entries.len());
+    for (aggregates, orders, child_row) in entries {
+        let item = aggregates[projection_index].clone().unwrap_or(Value::Null);
+        let order = orders
+            .get(projection_index)
+            .and_then(Clone::clone)
+            .unwrap_or_else(|| item.clone());
+        items_with_order.push((
+            order,
+            child_row.provenance.stable_key.clone(),
+            child_row.values.clone(),
+            child_row.provenance.ordering_key(),
+            item,
+        ));
+    }
+    items_with_order.sort_by(|left, right| match collect_ordering {
+        CollectOrdering::LegacyV1 => left
+            .0
+            .partial_cmp(&right.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                left.3
+                    .partial_cmp(&right.3)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+        CollectOrdering::TypedKeyV1 => compare_reference_values(&left.0, &right.0)
+            .then_with(|| left.1.compare(&right.1))
+            .then_with(|| {
+                compare_named_values(
+                    &left
+                        .2
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.clone()))
+                        .collect::<Vec<_>>(),
+                    &right
+                        .2
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.clone()))
+                        .collect::<Vec<_>>(),
+                )
+            }),
+    });
+    items_with_order
+        .into_iter()
+        .map(|(_, _, _, _, item)| item)
+        .collect()
 }
 
 #[derive(Default)]
@@ -1241,6 +1620,7 @@ pub struct ReferenceProgram {
     pub functions: BTreeMap<String, ast::Callable>,
     pub compiled_operators: Vec<CompiledOperator>,
     pub program_env: Option<Arc<CompiledProgramEnv>>,
+    pub collect_ordering: CollectOrdering,
 }
 
 /// Resolve a [`LinkedProgram`] into a [`ReferenceProgram`]. Independently re-implements the
@@ -1248,8 +1628,49 @@ pub struct ReferenceProgram {
 /// `lower_relations` call: resolving named row schemas to their linked record config, and
 /// extracting `decide` blocks' source relation from their `list` expression.
 pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldError> {
+    from_program_with_collect_ordering(program, CollectOrdering::LegacyV1)
+}
+
+/// Resolve a program with the collection-ordering mode selected by the saved
+/// world execution profile.
+pub fn from_program_with_collect_ordering(
+    program: &LinkedProgram,
+    collect_ordering: CollectOrdering,
+) -> Result<ReferenceProgram, WorldError> {
     let mut dag = lower_relations(program)
         .map_err(|e| WorldError::NetworkError(format!("relational lowering: {e}")))?;
+
+    if collect_ordering == CollectOrdering::LegacyV1 {
+        if let Some((index, _)) = dag.nodes.iter().enumerate().find(|(_, node)| {
+            matches!(node, OperatorNode::GroupedCount { projections, .. }
+                if projections.iter().any(|(_, projection)| matches!(projection, GroupProjection::CollectTake { .. })))
+        }) {
+            return Err(WorldError::NetworkError(format!(
+                "reference legacy collection profile does not support collect(...).take() at operator {index}"
+            )));
+        }
+    }
+
+    if collect_ordering == CollectOrdering::TypedKeyV1 {
+        for (index, node) in dag.nodes.iter().enumerate() {
+            if let OperatorNode::GroupedCount {
+                input, projections, ..
+            } = node
+            {
+                if projections.iter().any(|(_, projection)| {
+                    matches!(
+                        projection,
+                        GroupProjection::Collect { .. } | GroupProjection::CollectTake { .. }
+                    )
+                }) && !reference_has_stable_identity_path(&dag, *input, &mut BTreeSet::new())
+                {
+                    return Err(WorldError::NetworkError(format!(
+                        "reference collect at operator {index} has no stable typed child identity"
+                    )));
+                }
+            }
+        }
+    }
 
     for node in &mut dag.nodes {
         if let OperatorNode::Scan {
@@ -1345,7 +1766,8 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                             | GroupProjection::SumDecimal(expr)
                             | GroupProjection::Min(expr)
                             | GroupProjection::Max(expr)
-                            | GroupProjection::Collect { expr, .. } => Some(expr),
+                            | GroupProjection::Collect { expr, .. }
+                            | GroupProjection::CollectTake { expr, .. } => Some(expr),
                             GroupProjection::Key(_) | GroupProjection::Count => None,
                         };
                         expr.map(|e| program_env.compile_expr(e, &bindings))
@@ -1356,11 +1778,18 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
                 let compiled_collect_orders = projections
                     .iter()
                     .map(|(_, projection)| {
-                        if let GroupProjection::Collect {
-                            order_by: Some(order_expr),
-                            ..
-                        } = projection
-                        {
+                        let order_expr = match projection {
+                            GroupProjection::Collect {
+                                order_by: Some(order_expr),
+                                ..
+                            }
+                            | GroupProjection::CollectTake {
+                                order_by: Some(order_expr),
+                                ..
+                            } => Some(order_expr),
+                            _ => None,
+                        };
+                        if let Some(order_expr) = order_expr {
                             program_env
                                 .compile_expr(order_expr, &bindings)
                                 .map(Some)
@@ -1459,7 +1888,43 @@ pub fn from_program(program: &LinkedProgram) -> Result<ReferenceProgram, WorldEr
         functions,
         compiled_operators,
         program_env: Some(program_env),
+        collect_ordering,
     })
+}
+
+/// Independent structural check that a collect input has a typed identity
+/// path. The oracle does not call the production helper in
+/// `stable_child_key.rs`.
+fn reference_has_stable_identity_path(
+    dag: &RelationDag,
+    op: OperatorId,
+    seen: &mut BTreeSet<OperatorId>,
+) -> bool {
+    if !seen.insert(op) {
+        return false;
+    }
+    match dag.nodes.get(op.0) {
+        Some(OperatorNode::Scan { .. } | OperatorNode::DecisionRows { .. }) => true,
+        Some(
+            OperatorNode::Bind { input, .. }
+            | OperatorNode::Filter { input, .. }
+            | OperatorNode::Project { input, .. },
+        ) => reference_has_stable_identity_path(dag, *input, seen),
+        Some(OperatorNode::EquiJoin { left, right, .. }) => {
+            reference_has_stable_identity_path(dag, *left, seen)
+                && reference_has_stable_identity_path(dag, *right, seen)
+        }
+        Some(OperatorNode::DisjointUnion { left, right, .. }) => {
+            reference_has_stable_identity_path(dag, *left, seen)
+                && reference_has_stable_identity_path(dag, *right, seen)
+        }
+        Some(OperatorNode::AntiJoin { left, .. } | OperatorNode::ParentCount { left, .. }) => {
+            reference_has_stable_identity_path(dag, *left, seen)
+        }
+        Some(OperatorNode::Distinct { .. } | OperatorNode::UnionDistinct { .. }) => true,
+        Some(OperatorNode::GroupedCount { .. }) => true,
+        None => false,
+    }
 }
 
 /// Evaluate a resolved program against a full base-relation snapshot by plain set semantics,
@@ -1612,6 +2077,26 @@ fn evaluate_once_with_budget(
                 };
                 let empty = BTreeMap::new();
                 let records = base_relations.get(relation).unwrap_or(&empty);
+                let source_key_fields = match node {
+                    OperatorNode::Scan { key_fields, .. } => key_fields.clone(),
+                    OperatorNode::DecisionRows { decide, .. } => {
+                        let decision = program
+                            .decides
+                            .iter()
+                            .find(|decision| decision.name == *decide)
+                            .ok_or_else(|| {
+                                WorldError::NetworkError(format!(
+                                    "reference evaluator: decision row source '{decide}' has no compiled decide declaration"
+                                ))
+                            })?;
+                        if decision.per_fields.is_empty() {
+                            vec![decision.per_field.clone()]
+                        } else {
+                            decision.per_fields.clone()
+                        }
+                    }
+                    _ => unreachable!(),
+                };
                 let mut rows = Vec::with_capacity(records.len());
                 for (key, tuple) in records {
                     meter.tuples_scanned += 1;
@@ -1647,9 +2132,19 @@ fn evaluate_once_with_budget(
                                 })?,
                         );
                     }
+                    let declared_key = source_key_fields
+                        .iter()
+                        .map(|name| {
+                            row.get(name).cloned().ok_or_else(|| {
+                                WorldError::NetworkError(format!(
+                                    "missing declared source key {relation}.{name}"
+                                ))
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     rows.push(EvaluatedRow {
                         values: row,
-                        provenance: Provenance::base(key),
+                        provenance: Provenance::base(relation, key, declared_key),
                     });
                 }
                 rows
@@ -1861,7 +2356,7 @@ fn evaluate_once_with_budget(
                     }
                     out.push(EvaluatedRow {
                         values: row.values.clone(),
-                        provenance: Provenance::group_key(&key),
+                        provenance: Provenance::union_key(&key, &row.provenance),
                     });
                 }
                 out
@@ -1909,6 +2404,7 @@ fn evaluate_once_with_budget(
                 out
             }
             OperatorNode::Distinct { input } => {
+                let relation = output_relation_for_operator(dag, idx)?;
                 let mut set: BTreeSet<Row> = BTreeSet::new();
                 for row in &operator_outputs[input.0] {
                     meter.rows_evaluated += 1;
@@ -1917,12 +2413,13 @@ fn evaluate_once_with_budget(
                 }
                 set.into_iter()
                     .map(|values| {
-                        let provenance = Provenance::distinct_row(&values);
+                        let provenance = Provenance::distinct_row(relation, &values);
                         EvaluatedRow { values, provenance }
                     })
                     .collect()
             }
             OperatorNode::UnionDistinct { sources } => {
+                let relation = output_relation_for_operator(dag, idx)?;
                 let mut set: BTreeSet<Row> = BTreeSet::new();
                 for src in sources {
                     for row in &operator_outputs[src.0] {
@@ -1933,7 +2430,7 @@ fn evaluate_once_with_budget(
                 }
                 set.into_iter()
                     .map(|values| {
-                        let provenance = Provenance::distinct_row(&values);
+                        let provenance = Provenance::distinct_row(relation, &values);
                         EvaluatedRow { values, provenance }
                     })
                     .collect()
@@ -2011,7 +2508,15 @@ fn evaluate_once_with_budget(
                 }
                 groups
                     .into_iter()
-                    .map(|(key, entries)| build_grouped_row(projections, &key, &entries))
+                    .map(|(key, entries)| {
+                        build_grouped_row(
+                            output_relation_for_operator(dag, idx)?,
+                            projections,
+                            &key,
+                            &entries,
+                            program.collect_ordering,
+                        )
+                    })
                     .collect::<Result<Vec<_>, _>>()?
             }
         };

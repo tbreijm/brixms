@@ -51,6 +51,12 @@ pub enum GroupProjection {
         order_by: Option<Expr>,
         limit: usize,
     },
+    /// Bounded collection with an explicit truncation marker in its result.
+    CollectTake {
+        expr: Expr,
+        order_by: Option<Expr>,
+        limit: usize,
+    },
 }
 
 /// An operator node in the relational DAG.
@@ -434,6 +440,10 @@ fn substitute_expr(
         | Expr::Why(base)
         | Expr::Audit(base)
         | Expr::Not(base) => substitute_expr(base, args, scope),
+        Expr::CollectTake { collection, limit } => {
+            substitute_expr(collection, args, scope);
+            substitute_expr(limit, args, scope);
+        }
         Expr::Call { args: values, .. } | Expr::ListLit(values) => {
             for value in values {
                 substitute_expr(value, args, scope);
@@ -1054,6 +1064,24 @@ pub fn decision_field_schemas(
                             crate::world_type::infer(expr, &schemas[input.0], "", program)
                                 .unwrap_or_else(|| ast::Ty::Named("Str".into()));
                         Some((k.clone(), ast::Ty::App("List".into(), vec![elem_ty])))
+                    }
+                    GroupProjection::CollectTake { expr, .. } => {
+                        let elem_ty =
+                            crate::world_type::infer(expr, &schemas[input.0], "", program)
+                                .unwrap_or_else(|| ast::Ty::Named("Str".into()));
+                        Some((
+                            k.clone(),
+                            ast::Ty::Record(vec![
+                                ast::FieldDecl {
+                                    name: "items".into(),
+                                    ty: ast::Ty::App("List".into(), vec![elem_ty]),
+                                },
+                                ast::FieldDecl {
+                                    name: "truncated".into(),
+                                    ty: ast::Ty::Named("Bool".into()),
+                                },
+                            ]),
+                        ))
                     }
                 })
                 .collect(),
@@ -1797,6 +1825,62 @@ fn lower_derived_query(
                         limit,
                     }
                 }
+                Expr::CollectTake { collection, limit } => {
+                    let (expr, order_by) = match collection.as_ref() {
+                        Expr::Call { func, args }
+                            if func == "collect" && (1..=2).contains(&args.len()) =>
+                        {
+                            (args[0].clone(), args.get(1).cloned())
+                        }
+                        _ => {
+                            return Err(RelationalLowerError::UnsupportedExpression(
+                                "take() must follow collect(expr[, order_by])".into(),
+                            ));
+                        }
+                    };
+                    let limit = match limit.as_ref() {
+                        Expr::Num(s) => s.parse::<usize>().map_err(|_| {
+                            RelationalLowerError::UnsupportedExpression(
+                                "collect(...).take() limit must be a nonnegative integer literal"
+                                    .into(),
+                            )
+                        })?,
+                        _ => {
+                            return Err(RelationalLowerError::UnsupportedExpression(
+                                "collect(...).take() limit must be a nonnegative integer literal"
+                                    .into(),
+                            ));
+                        }
+                    };
+                    if limit > crate::input::MAX_COLLECTION_ELEMENTS {
+                        return Err(RelationalLowerError::UnsupportedExpression(format!(
+                            "collect(...).take() limit of {limit} exceeds maximum supported cardinality limit of {}",
+                            crate::input::MAX_COLLECTION_ELEMENTS
+                        )));
+                    }
+
+                    let elem_ty = expr_ty_for_aggregate(
+                        &expr,
+                        &decision_field_schemas(dag, program)[current_op.0],
+                        program,
+                    );
+                    match elem_ty.as_ref() {
+                        Some(ast::Ty::Named(n))
+                            if matches!(n.as_str(), "Str" | "Int" | "Decimal" | "Bool") => {}
+                        Some(ast::Ty::Named(_)) => {}
+                        Some(ast::Ty::App(nominal, _)) if nominal != "List" => {}
+                        _ => {
+                            return Err(RelationalLowerError::UnsupportedExpression(format!(
+                                "collect(...).take() element type must be Str, Int, Decimal, Bool or Nominal; got {elem_ty:?}"
+                            )));
+                        }
+                    }
+                    GroupProjection::CollectTake {
+                        expr,
+                        order_by,
+                        limit,
+                    }
+                }
                 _ => match query.group_by.iter().position(|key| key == &expression) {
                     Some(index) => GroupProjection::Key(index),
                     None => {
@@ -1873,6 +1957,10 @@ fn qualify_query_expr(
         | Expr::Prove(base)
         | Expr::Why(base)
         | Expr::Audit(base) => qualify_query_expr(base, owner, program)?,
+        Expr::CollectTake { collection, limit } => {
+            qualify_query_expr(collection, owner, program)?;
+            qualify_query_expr(limit, owner, program)?;
+        }
         Expr::Bin { lhs, rhs, .. } => {
             qualify_query_expr(lhs, owner, program)?;
             qualify_query_expr(rhs, owner, program)?;
@@ -2189,6 +2277,12 @@ fn validate_binding_fields(
         | Expr::Audit(base) => {
             validate_binding_fields(base, bindings, owner, relations, dag, schemas, program)?;
         }
+        Expr::CollectTake { collection, limit } => {
+            validate_binding_fields(
+                collection, bindings, owner, relations, dag, schemas, program,
+            )?;
+            validate_binding_fields(limit, bindings, owner, relations, dag, schemas, program)?;
+        }
         Expr::Bin { lhs, rhs, .. } => {
             validate_binding_fields(lhs, bindings, owner, relations, dag, schemas, program)?;
             validate_binding_fields(rhs, bindings, owner, relations, dag, schemas, program)?;
@@ -2346,6 +2440,7 @@ fn match_equijoin_predicate(
 
 fn expr_contains_aggregate(expr: &Expr) -> bool {
     match expr {
+        Expr::CollectTake { .. } => true,
         Expr::Call { func, .. }
             if ["count", "sum", "min", "max", "collect"].contains(&func.as_str()) =>
         {

@@ -389,7 +389,14 @@ pub fn verify_world_audit_bundle(
     let _ = computed_manifest_digest;
 
     let ref_prog = if let Some(ref linked) = linked_prog {
-        Some(reference::from_program(linked)?)
+        Some(reference::from_program_with_collect_ordering(
+            linked,
+            if bundle.exec_profile.evaluator == "brix-world-net@2" {
+                reference::CollectOrdering::TypedKeyV1
+            } else {
+                reference::CollectOrdering::LegacyV1
+            },
+        )?)
     } else {
         if bundle.world_manifest.program_required {
             return Err(VerifyError::Usage(
@@ -521,6 +528,13 @@ pub fn verify_world_audit_bundle(
                     expected: options.expect_program,
                     found: state.record.program_digest.unwrap_or(options.expect_head),
                 });
+            }
+            if bundle.exec_profile.evaluator == "brix-world-net@2"
+                && state.record.exec_profile_digest.is_none()
+            {
+                return Err(VerifyError::UnsupportedExecProfile(
+                    "typed collection semantics require a revision-bound execution profile".into(),
+                ));
             }
             if let Some(bound_profile) = state.record.exec_profile_digest {
                 if bundle.exec_profile.digest() != bound_profile {
@@ -780,6 +794,13 @@ pub fn verify_world_audit_bundle(
                     found: prog,
                 });
             }
+        }
+        if bundle.exec_profile.evaluator == "brix-world-net@2"
+            && record.exec_profile_digest.is_none()
+        {
+            return Err(VerifyError::UnsupportedExecProfile(
+                "typed collection semantics require a revision-bound execution profile".into(),
+            ));
         }
         if let Some(bound_profile) = record.exec_profile_digest {
             if bundle.exec_profile.digest() != bound_profile {

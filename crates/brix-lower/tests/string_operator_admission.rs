@@ -153,6 +153,33 @@ fn world_admission_rejects_string_ops_through_fields_and_untyped_helpers() {
 }
 
 #[test]
+fn world_admission_checks_string_ops_and_fields_inside_collect_take() {
+    for expression in [
+        "collect(e.name + \"!\").take(2)",
+        "collect(e.id, e.name + \"!\").take(2)",
+    ] {
+        let source = format!(
+            "rel input entries: {{ id: Str, name: Str }} key id\nrel derived result = select {{ value: {expression} }} from e in entries"
+        );
+        let error = lower_relations(&linked(&source)).unwrap_err();
+        assert!(
+            error.to_string().contains("unsupported for Str operands"),
+            "expression {expression:?}: {error}"
+        );
+    }
+
+    let unknown_field = r#"
+rel input entries: { id: Str, name: Str } key id
+rel derived result = select { value: collect(e.missing).take(2) } from e in entries
+"#;
+    let error = lower_relations(&linked(unknown_field)).unwrap_err();
+    assert!(
+        error.to_string().contains("unknown field"),
+        "unknown collect item field must fail admission: {error}"
+    );
+}
+
+#[test]
 fn world_admission_checks_nested_match_and_lambda_helper_bodies() {
     let source = r#"
 rel input entries: { id: Str, label: Str } key id

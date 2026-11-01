@@ -1639,7 +1639,17 @@ impl Parser {
             if self.check(&TokenKind::Dot) {
                 self.advance();
                 let field_name = self.expect_ident("field access after '.'")?.0;
-                expr = Expr::Field(Box::new(expr), field_name);
+                if field_name == "take" && self.check(&TokenKind::OpenParen) {
+                    self.advance();
+                    let limit = self.parse_expr()?;
+                    self.consume(TokenKind::CloseParen, "')' after collect take limit")?;
+                    expr = Expr::CollectTake {
+                        collection: Box::new(expr),
+                        limit: Box::new(limit),
+                    };
+                } else {
+                    expr = Expr::Field(Box::new(expr), field_name);
+                }
             } else {
                 break;
             }

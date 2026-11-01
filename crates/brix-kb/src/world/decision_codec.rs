@@ -183,31 +183,33 @@ impl Value {
         ty: &ast::Ty,
         schemas: &BTreeMap<String, brix_lower::l3_v2::L3Schema>,
     ) -> Result<Self, WorldError> {
-        use brix_lower::l3_v2::validate_l3_value;
-        let expected = brix_lower::world_expr::contract(ty).map_err(WorldError::NetworkError)?;
-        let name = expected.display_name();
+        let expected_name = brix_lower::world_expr::contract(ty)
+            .map(|expected| expected.display_name())
+            .unwrap_or_else(|_| format!("{ty:?}"));
         let text = || {
             std::str::from_utf8(bytes)
                 .map_err(|e| WorldError::NetworkError(format!("invalid scalar UTF-8: {e}")))
         };
-        let invalid = || WorldError::NetworkError(format!("invalid {name} scalar"));
-        match name.as_str() {
-            "Str" => return Ok(Self::Str(text()?.to_owned())),
-            "Int" => return text()?.parse().map(Self::Int).map_err(|_| invalid()),
-            "Bool" => {
-                return match text()? {
-                    "true" => Ok(Self::Bool(true)),
-                    "false" => Ok(Self::Bool(false)),
-                    _ => Err(invalid()),
+        let invalid = || WorldError::NetworkError(format!("invalid {expected_name} scalar"));
+        if let ast::Ty::Named(name) = ty {
+            match name.as_str() {
+                "Str" => return Ok(Self::Str(text()?.to_owned())),
+                "Int" => return text()?.parse().map(Self::Int).map_err(|_| invalid()),
+                "Bool" => {
+                    return match text()? {
+                        "true" => Ok(Self::Bool(true)),
+                        "false" => Ok(Self::Bool(false)),
+                        _ => Err(invalid()),
+                    }
                 }
+                "F64" => return text()?.parse().map(Self::F64).map_err(|_| invalid()),
+                "Decimal" => {
+                    return brix_canon::decimal_parse(text()?)
+                        .map(Self::Decimal)
+                        .map_err(|_| invalid())
+                }
+                _ => {}
             }
-            "F64" => return text()?.parse().map(Self::F64).map_err(|_| invalid()),
-            "Decimal" => {
-                return brix_canon::decimal_parse(text()?)
-                    .map(Self::Decimal)
-                    .map_err(|_| invalid())
-            }
-            _ => {}
         }
         let value = if let Some(payload) = bytes.strip_prefix(STRUCTURED_PREFIX) {
             let mut reader = brix_canon::CanonReader::new(payload);
@@ -223,7 +225,7 @@ impl Value {
                 .map_err(|e| WorldError::NetworkError(format!("invalid structured value: {e}")))?
                 .to_l3_value()
         };
-        validate_l3_value(&value, &expected, schemas, "world input")
+        validate_typed_world_value(&value, ty, schemas, "world input")
             .map_err(|e| WorldError::NetworkError(format!("type validation error: {e}")))?;
         Self::from_scalar(value)
     }
@@ -321,6 +323,128 @@ impl Value {
         })
     }
 }
+
+/// Validate structural anonymous records returned by relational projections.
+/// Nominal values still use the existing L3 schema validator. The decoder and
+/// this pass both have fixed depth, node, and container bounds.
+fn validate_typed_world_value(
+    value: &brix_lower::l3_v2::L3ValueV2,
+    ty: &ast::Ty,
+    schemas: &BTreeMap<String, brix_lower::l3_v2::L3Schema>,
+    path: &str,
+) -> Result<(), String> {
+    fn visit(
+        value: &brix_lower::l3_v2::L3ValueV2,
+        ty: &ast::Ty,
+        schemas: &BTreeMap<String, brix_lower::l3_v2::L3Schema>,
+        path: &str,
+        depth: usize,
+        remaining_nodes: &mut usize,
+    ) -> Result<(), String> {
+        use brix_lower::l3_v2::{validate_l3_value, L3ValueV2};
+
+        if depth >= brix_lower::input::MAX_INPUT_VALUE_DEPTH || *remaining_nodes == 0 {
+            return Err(format!(
+                "{path}: typed value exceeds structural validation limits"
+            ));
+        }
+        *remaining_nodes -= 1;
+        match (value, ty) {
+            (
+                L3ValueV2::Record {
+                    nominal_config,
+                    fields,
+                },
+                ast::Ty::Record(expected),
+            ) => {
+                if !nominal_config.is_empty() {
+                    return Err(format!(
+                        "{path}: expected anonymous record, found nominal '{nominal_config}'"
+                    ));
+                }
+                if expected.len() > brix_lower::input::MAX_INPUT_CONTAINER_WIDTH
+                    || fields.len() > brix_lower::input::MAX_INPUT_CONTAINER_WIDTH
+                    || fields.len() != expected.len()
+                {
+                    return Err(format!(
+                        "{path}: anonymous record has an invalid field count"
+                    ));
+                }
+                let mut expected_names = BTreeSet::new();
+                for field in expected {
+                    if !expected_names.insert(field.name.as_str()) {
+                        return Err(format!(
+                            "{path}: anonymous record schema has duplicate fields"
+                        ));
+                    }
+                }
+                let mut actual = BTreeMap::new();
+                for (name, value) in fields {
+                    if actual.insert(name.as_str(), value).is_some() {
+                        return Err(format!("{path}.{name}: duplicate record field"));
+                    }
+                }
+                if actual.len() != expected_names.len()
+                    || actual.keys().any(|name| !expected_names.contains(name))
+                {
+                    return Err(format!(
+                        "{path}: anonymous record fields do not match schema"
+                    ));
+                }
+                for field in expected {
+                    let value = actual
+                        .get(field.name.as_str())
+                        .ok_or_else(|| format!("{path}.{}: missing field", field.name))?;
+                    visit(
+                        value,
+                        &field.ty,
+                        schemas,
+                        &format!("{path}.{}", field.name),
+                        depth + 1,
+                        remaining_nodes,
+                    )?;
+                }
+                Ok(())
+            }
+            (L3ValueV2::List(items), ast::Ty::App(name, args))
+                if name == "List" && args.len() == 1 =>
+            {
+                if items.len() > brix_lower::input::MAX_COLLECTION_ELEMENTS {
+                    return Err(format!(
+                        "{path}: list has {} element(s), exceeding maximum of {}",
+                        items.len(),
+                        brix_lower::input::MAX_COLLECTION_ELEMENTS
+                    ));
+                }
+                for (index, item) in items.iter().enumerate() {
+                    visit(
+                        item,
+                        &args[0],
+                        schemas,
+                        &format!("{path}[{index}]"),
+                        depth + 1,
+                        remaining_nodes,
+                    )?;
+                }
+                Ok(())
+            }
+            (_, ast::Ty::App(name, _)) if name == "List" => Err(format!(
+                "{path}: value does not match structural type {ty:?}"
+            )),
+            (_, ast::Ty::Record(_)) => Err(format!(
+                "{path}: value does not match structural type {ty:?}"
+            )),
+            _ => {
+                let expected = brix_lower::world_expr::contract(ty)?;
+                validate_l3_value(value, &expected, schemas, path)
+            }
+        }
+    }
+
+    let mut remaining_nodes = brix_lower::input::MAX_WORLD_VALUE_NODES;
+    visit(value, ty, schemas, path, 0, &mut remaining_nodes)
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -373,9 +373,12 @@ pub fn execute_check_with_context(
             let linked = graph.link().map_err(|e| e.to_string())?;
             brix_lower::relation_dag::admit_named_queries_v1(&linked)
                 .map_err(|e| format!("named query admission failed: {e}"))?;
-            brix_kb::world::network::WorldNetwork::from_program(&linked)
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+            brix_kb::world::network::WorldNetwork::from_program_with_collect_ordering(
+                &linked,
+                brix_kb::world::CollectOrdering::TypedKeyV1,
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
         })();
         if let Err(msg) = world_check {
             had_error = true;

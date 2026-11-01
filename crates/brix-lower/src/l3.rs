@@ -842,6 +842,9 @@ fn normalize_static_value(expr: &ast::Expr, env: &NormEnv) -> Result<L3ValueV1, 
             })
         }
         ast::Expr::Field(_, name) => Err(L3LowerError::FieldAccessNotAllowed(name.clone())),
+        ast::Expr::CollectTake { .. } => {
+            Err(L3LowerError::FnItemNotAllowed("collect take".to_string()))
+        }
         ast::Expr::Call { func, args: _ } => {
             if env.ambiguous_ctors.contains(func) {
                 return Err(L3LowerError::AmbiguousConstructorReference(func.clone()));

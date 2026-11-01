@@ -1275,7 +1275,12 @@ impl WorldSession {
 
         let bundle_bytes = if include_bundle {
             if let Ok(closure) = self.program_closure() {
-                let ep = super::audit::ExecProfileV1::default();
+                let ep = self
+                    .exec_profile
+                    .as_ref()
+                    .map(|profile| super::audit::ExecProfileV1::from_json(&profile.to_json()))
+                    .transpose()?
+                    .unwrap_or_default();
                 let bundle =
                     build_genesis_bundle_up_to_revision(self, closure, ep, target.revision)?;
                 let limits = WorldAuditDecodeLimits::strict();

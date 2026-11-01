@@ -1223,6 +1223,10 @@ fn trace_expr_deps(
             }
         }
         ast::Expr::Field(base, _) => trace_expr_deps(base, current_module, reachable, all_configs),
+        ast::Expr::CollectTake { collection, limit } => {
+            trace_expr_deps(collection, current_module, reachable, all_configs);
+            trace_expr_deps(limit, current_module, reachable, all_configs);
+        }
         ast::Expr::Bin { lhs, rhs, .. } => {
             trace_expr_deps(lhs, current_module, reachable, all_configs);
             trace_expr_deps(rhs, current_module, reachable, all_configs);
@@ -1458,6 +1462,10 @@ impl NominalResolver<'_> {
             | Expr::Prove(value)
             | Expr::Why(value)
             | Expr::Audit(value) => self.expr(value, bound)?,
+            Expr::CollectTake { collection, limit } => {
+                self.expr(collection, bound)?;
+                self.expr(limit, bound)?;
+            }
             Expr::Bin { lhs, rhs, .. } => {
                 self.expr(lhs, bound)?;
                 self.expr(rhs, bound)?;

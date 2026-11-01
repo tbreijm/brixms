@@ -367,6 +367,90 @@ rel derived backordered_sku_count =
 }
 
 #[test]
+fn bounded_collect_take_has_distinct_dag_projection_and_record_schema() {
+    let source = r#"
+rel input events: { id: Str, category: Str, value: Str } key id
+rel derived grouped =
+    select { category: e.category, recent: collect(e.value, e.id).take(2) }
+    from e in events
+    group by e.category
+"#;
+    let sources = BTreeMap::from([("root".to_string(), source.to_string())]);
+    let loader = |name: &str| sources.get(name).cloned();
+    let linked = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default())
+        .unwrap()
+        .link()
+        .unwrap();
+    let dag = lower_relations(&linked).expect("bounded collect should lower");
+    let grouped = dag
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| match node {
+            OperatorNode::GroupedCount { projections, .. } => Some((index, projections)),
+            _ => None,
+        })
+        .expect("grouped projection node");
+    assert!(grouped.1.iter().any(|(name, projection)| {
+        name == "recent"
+            && matches!(
+                projection,
+                brix_lower::relation_dag::GroupProjection::CollectTake {
+                    limit: 2,
+                    order_by: Some(_),
+                    ..
+                }
+            )
+    }));
+    let schemas = brix_lower::relation_dag::decision_field_schemas(&dag, &linked);
+    let recent = schemas[grouped.0].get("recent").expect("recent schema");
+    assert_eq!(
+        recent,
+        &brix_syntax::ast::Ty::Record(vec![
+            brix_syntax::ast::FieldDecl {
+                name: "items".into(),
+                ty: brix_syntax::ast::Ty::App(
+                    "List".into(),
+                    vec![brix_syntax::ast::Ty::Named("Str".into())],
+                ),
+            },
+            brix_syntax::ast::FieldDecl {
+                name: "truncated".into(),
+                ty: brix_syntax::ast::Ty::Named("Bool".into()),
+            },
+        ])
+    );
+}
+
+#[test]
+fn bounded_collect_take_accepts_zero_and_rejects_invalid_limits() {
+    let base = r#"
+rel input events: { id: Str, category: Str, value: Str } key id
+rel derived grouped =
+    select { category: e.category, recent: collect(e.value).take(LIMIT) }
+    from e in events
+    group by e.category
+"#;
+    for (limit, accepted) in [
+        ("0", true),
+        ("1", true),
+        ("-1", false),
+        ("1.5", false),
+        ("n", false),
+        ("65537", false),
+    ] {
+        let source = base.replace("LIMIT", limit);
+        let sources = BTreeMap::from([("root".to_string(), source)]);
+        let loader = |name: &str| sources.get(name).cloned();
+        let linked = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default())
+            .unwrap()
+            .link()
+            .unwrap();
+        assert_eq!(lower_relations(&linked).is_ok(), accepted, "limit {limit}");
+    }
+}
+
+#[test]
 fn test_recursive_relation_cycle_rejected() {
     let src = r#"
 rel input base: { id: Str } key id

@@ -1,0 +1,14 @@
+{
+  "schema": "brix.test.legacy-collect-profile@1",
+  "producer_basis": "16b7752",
+  "exec_evaluator": "brix-world-net@1",
+  "expect_head": "2b06eb0940934700cde4177936c3992ec140aad87337066bdf5d6cb1dcfda4f2",
+  "expect_program": "e22c7c163a94cd998d0a59f9993142ccd1636c7cadedab8650bc77f69dcf5ecd",
+  "bundle_id": "f85a79ed9f26ec066ac47ef463fcd399b85ba82d16cb1d77d32518d4074e22b0",
+  "legacy_order": [
+    "b",
+    "z",
+    "ccc",
+    "aa"
+  ]
+}
