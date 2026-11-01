@@ -25,6 +25,22 @@ pub fn execute_check(
     package_paths: &[PathBuf],
     input_paths: &[PathBuf],
 ) -> u8 {
+    let invocation = match crate::request_evidence::InvocationEvidenceContext::from_environment() {
+        Ok(context) => context,
+        Err(message) => return pipeline::invocation_evidence_error("check", message, json),
+    };
+    execute_check_with_context(file, json, package_paths, input_paths, &invocation)
+}
+
+/// Execute check under an explicitly snapshotted evidence context. Server
+/// callers pass `Empty`, so process environment pins never authorize a request.
+pub fn execute_check_with_context(
+    file: &Path,
+    json: bool,
+    package_paths: &[PathBuf],
+    input_paths: &[PathBuf],
+    invocation: &crate::request_evidence::InvocationEvidenceContext,
+) -> u8 {
     let file_display = file.display().to_string();
 
     let source = match pipeline::stage_read_source("check", file, json) {
@@ -67,6 +83,18 @@ pub fn execute_check(
             Err(code) => return code,
         };
         let program_hex = pipeline::program_id_hex(&plan);
+        let profile = Some(FINITE_DECISION_PROFILE.to_string());
+        let evidence_context = match pipeline::stage_authorize_evidence(
+            "check",
+            profile.clone(),
+            Some(program_hex.clone()),
+            &plan,
+            invocation,
+            json,
+        ) {
+            Ok(context) => context,
+            Err(code) => return code,
+        };
 
         // If source declares inputs and NO --input was supplied:
         // Validate syntax and lowering/declarations only, do NOT build runtime or run preflight.
@@ -102,13 +130,13 @@ pub fn execute_check(
             return EXIT_SUCCESS;
         }
 
-        let profile = Some(FINITE_DECISION_PROFILE.to_string());
-        let snapshot = match pipeline::stage_load_snapshot(
+        let snapshot = match pipeline::stage_load_snapshot_with_context(
             "check",
             profile.clone(),
             Some(program_hex.clone()),
             input_paths,
             json,
+            &evidence_context,
         ) {
             Ok(s) => s,
             Err(code) => return code,

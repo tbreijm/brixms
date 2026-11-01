@@ -3009,6 +3009,8 @@ Input Format:
 Global Options:
   --help       Print help information
   --version    Print version information
+  --request-context <host-policy.json>
+               Immutable host evidence policy for run/why/whynot/audit/verify
 "
     );
 }

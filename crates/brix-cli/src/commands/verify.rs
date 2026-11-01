@@ -28,6 +28,34 @@ pub fn execute_verify(
     package_paths: &[PathBuf],
     input_paths: &[PathBuf],
 ) -> u8 {
+    let invocation = match crate::request_evidence::InvocationEvidenceContext::from_environment() {
+        Ok(context) => context,
+        Err(message) => return crate::pipeline::invocation_evidence_error("verify", message, json),
+    };
+    execute_verify_with_context(
+        expect_program_hex,
+        file,
+        bundle_path,
+        profile,
+        json,
+        package_paths,
+        input_paths,
+        &invocation,
+    )
+}
+
+/// Verify under an explicit per-invocation request evidence context.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_verify_with_context(
+    expect_program_hex: &str,
+    file: &Path,
+    bundle_path: &Path,
+    profile: VerifyProfile,
+    json: bool,
+    package_paths: &[PathBuf],
+    input_paths: &[PathBuf],
+    invocation: &crate::request_evidence::InvocationEvidenceContext,
+) -> u8 {
     let profile_str = match profile {
         VerifyProfile::FiniteDecision => brix_lower::FINITE_DECISION_PROFILE,
         VerifyProfile::L3V1 => brix_lower::L3_PROFILE_MARKER_V1,
@@ -78,12 +106,12 @@ pub fn execute_verify(
         }
     };
 
-    if bundle_meta.len() > decode_limits.max_total_bundle_bytes as u64 {
+    if bundle_meta.len() > crate::request_audit::MAX_REQUEST_AUDIT_WRAPPER_BYTES as u64 {
         let msg = format!(
             "bundle file '{}' exceeds maximum allowed size ({} bytes > {} limit)",
             bundle_path.display(),
             bundle_meta.len(),
-            decode_limits.max_total_bundle_bytes
+            crate::request_audit::MAX_REQUEST_AUDIT_WRAPPER_BYTES
         );
         if json {
             let res = CliResultJson::failure(
@@ -125,7 +153,7 @@ pub fn execute_verify(
     let mut bundle_bytes = Vec::new();
     if let Err(err) = bundle_file
         .by_ref()
-        .take((decode_limits.max_total_bundle_bytes + 1) as u64)
+        .take((crate::request_audit::MAX_REQUEST_AUDIT_WRAPPER_BYTES + 1) as u64)
         .read_to_end(&mut bundle_bytes)
     {
         let msg = format!("cannot read bundle file '{}': {err}", bundle_path.display());
@@ -145,12 +173,12 @@ pub fn execute_verify(
         return EXIT_USAGE_OR_IO;
     }
 
-    if bundle_bytes.len() > decode_limits.max_total_bundle_bytes {
+    if bundle_bytes.len() > crate::request_audit::MAX_REQUEST_AUDIT_WRAPPER_BYTES {
         let msg = format!(
             "bundle file '{}' exceeds maximum allowed size ({} bytes > {} limit)",
             bundle_path.display(),
             bundle_bytes.len(),
-            decode_limits.max_total_bundle_bytes
+            crate::request_audit::MAX_REQUEST_AUDIT_WRAPPER_BYTES
         );
         if json {
             let res = CliResultJson::failure(
@@ -168,27 +196,9 @@ pub fn execute_verify(
         return EXIT_USAGE_OR_IO;
     }
 
-    // 3. Decodes and bounds bundle before source work.
-    let decoded_bundle = match decode_audit_input_bundle_v1(&bundle_bytes, &decode_limits) {
-        Ok(b) => b,
-        Err(err) => {
-            let msg = format!("bundle decode error: {err:?}");
-            if json {
-                let res = CliResultJson::failure(
-                    "verify",
-                    Some(profile_str.to_string()),
-                    Some(expect_program_hex.to_string()),
-                    None,
-                    "unknown",
-                    vec![format!("bundle-decode-error: {err:?}")],
-                );
-                crate::json::emit_result_json(&res);
-            } else {
-                eprintln!("brix verify: unknown ({msg})");
-            }
-            return EXIT_REJECTED_OR_UNKNOWN;
-        }
-    };
+    // Bundle parsing is delayed until after the source plan and independently
+    // supplied request policy are checked. In particular, embedded inputs are
+    // not decoded or loaded before wrapper context comparison.
 
     // 4. Read source applying strict 1 MiB limit before allocation.
     let source = match read_source_bounded(file) {
@@ -273,6 +283,178 @@ pub fn execute_verify(
         return EXIT_USAGE_OR_IO;
     }
 
+    // The policy is bound to this exact source-derived finite-decision plan
+    // before wrapper payloads (including input shards) are decoded or loaded.
+    let mut evidence_context = crate::request_evidence::RequestEvidenceContext::empty();
+    if matches!(profile, VerifyProfile::FiniteDecision) {
+        let mut policy_module = resolved_module.clone();
+        crate::commands::prepare_finite_decision_module(&mut policy_module);
+        let plan = match brix_lower::finite_decision::lower_finite_decision_plan(
+            &policy_module,
+            brix_lower::FINITE_DECISION_PROFILE,
+        ) {
+            Ok(plan) => plan,
+            Err(err) => {
+                let message = format!("source lowering failed: {err}");
+                if json {
+                    crate::json::emit_result_json(&CliResultJson::failure(
+                        "verify",
+                        Some(profile_str.to_string()),
+                        Some(expect_program_hex.to_string()),
+                        None,
+                        "unknown",
+                        vec![message],
+                    ));
+                } else {
+                    eprintln!("brix verify: unknown ({message})");
+                }
+                return EXIT_REJECTED_OR_UNKNOWN;
+            }
+        };
+        evidence_context = match crate::pipeline::stage_authorize_evidence(
+            "verify",
+            Some(profile_str.to_string()),
+            Some(expect_program_hex.to_string()),
+            &plan,
+            invocation,
+            json,
+        ) {
+            Ok(context) => context,
+            Err(code) => return code,
+        };
+    } else if matches!(
+        invocation,
+        crate::request_evidence::InvocationEvidenceContext::HostPolicy(_)
+    ) {
+        let message = "request evidence policy is only supported for finite-decision verification";
+        if json {
+            crate::json::emit_result_json(&CliResultJson::failure(
+                "verify",
+                Some(profile_str.to_string()),
+                Some(expect_program_hex.to_string()),
+                None,
+                "rejected",
+                vec![message.into()],
+            ));
+        } else {
+            eprintln!("brix verify: rejected: {message}");
+        }
+        return EXIT_REJECTED_OR_UNKNOWN;
+    }
+
+    let wrapper_present =
+        match crate::request_audit::RequestAuditEvidenceV1::is_wrapper_bytes(&bundle_bytes) {
+            Ok(value) => value,
+            Err(err) => {
+                return report_bundle_error(
+                    &err.to_string(),
+                    profile_str,
+                    expect_program_hex,
+                    json,
+                    evidence_context.id(),
+                );
+            }
+        };
+    let mut _materialized_inputs = None;
+    let mut input_paths_for_snapshot = input_paths.to_vec();
+    let v1_bundle_bytes = if wrapper_present {
+        let (wrapper_context_id, wrapper_context_bytes) =
+            match crate::request_audit::RequestAuditEvidenceV1::inspect_context(&bundle_bytes) {
+                Ok(pair) => pair,
+                Err(err) => {
+                    return report_bundle_error(
+                        &err.to_string(),
+                        profile_str,
+                        expect_program_hex,
+                        json,
+                        evidence_context.id(),
+                    )
+                }
+            };
+        let expected_id = evidence_context.id().map(|id| id.digest().to_hex());
+        let expected_bytes = evidence_context.canonical_bytes().map(ToOwned::to_owned);
+        if wrapper_context_id != expected_id || wrapper_context_bytes != expected_bytes {
+            return report_bundle_error(
+                "request context does not match the independently authorized policy",
+                profile_str,
+                expect_program_hex,
+                json,
+                evidence_context.id(),
+            );
+        }
+        if !input_paths.is_empty() {
+            return report_bundle_error(
+                "--input cannot be combined with portable request audit inputs",
+                profile_str,
+                expect_program_hex,
+                json,
+                evidence_context.id(),
+            );
+        }
+        let wrapper = match crate::request_audit::RequestAuditEvidenceV1::decode(&bundle_bytes) {
+            Ok(wrapper) => wrapper,
+            Err(err) => {
+                return report_bundle_error(
+                    &err.to_string(),
+                    profile_str,
+                    expect_program_hex,
+                    json,
+                    evidence_context.id(),
+                )
+            }
+        };
+        if let Err(err) = wrapper.validate_input_budgets(&evidence_context.read_limits()) {
+            return report_bundle_error(
+                &err.to_string(),
+                profile_str,
+                expect_program_hex,
+                json,
+                evidence_context.id(),
+            );
+        }
+        let materialized =
+            match crate::request_audit::MaterializedAuditInputs::create(&wrapper.inputs) {
+                Ok(inputs) => inputs,
+                Err(err) => {
+                    return report_bundle_error(
+                        &err.to_string(),
+                        profile_str,
+                        expect_program_hex,
+                        json,
+                        evidence_context.id(),
+                    )
+                }
+            };
+        input_paths_for_snapshot = materialized.paths().to_vec();
+        let bytes = wrapper.v1_bundle;
+        _materialized_inputs = Some(materialized);
+        bytes
+    } else {
+        if evidence_context.is_host() {
+            return report_bundle_error(
+                "unbound V1 audit bundle is not accepted with a host request policy",
+                profile_str,
+                expect_program_hex,
+                json,
+                evidence_context.id(),
+            );
+        }
+        bundle_bytes
+    };
+    let decoded_bundle = match decode_audit_input_bundle_v1(&v1_bundle_bytes, &decode_limits) {
+        Ok(bundle) => bundle,
+        Err(err) => {
+            return report_bundle_error(
+                &format!("bundle-decode-error: {err:?}"),
+                profile_str,
+                expect_program_hex,
+                json,
+                evidence_context.id(),
+            )
+        }
+    };
+    let request_context_id = evidence_context.id();
+
     // 6. Call the correct source/module verifier.
     let plan_limits = PlanLimitsV1::generous();
 
@@ -286,7 +468,10 @@ pub fn execute_verify(
         receipt_ids_hex,
     ) = match profile {
         VerifyProfile::FiniteDecision => {
-            let snapshot = match crate::commands::load_cli_input_snapshot(input_paths) {
+            let snapshot = match crate::commands::load_cli_input_snapshot_with_context(
+                &input_paths_for_snapshot,
+                &evidence_context,
+            ) {
                 Ok(s) => s,
                 Err(err) => {
                     if json {
@@ -298,7 +483,10 @@ pub fn execute_verify(
                             err.status(),
                             vec![err.diagnostic()],
                         );
-                        crate::json::emit_result_json(&res);
+                        crate::json::emit_result_json_with_request_context(
+                            &res,
+                            request_context_id,
+                        );
                     } else {
                         eprintln!("{}", err.render_human("verify"));
                     }
@@ -361,7 +549,10 @@ pub fn execute_verify(
                             vec![diag.clone()],
                         )
                         .with_inputs(input_snapshot_hex, None);
-                        crate::json::emit_result_json(&res);
+                        crate::json::emit_result_json_with_request_context(
+                            &res,
+                            request_context_id,
+                        );
                     } else {
                         match &err {
                             brix_lower::audit_bundle::SourceBundleError::InputValidation(iv) => {
@@ -461,7 +652,7 @@ pub fn execute_verify(
             commits: None,
             entity_decisions: None,
         };
-        crate::json::emit_result_json(&res);
+        crate::json::emit_result_json_with_request_context(&res, request_context_id);
     } else {
         for line in receipt_lines {
             println!("{line}");
@@ -490,4 +681,27 @@ fn hex_to_32_bytes(hex: &str) -> Result<[u8; 32], &'static str> {
             .map_err(|_| "invalid non-hex character")?;
     }
     Ok(bytes)
+}
+
+fn report_bundle_error(
+    message: &str,
+    profile: &str,
+    expect_program: &str,
+    json: bool,
+    request_context: Option<brix_semantic::ContextId>,
+) -> u8 {
+    if json {
+        let result = CliResultJson::failure(
+            "verify",
+            Some(profile.to_string()),
+            Some(expect_program.to_string()),
+            None,
+            "unknown",
+            vec![format!("request-audit-bundle-error: {message}")],
+        );
+        crate::json::emit_result_json_with_request_context(&result, request_context);
+    } else {
+        eprintln!("brix verify: unknown (request-audit-bundle-error: {message})");
+    }
+    EXIT_REJECTED_OR_UNKNOWN
 }

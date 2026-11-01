@@ -34,7 +34,7 @@ use brix_syntax::parse_bounded;
 use crate::cli::{EXIT_REJECTED_OR_UNKNOWN, EXIT_SUCCESS, EXIT_USAGE_OR_IO};
 use crate::commands::{
     candidate_disposition_to_json, escape_diagnostic_human, fmt_value_human,
-    load_cli_input_snapshot, prepare_finite_decision_module, CliInputError,
+    load_cli_input_snapshot_with_context, prepare_finite_decision_module, CliInputError,
 };
 use crate::packages::{make_package_loader, read_source_bounded};
 
@@ -56,6 +56,21 @@ const MAX_JSON_STRING_BYTES: usize = 65536;
 
 /// Execute `brix test <file.test.json>... [--json]`.
 pub fn execute_test(files: &[PathBuf], json: bool) -> u8 {
+    let invocation = match crate::request_evidence::InvocationEvidenceContext::from_environment() {
+        Ok(context) => context,
+        Err(message) => return report_request_context_error("<invocation>", &message, json),
+    };
+    execute_test_with_context(files, json, &invocation)
+}
+
+/// Execute test suites with an invocation-scoped evidence context. The server
+/// passes `Empty`; standalone CLI calls snapshot environment pins once in the
+/// legacy wrapper above and share that immutable snapshot across all cases.
+pub fn execute_test_with_context(
+    files: &[PathBuf],
+    json: bool,
+    invocation: &crate::request_evidence::InvocationEvidenceContext,
+) -> u8 {
     let mut prepared_files = Vec::with_capacity(files.len());
     for path in files {
         match prepare_file(path) {
@@ -74,6 +89,18 @@ pub fn execute_test(files: &[PathBuf], json: bool) -> u8 {
                     eprintln!("brix test: {}", escape_diagnostic_human(&full));
                 }
                 return EXIT_USAGE_OR_IO;
+            }
+        }
+    }
+
+    // Authorize once per actual lowered program, before any test case reads
+    // its input/evidence files. A suite's cases all share the same sealed
+    // request context; environment is never consulted per case.
+    for prepared in &mut prepared_files {
+        match invocation.authorize_program(&prepared.plan) {
+            Ok(context) => prepared.evidence_context = context,
+            Err(message) => {
+                return report_request_context_error(&prepared.display_path, &message, json)
             }
         }
     }
@@ -118,6 +145,23 @@ pub fn execute_test(files: &[PathBuf], json: bool) -> u8 {
     }
 }
 
+fn report_request_context_error(file: &str, message: &str, json: bool) -> u8 {
+    if json {
+        crate::json::emit_result_json(&TestFatalErrorJson {
+            schema: TEST_RESULT_SCHEMA_V1.to_string(),
+            ok: false,
+            file: file.to_string(),
+            error: format!("request-context-invalid: {message}"),
+        });
+    } else {
+        eprintln!(
+            "brix test: {}",
+            escape_diagnostic_human(&format!("{file}: request-context-invalid: {message}"))
+        );
+    }
+    EXIT_REJECTED_OR_UNKNOWN
+}
+
 struct FileRunResult<'a> {
     prepared: &'a PreparedFile,
     cases: Vec<CaseOutcome>,
@@ -134,6 +178,7 @@ struct PreparedFile {
     base_dir: PathBuf,
     spec: TestFileSpec,
     plan: FiniteDecisionPlan,
+    evidence_context: crate::request_evidence::RequestEvidenceContext,
 }
 
 /// Read, strictly parse, and prepare a single `.test.json` suite file and the program it names.
@@ -187,6 +232,7 @@ fn prepare_file(path: &Path) -> Result<PreparedFile, String> {
         base_dir,
         spec,
         plan,
+        evidence_context: crate::request_evidence::RequestEvidenceContext::empty(),
     })
 }
 
@@ -238,20 +284,21 @@ fn run_case(prepared: &PreparedFile, case: &TestCaseSpec) -> CaseOutcome {
         .collect();
     let program_id_hex = Some(finite_decision_program_id(&prepared.plan).0.to_hex());
 
-    let snapshot = match load_cli_input_snapshot(&resolved_inputs) {
-        Ok(s) => s,
-        Err(err) => {
-            return CaseOutcome {
-                name: case.name.clone(),
-                ok: false,
-                program_id_hex,
-                input_snapshot_hex: None,
-                resolved_inputs: resolved_display,
-                error: Some(err.diagnostic()),
-                mismatches: Vec::new(),
-            };
-        }
-    };
+    let snapshot =
+        match load_cli_input_snapshot_with_context(&resolved_inputs, &prepared.evidence_context) {
+            Ok(s) => s,
+            Err(err) => {
+                return CaseOutcome {
+                    name: case.name.clone(),
+                    ok: false,
+                    program_id_hex,
+                    input_snapshot_hex: None,
+                    resolved_inputs: resolved_display,
+                    error: Some(err.diagnostic()),
+                    mismatches: Vec::new(),
+                };
+            }
+        };
     let input_snapshot_hex = if !snapshot.is_empty() {
         Some(snapshot.id().0.to_hex())
     } else {

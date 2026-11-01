@@ -597,3 +597,43 @@ actual read-only-filesystem changes received affected syntax/lowering, CLI,
 scoped-world and SDK reruns. Existing frozen vectors and histories were not
 updated. This checkpoint is A9-3 work, not the alpha.9 release: A9-4 through
 A9-7 and final series qualification remain outstanding.
+
+## 16. A9-4 implementation checkpoint (2026-11-01)
+
+The finite-decision request evidence consumer now uses an immutable,
+host-selected `brix.request-evidence-policy@1`. It pins the actual program,
+complete runtime claim identities, optional documentary snapshot, supported
+profile/verifier, authorization dimensions and read/replay caps. The actual
+source-derived plan is checked against the expected program before constructing
+and validating a V2 context against its canonical program preimage. Evidence
+bytes are a separate input and must pass bounded replay or pinned documentary
+snapshot validation; required missing evidence is rejected.
+
+`run`, `why`/`whynot`, `audit` and `verify` receive this context explicitly.
+Standalone CLI uses `--request-context FILE`; Python passes immutable policies
+per call on an explicitly trusted-host client. Default stdio is evidence-free
+and never reads ambient pins. Legacy standalone CLI environment pins are
+snapshotted once; `check` and `test` preserve their CLI behavior while their
+server paths receive explicit empty contexts. No request authority is stored in
+a mutable global or thread-local default.
+
+An additive `brix.audit-request-evidence@1` wrapper carries unchanged V1 audit
+bytes, checked context material and exact ordered input/evidence contents.
+Verification independently authorizes the source and expected policy, compares
+context identity and bytes before loading embedded inputs, replays evidence,
+and invokes the frozen V1 checker. Portable replay succeeds after original
+input files are removed. Legacy V1 artifacts retain their identity and are
+rejected when a strict host-context guarantee is requested. See
+[`a9-request-evidence.md`](../docs/planning/a9-request-evidence.md).
+
+Qualification covered 2,033 non-CLI workspace cases plus all 193 final CLI
+cases and 13 doctests, along with 44 Python tests. The initial full workspace
+run caught a legacy JSON field-order regression in the new annotation helper;
+the implementation was corrected and the entire CLI suite rerun successfully.
+Workspace Clippy with warnings denied, formatting, TCB inventory and SOC law
+mapping passed. The expensive 5,000-child release lifecycle remains qualified
+at the preceding A9-3 checkpoint; A9-4 changes only CLI/SDK request handling.
+Real SDK tests cover contradictory contexts on one client, concurrent callers,
+missing/cross-context evidence, timeout recovery, wrong-program recovery, and
+portable replay with wrong or forged context rejection. L3-v1 and world evidence
+retain their separate profiles; the finite-decision policy cannot replace them.
