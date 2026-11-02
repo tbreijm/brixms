@@ -235,8 +235,12 @@ fn test_grouped_collect_incremental_workflow_and_retraction() {
         sources: vec![("root".into(), PROGRAM.into())],
         program_manifest_digest: reopened.manifest().program_digest,
     };
-    let bundle =
-        build_genesis_bundle_from_session(&reopened, closure, ExecProfileV1::default()).unwrap();
+    let bundle = build_genesis_bundle_from_session(
+        &reopened,
+        closure,
+        ExecProfileV1::for_session(&reopened).unwrap(),
+    )
+    .unwrap();
     let limits = WorldAuditDecodeLimits::default();
     let bytes = bundle.encode(&limits).unwrap();
     let decoded = decode_world_audit_bundle_v1(&bytes, &limits).unwrap();
@@ -520,8 +524,12 @@ decide parent_plan for p in parent_slots per parent {
         sources: vec![("root".into(), program.into())],
         program_manifest_digest: session.manifest().program_digest,
     };
-    let bundle = build_genesis_bundle_from_session(&session, closure, ExecProfileV1::default())
-        .expect("bundle");
+    let bundle = build_genesis_bundle_from_session(
+        &session,
+        closure,
+        ExecProfileV1::for_session(&session).unwrap(),
+    )
+    .expect("bundle");
     let limits = WorldAuditDecodeLimits::default();
     let bytes = bundle.encode(&limits).expect("encode");
     let decoded = decode_world_audit_bundle_v1(&bytes, &limits).expect("decode");
@@ -728,8 +736,12 @@ decide derived_plan for d in derived_collected per parent {
         sources: vec![("root".into(), program.into())],
         program_manifest_digest: reopened.manifest().program_digest,
     };
-    let bundle = build_genesis_bundle_from_session(&reopened, closure, ExecProfileV1::default())
-        .expect("bundle");
+    let bundle = build_genesis_bundle_from_session(
+        &reopened,
+        closure,
+        ExecProfileV1::for_session(&reopened).unwrap(),
+    )
+    .expect("bundle");
     let limits = WorldAuditDecodeLimits::default();
     let bytes = bundle.encode(&limits).expect("encode");
     let decoded = decode_world_audit_bundle_v1(&bytes, &limits).expect("decode");

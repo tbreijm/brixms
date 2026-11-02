@@ -661,7 +661,7 @@ skipped only that case and the 28 existing ignored cases. Frozen histories and
 canonical expectations were not updated. A9-6 ordering/truncation and A9-7
 qualification remain required before an alpha.9 release.
 
-## 18. A9-6 consolidation checkpoint (2026-11-01)
+## 18. A9-6 consolidation checkpoint (2026-11-02)
 
 The collection implementation now distinguishes legacy full collection from
 `collect(value[, sort_key]).take(n)`, whose structural result is
@@ -683,9 +683,14 @@ cold restore/oracle comparison, nested grouped children, composite decision keys
 insertion permutations, replacement and final-child retraction. Typed record
 codec tests and portable CLI tests passed, including an independently pinned
 frozen legacy audit whose winner order differs from typed ordering. The full
-workspace and 16-case release collection matrix are running at this checkpoint;
-they are not yet recorded as passed. Workspace Clippy, TCB inventory and SOC
-law-map checks passed, and all 44 Python tests passed.
+workspace run covered 2,269 cases: 2,266 passed initially; three audit-construction
+call sites still supplied the legacy default profile for newly typed worlds.
+Those callers now select the recorded producing profile, and all six grouped
+collect tests plus eight new collection tests and both portable CLI tests pass
+on recheck. All 13 doctests passed. The complete 16-case release collection
+matrix, including 5,000 children under the new evaluator, passed in 1,216.93
+seconds. Workspace Clippy, TCB inventory and SOC law-map checks passed, and all
+44 Python tests passed. No frozen expected artifact was regenerated.
 
 This consolidation branch includes the reviewed #52/#53/#59 foundation and
 A9-1 through A9-6 implementation. A9-7's unfinished harness/runner remain local

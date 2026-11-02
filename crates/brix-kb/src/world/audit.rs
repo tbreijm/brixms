@@ -433,6 +433,17 @@ impl ExecProfileV1 {
         Self::default()
     }
 
+    /// Record the semantic profile that actually produced this session.
+    /// A generic default is insufficient for versioned collection worlds.
+    pub fn for_session(session: &WorldSession) -> Result<Self, WorldError> {
+        session
+            .exec_profile
+            .as_ref()
+            .map(|profile| Self::from_json(&profile.to_json()))
+            .transpose()
+            .map(|profile| profile.unwrap_or_default())
+    }
+
     pub fn is_supported(&self) -> bool {
         let default = Self::default();
         self.profile == default.profile
