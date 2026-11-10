@@ -306,6 +306,11 @@ pub struct ScopedQueryPageV1 {
     pub typed_rows: Vec<serde_json::Value>,
     pub next_cursor: Option<String>,
     pub has_more: bool,
+    /// Observation-only counters from bounded ephemeral evaluation. They do not
+    /// contribute to query identity, cursor bindings, or storage state.
+    pub work_units: u64,
+    pub matches: u64,
+    pub expressions_evaluated: u64,
 }
 
 impl ScopedQueryCursorV1 {

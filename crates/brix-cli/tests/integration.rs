@@ -113,7 +113,7 @@ fn test_01_help_and_version_behavior() {
         c
     });
     assert_eq!(code, 0);
-    assert!(stdout.contains("brix"));
+    assert_eq!(stdout.trim(), format!("brix {}", env!("CARGO_PKG_VERSION")));
 
     // Subcommand aliases and short aliases rejected with exit code 2
     for rejected in ["help", "version", "-h", "-V", "-v"] {

@@ -518,6 +518,12 @@ pub struct CommitProfile {
     pub chunk_persist_ms: f64,
     /// Chunking hit a non-environmental error and the batch was re-run unchunked.
     pub chunk_fallback: bool,
+    /// Operator work units charged by the incremental network for this commit.
+    pub operator_work: u64,
+    /// Successful incremental join matches produced by this commit.
+    pub matches: u64,
+    /// Actual predicate/projection expressions evaluated by the incremental network.
+    pub expressions_evaluated: u64,
 }
 
 /// Outcome receipt returned upon applying a batch.
@@ -2224,6 +2230,9 @@ impl WorldSession {
         let normalized_ops = batch.validate_and_normalize()?;
 
         let mut chunk_run = ChunkRun::single();
+        let mut operator_work = 0;
+        let mut matches = 0;
+        let mut expressions_evaluated = 0;
         // Stage operator network updates and deliberation if network is present
         let (staged_network, decision_root, decision_delta_digest, decision_delta_body) =
             if let Some(ref net) = self.network {
@@ -2255,6 +2264,9 @@ impl WorldSession {
                 )?;
                 sn = sn_applied;
                 chunk_run = run;
+                operator_work = delta_report.diagnostics.work_units;
+                matches = delta_report.diagnostics.matches;
+                expressions_evaluated = delta_report.diagnostics.expressions_evaluated;
                 phase!("apply_ops");
                 if sn.decides.is_empty() {
                     (Some(sn), None, None, None)
@@ -2690,6 +2702,9 @@ impl WorldSession {
             chunks: chunk_run.chunks,
             chunk_persist_ms: chunk_run.persist_ms,
             chunk_fallback: chunk_run.fallback,
+            operator_work,
+            matches,
+            expressions_evaluated,
         });
         Ok(RevisionReceipt {
             revision_seq: new_seq,
@@ -3707,17 +3722,76 @@ impl WorldSession {
                 "cannot change executable program after world revisions exist".into(),
             ));
         }
-        let exec_profile = ExecProfileV1::for_collect_ordering(ordering);
-        let val = serde_json::json!({
+        if self
+            .network
+            .as_ref()
+            .is_some_and(|existing| existing.fingerprint() != network.fingerprint())
+        {
+            return Err(WorldError::InvalidSchema(
+                "program differs from the executable network already bound to this world".into(),
+            ));
+        }
+        let program_path = self.paths.root.join("program.json");
+        let preserve_existing_profile =
+            program_path.exists() && self.manifest.program_digest == closure_digest;
+        let exec_profile = if preserve_existing_profile {
+            let head = self.pin_revision(self.current_revision)?.revision;
+            let expected_profile_digest = self.exec_profile.as_ref().map(ExecProfileV1::digest);
+            if head.program_digest != Some(closure_digest)
+                || head.exec_profile_digest != expected_profile_digest
+            {
+                return Err(WorldError::InvalidSchema(
+                    "stored program profile is not bound to the current revision".into(),
+                ));
+            }
+            if let Some(profile) = &self.exec_profile {
+                if !profile.is_supported() || profile.collect_ordering()? != ordering {
+                    return Err(WorldError::InvalidSchema(
+                        "stored execution profile does not match the requested program semantics"
+                            .into(),
+                    ));
+                }
+            } else if ordering != CollectOrdering::LegacyV1 {
+                return Err(WorldError::InvalidSchema(
+                    "profile-less program cannot select typed collection semantics".into(),
+                ));
+            }
+            // Opening and supplying the same program is verification, not a migration.
+            // Keep the artifact and current revision bytes untouched when the already-open
+            // network is the same one checked above.
+            if self.current_revision > 0 {
+                if self
+                    .network
+                    .as_ref()
+                    .is_some_and(|existing| existing.fingerprint() == network.fingerprint())
+                {
+                    return Ok(());
+                }
+                return Err(WorldError::InvalidSchema(
+                    "cannot replace the executable network of a populated world".into(),
+                ));
+            }
+            self.exec_profile.clone()
+        } else {
+            if self.current_revision > 0 {
+                return Err(WorldError::InvalidSchema(
+                    "cannot add or change an execution profile after world revisions exist".into(),
+                ));
+            }
+            Some(ExecProfileV1::for_collect_ordering(ordering))
+        };
+        let mut val = serde_json::json!({
             "schema": "brix.world.program@1",
             "root_module": root_module,
             "sources": closure_sources,
             "program_manifest_digest": closure_digest.to_hex(),
-            "exec_profile": exec_profile.to_json(),
         });
+        if let Some(profile) = &exec_profile {
+            val["exec_profile"] = profile.to_json();
+        }
         let bytes = serde_json::to_vec_pretty(&val).map_err(|e| WorldError::Json(e.to_string()))?;
-        atomic_write(&self.paths.root.join("program.json"), &bytes)?;
-        self.exec_profile = Some(exec_profile);
+        atomic_write(&program_path, &bytes)?;
+        self.exec_profile = exec_profile;
         if self.current_revision == 0
             || self.manifest.program_digest != closure_digest
             || !self.manifest.program_required
@@ -4058,7 +4132,7 @@ impl WorldSession {
             &lowered.program,
             CollectOrdering::TypedKeyV1,
         )?;
-        network.apply_ops_bounded(
+        let evaluation_report = network.apply_ops_bounded(
             &ops,
             Some(&NetworkLimits {
                 max_work: Some(request.max_eval_work),
@@ -4115,6 +4189,9 @@ impl WorldSession {
             typed_rows,
             next_cursor,
             has_more,
+            work_units: evaluation_report.diagnostics.work_units,
+            matches: evaluation_report.diagnostics.matches,
+            expressions_evaluated: evaluation_report.diagnostics.expressions_evaluated,
         })
     }
 

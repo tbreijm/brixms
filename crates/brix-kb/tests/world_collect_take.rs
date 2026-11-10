@@ -1,9 +1,11 @@
 //! Typed child-key ordering and prefix collection regressions for Alpha 9-6.
+use brix_kb::world::chunk_policy::FixedChunkPolicy;
 use brix_kb::world::decision_codec::Value;
 use brix_kb::world::reference::{self, CollectOrdering, Value as ReferenceValue};
 use brix_kb::world::{TupleRecord, WorldBatch, WorldBatchOp, WorldError, WorldKey, WorldSession};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 struct TestDir(PathBuf);
 
@@ -267,6 +269,51 @@ fn take_prefix_truncation_and_retractions_use_typed_primary_key_order() {
 }
 
 #[test]
+fn typed_collect_take_state_root_is_independent_of_internal_chunking() {
+    let run = |label: &str, chunk_size: Option<usize>| {
+        let dir = TestDir::new(label);
+        let sources = BTreeMap::from([("root".into(), BASIC_PROGRAM.into())]);
+        let mut session =
+            WorldSession::from_program_with_sources(&dir.0, "root", &sources).unwrap();
+        if let Some(size) = chunk_size {
+            session.chunk_policy = Arc::new(FixedChunkPolicy(size));
+        }
+        let ops = (0..32)
+            .map(|i| row_upsert(&format!("chunk-{i:02}"), "P", i % 4, &format!("value-{i}")))
+            .collect();
+        session
+            .apply_batch(WorldBatch::new(
+                session.current_revision(),
+                "same typed collect take batch",
+                ops,
+            ))
+            .unwrap();
+        let chunks = session.last_commit_profile.as_ref().unwrap().chunks;
+        if chunk_size.is_some() {
+            assert!(
+                chunks > 1,
+                "fixed chunk policy should exercise chunked apply"
+            );
+        } else {
+            assert_eq!(chunks, 1, "unbounded apply should use one chunk");
+        }
+        let root = session.network_state_root;
+        session.verify_oracle().unwrap();
+        drop(session);
+        let reopened = WorldSession::open(&dir.0).unwrap();
+        assert_eq!(reopened.network_state_root, root);
+        reopened.verify_oracle().unwrap();
+        root
+    };
+
+    assert_eq!(
+        run("typed-whole", None),
+        run("typed-chunked", Some(7)),
+        "internal chunk boundaries must not alter canonical typed collect state"
+    );
+}
+
+#[test]
 fn nested_grouped_collect_take_resolves_qualified_child_identity() {
     let program = r#"
 config Page = Page(List<Int>, Bool)
@@ -498,16 +545,23 @@ rel derived all = select {
     let sources = BTreeMap::from([("root".into(), program.into())]);
     let mut session =
         WorldSession::from_program_with_sources(&dir.0, "root", &sources).expect("create world");
+    session
+        .apply_batch(WorldBatch::new(
+            session.current_revision(),
+            "seed full legacy collect",
+            vec![row_upsert("a", "P", 0, "A"), row_upsert("b", "P", 1, "B")],
+        ))
+        .unwrap();
     let before_digest = session.current_revision_digest().unwrap();
     let before_revision = session.current_revision();
     let error = session
         .apply_batch(WorldBatch::new(
             before_revision,
-            "overflow legacy full collect",
+            "overflow after retraction legacy full collect",
             vec![
-                row_upsert("a", "P", 0, "A"),
-                row_upsert("b", "P", 0, "B"),
-                row_upsert("c", "P", 0, "C"),
+                row_remove("a"),
+                row_upsert("c", "P", 2, "C"),
+                row_upsert("d", "P", 3, "D"),
             ],
         ))
         .unwrap_err();

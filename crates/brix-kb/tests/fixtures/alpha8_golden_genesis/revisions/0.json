@@ -1,0 +1,21 @@
+{
+  "batch_digest": null,
+  "changed_keys": {},
+  "decision_delta_digest": null,
+  "decision_root": null,
+  "exec_profile_digest": "8b09d29e51de1c9ee8e49f40d5b81caac97c07dd1a9648de5f8eacdb4700ee51",
+  "expected_base_revision": 0,
+  "idempotency_key": "genesis",
+  "previous_revision_digest": null,
+  "program_digest": "3d354cc684b29b5d6c5d71fad12156ba5e36cea9addc8b955004d3cda3ca6132",
+  "relation_cardinalities": {},
+  "relation_roots": {},
+  "revision_digest": "5fb2a7e4f158c0bdd445695c48c4a54e5e55442d67481ff37627c70a1d7b887b",
+  "schema": "brix.world.revision@2",
+  "secondary_index_roots": {},
+  "seq": 0,
+  "status": {
+    "status": "committed"
+  },
+  "timestamp": "2026-10-04T00:00:00Z"
+}

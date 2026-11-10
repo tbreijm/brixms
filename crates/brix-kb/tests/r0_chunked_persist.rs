@@ -86,6 +86,31 @@ fn create(dir: &TempDir) -> WorldSession {
     WorldSession::from_program_with_sources(dir.path(), "root", &sources(MODEL)).unwrap()
 }
 
+fn copy_fixture_tree(source: &Path, target: &Path) {
+    fs::create_dir_all(target).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_fixture_tree(&source_path, &target_path);
+        } else {
+            fs::copy(source_path, target_path).unwrap();
+        }
+    }
+}
+
+fn create_alpha8_golden_world(dir: &TempDir) -> WorldSession {
+    assert_eq!(
+        MODEL,
+        include_str!("fixtures/alpha8_golden_genesis/root.brix")
+    );
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/alpha8_golden_genesis");
+    copy_fixture_tree(&fixture, dir.path());
+    WorldSession::open(dir.path()).unwrap()
+}
+
 fn rec(fields: &[(&str, &str)]) -> brix_kb::world::WorldTuple {
     let mut r = TupleRecord::new();
     for (k, v) in fields {
@@ -317,7 +342,7 @@ fn run_world(
 
 fn golden_hash(seed: u64, steps: usize, rounds: usize) -> String {
     let dir = TempDir::new(&format!("golden{seed}"));
-    let mut s = create(&dir);
+    let mut s = create_alpha8_golden_world(&dir);
     let mut out = String::new();
     for (i, ops) in fuzz_batches(seed, steps, rounds).into_iter().enumerate() {
         let b = WorldBatch::new(s.current_revision, format!("g{seed}-{i}"), ops);

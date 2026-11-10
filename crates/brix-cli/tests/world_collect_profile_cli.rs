@@ -64,6 +64,21 @@ fn independently_pinned_legacy_collect_audit_keeps_its_original_tie_order() {
     let pins: Value =
         serde_json::from_slice(&fs::read(fixture().join("pins.json")).unwrap()).unwrap();
     assert_ne!(pins["legacy_order"], json!(["aa", "b", "ccc", "z"]));
+    let frozen_bundle = brix_kb::world::audit::decode_world_audit_bundle_v1(
+        &fs::read(fixture().join("legacy_collect_profile.brixworldaudit")).unwrap(),
+        &brix_kb::world::audit::WorldAuditDecodeLimits::strict(),
+    )
+    .unwrap();
+    assert_eq!(frozen_bundle.id().to_hex(), pins["bundle_id"]);
+    assert_eq!(
+        frozen_bundle.exec_profile.crate_version,
+        pins["exec_crate_version"].as_str().unwrap(),
+        "the frozen alpha.8 profile version is part of this historical fixture"
+    );
+    assert_eq!(
+        frozen_bundle.exec_profile.crate_version, "0.1.0-alpha.8",
+        "do not relabel the frozen historical audit when the workspace version changes"
+    );
     let result = success(
         bin()
             .args([
@@ -107,6 +122,11 @@ query pages(kind: Str) = select { page: g.page } from g in groups where g.kind =
     let profile: Value =
         serde_json::from_slice(&fs::read(world.join("program.json")).unwrap()).unwrap();
     assert_eq!(profile["exec_profile"]["evaluator"], "brix-world-net@2");
+    assert_eq!(
+        profile["exec_profile"]["crate_version"],
+        env!("CARGO_PKG_VERSION"),
+        "new worlds must record the current package version"
+    );
     let batch = scratch.0.join("batch.json");
     fs::write(&batch,json!({"schema":"brix.world.batch@1","expected_base_revision":0,"idempotency_key":"load","operations":(["aa","b","ccc","z"].iter().map(|id|json!({"op":"upsert","relation":"model::record","key":id,"tuple":{"id":id,"kind":"k","ordinal":0}})).collect::<Vec<_>>())} ).to_string()).unwrap();
     let receipt = success(
@@ -153,6 +173,7 @@ query pages(kind: Str) = select { page: g.page } from g in groups where g.kind =
     )
     .unwrap();
     assert_eq!(audit.exec_profile.evaluator, "brix-world-net@2");
+    assert_eq!(audit.exec_profile.crate_version, env!("CARGO_PKG_VERSION"));
     success(
         bin()
             .args([

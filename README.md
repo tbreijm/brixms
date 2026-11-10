@@ -11,9 +11,10 @@ small policies once from the command line, and it keeps large, long-lived
 decision worlds up to date as facts change, doing work proportional to the
 change rather than to the size of the world.
 
-It is pre-release software (`0.1.0-alpha.8`): useful for bounded policy and
-settlement workflows, with broader proof and production guarantees still in
-progress. See [Status and limits](#status-and-limits).
+This branch prepares `0.1.0-alpha.9`; the installation instructions below
+refer to the published alpha.8 release. BrixMS is pre-release software for
+bounded policy and settlement workflows, with broader proof and production
+guarantees still in progress. See [Status and limits](#status-and-limits).
 
 ## The idea
 
@@ -207,6 +208,18 @@ $BRIX world verify \
 
 A successful verification reports `status: audited` together with the work it
 did to re-derive the result.
+
+## Alpha.9 development status
+
+Alpha.9 development adds host-scoped named queries, per-request finite-decision
+evidence contexts, composite relation keys, and versioned bounded-collection
+ordering. The A9-1 through A9-6 implementation is present; benchmark
+qualification and final release checks are still pending. The public scale
+fixture is synthetic and Atlas-shaped, not the Atlas model. No alpha.9 tag or
+archive has been published, so the installation instructions below remain on
+alpha.8. See the [Alpha.9 development notes](./docs/planning/alpha9-release-notes.md),
+[release contract](./spec/Alpha9_Release_Contract.md), and
+[scale qualification status](./docs/performance/alpha9-scale.md).
 
 ## alpha.8: collections, typed queries, and portable decision evidence
 

@@ -1,0 +1,8 @@
+{
+  "hardware_model": "Apple M1 Pro",
+  "cpu_count": 10,
+  "memory_bytes": 17179869184,
+  "os_version": "macOS 15.6.1 build 24G90",
+  "rustc": "rustc 1.96.1 (31fca3adb 2026-06-26)",
+  "collection_method": "Read-only sysctl machdep.cpu.brand_string hw.memsize hw.ncpu and sw_vers; collected outside sandbox on 2026-11-02. Metadata collection is outside qualifying measured invocations."
+}

@@ -946,13 +946,12 @@ pub fn verify_decision_evidence_with_limits(
         return Err(malformed("bundle program digest mismatch"));
     }
 
-    // Separate runtime version from Atlas release identity: ExecProfileV1.crate_version
-    // remains execution-profile metadata checked against the running verifier crate version.
-    let expected_crate_version = super::audit::ExecProfileV1::default().crate_version;
-    if decoded.exec_profile.crate_version != expected_crate_version {
+    // Preserve portable replay for known historical runtime profiles while rejecting
+    // arbitrary versions and profiles unsupported by this verifier.
+    if !decoded.exec_profile.is_supported_for_decision_evidence() {
         return Err(PolicyError::Refused(Disposition::Unknown {
             reason: Reason::ContextMismatch {
-                expected: format!("crate_version={expected_crate_version}"),
+                expected: "supported execution profile version and semantics".to_string(),
                 found: format!("crate_version={}", decoded.exec_profile.crate_version),
             },
         }));

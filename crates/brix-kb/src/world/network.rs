@@ -388,6 +388,10 @@ pub struct NetworkDiagnostics {
     pub join_fanout: BTreeMap<OperatorId, u64>,
     pub hot_join_keys: BTreeMap<String, u64>,
     pub peak_queue_size: usize,
+    /// Total queued work items and aggregate-tree nodes charged to this batch.
+    pub work_units: u64,
+    /// Successful join matches produced by this batch.
+    pub matches: u64,
     pub expressions_evaluated: u64,
 }
 
@@ -4373,6 +4377,8 @@ impl WorldNetwork {
             let mut union_before: BTreeMap<ValueList, Option<IntermediateTuple>> = BTreeMap::new();
             let mut grouped_before: BTreeMap<Vec<Value>, Option<IntermediateTuple>> =
                 BTreeMap::new();
+            let mut grouped_accumulators: BTreeMap<ValueList, GroupAccumulator> = BTreeMap::new();
+            let mut grouped_accumulator_dirty = BTreeSet::new();
             let slice_quantum = if is_group_operator {
                 usize::MAX
             } else {
@@ -4992,6 +4998,16 @@ impl WorldNetwork {
                         ..
                     } => match item {
                         OperatorWorkItem::Delta(delta) => {
+                            let transient_collect_cache =
+                                projections.iter().all(|(_, projection)| {
+                                    matches!(
+                                        projection,
+                                        GroupProjection::Key(_)
+                                            | GroupProjection::Count
+                                            | GroupProjection::Collect { .. }
+                                            | GroupProjection::CollectTake { .. }
+                                    )
+                                });
                             let is_ins = delta.is_insert();
                             let (tuple, deriv) = match delta {
                                 TupleDelta::Insert { tuple, derivation }
@@ -5084,26 +5100,54 @@ impl WorldNetwork {
 
                             if !grouped_before.contains_key(&key_vals) {
                                 let existing_count = groups.read(&gk, store)?.len();
-                                let existing_tuple = if existing_count > 0 {
-                                    let existing_accum = match aggregates.get(&gk, store)? {
-                                        Some(stored_list) => {
-                                            GroupAccumulator::from_value_list_for_ordering(
-                                                &stored_list,
-                                                projections,
-                                                self.collect_ordering,
-                                            )?
-                                        }
-                                        None => {
-                                            return Err(WorldError::NetworkError(
+                                let uncached_existing_accum = if existing_count > 0
+                                    && !transient_collect_cache
+                                {
+                                    let stored_list =
+                                        aggregates.get(&gk, store)?.ok_or_else(|| {
+                                            WorldError::NetworkError(
                                                 "missing persisted aggregate accumulator".into(),
-                                            ))
+                                            )
+                                        })?;
+                                    Some(GroupAccumulator::from_value_list_for_ordering(
+                                        &stored_list,
+                                        projections,
+                                        self.collect_ordering,
+                                    )?)
+                                } else {
+                                    None
+                                };
+                                let existing_tuple = if existing_count > 0 {
+                                    let existing_accum = if transient_collect_cache {
+                                        if !grouped_accumulators.contains_key(&gk) {
+                                            let stored_list =
+                                                aggregates.get(&gk, store)?.ok_or_else(|| {
+                                                    WorldError::NetworkError(
+                                                        "missing persisted aggregate accumulator"
+                                                            .into(),
+                                                    )
+                                                })?;
+                                            let accum =
+                                                GroupAccumulator::from_value_list_for_ordering(
+                                                    &stored_list,
+                                                    projections,
+                                                    self.collect_ordering,
+                                                )?;
+                                            grouped_accumulators.insert(gk.clone(), accum);
                                         }
+                                        grouped_accumulators
+                                            .get(&gk)
+                                            .expect("cached grouped accumulator")
+                                    } else {
+                                        uncached_existing_accum
+                                            .as_ref()
+                                            .expect("loaded grouped accumulator")
                                     };
                                     let mut tuple_tree_work = 0;
                                     let tuple = build_grouped_tuple(
                                         projections,
                                         &key_vals,
-                                        &existing_accum,
+                                        existing_accum,
                                         existing_count,
                                         &gk,
                                         aggregates,
@@ -5124,22 +5168,46 @@ impl WorldNetwork {
                                 grouped_before.insert(key_vals.clone(), existing_tuple);
                             }
 
-                            let mut accum = match aggregates.get(&gk, store)? {
-                                Some(stored_list) => {
-                                    GroupAccumulator::from_value_list_for_ordering(
-                                        &stored_list,
-                                        projections,
-                                        self.collect_ordering,
-                                    )?
-                                }
-                                None if groups.read(&gk, store)?.len() == 0 => {
-                                    GroupAccumulator::empty(projections)
-                                }
-                                None => {
-                                    return Err(WorldError::NetworkError(
-                                        "missing persisted aggregate accumulator".into(),
-                                    ))
-                                }
+                            if transient_collect_cache && !grouped_accumulators.contains_key(&gk) {
+                                let accum = match aggregates.get(&gk, store)? {
+                                    Some(stored_list) => {
+                                        GroupAccumulator::from_value_list_for_ordering(
+                                            &stored_list,
+                                            projections,
+                                            self.collect_ordering,
+                                        )?
+                                    }
+                                    None if groups.read(&gk, store)?.len() == 0 => {
+                                        GroupAccumulator::empty(projections)
+                                    }
+                                    None => {
+                                        return Err(WorldError::NetworkError(
+                                            "missing persisted aggregate accumulator".into(),
+                                        ))
+                                    }
+                                };
+                                grouped_accumulators.insert(gk.clone(), accum);
+                            }
+                            let mut uncached_accum = if transient_collect_cache {
+                                None
+                            } else {
+                                Some(match aggregates.get(&gk, store)? {
+                                    Some(stored_list) => {
+                                        GroupAccumulator::from_value_list_for_ordering(
+                                            &stored_list,
+                                            projections,
+                                            self.collect_ordering,
+                                        )?
+                                    }
+                                    None if groups.read(&gk, store)?.len() == 0 => {
+                                        GroupAccumulator::empty(projections)
+                                    }
+                                    None => {
+                                        return Err(WorldError::NetworkError(
+                                            "missing persisted aggregate accumulator".into(),
+                                        ))
+                                    }
+                                })
                             };
 
                             let (old_count, new_count) = if is_ins {
@@ -5173,6 +5241,15 @@ impl WorldNetwork {
                                     // after a delete.
                                     Value::Null
                                 };
+                                let accum = if transient_collect_cache {
+                                    grouped_accumulators
+                                        .get_mut(&gk)
+                                        .expect("cached grouped accumulator")
+                                } else {
+                                    uncached_accum
+                                        .as_mut()
+                                        .expect("uncached grouped accumulator")
+                                };
                                 let tree_work = accum.apply_delta(
                                     is_ins,
                                     projections,
@@ -5193,12 +5270,18 @@ impl WorldNetwork {
                                     limits,
                                 )?;
 
-                                if new_count == 0 {
-                                    aggregates.remove(&gk, store)?;
-                                } else {
+                                if transient_collect_cache {
                                     let encoded = accum.to_value_list(projections);
                                     check_persistable_accumulator(&encoded)?;
-                                    aggregates.set(gk.clone(), encoded, store)?;
+                                    grouped_accumulator_dirty.insert(gk.clone());
+                                } else {
+                                    if new_count == 0 {
+                                        aggregates.remove(&gk, store)?;
+                                    } else {
+                                        let encoded = accum.to_value_list(projections);
+                                        check_persistable_accumulator(&encoded)?;
+                                        aggregates.set(gk.clone(), encoded, store)?;
+                                    }
                                 }
                             }
                         }
@@ -5216,29 +5299,44 @@ impl WorldNetwork {
                 }) = self.operator_states.get_mut(&op_idx)
                 {
                     let store = &self.state;
+                    for group_key in grouped_accumulator_dirty {
+                        let count = groups.read(&group_key, store)?.len();
+                        if count == 0 {
+                            aggregates.remove(&group_key, store)?;
+                        } else {
+                            let accum = grouped_accumulators
+                                .get(&group_key)
+                                .expect("dirty grouped accumulator");
+                            let encoded = accum.to_value_list(projections);
+                            check_persistable_accumulator(&encoded)?;
+                            aggregates.set(group_key, encoded, store)?;
+                        }
+                    }
                     for (group_key, old_tuple) in grouped_before {
                         let gk = ValueList(group_key.clone());
                         let current_count = groups.read(&gk, store)?.len();
                         let new_tuple = if current_count > 0 {
-                            let accum = match aggregates.get(&gk, store)? {
-                                Some(stored_list) => {
-                                    GroupAccumulator::from_value_list_for_ordering(
-                                        &stored_list,
-                                        projections,
-                                        self.collect_ordering,
-                                    )?
-                                }
-                                None => {
-                                    return Err(WorldError::NetworkError(
+                            let restored_accum;
+                            let accum = if let Some(accum) = grouped_accumulators.get(&gk) {
+                                accum
+                            } else {
+                                let stored_list = aggregates.get(&gk, store)?.ok_or_else(|| {
+                                    WorldError::NetworkError(
                                         "missing persisted aggregate accumulator".into(),
-                                    ))
-                                }
+                                    )
+                                })?;
+                                restored_accum = GroupAccumulator::from_value_list_for_ordering(
+                                    &stored_list,
+                                    projections,
+                                    self.collect_ordering,
+                                )?;
+                                &restored_accum
                             };
                             let mut tuple_tree_work = 0;
                             let tuple = build_grouped_tuple(
                                 projections,
                                 &group_key,
-                                &accum,
+                                accum,
                                 current_count,
                                 &gk,
                                 aggregates,
@@ -5690,10 +5788,14 @@ impl WorldNetwork {
     pub fn finish_batch(&mut self, ctx: BatchCtx) -> NetworkDeltaReport {
         let BatchCtx {
             mut report,
-            diagnostics,
+            mut diagnostics,
             decisions,
+            total_work,
+            total_matches,
             ..
         } = ctx;
+        diagnostics.work_units = total_work;
+        diagnostics.matches = total_matches;
         for ((decide, entity), track) in decisions {
             match track.last {
                 Some(decision) => {
@@ -6627,6 +6729,10 @@ fn merge_stage_report(into: &mut NetworkDeltaReport, next: NetworkDeltaReport) {
         .diagnostics
         .peak_queue_size
         .max(next.diagnostics.peak_queue_size);
+    // Decision cascades carry cumulative work/match totals into each later stage.
+    // Keep the largest cumulative value rather than double-counting those snapshots.
+    into.diagnostics.work_units = into.diagnostics.work_units.max(next.diagnostics.work_units);
+    into.diagnostics.matches = into.diagnostics.matches.max(next.diagnostics.matches);
     into.diagnostics.expressions_evaluated += next.diagnostics.expressions_evaluated;
 }
 
@@ -6749,7 +6855,10 @@ pub fn eval_expr(
 
 #[cfg(test)]
 mod collect_accumulator_tests {
-    use super::{CollectOrdering, GroupAccumulator, GroupProjection, Value, ValueList};
+    use super::{
+        merge_stage_report, CollectOrdering, GroupAccumulator, GroupProjection, NetworkDeltaReport,
+        Value, ValueList,
+    };
     use crate::world::stable_child_key::StableChildKey;
     use crate::world::WorldNetwork;
     use brix_canon::Digest;
@@ -6897,5 +7006,28 @@ mod collect_accumulator_tests {
             typed_collect.fingerprint(),
             "collect comparator mode must be committed in the network identity"
         );
+    }
+
+    #[test]
+    fn batch_work_counters_survive_finish_and_cascade_merge() {
+        let mut network = WorldNetwork::new(RelationDag::new());
+        let mut first = network.begin_batch();
+        first.total_work = 7;
+        first.total_matches = 3;
+        first.total_expressions = 4;
+        first.diagnostics.expressions_evaluated = 4;
+        let mut report = network.finish_batch(first);
+        assert_eq!(report.diagnostics.work_units, 7);
+        assert_eq!(report.diagnostics.matches, 3);
+        assert_eq!(report.diagnostics.expressions_evaluated, 4);
+
+        let mut later_stage = NetworkDeltaReport::default();
+        later_stage.diagnostics.work_units = 11;
+        later_stage.diagnostics.matches = 5;
+        later_stage.diagnostics.expressions_evaluated = 2;
+        merge_stage_report(&mut report, later_stage);
+        assert_eq!(report.diagnostics.work_units, 11);
+        assert_eq!(report.diagnostics.matches, 5);
+        assert_eq!(report.diagnostics.expressions_evaluated, 6);
     }
 }
