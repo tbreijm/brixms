@@ -11,7 +11,7 @@ small policies once from the command line, and it keeps large, long-lived
 decision worlds up to date as facts change, doing work proportional to the
 change rather than to the size of the world.
 
-It is pre-release software (`0.1.0-alpha.6`): useful for bounded policy and
+It is pre-release software (`0.1.0-alpha.8`): useful for bounded policy and
 settlement workflows, with broader proof and production guarantees still in
 progress. See [Status and limits](#status-and-limits).
 
@@ -74,7 +74,7 @@ cargo run -p brix-cli -- run examples/shipping.brix
 
 `check` validates the program and its plan. `run` deliberates and prints the
 facts, the candidate dispositions, and the committed decision
-(`shipping = Ship @Derived`).
+(`ship = Ship @Derived`).
 
 To have the result checked independently, write an audit bundle and verify it
 against a program digest you obtained separately:
@@ -104,8 +104,10 @@ cargo run -p brix-cli -- run examples/shipping-input.brix \
 ```
 
 The input schema is versioned explicitly: `brix.input@1` covers scalars, `@2`
-records and variants, `@3` bounded top-level lists, and `@4` adds `F64` and
-`Decimal`. Numeric payloads are strings so JSON transport cannot round them.
+records and variants, `@3` bounded top-level lists, `@4` adds `F64` and
+`Decimal`, and `@5` admits bounded nested lists inside records and variants.
+Concrete generic schemas retain their type arguments when validating inputs.
+Numeric payloads are strings so JSON transport cannot round them.
 Repeated `--input` flags combine shards with disjoint keys. Inputs enter as
 `@Derived`; they do not establish audited or proven facts by themselves.
 
@@ -190,14 +192,15 @@ $BRIX world explain /tmp/orders-world order-1 --decide main::dispatch
 `explain` lists the candidates for the entity and the base facts that support
 the winner. To verify independently, export an audit bundle and check it
 against head and program digests obtained from a source you trust. Revisions
-are deterministic, so this walkthrough always yields the digests below;
+are deterministic for a fixed execution profile, so this walkthrough with
+alpha.8 yields the digests below;
 `world audit` prints `head_digest` and `world show --json` reports
 `program_digest`.
 
 ```bash
 $BRIX world audit /tmp/orders-world --out /tmp/orders.brixworld
 $BRIX world verify \
-  --expect-head 7845335831fec64e7f7c41825105826dfa93f87911fdd07d8076f9cd4f170a97 \
+  --expect-head 509bdc34e66c279c5838494b5befa5984e65d17a34a9514b873c502a94d6e0a0 \
   --expect-program 4f0394088b26f86a7bdad62077632d115398149a04a5639052c23daf864cb3ce \
   /tmp/orders.brixworld
 ```
@@ -205,7 +208,45 @@ $BRIX world verify \
 A successful verification reports `status: audited` together with the work it
 did to re-derive the result.
 
-## alpha.6: typed decisions that feed later decisions
+## alpha.8: collections, typed queries, and portable decision evidence
+
+Alpha.8 builds on the typed decision chains introduced in alpha.6 and the
+list-valued decision payloads and disjoint unions added in alpha.7:
+
+- **Bounded grouped collections.** `collect(value, order, limit)` builds an
+  ordered list incrementally, preserving duplicate projected values from
+  distinct supporting rows. Equal sort keys use a deterministic provenance
+  tie-break. Exceeding the limit aborts the batch without changing HEAD.
+  Combine nonempty groups with a parent-anchored `not exists` branch to keep
+  an empty list after the last child is removed.
+- **Concrete types and pinned reads.** Generic record and variant schemas
+  preserve concrete, module-qualified identities. `world query --typed`
+  decodes values through their declared schemas; revision-pinned queries and
+  scoped pagination cursors keep reads tied to the selected world and revision.
+- **Portable decision evidence.** `world evidence` exports a settlement and
+  its audit bundle; `world verify-evidence` independently replays the bundle
+  and checks the decision proof against the consumer's expected world,
+  program, revision, decision, entity, candidate, and value digest. This
+  establishes what settled at that revision, not the truth of input observations.
+- **Protected authority values.** Finite policies use `validate<T>(...)` for
+  `DocumentedStep` and `RuntimeOutcome`; ordinary literals or wire inputs
+  cannot manufacture these values. Documentary snapshots and runtime evidence
+  require independently configured trust pins. Validation distinguishes
+  `Satisfied`, `Violated`, and `Unknown`.
+- **Small expression forms.** `only` extracts a singleton with a typed fault
+  for zero or multiple elements; final wildcard match arms and typed empty
+  lists reduce policy boilerplate. Arithmetic typing certificates and iterative
+  proof traversal also fix the deep proof stack overflow.
+
+The [alpha.8 release notes](./docs/planning/alpha8-release-notes.md) describe
+compatibility and qualification; the [world profile guide](./docs/world-profile.md#using-a-world-certificate-in-a-finite-decision)
+explains evidence consumption and trust pins. The
+[Atlas smoke workflow](./scripts/smoke_world_atlas.py) exercises grouped
+collection, typed queries, portable evidence, and revision freshness across
+separate CLI processes. Downstream Atlas compiler migration and release pinning
+remain separate work in the Atlas repository.
+
+### Typed decisions that feed later decisions (introduced in alpha.6)
 
 World relations and decisions now carry nominal records and variants, including
 their typed payloads through restart, explanation, historical reads, and audit.
@@ -266,7 +307,7 @@ At 1M facts (800k decisions), the first full decisions read in a fresh
 process takes about 0.6 s with the checkpoint. On the 100k benchmark world, GC
 reclaimed about 40% of stored nodes.
 
-Known limits from the alpha.5 qualification (these measurements are not alpha.6 benchmarks):
+Known limits from the alpha.5 qualification (these measurements are not alpha.8 benchmarks):
 
 - Cold open is fast but not constant; it still grows slowly with world size.
 - Bulk loading still slows as the world grows: late batches cost several
@@ -302,9 +343,10 @@ CLI operations, including `world.*` (`world.batch`, `world.decisions`,
 See [ADR-0044](./spec/adr/ADR-0044_Serve_Protocol.md).
 
 The [Python client](./bindings/python/README.md) needs Python 3.9 or newer and
-has no third-party runtime dependency. It wraps the one-shot and `kb`
-operations; other methods go through `call`. The `brix` executable is built or
-installed separately:
+has no third-party runtime dependency. It wraps one-shot and `kb` operations,
+world initialization, batches and queries, and portable decision evidence
+(`get_decision_evidence` / `verify_decision_evidence`). Other operations go
+through `call`. The `brix` executable is built or installed separately:
 
 ```bash
 python3 -m pip install -e ./bindings/python
@@ -347,11 +389,12 @@ avoids reopening the world per request.
 
 Prerelease archives target macOS Apple Silicon (`aarch64-apple-darwin`) and
 Linux x86_64 (`x86_64-unknown-linux-gnu`), each with a SHA-256 sidecar. Pick a
-tag from the [GitHub Releases page](https://github.com/tbreijm/brixms/releases)
-(use `v0.1.0-alpha.6` once its release archives are published):
+tag from the [GitHub Releases page](https://github.com/tbreijm/brixms/releases).
+The [alpha.8 release](https://github.com/tbreijm/brixms/releases/tag/v0.1.0-alpha.8)
+has archives for both targets:
 
 ```bash
-VERSION=v0.1.0-alpha.6
+VERSION=v0.1.0-alpha.8
 TARGET=x86_64-unknown-linux-gnu # or aarch64-apple-darwin
 curl -LO "https://github.com/tbreijm/brixms/releases/download/${VERSION}/brix-${VERSION}-${TARGET}.tar.gz"
 curl -LO "https://github.com/tbreijm/brixms/releases/download/${VERSION}/brix-${VERSION}-${TARGET}.tar.gz.sha256"
