@@ -129,7 +129,11 @@ fn policy(program: &str, digest: &str, tenant: &str) -> Value {
 }
 
 fn run_cli(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_brix"))
+    let binary = std::env::var_os("CARGO_BIN_EXE_brix")
+        .or_else(|| std::env::var_os("NEXTEST_BIN_EXE_brix"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_brix")));
+    Command::new(binary)
         .args(args)
         .env_remove("BRIX_EXPECT_EVIDENCE_DIGEST")
         .env_remove("BRIX_EXPECT_RUNTIME_CLAIMS")

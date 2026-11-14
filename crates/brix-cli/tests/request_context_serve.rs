@@ -3,7 +3,15 @@ use brix_canon::Digest;
 use brix_lower::l3_v2::{DocumentaryDisposition, DocumentaryEntry, DocumentarySnapshot};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+
+fn brix_bin() -> PathBuf {
+    std::env::var_os("CARGO_BIN_EXE_brix")
+        .or_else(|| std::env::var_os("NEXTEST_BIN_EXE_brix"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_brix")))
+}
 
 const PROGRAM: &str = r#"
 config EvidenceRef = { uri: Str, kind: Str, scope: Str }
@@ -82,7 +90,7 @@ fn host_requests_isolate_contradictory_evidence_and_default_server_ignores_envir
     let (deny_pin, deny_env) = documentary(false);
     println!("documentary fixture: satisfied={allow_pin} violated={deny_pin}");
     for trusted in [false, true] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_brix"));
+        let mut command = Command::new(brix_bin());
         command.args(["serve", "--stdio"]);
         if trusted {
             command.arg("--trusted-host");
@@ -200,7 +208,7 @@ fn standalone_check_and_test_keep_explicit_legacy_invocation_pins() {
         ],
         vec!["test", "suite.json", "--json"],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_brix"))
+        let output = Command::new(brix_bin())
             .args(args)
             .current_dir(&scratch.0)
             .env("BRIX_EXPECT_EVIDENCE_DIGEST", &pin)
