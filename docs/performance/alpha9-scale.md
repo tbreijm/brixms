@@ -1,154 +1,61 @@
 # Alpha.9 scale qualification
 
-Status: **not yet qualified**. The runner and fixture are implemented, but the alpha.9
-qualification matrix has not completed. The release gate needs five valid
-repetitions for every size/profile combination and all three source counts.
+**Qualified.** The validated capture has 30 complete size/profile/repetition runs: five repetitions in each of six cells. There are zero failures, and all three ten-commit storage budgets pass. This is a fresh native alpha.9 qualification.
 
-## Workload and claim boundary
+The workload is a public synthetic Atlas-shaped fixture. No actual Atlas source dataset was available, so these results are not Atlas measurements and do not establish an improvement over Atlas performance claims.
 
-The benchmark example generates a deterministic, public Atlas-shaped fixture
-at 8,000, 80,000 and 800,000 source facts. It includes a 5,000-child hot group,
-balanced event groups, overlapping union-distinct inputs, a nested-field join,
-decisions and a partition-scoped named query. The exact fact distribution and
-digest are recorded in [`alpha9-fixture.md`](alpha9-fixture.md) and in every
-measurement record. No actual Atlas source dataset was available, so results
-must not be presented as Atlas-model measurements or as a direct performance
-comparison with Atlas's reported alpha.8 figures.
+## Build and host
 
-Both a one-commit load and a ten-commit load are measured. The proposed storage
-target applies only to the ten-commit history, immediately after its load and
-before incremental edit commits:
+| Field | Value |
+|---|---|
+| Source and embedded build commit | `12e37f8b40f2137516e6c9ede60c7431d942fdd5` |
+| Benchmark executable SHA-256 | `fc33c9f1746551bd5aa50d68e8e1afae4f98c4cdbfed99789e5cb79030d9538e` |
+| Host | Apple M1 Pro, 10 CPUs, 16 GiB RAM |
+| Operating system | macOS 15.6.1 (24G90) |
+| Rust | `rustc 1.96.1 (31fca3adb 2026-06-26)` |
+| Raw records and validated summary | [`raw/alpha9-scale-all.jsonl`](raw/alpha9-scale-all.jsonl), [`raw/alpha9-scale-summary.json`](raw/alpha9-scale-summary.json) |
 
-```text
-maximum logical world bytes = 16 MiB + 12 KiB × source fact count
-```
+## Ten-commit load and storage
 
-The ten-commit `child-load` JSON record reports logical and allocated bytes by
-storage component at that point. Later edit records append history; they do not
-change the captured budget measurement and the runner never compacts or removes
-revisions inside a measured world. A budget miss is not a pass unless an
-explicit revision is accepted.
+All table values summarize 5/5 repetitions as median [minimum–maximum]; the storage values were identical in all five runs. Storage is measured immediately after the ten-commit load, before edit history. “Cold open” is a separate fresh-process open measurement; OS cache state is unknown. Allocated bytes are filesystem allocation; logical bytes are the storage gate metric.
 
-## Capture phases
+| Source facts | Init ms | Load ms | Load peak RSS bytes | Logical bytes | Allocated bytes | Cold open ms | Logical budget (pass) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 8,000 | 51.22 [44.63–55.62] | 12,720.32 [12,532.05–13,098.01] | 237,355,008 [223,690,752–245,432,320] | 17,465,242 [17,465,242–17,465,242] | 17,616,896 [17,616,896–17,616,896] | 2.72 [2.70–2.77] | 115,081,216 |
+| 80,000 | 51.69 [39.24–80.63] | 18,472.54 [17,343.79–19,088.08] | 881,754,112 [842,596,352–920,141,824] | 132,341,944 [132,341,944–132,341,944] | 132,501,504 [132,501,504–132,501,504] | 7.03 [6.74–8.00] | 999,817,216 |
+| 800,000 | 30.21 [26.13–32.81] | 70,423.32 [68,817.04–71,496.56] | 5,147,983,872 [5,031,788,544–5,176,524,800] | 1,314,944,760 [1,314,944,760–1,314,944,760] | 1,360,510,976 [1,354,076,160–1,379,835,904] | 42.55 [41.28–44.38] | 9,847,177,216 |
 
-`scripts/alpha9_scale_capture.py` runs each repetition sequentially in a unique
-scratch directory, with only one benchmark world present at a time:
+The budget is `16 MiB + 12 KiB × source fact count`. All six matrix cells passed; storage is shown here for the ten-commit profile because that is the profile governed by this budget.
 
-1. `--full` creates an empty world and records initialization.
-2. `--child-load DIR` inserts the fixture in one or ten commits and records
-   load time, commit counters, counts and storage before edit history.
-3. `--child-open DIR`, `--child-query DIR` and `--child-query-warm DIR` run in
-   separate fresh processes against that exact loaded world. Warm-query mode
-   performs one untimed pagination pass, then times its measured pass.
-4. `--child-verify DIR` checks the loaded store, oracle and derived counts
-   before edits.
-5. `--child-edit DIR add` and `--child-edit DIR retract` each run in separate
-   processes and report their commit timing and available counters.
-6. A final `--child-verify DIR` checks the edited world.
+## Query and edit results
 
-The capture emits one JSONL record for each process phase plus cleanup. Each
-record retains its command, release binary path and SHA-256, commit/toolchain
-metadata from the example, fixture identity, platform, elapsed wall time,
-launcher-inclusive Python-spawn-to-Rust-main-entry time, peak RSS, free-space
-snapshots, exit state, and the example's JSON. On macOS peak RSS comes from an
-isolated Python resource launcher reading the one measured child's
-`RUSAGE_CHILDREN.ru_maxrss` value in bytes. This avoids `ps`; in the restricted
-benchmark shell `/usr/bin/time -l` exits after a denied `sysctl kern.clockrate`
-call. The compatibility parser accepts the platform's `NUMBER maximum resident
-set size` output order. If RSS or the Rust main-entry timestamp is absent, the
-record is marked incomplete and is not a valid sample.
+The detailed appendix contains the complete per-phase medians and ranges, disk component accounting, RSS, query results, and edit counters. Representative ten-commit fresh-process derived-query full-result medians were 5.47 ms (8k fulfillment), 451.73 ms (80k fulfillment), and 55,646.07 ms (800k fulfillment); the latter returns 80,000 rows. At 800k, the decision-value join full result was 50,031.12 ms and activity pages were 1,084.43 ms. These query APIs paginate outputs, but the current derived pagination implementation scans the full relation on each page, so large full-result queries are expensive. The [full derived-query and named-query tables](alpha9-scale-details.md#four-derived-relation-page-queries) include first-page/full-result timings and row/byte counts.
 
-Child output goes to bounded temporary files rather than undrained pipes, so a
-large diagnostic stream cannot block the child. A run is refused if scratch
-space is below 3 GiB; if it falls below that floor during a phase, the process
-group is stopped and the failure is retained. Timeout, OOM/signal, failed
-correctness, missing measurements and cleanup failure are also retained. No
-retry replaces a failed sample. The runner only removes its own unique
-per-repetition directory after all child processes have ended; cleanup failures
-are recorded.
+Measured one-row add/retract edits remained similar across fixture sizes: at 800k facts, medians were 94.70 ms and 96.46 ms for ten-commit add and retract, respectively. The 5,000-child hot-group workload reported three operator work units and three expressions evaluated for each operation; unrelated world size did not increase those counters. These are exposed logical work counters, not CPU instruction counts. The appendix lists state reads/writes, objects, and all repetitions' ranges.
 
-The resource launcher records each phase in a separate process: initialization,
-load, open, query, verification and edits are isolated. Open and both query
-passes run against the loaded world before the standalone correctness check;
-that check runs before edit measurements. Warm query follows the separate fresh
-query process. The OS cache is labeled **unknown**; the runner does not claim a
-cleared cache. Rust main-entry latency is reported from the parent process
-spawn timestamp and includes launcher overhead. The harness does not estimate
-startup by subtracting world-open latency.
+## Capture audit and limits
 
-Query records include work units, matches and expressions evaluated, plus
-first-page/full rows and bytes and canonical content digests for all four
-derived relations. The report checks these content measurements across fresh
-and warm query processes and repetitions. Edit records include commit counters
-for operator work and state I/O/objects. These are the counters exposed by the
-actual query/commit APIs; no work is inferred from elapsed time.
-Machine model and installed memory remain unavailable unless supplied by the
-operator. The root benchmark operator has separately obtained host metadata
-for this machine (Apple M1 Pro, 10 CPUs, 16 GiB RAM, macOS 15.6.1 build 24G90,
-`rustc 1.96.1 (31fca3adb 2026-06-26)`). Capture accepts this as an explicit
-JSON file with `--host-metadata`; it records the supplied values and their
-digest without invoking restricted system-inspection commands. Omitting the
-option leaves model and memory unavailable.
+Capture timestamps span 2026-11-10 08:56:11–20:18:31 UTC; summed process-monotonic elapsed time is 15,333.49 s. The audit found one 25,605.86 s discontinuity between the last 800k ten-commit repetition 5 verify-after-edits phase and the following 80k setup. This falls around the untimed correctness/transition work; its cause was not recorded. Timings use Rust `Instant` and Python monotonic clocks. No measured load, open, or query interval contains this discontinuity.
+
+Power and system load were uncontrolled, cache state is unknown, and process-wall measurements include the runner's 200 ms polling interval. The prior alpha.8 exploratory raw records were lost during temporary-file cleanup and are not used or reconstructed. The current alpha.9 qualification records are complete and durable.
 
 ## Reproduction
 
-Build the release example into a private target directory, then capture the
-matrix sequentially. The runner creates and removes one world at a time:
+From the source commit above, build with the commit embedded in the example, then capture all sizes and profiles with five repetitions using a durable scratch root:
 
 ```sh
-mkdir -p docs/performance/raw
-BRIX_BENCH_BUILD_COMMIT="$(git rev-parse HEAD)" \
-  CARGO_TARGET_DIR=/private/tmp/brix-a9-7-target \
+BRIX_BENCH_BUILD_COMMIT=12e37f8b40f2137516e6c9ede60c7431d942fdd5 \
+  CARGO_TARGET_DIR=target/alpha9-bench-build \
   cargo build --release -p brix-kb --example alpha9_scale_bench
 python3 scripts/alpha9_scale_capture.py \
-  /private/tmp/brix-a9-7-target/release/examples/alpha9_scale_bench \
-  docs/performance/raw/alpha9-scale-all.jsonl \
+  target/alpha9-bench-build/release/examples/alpha9_scale_bench \
+  docs/performance/raw/alpha9-scale-reproduction.jsonl \
   --sizes 8000 80000 800000 --profiles single ten --repetitions 5 \
-  --host-metadata docs/performance/alpha9-host.json --allow-large
-```
-
-The checked-in [`alpha9-host.json`](alpha9-host.json) records the operator-
-provided machine/toolchain metadata and its collection method.
-
-After all runs finish, validate and aggregate the raw capture without
-discarding failed records:
-
-```sh
+  --host-metadata docs/performance/alpha9-host.json --allow-large \
+  --scratch-root target/alpha9-benchmark-worlds
 python3 scripts/alpha9_scale_report.py \
-  docs/performance/raw/alpha9-scale-all.jsonl \
-  --output docs/performance/raw/alpha9-scale-summary.json
+  docs/performance/raw/alpha9-scale-reproduction.jsonl \
+  --output docs/performance/raw/alpha9-scale-reproduction-summary.json
 ```
 
-The summary reports per-phase sample counts, medians and ranges, all retained
-failures, the fixture/build identity checks, and the ten-revision logical
-storage gate. It exits nonzero unless every one of the six size/profile cells
-has five complete repetitions and all consistency and storage checks pass.
-
-`--allow-large` is an explicit command-line guard for 80k/800k runs; the
-resource controller remains active and larger sizes are processed sequentially.
-Each repetition uses a new
-world directory; the harness does not leave multiple fixture worlds resident.
-
-## Prior exploratory runs and recovery
-
-The initial 8k/80k rehearsals and partial 800k run used an alpha.8-version
-build and were excluded from qualification. The partial run was stopped when
-the package-version audit identified that mismatch. Temporary-file cleanup
-after interrupted sessions removed those exploratory JSONL files; their raw
-measurements cannot be reproduced from the remaining logs and are not
-presented as qualification evidence.
-
-The recovery restored all 619 source, test, fixture and documentation files
-from the saved candidate, checking every file against its retained Git blob
-identity. Only the three unqualified exploratory JSONL files were unavailable.
-The capture and report reject any package version other than alpha.9. The
-qualification matrix below must therefore be newly captured, with all failures
-retained, on the recovered alpha.9 candidate.
-
-## Results
-
-No alpha.9 qualification measurements are available yet. Publish the raw JSONL path, exact release
-binary hash and a summary of all 30 size/profile/repetition cells. Qualification
-requires at least five valid repetitions per cell; timeout, OOM, resource,
-correctness, cleanup or missing-measurement records remain visible and prevent
-that cell from having five valid samples.
+For methodology and all detailed measurements, see [the qualification appendix](alpha9-scale-details.md).

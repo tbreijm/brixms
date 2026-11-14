@@ -193,16 +193,17 @@ $BRIX world explain /tmp/orders-world order-1 --decide main::dispatch
 `explain` lists the candidates for the entity and the base facts that support
 the winner. To verify independently, export an audit bundle and check it
 against head and program digests obtained from a source you trust. Revisions
-are deterministic for a fixed execution profile, so this walkthrough with
-alpha.8 yields the digests below;
+are deterministic for a fixed execution profile. This alpha.9 source
+checkout yields the digests below; other versions and profiles can produce
+different identities.
 `world audit` prints `head_digest` and `world show --json` reports
 `program_digest`.
 
 ```bash
 $BRIX world audit /tmp/orders-world --out /tmp/orders.brixworld
 $BRIX world verify \
-  --expect-head 509bdc34e66c279c5838494b5befa5984e65d17a34a9514b873c502a94d6e0a0 \
-  --expect-program 4f0394088b26f86a7bdad62077632d115398149a04a5639052c23daf864cb3ce \
+  --expect-head f1a730d474e9984be279e4e5f58f8e2ae89c4e3ca06c4ddd96225246ad8b131a \
+  --expect-program 4c70ca60ea667eee652231cc8c8c2c51dc7acebd31d3547294bd6393e7afe536 \
   /tmp/orders.brixworld
 ```
 
@@ -213,13 +214,15 @@ did to re-derive the result.
 
 Alpha.9 development adds host-scoped named queries, per-request finite-decision
 evidence contexts, composite relation keys, and versioned bounded-collection
-ordering. The A9-1 through A9-6 implementation is present; benchmark
-qualification and final release checks are still pending. The public scale
-fixture is synthetic and Atlas-shaped, not the Atlas model. No alpha.9 tag or
-archive has been published, so the installation instructions below remain on
-alpha.8. See the [Alpha.9 development notes](./docs/planning/alpha9-release-notes.md),
+ordering. A9-1 through A9-7 are complete on this branch, with native macOS
+arm64 checks and all 30 scale-qualification runs passing. The workspace
+candidate is `0.1.0-alpha.9` and the Python SDK is `0.1.0a9`. The public scale
+fixture is synthetic and Atlas-shaped; it does not measure the Atlas model.
+No alpha.9 tag or archive has been published, so the installation instructions
+below remain on alpha.8. See the
+[Alpha.9 candidate notes](./docs/planning/alpha9-release-notes.md),
 [release contract](./spec/Alpha9_Release_Contract.md), and
-[scale qualification status](./docs/performance/alpha9-scale.md).
+[scale qualification report](./docs/performance/alpha9-scale.md).
 
 ## alpha.8: collections, typed queries, and portable decision evidence
 

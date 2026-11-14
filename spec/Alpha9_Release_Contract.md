@@ -695,3 +695,79 @@ seconds. Workspace Clippy, TCB inventory and SOC law-map checks passed, and all
 This consolidation branch includes the reviewed #52/#53/#59 foundation and
 A9-1 through A9-6 implementation. A9-7's unfinished harness/runner remain local
 in a separate checkout and are excluded. No alpha.9 release is created here.
+
+
+## 19. A9-7 and release-candidate qualification (2026-11-10)
+
+The consolidated candidate completes A9-1 through A9-7 on the reviewed
+#52/#53/#59 foundation. Runtime source commit
+`12e37f8b40f2137516e6c9ede60c7431d942fdd5` is the qualified build;
+subsequent report and release-document changes do not alter that source.
+The workspace candidate version is `0.1.0-alpha.9`; Python is `0.1.0a9`.
+No alpha.9 tag or release archive is published by this checkpoint.
+
+A9-7 now includes the deterministic public Atlas-shaped fixture, isolated
+fresh-process capture, validated raw records, full statistical report, and
+real operator/state counters. A transient collection-accumulator cache avoids
+reloading the same group's persisted state for every delta within an operator
+drain. Bounds and overflow rejection still apply to each delta; canonical
+state is flushed at the drain boundary. This does not change frozen results
+or allow an overflow to publish HEAD.
+
+The complete matrix contains **30 fresh worlds**: five repetitions at each of
+8k, 80k and 800k source facts, with both one- and ten-batch histories. All cells
+passed with zero failures. Store and independent oracle checks ran after load
+and after the add/retract sequence, outside measured load/query intervals.
+No compaction or history deletion was used to meet the storage gate.
+
+| Source facts | Ten-batch logical bytes | Budget: 16 MiB + 12 KiB × facts | Result |
+|---:|---:|---:|---|
+| 8,000 | 17,465,242 | 115,081,216 | Pass |
+| 80,000 | 132,341,944 | 999,817,216 | Pass |
+| 800,000 | 1,314,944,760 | 9,847,177,216 | Pass |
+
+The [qualification report](../docs/performance/alpha9-scale.md),
+[detailed appendix](../docs/performance/alpha9-scale-details.md),
+[raw records](../docs/performance/raw/alpha9-scale-all.jsonl), and
+[validated summary](../docs/performance/raw/alpha9-scale-summary.json)
+publish measurements and limitations. At 800k, ten-batch median load was
+70.42 seconds; cold open was 42.55 ms. Derived pagination currently rescans the
+relation for each page: returning all 80,000 fulfillment rows took 55.65 seconds.
+The fixture is synthetic, not actual Atlas data, and establishes no direct
+comparison against Atlas's alpha.8 figures. Cache/power conditions were not
+controlled. The report discloses a wall-clock discontinuity around untimed
+verification/transition work; no measured load, open or query interval contains
+it, and its cause was not recorded.
+
+Native macOS arm64 verification passed:
+
+- **2,276 workspace tests and 13 doctests**; the debug run skipped only the
+  separately qualified 5,000-child lifecycle and 28 pre-existing ignored cases.
+- All **16 release collection cases**, including 5,000 children, in 288.37 seconds.
+- All **44 Python SDK tests** against the extracted native release package and
+  **11 benchmark capture/report tests**.
+- Formatting, workspace all-target Clippy with warnings denied, TCB inventory
+  and its negative fixture, SOC law mapping and its negative fixture, **69
+  independent canonical vectors**, and dependency advisory/license checks.
+- All ten native package smoke stages and the Atlas-shaped CLI workflow.
+
+Existing alpha.8 histories, the genuine empty genesis fixture, legacy collection
+audit and alpha.5 semantic goldens keep their expected hashes. Same-source
+reopening preserves a validated recorded execution profile, including at
+revision zero; incompatible networks fail before program files are rewritten.
+The finite world decision-evidence consumer admits the supported alpha.8 and
+current profiles only after complete profile validation. Wider historical
+world replay support does not grant older evidence profiles new authority.
+
+Qualified native artifacts (local, not published):
+
+| Artifact | SHA-256 |
+|---|---|
+| CLI executable | `333da7374f403d76960d67bcf0e4a6da94c5a4e4e73ced5531ab59e4a3bae5eb` |
+| Scale benchmark executable | `fc33c9f1746551bd5aa50d68e8e1afae4f98c4cdbfed99789e5cb79030d9538e` |
+| `brix-v0.1.0-alpha.9-aarch64-apple-darwin.tar.gz` | `be864f42bbffe271dee1f82a6ee65aac663aa9a8bd602cb7245824a77e33ef20` |
+
+Cross-platform CI and publication remain separate from this native evidence.
+Parity against actual Atlas inputs requires the consuming project's data.
+World settlements remain `@Derived`; these qualification results do not promote
+runtime winners to general kernel proofs.

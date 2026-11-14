@@ -1,11 +1,13 @@
 # Alpha.9 development: scoped requests, relation composition, and bounded collections
 
-**Status (2026-11-02): development notes, not a published release.** The
-reviewed implementation covers A9-1 through A9-6. A9-7 benchmark qualification
-and the final release gates are pending. No `v0.1.0-alpha.9` tag or release
-archive has been published. The installation instructions in the top-level
-README therefore continue to describe alpha.8. The workspace candidate version
-is `0.1.0-alpha.9` and the Python package version is `0.1.0a9`.
+**Status (2026-11-10): release candidate, native qualification complete.**
+The reviewed implementation covers A9-1 through A9-7. All 30 scale runs and
+the native macOS arm64 validation gates passed on source commit
+`12e37f8b40f2137516e6c9ede60c7431d942fdd5`. No `v0.1.0-alpha.9` tag or
+release archive has been published. The installation instructions in the
+top-level README therefore continue to describe alpha.8. The workspace
+candidate version is `0.1.0-alpha.9` and the Python package version is
+`0.1.0a9`. Linux and cross-platform CI remain separate from native validation.
 
 Alpha.9 builds on the reviewed #52 resolution, #53 typing and #59 context
 foundation and on the alpha.8 persistent world runtime. Those foundations
@@ -117,11 +119,25 @@ The A9-7 fixture and capture design are documented in
 [`alpha9-scale.md`](../performance/alpha9-scale.md). The fixture is a
 deterministic **public synthetic Atlas-shaped workload**, not the Atlas model
 or an Atlas dataset. No direct performance comparison with Atlas's reported
-alpha.8 numbers is claimed. Qualification requires five valid repetitions at
-8k, 80k and 800k facts for both one- and ten-batch profiles, along with
-correctness checks and the ten-revision logical-storage budget. Results,
-medians, ranges and raw records remain pending until that matrix and the final
-release checks complete.
+alpha.8 numbers is claimed. All five repetitions at 8k, 80k and 800k facts
+for both one- and ten-batch profiles passed correctness checks, and each
+ten-revision logical-storage budget passed. The report publishes medians,
+ranges, storage accounting, memory, query timings and raw records. At 800k,
+ten-batch load took a median 70.42 seconds and retained 1,314,944,760 logical
+bytes against a 9,847,177,216-byte budget. Full-result derived pagination
+rescans the relation on each page; returning all 80,000 fulfillment rows took
+a median 55.65 seconds. This is a documented performance limit.
+
+Final native validation passed 2,276 workspace tests and 13 doctests, all 16
+release collection cases including the 5,000-child lifecycle, 44 Python SDK
+tests, and 11 benchmark capture/report tests. Formatting, workspace all-target
+Clippy with warnings denied, TCB inventory, SOC law mapping, 69 independent
+canonical vectors and dependency advisory/license checks passed. The extracted
+macOS arm64 package passed all ten packaging smoke stages and the Atlas-shaped
+CLI workflow. Debug testing skipped only the separately qualified 5,000-child
+case and 28 pre-existing ignored cases. Legacy frozen histories and audits
+retain their expected identities. Downstream parity against actual Atlas data
+and cross-platform release publication remain consumer/release steps.
 
 The normative delivery scope and acceptance requirements remain in the
 [Alpha.9 release contract](../../spec/Alpha9_Release_Contract.md). The
