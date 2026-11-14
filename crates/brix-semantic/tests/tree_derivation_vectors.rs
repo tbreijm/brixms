@@ -134,6 +134,9 @@ fn independent_tree(tree: &RealizesTree, w: &mut CanonWriter) {
             independent_tree(left, w);
             independent_tree(right, w);
         }),
+        RealizesTree::Id(obj) => w.write_enum(3, |w| {
+            independent_tree_obj(obj, w);
+        }),
     }
 }
 

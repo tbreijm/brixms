@@ -43,7 +43,7 @@ expression is `CfgAtom::Judged { context, expr }`, carrying the `ContextId` the
 expression is typed under (ADR-0028 ⟨D-CTXENDPOINT⟩). `CfgAtom::Expr`, the bare
 expression atom, is retired from emission and kept only so a decoder meeting an
 old artifact fails closed on an ordinal it knows rather than silently
-reinterpreting one it does not. **[Partial: `Expr::config_id`/`Ty::config_id` exist and every derivation endpoint is built from them, and two manifests now freeze encodings — `vectors/pinned_endpoint_identities_v1.json` (ADR-0025 Stage A: the six numeric `Ty::Con` atoms and the four `ArithOp` atoms) and `vectors/constructor_ordinals_v1.json` (§1.3: one exemplar per constructor, all twenty). Between them every constructor's *shape* is frozen. What is still unpinned is the encoding of value material no exemplar reaches: the `Expr::Record` exemplar carries a single field, so a change to how a multi-field record orders or delimits its fields moves no frozen digest. `TyCtx` itself has no vector.]**
+reinterpreting one it does not. **[Partial: `Expr::config_id`/`Ty::config_id` exist and every derivation endpoint is built from them. Two manifests freeze encodings — `vectors/pinned_endpoint_identities_v1.json` (ADR-0025 Stage A: the six numeric `Ty::Con` atoms and four `ArithOp` atoms) and `vectors/constructor_ordinals_v1.json` (§1.3: one exemplar per constructor, all twenty-six). The original one-field record exemplars preserve their frozen identities; additive multi-field record vectors and independent primitive-write checks pin field ordering and cardinality framing. `TyCtx` itself still has no vector.]**
 
 **1.2** `Expr` is the lowered L2 fragment, not a surface AST and not a revived
 Core IR. Lowering from surface syntax is `brix-lower`'s; this contract begins
@@ -216,10 +216,10 @@ nothing to do with the composition. `T` is the tightness status for
 | `g_tensor_split` | `Atom(Γ ⊢ And(a,b))` → `Prod(Atom(Γ ⊢ a), Atom(Γ ⊢ b))` | ✓ | ⟨D-SPLIT⟩ — see 3.4.2 |
 | `g_tensor` | `Prod(Atom(T tₐ), Atom(T t_b))` → `Atom(T Prod(tₐ,t_b))` | ✓ | product introduction — see 3.4.2 |
 | `g_fix` | `Atom(Γ ⊢ Fix(f,T,b))` → `Atom(Γ,f:T ⊢ b)` | ✗ | assumes what it establishes |
-| `g_arith_split` | `Atom(Γ ⊢ Arith(op,a,b))` → `Prod(Atom(Γ ⊢ a), Atom(Γ ⊢ b))` | ✓ | ⟨D-SPLIT⟩, conditional |
-| `g_arith_input` | `Prod(Atom(T a), Atom(T b))` → `Atom(ArithInput)` | ✗ | regime→kernel bridge |
-| `g_arith` | `Atom(ArithInput)` → `Atom(ArithResult)` | ✗ | kernel-checked, not yet closed |
-| `g_arith_result` | `Atom(ArithResult)` → `Atom(T result)` | ✗ | kernel→regime bridge |
+| `g_arith_split` | `Atom(Γ ⊢ Arith(op,a,b))` → `Prod(Atom(Op(op)), Prod(Atom(Γ ⊢ a), Atom(Γ ⊢ b)))` | ✓ | ⟨D-SPLIT⟩, conditional |
+| `g_arith_input` | `Prod(Atom(Op(op)), Prod(Atom(T a), Atom(T b)))` → `Atom(ArithInput)` | ✗ | regime→kernel bridge (`TypingArithInputV1`) |
+| `g_arith` | `Atom(ArithInput)` → `Atom(T result)` | ✗ | `TypingArithV3`, occurrence-closed; legacy V2 retains its `Atom(ArithResult)` target |
+| `g_arith_result` | `Atom(ArithResult)` → `Atom(T result)` | ✗ | legacy kernel→regime bridge; not emitted by new derivations |
 | `g_match_catchall` | `Prod(Atom(T armᵢ)…)` → `Atom(T result)` | ✗ | repeated branch premises unrepresented |
 | `NUMERIC` / `GRADE` edges | coercion-path data, **not leaves** | n/a | ⟨D-EXACTCOVERED⟩ |
 
@@ -230,8 +230,10 @@ nothing to do with the composition. `T` is the tightness status for
 `application_rule_is_a_kernel_theorem`,
 `arithmetic_split_rule_is_a_kernel_primitive`,
 `claim_kind_typing_discharge_is_not_portable` (which derives the tight set from
-`minted_generators()` and so cannot silently omit a row). The faithfulness
-gates do **not** cover every ✓ row — see 3.4.2.]**
+`minted_generators()` and so cannot silently omit a row). `g_tensor`'s product
+introduction is covered in `structural_generators_are_faithful_kernel_rules`,
+and `g_tensor_split`, `g_tensor`, `g_then_split` have dedicated faithfulness and
+negative pins (3.4.2).]**
 
 **3.4.1 The table is the generator set.** §3.4's rows and `minted_generators()`
 SHALL name the same generators, and each row's `T` column SHALL equal
@@ -247,20 +249,17 @@ the enumeration §3.1 makes single-source. **[Pinned:
 > was watching. Verified to fail now: removing `g_tensor`'s row, or flipping
 > `g_fix`'s `T` cell to ✓, fails the test naming the generator.
 
-**3.4.2 Three ✓ rows do not yet meet §9.2.** `g_then_split`, `g_tensor_split`
-and `g_tensor` are discharged in `generator_is_tight`, and their grounds are
-stated — ⟨D-SPLIT⟩ for the two splits, product introduction for `g_tensor`.
-What they do not have is §9.2(2)'s **faithfulness pin** or §9.2(3)'s **negative
-pin**. `structural_generators_are_faithful_kernel_rules` covers `g_record`,
-`g_field`, `g_ctor` and `g_match`; `g_tensor` claims `g_record`'s ground and is
-absent from it. **[Partial: the discharge is declared and the ground is stated;
-the artifacts §9.2 requires do not exist]**
-
-> Recorded rather than repaired here, because repairing it either adds pins or
-> withdraws the discharges, and withdrawing them moves the grade of every `then`
-> and `and` composition. §9.2 is unambiguous that all four obligations are
-> required, so this is a gap and not a variant reading — but which way it closes
-> is a decision, not a documentation change.
+**3.4.2 Discharge evidence for `g_then_split`, `g_tensor_split`, and `g_tensor`.**
+`g_then_split`, `g_tensor_split` and `g_tensor` are discharged in
+`generator_is_tight`. Their grounds are: ⟨D-SPLIT⟩ (structural decomposition)
+for `g_then_split` and `g_tensor_split`; and binary product introduction
+(`A -> B -> A × B`) for `g_tensor`. Each satisfies all four obligations of §9.2:
+stated ground; faithfulness pin (`structural_generators_are_faithful_kernel_rules`,
+`g_tensor_and_g_tensor_split_faithfulness_and_negative_pins`); negative pin
+checking precondition enforcement and middle-match sensitivity
+(`g_then_split_faithfulness_and_negative_pins`, `then_on_values_is_refused_because_the_endpoints_cannot_meet`);
+and typing-scoped judgment tightness (`claim_kind_typing_discharge_is_not_portable`).
+**[Pinned: `structural_generators_are_faithful_kernel_rules`, `g_tensor_and_g_tensor_split_faithfulness_and_negative_pins`, `g_then_split_faithfulness_and_negative_pins`, `then_on_values_is_refused_because_the_endpoints_cannot_meet`]**
 
 **3.5** The coercion families are **data carried inside a source object**, not
 tree leaves. No coercion generator reaches a leaf, so `generator_is_tight` is
@@ -521,12 +520,25 @@ document recording it SHALL say so. `g_record_empty` is such an interim: ADR-002
 **9.5 Kernel-closed leaves.** After ⟨D-PRIM⟩, a leaf is closed only when the
 certificate contains the `PrimRealizes` term for that leaf *and* the kernel
 accepted the resulting proof. Registry membership implies nothing about
-occurrences (ADR-0015 §8.7). Under ADR-0015 Stage D, supported arithmetic leaves
-(`g_arith` under `TypingArithV2`) are classified deterministically and emitted
-as closed `PrimRealizes` instances across tree elaboration. The two
-vocabulary-bridge leaves (`g_arith_input` and `g_arith_result`) remain
-hypotheses (`Hyp`), keeping the overall result `@Audited`. **[Implemented:
-ADR-0015 Stage D]**
+occurrences (ADR-0015 §8.7). New arithmetic derivations emit `g_arith_split`,
+then `Tensor(Id(Op(op)), Tensor(derive(a), derive(b)))`, then `g_arith_input`,
+then `g_arith`. The input bridge is closed by `TypingArithInputV1`; the result
+leaf is closed by `TypingArithV3`, whose destination is the pinned atomic
+`Ty::Con` endpoint. New derivations do not emit `g_arith_result`. Legacy
+`TypingArithV2` remains available to verify old arithmetic artifacts. These
+closures are occurrence-specific. **[Implemented:
+`exhaustive_arithmetic_matrix_through_production_elaboration`,
+`the_arith_input_bridge_is_minted_but_not_discharged`,
+`the_arith_result_bridge_is_minted_but_not_discharged`,
+`let_one_plus_two_emits_and_retains_an_independently_accepted_primitive_proof`]**
+
+An empty `typing_grounds(...).obligations` list is not an unconditional
+certificate. `g_lit` and structural split leaves remain implication
+antecedents in the kernel proof; the empty list says only that the typing
+grounds report found no undischarged occurrence under its policy. Literal and
+split discharges remain conditional on their stated grounds. `Proven` means the
+kernel accepted the resulting conditional theorem and the accepted primitive
+occurrences; it does not erase the antecedents.
 
 **9.6** The result grade is the composition outcome capped by the
 least-discharged leaf. **[Pinned: `honest_result_outcome`, and the standing
@@ -566,24 +578,24 @@ against `main` at the date above.
 > table drifts; nothing yet does that for this section, so it remains a
 > standing obligation under §12.3.
 
-- The λ-calculus core, the structural product/coproduct fragment, literals, and
-  the two zero-arity introductions reach genuine `Proven`.
-- **Arithmetic is capped.** `1 + 2` is `Int @Audited` and `7 / 2` is
-  `Float @Audited`, capped by `g_arith_input` and `g_arith_result`.
-  `g_arith`'s realization is closed by the kernel relation (`TypingArithV2`)
-  under ADR-0015 Stage D with an accepted `PrimRealizes` proof term, while the two
-  bridges remain open hypotheses because each connects to regime-encoded `Ty`
-  endpoints outside kernel vocabulary.
+- The λ-calculus core, structural product/coproduct fragment, literals, and
+  zero-arity introductions can reach `Proven` under their stated conditional
+  grounds; their kernel implications retain open antecedents where applicable.
+- New arithmetic derivations close `g_arith_input` and `g_arith` with
+  `TypingArithInputV1` and `TypingArithV3`; `g_arith_result` is not emitted.
+  `TypingArithV2` remains for legacy certificates. Arithmetic examples reach
+  `Proven` through accepted, occurrence-specific primitive proofs, while
+  literal and split antecedents remain conditional on their existing
+  discharge grounds. An empty typing-grounds obligation list does not make
+  those implications unconditional.
 - **Comparison is capped** by `g_cmp`.
 - **Recursion is capped** by `g_fix`, deliberately: it assumes the definition's
   own type in order to check the body, which is the standard and sound rule for
   typing but not a correspondence the kernel owns. Under ⟨D-JUDGE⟩ that scoping
   is the point — `fn loop(x: Int): Int = loop(x)` types correctly, because a
   typing judgement never claimed the function halts.
-- **Three discharges are declared without their §9.2 artifacts** —
-  `g_then_split`, `g_tensor_split`, `g_tensor` (§3.4.2). They are *not* capping
-  anything, which is precisely why this is worth stating: an undischarged
-  generator announces itself by capping the result, and these do not.
+- **`g_then_split`, `g_tensor_split`, and `g_tensor` meet §9.2** (§3.4.2) with
+  faithfulness and negative pins in `soc-regimes`. They do not cap the result.
 - **Catch-all matching is capped** by `g_match_catchall`, deliberately: ADR-0015
   §4 lists it as a non-goal until repeated branch premises are represented.
 - **Incremental invalidation does not exist** (§8).

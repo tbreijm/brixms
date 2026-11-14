@@ -33,6 +33,7 @@
 //!   it was built against was deleted at zero-legacy (N9); native is now the
 //!   sole checker.
 
+pub mod context_validation;
 pub mod coverage;
 pub mod finite_frontier;
 pub mod literal;
@@ -60,6 +61,12 @@ pub mod tree_audit;
 #[deny(missing_docs)]
 pub mod type_realization;
 
+pub use context_validation::{
+    audited_type_check_tree_in_context_v2, decode_closed_ty, encode_closed_ty,
+    infer_tree_in_context_v2, ty_context_from_checked_v2, ty_context_from_model_v2,
+    typed_assumption, ClosedTyAssumptionValidator, ContextTypeError, TyDecodeError, TyDecodeLimits,
+    NO_AXIOM_PROFILE_V1, TYPE_ASSUMPTION_SCHEMA_V1, TYPE_REGIME_PROFILE_V1,
+};
 pub use finite_frontier::{
     explain_why, explain_why_not, AdmissionDecision, AdmissionPolicy, AdmitAllPolicy,
     CandidateStatus, CanonicalCandidateV1, DeliberationOutcome, DenyAllPolicy, EvaluatedFrontier,

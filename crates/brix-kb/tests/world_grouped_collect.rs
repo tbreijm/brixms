@@ -235,8 +235,12 @@ fn test_grouped_collect_incremental_workflow_and_retraction() {
         sources: vec![("root".into(), PROGRAM.into())],
         program_manifest_digest: reopened.manifest().program_digest,
     };
-    let bundle =
-        build_genesis_bundle_from_session(&reopened, closure, ExecProfileV1::default()).unwrap();
+    let bundle = build_genesis_bundle_from_session(
+        &reopened,
+        closure,
+        ExecProfileV1::for_session(&reopened).unwrap(),
+    )
+    .unwrap();
     let limits = WorldAuditDecodeLimits::default();
     let bytes = bundle.encode(&limits).unwrap();
     let decoded = decode_world_audit_bundle_v1(&bytes, &limits).unwrap();
@@ -520,8 +524,12 @@ decide parent_plan for p in parent_slots per parent {
         sources: vec![("root".into(), program.into())],
         program_manifest_digest: session.manifest().program_digest,
     };
-    let bundle = build_genesis_bundle_from_session(&session, closure, ExecProfileV1::default())
-        .expect("bundle");
+    let bundle = build_genesis_bundle_from_session(
+        &session,
+        closure,
+        ExecProfileV1::for_session(&session).unwrap(),
+    )
+    .expect("bundle");
     let limits = WorldAuditDecodeLimits::default();
     let bytes = bundle.encode(&limits).expect("encode");
     let decoded = decode_world_audit_bundle_v1(&bytes, &limits).expect("decode");
@@ -728,8 +736,12 @@ decide derived_plan for d in derived_collected per parent {
         sources: vec![("root".into(), program.into())],
         program_manifest_digest: reopened.manifest().program_digest,
     };
-    let bundle = build_genesis_bundle_from_session(&reopened, closure, ExecProfileV1::default())
-        .expect("bundle");
+    let bundle = build_genesis_bundle_from_session(
+        &reopened,
+        closure,
+        ExecProfileV1::for_session(&reopened).unwrap(),
+    )
+    .expect("bundle");
     let limits = WorldAuditDecodeLimits::default();
     let bytes = bundle.encode(&limits).expect("encode");
     let decoded = decode_world_audit_bundle_v1(&bytes, &limits).expect("decode");
@@ -744,4 +756,38 @@ decide derived_plan for d in derived_collected per parent {
         },
     )
     .expect("reference verifier agrees on joined and derived collect");
+}
+
+#[test]
+fn test_reproduce_collect_corruption_at_257() {
+    let dir = TestDir::new("repro-257");
+    let program = r#"
+rel input record: { id: Str, kind: Str, ordinal: Int } key id
+rel derived o = select { kind: r.kind, ids: collect(r.id, r.ordinal, 1000) }
+  from r in record group by r.kind
+"#;
+    let sources = BTreeMap::from([("root".into(), program.into())]);
+    let mut session =
+        WorldSession::from_program_with_sources(&dir.0, "root", &sources).expect("create session");
+
+    let mut ops = Vec::new();
+    for i in 0..257 {
+        let mut r = TupleRecord::new();
+        r.set_str("id", &format!("rec_{i:04}"));
+        r.set_str("kind", "group_a");
+        r.set_str("ordinal", &i.to_string());
+        ops.push(WorldBatchOp::Upsert {
+            relation: "root::record".into(),
+            key: WorldKey::from_str(&format!("rec_{i:04}")),
+            tuple: r.to_tuple(),
+        });
+    }
+    session
+        .apply_batch(WorldBatch::new(0, "insert 257", ops))
+        .expect("batch");
+    drop(session);
+
+    let reopened = WorldSession::open(&dir.0).expect("reopen");
+    reopened.verify_state().expect("verify state");
+    reopened.verify_oracle().expect("verify oracle");
 }

@@ -1,0 +1,20 @@
+
+rel input orders: { id: Str, customer: Str, sku: Str, qty: Int, express: Str } key id
+rel input inventory: { id: Str, sku: Str, available: Int } key id
+rel input shipping: { id: Str, sku: Str, carrier: Str, lead_days: Int } key id
+
+rel derived fulfillment =
+    select { order_id: o.id, customer: o.customer, sku: o.sku, qty: o.qty, express: o.express, available: i.available, carrier: s.carrier, lead_days: s.lead_days }
+    from o in orders, i in inventory, s in shipping
+    where o.sku == i.sku && o.sku == s.sku && i.available >= 0
+
+rel derived sku_order_counts =
+    select { sku: f.sku, order_count: count() }
+    from f in fulfillment
+    group by f.sku
+
+decide dispatch for f in fulfillment per order_id {
+    propose ship_express priority 10 when f.express == "yes" && f.available >= f.qty = "air_express"
+    propose ship_standard priority 20 when f.express != "yes" && f.available >= f.qty = "ground_standard"
+    propose backorder priority 50 when f.available < f.qty = "backorder_hold"
+}

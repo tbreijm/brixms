@@ -1,6 +1,8 @@
 """Tests for world operations and pinned queries in BrixClient."""
 
+import json
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -269,3 +271,236 @@ decide plan for g in parent_context per parent {
         grants=["read:atlas"],
     )
     assert ver_hist["ok"] is True
+
+
+def test_world_composite_decision_keys_and_evidence(client, tmp_path):
+    world_dir = tmp_path / "world-composite"
+    prog_content = """config Decision = Allowed(Int) | Denied
+
+rel input limits: { tenant: Str, id: Str, amount: Int } key id
+rel input requests: { tenant: Str, id: Str, requested: Int } key id
+
+rel derived pending = select {
+    tenant: r.tenant,
+    id: r.id,
+    requested: r.requested,
+    limit: l.amount
+} from r in requests, l in limits
+where r.tenant == l.tenant && r.id == l.id
+
+decide grant for p in pending per (tenant, id) {
+    propose allow priority 1 when p.requested <= p.limit = Decision::Allowed(p.requested)
+    propose deny priority 2 when true = Decision::Denied
+}
+"""
+    prog_path = tmp_path / "composite.brix"
+    prog_path.write_text(prog_content)
+
+    init_res = client.world_init(world_dir, str(prog_path))
+    assert init_res["ok"] is True
+    manifest_digest = init_res["manifest_digest"]
+    program_digest = init_res["program_digest"]
+    batch = {
+        "schema": "brix.world.batch@1",
+        "expected_base_revision": 0,
+        "idempotency_key": "seed-comp",
+        "operations": [
+            {
+                "op": "upsert",
+                "relation": "composite::limits",
+                "key": "a::bc",
+                "tuple": {"tenant": "a", "id": "bc", "amount": 100},
+            },
+            {
+                "op": "upsert",
+                "relation": "composite::requests",
+                "key": "a::bc",
+                "tuple": {"tenant": "a", "id": "bc", "requested": 50},
+            },
+            {
+                "op": "upsert",
+                "relation": "composite::limits",
+                "key": "ab::c",
+                "tuple": {"tenant": "ab", "id": "c", "amount": 100},
+            },
+            {
+                "op": "upsert",
+                "relation": "composite::requests",
+                "key": "ab::c",
+                "tuple": {"tenant": "ab", "id": "c", "requested": 150},
+            },
+        ],
+    }
+    b_res = client.world_batch(world_dir, batch)
+    assert b_res["ok"] is True
+
+    rev1_digest = b_res["revision_digest"]
+
+    # 1. Query decisions using tuple/list entity
+    dec_a_bc = client.world_decisions(world_dir, "composite::grant", entity=["a", "bc"])
+    assert dec_a_bc["ok"] is True
+    s_a_bc = dec_a_bc["settlements"]["composite::grant"]["[\"a\",\"bc\"]"]
+    assert s_a_bc["candidate_name"] == "allow"
+    assert s_a_bc["entity_key"] == ["a", "bc"]
+
+    dec_ab_c = client.world_decisions(world_dir, "composite::grant", entity=["ab", "c"])
+    assert dec_ab_c["ok"] is True
+    s_ab_c = dec_ab_c["settlements"]["composite::grant"]["[\"ab\",\"c\"]"]
+    assert s_ab_c["candidate_name"] == "deny"
+    assert s_ab_c["entity_key"] == ["ab", "c"]
+
+    # 2. Explain decision with composite entity
+    expl = client.world_explain(world_dir, ["a", "bc"], decide="composite::grant")
+    assert expl["ok"] is True
+    assert expl["explanation"]["winning_candidate"] == "allow"
+    assert expl["explanation"]["entity_key"] == ["a", "bc"]
+
+    # 3. Decision evidence round trip with composite entity
+    evidence_res = client.get_decision_evidence(world_dir, decide="composite::grant", key=["a", "bc"], rev=1)
+    assert evidence_res["ok"] is True
+
+    ver = client.verify_decision_evidence(
+        evidence_res["evidence"],
+        world_manifest_digest=manifest_digest,
+        program_digest=program_digest,
+        revision=1,
+        revision_digest=rev1_digest,
+        decide_name="composite::grant",
+        entity_key=["a", "bc"],
+        candidate="allow",
+        value_digest=evidence_res["target"]["value_digest"],
+    )
+    assert ver["ok"] is True
+
+
+def test_review_entity_key_identity_and_numeric_evidence_roundtrip(client, tmp_path):
+    world_dir = tmp_path / "world-key-identity"
+    program = tmp_path / "key-identity.brix"
+    program.write_text(
+        """rel input rows: { id: Str, n: F64, d: Decimal } key id
+decide choose for r in rows per (id, n, d) {
+    propose yes priority 1 when true = 1
+}
+decide choose_scalar for r in rows per id {
+    propose yes priority 1 when true = 1
+}
+"""
+    )
+    init = client.world_init(world_dir, str(program))
+    assert init["ok"] is True
+    batch = client.world_batch(
+        world_dir,
+        {
+            "schema": "brix.world.batch@1",
+            "expected_base_revision": 0,
+            "idempotency_key": "identity-seed",
+            "operations": [
+                {
+                    "op": "upsert",
+                    "relation": "key-identity::rows",
+                    "key": "[\"a\", \"b\"]",
+                    "tuple": {"id": "[\"a\", \"b\"]", "n": 0.5, "d": "0.50"},
+                },
+                {
+                    "op": "upsert",
+                    "relation": "key-identity::rows",
+                    "key": '["a","b"]',
+                    "tuple": {"id": '["a","b"]', "n": 0.5, "d": "0.50"},
+                },
+                {
+                    "op": "upsert",
+                    "relation": "key-identity::rows",
+                    "key": "numeric",
+                    "tuple": {"id": "numeric", "n": 0.5, "d": "0.50"},
+                },
+            ],
+        },
+    )
+    assert batch["ok"] is True
+
+    spaced = '["a", "b"]'
+    exact = client.world_decisions(world_dir, "key-identity::choose_scalar", entity=spaced)
+    assert exact["ok"] is True
+    assert list(exact["settlements"]["key-identity::choose_scalar"]) == [spaced]
+    compact = client.world_decisions(
+        world_dir, "key-identity::choose_scalar", entity='["a","b"]'
+    )
+    assert compact["ok"] is True
+    assert list(compact["settlements"]["key-identity::choose_scalar"]) == ['["a","b"]']
+    explanation = client.world_explain(world_dir, spaced, decide="key-identity::choose_scalar")
+    assert explanation["ok"] is True
+    assert explanation["explanation"]["entity_key"] == spaced
+
+    evidence_file = tmp_path / "literal-str.evidence.json"
+    evidence = client.get_decision_evidence(
+        world_dir,
+        decide="key-identity::choose_scalar",
+        key=spaced,
+        rev=1,
+        out=evidence_file,
+    )
+    assert evidence["ok"] is True
+    saved_evidence = json.loads(evidence_file.read_text())
+    assert saved_evidence["target"]["entity_key"] == evidence["target"]["entity_key"] == spaced
+    assert (
+        saved_evidence["settlement"]["entity_key"]
+        == evidence["settlement"]["entity_key"]
+        == spaced
+    )
+    verified = client.verify_decision_evidence(
+        evidence_file,
+        world_manifest_digest=init["manifest_digest"],
+        program_digest=init["program_digest"],
+        revision=1,
+        revision_digest=batch["revision_digest"],
+        decide_name="key-identity::choose_scalar",
+        entity_key=spaced,
+        candidate="yes",
+        value_digest=evidence["target"]["value_digest"],
+    )
+    assert verified["ok"] is True
+
+    numeric_key = ["numeric", 0.5, Decimal("0.500")]
+    numeric_evidence = client.get_decision_evidence(
+        world_dir,
+        decide="key-identity::choose",
+        key=numeric_key,
+        rev=1,
+    )
+    assert numeric_evidence["ok"] is True
+    numeric_verify = client.verify_decision_evidence(
+        numeric_evidence["evidence"],
+        world_manifest_digest=init["manifest_digest"],
+        program_digest=init["program_digest"],
+        revision=1,
+        revision_digest=batch["revision_digest"],
+        decide_name="key-identity::choose",
+        entity_key=numeric_key,
+        candidate="yes",
+        value_digest=numeric_evidence["target"]["value_digest"],
+    )
+    assert numeric_verify["ok"] is True
+    wrong_key = client.verify_decision_evidence(
+        numeric_evidence["evidence"],
+        world_manifest_digest=init["manifest_digest"],
+        program_digest=init["program_digest"],
+        revision=1,
+        revision_digest=batch["revision_digest"],
+        decide_name="key-identity::choose",
+        entity_key=["numeric", 0.75, Decimal("0.500")],
+        candidate="yes",
+        value_digest=numeric_evidence["target"]["value_digest"],
+    )
+    assert wrong_key["ok"] is False
+    wrong_type = client.verify_decision_evidence(
+        numeric_evidence["evidence"],
+        world_manifest_digest=init["manifest_digest"],
+        program_digest=init["program_digest"],
+        revision=1,
+        revision_digest=batch["revision_digest"],
+        decide_name="key-identity::choose",
+        entity_key=["numeric", "0.5", Decimal("0.500")],
+        candidate="yes",
+        value_digest=numeric_evidence["target"]["value_digest"],
+    )
+    assert wrong_type["ok"] is False

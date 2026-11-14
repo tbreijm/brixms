@@ -16,6 +16,8 @@ pub enum ObjectTerm {
     Compose(Box<ObjectTerm>, Box<ObjectTerm>),
     /// Witness/object tensor (parallel composition) left ⊗ right (Profile 1.2).
     Tensor(Box<ObjectTerm>, Box<ObjectTerm>),
+    /// Structural identity witness id_A (ADR-0025 §10.1).
+    Id(Box<ObjectTerm>),
 }
 
 impl ObjectTerm {
@@ -25,6 +27,9 @@ impl ObjectTerm {
     ///   generator witness identity derivation (`WitnessId(generator_id.digest())`).
     /// - `Compose(outer, inner)`: recursively computes and returns
     ///   `compose(outer.witness_digest(), inner.witness_digest())`.
+    /// - `Tensor(left, right)`: recursively computes and returns
+    ///   `tensor(left.witness_digest(), right.witness_digest())`.
+    /// - `Id(inner)`: computes the identity witness identity matching `brix-semantic` (ADR-0025 §10.1).
     /// - `BoundVar(_)`: a bound variable in witness position is malformed; returns a deterministic
     ///   sentinel `WitnessId::from_canon(b"brix.kernel.witness_digest.bound_var")`.
     pub fn witness_digest(&self) -> WitnessId {
@@ -36,6 +41,19 @@ impl ObjectTerm {
             ObjectTerm::Tensor(left, right) => {
                 tensor(left.witness_digest(), right.witness_digest())
             }
+            ObjectTerm::Id(inner) => match inner.as_ref() {
+                ObjectTerm::Const(id) => brix_semantic::id_witness(id.digest().as_bytes()),
+                ObjectTerm::Tensor(left, right) => brix_semantic::tensor(
+                    ObjectTerm::Id(left.clone()).witness_digest(),
+                    ObjectTerm::Id(right.clone()).witness_digest(),
+                ),
+                _ => {
+                    let mut w = brix_canon::CanonWriter::new();
+                    w.write_tag(brix_semantic::WITNESS_ID_TAG);
+                    inner.canon_write(&mut w);
+                    WitnessId::from_canon(&w.finish())
+                }
+            },
             ObjectTerm::BoundVar(_) => {
                 WitnessId::from_canon(b"brix.kernel.witness_digest.bound_var")
             }
@@ -195,6 +213,9 @@ pub enum TermKind {
         /// destination schema.
         dst: ObjectTerm,
     },
+    // ADR-0025 §10.1 addition (append-only ordinal AFTER PrimRealizes=17)
+    /// Structural identity realization arrow id_A : A -> A.
+    RealizesId(ObjectTerm),
 }
 
 /// Fully explicit, canonical proof-term artifact carrying its embedded context digest.
@@ -236,6 +257,7 @@ fn shift_object_term(term: &ObjectTerm, amount: usize) -> ObjectTerm {
             Box::new(shift_object_term(left, amount)),
             Box::new(shift_object_term(right, amount)),
         ),
+        ObjectTerm::Id(inner) => ObjectTerm::Id(Box::new(shift_object_term(inner, amount))),
     }
 }
 
@@ -259,6 +281,7 @@ fn subst_obj(term: &ObjectTerm, replacement: &ObjectTerm, depth: usize) -> Objec
             Box::new(subst_obj(left, replacement, depth)),
             Box::new(subst_obj(right, replacement, depth)),
         ),
+        ObjectTerm::Id(inner) => ObjectTerm::Id(Box::new(subst_obj(inner, replacement, depth))),
     }
 }
 
@@ -313,6 +336,7 @@ impl Canonical for ObjectTerm {
                 left.canon_write(w);
                 right.canon_write(w);
             }),
+            ObjectTerm::Id(inner) => w.write_enum(4, |w| inner.canon_write(w)),
         }
     }
 }
@@ -446,6 +470,7 @@ impl Canonical for TermKind {
                 src.canon_write(w);
                 dst.canon_write(w);
             }),
+            TermKind::RealizesId(t) => w.write_enum(18, |w| t.canon_write(w)),
         }
     }
 }

@@ -245,6 +245,12 @@ pub enum FiniteDecisionLowerError {
         expected: &'static str,
         found: String,
     },
+    /// String concatenation and lexical less-than are outside the released
+    /// expression profile. They are rejected during lowering rather than at
+    /// the first runtime evaluation.
+    UnsupportedStringOperator {
+        operator: &'static str,
+    },
     BooleanTypeAnalysisLimit,
     ProfileMismatch {
         expected: String,
@@ -478,6 +484,10 @@ impl fmt::Display for FiniteDecisionLowerError {
                     "resource limit exceeded during Boolean operand type analysis"
                 )
             }
+            Self::UnsupportedStringOperator { operator } => write!(
+                f,
+                "operator '{operator}' is unsupported for Str operands in this profile"
+            ),
             Self::ProfileMismatch { expected, found } => {
                 write!(
                     f,
@@ -799,6 +809,10 @@ fn check_expr_bounds(
         | ast::Expr::Why(base)
         | ast::Expr::Audit(base)
         | ast::Expr::Not(base) => check_expr_bounds(base, depth + 1, node_count),
+        ast::Expr::CollectTake { collection, limit } => {
+            check_expr_bounds(collection, depth + 1, node_count)?;
+            check_expr_bounds(limit, depth + 1, node_count)
+        }
         ast::Expr::Record { fields, .. } => {
             for (_, val) in fields {
                 check_expr_bounds(val, depth + 1, node_count)?;
@@ -1910,6 +1924,12 @@ pub fn lower_finite_decision_plan(
                 return Err(FiniteDecisionLowerError::ItemNotAllowed(format!(
                     "rel derived {}",
                     r.name
+                )));
+            }
+            ast::Item::Query(q) => {
+                return Err(FiniteDecisionLowerError::ItemNotAllowed(format!(
+                    "query {}",
+                    q.name
                 )));
             }
             ast::Item::Newtype(n) => {

@@ -640,10 +640,11 @@ pub fn validate_l3_value(
 ) -> Result<(), String> {
     match (value, expected) {
         (L3ValueV2::List(items), L3SchemaType::List(element)) => {
-            if items.len() > 256 {
+            if items.len() > crate::input::MAX_COLLECTION_ELEMENTS {
                 return Err(format!(
-                    "{path}: list has {} element(s), exceeding maximum of 256",
-                    items.len()
+                    "{path}: list has {} element(s), exceeding maximum of {}",
+                    items.len(),
+                    crate::input::MAX_COLLECTION_ELEMENTS,
                 ));
             }
             for (index, item) in items.iter().enumerate() {
@@ -1299,6 +1300,9 @@ pub fn lower_l3_plan_v2(module: &ast::Module, profile: &str) -> Result<L3PlanV2,
                     "rel derived {}",
                     r.name
                 )))
+            }
+            ast::Item::Query(q) => {
+                return Err(L3V2LowerError::ItemNotAllowed(format!("query {}", q.name)))
             }
             ast::Item::Newtype(n) => {
                 return Err(L3V2LowerError::ItemNotAllowed(format!(
@@ -2298,6 +2302,9 @@ fn lower_expr_v2_impl(
                 })
             }
         }
+        ast::Expr::CollectTake { .. } => Err(L3V2LowerError::Unsupported(
+            "grouped collect take".to_string(),
+        )),
     }
 }
 
@@ -5320,6 +5327,80 @@ pub fn run_l3_plan_v2(plan: &L3PlanV2) -> L3RunV2 {
                     },
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_charge_value_counts_scalar_children_and_does_not_skip_large_lists() {
+        let mut budget = EvalBudget::default();
+        // A list of 4,097 strings of 300 bytes each:
+        // In broken code, items.len() > MAX_DERIVED_LIST_LEN (4096) skipped scalar children,
+        // charging only 16 bytes.
+        // In fixed code, all 4,097 strings are walked and charged: 4,097 * (8 + 300) = 1,261,876 bytes > MAX_EVAL_VALUE_BYTES (1,000,000).
+        let s = "x".repeat(300);
+        let items: Vec<L3ValueV2> = (0..=MAX_DERIVED_LIST_LEN)
+            .map(|_| L3ValueV2::Str(s.clone()))
+            .collect();
+        let list_val = L3ValueV2::List(items.into());
+        let err = budget
+            .charge_value(&list_val, 1)
+            .expect_err("must charge all scalar children and reject over-budget string list");
+        match err {
+            EvalFault::ResourceExhausted { limit, detail } => {
+                assert_eq!(limit, budget.max_bytes);
+                assert!(
+                    detail.contains("byte allocation limit exceeded"),
+                    "{detail}"
+                );
+            }
+            other => panic!("expected ResourceExhausted, got {other:?}"),
+        }
+
+        // Also test node allocation: 10,001 integer elements > MAX_EVAL_VALUE_NODES (10,000).
+        let mut budget2 = EvalBudget::default();
+        let int_items: Vec<L3ValueV2> = (0..=MAX_EVAL_VALUE_NODES)
+            .map(|i| L3ValueV2::Int(i as i64))
+            .collect();
+        let int_list = L3ValueV2::List(int_items.into());
+        let err2 = budget2
+            .charge_value(&int_list, 1)
+            .expect_err("must charge all nodes and reject over-budget node count");
+        match err2 {
+            EvalFault::ResourceExhausted { limit, detail } => {
+                assert_eq!(limit, budget2.max_nodes);
+                assert!(
+                    detail.contains("node allocation limit exceeded"),
+                    "{detail}"
+                );
+            }
+            other => panic!("expected ResourceExhausted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_charge_value_charges_string_bytes_of_list_elements() {
+        let mut budget = EvalBudget::default();
+        // 100 strings of 10,001 bytes = 1,000,100 bytes > MAX_EVAL_VALUE_BYTES (1,000,000)
+        let s = "a".repeat(10_001);
+        let items: Vec<L3ValueV2> = (0..100).map(|_| L3ValueV2::Str(s.clone())).collect();
+        let list_val = L3ValueV2::List(items.into());
+        let err = budget
+            .charge_value(&list_val, 1)
+            .expect_err("must charge all string bytes");
+        match err {
+            EvalFault::ResourceExhausted { limit, detail } => {
+                assert_eq!(limit, budget.max_bytes);
+                assert!(
+                    detail.contains("byte allocation limit exceeded"),
+                    "{detail}"
+                );
+            }
+            other => panic!("expected ResourceExhausted, got {other:?}"),
         }
     }
 }

@@ -4,6 +4,33 @@ use brix_syntax::ast::*;
 use brix_syntax::parse;
 
 #[test]
+fn test_parse_bounded_collect_take_projection() {
+    let module = parse(
+        r#"
+rel input events: { id: Str, category: Str, value: Str } key id
+rel derived grouped =
+    select { category: e.category, recent: collect(e.value, e.id).take(0) }
+    from e in events
+    group by e.category
+"#,
+    )
+    .expect("bounded collection syntax should parse");
+    let Item::RelDerived(decl) = &module.items[1] else {
+        panic!("expected derived relation")
+    };
+    let Expr::AnonRecord(fields) = &decl.query.select else {
+        panic!("expected record projection")
+    };
+    let Expr::CollectTake { collection, limit } = &fields[1].1 else {
+        panic!("expected explicit bounded collection AST")
+    };
+    assert!(
+        matches!(collection.as_ref(), Expr::Call { func, args } if func == "collect" && args.len() == 2)
+    );
+    assert_eq!(limit.as_ref(), &Expr::Num("0".into()));
+}
+
+#[test]
 fn test_parse_rel_input_single_key() {
     let src = r#"
 rel input order: { id: Str, customer: Str, sku: Str, qty: Int, status: Str } key id

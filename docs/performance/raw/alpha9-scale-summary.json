@@ -1,0 +1,6177 @@
+{
+  "cells": [
+    {
+      "complete_repetition_count": 5,
+      "complete_repetitions": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "derived_counts": {
+        "root::activity_pages": 20,
+        "root::all_entities": 400,
+        "root::decision_value_join": 800,
+        "root::fulfillment": 800
+      },
+      "derived_relation_pages": {
+        "root::activity_pages": {
+          "bytes": 5132,
+          "canonical_content_digest": "b59e42caf9159f8047ad16ac297fe2b0580c7288fd186b220452ffb2d18fb0c9",
+          "complete_query_ms": 1.920291,
+          "first_page_bytes": 5132,
+          "first_page_ms": 1.9176250000000001,
+          "first_page_rows": 20,
+          "pages": 1,
+          "rows": 20
+        },
+        "root::all_entities": {
+          "bytes": 37600,
+          "canonical_content_digest": "acab47e523a1b2752e500f77e2e8a3f6bafb016abebafb027d405e90057cfdc7",
+          "complete_query_ms": 3.903958,
+          "first_page_bytes": 37600,
+          "first_page_ms": 3.886583,
+          "first_page_rows": 400,
+          "pages": 1,
+          "rows": 400
+        },
+        "root::decision_value_join": {
+          "bytes": 58256,
+          "canonical_content_digest": "8b90a784bac4f7dbe1c4fcaf1fd5ea62d96df9ff13bf6bdf17b4b6b0c72b244f",
+          "complete_query_ms": 6.027291,
+          "first_page_bytes": 58256,
+          "first_page_ms": 5.996041,
+          "first_page_rows": 800,
+          "pages": 1,
+          "rows": 800
+        },
+        "root::fulfillment": {
+          "bytes": 82448,
+          "canonical_content_digest": "7e9a9919250777b9de7d3141db08cd99290ee934ecacbaad026ec75eba6b6ae7",
+          "complete_query_ms": 6.713708,
+          "first_page_bytes": 82448,
+          "first_page_ms": 6.674290999999999,
+          "first_page_rows": 800,
+          "pages": 1,
+          "rows": 800
+        }
+      },
+      "disk_budget": null,
+      "named_query_pages": {
+        "bytes": 3904,
+        "rows": 64
+      },
+      "passed": true,
+      "phases": {
+        "cleanup": {
+          "expected_samples": 5,
+          "metrics": {
+            "process_wall_ms": {
+              "max": 8.826750330626965,
+              "median": 7.901458069682121,
+              "min": 6.204249337315559,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "edit-add": {
+          "expected_samples": 5,
+          "metrics": {
+            "counter_changed_keys": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_chunks": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_expressions_evaluated": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "counter_objects_written": {
+              "max": 18.0,
+              "median": 18.0,
+              "min": 18.0,
+              "sample_count": 5
+            },
+            "counter_operator_work": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_revision": {
+              "max": 2.0,
+              "median": 2.0,
+              "min": 2.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_read": {
+              "max": 1198191.0,
+              "median": 1198191.0,
+              "min": 1198191.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_written": {
+              "max": 1204800.0,
+              "median": 1204800.0,
+              "min": 1204800.0,
+              "sample_count": 5
+            },
+            "counter_state_node_reads": {
+              "max": 11.0,
+              "median": 11.0,
+              "min": 11.0,
+              "sample_count": 5
+            },
+            "edit_ms": {
+              "max": 133.532333,
+              "median": 117.544125,
+              "min": 112.620583,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 63782912.0,
+              "median": 63193088.0,
+              "min": 63193088.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 421.60829063504934,
+              "median": 213.69379200041294,
+              "min": 211.83708310127258,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 116.507,
+              "median": 33.794,
+              "min": 32.343,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "edit-retract": {
+          "expected_samples": 5,
+          "metrics": {
+            "counter_changed_keys": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_chunks": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_expressions_evaluated": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "counter_objects_written": {
+              "max": 4.0,
+              "median": 4.0,
+              "min": 4.0,
+              "sample_count": 5
+            },
+            "counter_operator_work": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_revision": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_read": {
+              "max": 1198920.0,
+              "median": 1198920.0,
+              "min": 1198920.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_written": {
+              "max": 1980.0,
+              "median": 1980.0,
+              "min": 1980.0,
+              "sample_count": 5
+            },
+            "counter_state_node_reads": {
+              "max": 14.0,
+              "median": 14.0,
+              "min": 14.0,
+              "sample_count": 5
+            },
+            "edit_ms": {
+              "max": 124.36979099999999,
+              "median": 108.974375,
+              "min": 100.62637500000001,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 69386240.0,
+              "median": 62701568.0,
+              "min": 62701568.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 211.4958744496107,
+              "median": 202.93200016021729,
+              "min": 201.8711669370532,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 27.929,
+              "median": 26.477,
+              "min": 26.189,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "load": {
+          "expected_samples": 5,
+          "metrics": {
+            "commit_ms": {
+              "max": 13031.09025,
+              "median": 12811.043040999999,
+              "min": 12710.768708,
+              "sample_count": 5
+            },
+            "fixture_generation_ms": {
+              "max": 11.680916,
+              "median": 11.592625,
+              "min": 11.557125,
+              "sample_count": 5
+            },
+            "load_ms": {
+              "max": 13042.779042,
+              "median": 12822.644125,
+              "min": 12722.336792,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 190103552.0,
+              "median": 177471488.0,
+              "min": 169148416.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 13283.55854190886,
+              "median": 13081.715333275497,
+              "min": 13034.074083901942,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 27.022,
+              "median": 26.885,
+              "min": 26.419,
+              "sample_count": 5
+            },
+            "storage_allocated_bytes": {
+              "max": 11390976.0,
+              "median": 11390976.0,
+              "min": 11390976.0,
+              "sample_count": 5
+            },
+            "storage_component_objects_source_state_and_indexes_allocated_bytes": {
+              "max": 10846208.0,
+              "median": 10846208.0,
+              "min": 10846208.0,
+              "sample_count": 5
+            },
+            "storage_component_objects_source_state_and_indexes_logical_bytes": {
+              "max": 10837998.0,
+              "median": 10837998.0,
+              "min": 10837998.0,
+              "sample_count": 5
+            },
+            "storage_component_receipts_allocated_bytes": {
+              "max": 4096.0,
+              "median": 4096.0,
+              "min": 4096.0,
+              "sample_count": 5
+            },
+            "storage_component_receipts_logical_bytes": {
+              "max": 235.0,
+              "median": 235.0,
+              "min": 235.0,
+              "sample_count": 5
+            },
+            "storage_component_revision_journal_and_decisions_allocated_bytes": {
+              "max": 516096.0,
+              "median": 516096.0,
+              "min": 516096.0,
+              "sample_count": 5
+            },
+            "storage_component_revision_journal_and_decisions_logical_bytes": {
+              "max": 507672.0,
+              "median": 507672.0,
+              "min": 507672.0,
+              "sample_count": 5
+            },
+            "storage_component_root_metadata_allocated_bytes": {
+              "max": 24576.0,
+              "median": 24576.0,
+              "min": 24576.0,
+              "sample_count": 5
+            },
+            "storage_component_root_metadata_logical_bytes": {
+              "max": 7873.0,
+              "median": 7873.0,
+              "min": 7873.0,
+              "sample_count": 5
+            },
+            "storage_component_staging_scratch_allocated_bytes": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "storage_component_staging_scratch_logical_bytes": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "storage_logical_bytes": {
+              "max": 11353778.0,
+              "median": 11353778.0,
+              "min": 11353778.0,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 34.838167000000006,
+              "median": 31.821583,
+              "min": 29.213167000000002,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "open-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "peak_rss_bytes": {
+              "max": 24084480.0,
+              "median": 24084480.0,
+              "min": 24068096.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 213.97683303803205,
+              "median": 212.94441726058722,
+              "min": 205.7331670075655,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 35.681,
+              "median": 34.841,
+              "min": 33.582,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 6.621667,
+              "median": 6.533916,
+              "min": 6.502917,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "query-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "complete_query_ms": {
+              "max": 9.020333,
+              "median": 8.989625,
+              "min": 8.878416,
+              "sample_count": 5
+            },
+            "first_page_ms": {
+              "max": 4.821292,
+              "median": 4.778916000000001,
+              "min": 4.68775,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 24084480.0,
+              "median": 24068096.0,
+              "min": 24068096.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 214.26370926201344,
+              "median": 212.5469595193863,
+              "min": 212.48904149979353,
+              "sample_count": 5
+            },
+            "query_bytes": {
+              "max": 3904.0,
+              "median": 3904.0,
+              "min": 3904.0,
+              "sample_count": 5
+            },
+            "query_expressions_evaluated": {
+              "max": 512.0,
+              "median": 512.0,
+              "min": 512.0,
+              "sample_count": 5
+            },
+            "query_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "query_rows": {
+              "max": 64.0,
+              "median": 64.0,
+              "min": 64.0,
+              "sample_count": 5
+            },
+            "query_work_units": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_bytes": {
+              "max": 5132.0,
+              "median": 5132.0,
+              "min": 5132.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_complete_query_ms": {
+              "max": 1.951875,
+              "median": 1.939,
+              "min": 1.914708,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_bytes": {
+              "max": 5132.0,
+              "median": 5132.0,
+              "min": 5132.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_ms": {
+              "max": 1.949041,
+              "median": 1.936083,
+              "min": 1.911958,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_rows": {
+              "max": 20.0,
+              "median": 20.0,
+              "min": 20.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_rows": {
+              "max": 20.0,
+              "median": 20.0,
+              "min": 20.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_bytes": {
+              "max": 37600.0,
+              "median": 37600.0,
+              "min": 37600.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_complete_query_ms": {
+              "max": 3.914,
+              "median": 3.904334,
+              "min": 3.903958,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_bytes": {
+              "max": 37600.0,
+              "median": 37600.0,
+              "min": 37600.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_ms": {
+              "max": 3.896916,
+              "median": 3.886583,
+              "min": 3.8825410000000002,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_rows": {
+              "max": 400.0,
+              "median": 400.0,
+              "min": 400.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_rows": {
+              "max": 400.0,
+              "median": 400.0,
+              "min": 400.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_bytes": {
+              "max": 58256.0,
+              "median": 58256.0,
+              "min": 58256.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_complete_query_ms": {
+              "max": 6.268959,
+              "median": 6.027291,
+              "min": 5.969625,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_bytes": {
+              "max": 58256.0,
+              "median": 58256.0,
+              "min": 58256.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_ms": {
+              "max": 6.231709,
+              "median": 5.996041,
+              "min": 5.93775,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_rows": {
+              "max": 800.0,
+              "median": 800.0,
+              "min": 800.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_rows": {
+              "max": 800.0,
+              "median": 800.0,
+              "min": 800.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_bytes": {
+              "max": 82448.0,
+              "median": 82448.0,
+              "min": 82448.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_complete_query_ms": {
+              "max": 6.744916999999999,
+              "median": 6.713708,
+              "min": 6.68375,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_bytes": {
+              "max": 82448.0,
+              "median": 82448.0,
+              "min": 82448.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_ms": {
+              "max": 6.708417000000001,
+              "median": 6.674290999999999,
+              "min": 6.646458,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_rows": {
+              "max": 800.0,
+              "median": 800.0,
+              "min": 800.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_rows": {
+              "max": 800.0,
+              "median": 800.0,
+              "min": 800.0,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 28.723,
+              "median": 28.24,
+              "min": 28.092,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 6.666,
+              "median": 6.516875,
+              "min": 6.456334,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "setup": {
+          "expected_samples": 5,
+          "metrics": {
+            "init_ms": {
+              "max": 60.551458000000004,
+              "median": 44.168208,
+              "min": 38.792500000000004,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 24084480.0,
+              "median": 24068096.0,
+              "min": 24068096.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 212.91074994951487,
+              "median": 212.5689573585987,
+              "min": 211.5225000306964,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 37.745,
+              "median": 35.882,
+              "min": 33.82,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "verify-after-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "correctness_ms": {
+              "max": 39160.337417,
+              "median": 38745.116792,
+              "min": 38200.164166999995,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 249282560.0,
+              "median": 242204672.0,
+              "min": 228376576.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 39421.79874982685,
+              "median": 38964.11729045212,
+              "min": 38375.14341715723,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 26.187,
+              "median": 26.131,
+              "min": 25.965,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "verify-loaded-world": {
+          "expected_samples": 5,
+          "metrics": {
+            "correctness_ms": {
+              "max": 39238.337791,
+              "median": 39024.256125,
+              "min": 38155.12925,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 268009472.0,
+              "median": 257638400.0,
+              "min": 241434624.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 39340.52416589111,
+              "median": 39149.5017092675,
+              "min": 38236.607500351965,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 26.765,
+              "median": 26.586,
+              "min": 26.255,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "warm-query-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "complete_query_ms": {
+              "max": 8.436833,
+              "median": 8.330458,
+              "min": 8.313666000000001,
+              "sample_count": 5
+            },
+            "first_page_ms": {
+              "max": 4.298417,
+              "median": 4.196292,
+              "min": 4.185124999999999,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 24084480.0,
+              "median": 24068096.0,
+              "min": 24068096.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 211.98004204779863,
+              "median": 211.94466669112444,
+              "min": 202.8395002707839,
+              "sample_count": 5
+            },
+            "query_bytes": {
+              "max": 3904.0,
+              "median": 3904.0,
+              "min": 3904.0,
+              "sample_count": 5
+            },
+            "query_expressions_evaluated": {
+              "max": 512.0,
+              "median": 512.0,
+              "min": 512.0,
+              "sample_count": 5
+            },
+            "query_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "query_rows": {
+              "max": 64.0,
+              "median": 64.0,
+              "min": 64.0,
+              "sample_count": 5
+            },
+            "query_work_units": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_bytes": {
+              "max": 5132.0,
+              "median": 5132.0,
+              "min": 5132.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_complete_query_ms": {
+              "max": 1.957959,
+              "median": 1.9089580000000002,
+              "min": 1.8988749999999999,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_bytes": {
+              "max": 5132.0,
+              "median": 5132.0,
+              "min": 5132.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_ms": {
+              "max": 1.95525,
+              "median": 1.906458,
+              "min": 1.896333,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_rows": {
+              "max": 20.0,
+              "median": 20.0,
+              "min": 20.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_rows": {
+              "max": 20.0,
+              "median": 20.0,
+              "min": 20.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_bytes": {
+              "max": 37600.0,
+              "median": 37600.0,
+              "min": 37600.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_complete_query_ms": {
+              "max": 3.628458,
+              "median": 3.614333,
+              "min": 3.59275,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_bytes": {
+              "max": 37600.0,
+              "median": 37600.0,
+              "min": 37600.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_ms": {
+              "max": 3.611791,
+              "median": 3.598375,
+              "min": 3.57425,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_rows": {
+              "max": 400.0,
+              "median": 400.0,
+              "min": 400.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_rows": {
+              "max": 400.0,
+              "median": 400.0,
+              "min": 400.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_bytes": {
+              "max": 58256.0,
+              "median": 58256.0,
+              "min": 58256.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_complete_query_ms": {
+              "max": 5.685499999999999,
+              "median": 5.519708,
+              "min": 5.461917000000001,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_bytes": {
+              "max": 58256.0,
+              "median": 58256.0,
+              "min": 58256.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_ms": {
+              "max": 5.64975,
+              "median": 5.4867919999999994,
+              "min": 5.429042,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_rows": {
+              "max": 800.0,
+              "median": 800.0,
+              "min": 800.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_rows": {
+              "max": 800.0,
+              "median": 800.0,
+              "min": 800.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_bytes": {
+              "max": 82448.0,
+              "median": 82448.0,
+              "min": 82448.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_complete_query_ms": {
+              "max": 6.374917,
+              "median": 6.131709,
+              "min": 6.068042,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_bytes": {
+              "max": 82448.0,
+              "median": 82448.0,
+              "min": 82448.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_ms": {
+              "max": 6.33475,
+              "median": 6.098084,
+              "min": 6.034375,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_rows": {
+              "max": 800.0,
+              "median": 800.0,
+              "min": 800.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_rows": {
+              "max": 800.0,
+              "median": 800.0,
+              "min": 800.0,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 28.276,
+              "median": 28.123,
+              "min": 26.917,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 6.5206669999999995,
+              "median": 6.501542,
+              "min": 6.413334,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        }
+      },
+      "profile": "single",
+      "required_repetitions": 5,
+      "size": 8000,
+      "source_counts": {
+        "root::catalogue": 128,
+        "root::decision_labels": 2,
+        "root::entity_a": 400,
+        "root::entity_b": 400,
+        "root::events": 6206,
+        "root::inventory": 64,
+        "root::orders": 800
+      }
+    },
+    {
+      "complete_repetition_count": 5,
+      "complete_repetitions": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "derived_counts": {
+        "root::activity_pages": 20,
+        "root::all_entities": 400,
+        "root::decision_value_join": 800,
+        "root::fulfillment": 800
+      },
+      "derived_relation_pages": {
+        "root::activity_pages": {
+          "bytes": 5132,
+          "canonical_content_digest": "b59e42caf9159f8047ad16ac297fe2b0580c7288fd186b220452ffb2d18fb0c9",
+          "complete_query_ms": 0.362209,
+          "first_page_bytes": 5132,
+          "first_page_ms": 0.35954200000000003,
+          "first_page_rows": 20,
+          "pages": 1,
+          "rows": 20
+        },
+        "root::all_entities": {
+          "bytes": 37600,
+          "canonical_content_digest": "acab47e523a1b2752e500f77e2e8a3f6bafb016abebafb027d405e90057cfdc7",
+          "complete_query_ms": 2.462292,
+          "first_page_bytes": 37600,
+          "first_page_ms": 2.4450000000000003,
+          "first_page_rows": 400,
+          "pages": 1,
+          "rows": 400
+        },
+        "root::decision_value_join": {
+          "bytes": 58256,
+          "canonical_content_digest": "8b90a784bac4f7dbe1c4fcaf1fd5ea62d96df9ff13bf6bdf17b4b6b0c72b244f",
+          "complete_query_ms": 4.677125,
+          "first_page_bytes": 58256,
+          "first_page_ms": 4.642584,
+          "first_page_rows": 800,
+          "pages": 1,
+          "rows": 800
+        },
+        "root::fulfillment": {
+          "bytes": 82448,
+          "canonical_content_digest": "7e9a9919250777b9de7d3141db08cd99290ee934ecacbaad026ec75eba6b6ae7",
+          "complete_query_ms": 5.491292,
+          "first_page_bytes": 82448,
+          "first_page_ms": 5.454541,
+          "first_page_rows": 800,
+          "pages": 1,
+          "rows": 800
+        }
+      },
+      "disk_budget": {
+        "limit_logical_bytes": 115081216,
+        "measured": {
+          "max": 17465242.0,
+          "median": 17465242.0,
+          "min": 17465242.0,
+          "sample_count": 5
+        },
+        "passed": true,
+        "sample_count": 5
+      },
+      "named_query_pages": {
+        "bytes": 3904,
+        "rows": 64
+      },
+      "passed": true,
+      "phases": {
+        "cleanup": {
+          "expected_samples": 5,
+          "metrics": {
+            "process_wall_ms": {
+              "max": 20.890500396490097,
+              "median": 14.76620975881815,
+              "min": 14.501540921628475,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "edit-add": {
+          "expected_samples": 5,
+          "metrics": {
+            "counter_changed_keys": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_chunks": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_expressions_evaluated": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "counter_objects_written": {
+              "max": 19.0,
+              "median": 19.0,
+              "min": 19.0,
+              "sample_count": 5
+            },
+            "counter_operator_work": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_revision": {
+              "max": 11.0,
+              "median": 11.0,
+              "min": 11.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_read": {
+              "max": 1198361.0,
+              "median": 1198361.0,
+              "min": 1198361.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_written": {
+              "max": 1205206.0,
+              "median": 1205206.0,
+              "min": 1205206.0,
+              "sample_count": 5
+            },
+            "counter_state_node_reads": {
+              "max": 12.0,
+              "median": 12.0,
+              "min": 12.0,
+              "sample_count": 5
+            },
+            "edit_ms": {
+              "max": 120.409166,
+              "median": 109.546167,
+              "min": 105.491916,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 64176128.0,
+              "median": 63062016.0,
+              "min": 62865408.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 213.32212537527084,
+              "median": 211.43600065261126,
+              "min": 202.41883397102356,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 39.749,
+              "median": 34.852,
+              "min": 32.625,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "edit-retract": {
+          "expected_samples": 5,
+          "metrics": {
+            "counter_changed_keys": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_chunks": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_expressions_evaluated": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "counter_objects_written": {
+              "max": 4.0,
+              "median": 4.0,
+              "min": 4.0,
+              "sample_count": 5
+            },
+            "counter_operator_work": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_revision": {
+              "max": 12.0,
+              "median": 12.0,
+              "min": 12.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_read": {
+              "max": 1198920.0,
+              "median": 1198920.0,
+              "min": 1198920.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_written": {
+              "max": 2150.0,
+              "median": 2150.0,
+              "min": 2150.0,
+              "sample_count": 5
+            },
+            "counter_state_node_reads": {
+              "max": 14.0,
+              "median": 14.0,
+              "min": 14.0,
+              "sample_count": 5
+            },
+            "edit_ms": {
+              "max": 120.245375,
+              "median": 111.23675,
+              "min": 107.878375,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 62980096.0,
+              "median": 62963712.0,
+              "min": 62701568.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 211.41016576439142,
+              "median": 211.3744579255581,
+              "min": 201.70375052839518,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 27.605,
+              "median": 26.027,
+              "min": 25.967,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "load": {
+          "expected_samples": 5,
+          "metrics": {
+            "commit_ms": {
+              "max": 13086.00696,
+              "median": 12708.594583,
+              "min": 12520.396625,
+              "sample_count": 5
+            },
+            "fixture_generation_ms": {
+              "max": 11.970336000000001,
+              "median": 11.625166,
+              "min": 11.545749000000002,
+              "sample_count": 5
+            },
+            "load_ms": {
+              "max": 13098.006333000001,
+              "median": 12720.31675,
+              "min": 12532.048250000002,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 245432320.0,
+              "median": 237355008.0,
+              "min": 223690752.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 13252.499874681234,
+              "median": 12982.312916778028,
+              "min": 12847.76374977082,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 27.088,
+              "median": 26.943,
+              "min": 26.409,
+              "sample_count": 5
+            },
+            "storage_allocated_bytes": {
+              "max": 17616896.0,
+              "median": 17616896.0,
+              "min": 17616896.0,
+              "sample_count": 5
+            },
+            "storage_component_objects_source_state_and_indexes_allocated_bytes": {
+              "max": 16977920.0,
+              "median": 16977920.0,
+              "min": 16977920.0,
+              "sample_count": 5
+            },
+            "storage_component_objects_source_state_and_indexes_logical_bytes": {
+              "max": 16929587.0,
+              "median": 16929587.0,
+              "min": 16929587.0,
+              "sample_count": 5
+            },
+            "storage_component_receipts_allocated_bytes": {
+              "max": 40960.0,
+              "median": 40960.0,
+              "min": 40960.0,
+              "sample_count": 5
+            },
+            "storage_component_receipts_logical_bytes": {
+              "max": 2351.0,
+              "median": 2351.0,
+              "min": 2351.0,
+              "sample_count": 5
+            },
+            "storage_component_revision_journal_and_decisions_allocated_bytes": {
+              "max": 573440.0,
+              "median": 573440.0,
+              "min": 573440.0,
+              "sample_count": 5
+            },
+            "storage_component_revision_journal_and_decisions_logical_bytes": {
+              "max": 525427.0,
+              "median": 525427.0,
+              "min": 525427.0,
+              "sample_count": 5
+            },
+            "storage_component_root_metadata_allocated_bytes": {
+              "max": 24576.0,
+              "median": 24576.0,
+              "min": 24576.0,
+              "sample_count": 5
+            },
+            "storage_component_root_metadata_logical_bytes": {
+              "max": 7877.0,
+              "median": 7877.0,
+              "min": 7877.0,
+              "sample_count": 5
+            },
+            "storage_component_staging_scratch_allocated_bytes": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "storage_component_staging_scratch_logical_bytes": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "storage_logical_bytes": {
+              "max": 17465242.0,
+              "median": 17465242.0,
+              "min": 17465242.0,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 41.967541999999995,
+              "median": 30.748708,
+              "min": 27.864,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "open-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "peak_rss_bytes": {
+              "max": 24084480.0,
+              "median": 24068096.0,
+              "min": 24068096.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 213.12316600233316,
+              "median": 211.4563323557377,
+              "min": 202.47962418943644,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 35.428,
+              "median": 33.147,
+              "min": 32.509,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 2.771417,
+              "median": 2.718583,
+              "min": 2.697959,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "query-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "complete_query_ms": {
+              "max": 7.303292,
+              "median": 7.259667,
+              "min": 7.222625,
+              "sample_count": 5
+            },
+            "first_page_ms": {
+              "max": 4.579083000000001,
+              "median": 4.5694170000000005,
+              "min": 4.5055,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 24084480.0,
+              "median": 24068096.0,
+              "min": 24068096.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 212.6852497458458,
+              "median": 212.47379202395678,
+              "min": 212.03129086643457,
+              "sample_count": 5
+            },
+            "query_bytes": {
+              "max": 3904.0,
+              "median": 3904.0,
+              "min": 3904.0,
+              "sample_count": 5
+            },
+            "query_expressions_evaluated": {
+              "max": 512.0,
+              "median": 512.0,
+              "min": 512.0,
+              "sample_count": 5
+            },
+            "query_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "query_rows": {
+              "max": 64.0,
+              "median": 64.0,
+              "min": 64.0,
+              "sample_count": 5
+            },
+            "query_work_units": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_bytes": {
+              "max": 5132.0,
+              "median": 5132.0,
+              "min": 5132.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_complete_query_ms": {
+              "max": 0.378084,
+              "median": 0.367666,
+              "min": 0.362209,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_bytes": {
+              "max": 5132.0,
+              "median": 5132.0,
+              "min": 5132.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_ms": {
+              "max": 0.375292,
+              "median": 0.365042,
+              "min": 0.35954200000000003,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_rows": {
+              "max": 20.0,
+              "median": 20.0,
+              "min": 20.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_rows": {
+              "max": 20.0,
+              "median": 20.0,
+              "min": 20.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_bytes": {
+              "max": 37600.0,
+              "median": 37600.0,
+              "min": 37600.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_complete_query_ms": {
+              "max": 2.476125,
+              "median": 2.452209,
+              "min": 2.408042,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_bytes": {
+              "max": 37600.0,
+              "median": 37600.0,
+              "min": 37600.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_ms": {
+              "max": 2.4595,
+              "median": 2.434542,
+              "min": 2.391042,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_rows": {
+              "max": 400.0,
+              "median": 400.0,
+              "min": 400.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_rows": {
+              "max": 400.0,
+              "median": 400.0,
+              "min": 400.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_bytes": {
+              "max": 58256.0,
+              "median": 58256.0,
+              "min": 58256.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_complete_query_ms": {
+              "max": 4.800417,
+              "median": 4.677125,
+              "min": 4.6754999999999995,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_bytes": {
+              "max": 58256.0,
+              "median": 58256.0,
+              "min": 58256.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_ms": {
+              "max": 4.764917,
+              "median": 4.644042,
+              "min": 4.6415,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_rows": {
+              "max": 800.0,
+              "median": 800.0,
+              "min": 800.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_rows": {
+              "max": 800.0,
+              "median": 800.0,
+              "min": 800.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_bytes": {
+              "max": 82448.0,
+              "median": 82448.0,
+              "min": 82448.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_complete_query_ms": {
+              "max": 5.491292,
+              "median": 5.468208,
+              "min": 5.406875,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_bytes": {
+              "max": 82448.0,
+              "median": 82448.0,
+              "min": 82448.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_ms": {
+              "max": 5.454541,
+              "median": 5.428167,
+              "min": 5.365167,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_rows": {
+              "max": 800.0,
+              "median": 800.0,
+              "min": 800.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_rows": {
+              "max": 800.0,
+              "median": 800.0,
+              "min": 800.0,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 28.567,
+              "median": 27.81,
+              "min": 26.839,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 2.7502910000000003,
+              "median": 2.718209,
+              "min": 2.693667,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "setup": {
+          "expected_samples": 5,
+          "metrics": {
+            "init_ms": {
+              "max": 55.617875,
+              "median": 51.215375,
+              "min": 44.626,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 24084480.0,
+              "median": 24084480.0,
+              "min": 24068096.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 211.82162500917912,
+              "median": 211.4697080105543,
+              "min": 203.8713749498129,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 36.57,
+              "median": 35.846,
+              "min": 34.761,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "verify-after-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "correctness_ms": {
+              "max": 39531.432084,
+              "median": 38823.752958,
+              "min": 38360.671500000004,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 241762304.0,
+              "median": 238141440.0,
+              "min": 232587264.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 39757.7635422349,
+              "median": 39037.81250026077,
+              "min": 38556.90812505782,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 26.524,
+              "median": 26.245,
+              "min": 25.998,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "verify-loaded-world": {
+          "expected_samples": 5,
+          "metrics": {
+            "correctness_ms": {
+              "max": 39885.658917,
+              "median": 38758.197375,
+              "min": 37830.437416,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 269484032.0,
+              "median": 247889920.0,
+              "min": 242384896.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 39962.840707972646,
+              "median": 38893.03837437183,
+              "min": 38108.135709539056,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 27.71,
+              "median": 27.289,
+              "min": 26.52,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "warm-query-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "complete_query_ms": {
+              "max": 5.406458000000001,
+              "median": 5.371207999999999,
+              "min": 5.348709,
+              "sample_count": 5
+            },
+            "first_page_ms": {
+              "max": 2.7214169999999998,
+              "median": 2.701667,
+              "min": 2.681625,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 24084480.0,
+              "median": 24084480.0,
+              "min": 24068096.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 212.39770855754614,
+              "median": 212.32749987393618,
+              "min": 203.53733375668526,
+              "sample_count": 5
+            },
+            "query_bytes": {
+              "max": 3904.0,
+              "median": 3904.0,
+              "min": 3904.0,
+              "sample_count": 5
+            },
+            "query_expressions_evaluated": {
+              "max": 512.0,
+              "median": 512.0,
+              "min": 512.0,
+              "sample_count": 5
+            },
+            "query_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "query_rows": {
+              "max": 64.0,
+              "median": 64.0,
+              "min": 64.0,
+              "sample_count": 5
+            },
+            "query_work_units": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_bytes": {
+              "max": 5132.0,
+              "median": 5132.0,
+              "min": 5132.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_complete_query_ms": {
+              "max": 0.360792,
+              "median": 0.35724999999999996,
+              "min": 0.33754199999999995,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_bytes": {
+              "max": 5132.0,
+              "median": 5132.0,
+              "min": 5132.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_ms": {
+              "max": 0.358166,
+              "median": 0.354584,
+              "min": 0.334917,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_rows": {
+              "max": 20.0,
+              "median": 20.0,
+              "min": 20.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_rows": {
+              "max": 20.0,
+              "median": 20.0,
+              "min": 20.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_bytes": {
+              "max": 37600.0,
+              "median": 37600.0,
+              "min": 37600.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_complete_query_ms": {
+              "max": 2.1389579999999997,
+              "median": 2.129708,
+              "min": 2.1047919999999998,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_bytes": {
+              "max": 37600.0,
+              "median": 37600.0,
+              "min": 37600.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_ms": {
+              "max": 2.122125,
+              "median": 2.111917,
+              "min": 2.085,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_rows": {
+              "max": 400.0,
+              "median": 400.0,
+              "min": 400.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_rows": {
+              "max": 400.0,
+              "median": 400.0,
+              "min": 400.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_bytes": {
+              "max": 58256.0,
+              "median": 58256.0,
+              "min": 58256.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_complete_query_ms": {
+              "max": 4.178249999999999,
+              "median": 4.1183749999999995,
+              "min": 4.098415999999999,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_bytes": {
+              "max": 58256.0,
+              "median": 58256.0,
+              "min": 58256.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_ms": {
+              "max": 4.145167,
+              "median": 4.08575,
+              "min": 4.06675,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_rows": {
+              "max": 800.0,
+              "median": 800.0,
+              "min": 800.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_rows": {
+              "max": 800.0,
+              "median": 800.0,
+              "min": 800.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_bytes": {
+              "max": 82448.0,
+              "median": 82448.0,
+              "min": 82448.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_complete_query_ms": {
+              "max": 5.088292,
+              "median": 4.769749999999999,
+              "min": 4.717292,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_bytes": {
+              "max": 82448.0,
+              "median": 82448.0,
+              "min": 82448.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_ms": {
+              "max": 5.051667,
+              "median": 4.735666999999999,
+              "min": 4.682167,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_rows": {
+              "max": 800.0,
+              "median": 800.0,
+              "min": 800.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_rows": {
+              "max": 800.0,
+              "median": 800.0,
+              "min": 800.0,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 28.594,
+              "median": 27.833,
+              "min": 27.334,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 2.7352499999999997,
+              "median": 2.7195829999999996,
+              "min": 2.677042,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        }
+      },
+      "profile": "ten",
+      "required_repetitions": 5,
+      "size": 8000,
+      "source_counts": {
+        "root::catalogue": 128,
+        "root::decision_labels": 2,
+        "root::entity_a": 400,
+        "root::entity_b": 400,
+        "root::events": 6206,
+        "root::inventory": 64,
+        "root::orders": 800
+      }
+    },
+    {
+      "complete_repetition_count": 5,
+      "complete_repetitions": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "derived_counts": {
+        "root::activity_pages": 920,
+        "root::all_entities": 4000,
+        "root::decision_value_join": 8000,
+        "root::fulfillment": 8000
+      },
+      "derived_relation_pages": {
+        "root::activity_pages": {
+          "bytes": 236432,
+          "canonical_content_digest": "9c977baff379552fb9757fb8993450a61fe14e480b7487c594b812e645613cba",
+          "complete_query_ms": 24.567,
+          "first_page_bytes": 236432,
+          "first_page_ms": 24.477041,
+          "first_page_rows": 920,
+          "pages": 1,
+          "rows": 920
+        },
+        "root::all_entities": {
+          "bytes": 376000,
+          "canonical_content_digest": "636d10c5dc71cf4f7569dcf6b3752990eea341dd42fdd8b89d45288e40d1a3ce",
+          "complete_query_ms": 154.38299999999998,
+          "first_page_bytes": 96256,
+          "first_page_ms": 39.10825,
+          "first_page_rows": 1024,
+          "pages": 4,
+          "rows": 4000
+        },
+        "root::decision_value_join": {
+          "bytes": 582587,
+          "canonical_content_digest": "02faf95a7013651e7484fd908177aad2d3c4e602e4fc6d1826196c41d80fa507",
+          "complete_query_ms": 491.306917,
+          "first_page_bytes": 73339,
+          "first_page_ms": 62.124041999999996,
+          "first_page_rows": 1024,
+          "pages": 8,
+          "rows": 8000
+        },
+        "root::fulfillment": {
+          "bytes": 824471,
+          "canonical_content_digest": "5f1711bba527817c80a7465b367d9d7abb2580741cca91d0acbfd9d8f012b007",
+          "complete_query_ms": 544.6933750000001,
+          "first_page_bytes": 105533,
+          "first_page_ms": 68.469458,
+          "first_page_rows": 1024,
+          "pages": 8,
+          "rows": 8000
+        }
+      },
+      "disk_budget": null,
+      "named_query_pages": {
+        "bytes": 3904,
+        "rows": 64
+      },
+      "passed": true,
+      "phases": {
+        "cleanup": {
+          "expected_samples": 5,
+          "metrics": {
+            "process_wall_ms": {
+              "max": 8.8744992390275,
+              "median": 7.679708302021027,
+              "min": 3.949834033846855,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "edit-add": {
+          "expected_samples": 5,
+          "metrics": {
+            "counter_changed_keys": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_chunks": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_expressions_evaluated": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "counter_objects_written": {
+              "max": 22.0,
+              "median": 22.0,
+              "min": 22.0,
+              "sample_count": 5
+            },
+            "counter_operator_work": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_revision": {
+              "max": 2.0,
+              "median": 2.0,
+              "min": 2.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_read": {
+              "max": 1200052.0,
+              "median": 1200052.0,
+              "min": 1200052.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_written": {
+              "max": 1207379.0,
+              "median": 1207379.0,
+              "min": 1207379.0,
+              "sample_count": 5
+            },
+            "counter_state_node_reads": {
+              "max": 15.0,
+              "median": 15.0,
+              "min": 15.0,
+              "sample_count": 5
+            },
+            "edit_ms": {
+              "max": 90.60612499999999,
+              "median": 89.358542,
+              "min": 86.131,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 82821120.0,
+              "median": 82575360.0,
+              "min": 82575360.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 415.68395774811506,
+              "median": 211.79900038987398,
+              "min": 211.4240424707532,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 34.533,
+              "median": 28.324,
+              "min": 27.179,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "edit-retract": {
+          "expected_samples": 5,
+          "metrics": {
+            "counter_changed_keys": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_chunks": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_expressions_evaluated": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "counter_objects_written": {
+              "max": 4.0,
+              "median": 4.0,
+              "min": 4.0,
+              "sample_count": 5
+            },
+            "counter_operator_work": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_revision": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_read": {
+              "max": 1200822.0,
+              "median": 1200822.0,
+              "min": 1200822.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_written": {
+              "max": 1980.0,
+              "median": 1980.0,
+              "min": 1980.0,
+              "sample_count": 5
+            },
+            "counter_state_node_reads": {
+              "max": 19.0,
+              "median": 19.0,
+              "min": 19.0,
+              "sample_count": 5
+            },
+            "edit_ms": {
+              "max": 97.051875,
+              "median": 94.276792,
+              "min": 89.081042,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 62898176.0,
+              "median": 62734336.0,
+              "min": 62734336.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 214.17229156941175,
+              "median": 211.40324976295233,
+              "min": 201.99374947696924,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 35.977,
+              "median": 25.057,
+              "min": 25.012,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "load": {
+          "expected_samples": 5,
+          "metrics": {
+            "commit_ms": {
+              "max": 16755.103167,
+              "median": 16541.326041,
+              "min": 15533.687917,
+              "sample_count": 5
+            },
+            "fixture_generation_ms": {
+              "max": 116.87691699999999,
+              "median": 116.074708,
+              "min": 115.010833,
+              "sample_count": 5
+            },
+            "load_ms": {
+              "max": 16871.559291,
+              "median": 16658.215458000002,
+              "min": 15649.769542,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 1360642048.0,
+              "median": 1342062592.0,
+              "min": 1326022656.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 17182.662500068545,
+              "median": 16967.408750206232,
+              "min": 16136.820999905467,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 31.443,
+              "median": 31.241,
+              "min": 30.15,
+              "sample_count": 5
+            },
+            "storage_allocated_bytes": {
+              "max": 116543488.0,
+              "median": 116543488.0,
+              "min": 116543488.0,
+              "sample_count": 5
+            },
+            "storage_component_objects_source_state_and_indexes_allocated_bytes": {
+              "max": 111251456.0,
+              "median": 111251456.0,
+              "min": 111251456.0,
+              "sample_count": 5
+            },
+            "storage_component_objects_source_state_and_indexes_logical_bytes": {
+              "max": 111244388.0,
+              "median": 111244388.0,
+              "min": 111244388.0,
+              "sample_count": 5
+            },
+            "storage_component_receipts_allocated_bytes": {
+              "max": 4096.0,
+              "median": 4096.0,
+              "min": 4096.0,
+              "sample_count": 5
+            },
+            "storage_component_receipts_logical_bytes": {
+              "max": 235.0,
+              "median": 235.0,
+              "min": 235.0,
+              "sample_count": 5
+            },
+            "storage_component_revision_journal_and_decisions_allocated_bytes": {
+              "max": 5263360.0,
+              "median": 5263360.0,
+              "min": 5263360.0,
+              "sample_count": 5
+            },
+            "storage_component_revision_journal_and_decisions_logical_bytes": {
+              "max": 5252476.0,
+              "median": 5252476.0,
+              "min": 5252476.0,
+              "sample_count": 5
+            },
+            "storage_component_root_metadata_allocated_bytes": {
+              "max": 24576.0,
+              "median": 24576.0,
+              "min": 24576.0,
+              "sample_count": 5
+            },
+            "storage_component_root_metadata_logical_bytes": {
+              "max": 7879.0,
+              "median": 7879.0,
+              "min": 7879.0,
+              "sample_count": 5
+            },
+            "storage_component_staging_scratch_allocated_bytes": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "storage_component_staging_scratch_logical_bytes": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "storage_logical_bytes": {
+              "max": 116504978.0,
+              "median": 116504978.0,
+              "min": 116504978.0,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 31.408042,
+              "median": 30.094458,
+              "min": 28.06625,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "open-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "peak_rss_bytes": {
+              "max": 52002816.0,
+              "median": 51806208.0,
+              "min": 51806208.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 214.22004140913486,
+              "median": 211.4253332838416,
+              "min": 202.19637546688318,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 36.083,
+              "median": 26.894,
+              "min": 26.245,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 57.338417,
+              "median": 50.827541,
+              "min": 50.680791,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "query-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "complete_query_ms": {
+              "max": 43.834916,
+              "median": 43.810333,
+              "min": 43.577541999999994,
+              "sample_count": 5
+            },
+            "first_page_ms": {
+              "max": 24.047625,
+              "median": 24.029167,
+              "min": 23.900000000000002,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 91127808.0,
+              "median": 80166912.0,
+              "min": 68108288.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 1472.017084248364,
+              "median": 1454.7295002266765,
+              "min": 1454.1519591584802,
+              "sample_count": 5
+            },
+            "query_bytes": {
+              "max": 3904.0,
+              "median": 3904.0,
+              "min": 3904.0,
+              "sample_count": 5
+            },
+            "query_expressions_evaluated": {
+              "max": 512.0,
+              "median": 512.0,
+              "min": 512.0,
+              "sample_count": 5
+            },
+            "query_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "query_rows": {
+              "max": 64.0,
+              "median": 64.0,
+              "min": 64.0,
+              "sample_count": 5
+            },
+            "query_work_units": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_bytes": {
+              "max": 236432.0,
+              "median": 236432.0,
+              "min": 236432.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_complete_query_ms": {
+              "max": 24.625459,
+              "median": 24.468709,
+              "min": 24.417125000000002,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_bytes": {
+              "max": 236432.0,
+              "median": 236432.0,
+              "min": 236432.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_ms": {
+              "max": 24.534,
+              "median": 24.3795,
+              "min": 24.328583000000002,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_rows": {
+              "max": 920.0,
+              "median": 920.0,
+              "min": 920.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_rows": {
+              "max": 920.0,
+              "median": 920.0,
+              "min": 920.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_bytes": {
+              "max": 376000.0,
+              "median": 376000.0,
+              "min": 376000.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_complete_query_ms": {
+              "max": 154.61883400000002,
+              "median": 154.38299999999998,
+              "min": 154.29891700000002,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_bytes": {
+              "max": 96256.0,
+              "median": 96256.0,
+              "min": 96256.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_ms": {
+              "max": 39.175374999999995,
+              "median": 39.10825,
+              "min": 39.02775,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_pages": {
+              "max": 4.0,
+              "median": 4.0,
+              "min": 4.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_rows": {
+              "max": 4000.0,
+              "median": 4000.0,
+              "min": 4000.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_bytes": {
+              "max": 582587.0,
+              "median": 582587.0,
+              "min": 582587.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_complete_query_ms": {
+              "max": 494.33545899999996,
+              "median": 493.072667,
+              "min": 491.306917,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_bytes": {
+              "max": 73339.0,
+              "median": 73339.0,
+              "min": 73339.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_ms": {
+              "max": 62.70824999999999,
+              "median": 62.350791,
+              "min": 62.124041999999996,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_pages": {
+              "max": 8.0,
+              "median": 8.0,
+              "min": 8.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_rows": {
+              "max": 8000.0,
+              "median": 8000.0,
+              "min": 8000.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_bytes": {
+              "max": 824471.0,
+              "median": 824471.0,
+              "min": 824471.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_complete_query_ms": {
+              "max": 545.807625,
+              "median": 545.5560419999999,
+              "min": 544.069125,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_bytes": {
+              "max": 105533.0,
+              "median": 105533.0,
+              "min": 105533.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_ms": {
+              "max": 68.628041,
+              "median": 68.46508399999999,
+              "min": 68.32575,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_pages": {
+              "max": 8.0,
+              "median": 8.0,
+              "min": 8.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_rows": {
+              "max": 8000.0,
+              "median": 8000.0,
+              "min": 8000.0,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 31.305,
+              "median": 30.832,
+              "min": 30.449,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 52.997584,
+              "median": 52.310041,
+              "min": 51.933459,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "setup": {
+          "expected_samples": 5,
+          "metrics": {
+            "init_ms": {
+              "max": 41.760875000000006,
+              "median": 36.907667,
+              "min": 34.544834,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 24084480.0,
+              "median": 24084480.0,
+              "min": 24068096.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 212.49720826745033,
+              "median": 204.79820761829615,
+              "min": 201.75304170697927,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 53.989,
+              "median": 33.694,
+              "min": 27.674,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "verify-after-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "correctness_ms": {
+              "max": 54688.549666,
+              "median": 52087.703833,
+              "min": 51258.620542000004,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 2078605312.0,
+              "median": 1994702848.0,
+              "min": 1958445056.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 54921.78129218519,
+              "median": 52182.83745739609,
+              "min": 51384.10258293152,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 28.951,
+              "median": 27.879,
+              "min": 27.16,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "verify-loaded-world": {
+          "expected_samples": 5,
+          "metrics": {
+            "correctness_ms": {
+              "max": 53556.121959000004,
+              "median": 53076.6895,
+              "min": 52145.818374999995,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 2122416128.0,
+              "median": 1994227712.0,
+              "min": 1908391936.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 53871.15320749581,
+              "median": 53251.51349976659,
+              "min": 52398.586708121,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 29.44,
+              "median": 28.947,
+              "min": 27.699,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "warm-query-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "complete_query_ms": {
+              "max": 39.69875,
+              "median": 39.565875,
+              "min": 39.264959000000005,
+              "sample_count": 5
+            },
+            "first_page_ms": {
+              "max": 20.064249999999998,
+              "median": 19.888959,
+              "min": 19.657208,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 109477888.0,
+              "median": 102842368.0,
+              "min": 61767680.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 2715.1667093858123,
+              "median": 2713.290332816541,
+              "min": 2697.3382914438844,
+              "sample_count": 5
+            },
+            "query_bytes": {
+              "max": 3904.0,
+              "median": 3904.0,
+              "min": 3904.0,
+              "sample_count": 5
+            },
+            "query_expressions_evaluated": {
+              "max": 512.0,
+              "median": 512.0,
+              "min": 512.0,
+              "sample_count": 5
+            },
+            "query_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "query_rows": {
+              "max": 64.0,
+              "median": 64.0,
+              "min": 64.0,
+              "sample_count": 5
+            },
+            "query_work_units": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_bytes": {
+              "max": 236432.0,
+              "median": 236432.0,
+              "min": 236432.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_complete_query_ms": {
+              "max": 24.142667,
+              "median": 24.037416999999998,
+              "min": 23.917583,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_bytes": {
+              "max": 236432.0,
+              "median": 236432.0,
+              "min": 236432.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_ms": {
+              "max": 24.054333,
+              "median": 23.947792,
+              "min": 23.826916999999998,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_rows": {
+              "max": 920.0,
+              "median": 920.0,
+              "min": 920.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_rows": {
+              "max": 920.0,
+              "median": 920.0,
+              "min": 920.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_bytes": {
+              "max": 376000.0,
+              "median": 376000.0,
+              "min": 376000.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_complete_query_ms": {
+              "max": 155.089166,
+              "median": 154.992916,
+              "min": 154.150917,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_bytes": {
+              "max": 96256.0,
+              "median": 96256.0,
+              "min": 96256.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_ms": {
+              "max": 38.8595,
+              "median": 38.596083,
+              "min": 38.321332999999996,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_pages": {
+              "max": 4.0,
+              "median": 4.0,
+              "min": 4.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_rows": {
+              "max": 4000.0,
+              "median": 4000.0,
+              "min": 4000.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_bytes": {
+              "max": 582587.0,
+              "median": 582587.0,
+              "min": 582587.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_complete_query_ms": {
+              "max": 490.461958,
+              "median": 490.292417,
+              "min": 489.15275,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_bytes": {
+              "max": 73339.0,
+              "median": 73339.0,
+              "min": 73339.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_ms": {
+              "max": 61.265958000000005,
+              "median": 61.066041,
+              "min": 61.017709,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_pages": {
+              "max": 8.0,
+              "median": 8.0,
+              "min": 8.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_rows": {
+              "max": 8000.0,
+              "median": 8000.0,
+              "min": 8000.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_bytes": {
+              "max": 824471.0,
+              "median": 824471.0,
+              "min": 824471.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_complete_query_ms": {
+              "max": 545.72325,
+              "median": 544.847375,
+              "min": 542.8722499999999,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_bytes": {
+              "max": 105533.0,
+              "median": 105533.0,
+              "min": 105533.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_ms": {
+              "max": 69.25141699999999,
+              "median": 67.804333,
+              "min": 67.53774999999999,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_pages": {
+              "max": 8.0,
+              "median": 8.0,
+              "min": 8.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_rows": {
+              "max": 8000.0,
+              "median": 8000.0,
+              "min": 8000.0,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 29.941,
+              "median": 28.814,
+              "min": 28.145,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 51.962333,
+              "median": 51.300584,
+              "min": 50.895875,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        }
+      },
+      "profile": "single",
+      "required_repetitions": 5,
+      "size": 80000,
+      "source_counts": {
+        "root::catalogue": 128,
+        "root::decision_labels": 2,
+        "root::entity_a": 4000,
+        "root::entity_b": 4000,
+        "root::events": 63806,
+        "root::inventory": 64,
+        "root::orders": 8000
+      }
+    },
+    {
+      "complete_repetition_count": 5,
+      "complete_repetitions": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "derived_counts": {
+        "root::activity_pages": 920,
+        "root::all_entities": 4000,
+        "root::decision_value_join": 8000,
+        "root::fulfillment": 8000
+      },
+      "derived_relation_pages": {
+        "root::activity_pages": {
+          "bytes": 236432,
+          "canonical_content_digest": "9c977baff379552fb9757fb8993450a61fe14e480b7487c594b812e645613cba",
+          "complete_query_ms": 9.384875000000001,
+          "first_page_bytes": 236432,
+          "first_page_ms": 9.294125000000001,
+          "first_page_rows": 920,
+          "pages": 1,
+          "rows": 920
+        },
+        "root::all_entities": {
+          "bytes": 376000,
+          "canonical_content_digest": "636d10c5dc71cf4f7569dcf6b3752990eea341dd42fdd8b89d45288e40d1a3ce",
+          "complete_query_ms": 91.13074999999999,
+          "first_page_bytes": 96256,
+          "first_page_ms": 23.743834,
+          "first_page_rows": 1024,
+          "pages": 4,
+          "rows": 4000
+        },
+        "root::decision_value_join": {
+          "bytes": 582587,
+          "canonical_content_digest": "02faf95a7013651e7484fd908177aad2d3c4e602e4fc6d1826196c41d80fa507",
+          "complete_query_ms": 377.935834,
+          "first_page_bytes": 73339,
+          "first_page_ms": 48.194584,
+          "first_page_rows": 1024,
+          "pages": 8,
+          "rows": 8000
+        },
+        "root::fulfillment": {
+          "bytes": 824471,
+          "canonical_content_digest": "5f1711bba527817c80a7465b367d9d7abb2580741cca91d0acbfd9d8f012b007",
+          "complete_query_ms": 430.057666,
+          "first_page_bytes": 105533,
+          "first_page_ms": 54.25087499999999,
+          "first_page_rows": 1024,
+          "pages": 8,
+          "rows": 8000
+        }
+      },
+      "disk_budget": {
+        "limit_logical_bytes": 999817216,
+        "measured": {
+          "max": 132341944.0,
+          "median": 132341944.0,
+          "min": 132341944.0,
+          "sample_count": 5
+        },
+        "passed": true,
+        "sample_count": 5
+      },
+      "named_query_pages": {
+        "bytes": 3904,
+        "rows": 64
+      },
+      "passed": true,
+      "phases": {
+        "cleanup": {
+          "expected_samples": 5,
+          "metrics": {
+            "process_wall_ms": {
+              "max": 95.93662433326244,
+              "median": 36.371625028550625,
+              "min": 6.76620751619339,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "edit-add": {
+          "expected_samples": 5,
+          "metrics": {
+            "counter_changed_keys": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_chunks": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_expressions_evaluated": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "counter_objects_written": {
+              "max": 23.0,
+              "median": 23.0,
+              "min": 23.0,
+              "sample_count": 5
+            },
+            "counter_operator_work": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_revision": {
+              "max": 11.0,
+              "median": 11.0,
+              "min": 11.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_read": {
+              "max": 1200222.0,
+              "median": 1200222.0,
+              "min": 1200222.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_written": {
+              "max": 1207785.0,
+              "median": 1207785.0,
+              "min": 1207785.0,
+              "sample_count": 5
+            },
+            "counter_state_node_reads": {
+              "max": 16.0,
+              "median": 16.0,
+              "min": 16.0,
+              "sample_count": 5
+            },
+            "edit_ms": {
+              "max": 198.7845,
+              "median": 123.192542,
+              "min": 86.80283299999999,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 71942144.0,
+              "median": 66846720.0,
+              "min": 63143936.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 423.78804087638855,
+              "median": 406.4556248486042,
+              "min": 212.69625052809715,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 44.075,
+              "median": 37.204,
+              "min": 34.674,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "edit-retract": {
+          "expected_samples": 5,
+          "metrics": {
+            "counter_changed_keys": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_chunks": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_expressions_evaluated": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "counter_objects_written": {
+              "max": 4.0,
+              "median": 4.0,
+              "min": 4.0,
+              "sample_count": 5
+            },
+            "counter_operator_work": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_revision": {
+              "max": 12.0,
+              "median": 12.0,
+              "min": 12.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_read": {
+              "max": 1200822.0,
+              "median": 1200822.0,
+              "min": 1200822.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_written": {
+              "max": 2150.0,
+              "median": 2150.0,
+              "min": 2150.0,
+              "sample_count": 5
+            },
+            "counter_state_node_reads": {
+              "max": 19.0,
+              "median": 19.0,
+              "min": 19.0,
+              "sample_count": 5
+            },
+            "edit_ms": {
+              "max": 161.84312500000001,
+              "median": 139.393292,
+              "min": 91.609,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 69697536.0,
+              "median": 62832640.0,
+              "min": 62734336.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 414.79779221117496,
+              "median": 211.45183313637972,
+              "min": 209.9039163440466,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 29.323,
+              "median": 27.209,
+              "min": 25.972,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "load": {
+          "expected_samples": 5,
+          "metrics": {
+            "commit_ms": {
+              "max": 18969.633542999996,
+              "median": 18356.399209,
+              "min": 17216.238666,
+              "sample_count": 5
+            },
+            "fixture_generation_ms": {
+              "max": 127.51925000000001,
+              "median": 118.406626,
+              "min": 116.10104100000002,
+              "sample_count": 5
+            },
+            "load_ms": {
+              "max": 19088.076542,
+              "median": 18472.536208,
+              "min": 17343.787875,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 920141824.0,
+              "median": 881754112.0,
+              "min": 842596352.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 19439.20399993658,
+              "median": 18790.34366644919,
+              "min": 17765.66558331251,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 32.052,
+              "median": 26.756,
+              "min": 26.313,
+              "sample_count": 5
+            },
+            "storage_allocated_bytes": {
+              "max": 132501504.0,
+              "median": 132501504.0,
+              "min": 132501504.0,
+              "sample_count": 5
+            },
+            "storage_component_objects_source_state_and_indexes_allocated_bytes": {
+              "max": 127111168.0,
+              "median": 127111168.0,
+              "min": 127111168.0,
+              "sample_count": 5
+            },
+            "storage_component_objects_source_state_and_indexes_logical_bytes": {
+              "max": 127059952.0,
+              "median": 127059952.0,
+              "min": 127059952.0,
+              "sample_count": 5
+            },
+            "storage_component_receipts_allocated_bytes": {
+              "max": 40960.0,
+              "median": 40960.0,
+              "min": 40960.0,
+              "sample_count": 5
+            },
+            "storage_component_receipts_logical_bytes": {
+              "max": 2351.0,
+              "median": 2351.0,
+              "min": 2351.0,
+              "sample_count": 5
+            },
+            "storage_component_revision_journal_and_decisions_allocated_bytes": {
+              "max": 5324800.0,
+              "median": 5324800.0,
+              "min": 5324800.0,
+              "sample_count": 5
+            },
+            "storage_component_revision_journal_and_decisions_logical_bytes": {
+              "max": 5271758.0,
+              "median": 5271758.0,
+              "min": 5271758.0,
+              "sample_count": 5
+            },
+            "storage_component_root_metadata_allocated_bytes": {
+              "max": 24576.0,
+              "median": 24576.0,
+              "min": 24576.0,
+              "sample_count": 5
+            },
+            "storage_component_root_metadata_logical_bytes": {
+              "max": 7883.0,
+              "median": 7883.0,
+              "min": 7883.0,
+              "sample_count": 5
+            },
+            "storage_component_staging_scratch_allocated_bytes": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "storage_component_staging_scratch_logical_bytes": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "storage_logical_bytes": {
+              "max": 132341944.0,
+              "median": 132341944.0,
+              "min": 132341944.0,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 35.800875000000005,
+              "median": 30.828875,
+              "min": 28.517,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "open-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "peak_rss_bytes": {
+              "max": 24068096.0,
+              "median": 24068096.0,
+              "min": 24068096.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 212.9310006275773,
+              "median": 211.54083404690027,
+              "min": 203.10566667467356,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 35.612,
+              "median": 33.772,
+              "min": 31.486,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 8.000416999999999,
+              "median": 7.034667,
+              "min": 6.739415999999999,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "query-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "complete_query_ms": {
+              "max": 15.647583999999998,
+              "median": 15.40625,
+              "min": 14.954,
+              "sample_count": 5
+            },
+            "first_page_ms": {
+              "max": 11.229833999999999,
+              "median": 10.995208,
+              "min": 10.59475,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 79937536.0,
+              "median": 56999936.0,
+              "min": 36093952.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 1262.7927493304014,
+              "median": 1235.1748328655958,
+              "min": 1033.8210836052895,
+              "sample_count": 5
+            },
+            "query_bytes": {
+              "max": 3904.0,
+              "median": 3904.0,
+              "min": 3904.0,
+              "sample_count": 5
+            },
+            "query_expressions_evaluated": {
+              "max": 512.0,
+              "median": 512.0,
+              "min": 512.0,
+              "sample_count": 5
+            },
+            "query_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "query_rows": {
+              "max": 64.0,
+              "median": 64.0,
+              "min": 64.0,
+              "sample_count": 5
+            },
+            "query_work_units": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_bytes": {
+              "max": 236432.0,
+              "median": 236432.0,
+              "min": 236432.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_complete_query_ms": {
+              "max": 9.6545,
+              "median": 9.417458,
+              "min": 9.374125000000001,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_bytes": {
+              "max": 236432.0,
+              "median": 236432.0,
+              "min": 236432.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_ms": {
+              "max": 9.56175,
+              "median": 9.322875,
+              "min": 9.28325,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_rows": {
+              "max": 920.0,
+              "median": 920.0,
+              "min": 920.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_rows": {
+              "max": 920.0,
+              "median": 920.0,
+              "min": 920.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_bytes": {
+              "max": 376000.0,
+              "median": 376000.0,
+              "min": 376000.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_complete_query_ms": {
+              "max": 98.62679200000001,
+              "median": 95.865375,
+              "min": 90.95275,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_bytes": {
+              "max": 96256.0,
+              "median": 96256.0,
+              "min": 96256.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_ms": {
+              "max": 25.444125000000003,
+              "median": 24.821209,
+              "min": 23.743834,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_pages": {
+              "max": 4.0,
+              "median": 4.0,
+              "min": 4.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_rows": {
+              "max": 4000.0,
+              "median": 4000.0,
+              "min": 4000.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_bytes": {
+              "max": 582587.0,
+              "median": 582587.0,
+              "min": 582587.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_complete_query_ms": {
+              "max": 414.205625,
+              "median": 395.472708,
+              "min": 376.415666,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_bytes": {
+              "max": 73339.0,
+              "median": 73339.0,
+              "min": 73339.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_ms": {
+              "max": 54.202791,
+              "median": 50.453291,
+              "min": 47.992041,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_pages": {
+              "max": 8.0,
+              "median": 8.0,
+              "min": 8.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_rows": {
+              "max": 8000.0,
+              "median": 8000.0,
+              "min": 8000.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_bytes": {
+              "max": 824471.0,
+              "median": 824471.0,
+              "min": 824471.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_complete_query_ms": {
+              "max": 470.66999999999996,
+              "median": 451.725916,
+              "min": 427.996958,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_bytes": {
+              "max": 105533.0,
+              "median": 105533.0,
+              "min": 105533.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_ms": {
+              "max": 58.349875000000004,
+              "median": 57.265125,
+              "min": 54.210167,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_pages": {
+              "max": 8.0,
+              "median": 8.0,
+              "min": 8.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_rows": {
+              "max": 8000.0,
+              "median": 8000.0,
+              "min": 8000.0,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 33.359,
+              "median": 28.658,
+              "min": 26.734,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 7.817792000000001,
+              "median": 7.030875,
+              "min": 6.802458,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "setup": {
+          "expected_samples": 5,
+          "metrics": {
+            "init_ms": {
+              "max": 80.631541,
+              "median": 51.686042,
+              "min": 39.239333,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 24330240.0,
+              "median": 24084480.0,
+              "min": 24068096.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 212.7364156767726,
+              "median": 212.61016558855772,
+              "min": 203.26420851051807,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 40.098,
+              "median": 35.196,
+              "min": 25.438,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "verify-after-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "correctness_ms": {
+              "max": 59350.189541,
+              "median": 56565.870666999996,
+              "min": 52081.977125000005,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 2000814080.0,
+              "median": 1955659776.0,
+              "min": 1910947840.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 59516.36908296496,
+              "median": 56814.26875013858,
+              "min": 52169.56145875156,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 31.012,
+              "median": 26.733,
+              "min": 25.947,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "verify-loaded-world": {
+          "expected_samples": 5,
+          "metrics": {
+            "correctness_ms": {
+              "max": 56681.632375,
+              "median": 55788.906542,
+              "min": 52793.675292,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 1994653696.0,
+              "median": 1969438720.0,
+              "min": 1899724800.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 56836.656833067536,
+              "median": 55944.20041702688,
+              "min": 53043.036750517786,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 34.993,
+              "median": 26.982,
+              "min": 26.098,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "warm-query-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "complete_query_ms": {
+              "max": 9.049708,
+              "median": 8.858125,
+              "min": 8.424042,
+              "sample_count": 5
+            },
+            "first_page_ms": {
+              "max": 4.750624999999999,
+              "median": 4.58125,
+              "min": 4.355167,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 71401472.0,
+              "median": 69124096.0,
+              "min": 46956544.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 2090.246041305363,
+              "median": 2086.613167077303,
+              "min": 2077.973666600883,
+              "sample_count": 5
+            },
+            "query_bytes": {
+              "max": 3904.0,
+              "median": 3904.0,
+              "min": 3904.0,
+              "sample_count": 5
+            },
+            "query_expressions_evaluated": {
+              "max": 512.0,
+              "median": 512.0,
+              "min": 512.0,
+              "sample_count": 5
+            },
+            "query_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "query_rows": {
+              "max": 64.0,
+              "median": 64.0,
+              "min": 64.0,
+              "sample_count": 5
+            },
+            "query_work_units": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_bytes": {
+              "max": 236432.0,
+              "median": 236432.0,
+              "min": 236432.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_complete_query_ms": {
+              "max": 9.169041,
+              "median": 8.780209000000001,
+              "min": 8.408834,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_bytes": {
+              "max": 236432.0,
+              "median": 236432.0,
+              "min": 236432.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_ms": {
+              "max": 9.070833,
+              "median": 8.68525,
+              "min": 8.317167,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_rows": {
+              "max": 920.0,
+              "median": 920.0,
+              "min": 920.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_pages": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_rows": {
+              "max": 920.0,
+              "median": 920.0,
+              "min": 920.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_bytes": {
+              "max": 376000.0,
+              "median": 376000.0,
+              "min": 376000.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_complete_query_ms": {
+              "max": 100.681083,
+              "median": 95.71745800000001,
+              "min": 90.300125,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_bytes": {
+              "max": 96256.0,
+              "median": 96256.0,
+              "min": 96256.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_ms": {
+              "max": 24.81925,
+              "median": 24.069666,
+              "min": 22.860041000000002,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_pages": {
+              "max": 4.0,
+              "median": 4.0,
+              "min": 4.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_rows": {
+              "max": 4000.0,
+              "median": 4000.0,
+              "min": 4000.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_bytes": {
+              "max": 582587.0,
+              "median": 582587.0,
+              "min": 582587.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_complete_query_ms": {
+              "max": 401.7615,
+              "median": 396.96375,
+              "min": 374.666916,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_bytes": {
+              "max": 73339.0,
+              "median": 73339.0,
+              "min": 73339.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_ms": {
+              "max": 50.088,
+              "median": 49.869292,
+              "min": 46.695040999999996,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_pages": {
+              "max": 8.0,
+              "median": 8.0,
+              "min": 8.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_rows": {
+              "max": 8000.0,
+              "median": 8000.0,
+              "min": 8000.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_bytes": {
+              "max": 824471.0,
+              "median": 824471.0,
+              "min": 824471.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_complete_query_ms": {
+              "max": 465.689792,
+              "median": 452.250041,
+              "min": 426.380834,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_bytes": {
+              "max": 105533.0,
+              "median": 105533.0,
+              "min": 105533.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_ms": {
+              "max": 57.413959,
+              "median": 55.900541,
+              "min": 53.012459,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_pages": {
+              "max": 8.0,
+              "median": 8.0,
+              "min": 8.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_rows": {
+              "max": 8000.0,
+              "median": 8000.0,
+              "min": 8000.0,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 30.61,
+              "median": 28.552,
+              "min": 26.888,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 6.8865419999999995,
+              "median": 6.8006660000000005,
+              "min": 6.524165999999999,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        }
+      },
+      "profile": "ten",
+      "required_repetitions": 5,
+      "size": 80000,
+      "source_counts": {
+        "root::catalogue": 128,
+        "root::decision_labels": 2,
+        "root::entity_a": 4000,
+        "root::entity_b": 4000,
+        "root::events": 63806,
+        "root::inventory": 64,
+        "root::orders": 8000
+      }
+    },
+    {
+      "complete_repetition_count": 5,
+      "complete_repetitions": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "derived_counts": {
+        "root::activity_pages": 9920,
+        "root::all_entities": 40000,
+        "root::decision_value_join": 80000,
+        "root::fulfillment": 80000
+      },
+      "derived_relation_pages": {
+        "root::activity_pages": {
+          "bytes": 2549432,
+          "canonical_content_digest": "61d86bc6b5b9ce2affb73f32179f2a73fb53c73c151bef4ce9f1c36fc9a58a61",
+          "complete_query_ms": 2726.5849590000003,
+          "first_page_bytes": 263160,
+          "first_page_ms": 267.065167,
+          "first_page_rows": 1024,
+          "pages": 10,
+          "rows": 9920
+        },
+        "root::all_entities": {
+          "bytes": 3760000,
+          "canonical_content_digest": "543f58a2e92893a0e906709181c05ed44a122373c409de60a15f01036105b17f",
+          "complete_query_ms": 17445.241458,
+          "first_page_bytes": 96256,
+          "first_page_ms": 443.333041,
+          "first_page_rows": 1024,
+          "pages": 40,
+          "rows": 40000
+        },
+        "root::decision_value_join": {
+          "bytes": 5825882,
+          "canonical_content_digest": "3419215c6e14bed28e8810d95bfe92a8a4f0ad1a569cb7d8362442a559ac2936",
+          "complete_query_ms": 57438.453042,
+          "first_page_bytes": 71680,
+          "first_page_ms": 729.558542,
+          "first_page_rows": 1024,
+          "pages": 79,
+          "rows": 80000
+        },
+        "root::fulfillment": {
+          "bytes": 8244706,
+          "canonical_content_digest": "f49c77d82f107d99096f8807bd3d7641c82029f4c6f2dc9978eefdcc33daae46",
+          "complete_query_ms": 62752.883708,
+          "first_page_bytes": 105533,
+          "first_page_ms": 794.873375,
+          "first_page_rows": 1024,
+          "pages": 79,
+          "rows": 80000
+        }
+      },
+      "disk_budget": null,
+      "named_query_pages": {
+        "bytes": 3904,
+        "rows": 64
+      },
+      "passed": true,
+      "phases": {
+        "cleanup": {
+          "expected_samples": 5,
+          "metrics": {
+            "process_wall_ms": {
+              "max": 166.14987421780825,
+              "median": 149.36562441289425,
+              "min": 138.17099947482347,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "edit-add": {
+          "expected_samples": 5,
+          "metrics": {
+            "counter_changed_keys": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_chunks": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_expressions_evaluated": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "counter_objects_written": {
+              "max": 25.0,
+              "median": 25.0,
+              "min": 25.0,
+              "sample_count": 5
+            },
+            "counter_operator_work": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_revision": {
+              "max": 2.0,
+              "median": 2.0,
+              "min": 2.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_read": {
+              "max": 1201342.0,
+              "median": 1201342.0,
+              "min": 1201342.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_written": {
+              "max": 1209284.0,
+              "median": 1209284.0,
+              "min": 1209284.0,
+              "sample_count": 5
+            },
+            "counter_state_node_reads": {
+              "max": 18.0,
+              "median": 18.0,
+              "min": 18.0,
+              "sample_count": 5
+            },
+            "edit_ms": {
+              "max": 112.04329200000001,
+              "median": 101.096959,
+              "min": 92.87754199999999,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 495304704.0,
+              "median": 490356736.0,
+              "min": 478478336.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 843.3153750374913,
+              "median": 840.6695825979114,
+              "min": 829.8703329637647,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 45.077,
+              "median": 44.645,
+              "min": 34.292,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "edit-retract": {
+          "expected_samples": 5,
+          "metrics": {
+            "counter_changed_keys": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_chunks": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_expressions_evaluated": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "counter_objects_written": {
+              "max": 4.0,
+              "median": 4.0,
+              "min": 4.0,
+              "sample_count": 5
+            },
+            "counter_operator_work": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_revision": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_read": {
+              "max": 1202071.0,
+              "median": 1202071.0,
+              "min": 1202071.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_written": {
+              "max": 1980.0,
+              "median": 1980.0,
+              "min": 1980.0,
+              "sample_count": 5
+            },
+            "counter_state_node_reads": {
+              "max": 21.0,
+              "median": 21.0,
+              "min": 21.0,
+              "sample_count": 5
+            },
+            "edit_ms": {
+              "max": 98.57525,
+              "median": 94.406167,
+              "min": 89.74633299999999,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 69419008.0,
+              "median": 63340544.0,
+              "min": 62750720.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 211.79674938321114,
+              "median": 205.873291939497,
+              "min": 201.85712538659573,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 32.612,
+              "median": 30.305,
+              "min": 28.028,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "load": {
+          "expected_samples": 5,
+          "metrics": {
+            "commit_ms": {
+              "max": 88087.172792,
+              "median": 86263.841667,
+              "min": 85425.231,
+              "sample_count": 5
+            },
+            "fixture_generation_ms": {
+              "max": 1128.049083,
+              "median": 1124.047958,
+              "min": 1121.141084,
+              "sample_count": 5
+            },
+            "load_ms": {
+              "max": 89215.238875,
+              "median": 87384.993125,
+              "min": 86549.290625,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 8757624832.0,
+              "median": 8517468160.0,
+              "min": 5830377472.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 90838.18737510592,
+              "median": 88883.80808290094,
+              "min": 88236.15525010973,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 31.405,
+              "median": 28.208,
+              "min": 26.011,
+              "sample_count": 5
+            },
+            "storage_allocated_bytes": {
+              "max": 1170403328.0,
+              "median": 1169940480.0,
+              "min": 1169416192.0,
+              "sample_count": 5
+            },
+            "storage_component_objects_source_state_and_indexes_allocated_bytes": {
+              "max": 1117663232.0,
+              "median": 1117200384.0,
+              "min": 1116676096.0,
+              "sample_count": 5
+            },
+            "storage_component_objects_source_state_and_indexes_logical_bytes": {
+              "max": 1111157300.0,
+              "median": 1111157300.0,
+              "min": 1111157300.0,
+              "sample_count": 5
+            },
+            "storage_component_receipts_allocated_bytes": {
+              "max": 4096.0,
+              "median": 4096.0,
+              "min": 4096.0,
+              "sample_count": 5
+            },
+            "storage_component_receipts_logical_bytes": {
+              "max": 235.0,
+              "median": 235.0,
+              "min": 235.0,
+              "sample_count": 5
+            },
+            "storage_component_revision_journal_and_decisions_allocated_bytes": {
+              "max": 52711424.0,
+              "median": 52711424.0,
+              "min": 52711424.0,
+              "sample_count": 5
+            },
+            "storage_component_revision_journal_and_decisions_logical_bytes": {
+              "max": 52700481.0,
+              "median": 52700481.0,
+              "min": 52700481.0,
+              "sample_count": 5
+            },
+            "storage_component_root_metadata_allocated_bytes": {
+              "max": 24576.0,
+              "median": 24576.0,
+              "min": 24576.0,
+              "sample_count": 5
+            },
+            "storage_component_root_metadata_logical_bytes": {
+              "max": 7885.0,
+              "median": 7885.0,
+              "min": 7885.0,
+              "sample_count": 5
+            },
+            "storage_component_staging_scratch_allocated_bytes": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "storage_component_staging_scratch_logical_bytes": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "storage_logical_bytes": {
+              "max": 1163865901.0,
+              "median": 1163865901.0,
+              "min": 1163865901.0,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 29.495542,
+              "median": 28.450625,
+              "min": 21.325791,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "open-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "peak_rss_bytes": {
+              "max": 507887616.0,
+              "median": 487374848.0,
+              "min": 475643904.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 825.4955001175404,
+              "median": 626.6551250591874,
+              "min": 612.8022084012628,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 45.883,
+              "median": 40.932,
+              "min": 38.773,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 547.4422500000001,
+              "median": 530.631792,
+              "min": 522.3708750000001,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "query-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "complete_query_ms": {
+              "max": 440.229834,
+              "median": 437.78591700000004,
+              "min": 431.65675,
+              "sample_count": 5
+            },
+            "first_page_ms": {
+              "max": 254.898917,
+              "median": 252.81295799999998,
+              "min": 248.90045899999998,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 784875520.0,
+              "median": 771637248.0,
+              "min": 746536960.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 145818.71370784938,
+              "median": 145732.3269592598,
+              "min": 141615.01012463123,
+              "sample_count": 5
+            },
+            "query_bytes": {
+              "max": 3904.0,
+              "median": 3904.0,
+              "min": 3904.0,
+              "sample_count": 5
+            },
+            "query_expressions_evaluated": {
+              "max": 512.0,
+              "median": 512.0,
+              "min": 512.0,
+              "sample_count": 5
+            },
+            "query_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "query_rows": {
+              "max": 64.0,
+              "median": 64.0,
+              "min": 64.0,
+              "sample_count": 5
+            },
+            "query_work_units": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_bytes": {
+              "max": 2549432.0,
+              "median": 2549432.0,
+              "min": 2549432.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_complete_query_ms": {
+              "max": 2746.154042,
+              "median": 2739.5238750000003,
+              "min": 2719.338083,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_bytes": {
+              "max": 263160.0,
+              "median": 263160.0,
+              "min": 263160.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_ms": {
+              "max": 280.54266700000005,
+              "median": 272.019042,
+              "min": 267.065167,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_pages": {
+              "max": 10.0,
+              "median": 10.0,
+              "min": 10.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_rows": {
+              "max": 9920.0,
+              "median": 9920.0,
+              "min": 9920.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_bytes": {
+              "max": 3760000.0,
+              "median": 3760000.0,
+              "min": 3760000.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_complete_query_ms": {
+              "max": 17993.349208000003,
+              "median": 17922.196708000003,
+              "min": 17445.241458,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_bytes": {
+              "max": 96256.0,
+              "median": 96256.0,
+              "min": 96256.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_ms": {
+              "max": 482.146125,
+              "median": 447.52458299999995,
+              "min": 443.333041,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_pages": {
+              "max": 40.0,
+              "median": 40.0,
+              "min": 40.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_rows": {
+              "max": 40000.0,
+              "median": 40000.0,
+              "min": 40000.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_bytes": {
+              "max": 5825882.0,
+              "median": 5825882.0,
+              "min": 5825882.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_complete_query_ms": {
+              "max": 59262.560125,
+              "median": 59003.578457999996,
+              "min": 57438.453042,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_bytes": {
+              "max": 71680.0,
+              "median": 71680.0,
+              "min": 71680.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_ms": {
+              "max": 758.266083,
+              "median": 742.267917,
+              "min": 729.558542,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_pages": {
+              "max": 79.0,
+              "median": 79.0,
+              "min": 79.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_rows": {
+              "max": 80000.0,
+              "median": 80000.0,
+              "min": 80000.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_bytes": {
+              "max": 8244706.0,
+              "median": 8244706.0,
+              "min": 8244706.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_complete_query_ms": {
+              "max": 64785.68404099999,
+              "median": 64464.167,
+              "min": 62752.883708,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_bytes": {
+              "max": 105533.0,
+              "median": 105533.0,
+              "min": 105533.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_ms": {
+              "max": 824.230541,
+              "median": 816.077917,
+              "min": 794.873375,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_pages": {
+              "max": 79.0,
+              "median": 79.0,
+              "min": 79.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_rows": {
+              "max": 80000.0,
+              "median": 80000.0,
+              "min": 80000.0,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 29.641,
+              "median": 25.925,
+              "min": 25.473,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 531.1120000000001,
+              "median": 528.0258749999999,
+              "min": 517.552125,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "setup": {
+          "expected_samples": 5,
+          "metrics": {
+            "init_ms": {
+              "max": 29.707875,
+              "median": 25.319416,
+              "min": 24.120375,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 24248320.0,
+              "median": 24068096.0,
+              "min": 24068096.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 412.92008478194475,
+              "median": 204.9697507172823,
+              "min": 202.35745795071125,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 203.288,
+              "median": 43.925,
+              "min": 38.065,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "verify-after-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "correctness_ms": {
+              "max": 412202.7,
+              "median": 403315.972375,
+              "min": 401674.0215,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 8040136704.0,
+              "median": 7636041728.0,
+              "min": 7304527872.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 412614.84604049474,
+              "median": 403701.23024936765,
+              "min": 402002.5415001437,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 28.38,
+              "median": 27.79,
+              "min": 27.63,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "verify-loaded-world": {
+          "expected_samples": 5,
+          "metrics": {
+            "correctness_ms": {
+              "max": 446458.32016600005,
+              "median": 443968.267084,
+              "min": 441583.510334,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 7743373312.0,
+              "median": 7442776064.0,
+              "min": 7369408512.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 447327.77374982834,
+              "median": 444820.41375059634,
+              "min": 442431.5696656704,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 34.178,
+              "median": 32.236,
+              "min": 30.82,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "warm-query-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "complete_query_ms": {
+              "max": 375.605583,
+              "median": 373.190042,
+              "min": 372.175292,
+              "sample_count": 5
+            },
+            "first_page_ms": {
+              "max": 188.453125,
+              "median": 187.198208,
+              "min": 185.908416,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 871563264.0,
+              "median": 841940992.0,
+              "min": 816054272.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 291610.8250422403,
+              "median": 291252.7039172128,
+              "min": 289870.00604067,
+              "sample_count": 5
+            },
+            "query_bytes": {
+              "max": 3904.0,
+              "median": 3904.0,
+              "min": 3904.0,
+              "sample_count": 5
+            },
+            "query_expressions_evaluated": {
+              "max": 512.0,
+              "median": 512.0,
+              "min": 512.0,
+              "sample_count": 5
+            },
+            "query_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "query_rows": {
+              "max": 64.0,
+              "median": 64.0,
+              "min": 64.0,
+              "sample_count": 5
+            },
+            "query_work_units": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_bytes": {
+              "max": 2549432.0,
+              "median": 2549432.0,
+              "min": 2549432.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_complete_query_ms": {
+              "max": 2782.536542,
+              "median": 2731.607584,
+              "min": 2716.618542,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_bytes": {
+              "max": 263160.0,
+              "median": 263160.0,
+              "min": 263160.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_ms": {
+              "max": 276.147,
+              "median": 272.376416,
+              "min": 269.994042,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_pages": {
+              "max": 10.0,
+              "median": 10.0,
+              "min": 10.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_rows": {
+              "max": 9920.0,
+              "median": 9920.0,
+              "min": 9920.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_bytes": {
+              "max": 3760000.0,
+              "median": 3760000.0,
+              "min": 3760000.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_complete_query_ms": {
+              "max": 18045.56725,
+              "median": 17939.169709,
+              "min": 17830.269874999998,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_bytes": {
+              "max": 96256.0,
+              "median": 96256.0,
+              "min": 96256.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_ms": {
+              "max": 468.094375,
+              "median": 453.555,
+              "min": 439.711917,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_pages": {
+              "max": 40.0,
+              "median": 40.0,
+              "min": 40.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_rows": {
+              "max": 40000.0,
+              "median": 40000.0,
+              "min": 40000.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_bytes": {
+              "max": 5825882.0,
+              "median": 5825882.0,
+              "min": 5825882.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_complete_query_ms": {
+              "max": 59589.9495,
+              "median": 59374.828125,
+              "min": 59096.355707999996,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_bytes": {
+              "max": 71680.0,
+              "median": 71680.0,
+              "min": 71680.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_ms": {
+              "max": 755.762833,
+              "median": 747.9399169999999,
+              "min": 735.8336250000001,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_pages": {
+              "max": 79.0,
+              "median": 79.0,
+              "min": 79.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_rows": {
+              "max": 80000.0,
+              "median": 80000.0,
+              "min": 80000.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_bytes": {
+              "max": 8244706.0,
+              "median": 8244706.0,
+              "min": 8244706.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_complete_query_ms": {
+              "max": 65220.369708000006,
+              "median": 65064.271917,
+              "min": 64566.706709,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_bytes": {
+              "max": 105533.0,
+              "median": 105533.0,
+              "min": 105533.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_ms": {
+              "max": 829.312875,
+              "median": 813.638541,
+              "min": 797.998042,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_pages": {
+              "max": 79.0,
+              "median": 79.0,
+              "min": 79.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_rows": {
+              "max": 80000.0,
+              "median": 80000.0,
+              "min": 80000.0,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 34.315,
+              "median": 31.344,
+              "min": 27.274,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 549.8987920000001,
+              "median": 526.213167,
+              "min": 522.9941249999999,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        }
+      },
+      "profile": "single",
+      "required_repetitions": 5,
+      "size": 800000,
+      "source_counts": {
+        "root::catalogue": 128,
+        "root::decision_labels": 2,
+        "root::entity_a": 40000,
+        "root::entity_b": 40000,
+        "root::events": 639806,
+        "root::inventory": 64,
+        "root::orders": 80000
+      }
+    },
+    {
+      "complete_repetition_count": 5,
+      "complete_repetitions": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "derived_counts": {
+        "root::activity_pages": 9920,
+        "root::all_entities": 40000,
+        "root::decision_value_join": 80000,
+        "root::fulfillment": 80000
+      },
+      "derived_relation_pages": {
+        "root::activity_pages": {
+          "bytes": 2549432,
+          "canonical_content_digest": "61d86bc6b5b9ce2affb73f32179f2a73fb53c73c151bef4ce9f1c36fc9a58a61",
+          "complete_query_ms": 1084.4302500000001,
+          "first_page_bytes": 263160,
+          "first_page_ms": 107.32887500000001,
+          "first_page_rows": 1024,
+          "pages": 10,
+          "rows": 9920
+        },
+        "root::all_entities": {
+          "bytes": 3760000,
+          "canonical_content_digest": "543f58a2e92893a0e906709181c05ed44a122373c409de60a15f01036105b17f",
+          "complete_query_ms": 11901.088749999999,
+          "first_page_bytes": 96256,
+          "first_page_ms": 311.999916,
+          "first_page_rows": 1024,
+          "pages": 40,
+          "rows": 40000
+        },
+        "root::decision_value_join": {
+          "bytes": 5825882,
+          "canonical_content_digest": "3419215c6e14bed28e8810d95bfe92a8a4f0ad1a569cb7d8362442a559ac2936",
+          "complete_query_ms": 50335.649083,
+          "first_page_bytes": 71680,
+          "first_page_ms": 632.09425,
+          "first_page_rows": 1024,
+          "pages": 79,
+          "rows": 80000
+        },
+        "root::fulfillment": {
+          "bytes": 8244706,
+          "canonical_content_digest": "f49c77d82f107d99096f8807bd3d7641c82029f4c6f2dc9978eefdcc33daae46",
+          "complete_query_ms": 55966.593709,
+          "first_page_bytes": 105533,
+          "first_page_ms": 718.2588330000001,
+          "first_page_rows": 1024,
+          "pages": 79,
+          "rows": 80000
+        }
+      },
+      "disk_budget": {
+        "limit_logical_bytes": 9847177216,
+        "measured": {
+          "max": 1314944760.0,
+          "median": 1314944760.0,
+          "min": 1314944760.0,
+          "sample_count": 5
+        },
+        "passed": true,
+        "sample_count": 5
+      },
+      "named_query_pages": {
+        "bytes": 3904,
+        "rows": 64
+      },
+      "passed": true,
+      "phases": {
+        "cleanup": {
+          "expected_samples": 5,
+          "metrics": {
+            "process_wall_ms": {
+              "max": 164.8265402764082,
+              "median": 161.55700013041496,
+              "min": 128.87008395045996,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "edit-add": {
+          "expected_samples": 5,
+          "metrics": {
+            "counter_changed_keys": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_chunks": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_expressions_evaluated": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "counter_objects_written": {
+              "max": 26.0,
+              "median": 26.0,
+              "min": 26.0,
+              "sample_count": 5
+            },
+            "counter_operator_work": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_revision": {
+              "max": 11.0,
+              "median": 11.0,
+              "min": 11.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_read": {
+              "max": 1201512.0,
+              "median": 1201512.0,
+              "min": 1201512.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_written": {
+              "max": 1209690.0,
+              "median": 1209690.0,
+              "min": 1209690.0,
+              "sample_count": 5
+            },
+            "counter_state_node_reads": {
+              "max": 19.0,
+              "median": 19.0,
+              "min": 19.0,
+              "sample_count": 5
+            },
+            "edit_ms": {
+              "max": 101.127375,
+              "median": 94.699125,
+              "min": 92.07,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 89735168.0,
+              "median": 84459520.0,
+              "min": 84213760.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 424.5267082005739,
+              "median": 422.59704042226076,
+              "min": 410.31533386558294,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 49.038,
+              "median": 43.71,
+              "min": 43.242,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "edit-retract": {
+          "expected_samples": 5,
+          "metrics": {
+            "counter_changed_keys": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_chunks": {
+              "max": 1.0,
+              "median": 1.0,
+              "min": 1.0,
+              "sample_count": 5
+            },
+            "counter_expressions_evaluated": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "counter_objects_written": {
+              "max": 4.0,
+              "median": 4.0,
+              "min": 4.0,
+              "sample_count": 5
+            },
+            "counter_operator_work": {
+              "max": 3.0,
+              "median": 3.0,
+              "min": 3.0,
+              "sample_count": 5
+            },
+            "counter_revision": {
+              "max": 12.0,
+              "median": 12.0,
+              "min": 12.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_read": {
+              "max": 1202071.0,
+              "median": 1202071.0,
+              "min": 1202071.0,
+              "sample_count": 5
+            },
+            "counter_state_bytes_written": {
+              "max": 2150.0,
+              "median": 2150.0,
+              "min": 2150.0,
+              "sample_count": 5
+            },
+            "counter_state_node_reads": {
+              "max": 21.0,
+              "median": 21.0,
+              "min": 21.0,
+              "sample_count": 5
+            },
+            "edit_ms": {
+              "max": 103.201292,
+              "median": 96.46020800000001,
+              "min": 94.892917,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 69107712.0,
+              "median": 62963712.0,
+              "min": 62750720.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 211.78045962005854,
+              "median": 203.91858369112015,
+              "min": 202.91920751333237,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 34.777,
+              "median": 34.022,
+              "min": 30.146,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "load": {
+          "expected_samples": 5,
+          "metrics": {
+            "commit_ms": {
+              "max": 70364.658542,
+              "median": 69298.618667,
+              "min": 67693.145667,
+              "sample_count": 5
+            },
+            "fixture_generation_ms": {
+              "max": 1135.324749,
+              "median": 1124.653999,
+              "min": 1122.396957,
+              "sample_count": 5
+            },
+            "load_ms": {
+              "max": 71496.55774999999,
+              "median": 70423.324542,
+              "min": 68817.040417,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 5176524800.0,
+              "median": 5147983872.0,
+              "min": 5031788544.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 72741.93566758186,
+              "median": 71574.10062476993,
+              "min": 69802.21108254045,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 32.119,
+              "median": 31.006,
+              "min": 28.162,
+              "sample_count": 5
+            },
+            "storage_allocated_bytes": {
+              "max": 1379835904.0,
+              "median": 1360510976.0,
+              "min": 1354076160.0,
+              "sample_count": 5
+            },
+            "storage_component_objects_source_state_and_indexes_allocated_bytes": {
+              "max": 1327005696.0,
+              "median": 1307680768.0,
+              "min": 1301245952.0,
+              "sample_count": 5
+            },
+            "storage_component_objects_source_state_and_indexes_logical_bytes": {
+              "max": 1262215015.0,
+              "median": 1262215015.0,
+              "min": 1262215015.0,
+              "sample_count": 5
+            },
+            "storage_component_receipts_allocated_bytes": {
+              "max": 40960.0,
+              "median": 40960.0,
+              "min": 40960.0,
+              "sample_count": 5
+            },
+            "storage_component_receipts_logical_bytes": {
+              "max": 2351.0,
+              "median": 2351.0,
+              "min": 2351.0,
+              "sample_count": 5
+            },
+            "storage_component_revision_journal_and_decisions_allocated_bytes": {
+              "max": 52764672.0,
+              "median": 52764672.0,
+              "min": 52764672.0,
+              "sample_count": 5
+            },
+            "storage_component_revision_journal_and_decisions_logical_bytes": {
+              "max": 52719505.0,
+              "median": 52719505.0,
+              "min": 52719505.0,
+              "sample_count": 5
+            },
+            "storage_component_root_metadata_allocated_bytes": {
+              "max": 24576.0,
+              "median": 24576.0,
+              "min": 24576.0,
+              "sample_count": 5
+            },
+            "storage_component_root_metadata_logical_bytes": {
+              "max": 7889.0,
+              "median": 7889.0,
+              "min": 7889.0,
+              "sample_count": 5
+            },
+            "storage_component_staging_scratch_allocated_bytes": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "storage_component_staging_scratch_logical_bytes": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "storage_logical_bytes": {
+              "max": 1314944760.0,
+              "median": 1314944760.0,
+              "min": 1314944760.0,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 30.419332999999998,
+              "median": 29.351625,
+              "min": 26.320834,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "open-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "peak_rss_bytes": {
+              "max": 34127872.0,
+              "median": 32604160.0,
+              "min": 32342016.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 211.82366646826267,
+              "median": 211.67333330959082,
+              "min": 202.19845790416002,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 33.487,
+              "median": 30.671,
+              "min": 25.508,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 44.382791,
+              "median": 42.551625,
+              "min": 41.280333,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "query-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "complete_query_ms": {
+              "max": 94.095416,
+              "median": 90.76983299999999,
+              "min": 89.173959,
+              "sample_count": 5
+            },
+            "first_page_ms": {
+              "max": 72.721417,
+              "median": 70.387,
+              "min": 69.039333,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 383729664.0,
+              "median": 374472704.0,
+              "min": 318963712.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 119684.92941558361,
+              "median": 119000.9794998914,
+              "min": 112961.54483407736,
+              "sample_count": 5
+            },
+            "query_bytes": {
+              "max": 3904.0,
+              "median": 3904.0,
+              "min": 3904.0,
+              "sample_count": 5
+            },
+            "query_expressions_evaluated": {
+              "max": 512.0,
+              "median": 512.0,
+              "min": 512.0,
+              "sample_count": 5
+            },
+            "query_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "query_rows": {
+              "max": 64.0,
+              "median": 64.0,
+              "min": 64.0,
+              "sample_count": 5
+            },
+            "query_work_units": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_bytes": {
+              "max": 2549432.0,
+              "median": 2549432.0,
+              "min": 2549432.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_complete_query_ms": {
+              "max": 1131.8007089999999,
+              "median": 1084.4302500000001,
+              "min": 1066.431875,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_bytes": {
+              "max": 263160.0,
+              "median": 263160.0,
+              "min": 263160.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_ms": {
+              "max": 119.20916700000001,
+              "median": 109.337208,
+              "min": 106.967375,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_pages": {
+              "max": 10.0,
+              "median": 10.0,
+              "min": 10.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_rows": {
+              "max": 9920.0,
+              "median": 9920.0,
+              "min": 9920.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_bytes": {
+              "max": 3760000.0,
+              "median": 3760000.0,
+              "min": 3760000.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_complete_query_ms": {
+              "max": 12137.778208,
+              "median": 11826.641083,
+              "min": 11318.941833,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_bytes": {
+              "max": 96256.0,
+              "median": 96256.0,
+              "min": 96256.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_ms": {
+              "max": 311.999916,
+              "median": 290.984333,
+              "min": 284.57475,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_pages": {
+              "max": 40.0,
+              "median": 40.0,
+              "min": 40.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_rows": {
+              "max": 40000.0,
+              "median": 40000.0,
+              "min": 40000.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_bytes": {
+              "max": 5825882.0,
+              "median": 5825882.0,
+              "min": 5825882.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_complete_query_ms": {
+              "max": 50335.649083,
+              "median": 50031.123791,
+              "min": 47488.005625,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_bytes": {
+              "max": 71680.0,
+              "median": 71680.0,
+              "min": 71680.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_ms": {
+              "max": 645.1052080000001,
+              "median": 626.228083,
+              "min": 600.5477080000001,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_pages": {
+              "max": 79.0,
+              "median": 79.0,
+              "min": 79.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_rows": {
+              "max": 80000.0,
+              "median": 80000.0,
+              "min": 80000.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_bytes": {
+              "max": 8244706.0,
+              "median": 8244706.0,
+              "min": 8244706.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_complete_query_ms": {
+              "max": 55966.593709,
+              "median": 55646.066916,
+              "min": 52835.1535,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_bytes": {
+              "max": 105533.0,
+              "median": 105533.0,
+              "min": 105533.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_ms": {
+              "max": 732.6919160000001,
+              "median": 693.477209,
+              "min": 668.905625,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_pages": {
+              "max": 79.0,
+              "median": 79.0,
+              "min": 79.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_rows": {
+              "max": 80000.0,
+              "median": 80000.0,
+              "min": 80000.0,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 32.017,
+              "median": 31.314,
+              "min": 30.474,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 43.472583,
+              "median": 43.091459,
+              "min": 42.576792000000005,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "setup": {
+          "expected_samples": 5,
+          "metrics": {
+            "init_ms": {
+              "max": 32.810249999999996,
+              "median": 30.210250000000002,
+              "min": 26.1315,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 24117248.0,
+              "median": 24068096.0,
+              "min": 24068096.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 212.1932078152895,
+              "median": 204.40445747226477,
+              "min": 202.27049943059683,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 44.184,
+              "median": 43.844,
+              "min": 41.287,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "verify-after-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "correctness_ms": {
+              "max": 416285.54829199996,
+              "median": 411968.723917,
+              "min": 397150.972625,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 8963506176.0,
+              "median": 7812628480.0,
+              "min": 7652786176.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 416593.63858308643,
+              "median": 412224.6473748237,
+              "min": 397445.3108748421,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 29.222,
+              "median": 28.486,
+              "min": 26.716,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "verify-loaded-world": {
+          "expected_samples": 5,
+          "metrics": {
+            "correctness_ms": {
+              "max": 417018.432333,
+              "median": 410400.765792,
+              "min": 398762.177542,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 7750320128.0,
+              "median": 7619641344.0,
+              "min": 7478149120.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 417397.99766708165,
+              "median": 410751.4946665615,
+              "min": 399241.42091721296,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 33.954,
+              "median": 27.554,
+              "min": 25.974,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        },
+        "warm-query-before-edits": {
+          "expected_samples": 5,
+          "metrics": {
+            "complete_query_ms": {
+              "max": 41.504917,
+              "median": 40.799291000000004,
+              "min": 40.006375,
+              "sample_count": 5
+            },
+            "first_page_ms": {
+              "max": 21.132917000000003,
+              "median": 20.61225,
+              "min": 20.188292,
+              "sample_count": 5
+            },
+            "peak_rss_bytes": {
+              "max": 410370048.0,
+              "median": 405422080.0,
+              "min": 371851264.0,
+              "sample_count": 5
+            },
+            "process_wall_ms": {
+              "max": 240492.72862449288,
+              "median": 237254.9245832488,
+              "min": 226956.0797084123,
+              "sample_count": 5
+            },
+            "query_bytes": {
+              "max": 3904.0,
+              "median": 3904.0,
+              "min": 3904.0,
+              "sample_count": 5
+            },
+            "query_expressions_evaluated": {
+              "max": 512.0,
+              "median": 512.0,
+              "min": 512.0,
+              "sample_count": 5
+            },
+            "query_matches": {
+              "max": 0.0,
+              "median": 0.0,
+              "min": 0.0,
+              "sample_count": 5
+            },
+            "query_rows": {
+              "max": 64.0,
+              "median": 64.0,
+              "min": 64.0,
+              "sample_count": 5
+            },
+            "query_work_units": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_bytes": {
+              "max": 2549432.0,
+              "median": 2549432.0,
+              "min": 2549432.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_complete_query_ms": {
+              "max": 1155.35675,
+              "median": 1106.128334,
+              "min": 1068.0571670000002,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_bytes": {
+              "max": 263160.0,
+              "median": 263160.0,
+              "min": 263160.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_ms": {
+              "max": 118.838208,
+              "median": 108.96062500000001,
+              "min": 106.000917,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_pages": {
+              "max": 10.0,
+              "median": 10.0,
+              "min": 10.0,
+              "sample_count": 5
+            },
+            "relation_root::activity_pages_rows": {
+              "max": 9920.0,
+              "median": 9920.0,
+              "min": 9920.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_bytes": {
+              "max": 3760000.0,
+              "median": 3760000.0,
+              "min": 3760000.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_complete_query_ms": {
+              "max": 12014.745832999999,
+              "median": 11794.455459,
+              "min": 11329.557875,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_bytes": {
+              "max": 96256.0,
+              "median": 96256.0,
+              "min": 96256.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_ms": {
+              "max": 299.732791,
+              "median": 291.270042,
+              "min": 281.515416,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_pages": {
+              "max": 40.0,
+              "median": 40.0,
+              "min": 40.0,
+              "sample_count": 5
+            },
+            "relation_root::all_entities_rows": {
+              "max": 40000.0,
+              "median": 40000.0,
+              "min": 40000.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_bytes": {
+              "max": 5825882.0,
+              "median": 5825882.0,
+              "min": 5825882.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_complete_query_ms": {
+              "max": 50925.555292,
+              "median": 50091.767208,
+              "min": 47821.856167,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_bytes": {
+              "max": 71680.0,
+              "median": 71680.0,
+              "min": 71680.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_ms": {
+              "max": 643.886208,
+              "median": 614.74125,
+              "min": 601.889959,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_pages": {
+              "max": 79.0,
+              "median": 79.0,
+              "min": 79.0,
+              "sample_count": 5
+            },
+            "relation_root::decision_value_join_rows": {
+              "max": 80000.0,
+              "median": 80000.0,
+              "min": 80000.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_bytes": {
+              "max": 8244706.0,
+              "median": 8244706.0,
+              "min": 8244706.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_complete_query_ms": {
+              "max": 56136.269583999994,
+              "median": 55471.706957999995,
+              "min": 53054.809375,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_bytes": {
+              "max": 105533.0,
+              "median": 105533.0,
+              "min": 105533.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_ms": {
+              "max": 755.405167,
+              "median": 700.806416,
+              "min": 669.6134999999999,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_first_page_rows": {
+              "max": 1024.0,
+              "median": 1024.0,
+              "min": 1024.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_pages": {
+              "max": 79.0,
+              "median": 79.0,
+              "min": 79.0,
+              "sample_count": 5
+            },
+            "relation_root::fulfillment_rows": {
+              "max": 80000.0,
+              "median": 80000.0,
+              "min": 80000.0,
+              "sample_count": 5
+            },
+            "spawn_to_main_entry_ms": {
+              "max": 33.806,
+              "median": 32.254,
+              "min": 25.789,
+              "sample_count": 5
+            },
+            "world_open_ms": {
+              "max": 47.121292000000004,
+              "median": 43.230542,
+              "min": 41.402792,
+              "sample_count": 5
+            }
+          },
+          "status_counts": {
+            "ok": 5
+          },
+          "valid_samples": 5
+        }
+      },
+      "profile": "ten",
+      "required_repetitions": 5,
+      "size": 800000,
+      "source_counts": {
+        "root::catalogue": 128,
+        "root::decision_labels": 2,
+        "root::entity_a": 40000,
+        "root::entity_b": 40000,
+        "root::events": 639806,
+        "root::inventory": 64,
+        "root::orders": 80000
+      }
+    }
+  ],
+  "expected_cells": 6,
+  "failures": [],
+  "global_identity": {
+    "binary_sha256": [
+      "fc33c9f1746551bd5aa50d68e8e1afae4f98c4cdbfed99789e5cb79030d9538e"
+    ],
+    "embedded_build_commit": [
+      "12e37f8b40f2137516e6c9ede60c7431d942fdd5"
+    ],
+    "host_metadata_sha256": [
+      "002cd2937eb2c281286e85a37a83e684a4b7aebd1869badf1cf4b61fd57cca81"
+    ],
+    "repository_commit": [
+      "12e37f8b40f2137516e6c9ede60c7431d942fdd5"
+    ],
+    "rustc": [
+      "rustc 1.96.1 (31fca3adb 2026-06-26)"
+    ]
+  },
+  "qualified": true,
+  "raw_jsonl": "docs/performance/raw/alpha9-scale-all.jsonl",
+  "required_repetitions": 5,
+  "schema": "brix.alpha9.scale-summary@1"
+}

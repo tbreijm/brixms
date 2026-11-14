@@ -48,6 +48,28 @@ pub fn emit_result_json<T: Serialize>(payload: &T) {
     }
 }
 
+/// Add the validated request identity without changing legacy result schemas.
+/// The existing `context` field keeps its runtime context meaning.
+pub fn emit_result_json_with_request_context<T: Serialize>(
+    payload: &T,
+    context: Option<brix_semantic::ContextId>,
+) {
+    #[derive(Serialize)]
+    struct ContextualResult<'a, T: Serialize> {
+        #[serde(flatten)]
+        payload: &'a T,
+        request_context: String,
+    }
+    if let Some(context) = context {
+        emit_result_json(&ContextualResult {
+            payload,
+            request_context: context.digest().to_hex(),
+        });
+    } else {
+        emit_result_json(payload);
+    }
+}
+
 /// Run `f` (a full command invocation made with `json: true`) with stdout
 /// JSON capture active, and return the exact JSON value it would otherwise
 /// have printed, along with `f`'s own return value (the exit code).

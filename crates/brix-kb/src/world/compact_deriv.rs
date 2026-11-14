@@ -133,6 +133,7 @@ pub fn leaf_counts(dag: &RelationDag) -> Vec<usize> {
             OperatorNode::Scan { .. }
             | OperatorNode::DecisionRows { .. }
             | OperatorNode::Distinct { .. }
+            | OperatorNode::UnionDistinct { .. }
             | OperatorNode::GroupedCount { .. }
             | OperatorNode::DisjointUnion { .. } => 1,
             OperatorNode::Bind { input, .. }
@@ -277,10 +278,12 @@ fn shape(dag: &RelationDag, op: OperatorId, leaves: &[Leaf], i: &mut usize) -> R
             shape(dag, *left, leaves, i)?;
             shape(dag, *right, leaves, i)
         }
-        OperatorNode::Distinct { .. } => match next_leaf(leaves, i)? {
-            Leaf::Distinct(_) => Ok(()),
-            _ => noncanon("distinct operator expects a distinct leaf"),
-        },
+        OperatorNode::Distinct { .. } | OperatorNode::UnionDistinct { .. } => {
+            match next_leaf(leaves, i)? {
+                Leaf::Distinct(_) => Ok(()),
+                _ => noncanon("distinct operator expects a distinct leaf"),
+            }
+        }
         OperatorNode::GroupedCount { .. } | OperatorNode::DisjointUnion { .. } => {
             match next_leaf(leaves, i)? {
                 Leaf::Group(_) => Ok(()),
@@ -331,13 +334,15 @@ fn unfold(dag: &RelationDag, op: OperatorId, leaves: &[Leaf], i: &mut usize) -> 
                 right: Box::new(r),
             })
         }
-        OperatorNode::Distinct { .. } => match next_leaf(leaves, i)? {
-            Leaf::Distinct(k) => Ok(DerivationId::Distinct {
-                op,
-                tuple_key: k.clone(),
-            }),
-            _ => noncanon("distinct operator expects a distinct leaf"),
-        },
+        OperatorNode::Distinct { .. } | OperatorNode::UnionDistinct { .. } => {
+            match next_leaf(leaves, i)? {
+                Leaf::Distinct(k) => Ok(DerivationId::Distinct {
+                    op,
+                    tuple_key: k.clone(),
+                }),
+                _ => noncanon("distinct operator expects a distinct leaf"),
+            }
+        }
         OperatorNode::GroupedCount { .. } | OperatorNode::DisjointUnion { .. } => {
             match next_leaf(leaves, i)? {
                 Leaf::Group(k) => Ok(DerivationId::Group {

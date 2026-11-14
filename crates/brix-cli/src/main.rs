@@ -23,9 +23,13 @@ use std::process::ExitCode;
 
 pub mod cli;
 pub mod commands;
+pub mod host_context;
 pub mod json;
+pub mod named_query;
 pub mod packages;
 pub mod pipeline;
+pub mod request_audit;
+pub mod request_evidence;
 pub mod serve;
 
 fn main() -> ExitCode {
@@ -47,7 +51,42 @@ where
     I: IntoIterator<Item = T>,
     T: Into<String>,
 {
-    match cli::parse_args(args) {
+    let raw_args: Vec<String> = args.into_iter().map(Into::into).collect();
+    let json_out = raw_args.iter().any(|arg| arg == "--json");
+    let (args, policy_path) = match extract_request_context_args(raw_args) {
+        Ok(value) => value,
+        Err(message) => return pipeline::invocation_evidence_error("brix", message, json_out),
+    };
+    let command = cli::parse_args(args);
+    let supports_context = matches!(
+        &command,
+        Ok(cli::Command::Run { .. }
+            | cli::Command::Why { .. }
+            | cli::Command::WhyNot { .. }
+            | cli::Command::Audit { .. }
+            | cli::Command::Verify { .. })
+    );
+    if policy_path.is_some() && !supports_context {
+        return pipeline::invocation_evidence_error(
+            "brix",
+            "--request-context is supported by run, why, whynot, audit and verify".into(),
+            json_out,
+        );
+    }
+    let invocation = if supports_context {
+        let loaded = if let Some(path) = policy_path {
+            load_invocation_policy(&path)
+        } else {
+            request_evidence::InvocationEvidenceContext::from_environment()
+        };
+        match loaded {
+            Ok(context) => context,
+            Err(message) => return pipeline::invocation_evidence_error("brix", message, json_out),
+        }
+    } else {
+        request_evidence::InvocationEvidenceContext::empty()
+    };
+    match command {
         Ok(cli::Command::Help) => {
             cli::print_help();
             cli::EXIT_SUCCESS
@@ -67,7 +106,13 @@ where
             json,
             package_paths,
             input_paths,
-        }) => commands::run::execute_run(&file, json, &package_paths, &input_paths),
+        }) => commands::run::execute_run_with_context(
+            &file,
+            json,
+            &package_paths,
+            &input_paths,
+            &invocation,
+        ),
         Ok(cli::Command::Audit {
             file,
             bundle_out,
@@ -75,13 +120,14 @@ where
             json,
             package_paths,
             input_paths,
-        }) => commands::audit::execute_audit(
+        }) => commands::audit::execute_audit_with_context(
             &file,
             &bundle_out,
             force,
             json,
             &package_paths,
             &input_paths,
+            &invocation,
         ),
         Ok(cli::Command::Verify {
             expect_program,
@@ -91,7 +137,7 @@ where
             json,
             package_paths,
             input_paths,
-        }) => commands::verify::execute_verify(
+        }) => commands::verify::execute_verify_with_context(
             &expect_program,
             &file,
             &bundle,
@@ -99,6 +145,7 @@ where
             json,
             &package_paths,
             &input_paths,
+            &invocation,
         ),
         Ok(cli::Command::Why {
             file,
@@ -107,7 +154,7 @@ where
             json,
             package_paths,
             input_paths,
-        }) => commands::why::execute_why_or_whynot(
+        }) => commands::why::execute_why_or_whynot_with_context(
             &file,
             &candidate,
             entity,
@@ -115,6 +162,7 @@ where
             &package_paths,
             &input_paths,
             false,
+            &invocation,
         ),
         Ok(cli::Command::WhyNot {
             file,
@@ -123,7 +171,7 @@ where
             json,
             package_paths,
             input_paths,
-        }) => commands::why::execute_why_or_whynot(
+        }) => commands::why::execute_why_or_whynot_with_context(
             &file,
             &candidate,
             entity,
@@ -131,11 +179,28 @@ where
             &package_paths,
             &input_paths,
             true,
+            &invocation,
+        ),
+        Ok(cli::Command::Context {
+            file,
+            expect,
+            store,
+            profile,
+            simulation,
+            json,
+        }) => commands::context::execute(
+            &file,
+            expect.as_deref(),
+            store.as_deref(),
+            &profile,
+            simulation,
+            json,
         ),
         Ok(cli::Command::Test { files, json }) => commands::test::execute_test(&files, json),
         Ok(cli::Command::Kb { op, json }) => commands::kb::execute_kb(&op, json),
         Ok(cli::Command::World { op, json }) => commands::world::execute_world(&op, json),
         Ok(cli::Command::Serve) => serve::run_stdio(),
+        Ok(cli::Command::ServeHost) => serve::run_stdio_with_host(true),
         Err(err) => {
             if err.is_json {
                 let cmd_name = err.command.unwrap_or_else(|| "brix".to_string());
@@ -154,6 +219,51 @@ where
             cli::EXIT_USAGE_OR_IO
         }
     }
+}
+
+fn extract_request_context_args(
+    args: Vec<String>,
+) -> Result<(Vec<String>, Option<std::path::PathBuf>), String> {
+    let mut rest = Vec::new();
+    let mut policy = None;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let path = if arg == "--request-context" {
+            Some(
+                args.next()
+                    .ok_or("--request-context requires a host policy file")?,
+            )
+        } else {
+            arg.strip_prefix("--request-context=").map(str::to_owned)
+        };
+        if let Some(path) = path {
+            if path.is_empty() || policy.replace(std::path::PathBuf::from(path)).is_some() {
+                return Err("--request-context must name exactly one host policy file".into());
+            }
+        } else {
+            rest.push(arg);
+        }
+    }
+    Ok((rest, policy))
+}
+
+fn load_invocation_policy(
+    path: &std::path::Path,
+) -> Result<request_evidence::InvocationEvidenceContext, String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| {
+            file.take((request_evidence::MAX_REQUEST_EVIDENCE_POLICY_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+        })
+        .map_err(|error| format!("cannot read host request policy: {error}"))?;
+    if bytes.len() > request_evidence::MAX_REQUEST_EVIDENCE_POLICY_BYTES {
+        return Err("host request policy exceeds byte limit".into());
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| "host request policy is not UTF-8")?;
+    let value = host_context::parse_unique_json(text)?;
+    request_evidence::InvocationEvidenceContext::from_host_policy_json(&value)
 }
 
 #[cfg(test)]
@@ -229,6 +339,29 @@ mod tests {
         assert_eq!(
             run_with_args(["test", "/nonexistent/path/suite.test.json"]),
             cli::EXIT_USAGE_OR_IO
+        );
+    }
+    #[test]
+    fn invocation_policy_option_cannot_be_ambiguous_or_ignored() {
+        assert!(
+            extract_request_context_args(vec!["run".into(), "--request-context".into()]).is_err()
+        );
+        assert!(extract_request_context_args(vec![
+            "--request-context=a".into(),
+            "--request-context=b".into()
+        ])
+        .is_err());
+        let (args, policy) = extract_request_context_args(vec![
+            "run".into(),
+            "--request-context=host.json".into(),
+            "a.brix".into(),
+        ])
+        .unwrap();
+        assert_eq!(args, vec!["run", "a.brix"]);
+        assert_eq!(policy, Some(std::path::PathBuf::from("host.json")));
+        assert_eq!(
+            run_with_args(["serve", "--stdio", "--request-context=host.json"]),
+            cli::EXIT_REJECTED_OR_UNKNOWN
         );
     }
 }

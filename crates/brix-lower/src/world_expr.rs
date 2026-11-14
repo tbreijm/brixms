@@ -40,6 +40,10 @@ fn normalize_world_and(expr: &ast::Expr) -> ast::Expr {
                 .collect(),
         },
         Expr::Field(base, field) => Expr::Field(Box::new(normalize_world_and(base)), field.clone()),
+        Expr::CollectTake { collection, limit } => Expr::CollectTake {
+            collection: Box::new(normalize_world_and(collection)),
+            limit: Box::new(normalize_world_and(limit)),
+        },
         Expr::Call { func, args } => Expr::Call {
             func: func.clone(),
             args: args.iter().map(normalize_world_and).collect(),
@@ -419,13 +423,22 @@ impl CompiledWorldExpr {
             .with_functions(self.functions.clone())
             .with_schemas(self.schemas.clone())
             .with_checked_constructors();
+        let mut bound_lists = BTreeSet::new();
         for (name, value) in bindings {
+            collect_bound_lists(value, &mut bound_lists);
             env = env.with_let(name, value.clone());
         }
         let (value, steps) = l3_v2::eval_with_budget(&self.expr, &env, max_steps)
             .map_err(|fault| format!("Unknown(EvaluationFault): {fault}"))?;
         let mut remaining = crate::input::MAX_INPUT_VALUE_NODES;
-        validate_value_bounds(&value, 0, &mut remaining)?;
+        let mut world_remaining = crate::input::MAX_WORLD_VALUE_NODES;
+        validate_value_bounds(
+            &value,
+            0,
+            &mut remaining,
+            &mut world_remaining,
+            &bound_lists,
+        )?;
         validate_world_result(&value, &self.schemas)?;
         Ok((value, steps))
     }
@@ -435,25 +448,67 @@ impl CompiledWorldExpr {
     }
 }
 
+fn collect_bound_lists(value: &L3ValueV2, out: &mut BTreeSet<usize>) {
+    match value {
+        L3ValueV2::List(items) => {
+            out.insert(items.as_ptr() as *const () as usize);
+            for item in items.iter() {
+                collect_bound_lists(item, out);
+            }
+        }
+        L3ValueV2::Record { fields, .. } => {
+            for (_, v) in fields {
+                collect_bound_lists(v, out);
+            }
+        }
+        L3ValueV2::Ctor { args, .. } => {
+            for a in args {
+                collect_bound_lists(a, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 // Apply the brix.input@2 value budget to the complete result, before it can
 // enter persistent state. Lists preserve expression order and duplicates.
+// Pre-existing relational collection lists bound into `bindings` are governed
+// by MAX_COLLECTION_ELEMENTS and MAX_WORLD_VALUE_NODES; lists constructed inside
+// an expression remain bounded by MAX_INPUT_CONTAINER_WIDTH and MAX_INPUT_VALUE_NODES.
 fn validate_value_bounds(
     value: &L3ValueV2,
     depth: usize,
     remaining: &mut usize,
+    world_remaining: &mut usize,
+    bound_lists: &BTreeSet<usize>,
 ) -> Result<(), String> {
-    use crate::input::{MAX_INPUT_CONTAINER_WIDTH, MAX_INPUT_VALUE_DEPTH};
-    if depth >= MAX_INPUT_VALUE_DEPTH || *remaining == 0 {
+    use crate::input::{MAX_COLLECTION_ELEMENTS, MAX_INPUT_CONTAINER_WIDTH, MAX_INPUT_VALUE_DEPTH};
+    if depth >= MAX_INPUT_VALUE_DEPTH || *remaining == 0 || *world_remaining == 0 {
         return Err("world value (including list values) exceeds depth or node limit".into());
     }
     *remaining -= 1;
+    *world_remaining -= 1;
+    let is_bound_list = match value {
+        L3ValueV2::List(items) => bound_lists.contains(&(items.as_ptr() as *const () as usize)),
+        _ => false,
+    };
     let children: Vec<&L3ValueV2> = match value {
         L3ValueV2::List(items) => items.iter().collect(),
         L3ValueV2::Record { fields, .. } => fields.iter().map(|(_, v)| v).collect(),
         L3ValueV2::Ctor { args, .. } => args.iter().collect(),
         _ => return Ok(()),
     };
-    if children.len() > MAX_INPUT_CONTAINER_WIDTH || children.len() > *remaining {
+    let max_width = if is_bound_list {
+        MAX_COLLECTION_ELEMENTS
+    } else {
+        MAX_INPUT_CONTAINER_WIDTH
+    };
+    let available = if is_bound_list {
+        *world_remaining
+    } else {
+        *remaining
+    };
+    if children.len() > max_width || children.len() > available {
         let kind = if matches!(value, L3ValueV2::List(_)) {
             "list"
         } else {
@@ -463,8 +518,21 @@ fn validate_value_bounds(
             "{kind} value exceeds container width ({MAX_INPUT_CONTAINER_WIDTH}) or node limit"
         ));
     }
-    for child in children {
-        validate_value_bounds(child, depth + 1, remaining)?;
+    if is_bound_list {
+        for child in children {
+            let mut sub_remaining = crate::input::MAX_INPUT_VALUE_NODES;
+            validate_value_bounds(
+                child,
+                depth + 1,
+                &mut sub_remaining,
+                world_remaining,
+                bound_lists,
+            )?;
+        }
+    } else {
+        for child in children {
+            validate_value_bounds(child, depth + 1, remaining, world_remaining, bound_lists)?;
+        }
     }
     Ok(())
 }

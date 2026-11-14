@@ -1,0 +1,3 @@
+rel input record: { id: Str, kind: Str, ordinal: Int } key id
+rel derived groups = select { kind: r.kind, ids: collect(r.id, r.ordinal, 100) } from r in record group by r.kind
+decide selected for g in groups per kind { propose answer priority 1 when true = g.ids }

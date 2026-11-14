@@ -3,7 +3,10 @@
 use std::collections::BTreeMap;
 
 use brix_lower::module_graph::{ModuleGraph, ModuleLoaderLimits};
-use brix_lower::relation_dag::{lower_relations, OperatorNode, RelationalLowerError};
+use brix_lower::relation_dag::{
+    admit_named_queries_v1, lower_named_query_v1, lower_relations, OperatorNode,
+    RelationalLowerError,
+};
 
 #[test]
 fn test_adr0046_fulfillment_lowering_to_operator_dag() {
@@ -76,6 +79,74 @@ rel derived fulfillment =
         }
         _ => unreachable!(),
     }
+}
+
+#[test]
+fn named_query_admission_resolves_schema_and_rejects_unsupported_param_type() {
+    let source = r#"
+rel input catalogue_entries: { id: Str, kind: Str } key id
+query catalogue(kind: Str) = select { id: c.id, kind: c.kind }
+  from c in catalogue_entries where c.kind == kind
+"#;
+    let sources = BTreeMap::from([("root".to_string(), source.to_string())]);
+    let loader = |name: &str| sources.get(name).cloned();
+    let linked = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default())
+        .unwrap()
+        .link()
+        .unwrap();
+    let schema = admit_named_queries_v1(&linked).unwrap();
+    assert_eq!(schema["catalogue"].result_fields.len(), 2);
+    assert_eq!(schema["catalogue"].params[0].name, "kind");
+
+    let bad = source.replace("kind: Str", "kind: Float");
+    let sources = BTreeMap::from([("root".to_string(), bad)]);
+    let loader = |name: &str| sources.get(name).cloned();
+    let linked = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default())
+        .unwrap()
+        .link()
+        .unwrap();
+    assert!(admit_named_queries_v1(&linked).is_err());
+}
+
+#[test]
+fn named_query_lowering_prunes_unrelated_relations_and_decisions() {
+    let source = r#"
+rel input catalogue_entries: { id: Str } key id
+rel input unrelated_rows: { id: Str } key id
+rel derived unused_branch = select { id: u.id } from u in unrelated_rows
+decide unrelated_decision for u in unrelated_rows per id {
+  propose keep priority 1 when true = "yes"
+}
+query catalogue() = select { id: c.id } from c in catalogue_entries
+"#;
+    let sources = BTreeMap::from([("root".to_string(), source.to_string())]);
+    let loader = |name: &str| sources.get(name).cloned();
+    let linked = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default())
+        .unwrap()
+        .link()
+        .unwrap();
+    let query = linked
+        .root_items
+        .iter()
+        .find_map(|item| match item {
+            brix_syntax::ast::Item::Query(query) => Some(query),
+            _ => None,
+        })
+        .unwrap();
+    let lowered = lower_named_query_v1(&linked, query, &BTreeMap::new()).unwrap();
+    assert_eq!(lowered.program.rel_inputs.len(), 1);
+    assert!(lowered
+        .program
+        .rel_inputs
+        .keys()
+        .all(|name| name.name == "catalogue_entries"));
+    assert_eq!(lowered.program.rel_derived.len(), 1);
+    assert!(lowered.program.decides.is_empty());
+    assert!(lowered
+        .dag
+        .relation_outputs
+        .keys()
+        .all(|name| !name.contains("unrelated") && !name.contains("unused_branch")));
 }
 
 #[test]
@@ -296,6 +367,90 @@ rel derived backordered_sku_count =
 }
 
 #[test]
+fn bounded_collect_take_has_distinct_dag_projection_and_record_schema() {
+    let source = r#"
+rel input events: { id: Str, category: Str, value: Str } key id
+rel derived grouped =
+    select { category: e.category, recent: collect(e.value, e.id).take(2) }
+    from e in events
+    group by e.category
+"#;
+    let sources = BTreeMap::from([("root".to_string(), source.to_string())]);
+    let loader = |name: &str| sources.get(name).cloned();
+    let linked = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default())
+        .unwrap()
+        .link()
+        .unwrap();
+    let dag = lower_relations(&linked).expect("bounded collect should lower");
+    let grouped = dag
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, node)| match node {
+            OperatorNode::GroupedCount { projections, .. } => Some((index, projections)),
+            _ => None,
+        })
+        .expect("grouped projection node");
+    assert!(grouped.1.iter().any(|(name, projection)| {
+        name == "recent"
+            && matches!(
+                projection,
+                brix_lower::relation_dag::GroupProjection::CollectTake {
+                    limit: 2,
+                    order_by: Some(_),
+                    ..
+                }
+            )
+    }));
+    let schemas = brix_lower::relation_dag::decision_field_schemas(&dag, &linked);
+    let recent = schemas[grouped.0].get("recent").expect("recent schema");
+    assert_eq!(
+        recent,
+        &brix_syntax::ast::Ty::Record(vec![
+            brix_syntax::ast::FieldDecl {
+                name: "items".into(),
+                ty: brix_syntax::ast::Ty::App(
+                    "List".into(),
+                    vec![brix_syntax::ast::Ty::Named("Str".into())],
+                ),
+            },
+            brix_syntax::ast::FieldDecl {
+                name: "truncated".into(),
+                ty: brix_syntax::ast::Ty::Named("Bool".into()),
+            },
+        ])
+    );
+}
+
+#[test]
+fn bounded_collect_take_accepts_zero_and_rejects_invalid_limits() {
+    let base = r#"
+rel input events: { id: Str, category: Str, value: Str } key id
+rel derived grouped =
+    select { category: e.category, recent: collect(e.value).take(LIMIT) }
+    from e in events
+    group by e.category
+"#;
+    for (limit, accepted) in [
+        ("0", true),
+        ("1", true),
+        ("-1", false),
+        ("1.5", false),
+        ("n", false),
+        ("65537", false),
+    ] {
+        let source = base.replace("LIMIT", limit);
+        let sources = BTreeMap::from([("root".to_string(), source)]);
+        let loader = |name: &str| sources.get(name).cloned();
+        let linked = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default())
+            .unwrap()
+            .link()
+            .unwrap();
+        assert_eq!(lower_relations(&linked).is_ok(), accepted, "limit {limit}");
+    }
+}
+
+#[test]
 fn test_recursive_relation_cycle_rejected() {
     let src = r#"
 rel input base: { id: Str } key id
@@ -442,5 +597,221 @@ rel derived bad_join =
     match err {
         RelationalLowerError::MissingEquiJoinPredicate { .. } => {}
         other => panic!("expected MissingEquiJoinPredicate, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_scalar_projection_accepts_expression_and_exposes_value_field() {
+    let src = r#"
+rel input rows: { id: Str, count: Int } key id
+rel derived ids = select r.id from r in rows
+"#;
+    let mut sources = BTreeMap::new();
+    sources.insert("root".to_string(), src.to_string());
+    let loader = |name: &str| sources.get(name).cloned();
+    let graph = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default()).expect("loads");
+    let linked = graph.link().expect("links");
+    let dag = lower_relations(&linked).expect("scalar projection must be accepted");
+
+    let ids_op = dag.relation_outputs["root::ids"];
+    let distinct_node = &dag.nodes[ids_op.0];
+    let project_op = match distinct_node {
+        OperatorNode::Distinct { input } => *input,
+        other => panic!("expected Distinct, got {other:?}"),
+    };
+    let node = &dag.nodes[project_op.0];
+    match node {
+        OperatorNode::Project { projections, .. } => {
+            assert_eq!(projections.len(), 1);
+            assert_eq!(projections[0].0, "value");
+        }
+        other => panic!("expected Project, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_empty_anon_record_projection_rejected() {
+    let src = r#"
+rel input rows: { id: Str } key id
+rel derived bad = select {} from r in rows
+"#;
+    let mut sources = BTreeMap::new();
+    sources.insert("root".to_string(), src.to_string());
+    let loader = |name: &str| sources.get(name).cloned();
+    let graph = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default()).expect("loads");
+    let linked = graph.link().expect("links");
+    let err = lower_relations(&linked).expect_err("empty anon record must be rejected");
+    match err {
+        RelationalLowerError::UnsupportedExpression(msg) => {
+            assert!(
+                msg.contains("must not be an empty record projection"),
+                "{msg}"
+            );
+        }
+        other => panic!("expected UnsupportedExpression, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_union_schema_resolved_through_dag_without_value_fallback() {
+    let src = r#"
+rel input r1: { id: Str, tag: Str, count: Int } key id
+rel input r2: { id: Str, tag: Str, count: Int } key id
+rel derived u = union r1, r2 key id
+rel derived projected = select { id: u.id, tag: u.tag, twice: u.count } from u in u
+"#;
+    let mut sources = BTreeMap::new();
+    sources.insert("root".to_string(), src.to_string());
+    let loader = |name: &str| sources.get(name).cloned();
+    let graph = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default()).expect("loads");
+    let linked = graph.link().expect("links");
+    let dag = lower_relations(&linked).expect("union schema resolution must succeed");
+
+    assert!(dag.relation_outputs.contains_key("root::u"));
+    assert!(dag.relation_outputs.contains_key("root::projected"));
+}
+
+#[test]
+fn test_union_distinct_lowering_to_operator_node() {
+    let src = r#"
+rel input a: { id: Str, name: Str } key id
+rel input b: { id: Str, name: Str } key id
+rel input c: { id: Str, name: Str } key id
+rel derived combined = union distinct a, b, c
+"#;
+    let mut sources = BTreeMap::new();
+    sources.insert("root".to_string(), src.to_string());
+    let loader = |name: &str| sources.get(name).cloned();
+    let graph = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default()).expect("loads");
+    let linked = graph.link().expect("links");
+    let dag = lower_relations(&linked).expect("union distinct lowering");
+
+    let combined_op = dag.relation_outputs["root::combined"];
+    match &dag.nodes[combined_op.0] {
+        OperatorNode::UnionDistinct { sources } => {
+            assert_eq!(sources.len(), 3);
+        }
+        other => panic!("expected UnionDistinct node, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_union_mismatched_schemas_rejected_with_diagnostic() {
+    let src = r#"
+rel input r1: { id: Str, amount: Int } key id
+rel input r2: { id: Str, amount: Str } key id
+rel derived bad_u = union r1, r2 key id
+"#;
+    let mut sources = BTreeMap::new();
+    sources.insert("root".to_string(), src.to_string());
+    let loader = |name: &str| sources.get(name).cloned();
+    let graph = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default()).expect("loads");
+    let linked = graph.link().expect("links");
+    let err = lower_relations(&linked).expect_err("mismatched union schemas must fail");
+    match err {
+        RelationalLowerError::UnsupportedExpression(msg) => {
+            assert!(msg.contains("bad_u"), "{msg}");
+            assert!(msg.contains("r2"), "{msg}");
+            assert!(msg.contains("amount"), "{msg}");
+        }
+        other => panic!("expected UnsupportedExpression, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_composite_decision_key_lowering_and_winner_schema() {
+    let src = r#"
+rel input tenants: { tenant: Str, id: Str, quota: Int } key id
+decide allocate for t in tenants per (tenant, id) {
+    propose grant priority 1 when t.quota > 0 = t.quota
+}
+rel derived granted = select { tenant: a.tenant, id: a.id, quota: a.value } from a in allocate
+"#;
+    let mut sources = BTreeMap::new();
+    sources.insert("root".to_string(), src.to_string());
+    let loader = |name: &str| sources.get(name).cloned();
+    let graph = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default()).expect("loads");
+    let linked = graph.link().expect("links");
+    let dag = lower_relations(&linked).expect("composite decision key lowering");
+
+    assert!(dag.relation_outputs.contains_key("root::allocate"));
+    assert!(dag.relation_outputs.contains_key("root::granted"));
+}
+
+#[test]
+fn test_nested_field_path_equijoin_lowering() {
+    let src = r#"
+config Meta = { score: Int, label: Str }
+config Wrapper = { meta: Meta, owner: Str }
+
+rel input accounts: { id: Str, w: Wrapper } key id
+rel input targets: { id: Str, target_score: Int } key id
+
+rel derived matched = select { account: a.id, target: b.id }
+    from a in accounts, b in targets
+    where a.w.meta.score == b.target_score
+"#;
+    let mut sources = BTreeMap::new();
+    sources.insert("root".to_string(), src.to_string());
+    let loader = |name: &str| sources.get(name).cloned();
+    let graph = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default()).expect("loads");
+    let linked = graph.link().expect("links");
+    let dag = lower_relations(&linked).expect("nested field path equijoin lowering");
+
+    let join_node = dag
+        .nodes
+        .iter()
+        .find(|n| matches!(n, OperatorNode::EquiJoin { .. }))
+        .expect("join node exists");
+    match join_node {
+        OperatorNode::EquiJoin {
+            left_keys,
+            right_keys,
+            ..
+        } => {
+            assert_eq!(left_keys[0].binding, "a");
+            assert_eq!(left_keys[0].field, "w.meta.score");
+            assert_eq!(right_keys[0].binding, "b");
+            assert_eq!(right_keys[0].field, "target_score");
+        }
+        other => panic!("expected EquiJoin, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_nested_field_path_through_unnarrowed_variant_rejected() {
+    let src = r#"
+config Shape = Circle(Int) | Rect(Int, Int)
+config Wrapper = { shape: Shape }
+
+rel input items: { id: Str, w: Wrapper } key id
+rel input targets: { id: Str, radius: Int } key id
+
+rel derived bad_join = select { item: i.id }
+    from i in items, t in targets
+    where i.w.shape.radius == t.radius
+"#;
+    let mut sources = BTreeMap::new();
+    sources.insert("root".to_string(), src.to_string());
+    let loader = |name: &str| sources.get(name).cloned();
+    let load_res = ModuleGraph::load("root", &loader, ModuleLoaderLimits::default());
+    match load_res {
+        Err(err) => {
+            let msg = format!("{err:?}");
+            assert!(
+                msg.contains("cannot project field") || msg.contains("through sum/variant type"),
+                "{msg}"
+            );
+        }
+        Ok(graph) => {
+            let linked = graph.link().expect("links");
+            let err = lower_relations(&linked)
+                .expect_err("path through un-narrowed sum variant must fail");
+            let msg = format!("{err:?}");
+            assert!(
+                msg.contains("through sum") || msg.contains("without pattern matching"),
+                "{msg}"
+            );
+        }
     }
 }

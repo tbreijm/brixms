@@ -72,8 +72,8 @@ pub use input::{
     input_snapshot_id, load_input_snapshot_from_paths, validate_against_declarations,
     validate_completeness, InputDecodeError, InputError, InputLimits, InputScalarValue, InputShard,
     InputSnapshot, InputSnapshotId, InputValidationError, InputValue, INPUT_SCHEMA_V1,
-    INPUT_SCHEMA_V2, MAX_INPUT_CONTAINER_WIDTH, MAX_INPUT_NAME_BYTES, MAX_INPUT_VALUE_DEPTH,
-    MAX_INPUT_VALUE_NODES,
+    INPUT_SCHEMA_V2, MAX_COLLECTION_ELEMENTS, MAX_INPUT_CONTAINER_WIDTH, MAX_INPUT_NAME_BYTES,
+    MAX_INPUT_VALUE_DEPTH, MAX_INPUT_VALUE_NODES, MAX_WORLD_VALUE_NODES,
 };
 pub use l3::{
     lower_l3_plan, L3ConfigBody, L3ConfigDecl, L3LowerError, L3PlanItem, L3PlanV1, L3TypeRef,
@@ -107,8 +107,9 @@ pub use module_graph::{
     ModuleLinkError, ModuleLoaderLimits, ModuleManifestEntry, ProgramGraphManifest, QualifiedName,
 };
 pub use relation_dag::{
-    decision_field_schemas, derive_binding_names, derive_decide_binding_names, lower_relations,
-    OperatorId, OperatorNode, RelationDag, RelationalLowerError,
+    decision_field_schemas, derive_binding_names, derive_decide_binding_names,
+    lower_named_query_v1, lower_relations, LoweredNamedQueryV1, OperatorId, OperatorNode,
+    QueryScalarV1, RelationDag, RelationalLowerError,
 };
 pub use soc_core::{
     decode_audit_input_bundle_v1, encode_audit_input_bundle_v1, AuditDecodeLimits,
@@ -865,6 +866,9 @@ pub fn lower_expr(e: &ast::Expr, ctx: LowerCtx) -> Result<TrExpr, LowerError> {
             Box::new(lower_expr(base, ctx)?),
             name.clone(),
         )),
+        ast::Expr::CollectTake { .. } => Err(LowerError::Unsupported(
+            "grouped collect take is not in the L2-first fragment".to_string(),
+        )),
         // `then` / `and` — the category's own composition operators, lowered
         // onto the kernel's `RealizesComp` / `RealizesTensor`. These were the
         // only binary operators in the language with no lowering at all, which
@@ -1417,6 +1421,10 @@ fn check_declared_field_types(
             Ok(())
         }
         ast::Expr::Field(base, _) => check_declared_field_types(base, ctx, ty_ctx),
+        ast::Expr::CollectTake { collection, limit } => {
+            check_declared_field_types(collection, ctx, ty_ctx)?;
+            check_declared_field_types(limit, ctx, ty_ctx)
+        }
         ast::Expr::Bin { lhs, rhs, .. } => {
             check_declared_field_types(lhs, ctx, ty_ctx)?;
             check_declared_field_types(rhs, ctx, ty_ctx)

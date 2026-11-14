@@ -63,6 +63,8 @@ pub enum Item {
     RelInput(RelInputDecl),
     /// `rel derived name = select ... from ...` — relational derived declaration (ADR-0046).
     RelDerived(RelDerivedDecl),
+    /// Versioned alpha.9 read-only named query declaration.
+    Query(QueryDecl),
     /// `newtype Name[<Index>] = Repr` — a nominal type with an underlying
     /// representation (ADR-0048). Contextual at item position; `newtype` is
     /// not a reserved word.
@@ -90,12 +92,61 @@ pub struct RelDerivedDecl {
     pub query: RelQuery,
 }
 
+/// Read-only named query. This additive declaration has its own identity and
+/// does not participate in persisted relational program identities.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryDecl {
+    pub name: String,
+    pub params: Vec<QueryParam>,
+    pub query: RelQuery,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryParam {
+    pub name: String,
+    pub ty: Ty,
+}
+
+/// Names reserved for dimensions in the shared V2 context contract. Query
+/// parameters cannot bind these names, so caller data cannot shadow host
+/// context fields in language or admission APIs.
+pub fn is_reserved_context_dimension_name(name: &str) -> bool {
+    matches!(
+        name,
+        "parent"
+            | "program"
+            | "world"
+            | "namespace"
+            | "tenant"
+            | "principal"
+            | "capability_view"
+            | "scenario_mode"
+            | "branch"
+            | "valid_time_start"
+            | "valid_time_end"
+            | "transaction_time"
+            | "correction_time"
+            | "simulation_time"
+            | "observation_profile"
+            | "redaction_profile"
+            | "kernel_profile"
+            | "regime_profile"
+            | "axiom_profile"
+            | "validity_start"
+            | "validity_end"
+            | "step_budget"
+            | "depth_budget"
+    )
+}
+
 /// A relational query in a `rel derived` declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelQuery {
-    /// `union a, b key ...`: the two sources in `from` are merged without a
+    /// `union a, b key ...`: the sources in `from` are merged without a
     /// projection. Keys must be disjoint at each committed batch boundary.
     pub union_keys: Option<Vec<String>>,
+    /// `union distinct a, b[, c ...]`: set union over canonical typed row values.
+    pub union_distinct: bool,
     pub select: Expr,
     pub from: Vec<RelBinding>,
     pub where_clause: Option<Expr>,
@@ -138,6 +189,7 @@ pub struct DecideDecl {
     pub binder: String,
     pub list: Expr,
     pub per: Option<String>,
+    pub per_fields: Vec<String>,
     pub proposals: Vec<ProposeDecl>,
 }
 
@@ -377,6 +429,13 @@ pub enum Expr {
     },
     /// Field / role projection: `e.field`.
     Field(Box<Expr>, String),
+    /// Bounded grouped collection projection: `collect(value[, sort]).take(n)`.
+    /// This is distinct from the legacy `collect(...)` call so its truncation
+    /// semantics and versioned identity remain explicit.
+    CollectTake {
+        collection: Box<Expr>,
+        limit: Box<Expr>,
+    },
     /// Application: `f(args)` — a call, a generator/rule invocation, or a
     /// constructor application (`Succ(k)`); disambiguated at lowering.
     Call { func: String, args: Vec<Expr> },

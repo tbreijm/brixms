@@ -277,5 +277,5 @@ fn test_evaluation_never_changes_the_grade() {
     let cr = checked.into_iter().next().unwrap().expect("type-checks");
     // `/` type-checks fine (Int/Int -> Float) even though it is not
     // evaluated; the grade is unaffected by evaluability.
-    assert_eq!(cr.outcome, Outcome::Audited);
+    assert_eq!(cr.outcome, Outcome::Proven);
 }

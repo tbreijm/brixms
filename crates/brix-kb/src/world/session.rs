@@ -1,13 +1,14 @@
 //! Library session API for the persistent world runtime (ADR-0046 §3.2, P3).
 
 use brix_canon::{CanonReader, CanonWriter, Digest, Domain};
-use brix_lower::module_graph::{LinkedProgram, ModuleGraph, ModuleLoaderLimits};
+use brix_lower::module_graph::{LinkedProgram, ModuleGraph, ModuleLoaderLimits, QualifiedName};
 use brix_lower::relation_dag::{lower_relations, OperatorNode};
 use soc_core::store::{FileNodeStore, TrieMap};
 
 use super::state_store::{StateStore, DEFAULT_NODE_CACHE_BYTES};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -22,12 +23,23 @@ use super::decision_codec::compute_decision_root;
 use super::error::{CrashPoint, WorldError};
 use super::idempotency::{IdempotencyIndex, IdempotencySource};
 use super::manifest::{RelationDecl, WorldManifest, WORLD_PROFILE};
-use super::network::{DecisionExplanation, SettledDecision, UpstreamSettlementLink, WorldNetwork};
+use super::network::{
+    DecisionExplanation, NetworkLimits, SettledDecision, UpstreamSettlementLink, Value,
+    WorldNetwork,
+};
 use super::network_state::{Loaded, NetworkStateHeader, ValidityKey};
 use super::oracle::DiffEvent;
 use super::paths::WorldPaths;
 use super::revision::{SettlementStatus, WorldRevision, REVISION_SCHEMA_V3};
+use super::scoped_query::{
+    named_query_identity_v1, AuthorizedHostScope, ScopeError, ScopedCursorBindingsV1,
+    ScopedQueryCursorV1, ScopedQueryPageRequestV1, ScopedQueryPageV1,
+    MAX_SCOPED_QUERY_EVAL_MATCHES, MAX_SCOPED_QUERY_EVAL_WORK, MAX_SCOPED_QUERY_INPUT_BYTES,
+    MAX_SCOPED_QUERY_INPUT_ROWS, MAX_SCOPED_QUERY_OUTPUT_ROWS, MAX_SCOPED_QUERY_PAGE_ROWS,
+    SCOPED_QUERY_ORDERING_V2,
+};
 use super::settlement_checkpoint::{apply_delta, SettlementCheckpoint};
+use super::stable_child_key::CollectOrdering;
 use super::staging::StagingManager;
 use super::state_cache::StateCache;
 use super::types::{
@@ -99,6 +111,95 @@ fn manifest_node_cache_budget(manifest: &WorldManifest) -> usize {
 fn configure_node_store_caches(store: &FileNodeStore, budget: usize) {
     store.set_cache_budget_bytes(raw_cache_share(budget));
     store.set_decoded_cache_capacity(base_cache_share(budget));
+}
+
+/// `FileNodeStore::new` repairs a missing or damaged derived `.idx` by writing
+/// it. A read-only session must fail closed before calling it in that case.
+/// This mirrors the store's pack/index framing checks without modifying files.
+fn preflight_read_only_store(root: &Path) -> Result<(), WorldError> {
+    const PACK_MAGIC: &[u8; 8] = b"BRIXPK01";
+    const PACK_END: &[u8; 8] = b"BRIXEND1";
+    const IDX_MAGIC: &[u8; 8] = b"BRIXIDX1";
+    const RECORD: u64 = 80;
+    const FOOTER: u64 = 56;
+    const IDX_HEADER: u64 = 8 + 8 + 32 + 256 * 4;
+    let objects = root.join("objects");
+    if !objects.is_dir() {
+        return Err(WorldError::InvalidSchema(
+            "read-only open requires an existing objects directory".into(),
+        ));
+    }
+    for entry in fs::read_dir(&objects)? {
+        let pack = entry?.path();
+        if pack.extension().and_then(|value| value.to_str()) != Some("pack") {
+            continue;
+        }
+        let mut file = fs::File::open(&pack)?;
+        let size = file.metadata()?.len();
+        if size < 8 + RECORD + FOOTER {
+            return Err(WorldError::InvalidSchema("invalid pack size".into()));
+        }
+        let mut magic = [0; 8];
+        file.read_exact(&mut magic)?;
+        file.seek(SeekFrom::Start(size - FOOTER))?;
+        let mut footer = [0; FOOTER as usize];
+        file.read_exact(&mut footer)?;
+        let start = u64::from_be_bytes(footer[..8].try_into().expect("fixed footer"));
+        let count = u64::from_be_bytes(footer[8..16].try_into().expect("fixed footer"));
+        if &magic != PACK_MAGIC
+            || &footer[48..] != PACK_END
+            || count == 0
+            || start < 8
+            || start
+                .checked_add(count.checked_mul(RECORD).ok_or_else(|| {
+                    WorldError::InvalidSchema("pack record count overflow".into())
+                })?)
+                .and_then(|value| value.checked_add(FOOTER))
+                != Some(size)
+        {
+            return Err(WorldError::InvalidSchema("invalid pack footer".into()));
+        }
+        let idx = pack.with_extension("idx");
+        let mut index = fs::File::open(idx)?;
+        if index.metadata()?.len()
+            != count
+                .checked_mul(RECORD)
+                .and_then(|value| value.checked_add(IDX_HEADER + 32))
+                .ok_or_else(|| WorldError::InvalidSchema("index size overflow".into()))?
+        {
+            return Err(WorldError::InvalidSchema(
+                "read-only open refuses to repair a damaged pack index".into(),
+            ));
+        }
+        let mut header = vec![0; IDX_HEADER as usize];
+        index.read_exact(&mut header)?;
+        if &header[..8] != IDX_MAGIC
+            || u64::from_be_bytes(header[8..16].try_into().expect("fixed index header")) != count
+            || header[16..48] != footer[16..48]
+        {
+            return Err(WorldError::InvalidSchema(
+                "read-only open refuses to repair a damaged pack index".into(),
+            ));
+        }
+        let mut previous = 0u32;
+        for slot in 0..256 {
+            let at = 48 + slot * 4;
+            let current =
+                u32::from_be_bytes(header[at..at + 4].try_into().expect("fixed fanout entry"));
+            if current < previous {
+                return Err(WorldError::InvalidSchema(
+                    "read-only open refuses to repair a damaged pack index".into(),
+                ));
+            }
+            previous = current;
+        }
+        if u64::from(previous) != count {
+            return Err(WorldError::InvalidSchema(
+                "read-only open refuses to repair a damaged pack index".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A persisted base trie as `(root, len)` only. Callers guarantee the trie was persisted.
@@ -273,6 +374,104 @@ fn validate_program_relations(
     Ok(())
 }
 
+fn default_collect_ordering(program: &LinkedProgram) -> Result<CollectOrdering, WorldError> {
+    use brix_lower::relation_dag::GroupProjection;
+    let dag = lower_relations(program)?;
+    let has_collect = dag.nodes.iter().any(|node| match node {
+        OperatorNode::GroupedCount { projections, .. } => {
+            projections.iter().any(|(_, projection)| {
+                matches!(
+                    projection,
+                    GroupProjection::Collect { .. } | GroupProjection::CollectTake { .. }
+                )
+            })
+        }
+        _ => false,
+    });
+    Ok(if has_collect {
+        CollectOrdering::TypedKeyV1
+    } else {
+        CollectOrdering::LegacyV1
+    })
+}
+
+fn scope_world_error(error: ScopeError) -> WorldError {
+    match error {
+        ScopeError::InvalidCursor => {
+            WorldError::InvalidCursor("malformed named-query cursor".into())
+        }
+        ScopeError::CursorBindingMismatch => {
+            WorldError::InvalidCursor("named-query cursor binding mismatch".into())
+        }
+        other => WorldError::InvalidSchema(format!("named-query scope refused: {other:?}")),
+    }
+}
+
+fn scoped_query_input_relations(
+    program: &LinkedProgram,
+    query: &brix_syntax::ast::QueryDecl,
+) -> Result<BTreeSet<String>, WorldError> {
+    fn resolve(owner: &str, name: &str) -> QualifiedName {
+        if let Some((module, local)) = name.rsplit_once("::") {
+            QualifiedName::new(module, local)
+        } else {
+            QualifiedName::new(owner, name)
+        }
+    }
+    fn visit(
+        program: &LinkedProgram,
+        relation: &str,
+        owner: &str,
+        inputs: &mut BTreeSet<String>,
+        seen: &mut BTreeSet<QualifiedName>,
+    ) -> Result<(), WorldError> {
+        let qname = resolve(owner, relation);
+        if !seen.insert(qname.clone()) {
+            return Ok(());
+        }
+        if program.decides.contains_key(&qname) {
+            return Err(WorldError::InvalidSchema(format!("named queries cannot depend on decision relation '{qname}' in the initial scope profile")));
+        }
+        if program.rel_inputs.contains_key(&qname) {
+            inputs.insert(qname.to_string());
+            return Ok(());
+        }
+        if let Some(derived) = program.rel_derived.get(&qname) {
+            for binding in &derived.query.from {
+                visit(program, &binding.relation, &qname.module, inputs, seen)?;
+            }
+            if let Some(anti) = &derived.query.not_exists {
+                visit(program, &anti.binding.relation, &qname.module, inputs, seen)?;
+            }
+            return Ok(());
+        }
+        Err(WorldError::InvalidSchema(format!(
+            "named query depends on unknown relation '{qname}'"
+        )))
+    }
+    let mut inputs = BTreeSet::new();
+    let mut seen = BTreeSet::new();
+    for binding in &query.query.from {
+        visit(
+            program,
+            &binding.relation,
+            &program.root_module,
+            &mut inputs,
+            &mut seen,
+        )?;
+    }
+    if let Some(anti) = &query.query.not_exists {
+        visit(
+            program,
+            &anti.binding.relation,
+            &program.root_module,
+            &mut inputs,
+            &mut seen,
+        )?;
+    }
+    Ok(inputs)
+}
+
 pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), WorldError> {
     let temp = path.with_extension(format!("tmp.{}", std::process::id()));
     let mut file = fs::OpenOptions::new()
@@ -319,6 +518,12 @@ pub struct CommitProfile {
     pub chunk_persist_ms: f64,
     /// Chunking hit a non-environmental error and the batch was re-run unchunked.
     pub chunk_fallback: bool,
+    /// Operator work units charged by the incremental network for this commit.
+    pub operator_work: u64,
+    /// Successful incremental join matches produced by this commit.
+    pub matches: u64,
+    /// Actual predicate/projection expressions evaluated by the incremental network.
+    pub expressions_evaluated: u64,
 }
 
 /// Outcome receipt returned upon applying a batch.
@@ -806,11 +1011,32 @@ impl ExecProfileV1 {
         }
     }
 
+    /// Explicit collection semantics; the V1 profile remains reproducible.
+    pub fn for_collect_ordering(ordering: CollectOrdering) -> Self {
+        let mut profile = Self::current_for_network();
+        if ordering == CollectOrdering::TypedKeyV1 {
+            profile.evaluator = "brix-world-net@2".into();
+        }
+        profile
+    }
+
+    pub fn collect_ordering(&self) -> Result<CollectOrdering, WorldError> {
+        match self.evaluator.as_str() {
+            "brix-world-net@1" => Ok(CollectOrdering::LegacyV1),
+            "brix-world-net@2" => Ok(CollectOrdering::TypedKeyV1),
+            _ => Err(WorldError::InvalidSchema(
+                "unsupported collection execution profile".into(),
+            )),
+        }
+    }
+
     /// Whether this execution profile is supported by the current runtime evaluator.
     pub fn is_supported(&self) -> bool {
         let current = Self::current_for_network();
-        self.evaluator == current.evaluator
-            && self.numeric_semantics == current.numeric_semantics
+        matches!(
+            self.evaluator.as_str(),
+            "brix-world-net@1" | "brix-world-net@2"
+        ) && self.numeric_semantics == current.numeric_semantics
             && self.settlement == current.settlement
             && self.module_loader_limits == current.module_loader_limits
             && Self::is_supported_version(&self.crate_version)
@@ -989,6 +1215,8 @@ pub struct WorldSession {
     /// Whether `all_settlements` may leave a settlement checkpoint behind (best effort);
     /// off for `open_replay`.
     pub checkpoint_autowrite: bool,
+    /// A read-only open never publishes cache/checkpoint artifacts or batches.
+    read_only: bool,
     pub crash_injector: Option<CrashPoint>,
     pub network: Option<WorldNetwork>,
     /// Diagnostic: post-commit dehydrations that failed (network kept hydrated).
@@ -1097,6 +1325,7 @@ impl WorldSession {
             idempotency: IdempotencyIndex::empty(),
             gc_epoch,
             checkpoint_autowrite: true,
+            read_only: false,
             crash_injector: None,
             network: None,
             dehydrate_failures: 0,
@@ -1125,6 +1354,20 @@ impl WorldSession {
         Self::open_with_policy(root.as_ref(), OpenPolicy::default())
     }
 
+    /// Open without persistent cache refresh, checkpoint creation, writer
+    /// operations, or global network replay. Named queries build their own
+    /// ephemeral network after host scoping has reduced the base relations.
+    pub fn open_read_only(root: impl AsRef<Path>) -> Result<Self, WorldError> {
+        Self::open_with_options(
+            root.as_ref(),
+            OpenPolicy {
+                force_replay: true,
+                refresh_after_replay: false,
+            },
+            true,
+        )
+    }
+
     /// Open, always rebuilding the network by replaying the resident base facts and never
     /// reading persisted operator state (tests, verification, repair).
     pub fn open_replay(root: impl AsRef<Path>) -> Result<Self, WorldError> {
@@ -1139,6 +1382,14 @@ impl WorldSession {
 
     /// Open under an explicit [`OpenPolicy`].
     pub fn open_with_policy(root: &Path, policy: OpenPolicy) -> Result<Self, WorldError> {
+        Self::open_with_options(root, policy, false)
+    }
+
+    fn open_with_options(
+        root: &Path,
+        policy: OpenPolicy,
+        read_only: bool,
+    ) -> Result<Self, WorldError> {
         let started = Instant::now();
         let root = root.to_path_buf();
         let paths = WorldPaths::new(&root);
@@ -1168,6 +1419,9 @@ impl WorldSession {
         // Read the GC marker before the store is built: a collection in between is then seen
         // (the marker differs) rather than silently baked into this session's caches.
         let gc_epoch = super::gc::read_gc_epoch(&paths);
+        if read_only {
+            preflight_read_only_store(&root)?;
+        }
         let node_store = FileNodeStore::new(&root)?;
         configure_node_store_caches(&node_store, manifest_node_cache_budget(&manifest));
 
@@ -1262,6 +1516,7 @@ impl WorldSession {
             idempotency,
             gc_epoch,
             checkpoint_autowrite: policy.refresh_after_replay,
+            read_only,
             crash_injector: None,
             network: None,
             dehydrate_failures: 0,
@@ -1328,9 +1583,9 @@ impl WorldSession {
                     "program closure digest does not match world manifest".into(),
                 ));
             }
-            let network = WorldNetwork::from_program(&linked)?;
-            validate_program_relations(&session.manifest, &network)?;
-            pending_network = Some(network);
+            brix_lower::relation_dag::admit_named_queries_v1(&linked).map_err(|error| {
+                WorldError::InvalidSchema(format!("named query admission failed: {error}"))
+            })?;
 
             // Additive field (ADR-0046 P6 §1.1, decided 2026-10-04): a
             // `program.json` written before `exec_profile` existed simply
@@ -1338,6 +1593,17 @@ impl WorldSession {
             // profile — the file still opens either way.
             if let Some(profile_val) = val.get("exec_profile") {
                 session.exec_profile = Some(ExecProfileV1::from_json(profile_val)?);
+            }
+            if !read_only {
+                let ordering = session
+                    .exec_profile
+                    .as_ref()
+                    .map(ExecProfileV1::collect_ordering)
+                    .transpose()?
+                    .unwrap_or(CollectOrdering::LegacyV1);
+                let network = WorldNetwork::from_program_with_collect_ordering(&linked, ordering)?;
+                validate_program_relations(&session.manifest, &network)?;
+                pending_network = Some(network);
             }
         }
 
@@ -1349,6 +1615,12 @@ impl WorldSession {
             }
         }
         if let Some(profile) = &session.exec_profile {
+            if profile.evaluator == "brix-world-net@2" && current_rev.exec_profile_digest.is_none()
+            {
+                return Err(WorldError::InvalidSchema(
+                    "typed collection semantics require a revision-bound execution profile".into(),
+                ));
+            }
             if !profile.is_supported() {
                 return Err(WorldError::InvalidSchema(
                     "unsupported execution profile".into(),
@@ -1358,17 +1630,20 @@ impl WorldSession {
         if let Some(network) = pending_network {
             session.install_network(network, &current_rev, policy)?;
         }
-        if current_rev.decision_delta_digest.is_some() {
+        if !read_only && current_rev.decision_delta_digest.is_some() {
             session.decision_delta(current_revision)?;
         }
-        if let (Some(expected), Some(net)) = (current_rev.decision_root, &session.network) {
-            if net.decision_root() != expected {
-                return Err(WorldError::NetworkError(
-                    "restored decision root mismatch".into(),
-                ));
+        if !read_only {
+            if let (Some(expected), Some(net)) = (current_rev.decision_root, &session.network) {
+                if net.decision_root() != expected {
+                    return Err(WorldError::NetworkError(
+                        "restored decision root mismatch".into(),
+                    ));
+                }
             }
         }
-        if policy.refresh_after_replay
+        if !read_only
+            && policy.refresh_after_replay
             && session.idempotency.source == IdempotencySource::Scan
             && !session.idempotency.is_empty()
         {
@@ -1406,6 +1681,9 @@ impl WorldSession {
     /// publish the sidecar, re-checking under it that HEAD and the GC generation are what the
     /// nodes were written for.
     pub fn persist_idempotency_index(&mut self) -> Result<bool, WorldError> {
+        if self.read_only {
+            return Err(WorldError::ReadOnlySession);
+        }
         drop(WorldLockGuard::acquire(&self.root)?);
         let Some(digest) = self.current_revision_digest else {
             return Ok(false);
@@ -1589,11 +1867,17 @@ impl WorldSession {
     /// `network` in this world. The network contributes its own structural fingerprint, so
     /// state is never filed under a program other than the one that computed it.
     pub fn validity_key_for(&self, network: &WorldNetwork) -> ValidityKey {
-        ValidityKey::current(
+        let mut key = ValidityKey::current(
             self.manifest.program_digest,
             self.exec_profile.as_ref().map(ExecProfileV1::digest),
             network.fingerprint(),
-        )
+        );
+        if network.collect_ordering() == CollectOrdering::TypedKeyV1 {
+            key.lowering_version =
+                super::network_state::NETWORK_LOWERING_TYPED_COLLECT_VERSION.into();
+            key.evaluator = "brix-world-net@2".into();
+        }
+        key
     }
 
     /// Install the state `root` names into `network`, the single restore path for both a
@@ -1684,7 +1968,17 @@ impl WorldSession {
             }
             reason
         };
-        self.set_network(network)?;
+        if self.read_only {
+            network.attach_state_store(StateStore::from_file(
+                self.node_store.clone(),
+                state_cache_share(self.node_cache_budget()),
+            ));
+            self.apply_base_facts(&mut network)?;
+            network.current_revision = self.current_revision;
+            self.network = Some(network);
+        } else {
+            self.set_network(network)?;
+        }
         self.replay_reason = Some(reason);
         self.state_source = None;
         if !policy.force_replay && policy.refresh_after_replay {
@@ -1702,6 +1996,9 @@ impl WorldSession {
     /// state is flushed and with HEAD re-checked under the lock; it is a cache, never
     /// authoritative.
     pub fn refresh_state_cache(&mut self) -> Result<(), WorldError> {
+        if self.read_only {
+            return Err(WorldError::ReadOnlySession);
+        }
         self.refresh_state_cache_inner(true)
     }
 
@@ -1873,6 +2170,9 @@ impl WorldSession {
         batch: WorldBatch,
         limits: Option<&super::network::NetworkLimits>,
     ) -> Result<RevisionReceipt, WorldError> {
+        if self.read_only {
+            return Err(WorldError::ReadOnlySession);
+        }
         let _lock = WorldLockGuard::acquire_wait(&self.root, COMMIT_LOCK_WAIT)?;
         self.sync_gc_epoch()?;
         let commit_started = Instant::now();
@@ -1930,6 +2230,9 @@ impl WorldSession {
         let normalized_ops = batch.validate_and_normalize()?;
 
         let mut chunk_run = ChunkRun::single();
+        let mut operator_work = 0;
+        let mut matches = 0;
+        let mut expressions_evaluated = 0;
         // Stage operator network updates and deliberation if network is present
         let (staged_network, decision_root, decision_delta_digest, decision_delta_body) =
             if let Some(ref net) = self.network {
@@ -1961,6 +2264,9 @@ impl WorldSession {
                 )?;
                 sn = sn_applied;
                 chunk_run = run;
+                operator_work = delta_report.diagnostics.work_units;
+                matches = delta_report.diagnostics.matches;
+                expressions_evaluated = delta_report.diagnostics.expressions_evaluated;
                 phase!("apply_ops");
                 if sn.decides.is_empty() {
                     (Some(sn), None, None, None)
@@ -2396,6 +2702,9 @@ impl WorldSession {
             chunks: chunk_run.chunks,
             chunk_persist_ms: chunk_run.persist_ms,
             chunk_fallback: chunk_run.fallback,
+            operator_work,
+            matches,
+            expressions_evaluated,
         });
         Ok(RevisionReceipt {
             revision_seq: new_seq,
@@ -2499,6 +2808,9 @@ impl WorldSession {
 
     /// Pin a revision as an audit checkpoint or evidence anchor.
     pub fn pin_checkpoint(&mut self, seq: u64) -> Result<(), WorldError> {
+        if self.read_only {
+            return Err(WorldError::ReadOnlySession);
+        }
         if seq > self.current_revision || !self.paths.revision_file(seq).exists() {
             return Err(WorldError::RevisionNotFound(seq));
         }
@@ -2509,6 +2821,9 @@ impl WorldSession {
 
     /// Release a checkpoint pin.
     pub fn unpin_checkpoint(&mut self, seq: u64) -> bool {
+        if self.read_only {
+            return false;
+        }
         let removed = self.pins.unpin_checkpoint(seq);
         if removed {
             let _ = self.persist_pins();
@@ -2538,6 +2853,9 @@ impl WorldSession {
 
     /// Compact historical revision logs up to `up_to_seq` (inclusive), skipping pinned revisions.
     pub fn compact_history(&mut self, up_to_seq: u64) -> Result<CompactionReport, WorldError> {
+        if self.read_only {
+            return Err(WorldError::ReadOnlySession);
+        }
         let _lock = WorldLockGuard::acquire(&self.root)?;
         let mut report = CompactionReport::default();
         let limit = up_to_seq.min(self.current_revision);
@@ -2658,6 +2976,26 @@ impl WorldSession {
         }
     }
 
+    fn get_derived_entries(
+        &self,
+        relation: &str,
+    ) -> Result<Option<Vec<(WorldKey, TupleRecord)>>, WorldError> {
+        let Some(net) = self.network.as_ref() else {
+            return Ok(None);
+        };
+        if let Some(rows) = net.get_derived_entries(relation)? {
+            return Ok(Some(rows));
+        }
+        match net
+            .derived_relations
+            .keys()
+            .find(|k| k.ends_with(&format!("::{relation}")))
+        {
+            Some(k) => net.get_derived_entries(k),
+            None => Ok(None),
+        }
+    }
+
     /// Query a paged slice of derived tuples from the active operator network.
     pub fn query_derived_page(
         &self,
@@ -2674,7 +3012,7 @@ impl WorldSession {
             ));
         }
         let records = self
-            .get_derived(relation)?
+            .get_derived_entries(relation)?
             .ok_or_else(|| WorldError::UnknownRelation(relation.to_string()))?;
 
         let offset = match cursor {
@@ -2705,14 +3043,10 @@ impl WorldSession {
 
         let total = records.len();
         let entries: Vec<(WorldKey, WorldTuple)> = records
-            .iter()
+            .into_iter()
             .skip(offset)
             .take(limit)
-            .enumerate()
-            .map(|(i, r)| {
-                let key = WorldKey::from_str(&format!("{}", offset + i));
-                (key, r.to_tuple())
-            })
+            .map(|(key, r)| (key, r.to_tuple()))
             .collect();
 
         let next_offset = offset + entries.len();
@@ -2785,6 +3119,51 @@ impl WorldSession {
         }
     }
 
+    fn get_derived_entries_at(
+        &self,
+        seq: u64,
+        relation: &str,
+    ) -> Result<Option<Vec<(WorldKey, TupleRecord)>>, WorldError> {
+        if seq == self.current_revision {
+            return self.get_derived_entries(relation);
+        }
+        let snapshot = self.pin_revision(seq)?;
+        let Some(network) = self.network.as_ref() else {
+            return Ok(None);
+        };
+        let mut historical = network.clear_data();
+        let mut ops = Vec::new();
+        for (rel, trie) in &snapshot.relations {
+            if !network.base_relations.contains_key(rel) {
+                continue;
+            }
+            let (entries, _) = trie.iter_page_with_store(None, usize::MAX, &snapshot.node_store)?;
+            ops.extend(
+                entries
+                    .into_iter()
+                    .map(|(key, tuple)| WorldBatchOp::Upsert {
+                        relation: rel.clone(),
+                        key,
+                        tuple,
+                    }),
+            );
+        }
+        historical.apply_ops(&ops)?;
+        if let Some(rows) = historical.get_derived_entries(relation)? {
+            return Ok(Some(rows));
+        }
+        let qualified = historical
+            .derived_relations
+            .keys()
+            .find(|k| k.ends_with(&format!("::{relation}")))
+            .cloned();
+        if let Some(k) = qualified {
+            historical.get_derived_entries(&k)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Query a paged slice of derived tuples at a specific historical revision `seq`.
     pub fn query_derived_page_at(
         &self,
@@ -2801,7 +3180,7 @@ impl WorldSession {
             ));
         }
         let records = self
-            .get_derived_at(seq, relation)?
+            .get_derived_entries_at(seq, relation)?
             .ok_or_else(|| WorldError::UnknownRelation(relation.to_string()))?;
 
         let offset = match cursor {
@@ -2836,14 +3215,10 @@ impl WorldSession {
 
         let total = records.len();
         let entries: Vec<(WorldKey, WorldTuple)> = records
-            .iter()
+            .into_iter()
             .skip(offset)
             .take(limit)
-            .enumerate()
-            .map(|(i, r)| {
-                let key = WorldKey::from_str(&format!("{}", offset + i));
-                (key, r.to_tuple())
-            })
+            .map(|(key, r)| (key, r.to_tuple()))
             .collect();
 
         let next_offset = offset + entries.len();
@@ -3064,6 +3439,9 @@ impl WorldSession {
     /// that the settlements hash to the revision's decision root (a mismatch is corrupt
     /// state and nothing is written). Returns the number of settlements.
     pub fn refresh_settlement_checkpoint(&mut self) -> Result<usize, WorldError> {
+        if self.read_only {
+            return Err(WorldError::ReadOnlySession);
+        }
         let Some(net) = self.network.as_ref() else {
             return Err(WorldError::NetworkError("world has no network".into()));
         };
@@ -3272,9 +3650,19 @@ impl WorldSession {
 
         let tree = TrieMap::<WorldKey, WorldTuple>::from_root_digest(decision_root, 0);
         for decide_name in candidates {
-            let key = super::network::decision_key(&decide_name, entity_id);
+            let block = self
+                .network
+                .as_ref()
+                .and_then(|n| n.decides.get(&decide_name));
+            let is_composite = block.is_some_and(|b| b.per_types.len() > 1);
+            let norm_entity = block
+                .map(|b| super::decision_codec::normalize_entity_id(entity_id, &b.per_types))
+                .unwrap_or_else(|| super::decision_codec::normalize_untyped_entity_id(entity_id));
+            let key = super::network::decision_key(&decide_name, &norm_entity);
             if let Some(tuple) = tree.get_with_store(&key, &self.node_store)? {
-                let settled = super::network::decode_settled_decision(entity_id, tuple.as_bytes())?;
+                let mut settled =
+                    super::network::decode_settled_decision(&norm_entity, tuple.as_bytes())?;
+                settled.is_composite = is_composite;
                 return Ok(Some((decide_name, settled)));
             }
         }
@@ -3283,6 +3671,9 @@ impl WorldSession {
 
     /// Attach an operator network to this session and hydrate it with existing committed base records.
     pub fn set_network(&mut self, mut network: WorldNetwork) -> Result<(), WorldError> {
+        if self.read_only {
+            return Err(WorldError::ReadOnlySession);
+        }
         // A world's decisions and state are filed under the network that computed them;
         // swapping in a different program would let later commits attest foreign decisions.
         if let Some(existing) = &self.network {
@@ -3316,25 +3707,91 @@ impl WorldSession {
         root_module: &str,
         sources: &BTreeMap<String, String>,
     ) -> Result<(), WorldError> {
+        if self.read_only {
+            return Err(WorldError::ReadOnlySession);
+        }
         let (linked, closure_digest, closure_sources) = link_closure(root_module, sources)?;
-        let network = WorldNetwork::from_program(&linked)?;
+        brix_lower::relation_dag::admit_named_queries_v1(&linked).map_err(|error| {
+            WorldError::InvalidSchema(format!("named query admission failed: {error}"))
+        })?;
+        let ordering = self.selected_collect_ordering(&linked)?;
+        let network = WorldNetwork::from_program_with_collect_ordering(&linked, ordering)?;
         validate_program_relations(&self.manifest, &network)?;
         if self.current_revision > 0 && self.manifest.program_digest != closure_digest {
             return Err(WorldError::InvalidSchema(
                 "cannot change executable program after world revisions exist".into(),
             ));
         }
-        let exec_profile = ExecProfileV1::current_for_network();
-        let val = serde_json::json!({
+        if self
+            .network
+            .as_ref()
+            .is_some_and(|existing| existing.fingerprint() != network.fingerprint())
+        {
+            return Err(WorldError::InvalidSchema(
+                "program differs from the executable network already bound to this world".into(),
+            ));
+        }
+        let program_path = self.paths.root.join("program.json");
+        let preserve_existing_profile =
+            program_path.exists() && self.manifest.program_digest == closure_digest;
+        let exec_profile = if preserve_existing_profile {
+            let head = self.pin_revision(self.current_revision)?.revision;
+            let expected_profile_digest = self.exec_profile.as_ref().map(ExecProfileV1::digest);
+            if head.program_digest != Some(closure_digest)
+                || head.exec_profile_digest != expected_profile_digest
+            {
+                return Err(WorldError::InvalidSchema(
+                    "stored program profile is not bound to the current revision".into(),
+                ));
+            }
+            if let Some(profile) = &self.exec_profile {
+                if !profile.is_supported() || profile.collect_ordering()? != ordering {
+                    return Err(WorldError::InvalidSchema(
+                        "stored execution profile does not match the requested program semantics"
+                            .into(),
+                    ));
+                }
+            } else if ordering != CollectOrdering::LegacyV1 {
+                return Err(WorldError::InvalidSchema(
+                    "profile-less program cannot select typed collection semantics".into(),
+                ));
+            }
+            // Opening and supplying the same program is verification, not a migration.
+            // Keep the artifact and current revision bytes untouched when the already-open
+            // network is the same one checked above.
+            if self.current_revision > 0 {
+                if self
+                    .network
+                    .as_ref()
+                    .is_some_and(|existing| existing.fingerprint() == network.fingerprint())
+                {
+                    return Ok(());
+                }
+                return Err(WorldError::InvalidSchema(
+                    "cannot replace the executable network of a populated world".into(),
+                ));
+            }
+            self.exec_profile.clone()
+        } else {
+            if self.current_revision > 0 {
+                return Err(WorldError::InvalidSchema(
+                    "cannot add or change an execution profile after world revisions exist".into(),
+                ));
+            }
+            Some(ExecProfileV1::for_collect_ordering(ordering))
+        };
+        let mut val = serde_json::json!({
             "schema": "brix.world.program@1",
             "root_module": root_module,
             "sources": closure_sources,
             "program_manifest_digest": closure_digest.to_hex(),
-            "exec_profile": exec_profile.to_json(),
         });
+        if let Some(profile) = &exec_profile {
+            val["exec_profile"] = profile.to_json();
+        }
         let bytes = serde_json::to_vec_pretty(&val).map_err(|e| WorldError::Json(e.to_string()))?;
-        atomic_write(&self.paths.root.join("program.json"), &bytes)?;
-        self.exec_profile = Some(exec_profile);
+        atomic_write(&program_path, &bytes)?;
+        self.exec_profile = exec_profile;
         if self.current_revision == 0
             || self.manifest.program_digest != closure_digest
             || !self.manifest.program_required
@@ -3383,15 +3840,407 @@ impl WorldSession {
         Ok(())
     }
 
+    /// Read and independently reproduce the exact canonical program-manifest
+    /// preimage committed by this world's `program_digest`. Suitable for a
+    /// host `ContextResolverV2`; this method performs no writes.
+    pub fn program_artifact_preimage(&self) -> Result<Vec<u8>, WorldError> {
+        let bytes = fs::read(self.paths.root.join("program.json"))?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| WorldError::Json(e.to_string()))?;
+        if value.get("schema").and_then(|v| v.as_str()) != Some("brix.world.program@1") {
+            return Err(WorldError::InvalidSchema(
+                "unsupported program artifact schema".into(),
+            ));
+        }
+        let root_module = value
+            .get("root_module")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                WorldError::InvalidSchema("program artifact missing root_module".into())
+            })?;
+        let sources_value = value
+            .get("sources")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| WorldError::InvalidSchema("program artifact missing sources".into()))?;
+        let sources: BTreeMap<String, String> = sources_value
+            .iter()
+            .map(|(name, source)| {
+                source
+                    .as_str()
+                    .map(|s| (name.clone(), s.to_owned()))
+                    .ok_or_else(|| WorldError::InvalidSchema("program source must be text".into()))
+            })
+            .collect::<Result<_, _>>()?;
+        let loader = |name: &str| sources.get(name).cloned();
+        let graph = ModuleGraph::load(root_module, &loader, ModuleLoaderLimits::default())
+            .map_err(|e| WorldError::NetworkError(format!("module load error: {e}")))?;
+        let manifest = graph.manifest(WORLD_PROFILE);
+        if manifest.transitive_manifest_digest != self.manifest.program_digest {
+            return Err(WorldError::InvalidSchema(
+                "program artifact digest does not match world manifest".into(),
+            ));
+        }
+        Ok(manifest.canonical_preimage())
+    }
+
+    /// Load the world-bound executable source closure. The returned graph is
+    /// checked against the immutable program digest in this session's manifest.
+    pub fn load_linked_program(&self) -> Result<LinkedProgram, WorldError> {
+        let bytes = fs::read(self.paths.root.join("program.json"))?;
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| WorldError::Json(e.to_string()))?;
+        if value.get("schema").and_then(|v| v.as_str()) != Some("brix.world.program@1") {
+            return Err(WorldError::InvalidSchema(
+                "unsupported program artifact schema".into(),
+            ));
+        }
+        let root_module = value
+            .get("root_module")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                WorldError::InvalidSchema("program artifact missing root_module".into())
+            })?;
+        let sources_value = value
+            .get("sources")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| WorldError::InvalidSchema("program artifact missing sources".into()))?;
+        let sources: BTreeMap<String, String> = sources_value
+            .iter()
+            .map(|(name, source)| {
+                source
+                    .as_str()
+                    .map(|s| (name.clone(), s.to_owned()))
+                    .ok_or_else(|| WorldError::InvalidSchema("program source must be text".into()))
+            })
+            .collect::<Result<_, _>>()?;
+        let loader = |name: &str| sources.get(name).cloned();
+        let graph = ModuleGraph::load(root_module, &loader, ModuleLoaderLimits::default())
+            .map_err(|e| WorldError::NetworkError(format!("module load error: {e}")))?;
+        let digest = graph.manifest(WORLD_PROFILE).transitive_manifest_digest;
+        if digest != self.manifest.program_digest {
+            return Err(WorldError::InvalidSchema(
+                "program artifact digest does not match world manifest".into(),
+            ));
+        }
+        let linked = graph
+            .link()
+            .map_err(|e| WorldError::NetworkError(format!("module link error: {e}")))?;
+        brix_lower::relation_dag::admit_named_queries_v1(&linked).map_err(|error| {
+            WorldError::InvalidSchema(format!("named query admission failed: {error}"))
+        })?;
+        Ok(linked)
+    }
+
+    /// Execute one host-authorized named query over an ephemeral network whose
+    /// base relations have already been reduced to the authorized partition.
+    /// The persistent world, HEAD, caches and checkpoints are never modified.
+    pub fn query_named_scoped_page(
+        &self,
+        request: &ScopedQueryPageRequestV1,
+        scope: &AuthorizedHostScope,
+    ) -> Result<ScopedQueryPageV1, WorldError> {
+        let authorized_limits = scope.query_limits();
+        if request.limit == 0
+            || request.limit > MAX_SCOPED_QUERY_PAGE_ROWS
+            || request.max_input_rows == 0
+            || request.max_input_rows > MAX_SCOPED_QUERY_INPUT_ROWS
+            || request.max_input_bytes == 0
+            || request.max_input_bytes > MAX_SCOPED_QUERY_INPUT_BYTES
+            || request.max_eval_work == 0
+            || request.max_eval_work > MAX_SCOPED_QUERY_EVAL_WORK
+            || request.max_eval_matches == 0
+            || request.max_eval_matches > MAX_SCOPED_QUERY_EVAL_MATCHES
+            || request.max_output_rows == 0
+            || request.max_output_rows > MAX_SCOPED_QUERY_OUTPUT_ROWS
+            || request.limit > authorized_limits.page_rows
+            || request.max_input_rows > authorized_limits.max_input_rows
+            || request.max_input_bytes > authorized_limits.max_input_bytes
+            || request.max_eval_work > authorized_limits.max_eval_work
+            || request.max_eval_matches > authorized_limits.max_eval_matches
+            || request.max_output_rows > authorized_limits.max_output_rows
+        {
+            return Err(WorldError::InvalidSchema(
+                "named query read budget is invalid or exceeds the host maximum".into(),
+            ));
+        }
+        let program = self.load_linked_program()?;
+        let query = program
+            .root_items
+            .iter()
+            .find_map(|item| {
+                let item = match item {
+                    brix_syntax::ast::Item::Export(inner) => inner.as_ref(),
+                    other => other,
+                };
+                match item {
+                    brix_syntax::ast::Item::Query(query) if query.name == request.query_name => {
+                        Some(query)
+                    }
+                    _ => None,
+                }
+            })
+            .ok_or_else(|| {
+                WorldError::InvalidSchema(format!("unknown named query '{}'", request.query_name))
+            })?;
+        let args_digest = request
+            .arguments
+            .validate(query)
+            .map_err(scope_world_error)?;
+        let query_identity = named_query_identity_v1(self.manifest.program_digest, &query.name);
+        let decoded_cursor = request
+            .cursor
+            .as_deref()
+            .map(ScopedQueryCursorV1::decode_token)
+            .transpose()
+            .map_err(scope_world_error)?;
+        let revision_seq = request
+            .revision
+            .or_else(|| decoded_cursor.as_ref().map(|c| c.revision_seq()))
+            .unwrap_or(self.current_revision);
+        if decoded_cursor
+            .as_ref()
+            .is_some_and(|c| c.revision_seq() != revision_seq)
+        {
+            return Err(WorldError::InvalidCursor(
+                "cursor revision differs from requested revision".into(),
+            ));
+        }
+        let snapshot = self.pin_revision(revision_seq)?;
+        scope
+            .check_execution_bindings(
+                &snapshot.world_id,
+                revision_seq,
+                snapshot.revision_digest(),
+                self.manifest.program_digest,
+            )
+            .map_err(scope_world_error)?;
+        let bindings = ScopedCursorBindingsV1 {
+            query_identity,
+            program_identity: self.manifest.program_digest,
+            typed_arguments: args_digest,
+            scope_identity: scope.identity(),
+            context_identity: scope.context_id(),
+            world_identity: snapshot.world_id.clone(),
+            revision_seq,
+            revision_digest: snapshot.revision_digest(),
+            ordering_version: SCOPED_QUERY_ORDERING_V2,
+        };
+        let position = match request.cursor.as_deref() {
+            Some(token) => ScopedQueryCursorV1::from_token(token, &bindings)
+                .map_err(scope_world_error)?
+                .position(),
+            None => 0,
+        };
+
+        let lowered = brix_lower::lower_named_query_v1(
+            &program,
+            query,
+            &request.arguments.lower_scalars(),
+        )
+        .map_err(|e| WorldError::InvalidSchema(format!("named query admission failed: {e}")))?;
+        let output_schema = lowered
+            .dag
+            .relation_schemas
+            .get(&lowered.output_relation)
+            .cloned()
+            .ok_or_else(|| {
+                WorldError::InvalidSchema("named query result schema is unavailable".into())
+            })?;
+        let inputs = scoped_query_input_relations(&lowered.program, query)?;
+        let profile = scope.profile();
+        for relation in &inputs {
+            let partition = profile.partition_fields.get(relation);
+            let global = profile.global_relations.contains(relation);
+            if partition.is_none() && !global {
+                return Err(WorldError::InvalidSchema(format!(
+                    "scope profile does not authorize query input relation '{relation}'"
+                )));
+            }
+            if let Some(field) = partition {
+                let ty = lowered
+                    .dag
+                    .relation_schemas
+                    .get(relation)
+                    .and_then(|schema| schema.get(field));
+                if !matches!(ty, Some(brix_syntax::ast::Ty::Named(name)) if name == "Str") {
+                    return Err(WorldError::InvalidSchema(format!(
+                        "partition field '{relation}.{field}' must be declared Str"
+                    )));
+                }
+            }
+        }
+        let mut ops = Vec::new();
+        let mut input_rows = 0usize;
+        let mut input_bytes = 0usize;
+        for relation in inputs {
+            let trie = snapshot
+                .relations
+                .get(&relation)
+                .ok_or_else(|| WorldError::UnknownRelation(relation.clone()))?;
+            let partition_field = profile.partition_fields.get(&relation);
+            let mut cursor: Option<([u8; 32], WorldKey)> = None;
+            loop {
+                let page_cursor = cursor.as_ref().map(|(hash, key)| (hash, key));
+                // Pull one tuple at a time so no uncharged prefetched page can sit
+                // beyond a caller's row/byte budget.
+                let (entries, next) =
+                    trie.iter_page_with_store(page_cursor, 1, &snapshot.node_store)?;
+                if entries.is_empty() {
+                    break;
+                }
+                for (key, tuple) in entries {
+                    input_rows = input_rows.checked_add(1).ok_or_else(|| {
+                        WorldError::InvalidSchema("query input row budget overflow".into())
+                    })?;
+                    input_bytes = input_bytes
+                        .checked_add(key.as_bytes().len() + tuple.as_bytes().len())
+                        .ok_or_else(|| {
+                            WorldError::InvalidSchema("query input byte budget overflow".into())
+                        })?;
+                    if input_rows > request.max_input_rows || input_bytes > request.max_input_bytes
+                    {
+                        return Err(WorldError::InvalidSchema(
+                            "named query input budget exceeded".into(),
+                        ));
+                    }
+                    let include = if let Some(field) = partition_field {
+                        let record = TupleRecord::from_tuple(&tuple)?;
+                        let value = record.get_str(field).ok_or_else(|| {
+                            WorldError::InvalidSchema(format!(
+                                "partition field '{relation}.{field}' is absent or not UTF-8"
+                            ))
+                        })?;
+                        value == scope.tenant()
+                    } else {
+                        true
+                    };
+                    if include {
+                        ops.push(WorldBatchOp::Upsert {
+                            relation: relation.clone(),
+                            key,
+                            tuple,
+                        });
+                    }
+                }
+                match next {
+                    Some((hash, key)) => cursor = Some((hash, key)),
+                    None => break,
+                }
+            }
+        }
+        let mut network = WorldNetwork::from_program_with_collect_ordering(
+            &lowered.program,
+            CollectOrdering::TypedKeyV1,
+        )?;
+        let evaluation_report = network.apply_ops_bounded(
+            &ops,
+            Some(&NetworkLimits {
+                max_work: Some(request.max_eval_work),
+                max_matches: Some(request.max_eval_matches),
+                max_expressions: Some(request.max_eval_work),
+                max_queued_deltas: Some(request.max_input_rows.min(1_000_000)),
+            }),
+        )?;
+        let all_rows = network
+            .get_derived_tuples(&lowered.output_relation)?
+            .ok_or_else(|| {
+                WorldError::InvalidSchema("named query result relation was not evaluated".into())
+            })?;
+        if all_rows.len() > request.max_output_rows {
+            return Err(WorldError::InvalidSchema(
+                "named query output budget exceeded".into(),
+            ));
+        }
+        let start = usize::try_from(position)
+            .map_err(|_| WorldError::InvalidCursor("cursor offset is too large".into()))?;
+        if start > all_rows.len() {
+            return Err(WorldError::InvalidCursor(
+                "cursor offset exceeds result size".into(),
+            ));
+        }
+        let end = start.saturating_add(request.limit).min(all_rows.len());
+        let page = &all_rows[start..end];
+        let nominal_schemas =
+            brix_lower::world_expr::build_nominal_schemas(&lowered.program.available_configs)
+                .map_err(WorldError::NetworkError)?;
+        let typed_rows = page
+            .iter()
+            .map(|record| {
+                let mut object = serde_json::Map::new();
+                for (name, ty) in &output_schema {
+                    let bytes = record.get(name).ok_or_else(|| {
+                        WorldError::InvalidSchema(format!("result field '{name}' is absent"))
+                    })?;
+                    let value = Value::from_typed_bytes_with_schemas(bytes, ty, &nominal_schemas)?;
+                    object.insert(name.clone(), value.to_query_json());
+                }
+                Ok(serde_json::Value::Object(object))
+            })
+            .collect::<Result<Vec<_>, WorldError>>()?;
+        let has_more = end < all_rows.len();
+        let next_cursor =
+            has_more.then(|| ScopedQueryCursorV1::new(bindings, end as u64).to_token());
+        Ok(ScopedQueryPageV1 {
+            query_identity,
+            revision_seq,
+            revision_digest: snapshot.revision_digest(),
+            rows: page.iter().map(TupleRecord::to_tuple).collect(),
+            result_schema: output_schema,
+            typed_rows,
+            next_cursor,
+            has_more,
+            work_units: evaluation_report.diagnostics.work_units,
+            matches: evaluation_report.diagnostics.matches,
+            expressions_evaluated: evaluation_report.diagnostics.expressions_evaluated,
+        })
+    }
+
+    fn selected_collect_ordering(
+        &self,
+        program: &LinkedProgram,
+    ) -> Result<CollectOrdering, WorldError> {
+        if let Some(profile) = &self.exec_profile {
+            return profile.collect_ordering();
+        }
+        if let Some(network) = &self.network {
+            return Ok(network.collect_ordering());
+        }
+        default_collect_ordering(program)
+    }
+
     /// Initialize or open a world session bound to a linked program.
     pub fn from_program(
         root: impl AsRef<Path>,
         program: &LinkedProgram,
     ) -> Result<Self, WorldError> {
+        Self::from_program_ordering(root, program, None)
+    }
+
+    /// Create a world under an explicit supported semantic profile. Existing
+    /// worlds cannot switch their historical semantics through this API.
+    pub fn from_program_with_collect_ordering(
+        root: impl AsRef<Path>,
+        program: &LinkedProgram,
+        ordering: CollectOrdering,
+    ) -> Result<Self, WorldError> {
+        Self::from_program_ordering(root, program, Some(ordering))
+    }
+
+    fn from_program_ordering(
+        root: impl AsRef<Path>,
+        program: &LinkedProgram,
+        requested: Option<CollectOrdering>,
+    ) -> Result<Self, WorldError> {
         let root = root.as_ref().to_path_buf();
         if root.exists() && (root.join("world.json").exists() || root.join("HEAD").exists()) {
             let mut session = Self::open(&root)?;
-            let network = WorldNetwork::from_program(program)?;
+            let ordering = session.selected_collect_ordering(program)?;
+            if requested.is_some_and(|requested| requested != ordering) {
+                return Err(WorldError::InvalidSchema(
+                    "cannot change an existing world's collection execution profile".into(),
+                ));
+            }
+            let network = WorldNetwork::from_program_with_collect_ordering(program, ordering)?;
             validate_program_relations(&session.manifest, &network)?;
             match &session.network {
                 // `open` already installed the world's own program (restored or replayed).
@@ -3446,8 +4295,15 @@ impl WorldSession {
         );
         let mut manifest = manifest;
         manifest.program_required = true;
+        brix_lower::relation_dag::admit_named_queries_v1(program).map_err(|error| {
+            WorldError::InvalidSchema(format!("named query admission failed: {error}"))
+        })?;
+        let ordering = match requested {
+            Some(ordering) => ordering,
+            None => default_collect_ordering(program)?,
+        };
+        let network = WorldNetwork::from_program_with_collect_ordering(program, ordering)?;
         let mut session = Self::create(&root, manifest)?;
-        let network = WorldNetwork::from_program(program)?;
         session.set_network(network)?;
         Ok(session)
     }
@@ -3473,7 +4329,11 @@ impl WorldSession {
             if net.base_resident() {
                 net.verify_differential_correctness()?;
             } else {
+                // A cold-restored network keeps no base copy: confirm the persisted roots
+                // against a full replay, then run the same incremental-vs-recompute
+                // comparison on that replay so the oracle check is not just a root match.
                 self.verify_state()?;
+                self.replay_network()?.verify_differential_correctness()?;
             }
         }
         Ok(())
@@ -3649,6 +4509,9 @@ impl WorldSession {
         chunk_seq: u64,
         batch: &WorldBatch,
     ) -> Result<(), WorldError> {
+        if self.read_only {
+            return Err(WorldError::ReadOnlySession);
+        }
         StagingManager::stage_chunk(
             self.paths.staging_dir().as_path(),
             upload_id,
@@ -3664,6 +4527,9 @@ impl WorldSession {
         expected_chunks: u64,
         idempotency_key: &str,
     ) -> Result<RevisionReceipt, WorldError> {
+        if self.read_only {
+            return Err(WorldError::ReadOnlySession);
+        }
         let consolidated_batch = StagingManager::consolidate(
             self.paths.staging_dir().as_path(),
             upload_id,

@@ -43,14 +43,10 @@ fn human_output_separates_the_kernel_checked_leaf_from_the_remaining_obligations
     let (code, out) = check("human", "let x = 1 + 2\n", false);
     assert_eq!(code, 0, "{out}");
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines[0], "  x : Int @Audited = 3");
-    assert_eq!(lines[1], "    arithmetic typing leaf: kernel-checked");
-    assert_eq!(
-        lines[2],
-        "    remaining obligations: g_arith_input, g_arith_result"
-    );
-    // The grade is never Proven for this binding.
-    assert!(!out.contains("@Proven"));
+    assert_eq!(lines[0], "  x : Int @Proven = 3");
+    assert_eq!(lines[1], "    arithmetic input leaf: kernel-checked");
+    assert_eq!(lines[2], "    arithmetic typing leaf: kernel-checked");
+    assert_eq!(lines.len(), 3);
 }
 
 #[test]
@@ -70,7 +66,7 @@ fn json_adds_typing_additively_and_keeps_value_distinct_from_the_proof_claim() {
 
     let x = &bindings[0];
     assert_eq!(x["name"], "x");
-    assert_eq!(x["grade"], "Audited");
+    assert_eq!(x["grade"], "Proven");
     assert!(
         x["value"].is_object(),
         "the evaluated value stays its own field"
@@ -82,14 +78,14 @@ fn json_adds_typing_additively_and_keeps_value_distinct_from_the_proof_claim() {
         .iter()
         .map(|l| l["generator"].as_str().unwrap())
         .collect();
-    assert_eq!(closed, vec!["g_arith"]);
+    assert_eq!(closed, vec!["g_arith_input", "g_arith"]);
     let remaining: Vec<&str> = typing["remaining_obligations"]
         .as_array()
         .unwrap()
         .iter()
         .map(|l| l["generator"].as_str().unwrap())
         .collect();
-    assert_eq!(remaining, vec!["g_arith_input", "g_arith_result"]);
+    assert!(remaining.is_empty());
 
     // Pre-existing bindings carry no new key.
     let y = &bindings[1];

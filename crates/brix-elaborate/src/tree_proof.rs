@@ -34,8 +34,9 @@
 use std::sync::OnceLock;
 
 use brix_kernel::{
-    acceptance, resolve_primitive_relation, typing_arith_v2, Budget, Certificate, ExplicitTerm,
-    JudgmentKind, ObjectTerm, PrimitiveRelationId, Prop, TermKind, Var, Verdict,
+    acceptance, resolve_primitive_relation, typing_arith_input_v1, typing_arith_v2,
+    typing_arith_v3, Budget, Certificate, ExplicitTerm, JudgmentKind, ObjectTerm,
+    PrimitiveRelationId, Prop, TermKind, Var, Verdict,
 };
 use brix_semantic::{
     ContextId, GeneratorId, PropositionId, RealizesTree, TreeDerivation, TreeDerivationId, TreeObj,
@@ -223,11 +224,17 @@ impl AcceptedTreeProof {
 }
 
 /// The primitive relations a leaf may be closed by, in the order they are
-/// tried. One today. Resolved once: a relation id is content-derived, and
+/// tried. Resolved once: a relation id is content-derived, and
 /// deriving it walks the whole row set.
 fn closing_candidates() -> &'static [PrimitiveRelationId] {
-    static CANDIDATES: OnceLock<[PrimitiveRelationId; 1]> = OnceLock::new();
-    CANDIDATES.get_or_init(|| [typing_arith_v2()])
+    static CANDIDATES: OnceLock<[PrimitiveRelationId; 3]> = OnceLock::new();
+    CANDIDATES.get_or_init(|| {
+        [
+            typing_arith_v3(),
+            typing_arith_input_v1(),
+            typing_arith_v2(),
+        ]
+    })
 }
 
 /// Whether `relation` may close the leaf `(generator, src, dst)`.
@@ -249,10 +256,25 @@ fn relation_closes(
     if resolved.judgment_kind != JudgmentKind::Typing || resolved.generator != *generator {
         return false;
     }
-    let (TreeObj::Atom(src), TreeObj::Atom(dst)) = (src, dst) else {
+    let src_term = tree_obj_to_object_term(src);
+    let dst_term = tree_obj_to_object_term(dst);
+
+    if !resolved.accepts_endpoint_shapes(&src_term, &dst_term) {
         return false;
+    }
+
+    let src_id = match &src_term {
+        ObjectTerm::Const(id) => *id,
+        ObjectTerm::Tensor(..) => PropositionId::of(&src_term),
+        _ => return false,
     };
-    resolved.admits(&PropositionId(src.digest()), &PropositionId(dst.digest()))
+    let dst_id = match &dst_term {
+        ObjectTerm::Const(id) => *id,
+        ObjectTerm::Tensor(..) => PropositionId::of(&dst_term),
+        _ => return false,
+    };
+
+    resolved.admits(&src_id, &dst_id)
 }
 
 /// The deterministic closure choice for one leaf occurrence.
@@ -276,7 +298,7 @@ fn leaf_triples(tree: &RealizesTree) -> Option<Vec<(GeneratorId, &TreeObj, &Tree
         return None;
     }
     let leaves = tree.leaves();
-    if leaves.is_empty() {
+    if leaves.is_empty() && !tree.contains_id() {
         return None;
     }
     leaves
@@ -353,6 +375,7 @@ fn emit_term(tree: &RealizesTree, e: &mut Emit<'_>) -> TermKind {
                 right: Box::new(right),
             }
         }
+        RealizesTree::Id(obj) => TermKind::RealizesId(tree_obj_to_object_term(obj)),
     }
 }
 
@@ -498,6 +521,13 @@ fn read_closures(
         ) => {
             read_closures(left, tl, out)?;
             read_closures(right, tr, out)
+        }
+        (RealizesTree::Id(obj), TermKind::RealizesId(t)) => {
+            if tree_obj_to_object_term(obj) == *t {
+                Ok(())
+            } else {
+                Err(TreeProofError::ShapeMismatch)
+            }
         }
         _ => Err(TreeProofError::ShapeMismatch),
     }

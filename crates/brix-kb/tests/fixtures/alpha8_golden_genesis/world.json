@@ -1,0 +1,46 @@
+{
+  "created_at": "2026-10-04T00:00:00Z",
+  "profile": "brix.world@1",
+  "program_digest": "3d354cc684b29b5d6c5d71fad12156ba5e36cea9addc8b955004d3cda3ca6132",
+  "program_required": true,
+  "relations": [
+    {
+      "key_fields": [
+        "id"
+      ],
+      "name": "root::inventory",
+      "secondary_indexes": [],
+      "value_fields": [
+        "sku",
+        "available"
+      ]
+    },
+    {
+      "key_fields": [
+        "id"
+      ],
+      "name": "root::orders",
+      "secondary_indexes": [],
+      "value_fields": [
+        "customer",
+        "sku",
+        "qty",
+        "express"
+      ]
+    },
+    {
+      "key_fields": [
+        "id"
+      ],
+      "name": "root::shipping",
+      "secondary_indexes": [],
+      "value_fields": [
+        "sku",
+        "carrier",
+        "lead_days"
+      ]
+    }
+  ],
+  "schema": "brix.world@1",
+  "world_id": "world-1"
+}

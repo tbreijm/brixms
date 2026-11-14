@@ -136,5 +136,9 @@
       "ordinal": 8,
       "exemplar_config_id": "d463da5b289b216a10095028228f1127e5c196471de7947fde7cc1bb0b81903b"
     }
-  ]
+  ],
+  "multi_field_records": {
+    "expr_config_id": "0ea3aa276def297365eba4a4a213c2164ac81d282385fa7e9c759eb1c759c54c",
+    "ty_config_id": "2ada0935d31cc3f13ca40add86d4f8036d03a9442fcd220053eb12aebea9f935"
+  }
 }

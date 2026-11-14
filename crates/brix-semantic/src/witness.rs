@@ -64,6 +64,11 @@ impl WitnessId {
     pub fn tensor_chain(witnesses: &[WitnessId]) -> Option<WitnessId> {
         tensor_chain(witnesses)
     }
+
+    /// The canonical identity of the identity realization arrow id_A for an atomic object.
+    pub fn id(atom_digest: &[u8; 32]) -> WitnessId {
+        id_witness(atom_digest)
+    }
 }
 
 /// Dedicated composition tag for canonical witness identity hashing.
@@ -79,6 +84,12 @@ pub const WITNESS_COMPOSE_TAG: &str = "brix.semantic.WitnessId.compose";
 /// using `write_tag(WITNESS_TENSOR_TAG)` followed by `left`'s digest bytes and `right`'s
 /// digest bytes.
 pub const WITNESS_TENSOR_TAG: &str = "brix.semantic.WitnessId.tensor";
+
+/// Dedicated identity tag for canonical witness identity hashing (ADR-0025 §10.1).
+///
+/// **Frozen ABI tag.** Canonical identity witness hashes under [`brix_canon::Domain::Value`]
+/// using `write_tag(WITNESS_ID_TAG)` followed by the target atom's digest bytes.
+pub const WITNESS_ID_TAG: &str = "brix.semantic.WitnessId.id";
 
 /// The canonical identity of the composite witness `outer ∘ inner` (apply `inner` first, then `outer`).
 ///
@@ -112,6 +123,19 @@ pub fn tensor(left: WitnessId, right: WitnessId) -> WitnessId {
     w.write_tag(WITNESS_TENSOR_TAG);
     w.write_bytes(left.digest().as_bytes());
     w.write_bytes(right.digest().as_bytes());
+    WitnessId::from_canon(&w.finish())
+}
+
+/// The canonical identity of the identity realization arrow id_A for an atomic object.
+///
+/// **Encoding (Frozen ABI):**
+/// - `write_tag("brix.semantic.WitnessId.id")`
+/// - `atom_digest` bytes (`write_bytes`)
+/// - Digest payload under [`brix_canon::Domain::Value`].
+pub fn id_witness(atom_digest: &[u8; 32]) -> WitnessId {
+    let mut w = CanonWriter::new();
+    w.write_tag(WITNESS_ID_TAG);
+    w.write_bytes(atom_digest);
     WitnessId::from_canon(&w.finish())
 }
 

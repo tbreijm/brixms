@@ -198,8 +198,23 @@ fn build_manifest() -> String {
                 "    },\n"
             });
         }
-        out.push_str(if label == "ty" { "  ]\n" } else { "  ],\n" });
+        out.push_str("  ],\n");
     }
+    let expr_record = Expr::Record(vec![("b".into(), Expr::Lit(2)), ("a".into(), Expr::Lit(1))]);
+    let ty_record = Ty::Record(vec![
+        ("b".into(), Ty::Con("Str")),
+        ("a".into(), Ty::Con("Int")),
+    ]);
+    out.push_str("  \"multi_field_records\": {\n");
+    out.push_str(&format!(
+        "    \"expr_config_id\": \"{}\",\n",
+        digest_of(&expr_record)
+    ));
+    out.push_str(&format!(
+        "    \"ty_config_id\": \"{}\"\n",
+        digest_of(&ty_record)
+    ));
+    out.push_str("  }\n");
     out.push_str("}\n");
     out
 }
@@ -240,8 +255,8 @@ fn constructor_vectors_are_frozen() {
 /// *was* — where the encoder and the frozen file moved together because someone
 /// ran `BLESS_VECTORS=1` on a change that should not have been blessed.
 ///
-/// All twenty constructors, not a sample. An earlier draft of this test
-/// reconstructed seven, which would have left thirteen constructors covered by
+/// All twenty-six constructors, not a sample. An earlier draft of this test
+/// reconstructed seven, which would have left nineteen constructors covered by
 /// consumer 1 alone — the same partial-corpus failure this file exists to fix,
 /// reproduced inside its own guard.
 #[test]
@@ -487,6 +502,52 @@ fn every_digest_is_reproduced_by_primitive_canon_writes() {
             "{name}: the encoder disagrees with the ordinal declared in this file"
         );
     }
+}
+
+/// Additive payload vectors cover multi-field cardinality and canonical field
+/// ordering without changing the original one-field constructor exemplars.
+/// The expected byte stream is written independently of Expr/Ty's encoder.
+#[test]
+fn multi_field_record_vectors_pin_order_and_cardinality() {
+    fn hash(f: impl FnOnce(&mut CanonWriter)) -> String {
+        let mut w = CanonWriter::new();
+        f(&mut w);
+        brix_canon::Digest::of(brix_canon::Domain::Value, &w.finish()).to_hex()
+    }
+
+    let expr_reversed = Expr::Record(vec![("b".into(), Expr::Lit(2)), ("a".into(), Expr::Lit(1))]);
+    let expr_sorted = Expr::Record(vec![("a".into(), Expr::Lit(1)), ("b".into(), Expr::Lit(2))]);
+    let expr_expected = hash(|w| {
+        w.write_enum(4, |w| {
+            w.write_uint(2);
+            w.write_str("a");
+            w.write_enum(0, |w| w.write_int(1));
+            w.write_str("b");
+            w.write_enum(0, |w| w.write_int(2));
+        });
+    });
+    assert_eq!(digest_of(&expr_reversed), expr_expected);
+    assert_eq!(digest_of(&expr_sorted), expr_expected);
+
+    let ty_reversed = Ty::Record(vec![
+        ("b".into(), Ty::Con("Str")),
+        ("a".into(), Ty::Con("Int")),
+    ]);
+    let ty_sorted = Ty::Record(vec![
+        ("a".into(), Ty::Con("Int")),
+        ("b".into(), Ty::Con("Str")),
+    ]);
+    let ty_expected = hash(|w| {
+        w.write_enum(3, |w| {
+            w.write_uint(2);
+            w.write_str("a");
+            w.write_enum(0, |w| w.write_str("Int"));
+            w.write_str("b");
+            w.write_enum(0, |w| w.write_str("Str"));
+        });
+    });
+    assert_eq!(digest_of(&ty_reversed), ty_expected);
+    assert_eq!(digest_of(&ty_sorted), ty_expected);
 }
 
 /// Ordinals are contiguous from zero, with no gap and no duplicate.

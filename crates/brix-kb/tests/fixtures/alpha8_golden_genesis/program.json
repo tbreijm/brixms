@@ -1,0 +1,21 @@
+{
+  "exec_profile": {
+    "crate_version": "0.1.0-alpha.8",
+    "evaluator": "brix-world-net@1",
+    "module_loader_limits": {
+      "depth": 16,
+      "module_bytes": 1048576,
+      "modules": 256,
+      "total_bytes": 8388608
+    },
+    "numeric_semantics": "ADR-0045",
+    "profile": "brix.world.exec@1",
+    "settlement": "least-key(phase,priority,tiebreak)"
+  },
+  "program_manifest_digest": "3d354cc684b29b5d6c5d71fad12156ba5e36cea9addc8b955004d3cda3ca6132",
+  "root_module": "root",
+  "schema": "brix.world.program@1",
+  "sources": {
+    "root": "\nrel input orders: { id: Str, customer: Str, sku: Str, qty: Int, express: Str } key id\nrel input inventory: { id: Str, sku: Str, available: Int } key id\nrel input shipping: { id: Str, sku: Str, carrier: Str, lead_days: Int } key id\n\nrel derived fulfillment =\n    select { order_id: o.id, customer: o.customer, sku: o.sku, qty: o.qty, express: o.express, available: i.available, carrier: s.carrier, lead_days: s.lead_days }\n    from o in orders, i in inventory, s in shipping\n    where o.sku == i.sku && o.sku == s.sku && i.available >= 0\n\nrel derived sku_order_counts =\n    select { sku: f.sku, order_count: count() }\n    from f in fulfillment\n    group by f.sku\n\ndecide dispatch for f in fulfillment per order_id {\n    propose ship_express priority 10 when f.express == \"yes\" && f.available >= f.qty = \"air_express\"\n    propose ship_standard priority 20 when f.express != \"yes\" && f.available >= f.qty = \"ground_standard\"\n    propose backorder priority 50 when f.available < f.qty = \"backorder_hold\"\n}\n"
+  }
+}
