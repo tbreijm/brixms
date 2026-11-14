@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use brix_kb::world::WorldSession;
 use brix_kb::world::{audit, session};
+use brix_kb::world::{WorldPaths, WorldSession};
 
 struct TempWorld(PathBuf);
 
@@ -84,6 +84,7 @@ fn reopening_alpha8_program_closure_preserves_its_profile_and_genesis() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/alpha8_golden_genesis");
     let temp = TempWorld::new();
     copy_tree(&source_fixture, &temp.0);
+    WorldPaths::new(&temp.0).ensure_dirs().unwrap();
 
     let profile_before = fs::read(temp.0.join("program.json")).unwrap();
     let head_before = fs::read(temp.0.join("HEAD")).unwrap();

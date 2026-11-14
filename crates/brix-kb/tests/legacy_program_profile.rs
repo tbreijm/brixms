@@ -1,6 +1,6 @@
 //! Existing executable worlds keep their recorded profile when callers resupply the same
 //! program closure under a newer package build.
-use brix_kb::world::{TupleRecord, WorldBatch, WorldBatchOp, WorldKey, WorldSession};
+use brix_kb::world::{TupleRecord, WorldBatch, WorldBatchOp, WorldKey, WorldPaths, WorldSession};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -64,6 +64,8 @@ fn create_populated_alpha8_world(label: &str) -> (TempDir, WorldSession) {
     let dir = TempDir::new(label);
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(PROFILE_FIXTURE);
     copy_tree(&fixture, &dir.0);
+    // Git preserves the frozen files, but not the genesis world's empty directories.
+    WorldPaths::new(&dir.0).ensure_dirs().unwrap();
     assert_eq!(
         fs::read_to_string(dir.0.join("root.brix")).unwrap(),
         MODEL,

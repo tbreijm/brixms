@@ -20,3 +20,8 @@ byte for byte (1003 bytes, including its leading newline). The
 fixture intentionally contains only revision zero and no facts. Its expected
 revision-history hashes remain pinned in that test; they are not regenerated
 from this candidate runtime.
+
+Git does not preserve the empty `objects`, `receipts`, and `staging` directories
+created by world initialization. Fixture consumers call `WorldPaths::ensure_dirs`
+on their temporary copy before opening it. This restores the directory layout
+without changing any frozen file or digest.

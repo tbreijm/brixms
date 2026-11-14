@@ -108,6 +108,8 @@ fn create_alpha8_golden_world(dir: &TempDir) -> WorldSession {
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/alpha8_golden_genesis");
     copy_fixture_tree(&fixture, dir.path());
+    // Recreate the empty world directories omitted from a fresh Git checkout.
+    WorldPaths::new(dir.path()).ensure_dirs().unwrap();
     WorldSession::open(dir.path()).unwrap()
 }
 
